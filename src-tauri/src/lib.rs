@@ -6,6 +6,9 @@ pub mod games;
 pub mod installer;
 pub mod nexus;
 pub mod plugins;
+pub mod launcher;
+pub mod skse;
+pub mod downgrader;
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -17,6 +20,9 @@ use config::AppConfig;
 use database::{InstalledMod, ModDatabase};
 use games::DetectedGame;
 use plugins::skyrim_plugins::PluginEntry;
+use launcher::LaunchResult;
+use skse::SkseStatus;
+use downgrader::DowngradeStatus;
 
 struct AppState {
     db: Mutex<ModDatabase>,
@@ -285,6 +291,182 @@ fn set_config_value(key: String, value: String) -> Result<(), String> {
     config::set_config_value(&key, &value).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn launch_game_cmd(
+    game_id: String,
+    bottle_name: String,
+    use_skse: bool,
+) -> Result<LaunchResult, String> {
+    let bottle = bottles::find_bottle_by_name(&bottle_name)
+        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
+    let detected_games = games::detect_games(&bottle);
+    let game = detected_games
+        .iter()
+        .find(|g| g.game_id == game_id)
+        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
+
+    let game_path = PathBuf::from(&game.game_path);
+
+    // Determine which executable to launch
+    let exe_name = if use_skse && game_id == "skyrimse" {
+        "skse64_loader.exe".to_string()
+    } else {
+        games::with_plugin(&game_id, |plugin| {
+            plugin.executables().first().map(|s| s.to_string()).unwrap_or_default()
+        })
+        .unwrap_or_default()
+    };
+
+    let exe_path = launcher::find_executable(&game_path, &exe_name)
+        .ok_or_else(|| format!("Executable '{}' not found in {}", exe_name, game_path.display()))?;
+
+    launcher::launch_game(&bottle, &exe_path, Some(&game_path))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn check_skse(game_id: String, bottle_name: String) -> Result<SkseStatus, String> {
+    if game_id != "skyrimse" {
+        return Ok(SkseStatus {
+            installed: false,
+            loader_path: None,
+            version: None,
+            use_skse: false,
+        });
+    }
+
+    let bottle = bottles::find_bottle_by_name(&bottle_name)
+        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
+    let detected_games = games::detect_games(&bottle);
+    let game = detected_games
+        .iter()
+        .find(|g| g.game_id == game_id)
+        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
+
+    let game_path = PathBuf::from(&game.game_path);
+    let mut status = skse::detect_skse(&game_path);
+    status.use_skse = skse::get_skse_preference(&game_id, &bottle_name);
+
+    Ok(status)
+}
+
+#[tauri::command]
+async fn install_skse_cmd(
+    game_id: String,
+    bottle_name: String,
+) -> Result<SkseStatus, String> {
+    if game_id != "skyrimse" {
+        return Err("SKSE is only available for Skyrim Special Edition".to_string());
+    }
+
+    let bottle = bottles::find_bottle_by_name(&bottle_name)
+        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
+    let detected_games = games::detect_games(&bottle);
+    let game = detected_games
+        .iter()
+        .find(|g| g.game_id == game_id)
+        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
+
+    let game_path = PathBuf::from(&game.game_path);
+    let download_dir = config::get_config()
+        .ok()
+        .and_then(|c| c.download_dir.map(PathBuf::from))
+        .unwrap_or_else(config::downloads_dir);
+
+    skse::download_and_install_skse(&game_path, &download_dir)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_skse_preference_cmd(
+    game_id: String,
+    bottle_name: String,
+    enabled: bool,
+) -> Result<(), String> {
+    skse::set_skse_preference(&game_id, &bottle_name, enabled)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn check_skyrim_version(game_id: String, bottle_name: String) -> Result<DowngradeStatus, String> {
+    if game_id != "skyrimse" {
+        return Err("Version check is only available for Skyrim SE".to_string());
+    }
+
+    let bottle = bottles::find_bottle_by_name(&bottle_name)
+        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
+    let detected_games = games::detect_games(&bottle);
+    let game = detected_games
+        .iter()
+        .find(|g| g.game_id == game_id)
+        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
+
+    let game_path = PathBuf::from(&game.game_path);
+    downgrader::detect_skyrim_version(&game_path)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn downgrade_skyrim(
+    game_id: String,
+    bottle_name: String,
+    _mode: String,
+) -> Result<DowngradeStatus, String> {
+    if game_id != "skyrimse" {
+        return Err("Downgrade is only available for Skyrim SE".to_string());
+    }
+
+    let bottle = bottles::find_bottle_by_name(&bottle_name)
+        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
+    let detected_games = games::detect_games(&bottle);
+    let game = detected_games
+        .iter()
+        .find(|g| g.game_id == game_id)
+        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
+
+    let game_path = PathBuf::from(&game.game_path);
+    let download_dir = config::get_config()
+        .ok()
+        .and_then(|c| c.download_dir.map(PathBuf::from))
+        .unwrap_or_else(config::downloads_dir);
+
+    // Create stock game copy first
+    let stock_dir = download_dir.parent().unwrap_or(&download_dir).join("stock_games");
+    let stock_game_path = downgrader::create_stock_game(&game_path, &stock_dir)
+        .map_err(|e| e.to_string())?;
+
+    // Store stock game path in config
+    let config_key = format!("stock_game:{}:{}", game_id, bottle_name);
+    let _ = config::set_config_value(&config_key, &stock_game_path.to_string_lossy());
+
+    // Return status (actual USSEDP patching is a future enhancement)
+    downgrader::detect_skyrim_version(&stock_game_path)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_vibrancy(window: tauri::Window, material: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
+        let mat = match material.as_str() {
+            "sidebar" => NSVisualEffectMaterial::Sidebar,
+            "underWindowBackground" => NSVisualEffectMaterial::UnderWindowBackground,
+            "contentBackground" => NSVisualEffectMaterial::ContentBackground,
+            "hudWindow" => NSVisualEffectMaterial::HudWindow,
+            _ => NSVisualEffectMaterial::UnderWindowBackground,
+        };
+        apply_vibrancy(&window, mat, Some(NSVisualEffectState::FollowsWindowActiveState), None)
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (window, material);
+    }
+    Ok(())
+}
+
 // --- Helpers ---
 
 fn sync_skyrim_plugins_for_game(game: &DetectedGame, bottle: &Bottle) -> Result<(), String> {
@@ -336,6 +518,13 @@ pub fn run() {
             download_from_nexus,
             get_config,
             set_config_value,
+            launch_game_cmd,
+            check_skse,
+            install_skse_cmd,
+            set_skse_preference_cmd,
+            check_skyrim_version,
+            downgrade_skyrim,
+            set_vibrancy,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -208,6 +208,10 @@
   {#await import("./settings/+page.svelte") then mod}
     <mod.default />
   {/await}
+{:else if $currentPage === "about"}
+  {#await import("./about/+page.svelte") then mod}
+    <mod.default />
+  {/await}
 {/if}
 
 <style>

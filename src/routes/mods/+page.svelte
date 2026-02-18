@@ -6,6 +6,11 @@
     installMod,
     uninstallMod,
     toggleMod,
+    launchGame,
+    checkSkse,
+    installSkse,
+    setSksePreference,
+    checkSkyrimVersion,
   } from "$lib/api";
   import {
     selectedGame,
@@ -14,12 +19,18 @@
     currentPage,
     showError,
     showSuccess,
+    skseStatus,
   } from "$lib/stores";
-  import type { InstalledMod, DetectedGame } from "$lib/types";
+  import type { InstalledMod, DetectedGame, SkseStatus } from "$lib/types";
 
   let installing = $state(false);
   let confirmUninstall = $state<number | null>(null);
   let togglingMod = $state<number | null>(null);
+  let launching = $state(false);
+  let skse = $state<SkseStatus | null>(null);
+  let showSksePrompt = $state(false);
+  let installingSkse = $state(false);
+  let showSkseMenu = $state(false);
 
   // Game picker state
   let pickedGame = $state<DetectedGame | null>(null);
@@ -108,6 +119,85 @@
     selectedGame.set(game);
   }
 
+  // SKSE detection
+  $effect(() => {
+    const game = pickedGame ?? $selectedGame;
+    if (game && game.game_id === "skyrimse") {
+      checkSkseStatus(game);
+    } else {
+      skse = null;
+      showSksePrompt = false;
+    }
+  });
+
+  async function checkSkseStatus(game: DetectedGame) {
+    try {
+      skse = await checkSkse(game.game_id, game.bottle_name);
+      skseStatus.set(skse);
+      if (!skse.installed) {
+        const dismissed = localStorage.getItem(`skse_dismissed:${game.game_id}:${game.bottle_name}`);
+        if (!dismissed) showSksePrompt = true;
+      }
+    } catch {
+      // Non-critical
+    }
+  }
+
+  async function handlePlay() {
+    const game = pickedGame ?? $selectedGame;
+    if (!game) return;
+    launching = true;
+    try {
+      const useSkse = !!(skse?.installed && skse?.use_skse && game.game_id === "skyrimse");
+      const result = await launchGame(game.game_id, game.bottle_name, useSkse);
+      if (result.success) {
+        showSuccess(`Launched ${game.display_name}${useSkse ? " via SKSE" : ""}`);
+      }
+    } catch (e: any) {
+      showError(`Failed to launch: ${e}`);
+    } finally {
+      launching = false;
+    }
+  }
+
+  async function handleInstallSkse() {
+    const game = pickedGame ?? $selectedGame;
+    if (!game) return;
+    installingSkse = true;
+    try {
+      skse = await installSkse(game.game_id, game.bottle_name);
+      skseStatus.set(skse);
+      showSksePrompt = false;
+      showSuccess("SKSE installed successfully");
+    } catch (e: any) {
+      showError(`SKSE installation failed: ${e}`);
+    } finally {
+      installingSkse = false;
+    }
+  }
+
+  function dismissSksePrompt() {
+    const game = pickedGame ?? $selectedGame;
+    if (game) {
+      localStorage.setItem(`skse_dismissed:${game.game_id}:${game.bottle_name}`, "true");
+    }
+    showSksePrompt = false;
+  }
+
+  async function toggleSksePreference() {
+    const game = pickedGame ?? $selectedGame;
+    if (!game || !skse) return;
+    const newValue = !skse.use_skse;
+    try {
+      await setSksePreference(game.game_id, game.bottle_name, newValue);
+      skse = { ...skse, use_skse: newValue };
+      skseStatus.set(skse);
+    } catch (e: any) {
+      showError(`Failed to update SKSE preference: ${e}`);
+    }
+    showSkseMenu = false;
+  }
+
   function formatDate(iso: string): string {
     return new Date(iso).toLocaleDateString(undefined, {
       month: "short",
@@ -185,6 +275,20 @@
         </div>
       </div>
       <div class="header-actions">
+        <a
+          href="https://www.nexusmods.com/{activeGame.nexus_slug}"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="btn btn-ghost nexus-link"
+          title="View on Nexus Mods"
+        >
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M11 8v3a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h3" />
+            <path d="M8 2h4v4" />
+            <path d="M6 8L12 2" />
+          </svg>
+          Nexus Mods
+        </a>
         <button class="btn btn-ghost" onclick={() => { pickedGame = null; selectedGame.set(null); }}>
           Change Game
         </button>
@@ -200,8 +304,78 @@
             Install Mod
           {/if}
         </button>
+        <div class="play-button-group">
+          <button class="btn btn-play" onclick={handlePlay} disabled={launching}>
+            {#if launching}
+              <span class="spinner spinner-play"></span>
+              Launching...
+            {:else}
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
+                <path d="M3 1.5v11l9-5.5L3 1.5z" />
+              </svg>
+              Play{#if skse?.installed && skse?.use_skse} (SKSE){/if}
+            {/if}
+          </button>
+          {#if activeGame?.game_id === "skyrimse" && skse?.installed}
+            <button
+              class="btn btn-play-dropdown"
+              onclick={() => showSkseMenu = !showSkseMenu}
+              aria-label="SKSE options"
+            >
+              <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
+                <path d="M2 3.5L5 7L8 3.5H2z" />
+              </svg>
+            </button>
+          {/if}
+          {#if showSkseMenu}
+            <div class="skse-dropdown">
+              <button class="dropdown-item" onclick={toggleSksePreference}>
+                <span class="dropdown-check">
+                  {#if skse?.use_skse}
+                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M10 3L4.5 8.5L2 6" />
+                    </svg>
+                  {/if}
+                </span>
+                Launch via SKSE
+              </button>
+              <div class="dropdown-divider"></div>
+              <div class="dropdown-info">
+                SKSE {skse?.version ?? ""}
+              </div>
+            </div>
+          {/if}
+        </div>
       </div>
     </div>
+
+    <!-- SKSE Prompt Banner -->
+    {#if showSksePrompt && activeGame?.game_id === "skyrimse"}
+      <div class="skse-banner">
+        <div class="skse-banner-icon">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="10" cy="10" r="9" />
+            <path d="M10 6v4" />
+            <circle cx="10" cy="14" r="0.5" fill="currentColor" />
+          </svg>
+        </div>
+        <div class="skse-banner-content">
+          <p class="skse-banner-title">SKSE Not Installed</p>
+          <p class="skse-banner-text">
+            Skyrim Script Extender (SKSE) is required by most Skyrim mods.
+            Would you like to download and install it?
+          </p>
+        </div>
+        <div class="skse-banner-actions">
+          <button class="btn btn-primary btn-sm" onclick={handleInstallSkse} disabled={installingSkse}>
+            {installingSkse ? "Installing..." : "Install SKSE"}
+          </button>
+          <button class="btn btn-ghost btn-sm" onclick={dismissSksePrompt}>
+            Dismiss
+          </button>
+        </div>
+      </div>
+    {/if}
 
     <!-- Content Area -->
     {#if $installedMods.length === 0}
@@ -843,5 +1017,161 @@
     display: flex;
     gap: var(--space-1);
     align-items: center;
+  }
+
+  /* --- Nexus link --- */
+
+  .nexus-link {
+    text-decoration: none !important;
+  }
+
+  /* --- Play Button --- */
+
+  .play-button-group {
+    display: flex;
+    align-items: stretch;
+    position: relative;
+  }
+
+  .btn-play {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-5);
+    background: var(--green);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+    border-radius: var(--radius) 0 0 var(--radius);
+    white-space: nowrap;
+    transition: background var(--duration-fast) var(--ease),
+                box-shadow var(--duration-fast) var(--ease);
+  }
+
+  .btn-play:hover:not(:disabled) {
+    filter: brightness(1.1);
+    box-shadow: 0 1px 6px rgba(48, 209, 88, 0.3);
+  }
+
+  .btn-play:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .play-button-group .btn-play:only-child {
+    border-radius: var(--radius);
+  }
+
+  .btn-play-dropdown {
+    display: inline-flex;
+    align-items: center;
+    padding: 0 var(--space-2);
+    background: var(--green);
+    color: #fff;
+    border-left: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 0 var(--radius) var(--radius) 0;
+    transition: background var(--duration-fast) var(--ease);
+  }
+
+  .btn-play-dropdown:hover {
+    filter: brightness(1.1);
+  }
+
+  .spinner-play {
+    border-color: rgba(255, 255, 255, 0.3);
+    border-top-color: #fff;
+  }
+
+  /* --- SKSE Dropdown --- */
+
+  .skse-dropdown {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    margin-top: var(--space-1);
+    background: var(--bg-elevated);
+    border: 1px solid var(--separator-opaque);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-lg);
+    min-width: 180px;
+    z-index: 100;
+    overflow: hidden;
+  }
+
+  .dropdown-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    width: 100%;
+    padding: var(--space-2) var(--space-3);
+    font-size: 13px;
+    color: var(--text-primary);
+    text-align: left;
+    transition: background var(--duration-fast) var(--ease);
+  }
+
+  .dropdown-item:hover {
+    background: var(--surface-hover);
+  }
+
+  .dropdown-check {
+    width: 16px;
+    height: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--green);
+  }
+
+  .dropdown-divider {
+    height: 1px;
+    background: var(--separator);
+  }
+
+  .dropdown-info {
+    padding: var(--space-2) var(--space-3);
+    font-size: 11px;
+    color: var(--text-tertiary);
+  }
+
+  /* --- SKSE Banner --- */
+
+  .skse-banner {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+    padding: var(--space-3) var(--space-4);
+    background: var(--yellow-subtle);
+    border: 1px solid var(--yellow-subtle);
+    border-radius: var(--radius);
+  }
+
+  .skse-banner-icon {
+    color: var(--yellow);
+    flex-shrink: 0;
+  }
+
+  .skse-banner-content {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .skse-banner-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .skse-banner-text {
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.4;
+  }
+
+  .skse-banner-actions {
+    display: flex;
+    gap: var(--space-2);
+    flex-shrink: 0;
   }
 </style>

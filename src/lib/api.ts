@@ -5,6 +5,9 @@ import type {
   InstalledMod,
   PluginEntry,
   AppConfig,
+  LaunchResult,
+  SkseStatus,
+  DowngradeStatus,
 } from "./types";
 
 // Bottles
@@ -93,4 +96,57 @@ export async function setConfigValue(
   value: string
 ): Promise<void> {
   return invoke("set_config_value", { key, value });
+}
+
+// Game Launching
+export async function launchGame(
+  gameId: string,
+  bottleName: string,
+  useSkse: boolean
+): Promise<LaunchResult> {
+  return invoke("launch_game_cmd", { gameId, bottleName, useSkse });
+}
+
+// SKSE Management
+export async function checkSkse(
+  gameId: string,
+  bottleName: string
+): Promise<SkseStatus> {
+  return invoke("check_skse", { gameId, bottleName });
+}
+
+export async function installSkse(
+  gameId: string,
+  bottleName: string
+): Promise<SkseStatus> {
+  return invoke("install_skse_cmd", { gameId, bottleName });
+}
+
+export async function setSksePreference(
+  gameId: string,
+  bottleName: string,
+  enabled: boolean
+): Promise<void> {
+  return invoke("set_skse_preference_cmd", { gameId, bottleName, enabled });
+}
+
+// Skyrim Downgrade
+export async function checkSkyrimVersion(
+  gameId: string,
+  bottleName: string
+): Promise<DowngradeStatus> {
+  return invoke("check_skyrim_version", { gameId, bottleName });
+}
+
+export async function downgradeSkyrim(
+  gameId: string,
+  bottleName: string,
+  mode: string
+): Promise<DowngradeStatus> {
+  return invoke("downgrade_skyrim", { gameId, bottleName, mode });
+}
+
+// Vibrancy
+export async function setVibrancy(material: string): Promise<void> {
+  return invoke("set_vibrancy", { material });
 }

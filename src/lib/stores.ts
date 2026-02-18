@@ -1,5 +1,5 @@
 import { writable, derived } from "svelte/store";
-import type { Bottle, DetectedGame, InstalledMod, AppConfig } from "./types";
+import type { Bottle, DetectedGame, InstalledMod, AppConfig, SkseStatus } from "./types";
 
 // App state
 export const bottles = writable<Bottle[]>([]);
@@ -35,6 +35,9 @@ export const activeMods = derived(
     );
   }
 );
+
+// SKSE state
+export const skseStatus = writable<SkseStatus | null>(null);
 
 // Notification helpers
 export function showError(msg: string) {

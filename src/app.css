@@ -1,26 +1,37 @@
 /*
  * Corkscrew Design System
- * Inspired by Apple's Human Interface Guidelines — dark variant
- * Layered backgrounds, refined typography, warm accent palette
+ * Inspired by Apple's Human Interface Guidelines
+ * Supports dark & light themes with macOS vibrancy
  */
 
-:root {
-  /* Background layers (subtle depth, not harsh contrast) */
+/* ==============================
+   Dark Theme (default)
+   ============================== */
+
+:root,
+[data-theme="dark"] {
+  /* Background layers */
   --bg-base: #161618;
+  --bg-base-vibrancy: rgba(22, 22, 24, 0.72);
   --bg-primary: #1c1c1e;
+  --bg-primary-vibrancy: rgba(28, 28, 30, 0.65);
   --bg-secondary: #2c2c2e;
   --bg-tertiary: #3a3a3c;
   --bg-elevated: #1c1c1e;
 
-  /* Grouped background (for sidebar, panels) */
+  /* Grouped background (sidebar, panels) */
   --bg-grouped: #1c1c1e;
+  --bg-grouped-vibrancy: rgba(28, 28, 30, 0.50);
   --bg-grouped-secondary: #2c2c2e;
+  --bg-grouped-secondary-vibrancy: rgba(44, 44, 46, 0.55);
   --bg-grouped-tertiary: #3a3a3c;
 
   /* Surface layers (cards, sheets) */
   --surface: rgba(255, 255, 255, 0.05);
+  --surface-vibrancy: rgba(255, 255, 255, 0.06);
   --surface-hover: rgba(255, 255, 255, 0.08);
   --surface-active: rgba(255, 255, 255, 0.12);
+  --surface-subtle: rgba(255, 255, 255, 0.015);
 
   /* Text hierarchy (Apple's label colors) */
   --text-primary: rgba(255, 255, 255, 0.92);
@@ -28,11 +39,12 @@
   --text-tertiary: rgba(255, 255, 255, 0.35);
   --text-quaternary: rgba(255, 255, 255, 0.18);
 
-  /* Accent — warm orange to match the Corkscrew brand */
+  /* Accent — warm orange brand */
   --accent: #e8802a;
   --accent-hover: #f09040;
   --accent-subtle: rgba(232, 128, 42, 0.15);
   --accent-muted: rgba(232, 128, 42, 0.25);
+  --accent-on: #ffffff;
 
   /* Semantic colors */
   --green: #30d158;
@@ -48,18 +60,120 @@
   --separator: rgba(255, 255, 255, 0.08);
   --separator-opaque: #38383a;
 
+  /* Shadows */
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3);
+  --shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
+
+  /* Scrollbar */
+  --scrollbar-thumb: rgba(255, 255, 255, 0.12);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.2);
+
+  color-scheme: dark;
+}
+
+/* ==============================
+   Light Theme
+   ============================== */
+
+[data-theme="light"] {
+  /* Background layers */
+  --bg-base: #f2f2f7;
+  --bg-base-vibrancy: rgba(242, 242, 247, 0.72);
+  --bg-primary: #ffffff;
+  --bg-primary-vibrancy: rgba(255, 255, 255, 0.65);
+  --bg-secondary: #f2f2f7;
+  --bg-tertiary: #e5e5ea;
+  --bg-elevated: #ffffff;
+
+  /* Grouped background */
+  --bg-grouped: #f2f2f7;
+  --bg-grouped-vibrancy: rgba(242, 242, 247, 0.50);
+  --bg-grouped-secondary: #ffffff;
+  --bg-grouped-secondary-vibrancy: rgba(255, 255, 255, 0.70);
+  --bg-grouped-tertiary: #f2f2f7;
+
+  /* Surface layers */
+  --surface: rgba(0, 0, 0, 0.03);
+  --surface-vibrancy: rgba(255, 255, 255, 0.45);
+  --surface-hover: rgba(0, 0, 0, 0.05);
+  --surface-active: rgba(0, 0, 0, 0.08);
+  --surface-subtle: rgba(0, 0, 0, 0.015);
+
+  /* Text hierarchy (Apple light-mode labels) */
+  --text-primary: rgba(0, 0, 0, 0.85);
+  --text-secondary: rgba(0, 0, 0, 0.50);
+  --text-tertiary: rgba(0, 0, 0, 0.30);
+  --text-quaternary: rgba(0, 0, 0, 0.18);
+
+  /* Accent — slightly deeper for light bg contrast */
+  --accent: #d6711f;
+  --accent-hover: #c46518;
+  --accent-subtle: rgba(214, 113, 31, 0.12);
+  --accent-muted: rgba(214, 113, 31, 0.20);
+  --accent-on: #ffffff;
+
+  /* Semantic colors (Apple light variants) */
+  --green: #28a745;
+  --green-subtle: rgba(40, 167, 69, 0.12);
+  --red: #ff3b30;
+  --red-subtle: rgba(255, 59, 48, 0.12);
+  --yellow: #f0a500;
+  --yellow-subtle: rgba(240, 165, 0, 0.12);
+  --blue: #007aff;
+  --blue-subtle: rgba(0, 122, 255, 0.12);
+
+  /* Separators */
+  --separator: rgba(0, 0, 0, 0.09);
+  --separator-opaque: #c6c6c8;
+
+  /* Shadows (lighter) */
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.08);
+  --shadow: 0 2px 8px rgba(0, 0, 0, 0.10);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.15);
+
+  /* Scrollbar */
+  --scrollbar-thumb: rgba(0, 0, 0, 0.15);
+  --scrollbar-thumb-hover: rgba(0, 0, 0, 0.25);
+
+  color-scheme: light;
+}
+
+/* ==============================
+   Vibrancy Overrides (macOS)
+   ============================== */
+
+html.vibrancy-active {
+  --bg-base: var(--bg-base-vibrancy);
+  --bg-primary: var(--bg-primary-vibrancy);
+  --bg-grouped: var(--bg-grouped-vibrancy);
+  --bg-grouped-secondary: var(--bg-grouped-secondary-vibrancy);
+  --surface: var(--surface-vibrancy);
+}
+
+html.vibrancy-active,
+html.vibrancy-active body {
+  background: transparent !important;
+}
+
+/* Frosted-glass card effect when vibrancy is active */
+html.vibrancy-active .vibrancy-card {
+  backdrop-filter: blur(20px) saturate(1.8);
+  -webkit-backdrop-filter: blur(20px) saturate(1.8);
+}
+
+/* ==============================
+   Shared Design Tokens
+   ============================== */
+
+:root {
   /* Corners */
   --radius-sm: 6px;
   --radius: 10px;
   --radius-lg: 14px;
   --radius-xl: 20px;
 
-  /* Shadows */
-  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3);
-  --shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
-  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
-
-  /* Typography scale */
+  /* Typography */
   --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", system-ui, sans-serif;
   --font-mono: "SF Mono", "Menlo", "Cascadia Code", "JetBrains Mono", monospace;
   --font-rounded: -apple-system, BlinkMacSystemFont, "SF Pro Rounded", system-ui, sans-serif;
@@ -117,14 +231,14 @@ html, body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.12);
+  background: var(--scrollbar-thumb);
   border-radius: 4px;
   border: 2px solid transparent;
   background-clip: content-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.2);
+  background: var(--scrollbar-thumb-hover);
   background-clip: content-box;
 }
 

@@ -1,14 +1,20 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { getConfig, setConfigValue } from "$lib/api";
-  import { config, showError, showSuccess } from "$lib/stores";
+  import { getConfig, setConfigValue, checkSkse, installSkse } from "$lib/api";
+  import { config, showError, showSuccess, selectedGame, skseStatus } from "$lib/stores";
   import type { AppConfig } from "$lib/types";
+  import ThemeToggle from "$lib/components/ThemeToggle.svelte";
 
   let apiKey = $state("");
   let downloadDir = $state("");
   let savingApiKey = $state(false);
   let savingDownloadDir = $state(false);
   let showApiKey = $state(false);
+  let installingSkse = $state(false);
+
+  const game = $derived($selectedGame);
+  const skse = $derived($skseStatus);
+  const isSkyrim = $derived(game?.game_id === "skyrimse");
 
   onMount(async () => {
     try {
@@ -19,7 +25,29 @@
     } catch (e: any) {
       showError(`Failed to load config: ${e}`);
     }
+
+    // Check SKSE status if Skyrim is selected
+    if (game && isSkyrim) {
+      try {
+        const status = await checkSkse(game.game_id, game.bottle_name);
+        skseStatus.set(status);
+      } catch { /* ignore */ }
+    }
   });
+
+  async function handleInstallSkse() {
+    if (!game) return;
+    installingSkse = true;
+    try {
+      const status = await installSkse(game.game_id, game.bottle_name);
+      skseStatus.set(status);
+      showSuccess("SKSE installed successfully");
+    } catch (e: any) {
+      showError(`Failed to install SKSE: ${e}`);
+    } finally {
+      installingSkse = false;
+    }
+  }
 
   async function saveApiKey() {
     savingApiKey = true;
@@ -48,6 +76,52 @@
 
 <div class="settings-page">
   <h1 class="page-title">Settings</h1>
+
+  <!-- Appearance -->
+  <div class="section">
+    <h2 class="section-title">Appearance</h2>
+    <div class="section-card">
+      <div class="card-row appearance-row">
+        <span class="row-label">Theme</span>
+        <ThemeToggle />
+      </div>
+    </div>
+  </div>
+
+  {#if isSkyrim}
+    <!-- Game Tools -->
+    <div class="section">
+      <h2 class="section-title">Game Tools</h2>
+      <div class="section-card">
+        <div class="card-row tool-row">
+          <div class="tool-info">
+            <span class="row-label">SKSE (Script Extender)</span>
+            <span class="tool-description">
+              {#if skse?.installed}
+                Installed{skse.version ? ` — v${skse.version}` : ""}
+              {:else}
+                Required by most Skyrim mods
+              {/if}
+            </span>
+          </div>
+          <div class="tool-action">
+            {#if skse?.installed}
+              <span class="badge badge-green">Installed</span>
+            {:else}
+              <button
+                class="btn-primary"
+                onclick={handleInstallSkse}
+                disabled={installingSkse}
+                type="button"
+              >
+                {installingSkse ? "Installing..." : "Install SKSE"}
+              </button>
+            {/if}
+          </div>
+        </div>
+      </div>
+    </div>
+  {/if}
 
   <!-- Nexus Mods -->
   <div class="section">
@@ -138,13 +212,14 @@
       </div>
       <div class="card-divider"></div>
       <div class="card-row about-row">
-        <span class="row-label">License</span>
-        <span class="row-value">GPL-3.0-or-later</span>
-      </div>
-      <div class="card-divider"></div>
-      <div class="card-row about-row">
-        <span class="row-label">Platform</span>
-        <span class="row-value">macOS / Linux</span>
+        <span class="row-label">More Info & Credits</span>
+        <button
+          class="btn-link"
+          onclick={() => { import('$lib/stores').then(m => m.currentPage.set('about')); }}
+          type="button"
+        >
+          View About Page
+        </button>
       </div>
     </div>
   </div>
@@ -302,6 +377,48 @@
     color: var(--text-primary);
   }
 
+  /* --- Appearance --- */
+
+  .appearance-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  /* --- Game Tools --- */
+
+  .tool-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-4);
+  }
+
+  .tool-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .tool-description {
+    font-size: 12px;
+    color: var(--text-tertiary);
+  }
+
+  .tool-action {
+    flex-shrink: 0;
+  }
+
+  .badge-green {
+    display: inline-block;
+    padding: 1px var(--space-2);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--green);
+    background: color-mix(in srgb, var(--green) 15%, transparent);
+    border-radius: var(--radius-sm);
+  }
+
   /* --- About rows --- */
 
   .about-row {
@@ -319,5 +436,19 @@
     font-size: 13px;
     font-weight: 500;
     color: var(--text-primary);
+  }
+
+  .btn-link {
+    background: none;
+    border: none;
+    color: var(--accent);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    padding: 0;
+  }
+
+  .btn-link:hover {
+    text-decoration: underline;
   }
 </style>

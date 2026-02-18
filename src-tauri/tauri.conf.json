@@ -10,6 +10,7 @@
     "frontendDist": "../build"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
         "title": "Corkscrew",
@@ -18,7 +19,11 @@
         "minWidth": 800,
         "minHeight": 600,
         "decorations": true,
-        "transparent": false
+        "transparent": true,
+        "windowEffects": {
+          "effects": ["underWindowBackground"],
+          "state": "followsWindowActiveState"
+        }
       }
     ],
     "security": {

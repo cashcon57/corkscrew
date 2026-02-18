@@ -35,6 +35,27 @@ export interface PluginEntry {
 export interface AppConfig {
   nexus_api_key: string | null;
   download_dir: string | null;
+  [key: string]: unknown;
+}
+
+export interface LaunchResult {
+  executable: string;
+  bottle_name: string;
+  success: boolean;
+}
+
+export interface SkseStatus {
+  installed: boolean;
+  loader_path: string | null;
+  version: string | null;
+  use_skse: boolean;
+}
+
+export interface DowngradeStatus {
+  current_version: string;
+  target_version: string;
+  is_downgraded: boolean;
+  stock_game_path: string | null;
 }
 
 export interface ModConflict {

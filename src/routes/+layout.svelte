@@ -1,13 +1,20 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import "../app.css";
   import { currentPage, errorMessage, successMessage } from "$lib/stores";
+  import { initTheme } from "$lib/theme";
 
   const navItems = [
     { id: "dashboard", label: "Dashboard" },
     { id: "mods", label: "Mods" },
     { id: "plugins", label: "Load Order" },
     { id: "settings", label: "Settings" },
+    { id: "about", label: "About" },
   ];
+
+  onMount(() => {
+    initTheme();
+  });
 
   function navigate(page: string) {
     currentPage.set(page);
@@ -49,9 +56,13 @@
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
                   <path d="M2.5 3.5a1 1 0 011-1h9a1 1 0 011 1v1a1 1 0 01-1 1h-9a1 1 0 01-1-1v-1zm0 4a1 1 0 011-1h9a1 1 0 011 1v1a1 1 0 01-1 1h-9a1 1 0 01-1-1v-1zm0 4a1 1 0 011-1h9a1 1 0 011 1v1a1 1 0 01-1 1h-9a1 1 0 01-1-1v-1z" />
                 </svg>
-              {:else}
+              {:else if item.id === "settings"}
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
                   <path d="M8 0a3 3 0 00-1.17 5.76A5.5 5.5 0 002.5 11v.5a1 1 0 001 1h9a1 1 0 001-1V11a5.5 5.5 0 00-4.33-5.24A3 3 0 008 0zM5 14.25a.75.75 0 01.75-.75h4.5a.75.75 0 010 1.5h-4.5a.75.75 0 01-.75-.75z" />
+                </svg>
+              {:else}
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                  <path d="M8 1a7 7 0 110 14A7 7 0 018 1zm0 3a.75.75 0 00-.75.75v.5a.75.75 0 001.5 0v-.5A.75.75 0 008 4zm0 3a.75.75 0 00-.75.75v3.5a.75.75 0 001.5 0v-3.5A.75.75 0 008 7z" />
                 </svg>
               {/if}
             </span>
@@ -239,14 +250,14 @@
 
   .toast-error {
     background: var(--red-subtle);
-    border: 1px solid rgba(255, 69, 58, 0.25);
-    color: #ff6961;
+    border: 1px solid var(--red-subtle);
+    color: var(--red);
   }
 
   .toast-success {
     background: var(--green-subtle);
-    border: 1px solid rgba(48, 209, 88, 0.25);
-    color: #6ee7a0;
+    border: 1px solid var(--green-subtle);
+    color: var(--green);
   }
 
   .toast-icon {
