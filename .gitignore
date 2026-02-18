@@ -1,16 +1,21 @@
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-*.egg
-dist/
-build/
-*.whl
+# Rust
+target/
+Cargo.lock
 
-# Virtual environments
-.venv/
-venv/
-env/
+# Node
+node_modules/
+/build
+/.svelte-kit
+/package
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
+Thumbs.db
 
 # IDE
 .vscode/
@@ -19,10 +24,19 @@ env/
 *.swo
 *~
 
-# OS
-.DS_Store
-Thumbs.db
-
-# Project
+# Project data
 *.db
 *.sqlite
+
+# Vite
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+
+# Legacy Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+*.whl
+.venv/
+venv/

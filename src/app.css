@@ -1,0 +1,174 @@
+/*
+ * Corkscrew Design System
+ * Inspired by Apple's Human Interface Guidelines — dark variant
+ * Layered backgrounds, refined typography, warm accent palette
+ */
+
+:root {
+  /* Background layers (subtle depth, not harsh contrast) */
+  --bg-base: #161618;
+  --bg-primary: #1c1c1e;
+  --bg-secondary: #2c2c2e;
+  --bg-tertiary: #3a3a3c;
+  --bg-elevated: #1c1c1e;
+
+  /* Grouped background (for sidebar, panels) */
+  --bg-grouped: #1c1c1e;
+  --bg-grouped-secondary: #2c2c2e;
+  --bg-grouped-tertiary: #3a3a3c;
+
+  /* Surface layers (cards, sheets) */
+  --surface: rgba(255, 255, 255, 0.05);
+  --surface-hover: rgba(255, 255, 255, 0.08);
+  --surface-active: rgba(255, 255, 255, 0.12);
+
+  /* Text hierarchy (Apple's label colors) */
+  --text-primary: rgba(255, 255, 255, 0.92);
+  --text-secondary: rgba(255, 255, 255, 0.55);
+  --text-tertiary: rgba(255, 255, 255, 0.35);
+  --text-quaternary: rgba(255, 255, 255, 0.18);
+
+  /* Accent — warm orange to match the Corkscrew brand */
+  --accent: #e8802a;
+  --accent-hover: #f09040;
+  --accent-subtle: rgba(232, 128, 42, 0.15);
+  --accent-muted: rgba(232, 128, 42, 0.25);
+
+  /* Semantic colors */
+  --green: #30d158;
+  --green-subtle: rgba(48, 209, 88, 0.15);
+  --red: #ff453a;
+  --red-subtle: rgba(255, 69, 58, 0.15);
+  --yellow: #ffd60a;
+  --yellow-subtle: rgba(255, 214, 10, 0.15);
+  --blue: #0a84ff;
+  --blue-subtle: rgba(10, 132, 255, 0.15);
+
+  /* Separators */
+  --separator: rgba(255, 255, 255, 0.08);
+  --separator-opaque: #38383a;
+
+  /* Corners */
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3);
+  --shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
+
+  /* Typography scale */
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", system-ui, sans-serif;
+  --font-mono: "SF Mono", "Menlo", "Cascadia Code", "JetBrains Mono", monospace;
+  --font-rounded: -apple-system, BlinkMacSystemFont, "SF Pro Rounded", system-ui, sans-serif;
+
+  /* Spacing scale (4px base) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  /* Transitions */
+  --ease: cubic-bezier(0.25, 0.1, 0.25, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --duration-fast: 120ms;
+  --duration: 200ms;
+  --duration-slow: 350ms;
+}
+
+/* --- Reset & Base --- */
+
+*, *::before, *::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.47;
+  color: var(--text-primary);
+  background-color: var(--bg-base);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  user-select: none;
+  letter-spacing: -0.01em;
+}
+
+/* --- Scrollbars (thin, subtle, Apple-style) --- */
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* --- Typography --- */
+
+h1 { font-size: 28px; font-weight: 700; letter-spacing: -0.025em; line-height: 1.2; }
+h2 { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.25; }
+h3 { font-size: 17px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.3; }
+h4 { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.35; }
+
+/* --- Interactive elements --- */
+
+button {
+  cursor: pointer;
+  border: none;
+  font-family: inherit;
+  font-size: inherit;
+  letter-spacing: inherit;
+  background: transparent;
+  color: inherit;
+}
+
+input, select, textarea {
+  font-family: inherit;
+  font-size: inherit;
+  letter-spacing: inherit;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+/* --- Selection --- */
+
+::selection {
+  background: var(--accent-muted);
+  color: var(--text-primary);
+}

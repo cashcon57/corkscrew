@@ -1,8 +1,24 @@
-# Corkscrew 🍷
+<p align="center">
+  <img src="graphics/icon-readme.png" width="200" alt="Corkscrew">
+</p>
 
-**A mod manager for CrossOver and Wine games on macOS.**
+<h1 align="center">Corkscrew</h1>
 
-Corkscrew lets you install, manage, and organize mods for Windows games running through [CrossOver](https://www.codeweavers.com/crossover), [Whisky](https://getwhisky.app/), and other Wine-based compatibility layers on macOS — no Windows VM required.
+<p align="center">
+  <strong>A native mod manager for Wine games on macOS and Linux.</strong>
+</p>
+
+<p align="center">
+  <a href="#features">Features</a>&nbsp;&nbsp;&bull;&nbsp;&nbsp;
+  <a href="#installation">Installation</a>&nbsp;&nbsp;&bull;&nbsp;&nbsp;
+  <a href="#supported-platforms">Platforms</a>&nbsp;&nbsp;&bull;&nbsp;&nbsp;
+  <a href="#how-it-works">How It Works</a>&nbsp;&nbsp;&bull;&nbsp;&nbsp;
+  <a href="#contributing">Contributing</a>
+</p>
+
+<br>
+
+Corkscrew installs, manages, and organizes mods for Windows games running through [CrossOver](https://www.codeweavers.com/crossover), [Whisky](https://getwhisky.app/), [Lutris](https://lutris.net/), [Proton](https://github.com/ValveSoftware/Proton), and other Wine-based compatibility layers — no Windows VM required.
 
 It works by reading and writing directly to your Wine bottle's filesystem, the same way the game itself sees it. Your bottles, your mods, no middleman.
 
@@ -10,136 +26,128 @@ It works by reading and writing directly to your Wine bottle's filesystem, the s
 
 ---
 
-## What It Does
+## Features
 
-- **Detects your bottles** — Finds CrossOver, Whisky, Moonshine, Heroic, and Mythic bottles automatically
-- **Finds your games** — Scans bottles for supported titles (Skyrim SE via Steam or GOG to start)
-- **Installs mods from archives** — Handles `.zip`, `.7z`, and `.rar` files, deploys to the right `Data/` directory
-- **Downloads from Nexus Mods** — Paste an NXM link, Corkscrew fetches and installs it
-- **Tracks what you've installed** — SQLite database keeps tabs on every file so uninstalls are clean
-- **Manages plugin load order** — Reads and syncs `plugins.txt` for Bethesda games
-- **Parses FOMOD installers** — Understands the standard XML-based mod installer format
+- **Automatic bottle detection** — Finds CrossOver, Whisky, Moonshine, Heroic, Mythic, Lutris, Proton, and native Wine prefixes
+- **Game scanning** — Discovers supported titles across all bottles (Skyrim SE via Steam or GOG to start)
+- **Mod installation** — Handles `.zip`, `.7z`, and `.rar` archives, deploys to the correct `Data/` directory with smart root detection
+- **Nexus Mods integration** — Download and install directly from NXM links
+- **Mod tracking** — SQLite database records every installed file for clean uninstalls
+- **Plugin load order** — Reads and syncs `plugins.txt` and `loadorder.txt` for Bethesda games
+- **FOMOD support** — Parses the standard XML-based mod installer format
+- **Cross-platform** — Native app for both macOS and Linux (SteamOS, Fedora, Ubuntu)
 
-## What It Doesn't Do (Yet)
+### Planned
 
-- GUI — it's CLI-only for now
-- Support games beyond Skyrim SE
-- Handle mod conflicts with anything smarter than priority ordering
-- Wabbajack or NexusMods collection/modlist support
-- NXM protocol handler registration (you paste the link manually)
-
-These are all on the roadmap. One bottle at a time.
+- FOMOD wizard UI with option selection
+- Drag-and-drop mod archive installation
+- Mod profiles
+- Nexus Mods modlist support
+- Wabbajack modlist support
+- Mod conflict detection and resolution
 
 ---
 
 ## Installation
 
-Requires Python 3.10+ and a macOS system with CrossOver or another Wine-based runner.
+### Requirements
+
+- macOS 10.15+ or Linux with GTK 3 / WebKitGTK
+- A Wine-based runner (CrossOver, Whisky, Lutris, Proton, etc.)
+
+### From Release
+
+Download the latest release for your platform:
+
+| Platform | Format |
+|----------|--------|
+| macOS | `.dmg` (drag to Applications) |
+| Linux | AppImage, `.deb`, `.rpm` |
+
+### From Source
 
 ```bash
-# Clone and install in development mode
 git clone https://github.com/cashcon57/corkscrew.git
 cd corkscrew
-pip install -e .
+npm install
+cargo tauri build
 ```
 
-## Quick Start
-
-```bash
-# See what bottles Corkscrew can find
-corkscrew bottles
-
-# See what games are in those bottles
-corkscrew games
-
-# Install a mod from a local archive
-corkscrew install ~/Downloads/SomeSkryimMod.zip -g skyrimse -b "My Bottle"
-
-# List installed mods
-corkscrew mods -g skyrimse -b "My Bottle"
-
-# Check plugin load order
-corkscrew plugins -b "My Bottle"
-
-# Uninstall by mod ID
-corkscrew uninstall 1 -g skyrimse -b "My Bottle"
-```
-
-### Nexus Mods Integration
-
-```bash
-# Set your personal API key (get one from nexusmods.com → API Access)
-corkscrew config set nexus_api_key YOUR_KEY_HERE
-
-# Download and install from an NXM link
-corkscrew nexus-download "nxm://skyrimspecialedition/mods/12345/files/67890?key=abc&expires=123" \
-  -g skyrimse -b "My Bottle"
-```
+Requires [Node.js](https://nodejs.org/) and a [Rust toolchain](https://rustup.rs/).
 
 ---
 
-## Supported Bottle Sources
+## Supported Platforms
 
-| Source | Path |
-|--------|------|
-| CrossOver | `~/Library/Application Support/CrossOver/Bottles/` |
-| Whisky | `~/Library/Containers/com.isaacmarovitz.Whisky/Bottles/` |
-| Moonshine | `~/Library/Containers/com.isaacmarovitz.Moonshine/Bottles/` |
-| Heroic (Wine) | `~/Games/Heroic/Prefixes/` |
-| Mythic | `~/Library/Application Support/Mythic/Bottles/` |
+### Bottle Sources
 
-## Supported Games
+| Source | macOS | Linux |
+|--------|:-----:|:-----:|
+| CrossOver | &check; | &check; |
+| Whisky | &check; | — |
+| Moonshine | &check; | — |
+| Heroic (Wine) | &check; | &check; |
+| Mythic | &check; | — |
+| Lutris | — | &check; |
+| Proton / Steam | — | &check; |
+| Bottles | — | &check; |
+| Native Wine | &check; | &check; |
+
+### Games
 
 | Game | ID | Status |
 |------|----|--------|
 | Skyrim Special Edition | `skyrimse` | Working |
 | *More to come* | | Planned |
 
-Adding a new game is a matter of writing a small plugin — see [skyrim_se.py](src/corkscrew/plugins/skyrim_se.py) for the pattern.
+Adding a new game is a matter of writing a small plugin — see [`plugins/skyrim_se.rs`](src-tauri/src/plugins/skyrim_se.rs) for the pattern.
 
 ---
 
 ## How It Works
 
-Wine bottles are just directories. A CrossOver bottle at `~/Library/Application Support/CrossOver/Bottles/MyBottle/` has a `drive_c/` folder that maps to the game's `C:\` drive. Corkscrew navigates this structure natively from macOS to find game installs and deploy mod files — no Wine runtime needed, no Windows tools required.
+Wine bottles are just directories. A CrossOver bottle at `~/Library/Application Support/CrossOver/Bottles/MyBottle/` has a `drive_c/` folder that maps to the game's `C:\` drive.
 
-For Skyrim SE, mods typically go into `drive_c/Program Files (x86)/Steam/steamapps/common/Skyrim Special Edition/Data/`. Corkscrew figures out the right path, extracts your archive, and puts files where the game expects them.
+Corkscrew navigates this structure natively to find game installs and deploy mod files — no Wine runtime needed, no Windows tools required. For Skyrim SE, mods go into the `Data/` directory within the game install. Corkscrew figures out the right path, extracts your archive, and puts files where the game expects them.
+
+### Architecture
+
+Built with [Tauri v2](https://v2.tauri.app/) for a small, fast, native experience:
+
+- **Frontend** — [Svelte 5](https://svelte.dev/) + [SvelteKit](https://svelte.dev/docs/kit) with static adapter
+- **Backend** — Rust with async I/O, SQLite, and direct filesystem access
+- **Bundle** — Single binary, ~9 MB on macOS
+
+```
+src/                    Svelte frontend
+src-tauri/src/
+├── bottles.rs          Bottle detection (macOS + Linux paths)
+├── games.rs            Game detection framework + plugin registry
+├── installer.rs        Archive extraction and mod deployment
+├── database.rs         SQLite mod tracking
+├── nexus.rs            Nexus Mods API client
+├── config.rs           Configuration management
+├── fomod.rs            FOMOD installer XML parser
+└── plugins/
+    ├── skyrim_se.rs    Skyrim SE game plugin
+    └── skyrim_plugins.rs  Plugin load order management
+```
 
 ---
 
-## Project Structure
-
-```
-src/corkscrew/
-├── bottles.py          # Bottle detection (CrossOver, Whisky, etc.)
-├── games.py            # Game detection framework + plugin registry
-├── installer.py        # Archive extraction and file deployment
-├── database.py         # SQLite mod tracking
-├── nexus.py            # Nexus Mods API client
-├── config.py           # User configuration
-├── cli.py              # CLI interface (Click + Rich)
-├── plugins/
-│   ├── skyrim_se.py    # Skyrim SE game plugin
-│   └── skyrim_plugins.py  # Plugin load order management
-└── fomod/
-    └── parser.py       # FOMOD installer XML parser
-```
-
 ## Contributing
 
-This is a young project and there's plenty to do. If you're a Mac gamer who's tired of manually dragging files into Wine prefixes, you're the target audience — and probably the ideal contributor.
+This is a young project and there's plenty to do. If you're a Mac or Linux gamer who's tired of manually dragging files into Wine prefixes, you're the target audience — and probably the ideal contributor.
 
-Bug reports, feature requests, and pull requests are all welcome. If you want to add support for a new game, the plugin system is designed to make that straightforward.
+Bug reports, feature requests, and pull requests are all welcome.
 
 ## Acknowledgments
 
-Corkscrew wouldn't exist without the ecosystem it builds on:
-
-- [CrossOver](https://www.codeweavers.com/crossover) by CodeWeavers — for making Windows games work on macOS
-- [Nexus Mods](https://www.nexusmods.com/) — for the modding community and API
-- [Mod Organizer 2](https://github.com/ModOrganizer2/modorganizer) and [Vortex](https://github.com/Nexus-Mods/Vortex) — for blazing the trail on mod management
-- The [FOMOD](https://fomod-docs.readthedocs.io/) standard — for a sane installer format
-- [Wine](https://www.winehq.org/) — for the compatibility layer that makes all of this possible
+- [CrossOver](https://www.codeweavers.com/crossover) by CodeWeavers
+- [Nexus Mods](https://www.nexusmods.com/) for the modding community and API
+- [Mod Organizer 2](https://github.com/ModOrganizer2/modorganizer) and [Vortex](https://github.com/Nexus-Mods/Vortex) for blazing the trail
+- The [FOMOD](https://fomod-docs.readthedocs.io/) standard
+- [Wine](https://www.winehq.org/) and all the compatibility layer projects
 
 ## License
 

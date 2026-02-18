@@ -1,0 +1,574 @@
+//! Plugin load order management for Skyrim Special Edition.
+//!
+//! Handles reading, writing, and synchronising `plugins.txt` and
+//! `loadorder.txt` files used by Skyrim SE to determine which plugins
+//! are active and in what order they are loaded.
+//!
+//! ## File formats
+//!
+//! **`plugins.txt`**:
+//! - Lines starting with `#` are comments.
+//! - Lines starting with `*` denote an enabled plugin (the `*` is stripped).
+//! - All other non-empty lines are disabled plugins.
+//!
+//! **`loadorder.txt`**:
+//! - Plain list of plugin filenames, one per line, in load order.
+//! - Comments (`#`) and blank lines are ignored.
+
+use std::fs;
+use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
+
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Plugins that are always implicitly loaded by the engine in this order.
+/// They do not need to appear in `plugins.txt` (though they sometimes do).
+pub const IMPLICIT_PLUGINS: &[&str] = &[
+    "Skyrim.esm",
+    "Update.esm",
+    "Dawnguard.esm",
+    "HearthFires.esm",
+    "Dragonborn.esm",
+];
+
+// ---------------------------------------------------------------------------
+// PluginEntry
+// ---------------------------------------------------------------------------
+
+/// A single entry in the plugin load order.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PluginEntry {
+    /// Filename of the plugin (e.g. `"MyMod.esp"`).
+    pub filename: String,
+    /// Whether the plugin is enabled (active).
+    pub enabled: bool,
+}
+
+impl PluginEntry {
+    /// Returns `true` if this plugin has the `.esl` extension (ESL light plugin).
+    pub fn is_esl(&self) -> bool {
+        self.filename
+            .rsplit('.')
+            .next()
+            .map(|ext| ext.eq_ignore_ascii_case("esl"))
+            .unwrap_or(false)
+    }
+
+    /// Returns `true` if this plugin has the `.esm` extension (master file).
+    pub fn is_esm(&self) -> bool {
+        self.filename
+            .rsplit('.')
+            .next()
+            .map(|ext| ext.eq_ignore_ascii_case("esm"))
+            .unwrap_or(false)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// plugins.txt
+// ---------------------------------------------------------------------------
+
+/// Read a `plugins.txt` file and return the plugin entries.
+///
+/// Lines starting with `#` are comments and are skipped. Lines starting with
+/// `*` indicate an enabled plugin. All other non-empty lines are treated as
+/// disabled plugins.
+pub fn read_plugins_txt(path: &Path) -> Result<Vec<PluginEntry>> {
+    let file = fs::File::open(path)
+        .with_context(|| format!("Failed to open plugins.txt: {}", path.display()))?;
+    let reader = BufReader::new(file);
+    let mut entries = Vec::new();
+
+    for line in reader.lines() {
+        let line = line.with_context(|| "Failed to read line from plugins.txt")?;
+        let trimmed = line.trim();
+
+        // Skip empty lines and comments.
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        if let Some(name) = trimmed.strip_prefix('*') {
+            let name = name.trim();
+            if !name.is_empty() {
+                entries.push(PluginEntry {
+                    filename: name.to_string(),
+                    enabled: true,
+                });
+            }
+        } else {
+            entries.push(PluginEntry {
+                filename: trimmed.to_string(),
+                enabled: false,
+            });
+        }
+    }
+
+    Ok(entries)
+}
+
+/// Write plugin entries to a `plugins.txt` file.
+///
+/// Enabled plugins are prefixed with `*`. A header comment is written at
+/// the top of the file.
+pub fn write_plugins_txt(path: &Path, entries: &[PluginEntry]) -> Result<()> {
+    // Ensure parent directory exists.
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+    }
+
+    let mut file = fs::File::create(path)
+        .with_context(|| format!("Failed to create plugins.txt: {}", path.display()))?;
+
+    writeln!(file, "# This file is used to determine plugin load order.")?;
+    writeln!(file, "# Managed by Corkscrew.")?;
+
+    for entry in entries {
+        if entry.enabled {
+            writeln!(file, "*{}", entry.filename)?;
+        } else {
+            writeln!(file, "{}", entry.filename)?;
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// loadorder.txt
+// ---------------------------------------------------------------------------
+
+/// Read a `loadorder.txt` file and return the plugin filenames in order.
+///
+/// Comments (`#`) and blank lines are ignored.
+pub fn read_loadorder_txt(path: &Path) -> Result<Vec<String>> {
+    let file = fs::File::open(path)
+        .with_context(|| format!("Failed to open loadorder.txt: {}", path.display()))?;
+    let reader = BufReader::new(file);
+    let mut plugins = Vec::new();
+
+    for line in reader.lines() {
+        let line = line.with_context(|| "Failed to read line from loadorder.txt")?;
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        plugins.push(trimmed.to_string());
+    }
+
+    Ok(plugins)
+}
+
+/// Write plugin filenames to a `loadorder.txt` file in the given order.
+pub fn write_loadorder_txt(path: &Path, plugins: &[String]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+    }
+
+    let mut file = fs::File::create(path)
+        .with_context(|| format!("Failed to create loadorder.txt: {}", path.display()))?;
+
+    for plugin in plugins {
+        writeln!(file, "{}", plugin)?;
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Discovery
+// ---------------------------------------------------------------------------
+
+/// Discover all plugin files (`.esp`, `.esm`, `.esl`) in the given data
+/// directory.
+///
+/// Returns a sorted list of filenames found on disk.
+pub fn discover_plugins(data_dir: &Path) -> Result<Vec<String>> {
+    let mut plugins = Vec::new();
+
+    let entries = fs::read_dir(data_dir)
+        .with_context(|| format!("Failed to read data directory: {}", data_dir.display()))?;
+
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if is_plugin_file(&name) {
+            plugins.push(name);
+        }
+    }
+
+    plugins.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    Ok(plugins)
+}
+
+/// Check whether a filename has a recognised plugin extension.
+fn is_plugin_file(filename: &str) -> bool {
+    let ext = filename.rsplit('.').next().unwrap_or("");
+    matches!(ext.to_lowercase().as_str(), "esp" | "esm" | "esl")
+}
+
+// ---------------------------------------------------------------------------
+// Synchronisation
+// ---------------------------------------------------------------------------
+
+/// Synchronise the on-disk plugin state with `plugins.txt` and
+/// `loadorder.txt`.
+///
+/// This function:
+/// 1. Discovers all plugins present in `data_dir`.
+/// 2. Reads the existing `plugins.txt` (if present) to preserve
+///    enabled/disabled state.
+/// 3. Adds any newly discovered plugins as disabled.
+/// 4. Removes entries for plugins no longer on disk.
+/// 5. Ensures implicit (base game) plugins are present and enabled.
+/// 6. Writes the updated `plugins.txt` and `loadorder.txt`.
+pub fn sync_plugins(
+    data_dir: &Path,
+    plugins_file: &Path,
+    loadorder_file: &Path,
+) -> Result<()> {
+    let on_disk = discover_plugins(data_dir)?;
+
+    // Build a set of filenames on disk for quick lookup (case-insensitive).
+    let on_disk_lower: Vec<String> = on_disk.iter().map(|s| s.to_lowercase()).collect();
+
+    // Read existing state if available.
+    let existing = if plugins_file.exists() {
+        read_plugins_txt(plugins_file).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    // Build a map of existing entries (lowercase key -> PluginEntry).
+    let mut existing_map: std::collections::HashMap<String, PluginEntry> = existing
+        .into_iter()
+        .map(|e| (e.filename.to_lowercase(), e))
+        .collect();
+
+    // Ensure implicit plugins are present and enabled.
+    for &implicit in IMPLICIT_PLUGINS {
+        let key = implicit.to_lowercase();
+        if on_disk_lower.contains(&key) {
+            existing_map
+                .entry(key)
+                .and_modify(|e| e.enabled = true)
+                .or_insert(PluginEntry {
+                    filename: implicit.to_string(),
+                    enabled: true,
+                });
+        }
+    }
+
+    // Build the final ordered list.
+    let mut result: Vec<PluginEntry> = Vec::new();
+
+    // First add implicit plugins in their canonical order.
+    for &implicit in IMPLICIT_PLUGINS {
+        let key = implicit.to_lowercase();
+        if on_disk_lower.contains(&key) {
+            // Use the on-disk filename casing.
+            let real_name = on_disk
+                .iter()
+                .find(|n| n.to_lowercase() == key)
+                .cloned()
+                .unwrap_or_else(|| implicit.to_string());
+            result.push(PluginEntry {
+                filename: real_name,
+                enabled: true,
+            });
+            existing_map.remove(&key);
+        }
+    }
+
+    // Then add remaining plugins in on-disk discovery order, preserving
+    // enabled state from the existing file.
+    for plugin_name in &on_disk {
+        let key = plugin_name.to_lowercase();
+
+        // Skip implicit plugins already added.
+        if IMPLICIT_PLUGINS
+            .iter()
+            .any(|&i| i.to_lowercase() == key)
+        {
+            continue;
+        }
+
+        let entry = if let Some(existing_entry) = existing_map.remove(&key) {
+            PluginEntry {
+                filename: plugin_name.clone(),
+                enabled: existing_entry.enabled,
+            }
+        } else {
+            // Newly discovered plugin, default to disabled.
+            PluginEntry {
+                filename: plugin_name.clone(),
+                enabled: false,
+            }
+        };
+
+        result.push(entry);
+    }
+
+    // Write updated files.
+    write_plugins_txt(plugins_file, &result)?;
+
+    let load_order: Vec<String> = result.iter().map(|e| e.filename.clone()).collect();
+    write_loadorder_txt(loadorder_file, &load_order)?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn plugin_entry_is_esl() {
+        let entry = PluginEntry {
+            filename: "MyMod.esl".into(),
+            enabled: true,
+        };
+        assert!(entry.is_esl());
+        assert!(!entry.is_esm());
+    }
+
+    #[test]
+    fn plugin_entry_is_esm() {
+        let entry = PluginEntry {
+            filename: "Skyrim.esm".into(),
+            enabled: true,
+        };
+        assert!(entry.is_esm());
+        assert!(!entry.is_esl());
+    }
+
+    #[test]
+    fn plugin_entry_esp_is_neither() {
+        let entry = PluginEntry {
+            filename: "MyMod.esp".into(),
+            enabled: false,
+        };
+        assert!(!entry.is_esm());
+        assert!(!entry.is_esl());
+    }
+
+    #[test]
+    fn read_write_plugins_txt_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("plugins.txt");
+
+        let entries = vec![
+            PluginEntry {
+                filename: "Skyrim.esm".into(),
+                enabled: true,
+            },
+            PluginEntry {
+                filename: "MyMod.esp".into(),
+                enabled: false,
+            },
+            PluginEntry {
+                filename: "CoolMod.esp".into(),
+                enabled: true,
+            },
+        ];
+
+        write_plugins_txt(&path, &entries).unwrap();
+        let read_back = read_plugins_txt(&path).unwrap();
+
+        assert_eq!(read_back.len(), 3);
+        assert_eq!(read_back[0].filename, "Skyrim.esm");
+        assert!(read_back[0].enabled);
+        assert_eq!(read_back[1].filename, "MyMod.esp");
+        assert!(!read_back[1].enabled);
+        assert_eq!(read_back[2].filename, "CoolMod.esp");
+        assert!(read_back[2].enabled);
+    }
+
+    #[test]
+    fn read_plugins_txt_skips_comments() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("plugins.txt");
+        fs::write(
+            &path,
+            "# Comment line\n*Skyrim.esm\n# Another comment\nMyMod.esp\n\n",
+        )
+        .unwrap();
+
+        let entries = read_plugins_txt(&path).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].filename, "Skyrim.esm");
+        assert!(entries[0].enabled);
+        assert_eq!(entries[1].filename, "MyMod.esp");
+        assert!(!entries[1].enabled);
+    }
+
+    #[test]
+    fn read_write_loadorder_txt_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("loadorder.txt");
+
+        let plugins = vec![
+            "Skyrim.esm".to_string(),
+            "Update.esm".to_string(),
+            "MyMod.esp".to_string(),
+        ];
+
+        write_loadorder_txt(&path, &plugins).unwrap();
+        let read_back = read_loadorder_txt(&path).unwrap();
+
+        assert_eq!(read_back, plugins);
+    }
+
+    #[test]
+    fn discover_plugins_finds_plugin_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("Data");
+        fs::create_dir_all(&data_dir).unwrap();
+
+        // Create some plugin files and a non-plugin file.
+        fs::write(data_dir.join("Skyrim.esm"), b"fake").unwrap();
+        fs::write(data_dir.join("MyMod.esp"), b"fake").unwrap();
+        fs::write(data_dir.join("Light.esl"), b"fake").unwrap();
+        fs::write(data_dir.join("readme.txt"), b"not a plugin").unwrap();
+        fs::write(data_dir.join("texture.dds"), b"not a plugin").unwrap();
+
+        let plugins = discover_plugins(&data_dir).unwrap();
+        assert_eq!(plugins.len(), 3);
+
+        let names: Vec<&str> = plugins.iter().map(|s| s.as_str()).collect();
+        assert!(names.contains(&"Skyrim.esm"));
+        assert!(names.contains(&"MyMod.esp"));
+        assert!(names.contains(&"Light.esl"));
+    }
+
+    #[test]
+    fn is_plugin_file_detects_extensions() {
+        assert!(is_plugin_file("Skyrim.esm"));
+        assert!(is_plugin_file("MyMod.ESP"));
+        assert!(is_plugin_file("Light.esl"));
+        assert!(!is_plugin_file("readme.txt"));
+        assert!(!is_plugin_file("texture.dds"));
+        assert!(!is_plugin_file("no_extension"));
+    }
+
+    #[test]
+    fn sync_plugins_creates_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("Data");
+        fs::create_dir_all(&data_dir).unwrap();
+
+        // Create base game plugins and a user mod.
+        fs::write(data_dir.join("Skyrim.esm"), b"fake").unwrap();
+        fs::write(data_dir.join("Update.esm"), b"fake").unwrap();
+        fs::write(data_dir.join("Dawnguard.esm"), b"fake").unwrap();
+        fs::write(data_dir.join("HearthFires.esm"), b"fake").unwrap();
+        fs::write(data_dir.join("Dragonborn.esm"), b"fake").unwrap();
+        fs::write(data_dir.join("UserMod.esp"), b"fake").unwrap();
+
+        let plugins_file = tmp.path().join("plugins.txt");
+        let loadorder_file = tmp.path().join("loadorder.txt");
+
+        sync_plugins(&data_dir, &plugins_file, &loadorder_file).unwrap();
+
+        // Verify plugins.txt was created.
+        let entries = read_plugins_txt(&plugins_file).unwrap();
+
+        // Implicit plugins should be first and enabled.
+        assert_eq!(entries[0].filename, "Skyrim.esm");
+        assert!(entries[0].enabled);
+        assert_eq!(entries[4].filename, "Dragonborn.esm");
+        assert!(entries[4].enabled);
+
+        // User mod should be present but disabled.
+        let user_mod = entries.iter().find(|e| e.filename == "UserMod.esp").unwrap();
+        assert!(!user_mod.enabled);
+
+        // Verify loadorder.txt was created.
+        let load_order = read_loadorder_txt(&loadorder_file).unwrap();
+        assert_eq!(load_order.len(), entries.len());
+    }
+
+    #[test]
+    fn sync_plugins_preserves_enabled_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("Data");
+        fs::create_dir_all(&data_dir).unwrap();
+
+        fs::write(data_dir.join("Skyrim.esm"), b"fake").unwrap();
+        fs::write(data_dir.join("UserMod.esp"), b"fake").unwrap();
+
+        let plugins_file = tmp.path().join("plugins.txt");
+        let loadorder_file = tmp.path().join("loadorder.txt");
+
+        // Pre-populate plugins.txt with UserMod enabled.
+        write_plugins_txt(
+            &plugins_file,
+            &[
+                PluginEntry {
+                    filename: "Skyrim.esm".into(),
+                    enabled: true,
+                },
+                PluginEntry {
+                    filename: "UserMod.esp".into(),
+                    enabled: true,
+                },
+            ],
+        )
+        .unwrap();
+
+        sync_plugins(&data_dir, &plugins_file, &loadorder_file).unwrap();
+
+        let entries = read_plugins_txt(&plugins_file).unwrap();
+        let user_mod = entries.iter().find(|e| e.filename == "UserMod.esp").unwrap();
+        assert!(user_mod.enabled, "UserMod.esp should remain enabled after sync");
+    }
+
+    #[test]
+    fn sync_plugins_removes_missing_plugins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("Data");
+        fs::create_dir_all(&data_dir).unwrap();
+
+        fs::write(data_dir.join("Skyrim.esm"), b"fake").unwrap();
+
+        let plugins_file = tmp.path().join("plugins.txt");
+        let loadorder_file = tmp.path().join("loadorder.txt");
+
+        // Pre-populate with a plugin that no longer exists on disk.
+        write_plugins_txt(
+            &plugins_file,
+            &[
+                PluginEntry {
+                    filename: "Skyrim.esm".into(),
+                    enabled: true,
+                },
+                PluginEntry {
+                    filename: "DeletedMod.esp".into(),
+                    enabled: true,
+                },
+            ],
+        )
+        .unwrap();
+
+        sync_plugins(&data_dir, &plugins_file, &loadorder_file).unwrap();
+
+        let entries = read_plugins_txt(&plugins_file).unwrap();
+        assert!(
+            !entries.iter().any(|e| e.filename == "DeletedMod.esp"),
+            "Deleted plugin should be removed from plugins.txt"
+        );
+    }
+}
