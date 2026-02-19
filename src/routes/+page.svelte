@@ -32,7 +32,7 @@
   }
 
   const sourceColors: Record<string, { color: string; bg: string; gradient: string }> = {
-    CrossOver:  { color: "#e8453a", bg: "rgba(232, 69, 58, 0.14)",  gradient: "linear-gradient(135deg, rgba(232, 69, 58, 0.18), rgba(232, 69, 58, 0.06))" },
+    CrossOver:  { color: "#c850c0", bg: "rgba(200, 80, 192, 0.14)",  gradient: "linear-gradient(135deg, rgba(200, 80, 192, 0.18), rgba(200, 80, 192, 0.06))" },
     Whisky:     { color: "#e8a317", bg: "rgba(232, 163, 23, 0.14)",  gradient: "linear-gradient(135deg, rgba(232, 163, 23, 0.18), rgba(232, 163, 23, 0.06))" },
     Moonshine:  { color: "#bf5af2", bg: "rgba(191, 90, 242, 0.14)",  gradient: "linear-gradient(135deg, rgba(191, 90, 242, 0.18), rgba(191, 90, 242, 0.06))" },
     Heroic:     { color: "#0a84ff", bg: "rgba(10, 132, 255, 0.14)",  gradient: "linear-gradient(135deg, rgba(10, 132, 255, 0.18), rgba(10, 132, 255, 0.06))" },
@@ -124,8 +124,8 @@
                 <div class="bottle-card-inner">
                   <div class="bottle-icon" style="color: {style.color}; background: {style.bg};">
                     {#if bottle.source === "CrossOver"}
-                      <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-                        <line x1="4" y1="4" x2="16" y2="16" /><line x1="16" y1="4" x2="4" y2="16" />
+                      <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M4 6l5 4-5 4" /><path d="M16 6l-5 4 5 4" />
                       </svg>
                     {:else if bottle.source === "Whisky"}
                       <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
