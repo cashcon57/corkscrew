@@ -124,43 +124,59 @@
                 <div class="bottle-card-inner">
                   <div class="bottle-icon" style="color: {style.color}; background: {style.bg};">
                     {#if bottle.source === "CrossOver"}
+                      <!-- Nested overlapping diamonds (geometric crossing shapes) -->
                       <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M4 6l5 4-5 4" /><path d="M16 6l-5 4 5 4" />
+                        <rect x="4" y="4" width="8" height="8" rx="1" transform="rotate(45 8 8)" />
+                        <rect x="8" y="8" width="8" height="8" rx="1" transform="rotate(45 12 12)" />
                       </svg>
                     {:else if bottle.source === "Whisky"}
+                      <!-- Rocks/tumbler glass with liquid -->
                       <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M5 6h10l-1 10a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6z" />
-                        <path d="M4 6h12" /><path d="M8 6V4h4v2" />
+                        <path d="M4.5 5h11l-1.5 11a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L4.5 5z" />
+                        <path d="M6.5 11h7" />
                       </svg>
                     {:else if bottle.source === "Moonshine"}
+                      <!-- Crescent moon -->
                       <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
                         <path d="M15 4a7 7 0 1 0-1 12A5 5 0 0 1 15 4z" />
                       </svg>
                     {:else if bottle.source === "Heroic"}
+                      <!-- Shield with sword -->
                       <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                        <rect x="3" y="6" width="14" height="9" rx="2" />
-                        <circle cx="7" cy="10.5" r="1.5" />
-                        <circle cx="13" cy="10.5" r="1.5" />
+                        <path d="M10 2L3 5v5c0 4.4 3 7.5 7 9 4-1.5 7-4.6 7-9V5l-7-3z" />
+                        <line x1="10" y1="7" x2="10" y2="14" />
+                        <line x1="8" y1="9" x2="12" y2="9" />
                       </svg>
                     {:else if bottle.source === "Mythic"}
+                      <!-- Three stepping diamonds -->
                       <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                        <polygon points="10,2 18,10 10,18 2,10" />
+                        <rect x="3" y="11" width="5" height="5" rx="0.5" transform="rotate(45 5.5 13.5)" />
+                        <rect x="6" y="8" width="5" height="5" rx="0.5" transform="rotate(45 8.5 10.5)" />
+                        <rect x="9" y="5" width="5" height="5" rx="0.5" transform="rotate(45 11.5 7.5)" />
                       </svg>
                     {:else if bottle.source === "Wine"}
+                      <!-- Wine glass -->
                       <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
                         <path d="M7 2h6l.5 5a3.5 3.5 0 0 1-7 0L7 2z" /><line x1="10" y1="12" x2="10" y2="17" />
                         <line x1="7" y1="17" x2="13" y2="17" />
                       </svg>
                     {:else if bottle.source === "Lutris"}
+                      <!-- Otter curling around orb -->
                       <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                        <circle cx="10" cy="6" r="3" /><path d="M4 18c0-3.3 2.7-6 6-6s6 2.7 6 6" />
+                        <circle cx="10" cy="11" r="4" />
+                        <path d="M6.5 8.5C5 6 6.5 3 10 3c3.5 0 5 3 3.5 5.5" />
+                        <circle cx="8" cy="5.5" r="0.5" fill="currentColor" />
                       </svg>
                     {:else if bottle.source === "Proton"}
+                      <!-- Atom symbol (Rutherford-Bohr model) -->
                       <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                        <circle cx="10" cy="10" r="7" />
-                        <path d="M10 5v5l3.5 3.5" />
+                        <circle cx="10" cy="10" r="1.5" fill="currentColor" stroke="none" />
+                        <ellipse cx="10" cy="10" rx="7" ry="3" />
+                        <ellipse cx="10" cy="10" rx="7" ry="3" transform="rotate(60 10 10)" />
+                        <ellipse cx="10" cy="10" rx="7" ry="3" transform="rotate(120 10 10)" />
                       </svg>
                     {:else if bottle.source === "Bottles"}
+                      <!-- Bottle silhouette -->
                       <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
                         <path d="M8 2h4v3l2 2v8a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V7l2-2V2z" />
                       </svg>

@@ -373,9 +373,17 @@ async fn install_skse_cmd(
         .and_then(|c| c.download_dir.map(PathBuf::from))
         .unwrap_or_else(config::downloads_dir);
 
-    skse::download_and_install_skse(&game_path, &download_dir)
+    let mut status = skse::download_and_install_skse(&game_path, &download_dir)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    // Auto-enable SKSE after successful installation
+    if status.installed {
+        let _ = skse::set_skse_preference(&game_id, &bottle_name, true);
+        status.use_skse = true;
+    }
+
+    Ok(status)
 }
 
 #[tauri::command]

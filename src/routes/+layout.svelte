@@ -22,9 +22,12 @@
 </script>
 
 <div class="app-shell">
+  <!-- Full-width drag region at top of window for window movement -->
+  <div class="window-drag-region" data-tauri-drag-region></div>
+
   <nav class="sidebar">
-    <!-- Traffic light zone: draggable area where macOS traffic lights sit -->
-    <div class="sidebar-traffic-zone" data-tauri-drag-region></div>
+    <!-- Traffic light zone: spacer for macOS traffic lights -->
+    <div class="sidebar-traffic-zone"></div>
 
     <ul class="nav-list">
       {#each navItems as item}
@@ -83,8 +86,6 @@
   </nav>
 
   <main class="content">
-    <!-- Content drag region (matches sidebar traffic zone height) -->
-    <div class="content-drag-region" data-tauri-drag-region></div>
 
     {#if $errorMessage}
       <div class="toast toast-error" role="alert">
@@ -233,16 +234,16 @@
     position: relative;
   }
 
-  /* Content drag region — sits at the top of the content area,
-     providing a draggable strip that matches the sidebar traffic zone.
-     Fixed positioning so it doesn't scroll away. */
-  .content-drag-region {
+  /* Full-width drag region — overlays the entire top of the window
+     for dragging. Sits above sidebar + content in a fixed position. */
+  .window-drag-region {
     position: fixed;
     top: 0;
-    left: 220px;
+    left: 0;
     right: 0;
     height: 52px;
-    z-index: 10;
+    z-index: 100;
+    -webkit-app-region: drag;
     /* Transparent — just a drag target, no visual element */
   }
 
@@ -259,6 +260,7 @@
     align-items: center;
     gap: var(--space-2);
     z-index: 1000;
+    -webkit-app-region: no-drag;
     box-shadow: var(--shadow-lg);
     animation: toastIn var(--duration-slow) var(--ease-out);
     backdrop-filter: blur(20px);
