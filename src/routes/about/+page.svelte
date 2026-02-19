@@ -55,9 +55,7 @@
     <div class="section-card">
       <div class="card-row">
         <span class="row-label">Tauri</span>
-        <span class="row-value">
-          <span class="badge">v2</span>
-        </span>
+        <span class="row-value">v2</span>
       </div>
       <div class="card-divider"></div>
       <div class="card-row">
@@ -207,25 +205,12 @@
   }
 
   .row-value a {
-    color: var(--accent);
+    color: var(--system-accent);
     text-decoration: none;
   }
 
   .row-value a:hover {
     text-decoration: underline;
-  }
-
-  /* --- Badge --- */
-
-  .badge {
-    display: inline-block;
-    padding: 1px var(--space-2);
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--accent);
-    background: var(--accent-subtle);
-    border-radius: var(--radius-sm);
-    letter-spacing: 0.01em;
   }
 
   /* --- Footer --- */

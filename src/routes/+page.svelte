@@ -31,20 +31,20 @@
     currentPage.set("mods");
   }
 
-  const sourceColors: Record<string, { color: string; bg: string }> = {
-    CrossOver: { color: "#ff453a", bg: "rgba(255, 69, 58, 0.12)" },
-    Whisky: { color: "#ffd60a", bg: "rgba(255, 214, 10, 0.12)" },
-    Moonshine: { color: "#bf5af2", bg: "rgba(191, 90, 242, 0.12)" },
-    Heroic: { color: "#0a84ff", bg: "rgba(10, 132, 255, 0.12)" },
-    Mythic: { color: "#30d158", bg: "rgba(48, 209, 88, 0.12)" },
-    Wine: { color: "#ff6961", bg: "rgba(255, 105, 97, 0.12)" },
-    Lutris: { color: "#ff9f0a", bg: "rgba(255, 159, 10, 0.12)" },
-    Proton: { color: "#30d158", bg: "rgba(48, 209, 88, 0.12)" },
-    Bottles: { color: "#bf5af2", bg: "rgba(191, 90, 242, 0.12)" },
+  const sourceColors: Record<string, { color: string; bg: string; gradient: string }> = {
+    CrossOver:  { color: "#e8453a", bg: "rgba(232, 69, 58, 0.14)",  gradient: "linear-gradient(135deg, rgba(232, 69, 58, 0.18), rgba(232, 69, 58, 0.06))" },
+    Whisky:     { color: "#e8a317", bg: "rgba(232, 163, 23, 0.14)",  gradient: "linear-gradient(135deg, rgba(232, 163, 23, 0.18), rgba(232, 163, 23, 0.06))" },
+    Moonshine:  { color: "#bf5af2", bg: "rgba(191, 90, 242, 0.14)",  gradient: "linear-gradient(135deg, rgba(191, 90, 242, 0.18), rgba(191, 90, 242, 0.06))" },
+    Heroic:     { color: "#0a84ff", bg: "rgba(10, 132, 255, 0.14)",  gradient: "linear-gradient(135deg, rgba(10, 132, 255, 0.18), rgba(10, 132, 255, 0.06))" },
+    Mythic:     { color: "#30d158", bg: "rgba(48, 209, 88, 0.14)",   gradient: "linear-gradient(135deg, rgba(48, 209, 88, 0.18), rgba(48, 209, 88, 0.06))" },
+    Wine:       { color: "#722F37", bg: "rgba(114, 47, 55, 0.14)",   gradient: "linear-gradient(135deg, rgba(114, 47, 55, 0.18), rgba(114, 47, 55, 0.06))" },
+    Lutris:     { color: "#ff9f0a", bg: "rgba(255, 159, 10, 0.14)",  gradient: "linear-gradient(135deg, rgba(255, 159, 10, 0.18), rgba(255, 159, 10, 0.06))" },
+    Proton:     { color: "#1a9fff", bg: "rgba(26, 159, 255, 0.14)",  gradient: "linear-gradient(135deg, rgba(26, 159, 255, 0.18), rgba(26, 159, 255, 0.06))" },
+    Bottles:    { color: "#3584e4", bg: "rgba(53, 132, 228, 0.14)",  gradient: "linear-gradient(135deg, rgba(53, 132, 228, 0.18), rgba(53, 132, 228, 0.06))" },
   };
 
-  function getSourceStyle(source: string): { color: string; bg: string } {
-    return sourceColors[source] || { color: "#8e8e93", bg: "rgba(142, 142, 147, 0.12)" };
+  function getSourceStyle(source: string): { color: string; bg: string; gradient: string } {
+    return sourceColors[source] || { color: "#8e8e93", bg: "rgba(142, 142, 147, 0.12)", gradient: "none" };
   }
 
   function truncatePath(path: string, maxLen: number = 60): string {
@@ -116,22 +116,75 @@
         {:else}
           <div class="card-grid">
             {#each $bottles as bottle, i}
+              {@const style = getSourceStyle(bottle.source)}
               <div
                 class="card bottle-card"
                 style="animation-delay: {i * 40}ms"
               >
-                <div class="card-top-row">
-                  <span
-                    class="source-badge"
-                    style="color: {getSourceStyle(bottle.source).color}; background: {getSourceStyle(bottle.source).bg};"
-                  >
-                    {bottle.source}
-                  </span>
+                <div class="bottle-card-inner">
+                  <div class="bottle-icon" style="color: {style.color}; background: {style.bg};">
+                    {#if bottle.source === "CrossOver"}
+                      <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                        <line x1="4" y1="4" x2="16" y2="16" /><line x1="16" y1="4" x2="4" y2="16" />
+                      </svg>
+                    {:else if bottle.source === "Whisky"}
+                      <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M5 6h10l-1 10a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6z" />
+                        <path d="M4 6h12" /><path d="M8 6V4h4v2" />
+                      </svg>
+                    {:else if bottle.source === "Moonshine"}
+                      <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M15 4a7 7 0 1 0-1 12A5 5 0 0 1 15 4z" />
+                      </svg>
+                    {:else if bottle.source === "Heroic"}
+                      <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="3" y="6" width="14" height="9" rx="2" />
+                        <circle cx="7" cy="10.5" r="1.5" />
+                        <circle cx="13" cy="10.5" r="1.5" />
+                      </svg>
+                    {:else if bottle.source === "Mythic"}
+                      <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <polygon points="10,2 18,10 10,18 2,10" />
+                      </svg>
+                    {:else if bottle.source === "Wine"}
+                      <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M7 2h6l.5 5a3.5 3.5 0 0 1-7 0L7 2z" /><line x1="10" y1="12" x2="10" y2="17" />
+                        <line x1="7" y1="17" x2="13" y2="17" />
+                      </svg>
+                    {:else if bottle.source === "Lutris"}
+                      <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="10" cy="6" r="3" /><path d="M4 18c0-3.3 2.7-6 6-6s6 2.7 6 6" />
+                      </svg>
+                    {:else if bottle.source === "Proton"}
+                      <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="10" cy="10" r="7" />
+                        <path d="M10 5v5l3.5 3.5" />
+                      </svg>
+                    {:else if bottle.source === "Bottles"}
+                      <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M8 2h4v3l2 2v8a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V7l2-2V2z" />
+                      </svg>
+                    {:else}
+                      <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="3" y="3" width="14" height="14" rx="3" />
+                      </svg>
+                    {/if}
+                  </div>
+                  <div class="bottle-info">
+                    <div class="card-top-row">
+                      <span
+                        class="source-badge"
+                        style="color: {style.color}; background: {style.bg};"
+                      >
+                        {bottle.source}
+                      </span>
+                    </div>
+                    <h4 class="card-name">{bottle.name}</h4>
+                    <p class="card-path" title={bottle.path}>
+                      {truncatePath(bottle.path)}
+                    </p>
+                  </div>
                 </div>
-                <h4 class="card-name">{bottle.name}</h4>
-                <p class="card-path" title={bottle.path}>
-                  {truncatePath(bottle.path)}
-                </p>
               </div>
             {/each}
           </div>
@@ -309,7 +362,7 @@
     width: 100%;
     height: 100%;
     border: 2.5px solid var(--separator);
-    border-top-color: var(--accent);
+    border-top-color: var(--system-accent);
     border-radius: 50%;
     animation: spin 0.9s cubic-bezier(0.4, 0, 0.2, 1) infinite;
   }
@@ -420,6 +473,35 @@
   .bottle-card:hover {
     background: var(--surface-hover);
     border-color: rgba(255, 255, 255, 0.12);
+  }
+
+  .bottle-card-inner {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-4);
+  }
+
+  .bottle-icon {
+    width: 40px;
+    height: 40px;
+    border-radius: var(--radius);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+
+  .bottle-info {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .bottle-info .card-top-row {
+    margin-bottom: var(--space-1);
+  }
+
+  .bottle-info .card-name {
+    margin-bottom: var(--space-1);
   }
 
   /* ============================================

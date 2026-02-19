@@ -123,7 +123,7 @@
             class:row-disabled={!plugin.enabled}
           >
             <span class="col-index">
-              <span class="index-num">{String(i).padStart(2, "0")}</span>
+              <span class="index-num">{i}</span>
             </span>
             <span class="col-plugin">
               <span class="plugin-filename">{plugin.filename}</span>
@@ -149,9 +149,7 @@
       </div>
     </div>
 
-    <div class="list-footer">
-      <span class="footer-text">{plugins.length} plugins loaded</span>
-    </div>
+    <!-- Footer removed for cleaner HIG look -->
   {/if}
 </div>
 
@@ -232,7 +230,6 @@
 
   .list-container {
     background: var(--surface);
-    border: 1px solid var(--separator);
     border-radius: var(--radius-lg);
     overflow: hidden;
   }
@@ -246,10 +243,8 @@
     background: var(--bg-secondary);
     border-bottom: 1px solid var(--separator);
     font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text-tertiary);
+    font-weight: 500;
+    color: var(--text-secondary);
     align-items: center;
   }
 
@@ -266,13 +261,16 @@
     display: grid;
     grid-template-columns: 48px 1fr 64px 80px;
     padding: var(--space-2) var(--space-4);
-    border-bottom: 1px solid var(--separator);
     align-items: center;
     transition: background var(--duration-fast) var(--ease);
   }
 
-  .list-row:last-child {
-    border-bottom: none;
+  .list-row:nth-child(even) {
+    background: rgba(255, 255, 255, 0.025);
+  }
+
+  :global([data-theme="light"]) .list-row:nth-child(even) {
+    background: rgba(0, 0, 0, 0.025);
   }
 
   .list-row:hover {
@@ -300,7 +298,6 @@
     font-weight: 500;
     color: var(--text-quaternary);
     letter-spacing: 0;
-    min-width: 20px;
   }
 
   .col-plugin {
@@ -362,20 +359,6 @@
     color: var(--text-tertiary);
   }
 
-  /* ---- Footer ---- */
-
-  .list-footer {
-    display: flex;
-    justify-content: center;
-  }
-
-  .footer-text {
-    font-size: 12px;
-    font-weight: 400;
-    color: var(--text-tertiary);
-    letter-spacing: 0.01em;
-  }
-
   /* ---- Empty state ---- */
 
   .empty-state {
@@ -385,7 +368,6 @@
     gap: var(--space-3);
     padding: var(--space-12) var(--space-8);
     background: var(--surface);
-    border: 1px solid var(--separator);
     border-radius: var(--radius-lg);
     text-align: center;
   }
@@ -428,7 +410,7 @@
     width: 28px;
     height: 28px;
     border: 2.5px solid var(--separator-opaque);
-    border-top-color: var(--accent);
+    border-top-color: var(--system-accent);
     border-radius: 50%;
     animation: spin 0.75s linear infinite;
   }

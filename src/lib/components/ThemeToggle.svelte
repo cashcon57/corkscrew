@@ -30,19 +30,26 @@
     >
       <span class="toggle-icon">
         {#if opt.id === "light"}
-          <!-- Sun icon -->
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M8 1a.5.5 0 01.5.5v1a.5.5 0 01-1 0v-1A.5.5 0 018 1zm0 11a.5.5 0 01.5.5v1a.5.5 0 01-1 0v-1A.5.5 0 018 12zm7-4a.5.5 0 01-.5.5h-1a.5.5 0 010-1h1A.5.5 0 0115 8zM4 8a.5.5 0 01-.5.5h-1a.5.5 0 010-1h1A.5.5 0 014 8zm8.95-3.54a.5.5 0 010 .7l-.71.71a.5.5 0 11-.7-.7l.7-.71a.5.5 0 01.71 0zM5.17 10.46a.5.5 0 010 .7l-.71.71a.5.5 0 01-.7-.7l.7-.71a.5.5 0 01.71 0zm7.07 1.41a.5.5 0 01-.7 0l-.71-.7a.5.5 0 01.7-.71l.71.7a.5.5 0 010 .71zM4.46 5.17a.5.5 0 01-.7 0l-.71-.71a.5.5 0 01.7-.7l.71.7a.5.5 0 010 .71zM8 5a3 3 0 100 6 3 3 0 000-6z" />
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="8" cy="8" r="3" />
+            <line x1="8" y1="1.5" x2="8" y2="3" />
+            <line x1="8" y1="13" x2="8" y2="14.5" />
+            <line x1="1.5" y1="8" x2="3" y2="8" />
+            <line x1="13" y1="8" x2="14.5" y2="8" />
+            <line x1="3.4" y1="3.4" x2="4.5" y2="4.5" />
+            <line x1="11.5" y1="11.5" x2="12.6" y2="12.6" />
+            <line x1="3.4" y1="12.6" x2="4.5" y2="11.5" />
+            <line x1="11.5" y1="4.5" x2="12.6" y2="3.4" />
           </svg>
         {:else if opt.id === "system"}
-          <!-- Monitor icon -->
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M2.5 2A1.5 1.5 0 001 3.5v7A1.5 1.5 0 002.5 12H6v1.5H4.5a.5.5 0 000 1h7a.5.5 0 000-1H10V12h3.5a1.5 1.5 0 001.5-1.5v-7A1.5 1.5 0 0013.5 2h-11zM2.5 3h11a.5.5 0 01.5.5v7a.5.5 0 01-.5.5h-11a.5.5 0 01-.5-.5v-7a.5.5 0 01.5-.5zM7 12h2v1.5H7V12z" />
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="1.5" y="2.5" width="13" height="8.5" rx="1" />
+            <line x1="6" y1="13.5" x2="10" y2="13.5" />
+            <line x1="8" y1="11" x2="8" y2="13.5" />
           </svg>
         {:else}
-          <!-- Moon icon -->
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M6.2 1.74A7 7 0 0014.26 9.8a.5.5 0 01-.62.62A6.5 6.5 0 015.58 2.36a.5.5 0 01.62-.62zM4.68 3.32a5.5 5.5 0 107.99 8A8 8 0 014.68 3.32z" />
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M13.5 9.5a6 6 0 01-7-7 6 6 0 107 7z" />
           </svg>
         {/if}
       </span>
@@ -65,7 +72,7 @@
     display: flex;
     align-items: center;
     gap: var(--space-1);
-    padding: var(--space-1) var(--space-3);
+    padding: 5px var(--space-4);
     border-radius: calc(var(--radius) - 2px);
     font-size: 12px;
     font-weight: 500;
@@ -73,7 +80,8 @@
     background: transparent;
     transition:
       background var(--duration-fast) var(--ease),
-      color var(--duration-fast) var(--ease);
+      color var(--duration-fast) var(--ease),
+      box-shadow var(--duration-fast) var(--ease);
     white-space: nowrap;
     line-height: 1.4;
   }
@@ -83,17 +91,19 @@
     background: var(--surface-hover);
   }
 
+  /* NSSegmentedControl style: elevated white segment with shadow */
   .toggle-option.active {
-    background: var(--accent-subtle);
-    color: var(--accent);
+    background: var(--bg-elevated);
+    color: var(--text-primary);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
   }
 
   .toggle-icon {
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 14px;
-    height: 14px;
+    width: 12px;
+    height: 12px;
     flex-shrink: 0;
   }
 

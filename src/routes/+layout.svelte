@@ -23,14 +23,8 @@
 
 <div class="app-shell">
   <nav class="sidebar">
-    <div class="sidebar-drag-region" data-tauri-drag-region></div>
-
-    <div class="sidebar-brand">
-      <div class="sidebar-brand-text">
-        <span class="sidebar-title">Corkscrew</span>
-        <span class="sidebar-subtitle">v0.1.0</span>
-      </div>
-    </div>
+    <!-- Traffic light zone: draggable area where macOS traffic lights sit -->
+    <div class="sidebar-traffic-zone" data-tauri-drag-region></div>
 
     <ul class="nav-list">
       {#each navItems as item}
@@ -42,27 +36,35 @@
           >
             <span class="nav-icon">
               {#if item.id === "dashboard"}
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-                  <rect x="1" y="1" width="6" height="6" rx="1.5" />
-                  <rect x="9" y="1" width="6" height="6" rx="1.5" />
-                  <rect x="1" y="9" width="6" height="6" rx="1.5" />
-                  <rect x="9" y="9" width="6" height="6" rx="1.5" />
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="1.5" y="1.5" width="5" height="5" rx="1" />
+                  <rect x="9.5" y="1.5" width="5" height="5" rx="1" />
+                  <rect x="1.5" y="9.5" width="5" height="5" rx="1" />
+                  <rect x="9.5" y="9.5" width="5" height="5" rx="1" />
                 </svg>
               {:else if item.id === "mods"}
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-                  <path d="M3 2.5A1.5 1.5 0 014.5 1h7A1.5 1.5 0 0113 2.5v11a1.5 1.5 0 01-1.5 1.5h-7A1.5 1.5 0 013 13.5v-11zM5.5 4a.5.5 0 000 1h5a.5.5 0 000-1h-5zm0 3a.5.5 0 000 1h5a.5.5 0 000-1h-5zm0 3a.5.5 0 000 1h3a.5.5 0 000-1h-3z" />
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="3" y="1.5" width="10" height="13" rx="1.5" />
+                  <line x1="5.5" y1="4.5" x2="10.5" y2="4.5" />
+                  <line x1="5.5" y1="7" x2="10.5" y2="7" />
+                  <line x1="5.5" y1="9.5" x2="8.5" y2="9.5" />
                 </svg>
               {:else if item.id === "plugins"}
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-                  <path d="M2.5 3.5a1 1 0 011-1h9a1 1 0 011 1v1a1 1 0 01-1 1h-9a1 1 0 01-1-1v-1zm0 4a1 1 0 011-1h9a1 1 0 011 1v1a1 1 0 01-1 1h-9a1 1 0 01-1-1v-1zm0 4a1 1 0 011-1h9a1 1 0 011 1v1a1 1 0 01-1 1h-9a1 1 0 01-1-1v-1z" />
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="2.5" y="2" width="11" height="3" rx="1" />
+                  <rect x="2.5" y="6.5" width="11" height="3" rx="1" />
+                  <rect x="2.5" y="11" width="11" height="3" rx="1" />
                 </svg>
               {:else if item.id === "settings"}
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-                  <path d="M8 0a3 3 0 00-1.17 5.76A5.5 5.5 0 002.5 11v.5a1 1 0 001 1h9a1 1 0 001-1V11a5.5 5.5 0 00-4.33-5.24A3 3 0 008 0zM5 14.25a.75.75 0 01.75-.75h4.5a.75.75 0 010 1.5h-4.5a.75.75 0 01-.75-.75z" />
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="8" cy="8" r="2.5" />
+                  <path d="M8 1.5v2M8 12.5v2M2.7 4.5l1.7 1M11.6 10.5l1.7 1M1.5 8h2M12.5 8h2M2.7 11.5l1.7-1M11.6 5.5l1.7-1" />
                 </svg>
               {:else}
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-                  <path d="M8 1a7 7 0 110 14A7 7 0 018 1zm0 3a.75.75 0 00-.75.75v.5a.75.75 0 001.5 0v-.5A.75.75 0 008 4zm0 3a.75.75 0 00-.75.75v3.5a.75.75 0 001.5 0v-3.5A.75.75 0 008 7z" />
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="8" cy="8" r="6.5" />
+                  <line x1="8" y1="7" x2="8" y2="11" />
+                  <circle cx="8" cy="5" r="0.5" fill="currentColor" />
                 </svg>
               {/if}
             </span>
@@ -73,20 +75,29 @@
     </ul>
 
     <div class="sidebar-footer">
-      <span class="sidebar-footer-text">Mod Manager for Wine Games</span>
+      <div class="sidebar-brand">
+        <span class="sidebar-title">Corkscrew</span>
+        <span class="sidebar-subtitle">v0.1.0</span>
+      </div>
     </div>
   </nav>
 
   <main class="content">
+    <!-- Content drag region (matches sidebar traffic zone height) -->
+    <div class="content-drag-region" data-tauri-drag-region></div>
+
     {#if $errorMessage}
       <div class="toast toast-error" role="alert">
-        <svg class="toast-icon" width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
-          <path d="M7 0a7 7 0 110 14A7 7 0 017 0zm-.5 4a.75.75 0 00-.75.75v3.5a.75.75 0 001.5 0v-3.5A.75.75 0 006.5 4zM7 10a.75.75 0 100 1.5.75.75 0 000-1.5z" />
+        <svg class="toast-icon" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="7" cy="7" r="6" />
+          <line x1="7" y1="4" x2="7" y2="7.5" />
+          <circle cx="7" cy="10" r="0.5" fill="currentColor" />
         </svg>
         <span class="toast-text">{$errorMessage}</span>
         <button class="toast-dismiss" onclick={() => errorMessage.set(null)} aria-label="Dismiss error">
-          <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
-            <path d="M1.7 1.7a.6.6 0 01.85 0L5 4.15 7.45 1.7a.6.6 0 01.85.85L5.85 5l2.45 2.45a.6.6 0 01-.85.85L5 5.85 2.55 8.3a.6.6 0 01-.85-.85L4.15 5 1.7 2.55a.6.6 0 010-.85z" />
+          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+            <line x1="2" y1="2" x2="8" y2="8" />
+            <line x1="8" y1="2" x2="2" y2="8" />
           </svg>
         </button>
       </div>
@@ -94,13 +105,15 @@
 
     {#if $successMessage}
       <div class="toast toast-success" role="status">
-        <svg class="toast-icon" width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
-          <path d="M7 0a7 7 0 110 14A7 7 0 017 0zm2.85 5.15a.6.6 0 00-.85-.85L6.25 7.05 5 5.8a.6.6 0 00-.85.85l1.68 1.67a.6.6 0 00.84 0l3.18-3.17z" />
+        <svg class="toast-icon" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="7" cy="7" r="6" />
+          <path d="M4.5 7l2 2 3-3.5" />
         </svg>
         <span class="toast-text">{$successMessage}</span>
         <button class="toast-dismiss" onclick={() => successMessage.set(null)} aria-label="Dismiss notification">
-          <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
-            <path d="M1.7 1.7a.6.6 0 01.85 0L5 4.15 7.45 1.7a.6.6 0 01.85.85L5.85 5l2.45 2.45a.6.6 0 01-.85.85L5 5.85 2.55 8.3a.6.6 0 01-.85-.85L4.15 5 1.7 2.55a.6.6 0 010-.85z" />
+          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+            <line x1="2" y1="2" x2="8" y2="8" />
+            <line x1="8" y1="2" x2="2" y2="8" />
           </svg>
         </button>
       </div>
@@ -120,52 +133,34 @@
   /* --- Sidebar --- */
 
   .sidebar {
-    width: 240px;
-    min-width: 240px;
+    width: 220px;
+    min-width: 220px;
     background: var(--bg-grouped);
     border-right: 1px solid var(--separator);
     display: flex;
     flex-direction: column;
   }
 
-  .sidebar-drag-region {
-    height: 28px;
+  /* Remove sidebar border when vibrancy provides visual separation */
+  :global(html.vibrancy-active) .sidebar {
+    border-right: none;
+  }
+
+  /* Traffic light zone — macOS overlay titlebar puts
+     close/minimize/maximize buttons in this area */
+  .sidebar-traffic-zone {
+    height: 52px;
     flex-shrink: 0;
-  }
-
-  .sidebar-brand {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    padding: 0 var(--space-4) var(--space-4);
-  }
-
-  .sidebar-brand-text {
-    display: flex;
-    flex-direction: column;
-  }
-
-  .sidebar-title {
-    font-size: 15px;
-    font-weight: 700;
-    letter-spacing: -0.02em;
-    color: var(--text-primary);
-    line-height: 1.2;
-  }
-
-  .sidebar-subtitle {
-    font-size: 11px;
-    color: var(--text-tertiary);
-    font-weight: 500;
+    /* Entire zone is draggable for window movement */
   }
 
   .nav-list {
     list-style: none;
-    padding: 0 var(--space-3);
+    padding: 0 var(--space-2);
     flex: 1;
     display: flex;
     flex-direction: column;
-    gap: 1px;
+    gap: 2px;
   }
 
   .nav-item {
@@ -173,7 +168,7 @@
     align-items: center;
     gap: var(--space-2);
     width: 100%;
-    padding: 7px 10px;
+    padding: 6px 10px;
     border-radius: var(--radius-sm);
     color: var(--text-secondary);
     font-size: 13px;
@@ -188,33 +183,43 @@
   }
 
   .nav-item.active {
-    background: var(--accent-subtle);
-    color: var(--accent);
+    background: var(--system-accent-subtle);
+    color: var(--system-accent);
   }
 
   .nav-icon {
-    width: 18px;
-    height: 18px;
+    width: 16px;
+    height: 16px;
     display: flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
-    opacity: 0.8;
   }
 
-  .nav-item.active .nav-icon {
-    opacity: 1;
-  }
+  /* --- Sidebar footer (brand) --- */
 
   .sidebar-footer {
-    padding: var(--space-3) var(--space-4);
+    padding: var(--space-3) var(--space-4) var(--space-4);
     border-top: 1px solid var(--separator);
   }
 
-  .sidebar-footer-text {
+  .sidebar-brand {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .sidebar-title {
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--text-secondary);
+    line-height: 1.2;
+  }
+
+  .sidebar-subtitle {
     font-size: 11px;
-    color: var(--text-quaternary);
-    font-weight: 500;
+    color: var(--text-tertiary);
+    font-weight: 400;
   }
 
   /* --- Content --- */
@@ -222,17 +227,30 @@
   .content {
     flex: 1;
     overflow-y: auto;
-    padding: var(--space-8);
-    padding-top: calc(28px + var(--space-6));
+    padding: var(--space-6);
+    padding-top: calc(52px + var(--space-4));
     background: var(--bg-base);
     position: relative;
+  }
+
+  /* Content drag region — sits at the top of the content area,
+     providing a draggable strip that matches the sidebar traffic zone.
+     Fixed positioning so it doesn't scroll away. */
+  .content-drag-region {
+    position: fixed;
+    top: 0;
+    left: 220px;
+    right: 0;
+    height: 52px;
+    z-index: 10;
+    /* Transparent — just a drag target, no visual element */
   }
 
   /* --- Toast notifications --- */
 
   .toast {
     position: fixed;
-    top: var(--space-4);
+    top: calc(52px + var(--space-2));
     right: var(--space-4);
     padding: 10px var(--space-4);
     border-radius: var(--radius);
@@ -242,7 +260,7 @@
     gap: var(--space-2);
     z-index: 1000;
     box-shadow: var(--shadow-lg);
-    animation: toastIn var(--duration) var(--ease);
+    animation: toastIn var(--duration-slow) var(--ease-out);
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
     max-width: 400px;
@@ -271,10 +289,15 @@
 
   .toast-dismiss {
     flex-shrink: 0;
-    padding: var(--space-1);
+    padding: var(--space-2);
     border-radius: var(--radius-sm);
     opacity: 0.5;
     transition: opacity var(--duration-fast) var(--ease);
+    min-width: 28px;
+    min-height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
 
   .toast-dismiss:hover {

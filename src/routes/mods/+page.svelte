@@ -852,15 +852,15 @@
   }
 
   .btn-primary {
-    background: var(--accent);
-    color: #fff;
+    background: var(--system-accent);
+    color: var(--system-accent-on);
     padding: var(--space-2) var(--space-5);
     border-radius: var(--radius);
   }
 
   .btn-primary:hover:not(:disabled) {
-    background: var(--accent-hover);
-    box-shadow: 0 1px 6px rgba(232, 128, 42, 0.3);
+    background: var(--system-accent-hover);
+    box-shadow: 0 1px 6px rgba(0, 122, 255, 0.25);
   }
 
   .btn-primary:active:not(:disabled) {
@@ -980,7 +980,6 @@
     flex: 1;
     overflow: hidden;
     border-radius: var(--radius-lg);
-    border: 1px solid var(--separator);
     background: var(--bg-primary);
   }
 
@@ -1003,10 +1002,8 @@
 
   .table-header span {
     font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--text-tertiary);
+    font-weight: 500;
+    color: var(--text-secondary);
   }
 
   .table-body {
@@ -1020,16 +1017,15 @@
     padding: var(--space-3) var(--space-4);
     align-items: center;
     font-size: 13px;
-    border-bottom: 1px solid var(--separator);
     transition: background var(--duration-fast) var(--ease);
   }
 
-  .table-row:last-child {
-    border-bottom: none;
+  .table-row:nth-child(even) {
+    background: rgba(255, 255, 255, 0.025);
   }
 
-  .table-row.row-even {
-    background: rgba(255, 255, 255, 0.015);
+  :global([data-theme="light"]) .table-row:nth-child(even) {
+    background: rgba(0, 0, 0, 0.025);
   }
 
   .table-row:hover {

@@ -20,6 +20,8 @@
         "minHeight": 600,
         "decorations": true,
         "transparent": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
         "windowEffects": {
           "effects": ["underWindowBackground"],
           "state": "followsWindowActiveState"
