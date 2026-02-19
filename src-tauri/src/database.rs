@@ -24,6 +24,9 @@ pub enum DatabaseError {
 
     #[error("Mod not found: {0}")]
     ModNotFound(i64),
+
+    #[error("{0}")]
+    Other(String),
 }
 
 pub type Result<T> = std::result::Result<T, DatabaseError>;
@@ -38,12 +41,52 @@ pub struct InstalledMod {
     pub game_id: String,
     pub bottle_name: String,
     pub nexus_mod_id: Option<i64>,
+    pub nexus_file_id: Option<i64>,
+    pub source_url: Option<String>,
     pub name: String,
     pub version: String,
     pub archive_name: String,
     pub installed_files: Vec<String>,
     pub installed_at: String,
     pub enabled: bool,
+    pub staging_path: Option<String>,
+    pub install_priority: i32,
+}
+
+// ---------------------------------------------------------------------------
+// DeploymentEntry
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DeploymentEntry {
+    pub id: i64,
+    pub game_id: String,
+    pub bottle_name: String,
+    pub mod_id: i64,
+    pub relative_path: String,
+    pub staging_path: String,
+    pub deploy_method: String,
+    pub sha256: Option<String>,
+    pub deployed_at: String,
+    pub mod_name: String,
+}
+
+// ---------------------------------------------------------------------------
+// FileConflict
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FileConflict {
+    pub relative_path: String,
+    pub mods: Vec<ConflictModInfo>,
+    pub winner_mod_id: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ConflictModInfo {
+    pub mod_id: i64,
+    pub mod_name: String,
+    pub priority: i32,
 }
 
 // ---------------------------------------------------------------------------
@@ -59,7 +102,7 @@ pub struct ModDatabase {
 
 impl ModDatabase {
     /// Open (or create) the database at `db_path`, creating parent
-    /// directories as needed, and initialise the schema.
+    /// directories as needed, and run all pending schema migrations.
     pub fn new(db_path: &Path) -> Result<Self> {
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -70,40 +113,35 @@ impl ModDatabase {
         // Enable WAL mode for better concurrent-read performance.
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
 
-        Self::init_schema(&conn)?;
+        // Enable foreign key enforcement.
+        conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+
+        // Run schema migrations
+        crate::migrations::migrate(&conn).map_err(|e| {
+            DatabaseError::Other(format!("Schema migration failed: {}", e))
+        })?;
 
         Ok(Self {
             conn: Mutex::new(conn),
         })
     }
 
-    /// Create the `installed_mods` table and associated index if they do not
-    /// already exist.
-    fn init_schema(conn: &Connection) -> Result<()> {
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS installed_mods (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                game_id         TEXT    NOT NULL,
-                bottle_name     TEXT    NOT NULL,
-                nexus_mod_id    INTEGER,
-                name            TEXT    NOT NULL,
-                version         TEXT    NOT NULL,
-                archive_name    TEXT    NOT NULL,
-                installed_files TEXT    NOT NULL,
-                installed_at    TEXT    NOT NULL,
-                enabled         INTEGER NOT NULL DEFAULT 1
-            );
+    // -- connection access ---------------------------------------------------
 
-            CREATE INDEX IF NOT EXISTS idx_installed_mods_game_bottle
-                ON installed_mods (game_id, bottle_name);",
-        )?;
-        Ok(())
+    /// Obtain a lock on the underlying database connection.
+    ///
+    /// This is used by other modules (e.g. `executables`) that need to run
+    /// their own SQL against the same database.
+    pub fn conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
+        self.conn
+            .lock()
+            .map_err(|e| DatabaseError::Other(format!("Failed to lock database: {}", e)))
     }
 
     // -- helpers ------------------------------------------------------------
 
     /// Build an `InstalledMod` from the current row of a prepared statement.
-    /// Column order must match the SELECT used by the caller.
+    /// Column order must match [`Self::SELECT_COLUMNS`].
     fn row_to_mod(row: &rusqlite::Row<'_>) -> rusqlite::Result<InstalledMod> {
         let files_json: String = row.get(7)?;
         let installed_files: Vec<String> =
@@ -115,19 +153,24 @@ impl ModDatabase {
             game_id: row.get(1)?,
             bottle_name: row.get(2)?,
             nexus_mod_id: row.get(3)?,
+            nexus_file_id: row.get(10)?,
+            source_url: row.get(11)?,
             name: row.get(4)?,
             version: row.get(5)?,
             archive_name: row.get(6)?,
             installed_files,
             installed_at: row.get(8)?,
             enabled: enabled_int != 0,
+            staging_path: row.get(12)?,
+            install_priority: row.get(13)?,
         })
     }
 
     /// The column list used in every SELECT on `installed_mods`.
     const SELECT_COLUMNS: &'static str =
         "id, game_id, bottle_name, nexus_mod_id, name, version, \
-         archive_name, installed_files, installed_at, enabled";
+         archive_name, installed_files, installed_at, enabled, \
+         nexus_file_id, source_url, staging_path, install_priority";
 
     // -- public API ---------------------------------------------------------
 
@@ -279,6 +322,289 @@ impl ModDatabase {
             return Err(DatabaseError::ModNotFound(mod_id));
         }
         Ok(())
+    }
+
+    /// Set the staging path for a mod.
+    pub fn set_staging_path(&self, mod_id: i64, staging_path: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE installed_mods SET staging_path = ?1 WHERE id = ?2",
+            params![staging_path, mod_id],
+        )?;
+        Ok(())
+    }
+
+    /// Set the install priority for a mod.
+    pub fn set_mod_priority(&self, mod_id: i64, priority: i32) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE installed_mods SET install_priority = ?1 WHERE id = ?2",
+            params![priority, mod_id],
+        )?;
+        Ok(())
+    }
+
+    /// Reorder mod priorities for a game/bottle based on the given ID order.
+    /// The first ID in the list gets priority 0, the second gets 1, etc.
+    pub fn reorder_priorities(
+        &self,
+        game_id: &str,
+        bottle_name: &str,
+        ordered_mod_ids: &[i64],
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "UPDATE installed_mods SET install_priority = ?1
+             WHERE id = ?2 AND game_id = ?3 AND bottle_name = ?4",
+        )?;
+
+        for (i, mod_id) in ordered_mod_ids.iter().enumerate() {
+            stmt.execute(params![i as i32, mod_id, game_id, bottle_name])?;
+        }
+        Ok(())
+    }
+
+    // -- Deployment manifest ------------------------------------------------
+
+    /// Add a deployment manifest entry.
+    pub fn add_deployment_entry(
+        &self,
+        game_id: &str,
+        bottle_name: &str,
+        mod_id: i64,
+        relative_path: &str,
+        staging_path: &str,
+        deploy_method: &str,
+        sha256: Option<&str>,
+    ) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        let deployed_at = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT OR REPLACE INTO deployment_manifest
+                (game_id, bottle_name, mod_id, relative_path, staging_path, deploy_method, sha256, deployed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![game_id, bottle_name, mod_id, relative_path, staging_path, deploy_method, sha256, deployed_at],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Remove all deployment manifest entries for a mod.
+    pub fn remove_deployment_entries_for_mod(&self, mod_id: i64) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+
+        // First collect the relative paths
+        let mut stmt = conn.prepare(
+            "SELECT relative_path FROM deployment_manifest WHERE mod_id = ?1",
+        )?;
+        let paths: Vec<String> = stmt
+            .query_map(params![mod_id], |row| row.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // Then delete
+        conn.execute(
+            "DELETE FROM deployment_manifest WHERE mod_id = ?1",
+            params![mod_id],
+        )?;
+
+        Ok(paths)
+    }
+
+    /// Get deployment manifest for a game/bottle.
+    pub fn get_deployment_manifest(
+        &self,
+        game_id: &str,
+        bottle_name: &str,
+    ) -> Result<Vec<DeploymentEntry>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT dm.id, dm.game_id, dm.bottle_name, dm.mod_id, dm.relative_path,
+                    dm.staging_path, dm.deploy_method, dm.sha256, dm.deployed_at,
+                    COALESCE(im.name, 'Unknown') as mod_name
+             FROM deployment_manifest dm
+             LEFT JOIN installed_mods im ON dm.mod_id = im.id
+             WHERE dm.game_id = ?1 AND dm.bottle_name = ?2
+             ORDER BY dm.relative_path",
+        )?;
+
+        let rows = stmt.query_map(params![game_id, bottle_name], |row| {
+            Ok(DeploymentEntry {
+                id: row.get(0)?,
+                game_id: row.get(1)?,
+                bottle_name: row.get(2)?,
+                mod_id: row.get(3)?,
+                relative_path: row.get(4)?,
+                staging_path: row.get(5)?,
+                deploy_method: row.get(6)?,
+                sha256: row.get(7)?,
+                deployed_at: row.get(8)?,
+                mod_name: row.get(9)?,
+            })
+        })?;
+
+        let mut entries = Vec::new();
+        for row in rows {
+            entries.push(row?);
+        }
+        Ok(entries)
+    }
+
+    /// Get the deployment entry for a specific file path.
+    pub fn get_deployed_file(
+        &self,
+        game_id: &str,
+        bottle_name: &str,
+        relative_path: &str,
+    ) -> Result<Option<DeploymentEntry>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT dm.id, dm.game_id, dm.bottle_name, dm.mod_id, dm.relative_path,
+                    dm.staging_path, dm.deploy_method, dm.sha256, dm.deployed_at,
+                    COALESCE(im.name, 'Unknown') as mod_name
+             FROM deployment_manifest dm
+             LEFT JOIN installed_mods im ON dm.mod_id = im.id
+             WHERE dm.game_id = ?1 AND dm.bottle_name = ?2 AND dm.relative_path = ?3",
+        )?;
+
+        let mut rows = stmt.query_map(
+            params![game_id, bottle_name, relative_path],
+            |row| {
+                Ok(DeploymentEntry {
+                    id: row.get(0)?,
+                    game_id: row.get(1)?,
+                    bottle_name: row.get(2)?,
+                    mod_id: row.get(3)?,
+                    relative_path: row.get(4)?,
+                    staging_path: row.get(5)?,
+                    deploy_method: row.get(6)?,
+                    sha256: row.get(7)?,
+                    deployed_at: row.get(8)?,
+                    mod_name: row.get(9)?,
+                })
+            },
+        )?;
+
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    // -- File hashes --------------------------------------------------------
+
+    /// Store file hashes for a mod's staging files.
+    pub fn store_file_hashes(
+        &self,
+        mod_id: i64,
+        hashes: &[(String, String, u64)], // (relative_path, sha256, file_size)
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "INSERT OR REPLACE INTO file_hashes (mod_id, relative_path, sha256, file_size)
+             VALUES (?1, ?2, ?3, ?4)",
+        )?;
+
+        for (path, hash, size) in hashes {
+            stmt.execute(params![mod_id, path, hash, *size as i64])?;
+        }
+        Ok(())
+    }
+
+    /// Get file hashes for a mod.
+    pub fn get_file_hashes(
+        &self,
+        mod_id: i64,
+    ) -> Result<Vec<(String, String, u64)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT relative_path, sha256, file_size FROM file_hashes WHERE mod_id = ?1",
+        )?;
+
+        let rows = stmt.query_map(params![mod_id], |row| {
+            let size: i64 = row.get(2)?;
+            Ok((row.get(0)?, row.get(1)?, size as u64))
+        })?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    // -- Mod field updates --------------------------------------------------
+
+    /// Update the installed_files JSON for a mod.
+    pub fn update_installed_files(&self, mod_id: i64, files: &[String]) -> Result<()> {
+        let files_json = serde_json::to_string(files)?;
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE installed_mods SET installed_files = ?1 WHERE id = ?2",
+            params![files_json, mod_id],
+        )?;
+        Ok(())
+    }
+
+    /// Get the next priority value for a game/bottle (current max + 1, or 0 if empty).
+    pub fn get_next_priority(&self, game_id: &str, bottle_name: &str) -> Result<i32> {
+        let conn = self.conn.lock().unwrap();
+        let max_priority: Option<i32> = conn
+            .prepare(
+                "SELECT MAX(install_priority) FROM installed_mods
+                 WHERE game_id = ?1 AND bottle_name = ?2",
+            )?
+            .query_row(params![game_id, bottle_name], |row| row.get(0))?;
+        Ok(max_priority.map_or(0, |p| p + 1))
+    }
+
+    // -- Conflicts ----------------------------------------------------------
+
+    /// Find all file conflicts for a game/bottle.
+    /// Returns files where multiple enabled mods want the same path.
+    pub fn find_all_conflicts(
+        &self,
+        game_id: &str,
+        bottle_name: &str,
+    ) -> Result<Vec<FileConflict>> {
+        let mods = self.list_mods(game_id, bottle_name)?;
+        let mut file_to_mods: HashMap<String, Vec<ConflictModInfo>> = HashMap::new();
+
+        for m in &mods {
+            if !m.enabled {
+                continue;
+            }
+            for file in &m.installed_files {
+                file_to_mods
+                    .entry(file.clone())
+                    .or_default()
+                    .push(ConflictModInfo {
+                        mod_id: m.id,
+                        mod_name: m.name.clone(),
+                        priority: m.install_priority,
+                    });
+            }
+        }
+
+        let mut conflicts = Vec::new();
+        for (path, mods_info) in file_to_mods {
+            if mods_info.len() > 1 {
+                // Winner is the mod with highest priority
+                let winner_mod_id = mods_info
+                    .iter()
+                    .max_by_key(|m| m.priority)
+                    .map(|m| m.mod_id)
+                    .unwrap_or(0);
+
+                conflicts.push(FileConflict {
+                    relative_path: path,
+                    mods: mods_info,
+                    winner_mod_id,
+                });
+            }
+        }
+
+        conflicts.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+        Ok(conflicts)
     }
 }
 

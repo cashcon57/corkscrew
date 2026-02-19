@@ -210,7 +210,7 @@ fn looks_like_mod_content(directory: &Path) -> bool {
 /// 2. If the extracted root contains a child named "Data" -> return that.
 /// 3. If the extracted root looks like mod content -> return it.
 /// 4. Default -> return the extracted root unchanged.
-fn find_data_root(extracted_dir: &Path) -> PathBuf {
+pub fn find_data_root(extracted_dir: &Path) -> PathBuf {
     _find_data_root_inner(extracted_dir, 0)
 }
 

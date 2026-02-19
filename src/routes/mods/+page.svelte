@@ -25,6 +25,7 @@
   import type { InstalledMod, DetectedGame, SkseStatus, DowngradeStatus } from "$lib/types";
 
   let installing = $state(false);
+  let loadingMods = $state(false);
   let confirmUninstall = $state<number | null>(null);
   let togglingMod = $state<number | null>(null);
   let launching = $state(false);
@@ -52,11 +53,14 @@
   });
 
   async function loadMods(game: DetectedGame) {
+    loadingMods = true;
     try {
       const mods = await getInstalledMods(game.game_id, game.bottle_name);
       installedMods.set(mods);
     } catch (e: any) {
       showError(`Failed to load mods: ${e}`);
+    } finally {
+      loadingMods = false;
     }
   }
 
@@ -107,11 +111,12 @@
   }
 
   async function handleToggle(mod: InstalledMod) {
+    const game = pickedGame ?? $selectedGame;
+    if (!game) return;
     togglingMod = mod.id;
     try {
-      await toggleMod(mod.id, !mod.enabled);
-      const game = pickedGame ?? $selectedGame;
-      if (game) await loadMods(game);
+      await toggleMod(mod.id, game.game_id, game.bottle_name, !mod.enabled);
+      await loadMods(game);
     } catch (e: any) {
       showError(`Failed to toggle mod: ${e}`);
     } finally {
@@ -517,7 +522,14 @@
     {/if}
 
     <!-- Content Area -->
-    {#if $installedMods.length === 0}
+    {#if loadingMods}
+      <div class="empty-state">
+        <div class="empty-icon">
+          <span class="spinner"></span>
+        </div>
+        <h3 class="empty-title">Loading mods...</h3>
+      </div>
+    {:else if $installedMods.length === 0}
       <div class="empty-state">
         <div class="empty-icon">
           <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">

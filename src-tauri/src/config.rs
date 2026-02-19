@@ -85,15 +85,22 @@ pub fn db_path() -> PathBuf {
         .join("mods.db")
 }
 
+/// Returns the base data directory for Corkscrew application data.
+///
+/// - macOS:  `~/Library/Application Support/corkscrew`
+/// - Linux:  `~/.local/share/corkscrew`
+pub fn data_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("corkscrew")
+}
+
 /// Returns the path to the downloads directory.
 ///
 /// - macOS:  `~/Library/Application Support/corkscrew/downloads`
 /// - Linux:  `~/.local/share/corkscrew/downloads`
 pub fn downloads_dir() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("corkscrew")
-        .join("downloads")
+    data_dir().join("downloads")
 }
 
 // ---------------------------------------------------------------------------

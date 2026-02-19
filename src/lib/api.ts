@@ -8,6 +8,10 @@ import type {
   LaunchResult,
   SkseStatus,
   DowngradeStatus,
+  CustomExecutable,
+  DeploymentEntry,
+  FileConflict,
+  DeployResult,
 } from "./types";
 
 // Bottles
@@ -58,9 +62,11 @@ export async function uninstallMod(
 
 export async function toggleMod(
   modId: number,
+  gameId: string,
+  bottleName: string,
   enabled: boolean
 ): Promise<void> {
-  return invoke("toggle_mod", { modId, enabled });
+  return invoke("toggle_mod", { modId, gameId, bottleName, enabled });
 }
 
 // Plugins (Load Order)
@@ -149,4 +155,90 @@ export async function downgradeSkyrim(
 // Vibrancy
 export async function setVibrancy(material: string): Promise<void> {
   return invoke("set_vibrancy", { material });
+}
+
+// Custom Executables
+export async function addCustomExe(
+  gameId: string,
+  bottleName: string,
+  name: string,
+  exePath: string,
+  workingDir?: string,
+  args?: string
+): Promise<number> {
+  return invoke("add_custom_exe", {
+    gameId,
+    bottleName,
+    name,
+    exePath,
+    workingDir: workingDir ?? null,
+    args: args ?? null,
+  });
+}
+
+export async function removeCustomExe(exeId: number): Promise<void> {
+  return invoke("remove_custom_exe", { exeId });
+}
+
+export async function listCustomExes(
+  gameId: string,
+  bottleName: string
+): Promise<CustomExecutable[]> {
+  return invoke("list_custom_exes", { gameId, bottleName });
+}
+
+export async function setDefaultExe(
+  gameId: string,
+  bottleName: string,
+  exeId: number | null
+): Promise<void> {
+  return invoke("set_default_exe", { gameId, bottleName, exeId });
+}
+
+// Deployment Management
+export async function getConflicts(
+  gameId: string,
+  bottleName: string
+): Promise<FileConflict[]> {
+  return invoke("get_conflicts", { gameId, bottleName });
+}
+
+export async function getDeploymentManifest(
+  gameId: string,
+  bottleName: string
+): Promise<DeploymentEntry[]> {
+  return invoke("get_deployment_manifest_cmd", { gameId, bottleName });
+}
+
+export async function setModPriority(
+  modId: number,
+  priority: number
+): Promise<void> {
+  return invoke("set_mod_priority", { modId, priority });
+}
+
+export async function reorderMods(
+  gameId: string,
+  bottleName: string,
+  orderedModIds: number[]
+): Promise<void> {
+  return invoke("reorder_mods", { gameId, bottleName, orderedModIds });
+}
+
+export async function redeployAllMods(
+  gameId: string,
+  bottleName: string
+): Promise<DeployResult> {
+  return invoke("redeploy_all_mods", { gameId, bottleName });
+}
+
+export async function purgeDeployment(
+  gameId: string,
+  bottleName: string
+): Promise<string[]> {
+  return invoke("purge_deployment_cmd", { gameId, bottleName });
+}
+
+export async function verifyModIntegrity(modId: number): Promise<string[]> {
+  return invoke("verify_mod_integrity", { modId });
 }

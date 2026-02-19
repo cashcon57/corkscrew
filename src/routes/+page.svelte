@@ -292,19 +292,27 @@
     {/if}
   </div>
 {:else if $currentPage === "mods"}
-  {#await import("./mods/+page.svelte") then mod}
+  {#await import("./mods/+page.svelte")}
+    <div class="page-loading"><div class="spinner"><div class="spinner-ring"></div></div></div>
+  {:then mod}
     <mod.default />
   {/await}
 {:else if $currentPage === "plugins"}
-  {#await import("./plugins/+page.svelte") then mod}
+  {#await import("./plugins/+page.svelte")}
+    <div class="page-loading"><div class="spinner"><div class="spinner-ring"></div></div></div>
+  {:then mod}
     <mod.default />
   {/await}
 {:else if $currentPage === "settings"}
-  {#await import("./settings/+page.svelte") then mod}
+  {#await import("./settings/+page.svelte")}
+    <div class="page-loading"><div class="spinner"><div class="spinner-ring"></div></div></div>
+  {:then mod}
     <mod.default />
   {/await}
 {:else if $currentPage === "about"}
-  {#await import("./about/+page.svelte") then mod}
+  {#await import("./about/+page.svelte")}
+    <div class="page-loading"><div class="spinner"><div class="spinner-ring"></div></div></div>
+  {:then mod}
     <mod.default />
   {/await}
 {/if}
@@ -724,5 +732,14 @@
     color: var(--text-tertiary);
     max-width: 360px;
     line-height: 1.55;
+  }
+
+  /* Page loading spinner for lazy imports */
+  .page-loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 200px;
+    flex: 1;
   }
 </style>

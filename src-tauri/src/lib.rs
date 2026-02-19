@@ -1,12 +1,16 @@
 pub mod bottles;
 pub mod config;
 pub mod database;
+pub mod deployer;
+pub mod executables;
 pub mod fomod;
 pub mod games;
 pub mod installer;
+pub mod migrations;
 pub mod nexus;
 pub mod plugins;
 pub mod launcher;
+pub mod staging;
 pub mod skse;
 pub mod downgrader;
 
@@ -17,7 +21,8 @@ use tauri::State;
 
 use bottles::Bottle;
 use config::AppConfig;
-use database::{InstalledMod, ModDatabase};
+use database::{DeploymentEntry, FileConflict, InstalledMod, ModDatabase};
+use executables::CustomExecutable;
 use games::DetectedGame;
 use plugins::skyrim_plugins::PluginEntry;
 use launcher::LaunchResult;
@@ -94,17 +99,43 @@ fn install_mod_cmd(
     });
     let version = mod_version.unwrap_or_default();
 
-    // Install files
-    let installed_files = installer::install_mod(&archive, &data_dir, &name, &version, None)
-        .map_err(|e| e.to_string())?;
-
-    // Record in database
     let db = state.db.lock().map_err(|e| e.to_string())?;
+
+    // 1. Reserve a DB record (empty files initially) and assign priority
+    let next_priority = db.get_next_priority(&game_id, &bottle_name).map_err(|e| e.to_string())?;
     let mod_id = db
-        .add_mod(&game_id, &bottle_name, None, &name, &version, &archive_path, &installed_files)
+        .add_mod(&game_id, &bottle_name, None, &name, &version, &archive_path, &[])
+        .map_err(|e| e.to_string())?;
+    db.set_mod_priority(mod_id, next_priority).map_err(|e| e.to_string())?;
+
+    // 2. Stage the mod (extract to staging folder, compute hashes)
+    let staging_result = match staging::stage_mod(&archive, &game_id, &bottle_name, mod_id, &name) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = db.remove_mod(mod_id);
+            return Err(format!("Staging failed: {}", e));
+        }
+    };
+
+    // 3. Update DB with staging info
+    db.set_staging_path(mod_id, &staging_result.staging_path.to_string_lossy())
+        .map_err(|e| e.to_string())?;
+    db.update_installed_files(mod_id, &staging_result.files)
+        .map_err(|e| e.to_string())?;
+    db.store_file_hashes(mod_id, &staging_result.hashes)
         .map_err(|e| e.to_string())?;
 
-    // Sync Skyrim plugins if applicable
+    // 4. Deploy from staging to game dir via hardlink/copy
+    if let Err(e) = deployer::deploy_mod(
+        &db, &game_id, &bottle_name, mod_id,
+        &staging_result.staging_path, &data_dir, &staging_result.files,
+    ) {
+        let _ = staging::remove_staging(&staging_result.staging_path);
+        let _ = db.remove_mod(mod_id);
+        return Err(format!("Deploy failed: {}", e));
+    }
+
+    // 5. Sync Skyrim plugins if applicable
     if game_id == "skyrimse" {
         let _ = sync_skyrim_plugins_for_game(game, &bottle);
     }
@@ -139,11 +170,23 @@ fn uninstall_mod(
 
     let data_dir = PathBuf::from(&game.data_dir);
 
-    // Remove files from disk
-    let removed = installer::uninstall_mod_files(&data_dir, &installed_mod.installed_files)
-        .map_err(|e| e.to_string())?;
+    // Remove deployed files from game directory
+    let removed = if installed_mod.staging_path.is_some() {
+        // Staged mod: undeploy via deployment manifest
+        deployer::undeploy_mod(&db, &game_id, &bottle_name, mod_id, &data_dir)
+            .map_err(|e| e.to_string())?
+    } else {
+        // Legacy mod: remove files directly
+        installer::uninstall_mod_files(&data_dir, &installed_mod.installed_files)
+            .map_err(|e| e.to_string())?
+    };
 
-    // Remove from database
+    // Remove staging directory if it exists
+    if let Some(ref staging_path) = installed_mod.staging_path {
+        let _ = staging::remove_staging(Path::new(staging_path));
+    }
+
+    // Remove from database (cascades to deployment_manifest, file_hashes)
     db.remove_mod(mod_id).map_err(|e| e.to_string())?;
 
     // Sync Skyrim plugins if applicable
@@ -155,9 +198,58 @@ fn uninstall_mod(
 }
 
 #[tauri::command]
-fn toggle_mod(mod_id: i64, enabled: bool, state: State<AppState>) -> Result<(), String> {
+fn toggle_mod(
+    mod_id: i64,
+    game_id: String,
+    bottle_name: String,
+    enabled: bool,
+    state: State<AppState>,
+) -> Result<(), String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.set_enabled(mod_id, enabled).map_err(|e| e.to_string())
+
+    let installed_mod = db
+        .get_mod(mod_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Mod with ID {} not found", mod_id))?;
+
+    // Update DB flag
+    db.set_enabled(mod_id, enabled).map_err(|e| e.to_string())?;
+
+    // For staged mods, actually deploy/undeploy files
+    if let Some(ref staging_path_str) = installed_mod.staging_path {
+        let bottle = bottles::find_bottle_by_name(&bottle_name)
+            .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
+        let detected_games = games::detect_games(&bottle);
+        let game = detected_games
+            .iter()
+            .find(|g| g.game_id == game_id)
+            .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
+
+        let data_dir = PathBuf::from(&game.data_dir);
+        let staging_path = PathBuf::from(staging_path_str);
+
+        if enabled {
+            // Re-deploy from staging
+            let files = staging::list_staging_files(&staging_path)
+                .map_err(|e| e.to_string())?;
+            deployer::deploy_mod(
+                &db, &game_id, &bottle_name, mod_id,
+                &staging_path, &data_dir, &files,
+            ).map_err(|e| e.to_string())?;
+        } else {
+            // Undeploy (remove from game dir, keep staging intact)
+            deployer::undeploy_mod(&db, &game_id, &bottle_name, mod_id, &data_dir)
+                .map_err(|e| e.to_string())?;
+        }
+
+        // Sync Skyrim plugins if applicable
+        if game_id == "skyrimse" {
+            let _ = sync_skyrim_plugins_for_game(game, &bottle);
+        }
+    }
+    // Legacy mods (no staging_path): only the DB flag changes
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -245,11 +337,10 @@ async fn download_from_nexus(
             })?;
 
         let data_dir = PathBuf::from(&game.data_dir);
-        let installed_files =
-            installer::install_mod(&archive_path, &data_dir, &mod_name, &mod_version, Some(nxm.mod_id))
-                .map_err(|e| e.to_string())?;
-
         let db = state.db.lock().map_err(|e| e.to_string())?;
+
+        // 1. Add mod to DB with Nexus ID
+        let next_priority = db.get_next_priority(&game_id, &bottle_name).map_err(|e| e.to_string())?;
         let mod_id = db
             .add_mod(
                 &game_id,
@@ -258,9 +349,39 @@ async fn download_from_nexus(
                 &mod_name,
                 &mod_version,
                 &archive_path.to_string_lossy(),
-                &installed_files,
+                &[],
             )
             .map_err(|e| e.to_string())?;
+        db.set_mod_priority(mod_id, next_priority).map_err(|e| e.to_string())?;
+
+        // 2. Stage
+        let staging_result = match staging::stage_mod(
+            &archive_path, &game_id, &bottle_name, mod_id, &mod_name,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = db.remove_mod(mod_id);
+                return Err(format!("Staging failed: {}", e));
+            }
+        };
+
+        // 3. Update DB
+        db.set_staging_path(mod_id, &staging_result.staging_path.to_string_lossy())
+            .map_err(|e| e.to_string())?;
+        db.update_installed_files(mod_id, &staging_result.files)
+            .map_err(|e| e.to_string())?;
+        db.store_file_hashes(mod_id, &staging_result.hashes)
+            .map_err(|e| e.to_string())?;
+
+        // 4. Deploy
+        if let Err(e) = deployer::deploy_mod(
+            &db, &game_id, &bottle_name, mod_id,
+            &staging_result.staging_path, &data_dir, &staging_result.files,
+        ) {
+            let _ = staging::remove_staging(&staging_result.staging_path);
+            let _ = db.remove_mod(mod_id);
+            return Err(format!("Deploy failed: {}", e));
+        }
 
         if game_id == "skyrimse" {
             let _ = sync_skyrim_plugins_for_game(game, &bottle);
@@ -296,6 +417,7 @@ fn launch_game_cmd(
     game_id: String,
     bottle_name: String,
     use_skse: bool,
+    state: State<AppState>,
 ) -> Result<LaunchResult, String> {
     let bottle = bottles::find_bottle_by_name(&bottle_name)
         .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
@@ -307,7 +429,30 @@ fn launch_game_cmd(
 
     let game_path = PathBuf::from(&game.game_path);
 
-    // Determine which executable to launch
+    // Check for a custom default executable first
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let custom_exe = executables::get_default_executable(&db, &game_id, &bottle_name)
+        .unwrap_or(None);
+    drop(db); // Release lock before launching
+
+    if let Some(custom) = custom_exe {
+        let exe_path = PathBuf::from(&custom.exe_path);
+        let work_dir = custom.working_dir.as_deref().map(Path::new);
+
+        log::info!(
+            "launch_game_cmd: using custom exe '{}' at {}",
+            custom.name, exe_path.display()
+        );
+
+        return launcher::launch_game(
+            &bottle,
+            &exe_path,
+            work_dir.or(Some(&game_path)),
+        )
+        .map_err(|e| format!("Launch failed ({}): {}", bottle.source, e));
+    }
+
+    // Determine which built-in executable to launch
     let exe_name = if use_skse && game_id == "skyrimse" {
         "skse64_loader.exe".to_string()
     } else {
@@ -499,6 +644,206 @@ fn set_vibrancy(window: tauri::Window, material: String) -> Result<(), String> {
     Ok(())
 }
 
+// --- Custom Executables ---
+
+#[tauri::command]
+fn add_custom_exe(
+    game_id: String,
+    bottle_name: String,
+    name: String,
+    exe_path: String,
+    working_dir: Option<String>,
+    args: Option<String>,
+    state: State<AppState>,
+) -> Result<i64, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    executables::add_executable(
+        &db,
+        &game_id,
+        &bottle_name,
+        &name,
+        &exe_path,
+        working_dir.as_deref(),
+        args.as_deref(),
+    )
+}
+
+#[tauri::command]
+fn remove_custom_exe(exe_id: i64, state: State<AppState>) -> Result<(), String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    executables::remove_executable(&db, exe_id)
+}
+
+#[tauri::command]
+fn list_custom_exes(
+    game_id: String,
+    bottle_name: String,
+    state: State<AppState>,
+) -> Result<Vec<CustomExecutable>, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    executables::list_executables(&db, &game_id, &bottle_name)
+}
+
+#[tauri::command]
+fn set_default_exe(
+    game_id: String,
+    bottle_name: String,
+    exe_id: Option<i64>,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    match exe_id {
+        Some(id) => executables::set_default_executable(&db, &game_id, &bottle_name, id),
+        None => executables::clear_default_executable(&db, &game_id, &bottle_name),
+    }
+}
+
+// --- Deployment Management ---
+
+#[tauri::command]
+fn get_conflicts(
+    game_id: String,
+    bottle_name: String,
+    state: State<AppState>,
+) -> Result<Vec<FileConflict>, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.find_all_conflicts(&game_id, &bottle_name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_deployment_manifest_cmd(
+    game_id: String,
+    bottle_name: String,
+    state: State<AppState>,
+) -> Result<Vec<DeploymentEntry>, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.get_deployment_manifest(&game_id, &bottle_name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_mod_priority(
+    mod_id: i64,
+    priority: i32,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.set_mod_priority(mod_id, priority).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn reorder_mods(
+    game_id: String,
+    bottle_name: String,
+    ordered_mod_ids: Vec<i64>,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.reorder_priorities(&game_id, &bottle_name, &ordered_mod_ids)
+        .map_err(|e| e.to_string())?;
+
+    // Find the game for data_dir
+    let bottle = bottles::find_bottle_by_name(&bottle_name)
+        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
+    let detected_games = games::detect_games(&bottle);
+    let game = detected_games
+        .iter()
+        .find(|g| g.game_id == game_id)
+        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
+
+    let data_dir = PathBuf::from(&game.data_dir);
+
+    // Redeploy to reflect new priority order
+    deployer::redeploy_all(&db, &game_id, &bottle_name, &data_dir)
+        .map_err(|e| e.to_string())?;
+
+    // Sync plugins after redeploy
+    if game_id == "skyrimse" {
+        let _ = sync_skyrim_plugins_for_game(game, &bottle);
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+fn redeploy_all_mods(
+    game_id: String,
+    bottle_name: String,
+    state: State<AppState>,
+) -> Result<serde_json::Value, String> {
+    let bottle = bottles::find_bottle_by_name(&bottle_name)
+        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
+    let detected_games = games::detect_games(&bottle);
+    let game = detected_games
+        .iter()
+        .find(|g| g.game_id == game_id)
+        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
+
+    let data_dir = PathBuf::from(&game.data_dir);
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+
+    let result = deployer::redeploy_all(&db, &game_id, &bottle_name, &data_dir)
+        .map_err(|e| e.to_string())?;
+
+    if game_id == "skyrimse" {
+        let _ = sync_skyrim_plugins_for_game(game, &bottle);
+    }
+
+    Ok(serde_json::json!({
+        "deployed_count": result.deployed_count,
+        "skipped_count": result.skipped_count,
+        "fallback_used": result.fallback_used,
+    }))
+}
+
+#[tauri::command]
+fn purge_deployment_cmd(
+    game_id: String,
+    bottle_name: String,
+    state: State<AppState>,
+) -> Result<Vec<String>, String> {
+    let bottle = bottles::find_bottle_by_name(&bottle_name)
+        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
+    let detected_games = games::detect_games(&bottle);
+    let game = detected_games
+        .iter()
+        .find(|g| g.game_id == game_id)
+        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
+
+    let data_dir = PathBuf::from(&game.data_dir);
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+
+    let removed = deployer::purge_deployment(&db, &game_id, &bottle_name, &data_dir)
+        .map_err(|e| e.to_string())?;
+
+    if game_id == "skyrimse" {
+        let _ = sync_skyrim_plugins_for_game(game, &bottle);
+    }
+
+    Ok(removed)
+}
+
+#[tauri::command]
+fn verify_mod_integrity(
+    mod_id: i64,
+    state: State<AppState>,
+) -> Result<Vec<String>, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+
+    let installed_mod = db
+        .get_mod(mod_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Mod with ID {} not found", mod_id))?;
+
+    let staging_path = installed_mod
+        .staging_path
+        .as_ref()
+        .ok_or_else(|| "Legacy mod — no staging data for integrity check".to_string())?;
+
+    let hashes = db.get_file_hashes(mod_id).map_err(|e| e.to_string())?;
+    staging::verify_staging_integrity(Path::new(staging_path), &hashes)
+        .map_err(|e| e.to_string())
+}
+
 // --- Helpers ---
 
 fn sync_skyrim_plugins_for_game(game: &DetectedGame, bottle: &Bottle) -> Result<(), String> {
@@ -534,6 +879,9 @@ pub fn run() {
     let db_path = config::db_path();
     let db = ModDatabase::new(&db_path).expect("Failed to initialize mod database");
 
+    // Initialize additional schemas
+    executables::init_schema(&db).expect("Failed to initialize executables schema");
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -557,6 +905,17 @@ pub fn run() {
             check_skyrim_version,
             downgrade_skyrim,
             set_vibrancy,
+            add_custom_exe,
+            remove_custom_exe,
+            list_custom_exes,
+            set_default_exe,
+            get_conflicts,
+            get_deployment_manifest_cmd,
+            set_mod_priority,
+            reorder_mods,
+            redeploy_all_mods,
+            purge_deployment_cmd,
+            verify_mod_integrity,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
