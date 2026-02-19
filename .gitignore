@@ -24,6 +24,9 @@ Thumbs.db
 *.swo
 *~
 
+# MCP (contains absolute paths)
+.mcp.json
+
 # Project data
 *.db
 *.sqlite
