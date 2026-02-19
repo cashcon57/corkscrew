@@ -152,3 +152,29 @@ export interface CustomExecutable {
   args: string | null;
   is_default: boolean;
 }
+
+export interface Profile {
+  id: number;
+  game_id: string;
+  bottle_name: string;
+  name: string;
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface ModUpdateInfo {
+  mod_id: number;
+  nexus_mod_id: number;
+  mod_name: string;
+  current_version: string;
+  latest_version: string;
+  latest_file_name: string;
+  latest_file_id: number;
+}
+
+export interface IntegrityReport {
+  modified_files: string[];
+  unknown_files: string[];
+  missing_files: string[];
+  total_scanned: number;
+}

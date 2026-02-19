@@ -6,10 +6,12 @@ pub mod executables;
 pub mod fomod;
 pub mod games;
 pub mod installer;
+pub mod integrity;
 pub mod loot;
 pub mod migrations;
 pub mod nexus;
 pub mod plugins;
+pub mod profiles;
 pub mod launcher;
 pub mod staging;
 pub mod skse;
@@ -24,9 +26,13 @@ use bottles::Bottle;
 use config::AppConfig;
 use database::{DeploymentEntry, FileConflict, InstalledMod, ModDatabase};
 use executables::CustomExecutable;
+use fomod::FomodInstaller;
 use games::DetectedGame;
+use integrity::IntegrityReport;
 use plugins::skyrim_plugins::PluginEntry;
+use profiles::Profile;
 use launcher::LaunchResult;
+use nexus::ModUpdateInfo;
 use skse::SkseStatus;
 use downgrader::DowngradeStatus;
 use loot::{PluginWarning, SortResult};
@@ -1049,6 +1055,300 @@ fn get_plugin_messages(
         .map_err(|e| e.to_string())
 }
 
+// --- Profiles ---
+
+#[tauri::command]
+fn list_profiles_cmd(
+    game_id: String,
+    bottle_name: String,
+    state: State<AppState>,
+) -> Result<Vec<Profile>, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    profiles::list_profiles(&db, &game_id, &bottle_name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn create_profile_cmd(
+    game_id: String,
+    bottle_name: String,
+    name: String,
+    state: State<AppState>,
+) -> Result<i64, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    profiles::create_profile(&db, &game_id, &bottle_name, &name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_profile_cmd(
+    profile_id: i64,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    profiles::delete_profile(&db, profile_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn rename_profile_cmd(
+    profile_id: i64,
+    new_name: String,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    profiles::rename_profile(&db, profile_id, &new_name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_profile_snapshot(
+    profile_id: i64,
+    game_id: String,
+    bottle_name: String,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+
+    // Determine plugins file path
+    let plugins_file = if game_id == "skyrimse" {
+        let bottle = bottles::find_bottle_by_name(&bottle_name)
+            .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
+        let detected_games = games::detect_games(&bottle);
+        let game = detected_games
+            .iter()
+            .find(|g| g.game_id == game_id)
+            .ok_or_else(|| format!("Game '{}' not found", game_id))?;
+
+        games::with_plugin(&game_id, |plugin| {
+            plugin.get_plugins_file(Path::new(&game.game_path), &bottle)
+        })
+        .flatten()
+    } else {
+        None
+    };
+
+    profiles::snapshot_current_state(
+        &db,
+        profile_id,
+        &game_id,
+        &bottle_name,
+        plugins_file.as_deref(),
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn activate_profile(
+    profile_id: i64,
+    game_id: String,
+    bottle_name: String,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+
+    // Look up the game
+    let bottle = bottles::find_bottle_by_name(&bottle_name)
+        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
+    let detected_games = games::detect_games(&bottle);
+    let game = detected_games
+        .iter()
+        .find(|g| g.game_id == game_id)
+        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
+
+    let data_dir = PathBuf::from(&game.data_dir);
+
+    // 1. Save current state to the currently active profile (if any)
+    if let Ok(Some(current_active)) = profiles::get_active_profile(&db, &game_id, &bottle_name) {
+        let plugins_file = if game_id == "skyrimse" {
+            games::with_plugin(&game_id, |plugin| {
+                plugin.get_plugins_file(Path::new(&game.game_path), &bottle)
+            })
+            .flatten()
+        } else {
+            None
+        };
+
+        let _ = profiles::snapshot_current_state(
+            &db,
+            current_active.id,
+            &game_id,
+            &bottle_name,
+            plugins_file.as_deref(),
+        );
+    }
+
+    // 2. Purge current deployment
+    let _ = deployer::purge_deployment(&db, &game_id, &bottle_name, &data_dir);
+
+    // 3. Load target profile state
+    let mod_states = profiles::get_mod_states(&db, profile_id)
+        .map_err(|e| e.to_string())?;
+
+    // 4. Apply mod enabled states and priorities
+    for ms in &mod_states {
+        let _ = db.set_enabled(ms.mod_id, ms.enabled);
+        let _ = db.set_mod_priority(ms.mod_id, ms.priority);
+    }
+
+    // 5. Redeploy enabled mods
+    let _ = deployer::redeploy_all(&db, &game_id, &bottle_name, &data_dir);
+
+    // 6. Apply plugin states
+    let plugin_states = profiles::get_plugin_states(&db, profile_id)
+        .map_err(|e| e.to_string())?;
+
+    if !plugin_states.is_empty() && game_id == "skyrimse" {
+        let plugins_file = games::with_plugin(&game_id, |plugin| {
+            plugin.get_plugins_file(Path::new(&game.game_path), &bottle)
+        })
+        .flatten();
+
+        if let Some(pf) = plugins_file {
+            let loadorder_file = pf
+                .parent()
+                .map(|p| p.join("loadorder.txt"))
+                .unwrap_or_else(|| pf.with_file_name("loadorder.txt"));
+
+            let entries: Vec<PluginEntry> = plugin_states
+                .iter()
+                .map(|ps| PluginEntry {
+                    filename: ps.plugin_filename.clone(),
+                    enabled: ps.enabled,
+                })
+                .collect();
+
+            let _ = plugins::skyrim_plugins::apply_load_order(&pf, &loadorder_file, &entries);
+        }
+    }
+
+    // 7. Mark profile as active
+    profiles::set_active_profile(&db, &game_id, &bottle_name, profile_id)
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+// --- Update Checking ---
+
+#[tauri::command]
+async fn check_mod_updates(
+    game_id: String,
+    bottle_name: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<ModUpdateInfo>, String> {
+    let cfg = config::get_config().map_err(|e| e.to_string())?;
+    let api_key = cfg
+        .nexus_api_key
+        .ok_or_else(|| "No Nexus API key configured".to_string())?;
+
+    let mods = {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        db.list_mods(&game_id, &bottle_name).map_err(|e| e.to_string())?
+    };
+
+    // Build query list from mods that have a nexus_mod_id
+    let queries: Vec<nexus::ModUpdateQuery> = mods
+        .iter()
+        .filter_map(|m| {
+            m.nexus_mod_id.map(|nid| nexus::ModUpdateQuery {
+                local_mod_id: m.id,
+                nexus_mod_id: nid,
+                nexus_file_id: m.nexus_file_id,
+                mod_name: m.name.clone(),
+                current_version: m.version.clone(),
+            })
+        })
+        .collect();
+
+    if queries.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // Determine game slug from game_id
+    let game_slug = match game_id.as_str() {
+        "skyrimse" => "skyrimspecialedition",
+        other => other,
+    };
+
+    let client = nexus::NexusClient::new(api_key);
+    client
+        .check_updates(game_slug, &queries)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+// --- FOMOD ---
+
+#[tauri::command]
+fn detect_fomod(staging_path: String) -> Result<Option<FomodInstaller>, String> {
+    let path = PathBuf::from(&staging_path);
+    fomod::parse_fomod(&path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_fomod_defaults(installer: FomodInstaller) -> Result<std::collections::HashMap<String, Vec<String>>, String> {
+    Ok(fomod::get_default_selections(&installer))
+}
+
+#[tauri::command]
+fn get_fomod_files(
+    installer: FomodInstaller,
+    selections: std::collections::HashMap<String, Vec<String>>,
+) -> Result<Vec<fomod::FomodFile>, String> {
+    Ok(fomod::get_files_for_selections(&installer, &selections))
+}
+
+// --- Integrity ---
+
+#[tauri::command]
+fn create_game_snapshot(
+    game_id: String,
+    bottle_name: String,
+    state: State<AppState>,
+) -> Result<usize, String> {
+    let bottle = bottles::find_bottle_by_name(&bottle_name)
+        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
+    let detected_games = games::detect_games(&bottle);
+    let game = detected_games
+        .iter()
+        .find(|g| g.game_id == game_id)
+        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
+
+    let data_dir = PathBuf::from(&game.data_dir);
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+
+    integrity::create_game_snapshot(&db, &game_id, &bottle_name, &data_dir)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn check_game_integrity(
+    game_id: String,
+    bottle_name: String,
+    state: State<AppState>,
+) -> Result<IntegrityReport, String> {
+    let bottle = bottles::find_bottle_by_name(&bottle_name)
+        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
+    let detected_games = games::detect_games(&bottle);
+    let game = detected_games
+        .iter()
+        .find(|g| g.game_id == game_id)
+        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
+
+    let data_dir = PathBuf::from(&game.data_dir);
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+
+    integrity::check_game_integrity(&db, &game_id, &bottle_name, &data_dir)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn has_game_snapshot(
+    game_id: String,
+    bottle_name: String,
+    state: State<AppState>,
+) -> Result<bool, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    integrity::has_snapshot(&db, &game_id, &bottle_name).map_err(|e| e.to_string())
+}
+
 // --- Helpers ---
 
 fn sync_skyrim_plugins_for_game(game: &DetectedGame, bottle: &Bottle) -> Result<(), String> {
@@ -1086,6 +1386,8 @@ pub fn run() {
 
     // Initialize additional schemas
     executables::init_schema(&db).expect("Failed to initialize executables schema");
+    profiles::init_schema(&db).expect("Failed to initialize profiles schema");
+    integrity::init_schema(&db).expect("Failed to initialize integrity schema");
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -1127,6 +1429,19 @@ pub fn run() {
             toggle_plugin_cmd,
             move_plugin_cmd,
             get_plugin_messages,
+            list_profiles_cmd,
+            create_profile_cmd,
+            delete_profile_cmd,
+            rename_profile_cmd,
+            save_profile_snapshot,
+            activate_profile,
+            check_mod_updates,
+            detect_fomod,
+            get_fomod_defaults,
+            get_fomod_files,
+            create_game_snapshot,
+            check_game_integrity,
+            has_game_snapshot,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

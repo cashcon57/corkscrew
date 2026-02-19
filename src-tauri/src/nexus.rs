@@ -127,6 +127,28 @@ impl NXMLink {
     }
 }
 
+/// Query input for checking mod updates.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModUpdateQuery {
+    pub local_mod_id: i64,
+    pub nexus_mod_id: i64,
+    pub nexus_file_id: Option<i64>,
+    pub mod_name: String,
+    pub current_version: String,
+}
+
+/// Result of an update check for a single mod.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModUpdateInfo {
+    pub mod_id: i64,
+    pub nexus_mod_id: i64,
+    pub mod_name: String,
+    pub current_version: String,
+    pub latest_version: String,
+    pub latest_file_name: String,
+    pub latest_file_id: i64,
+}
+
 /// A single CDN download link returned by the Nexus Mods API.
 #[derive(Clone, Debug, Deserialize)]
 pub struct DownloadLink {
@@ -331,6 +353,70 @@ impl NexusClient {
         tokio::io::AsyncWriteExt::flush(&mut file).await?;
 
         Ok(file_path)
+    }
+
+    /// Check for updates on a list of mods.
+    ///
+    /// For each mod with a `nexus_mod_id`, fetches the latest files from the
+    /// Nexus API and compares with the locally stored `nexus_file_id`. Returns
+    /// info about mods that have newer versions available.
+    pub async fn check_updates(
+        &self,
+        game_slug: &str,
+        mods: &[ModUpdateQuery],
+    ) -> Result<Vec<ModUpdateInfo>> {
+        let mut updates = Vec::new();
+
+        for m in mods {
+            let files = match self.get_mod_files(game_slug, m.nexus_mod_id).await {
+                Ok(f) => f,
+                Err(_) => continue, // Skip mods that fail (rate limited, removed, etc.)
+            };
+
+            // Find the latest "main" file or the file with the highest file_id
+            let latest = files
+                .iter()
+                .filter_map(|f| {
+                    let file_id = f.get("file_id").and_then(|v| v.as_i64())?;
+                    let version = f.get("version").and_then(|v| v.as_str())
+                        .unwrap_or("").to_string();
+                    let name = f.get("name").and_then(|v| v.as_str())
+                        .unwrap_or("").to_string();
+                    let category = f.get("category_id").and_then(|v| v.as_i64());
+                    Some((file_id, version, name, category))
+                })
+                // Prefer main files (category 1), then updates (category 4)
+                .max_by_key(|(id, _, _, cat)| {
+                    let cat_weight = match cat {
+                        Some(1) => 1000000, // main files
+                        Some(4) => 500000,  // update files
+                        _ => 0,
+                    };
+                    cat_weight + *id as i64
+                });
+
+            if let Some((latest_file_id, latest_version, latest_name, _)) = latest {
+                // Compare against locally installed file_id
+                let has_update = match m.nexus_file_id {
+                    Some(local_id) => latest_file_id > local_id,
+                    None => false, // No file ID tracked, can't compare
+                };
+
+                if has_update {
+                    updates.push(ModUpdateInfo {
+                        mod_id: m.local_mod_id,
+                        nexus_mod_id: m.nexus_mod_id,
+                        mod_name: m.mod_name.clone(),
+                        current_version: m.current_version.clone(),
+                        latest_version,
+                        latest_file_name: latest_name,
+                        latest_file_id,
+                    });
+                }
+            }
+        }
+
+        Ok(updates)
     }
 
     /// Convenience wrapper: resolve an NXM link, fetch CDN URLs, then

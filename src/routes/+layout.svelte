@@ -8,6 +8,7 @@
     { id: "dashboard", label: "Dashboard" },
     { id: "mods", label: "Mods" },
     { id: "plugins", label: "Load Order" },
+    { id: "profiles", label: "Profiles" },
     { id: "settings", label: "Settings" },
     { id: "about", label: "About" },
   ];
@@ -57,6 +58,13 @@
                   <rect x="2.5" y="2" width="11" height="3" rx="1" />
                   <rect x="2.5" y="6.5" width="11" height="3" rx="1" />
                   <rect x="2.5" y="11" width="11" height="3" rx="1" />
+                </svg>
+              {:else if item.id === "profiles"}
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="2" y="2" width="12" height="4" rx="1" />
+                  <rect x="2" y="10" width="12" height="4" rx="1" />
+                  <line x1="5" y1="4" x2="5" y2="4" />
+                  <line x1="5" y1="12" x2="5" y2="12" />
                 </svg>
               {:else if item.id === "settings"}
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">

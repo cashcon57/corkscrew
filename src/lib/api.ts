@@ -14,6 +14,11 @@ import type {
   DeployResult,
   SortResult,
   PluginWarning,
+  Profile,
+  ModUpdateInfo,
+  IntegrityReport,
+  FomodInstaller,
+  FomodFile,
 } from "./types";
 
 // Bottles
@@ -291,4 +296,97 @@ export async function getPluginMessages(
   pluginName: string
 ): Promise<PluginWarning[]> {
   return invoke("get_plugin_messages", { gameId, bottleName, pluginName });
+}
+
+// Profiles
+export async function listProfiles(
+  gameId: string,
+  bottleName: string
+): Promise<Profile[]> {
+  return invoke("list_profiles_cmd", { gameId, bottleName });
+}
+
+export async function createProfile(
+  gameId: string,
+  bottleName: string,
+  name: string
+): Promise<number> {
+  return invoke("create_profile_cmd", { gameId, bottleName, name });
+}
+
+export async function deleteProfile(profileId: number): Promise<void> {
+  return invoke("delete_profile_cmd", { profileId });
+}
+
+export async function renameProfile(
+  profileId: number,
+  newName: string
+): Promise<void> {
+  return invoke("rename_profile_cmd", { profileId, newName });
+}
+
+export async function saveProfileSnapshot(
+  profileId: number,
+  gameId: string,
+  bottleName: string
+): Promise<void> {
+  return invoke("save_profile_snapshot", { profileId, gameId, bottleName });
+}
+
+export async function activateProfile(
+  profileId: number,
+  gameId: string,
+  bottleName: string
+): Promise<void> {
+  return invoke("activate_profile", { profileId, gameId, bottleName });
+}
+
+// Update Checking
+export async function checkModUpdates(
+  gameId: string,
+  bottleName: string
+): Promise<ModUpdateInfo[]> {
+  return invoke("check_mod_updates", { gameId, bottleName });
+}
+
+// FOMOD
+export async function detectFomod(
+  stagingPath: string
+): Promise<FomodInstaller | null> {
+  return invoke("detect_fomod", { stagingPath });
+}
+
+export async function getFomodDefaults(
+  installer: FomodInstaller
+): Promise<Record<string, string[]>> {
+  return invoke("get_fomod_defaults", { installer });
+}
+
+export async function getFomodFiles(
+  installer: FomodInstaller,
+  selections: Record<string, string[]>
+): Promise<FomodFile[]> {
+  return invoke("get_fomod_files", { installer, selections });
+}
+
+// Integrity
+export async function createGameSnapshot(
+  gameId: string,
+  bottleName: string
+): Promise<number> {
+  return invoke("create_game_snapshot", { gameId, bottleName });
+}
+
+export async function checkGameIntegrity(
+  gameId: string,
+  bottleName: string
+): Promise<IntegrityReport> {
+  return invoke("check_game_integrity", { gameId, bottleName });
+}
+
+export async function hasGameSnapshot(
+  gameId: string,
+  bottleName: string
+): Promise<boolean> {
+  return invoke("has_game_snapshot", { gameId, bottleName });
 }
