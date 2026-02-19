@@ -6,6 +6,7 @@ pub mod executables;
 pub mod fomod;
 pub mod games;
 pub mod installer;
+pub mod loot;
 pub mod migrations;
 pub mod nexus;
 pub mod plugins;
@@ -28,6 +29,7 @@ use plugins::skyrim_plugins::PluginEntry;
 use launcher::LaunchResult;
 use skse::SkseStatus;
 use downgrader::DowngradeStatus;
+use loot::{PluginWarning, SortResult};
 
 struct AppState {
     db: Mutex<ModDatabase>,
@@ -844,6 +846,209 @@ fn verify_mod_integrity(
         .map_err(|e| e.to_string())
 }
 
+// --- LOOT & Plugin Management ---
+
+#[tauri::command]
+async fn sort_plugins_loot(
+    game_id: String,
+    bottle_name: String,
+) -> Result<SortResult, String> {
+    let bottle = bottles::find_bottle_by_name(&bottle_name)
+        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
+    let detected_games = games::detect_games(&bottle);
+    let game = detected_games
+        .iter()
+        .find(|g| g.game_id == game_id)
+        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
+
+    let game_path = PathBuf::from(&game.game_path);
+    let data_dir = PathBuf::from(&game.data_dir);
+    let local_path = loot::local_game_path(&bottle, &game_id)
+        .ok_or_else(|| format!("Cannot determine local path for game '{}'", game_id))?;
+
+    // Sort using LOOT
+    let sort_result = loot::sort_plugins(&game_id, &game_path, &data_dir, &local_path)
+        .map_err(|e| e.to_string())?;
+
+    // Apply the sorted order to disk
+    if sort_result.plugins_moved > 0 {
+        let plugins_file = games::with_plugin(&game_id, |plugin| {
+            plugin.get_plugins_file(Path::new(&game.game_path), &bottle)
+        })
+        .flatten()
+        .ok_or_else(|| "Could not determine plugins file location".to_string())?;
+
+        let loadorder_file = plugins_file
+            .parent()
+            .map(|p| p.join("loadorder.txt"))
+            .unwrap_or_else(|| plugins_file.with_file_name("loadorder.txt"));
+
+        // Build PluginEntry list from sorted order, preserving enabled state
+        let existing = if plugins_file.exists() {
+            plugins::skyrim_plugins::read_plugins_txt(&plugins_file)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        let enabled_map: std::collections::HashMap<String, bool> = existing
+            .iter()
+            .map(|e| (e.filename.to_lowercase(), e.enabled))
+            .collect();
+
+        let ordered_entries: Vec<PluginEntry> = sort_result
+            .sorted_order
+            .iter()
+            .map(|name| PluginEntry {
+                filename: name.clone(),
+                enabled: enabled_map
+                    .get(&name.to_lowercase())
+                    .copied()
+                    .unwrap_or(false),
+            })
+            .collect();
+
+        plugins::skyrim_plugins::apply_load_order(
+            &plugins_file,
+            &loadorder_file,
+            &ordered_entries,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    Ok(sort_result)
+}
+
+#[tauri::command]
+async fn update_loot_masterlist(game_id: String) -> Result<String, String> {
+    loot::update_masterlist(&game_id)
+        .await
+        .map(|p| p.to_string_lossy().to_string())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn reorder_plugins_cmd(
+    game_id: String,
+    bottle_name: String,
+    ordered_plugins: Vec<String>,
+) -> Result<Vec<PluginEntry>, String> {
+    let bottle = bottles::find_bottle_by_name(&bottle_name)
+        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
+    let detected_games = games::detect_games(&bottle);
+    let game = detected_games
+        .iter()
+        .find(|g| g.game_id == game_id)
+        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
+
+    let plugins_file = games::with_plugin(&game_id, |plugin| {
+        plugin.get_plugins_file(Path::new(&game.game_path), &bottle)
+    })
+    .flatten()
+    .ok_or_else(|| "Could not determine plugins file location".to_string())?;
+
+    let loadorder_file = plugins_file
+        .parent()
+        .map(|p| p.join("loadorder.txt"))
+        .unwrap_or_else(|| plugins_file.with_file_name("loadorder.txt"));
+
+    plugins::skyrim_plugins::reorder_plugins(&plugins_file, &loadorder_file, &ordered_plugins)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn toggle_plugin_cmd(
+    game_id: String,
+    bottle_name: String,
+    plugin_name: String,
+    enabled: bool,
+) -> Result<Vec<PluginEntry>, String> {
+    let bottle = bottles::find_bottle_by_name(&bottle_name)
+        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
+    let detected_games = games::detect_games(&bottle);
+    let game = detected_games
+        .iter()
+        .find(|g| g.game_id == game_id)
+        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
+
+    let plugins_file = games::with_plugin(&game_id, |plugin| {
+        plugin.get_plugins_file(Path::new(&game.game_path), &bottle)
+    })
+    .flatten()
+    .ok_or_else(|| "Could not determine plugins file location".to_string())?;
+
+    let loadorder_file = plugins_file
+        .parent()
+        .map(|p| p.join("loadorder.txt"))
+        .unwrap_or_else(|| plugins_file.with_file_name("loadorder.txt"));
+
+    plugins::skyrim_plugins::toggle_plugin(
+        &plugins_file,
+        &loadorder_file,
+        &plugin_name,
+        enabled,
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn move_plugin_cmd(
+    game_id: String,
+    bottle_name: String,
+    plugin_name: String,
+    new_index: usize,
+) -> Result<Vec<PluginEntry>, String> {
+    let bottle = bottles::find_bottle_by_name(&bottle_name)
+        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
+    let detected_games = games::detect_games(&bottle);
+    let game = detected_games
+        .iter()
+        .find(|g| g.game_id == game_id)
+        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
+
+    let plugins_file = games::with_plugin(&game_id, |plugin| {
+        plugin.get_plugins_file(Path::new(&game.game_path), &bottle)
+    })
+    .flatten()
+    .ok_or_else(|| "Could not determine plugins file location".to_string())?;
+
+    let loadorder_file = plugins_file
+        .parent()
+        .map(|p| p.join("loadorder.txt"))
+        .unwrap_or_else(|| plugins_file.with_file_name("loadorder.txt"));
+
+    plugins::skyrim_plugins::move_plugin(
+        &plugins_file,
+        &loadorder_file,
+        &plugin_name,
+        new_index,
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_plugin_messages(
+    game_id: String,
+    bottle_name: String,
+    plugin_name: String,
+) -> Result<Vec<PluginWarning>, String> {
+    let bottle = bottles::find_bottle_by_name(&bottle_name)
+        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
+    let detected_games = games::detect_games(&bottle);
+    let game = detected_games
+        .iter()
+        .find(|g| g.game_id == game_id)
+        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
+
+    let game_path = PathBuf::from(&game.game_path);
+    let data_dir = PathBuf::from(&game.data_dir);
+    let local_path = loot::local_game_path(&bottle, &game_id)
+        .ok_or_else(|| format!("Cannot determine local path for game '{}'", game_id))?;
+
+    loot::get_plugin_messages(&game_id, &game_path, &data_dir, &local_path, &plugin_name)
+        .map_err(|e| e.to_string())
+}
+
 // --- Helpers ---
 
 fn sync_skyrim_plugins_for_game(game: &DetectedGame, bottle: &Bottle) -> Result<(), String> {
@@ -916,6 +1121,12 @@ pub fn run() {
             redeploy_all_mods,
             purge_deployment_cmd,
             verify_mod_integrity,
+            sort_plugins_loot,
+            update_loot_masterlist,
+            reorder_plugins_cmd,
+            toggle_plugin_cmd,
+            move_plugin_cmd,
+            get_plugin_messages,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

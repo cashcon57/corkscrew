@@ -327,6 +327,147 @@ pub fn sync_plugins(
 }
 
 // ---------------------------------------------------------------------------
+// Reorder / Toggle / Move
+// ---------------------------------------------------------------------------
+
+/// Apply a new load order by rewriting both `plugins.txt` and `loadorder.txt`.
+///
+/// `ordered_plugins` contains `PluginEntry` items in the desired order.
+/// This replaces the current files on disk.
+pub fn apply_load_order(
+    plugins_file: &Path,
+    loadorder_file: &Path,
+    ordered_plugins: &[PluginEntry],
+) -> Result<()> {
+    write_plugins_txt(plugins_file, ordered_plugins)?;
+    let load_order: Vec<String> = ordered_plugins.iter().map(|e| e.filename.clone()).collect();
+    write_loadorder_txt(loadorder_file, &load_order)?;
+    Ok(())
+}
+
+/// Reorder plugins from a list of filenames, preserving enabled state.
+///
+/// Any plugins not mentioned in `ordered_names` are appended at the end
+/// in their original relative order.
+pub fn reorder_plugins(
+    plugins_file: &Path,
+    loadorder_file: &Path,
+    ordered_names: &[String],
+) -> Result<Vec<PluginEntry>> {
+    let existing = if plugins_file.exists() {
+        read_plugins_txt(plugins_file)?
+    } else {
+        Vec::new()
+    };
+
+    // Build a map of existing state
+    let state_map: std::collections::HashMap<String, bool> = existing
+        .iter()
+        .map(|e| (e.filename.to_lowercase(), e.enabled))
+        .collect();
+
+    let mut result: Vec<PluginEntry> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Add plugins in the requested order
+    for name in ordered_names {
+        let key = name.to_lowercase();
+        if seen.contains(&key) {
+            continue;
+        }
+        seen.insert(key.clone());
+
+        let enabled = state_map.get(&key).copied().unwrap_or(false);
+        result.push(PluginEntry {
+            filename: name.clone(),
+            enabled,
+        });
+    }
+
+    // Append any remaining plugins not in the ordered list
+    for entry in &existing {
+        let key = entry.filename.to_lowercase();
+        if !seen.contains(&key) {
+            seen.insert(key);
+            result.push(entry.clone());
+        }
+    }
+
+    apply_load_order(plugins_file, loadorder_file, &result)?;
+    Ok(result)
+}
+
+/// Toggle the enabled state of a single plugin.
+///
+/// Returns the updated full plugin list.
+pub fn toggle_plugin(
+    plugins_file: &Path,
+    loadorder_file: &Path,
+    plugin_name: &str,
+    enabled: bool,
+) -> Result<Vec<PluginEntry>> {
+    let mut entries = if plugins_file.exists() {
+        read_plugins_txt(plugins_file)?
+    } else {
+        Vec::new()
+    };
+
+    let target_lower = plugin_name.to_lowercase();
+    let mut found = false;
+
+    for entry in &mut entries {
+        if entry.filename.to_lowercase() == target_lower {
+            entry.enabled = enabled;
+            found = true;
+            break;
+        }
+    }
+
+    if !found {
+        // Plugin not in list — add it
+        entries.push(PluginEntry {
+            filename: plugin_name.to_string(),
+            enabled,
+        });
+    }
+
+    apply_load_order(plugins_file, loadorder_file, &entries)?;
+    Ok(entries)
+}
+
+/// Move a plugin to a new position in the load order.
+///
+/// Returns the updated full plugin list.
+pub fn move_plugin(
+    plugins_file: &Path,
+    loadorder_file: &Path,
+    plugin_name: &str,
+    new_index: usize,
+) -> Result<Vec<PluginEntry>> {
+    let mut entries = if plugins_file.exists() {
+        read_plugins_txt(plugins_file)?
+    } else {
+        Vec::new()
+    };
+
+    let target_lower = plugin_name.to_lowercase();
+
+    // Find and remove the plugin from its current position
+    let pos = entries
+        .iter()
+        .position(|e| e.filename.to_lowercase() == target_lower);
+
+    if let Some(current_pos) = pos {
+        let entry = entries.remove(current_pos);
+        let insert_at = new_index.min(entries.len());
+        entries.insert(insert_at, entry);
+    }
+
+    apply_load_order(plugins_file, loadorder_file, &entries)?;
+    Ok(entries)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -570,5 +711,78 @@ mod tests {
             !entries.iter().any(|e| e.filename == "DeletedMod.esp"),
             "Deleted plugin should be removed from plugins.txt"
         );
+    }
+
+    #[test]
+    fn toggle_plugin_enables_and_disables() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pf = tmp.path().join("plugins.txt");
+        let lo = tmp.path().join("loadorder.txt");
+
+        write_plugins_txt(
+            &pf,
+            &[
+                PluginEntry { filename: "Skyrim.esm".into(), enabled: true },
+                PluginEntry { filename: "MyMod.esp".into(), enabled: false },
+            ],
+        ).unwrap();
+
+        // Enable MyMod.esp
+        let result = toggle_plugin(&pf, &lo, "MyMod.esp", true).unwrap();
+        let my_mod = result.iter().find(|e| e.filename == "MyMod.esp").unwrap();
+        assert!(my_mod.enabled);
+
+        // Disable MyMod.esp
+        let result = toggle_plugin(&pf, &lo, "MyMod.esp", false).unwrap();
+        let my_mod = result.iter().find(|e| e.filename == "MyMod.esp").unwrap();
+        assert!(!my_mod.enabled);
+    }
+
+    #[test]
+    fn move_plugin_changes_position() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pf = tmp.path().join("plugins.txt");
+        let lo = tmp.path().join("loadorder.txt");
+
+        write_plugins_txt(
+            &pf,
+            &[
+                PluginEntry { filename: "A.esm".into(), enabled: true },
+                PluginEntry { filename: "B.esp".into(), enabled: true },
+                PluginEntry { filename: "C.esp".into(), enabled: true },
+            ],
+        ).unwrap();
+
+        // Move C to position 1 (between A and B)
+        let result = move_plugin(&pf, &lo, "C.esp", 1).unwrap();
+        assert_eq!(result[0].filename, "A.esm");
+        assert_eq!(result[1].filename, "C.esp");
+        assert_eq!(result[2].filename, "B.esp");
+    }
+
+    #[test]
+    fn reorder_plugins_preserves_enabled_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pf = tmp.path().join("plugins.txt");
+        let lo = tmp.path().join("loadorder.txt");
+
+        write_plugins_txt(
+            &pf,
+            &[
+                PluginEntry { filename: "A.esm".into(), enabled: true },
+                PluginEntry { filename: "B.esp".into(), enabled: false },
+                PluginEntry { filename: "C.esp".into(), enabled: true },
+            ],
+        ).unwrap();
+
+        let new_order = vec!["C.esp".to_string(), "A.esm".to_string(), "B.esp".to_string()];
+        let result = reorder_plugins(&pf, &lo, &new_order).unwrap();
+
+        assert_eq!(result[0].filename, "C.esp");
+        assert!(result[0].enabled);
+        assert_eq!(result[1].filename, "A.esm");
+        assert!(result[1].enabled);
+        assert_eq!(result[2].filename, "B.esp");
+        assert!(!result[2].enabled); // preserves disabled state
     }
 }

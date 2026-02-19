@@ -130,6 +130,18 @@ export interface FomodFile {
   is_folder: boolean;
 }
 
+export interface SortResult {
+  sorted_order: string[];
+  plugins_moved: number;
+  warnings: PluginWarning[];
+}
+
+export interface PluginWarning {
+  plugin_name: string;
+  level: "info" | "warn" | "error";
+  message: string;
+}
+
 export interface CustomExecutable {
   id: number;
   game_id: string;

@@ -12,6 +12,8 @@ import type {
   DeploymentEntry,
   FileConflict,
   DeployResult,
+  SortResult,
+  PluginWarning,
 } from "./types";
 
 // Bottles
@@ -241,4 +243,52 @@ export async function purgeDeployment(
 
 export async function verifyModIntegrity(modId: number): Promise<string[]> {
   return invoke("verify_mod_integrity", { modId });
+}
+
+// LOOT & Plugin Management
+export async function sortPluginsLoot(
+  gameId: string,
+  bottleName: string
+): Promise<SortResult> {
+  return invoke("sort_plugins_loot", { gameId, bottleName });
+}
+
+export async function updateLootMasterlist(
+  gameId: string
+): Promise<string> {
+  return invoke("update_loot_masterlist", { gameId });
+}
+
+export async function reorderPlugins(
+  gameId: string,
+  bottleName: string,
+  orderedPlugins: string[]
+): Promise<PluginEntry[]> {
+  return invoke("reorder_plugins_cmd", { gameId, bottleName, orderedPlugins });
+}
+
+export async function togglePlugin(
+  gameId: string,
+  bottleName: string,
+  pluginName: string,
+  enabled: boolean
+): Promise<PluginEntry[]> {
+  return invoke("toggle_plugin_cmd", { gameId, bottleName, pluginName, enabled });
+}
+
+export async function movePlugin(
+  gameId: string,
+  bottleName: string,
+  pluginName: string,
+  newIndex: number
+): Promise<PluginEntry[]> {
+  return invoke("move_plugin_cmd", { gameId, bottleName, pluginName, newIndex });
+}
+
+export async function getPluginMessages(
+  gameId: string,
+  bottleName: string,
+  pluginName: string
+): Promise<PluginWarning[]> {
+  return invoke("get_plugin_messages", { gameId, bottleName, pluginName });
 }
