@@ -11,6 +11,7 @@
     installSkse,
     setSksePreference,
     checkSkyrimVersion,
+    downgradeSkyrim,
   } from "$lib/api";
   import {
     selectedGame,
@@ -21,7 +22,7 @@
     showSuccess,
     skseStatus,
   } from "$lib/stores";
-  import type { InstalledMod, DetectedGame, SkseStatus } from "$lib/types";
+  import type { InstalledMod, DetectedGame, SkseStatus, DowngradeStatus } from "$lib/types";
 
   let installing = $state(false);
   let confirmUninstall = $state<number | null>(null);
@@ -31,6 +32,10 @@
   let showSksePrompt = $state(false);
   let installingSkse = $state(false);
   let showSkseMenu = $state(false);
+  let downgradeStatus = $state<DowngradeStatus | null>(null);
+  let downgrading = $state(false);
+  let showDowngradeBanner = $state(false);
+  let draggingOver = $state(false);
 
   // Game picker state
   let pickedGame = $state<DetectedGame | null>(null);
@@ -119,14 +124,17 @@
     selectedGame.set(game);
   }
 
-  // SKSE detection
+  // SKSE & version detection
   $effect(() => {
     const game = pickedGame ?? $selectedGame;
     if (game && game.game_id === "skyrimse") {
       checkSkseStatus(game);
+      checkVersionStatus(game);
     } else {
       skse = null;
       showSksePrompt = false;
+      downgradeStatus = null;
+      showDowngradeBanner = false;
     }
   });
 
@@ -176,6 +184,86 @@
     }
   }
 
+  async function checkVersionStatus(game: DetectedGame) {
+    try {
+      const status = await checkSkyrimVersion(game.game_id, game.bottle_name);
+      downgradeStatus = status;
+      if (!status.is_downgraded) {
+        const dismissed = localStorage.getItem(`downgrade_dismissed:${game.game_id}:${game.bottle_name}`);
+        if (!dismissed) showDowngradeBanner = true;
+      }
+    } catch {
+      // Non-critical
+    }
+  }
+
+  async function handleDowngrade() {
+    const game = pickedGame ?? $selectedGame;
+    if (!game) return;
+    downgrading = true;
+    try {
+      const status = await downgradeSkyrim(game.game_id, game.bottle_name, "stock_game");
+      downgradeStatus = status;
+      showDowngradeBanner = false;
+      showSuccess(`Stock Game copy created for v${status.target_version}`);
+    } catch (e: any) {
+      showError(`Downgrade failed: ${e}`);
+    } finally {
+      downgrading = false;
+    }
+  }
+
+  function dismissDowngradeBanner() {
+    const game = pickedGame ?? $selectedGame;
+    if (game) {
+      localStorage.setItem(`downgrade_dismissed:${game.game_id}:${game.bottle_name}`, "true");
+    }
+    showDowngradeBanner = false;
+  }
+
+  // Drag-and-drop mod install
+  function handleDragOver(e: DragEvent) {
+    e.preventDefault();
+    draggingOver = true;
+  }
+
+  function handleDragLeave() {
+    draggingOver = false;
+  }
+
+  async function handleDrop(e: DragEvent) {
+    e.preventDefault();
+    draggingOver = false;
+    const game = pickedGame ?? $selectedGame;
+    if (!game || !e.dataTransfer?.files?.length) return;
+
+    const file = e.dataTransfer.files[0];
+    const ext = file.name.split(".").pop()?.toLowerCase();
+    if (!ext || !["zip", "7z", "rar"].includes(ext)) {
+      showError("Unsupported file type. Use .zip, .7z, or .rar archives.");
+      return;
+    }
+
+    // Tauri needs the file path from the drop event
+    // dataTransfer.files[0].path is available in Tauri webview
+    const filePath = (file as any).path;
+    if (!filePath) {
+      showError("Could not read file path from drop event.");
+      return;
+    }
+
+    installing = true;
+    try {
+      const mod = await installMod(filePath, game.game_id, game.bottle_name);
+      showSuccess(`Installed "${(mod as InstalledMod).name}" successfully`);
+      await loadMods(game);
+    } catch (e: any) {
+      showError(`Install failed: ${e}`);
+    } finally {
+      installing = false;
+    }
+  }
+
   function dismissSksePrompt() {
     const game = pickedGame ?? $selectedGame;
     if (game) {
@@ -211,7 +299,26 @@
   const enabledCount = $derived($installedMods.filter((m) => m.enabled).length);
 </script>
 
-<div class="mods-page">
+<div
+  class="mods-page"
+  class:drag-active={draggingOver}
+  ondragover={handleDragOver}
+  ondragleave={handleDragLeave}
+  ondrop={handleDrop}
+  role="application"
+>
+  {#if draggingOver}
+    <div class="drop-overlay">
+      <div class="drop-overlay-content">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+          <polyline points="7 10 12 15 17 10" />
+          <line x1="12" y1="15" x2="12" y2="3" />
+        </svg>
+        <p>Drop mod archive to install</p>
+      </div>
+    </div>
+  {/if}
   {#if !activeGame}
     <!-- Game Picker -->
     <div class="picker-container">
@@ -371,6 +478,38 @@
             {installingSkse ? "Installing..." : "Install SKSE"}
           </button>
           <button class="btn btn-ghost btn-sm" onclick={dismissSksePrompt}>
+            Dismiss
+          </button>
+        </div>
+      </div>
+    {/if}
+
+    <!-- Skyrim Downgrade Banner -->
+    {#if showDowngradeBanner && activeGame?.game_id === "skyrimse" && downgradeStatus && !downgradeStatus.is_downgraded}
+      <div class="downgrade-banner">
+        <div class="skse-banner-icon">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M10 2v12" />
+            <polyline points="6 10 10 14 14 10" />
+            <path d="M4 18h12" />
+          </svg>
+        </div>
+        <div class="skse-banner-content">
+          <p class="skse-banner-title">
+            Skyrim SE {downgradeStatus.current_version}
+            {#if downgradeStatus.current_version !== "1.5.97"}
+              — Downgrade Available
+            {/if}
+          </p>
+          <p class="skse-banner-text">
+            Most mods target v1.5.97. Create a "Stock Game" copy to prevent Steam auto-updates and enable mod compatibility.
+          </p>
+        </div>
+        <div class="skse-banner-actions">
+          <button class="btn btn-primary btn-sm" onclick={handleDowngrade} disabled={downgrading}>
+            {downgrading ? "Creating..." : "Create Stock Game"}
+          </button>
+          <button class="btn btn-ghost btn-sm" onclick={dismissDowngradeBanner}>
             Dismiss
           </button>
         </div>
@@ -1173,5 +1312,59 @@
     display: flex;
     gap: var(--space-2);
     flex-shrink: 0;
+  }
+
+  /* --- Downgrade Banner --- */
+
+  .downgrade-banner {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+    padding: var(--space-3) var(--space-4);
+    background: color-mix(in srgb, var(--blue) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--blue) 20%, transparent);
+    border-radius: var(--radius);
+  }
+
+  .downgrade-banner .skse-banner-icon {
+    color: var(--blue);
+  }
+
+  /* --- Drag & Drop Overlay --- */
+
+  .mods-page {
+    position: relative;
+  }
+
+  .drag-active {
+    outline: 2px dashed var(--accent);
+    outline-offset: -2px;
+    border-radius: var(--radius-lg);
+  }
+
+  .drop-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 200;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: color-mix(in srgb, var(--bg-base) 85%, transparent);
+    backdrop-filter: blur(8px);
+    border-radius: var(--radius-lg);
+  }
+
+  .drop-overlay-content {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-3);
+    color: var(--accent);
+  }
+
+  .drop-overlay-content p {
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
   }
 </style>
