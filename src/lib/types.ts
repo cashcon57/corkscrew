@@ -178,3 +178,47 @@ export interface IntegrityReport {
   missing_files: string[];
   total_scanned: number;
 }
+
+// Wabbajack Modlists
+
+export interface ModlistSummary {
+  title: string;
+  description: string;
+  author: string;
+  game: string;
+  tags: string[];
+  nsfw: boolean;
+  version: string;
+  image_url: string;
+  readme_url: string;
+  download_url: string;
+  machine_url: string;
+  repository: string;
+  download_size: number;
+  install_size: number;
+  archive_count: number;
+  file_count: number;
+}
+
+export interface ParsedModlist {
+  name: string;
+  author: string;
+  description: string;
+  version: string;
+  game_type: number;
+  game_name: string;
+  is_nsfw: boolean;
+  archive_count: number;
+  total_download_size: number;
+  directive_count: number;
+  directive_breakdown: Record<string, number>;
+  archives: ArchiveSummary[];
+}
+
+export interface ArchiveSummary {
+  name: string;
+  size: number;
+  source_type: string;
+  nexus_mod_id: number | null;
+  nexus_file_id: number | null;
+}

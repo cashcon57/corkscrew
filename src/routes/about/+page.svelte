@@ -1,5 +1,7 @@
 <script lang="ts">
-  // No reactive state needed — this is a static informational page.
+  function openUrl(url: string) {
+    window.open(url, "_blank");
+  }
 </script>
 
 <div class="about-page">
@@ -13,7 +15,7 @@
       height="80"
     />
     <h1 class="app-name">Corkscrew</h1>
-    <span class="app-version">v0.1.0</span>
+    <span class="app-version">v0.3.0-alpha</span>
     <p class="app-tagline">A native mod manager for Wine games</p>
   </div>
 
@@ -39,11 +41,9 @@
       <div class="card-row">
         <span class="row-label">GitHub</span>
         <span class="row-value">
-          <a
-            href="https://github.com/cashcon57/corkscrew"
-            target="_blank"
-            rel="noopener noreferrer"
-          >github.com/cashcon57/corkscrew</a>
+          <button class="link-btn" onclick={() => openUrl("https://github.com/cashcon57/corkscrew")}>
+            github.com/cashcon57/corkscrew
+          </button>
         </span>
       </div>
     </div>
@@ -67,36 +67,149 @@
         <span class="row-label">Rust</span>
         <span class="row-value">2021 edition</span>
       </div>
+      <div class="card-divider"></div>
+      <div class="card-row">
+        <span class="row-label">SQLite</span>
+        <span class="row-value">via rusqlite</span>
+      </div>
     </div>
   </div>
 
-  <!-- Acknowledgments -->
+  <!-- Projects We Build Upon -->
   <div class="section">
-    <h2 class="section-title">Acknowledgments</h2>
+    <h2 class="section-title">Projects We Build Upon</h2>
+    <p class="section-subtitle">
+      Corkscrew stands on the shoulders of these open source projects.
+      We are deeply grateful for their work.
+    </p>
+    <div class="section-card">
+      <button class="credit-row" onclick={() => openUrl("https://github.com/loot/libloot")}>
+        <div class="credit-info">
+          <span class="credit-name">LOOT / libloot</span>
+          <span class="credit-desc">
+            Plugin sorting engine powering Corkscrew's automatic load order management. Created by WrinklyNinja.
+          </span>
+        </div>
+        <span class="credit-license">GPL-3.0</span>
+      </button>
+      <div class="card-divider"></div>
+      <button class="credit-row" onclick={() => openUrl("https://github.com/wabbajack-tools/wabbajack")}>
+        <div class="credit-info">
+          <span class="credit-name">Wabbajack</span>
+          <span class="credit-desc">
+            Pioneered automated modlist installation and the Stock Game approach. Corkscrew browses Wabbajack's modlist gallery.
+          </span>
+        </div>
+        <span class="credit-license">GPL-3.0</span>
+      </button>
+      <div class="card-divider"></div>
+      <button class="credit-row" onclick={() => openUrl("https://github.com/Nexus-Mods/Vortex")}>
+        <div class="credit-info">
+          <span class="credit-name">Vortex</span>
+          <span class="credit-desc">
+            Deployment model, conflict resolution patterns, and Nexus Collections format informed Corkscrew's staging engine.
+          </span>
+        </div>
+        <span class="credit-license">GPL-3.0</span>
+      </button>
+      <div class="card-divider"></div>
+      <button class="credit-row" onclick={() => openUrl("https://github.com/ModOrganizer2/modorganizer")}>
+        <div class="credit-info">
+          <span class="credit-name">Mod Organizer 2</span>
+          <span class="credit-desc">
+            Virtual filesystem concept and profile system inspired Corkscrew's staging/deploy architecture and mod profiles.
+          </span>
+        </div>
+        <span class="credit-license">GPL-3.0</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- Communities & Services -->
+  <div class="section">
+    <h2 class="section-title">Communities & Services</h2>
+    <div class="section-card">
+      <button class="credit-row" onclick={() => openUrl("https://skse.silverlock.org/")}>
+        <div class="credit-info">
+          <span class="credit-name">SKSE Team</span>
+          <span class="credit-desc">Skyrim Script Extender — essential for most Skyrim mods.</span>
+        </div>
+      </button>
+      <div class="card-divider"></div>
+      <button class="credit-row" onclick={() => openUrl("https://www.winehq.org/")}>
+        <div class="credit-info">
+          <span class="credit-name">Wine Project</span>
+          <span class="credit-desc">The foundation that makes running Windows games on macOS and Linux possible.</span>
+        </div>
+      </button>
+      <div class="card-divider"></div>
+      <button class="credit-row" onclick={() => openUrl("https://www.codeweavers.com/crossover")}>
+        <div class="credit-info">
+          <span class="credit-name">CrossOver</span>
+          <span class="credit-desc">A polished Wine implementation by CodeWeavers and major Wine contributor.</span>
+        </div>
+      </button>
+      <div class="card-divider"></div>
+      <button class="credit-row" onclick={() => openUrl("https://www.nexusmods.com/")}>
+        <div class="credit-info">
+          <span class="credit-name">Nexus Mods</span>
+          <span class="credit-desc">The modding community, mod hosting platform, and API that mod managers depend on.</span>
+        </div>
+      </button>
+      <div class="card-divider"></div>
+      <button class="credit-row" onclick={() => openUrl("https://fomod-docs.readthedocs.io/")}>
+        <div class="credit-info">
+          <span class="credit-name">FOMOD Standard</span>
+          <span class="credit-desc">The XML-based mod installer format used by many mod authors.</span>
+        </div>
+      </button>
+      <div class="card-divider"></div>
+      <button class="credit-row" onclick={() => openUrl("https://github.com/Omni-guides/Jackify")}>
+        <div class="credit-info">
+          <span class="credit-name">Jackify</span>
+          <span class="credit-desc">Pioneered Wabbajack modlist installation on Linux and SteamOS/Steam Deck.</span>
+        </div>
+      </button>
+    </div>
+  </div>
+
+  <!-- Libraries -->
+  <div class="section">
+    <h2 class="section-title">Key Libraries</h2>
     <div class="section-card">
       <div class="card-row">
-        <span class="row-label">SKSE Team</span>
-        <span class="row-value">Skyrim Script Extender</span>
+        <span class="row-label">Tauri</span>
+        <span class="row-value">Cross-platform app framework</span>
       </div>
       <div class="card-divider"></div>
       <div class="card-row">
-        <span class="row-label">Wine Project</span>
-        <span class="row-value">Windows compatibility layer</span>
+        <span class="row-label">Svelte</span>
+        <span class="row-value">Frontend framework</span>
       </div>
       <div class="card-divider"></div>
       <div class="card-row">
-        <span class="row-label">CodeWeavers</span>
-        <span class="row-value">CrossOver</span>
+        <span class="row-label">libloot</span>
+        <span class="row-value">Plugin sorting (Rust)</span>
       </div>
       <div class="card-divider"></div>
       <div class="card-row">
-        <span class="row-label">Nexus Mods</span>
-        <span class="row-value">Mod hosting platform</span>
+        <span class="row-label">rusqlite</span>
+        <span class="row-value">SQLite bindings</span>
       </div>
       <div class="card-divider"></div>
       <div class="card-row">
-        <span class="row-label">Wabbajack</span>
-        <span class="row-value">Automated modlist installer</span>
+        <span class="row-label">quick-xml</span>
+        <span class="row-value">FOMOD XML parsing</span>
+      </div>
+      <div class="card-divider"></div>
+      <div class="card-row">
+        <span class="row-label">reqwest</span>
+        <span class="row-value">HTTP client</span>
+      </div>
+      <div class="card-divider"></div>
+      <div class="card-row">
+        <span class="row-label">sevenz-rust</span>
+        <span class="row-value">7z archive extraction</span>
       </div>
     </div>
   </div>
@@ -168,6 +281,14 @@
     margin-bottom: var(--space-2);
   }
 
+  .section-subtitle {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    padding: 0 var(--space-4);
+    margin-bottom: var(--space-3);
+    line-height: 1.5;
+  }
+
   .section-card {
     background: var(--bg-grouped-secondary);
     border-radius: var(--radius-lg);
@@ -204,13 +325,70 @@
     text-align: right;
   }
 
-  .row-value a {
+  .link-btn {
+    font-size: 13px;
+    font-weight: 500;
     color: var(--system-accent);
-    text-decoration: none;
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0;
+    text-align: right;
   }
 
-  .row-value a:hover {
+  .link-btn:hover {
     text-decoration: underline;
+  }
+
+  /* --- Credit rows (clickable) --- */
+
+  .credit-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    width: 100%;
+    text-align: left;
+    cursor: pointer;
+    background: none;
+    border: none;
+    transition: background var(--duration-fast) var(--ease);
+  }
+
+  .credit-row:hover {
+    background: var(--surface-hover);
+  }
+
+  .credit-info {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .credit-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .credit-desc {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    line-height: 1.4;
+  }
+
+  .credit-license {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    background: rgba(255, 255, 255, 0.06);
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+    white-space: nowrap;
+    flex-shrink: 0;
   }
 
   /* --- Footer --- */

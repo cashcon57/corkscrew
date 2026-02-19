@@ -303,6 +303,12 @@
   {:then mod}
     <mod.default />
   {/await}
+{:else if $currentPage === "modlists"}
+  {#await import("./modlists/+page.svelte")}
+    <div class="page-loading"><div class="spinner"><div class="spinner-ring"></div></div></div>
+  {:then mod}
+    <mod.default />
+  {/await}
 {:else if $currentPage === "profiles"}
   {#await import("./profiles/+page.svelte")}
     <div class="page-loading"><div class="spinner"><div class="spinner-ring"></div></div></div>

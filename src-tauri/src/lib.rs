@@ -16,6 +16,7 @@ pub mod launcher;
 pub mod staging;
 pub mod skse;
 pub mod downgrader;
+pub mod wabbajack;
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -36,6 +37,7 @@ use nexus::ModUpdateInfo;
 use skse::SkseStatus;
 use downgrader::DowngradeStatus;
 use loot::{PluginWarning, SortResult};
+use wabbajack::{ModlistSummary, ParsedModlist};
 
 struct AppState {
     db: Mutex<ModDatabase>,
@@ -1349,6 +1351,18 @@ fn has_game_snapshot(
     integrity::has_snapshot(&db, &game_id, &bottle_name).map_err(|e| e.to_string())
 }
 
+// --- Wabbajack Modlists ---
+
+#[tauri::command]
+async fn get_wabbajack_modlists() -> Result<Vec<ModlistSummary>, String> {
+    wabbajack::fetch_modlist_gallery().await
+}
+
+#[tauri::command]
+fn parse_wabbajack_file(file_path: String) -> Result<ParsedModlist, String> {
+    wabbajack::parse_wabbajack_file(std::path::Path::new(&file_path))
+}
+
 // --- Helpers ---
 
 fn sync_skyrim_plugins_for_game(game: &DetectedGame, bottle: &Bottle) -> Result<(), String> {
@@ -1442,6 +1456,8 @@ pub fn run() {
             create_game_snapshot,
             check_game_integrity,
             has_game_snapshot,
+            get_wabbajack_modlists,
+            parse_wabbajack_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

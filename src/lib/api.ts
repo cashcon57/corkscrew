@@ -19,6 +19,8 @@ import type {
   IntegrityReport,
   FomodInstaller,
   FomodFile,
+  ModlistSummary,
+  ParsedModlist,
 } from "./types";
 
 // Bottles
@@ -389,4 +391,15 @@ export async function hasGameSnapshot(
   bottleName: string
 ): Promise<boolean> {
   return invoke("has_game_snapshot", { gameId, bottleName });
+}
+
+// Wabbajack Modlists
+export async function getWabbajackModlists(): Promise<ModlistSummary[]> {
+  return invoke("get_wabbajack_modlists");
+}
+
+export async function parseWabbajackFile(
+  filePath: string
+): Promise<ParsedModlist> {
+  return invoke("parse_wabbajack_file", { filePath });
 }
