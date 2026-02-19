@@ -12,6 +12,7 @@
   import type { Bottle, DetectedGame } from "$lib/types";
 
   let loadingState = $state<"idle" | "loading" | "done">("idle");
+  const isMac = typeof navigator !== "undefined" && navigator.platform?.startsWith("Mac");
 
   onMount(async () => {
     loadingState = "loading";
@@ -45,6 +46,21 @@
 
   function getSourceStyle(source: string): { color: string; bg: string; gradient: string } {
     return sourceColors[source] || { color: "#8e8e93", bg: "rgba(142, 142, 147, 0.12)", gradient: "none" };
+  }
+
+  // Recommended sources per platform — others work but may have less compatibility
+  const recommendedSources: Record<string, string[]> = {
+    macOS: ["CrossOver", "Moonshine"],
+    Linux: ["Proton", "Lutris"],
+  };
+
+  function getCompatibilityTip(source: string): string | null {
+    const platform = isMac ? "macOS" : "Linux";
+    const recommended = recommendedSources[platform];
+    if (!recommended || recommended.includes(source)) return null;
+    if (source === "Whisky") return "Whisky is archived. Consider migrating to Moonshine or CrossOver for continued support.";
+    const recs = recommended.join(" or ");
+    return `For best mod compatibility, consider using ${recs}.`;
   }
 
   function truncatePath(path: string, maxLen: number = 60): string {
@@ -110,7 +126,7 @@
             </div>
             <p class="empty-title">No bottles found</p>
             <p class="empty-detail">
-              Corkscrew looks for bottles from CrossOver, Whisky, Moonshine, Heroic, Mythic, Lutris, Proton, and native Wine.
+              Corkscrew looks for bottles from CrossOver, Moonshine, Heroic, Mythic, Lutris, Proton, Bottles, and native Wine.
             </p>
           </div>
         {:else}
@@ -130,7 +146,7 @@
                         <rect x="8" y="8" width="8" height="8" rx="1" transform="rotate(45 12 12)" />
                       </svg>
                     {:else if bottle.source === "Whisky"}
-                      <!-- Rocks/tumbler glass with liquid -->
+                      <!-- Rocks/tumbler glass with liquid (archived, but still detect existing bottles) -->
                       <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
                         <path d="M4.5 5h11l-1.5 11a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L4.5 5z" />
                         <path d="M6.5 11h7" />
@@ -199,6 +215,16 @@
                     <p class="card-path" title={bottle.path}>
                       {truncatePath(bottle.path)}
                     </p>
+                    {#if getCompatibilityTip(bottle.source)}
+                      <p class="compat-tip">
+                        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                          <circle cx="6" cy="6" r="5" />
+                          <line x1="6" y1="4" x2="6" y2="6.5" />
+                          <circle cx="6" cy="8.5" r="0.3" fill="currentColor" />
+                        </svg>
+                        {getCompatibilityTip(bottle.source)}
+                      </p>
+                    {/if}
                   </div>
                 </div>
               </div>
@@ -518,6 +544,21 @@
 
   .bottle-info .card-name {
     margin-bottom: var(--space-1);
+  }
+
+  .compat-tip {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-1);
+    margin-top: var(--space-2);
+    font-size: 11px;
+    color: var(--yellow);
+    line-height: 1.4;
+  }
+
+  .compat-tip svg {
+    flex-shrink: 0;
+    margin-top: 1px;
   }
 
   /* ============================================

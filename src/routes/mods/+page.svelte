@@ -202,10 +202,10 @@
     if (!game) return;
     downgrading = true;
     try {
-      const status = await downgradeSkyrim(game.game_id, game.bottle_name, "stock_game");
+      const status = await downgradeSkyrim(game.game_id, game.bottle_name, "full");
       downgradeStatus = status;
       showDowngradeBanner = false;
-      showSuccess(`Stock Game copy created for v${status.target_version}`);
+      showSuccess(`Game downgraded to v${status.target_version}`);
     } catch (e: any) {
       showError(`Downgrade failed: ${e}`);
     } finally {
@@ -502,12 +502,12 @@
             {/if}
           </p>
           <p class="skse-banner-text">
-            Most mods target v1.5.97. Create a "Stock Game" copy to prevent Steam auto-updates and enable mod compatibility.
+            Most mods target v1.5.97. Downgrade creates a protected copy of your game files that won't be overwritten by Steam updates.
           </p>
         </div>
         <div class="skse-banner-actions">
           <button class="btn btn-primary btn-sm" onclick={handleDowngrade} disabled={downgrading}>
-            {downgrading ? "Creating..." : "Create Stock Game"}
+            {downgrading ? "Downgrading..." : "Downgrade to v1.5.97"}
           </button>
           <button class="btn btn-ghost btn-sm" onclick={dismissDowngradeBanner}>
             Dismiss

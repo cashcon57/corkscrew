@@ -3,8 +3,8 @@
 //! Provides utilities for:
 //! - Detecting whether a Skyrim SE installation is the classic SE build (v1.5.97)
 //!   or the newer Anniversary Edition (v1.6.x+)
-//! - Creating a "Stock Game" copy that isolates the game from Steam auto-updates
-//! - Managing Stock Game paths in the Corkscrew configuration
+//! - Creating a downgrade copy that isolates the game from Steam auto-updates
+//! - Managing downgrade copy paths in the Corkscrew configuration
 //!
 //! Version detection uses a combination of SHA-256 hashing and file size
 //! heuristics, since the SkyrimSE.exe binary differs significantly between
@@ -59,8 +59,8 @@ pub struct DowngradeStatus {
     pub target_version: String,
     /// Whether the game is already at the target (downgraded/SE) version.
     pub is_downgraded: bool,
-    /// Path to the Stock Game copy, if one has been created.
-    pub stock_game_path: Option<String>,
+    /// Path to the downgrade copy, if one has been created.
+    pub downgrade_path: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -171,14 +171,14 @@ pub fn detect_skyrim_version(game_path: &Path) -> Result<DowngradeStatus> {
         }
     };
 
-    // Check for existing Stock Game path.
-    let stock_game_path = get_stock_game_path_from_config(game_path);
+    // Check for existing downgrade copy path.
+    let downgrade_path = get_downgrade_path_from_config(game_path);
 
     Ok(DowngradeStatus {
         current_version,
         target_version: TARGET_VERSION.to_string(),
         is_downgraded,
-        stock_game_path: stock_game_path.map(|p| p.to_string_lossy().into_owned()),
+        downgrade_path: downgrade_path.map(|p| p.to_string_lossy().into_owned()),
     })
 }
 
@@ -242,39 +242,39 @@ fn compute_sha256(path: &Path) -> Result<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Stock Game creation
+// Downgrade copy creation
 // ---------------------------------------------------------------------------
 
-/// Create a "Stock Game" copy of the entire game installation.
+/// Create a downgrade copy of the entire game installation.
 ///
-/// Copies the full game directory to `target_dir/StockGame/`, providing an
-/// isolated copy that is immune to Steam auto-updates. This is a common
-/// technique in the Skyrim modding community.
+/// Copies the full game directory to `target_dir/DowngradedGame/`, providing
+/// an isolated copy that is immune to Steam auto-updates. The copy can then
+/// be patched to the target version for mod compatibility.
 ///
-/// Returns the path to the created Stock Game directory.
+/// Returns the path to the created downgrade copy directory.
 ///
 /// # Arguments
 ///
 /// * `game_path` - The original game installation directory.
-/// * `target_dir` - The parent directory where `StockGame/` will be created.
-pub fn create_stock_game(game_path: &Path, target_dir: &Path) -> Result<PathBuf> {
-    let stock_game_path = target_dir.join("StockGame");
+/// * `target_dir` - The parent directory where `DowngradedGame/` will be created.
+pub fn create_downgrade_copy(game_path: &Path, target_dir: &Path) -> Result<PathBuf> {
+    let downgrade_path = target_dir.join("DowngradedGame");
 
-    if stock_game_path.exists() {
+    if downgrade_path.exists() {
         warn!(
-            "Stock Game directory already exists: {}. It will be replaced.",
-            stock_game_path.display()
+            "Downgrade copy already exists: {}. It will be replaced.",
+            downgrade_path.display()
         );
-        fs::remove_dir_all(&stock_game_path)?;
+        fs::remove_dir_all(&downgrade_path)?;
     }
 
     info!(
-        "Creating Stock Game copy: {} -> {}",
+        "Creating downgrade copy: {} -> {}",
         game_path.display(),
-        stock_game_path.display()
+        downgrade_path.display()
     );
 
-    fs::create_dir_all(&stock_game_path)?;
+    fs::create_dir_all(&downgrade_path)?;
 
     // Walk the source directory and copy everything.
     let mut files_copied: u64 = 0;
@@ -289,7 +289,7 @@ pub fn create_stock_game(game_path: &Path, target_dir: &Path) -> Result<PathBuf>
             .strip_prefix(game_path)
             .map_err(|e| DowngraderError::Other(e.to_string()))?;
 
-        let dest = stock_game_path.join(relative);
+        let dest = downgrade_path.join(relative);
 
         if entry.file_type().is_dir() {
             fs::create_dir_all(&dest)?;
@@ -303,7 +303,7 @@ pub fn create_stock_game(game_path: &Path, target_dir: &Path) -> Result<PathBuf>
 
             if files_copied % 100 == 0 {
                 debug!(
-                    "Stock Game progress: {} files ({:.1} MB)",
+                    "Downgrade copy progress: {} files ({:.1} MB)",
                     files_copied,
                     bytes_copied as f64 / (1024.0 * 1024.0)
                 );
@@ -314,26 +314,25 @@ pub fn create_stock_game(game_path: &Path, target_dir: &Path) -> Result<PathBuf>
 
     let total_mb = bytes_copied as f64 / (1024.0 * 1024.0);
     info!(
-        "Stock Game created: {} files, {:.1} MB at {}",
-        files_copied, total_mb, stock_game_path.display()
+        "Downgrade copy created: {} files, {:.1} MB at {}",
+        files_copied, total_mb, downgrade_path.display()
     );
 
-    // Store the Stock Game path in config.
-    store_stock_game_path(game_path, &stock_game_path);
+    // Store the downgrade copy path in config.
+    store_downgrade_path(game_path, &downgrade_path);
 
-    Ok(stock_game_path)
+    Ok(downgrade_path)
 }
 
 // ---------------------------------------------------------------------------
-// Stock Game path management
+// Downgrade path management
 // ---------------------------------------------------------------------------
 
-/// Retrieve the stored Stock Game path for a given game installation.
+/// Retrieve the stored downgrade copy path for a given game installation.
 ///
-/// Uses `game_id` and `bottle_name` derived from the game path if available,
-/// or falls back to a path-based config key.
-pub fn get_stock_game_path(game_id: &str, bottle_name: &str) -> Option<PathBuf> {
-    let key = format!("stock_game_{}_{}", game_id, bottle_name);
+/// Uses `game_id` and `bottle_name` to look up the config key.
+pub fn get_downgrade_path(game_id: &str, bottle_name: &str) -> Option<PathBuf> {
+    let key = format!("downgrade_{}_{}", game_id, bottle_name);
     config::get_config_value(&key)
         .ok()
         .flatten()
@@ -341,9 +340,9 @@ pub fn get_stock_game_path(game_id: &str, bottle_name: &str) -> Option<PathBuf> 
         .filter(|p| p.exists())
 }
 
-/// Internal: look up Stock Game path using a path-based config key.
-fn get_stock_game_path_from_config(game_path: &Path) -> Option<PathBuf> {
-    let key = stock_game_config_key(game_path);
+/// Internal: look up downgrade copy path using a path-based config key.
+fn get_downgrade_path_from_config(game_path: &Path) -> Option<PathBuf> {
+    let key = downgrade_config_key(game_path);
     config::get_config_value(&key)
         .ok()
         .flatten()
@@ -351,21 +350,20 @@ fn get_stock_game_path_from_config(game_path: &Path) -> Option<PathBuf> {
         .filter(|p| p.exists())
 }
 
-/// Store the Stock Game path in the configuration.
-fn store_stock_game_path(game_path: &Path, stock_game_path: &Path) {
-    let key = stock_game_config_key(game_path);
-    let value = stock_game_path.to_string_lossy();
+/// Store the downgrade copy path in the configuration.
+fn store_downgrade_path(game_path: &Path, downgrade_path: &Path) {
+    let key = downgrade_config_key(game_path);
+    let value = downgrade_path.to_string_lossy();
     if let Err(e) = config::set_config_value(&key, &value) {
-        warn!("Failed to store Stock Game path in config: {}", e);
+        warn!("Failed to store downgrade path in config: {}", e);
     }
 }
 
-/// Generate a config key for the Stock Game path based on the game installation path.
+/// Generate a config key for the downgrade path based on the game installation path.
 ///
 /// Uses a sanitized version of the game path to create a unique key.
-fn stock_game_config_key(game_path: &Path) -> String {
+fn downgrade_config_key(game_path: &Path) -> String {
     let path_str = game_path.to_string_lossy();
-    // Create a simple hash-like key from the path to avoid special characters.
     let sanitized: String = path_str
         .chars()
         .map(|c| {
@@ -376,7 +374,7 @@ fn stock_game_config_key(game_path: &Path) -> String {
             }
         })
         .collect();
-    format!("stock_game_path_{}", sanitized)
+    format!("downgrade_path_{}", sanitized)
 }
 
 // ---------------------------------------------------------------------------
@@ -394,7 +392,7 @@ mod tests {
             current_version: "1.5.97".to_string(),
             target_version: "1.5.97".to_string(),
             is_downgraded: true,
-            stock_game_path: Some("/path/to/StockGame".to_string()),
+            downgrade_path: Some("/path/to/DowngradedGame".to_string()),
         };
 
         let json = serde_json::to_string(&status).unwrap();
@@ -404,8 +402,8 @@ mod tests {
         assert_eq!(deserialized.target_version, "1.5.97");
         assert!(deserialized.is_downgraded);
         assert_eq!(
-            deserialized.stock_game_path,
-            Some("/path/to/StockGame".to_string())
+            deserialized.downgrade_path,
+            Some("/path/to/DowngradedGame".to_string())
         );
     }
 
@@ -475,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn create_stock_game_copies_files() {
+    fn create_downgrade_copy_copies_files() {
         let tmp = tempfile::tempdir().unwrap();
 
         // Create a fake game directory.
@@ -486,24 +484,24 @@ mod tests {
         fs::write(game_dir.join("SkyrimSE.ini"), b"fake ini").unwrap();
         fs::write(game_data.join("mesh.nif"), b"fake mesh").unwrap();
 
-        // Create Stock Game.
+        // Create downgrade copy.
         let target = tmp.path().join("mods");
-        let stock_path = create_stock_game(&game_dir, &target).unwrap();
+        let downgrade_path = create_downgrade_copy(&game_dir, &target).unwrap();
 
-        assert_eq!(stock_path, target.join("StockGame"));
-        assert!(stock_path.join("SkyrimSE.exe").exists());
-        assert!(stock_path.join("SkyrimSE.ini").exists());
-        assert!(stock_path.join("Data").join("Meshes").join("mesh.nif").exists());
+        assert_eq!(downgrade_path, target.join("DowngradedGame"));
+        assert!(downgrade_path.join("SkyrimSE.exe").exists());
+        assert!(downgrade_path.join("SkyrimSE.ini").exists());
+        assert!(downgrade_path.join("Data").join("Meshes").join("mesh.nif").exists());
 
         // Verify file contents.
         assert_eq!(
-            fs::read_to_string(stock_path.join("SkyrimSE.exe")).unwrap(),
+            fs::read_to_string(downgrade_path.join("SkyrimSE.exe")).unwrap(),
             "fake exe"
         );
     }
 
     #[test]
-    fn create_stock_game_replaces_existing() {
+    fn create_downgrade_copy_replaces_existing() {
         let tmp = tempfile::tempdir().unwrap();
 
         // Create a fake game directory.
@@ -513,8 +511,8 @@ mod tests {
 
         let target = tmp.path().join("mods");
 
-        // Create Stock Game twice.
-        let path1 = create_stock_game(&game_dir, &target).unwrap();
+        // Create downgrade copy twice.
+        let path1 = create_downgrade_copy(&game_dir, &target).unwrap();
         assert_eq!(
             fs::read_to_string(path1.join("SkyrimSE.exe")).unwrap(),
             "original"
@@ -522,7 +520,7 @@ mod tests {
 
         // Update the source and re-create.
         fs::write(game_dir.join("SkyrimSE.exe"), b"updated").unwrap();
-        let path2 = create_stock_game(&game_dir, &target).unwrap();
+        let path2 = create_downgrade_copy(&game_dir, &target).unwrap();
         assert_eq!(path1, path2);
         assert_eq!(
             fs::read_to_string(path2.join("SkyrimSE.exe")).unwrap(),
@@ -547,19 +545,19 @@ mod tests {
     }
 
     #[test]
-    fn stock_game_config_key_is_deterministic() {
+    fn downgrade_config_key_is_deterministic() {
         let path = Path::new("/home/user/.wine/drive_c/Games/Skyrim");
-        let key1 = stock_game_config_key(path);
-        let key2 = stock_game_config_key(path);
+        let key1 = downgrade_config_key(path);
+        let key2 = downgrade_config_key(path);
         assert_eq!(key1, key2);
-        assert!(key1.starts_with("stock_game_path_"));
+        assert!(key1.starts_with("downgrade_path_"));
         // Should not contain slashes or other special characters.
-        assert!(!key1[16..].contains('/'));
+        assert!(!key1[15..].contains('/'));
     }
 
     #[test]
-    fn get_stock_game_path_returns_none_for_nonexistent() {
-        let result = get_stock_game_path("skyrimse", "nonexistent_bottle_xyz");
+    fn get_downgrade_path_returns_none_for_nonexistent() {
+        let result = get_downgrade_path("skyrimse", "nonexistent_bottle_xyz");
         assert!(result.is_none());
     }
 

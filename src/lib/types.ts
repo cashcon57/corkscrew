@@ -55,7 +55,7 @@ export interface DowngradeStatus {
   current_version: string;
   target_version: string;
   is_downgraded: boolean;
-  stock_game_path: string | null;
+  downgrade_path: string | null;
 }
 
 export interface ModConflict {

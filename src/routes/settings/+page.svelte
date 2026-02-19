@@ -34,9 +34,8 @@
 
   const layers: LayerInfo[] = [
     { name: "CrossOver", url: "https://www.codeweavers.com/crossover", description: "Commercial Wine wrapper with excellent compatibility and support. Best plug-and-play experience. CodeWeavers funds Wine development.", platforms: ["macOS", "Linux"], cost: "Paid ($74)", color: "#c850c0", bg: "rgba(200, 80, 192, 0.14)", icon: "crossover", recommendation: "Best overall compatibility" },
-    { name: "Moonshine", url: "https://github.com/ybmeng/moonshine", description: "Free, maintained fork of Whisky with Wine Staging 11.2, OpenGL 3.2+ support, and macOS 26 compatibility.", platforms: ["macOS"], cost: "Free", color: "#bf5af2", bg: "rgba(191, 90, 242, 0.14)", icon: "moonshine", recommendation: "Best free option for macOS" },
+    { name: "Moonshine", url: "https://github.com/ybmeng/moonshine", description: "Free, open-source Wine wrapper with Wine Staging 11.2, OpenGL 3.2+ support, and macOS 26 compatibility.", platforms: ["macOS"], cost: "Free", color: "#bf5af2", bg: "rgba(191, 90, 242, 0.14)", icon: "moonshine", recommendation: "Best free option for macOS" },
     { name: "Heroic", url: "https://heroicgameslauncher.com/", description: "Open-source game launcher for GOG and Epic Games. Bundles Wine/Proton for easy setup.", platforms: ["macOS", "Linux"], cost: "Free", color: "#0a84ff", bg: "rgba(10, 132, 255, 0.14)", icon: "heroic" },
-    { name: "Whisky", url: "https://getwhisky.app/", description: "Archived (May 2025). Developer recommended CrossOver instead. Moonshine is the maintained fork.", platforms: ["macOS"], cost: "Free", color: "#e8a317", bg: "rgba(232, 163, 23, 0.14)", icon: "whisky" },
     { name: "Mythic", url: "https://getmythic.app/", description: "Native macOS game launcher for Epic Games with built-in Wine support.", platforms: ["macOS"], cost: "Free", color: "#30d158", bg: "rgba(48, 209, 88, 0.14)", icon: "mythic" },
     { name: "Lutris", url: "https://lutris.net/", description: "Open-source gaming platform for Linux. Manages Wine, Proton, and native runners.", platforms: ["Linux"], cost: "Free", color: "#ff9f0a", bg: "rgba(255, 159, 10, 0.14)", icon: "lutris", recommendation: "Best for Linux desktop" },
     { name: "Proton / Steam", url: "https://store.steampowered.com/", description: "Valve's Wine fork built into Steam. The standard for gaming on Linux. Seamless for Steam library games.", platforms: ["Linux"], cost: "Free", color: "#1a9fff", bg: "rgba(26, 159, 255, 0.14)", icon: "proton", recommendation: "Best for Steam Deck / SteamOS" },
@@ -51,14 +50,10 @@
       : layers.filter(l => l.recommendation && l.platforms.includes("Linux"))
   );
 
-  const platformExclusive = $derived(
+  const otherOptions = $derived(
     isMac
-      ? layers.filter(l => !l.recommendation && l.platforms.length === 1 && l.platforms[0] === "macOS")
-      : layers.filter(l => !l.recommendation && l.platforms.length === 1 && l.platforms[0] === "Linux")
-  );
-
-  const crossPlatform = $derived(
-    layers.filter(l => !l.recommendation && l.platforms.length > 1)
+      ? layers.filter(l => !l.recommendation && l.platforms.includes("macOS"))
+      : layers.filter(l => !l.recommendation && l.platforms.includes("Linux"))
   );
 
   // For comparison dialog
@@ -132,11 +127,6 @@
       <rect x="4" y="4" width="8" height="8" rx="1" transform="rotate(45 8 8)" />
       <rect x="8" y="8" width="8" height="8" rx="1" transform="rotate(45 12 12)" />
     </svg>
-  {:else if icon === "whisky"}
-    <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M4.5 5h11l-1.5 11a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L4.5 5z" />
-      <path d="M6.5 11h7" />
-    </svg>
   {:else if icon === "moonshine"}
     <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
       <path d="M15 4a7 7 0 1 0-1 12A5 5 0 0 1 15 4z" />
@@ -200,6 +190,17 @@
             {layer.cost === "Free" ? "Free" : layer.cost}
           </span>
         </div>
+        <a
+          href={layer.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          class="layer-download-link"
+        >
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M6 2v6.5" /><path d="M3 6.5L6 9.5 9 6.5" /><line x1="2" y1="11" x2="10" y2="11" />
+          </svg>
+          Download
+        </a>
       </div>
       <span class="layer-description">{layer.description}</span>
       {#if isRecommended && layer.recommendation}
@@ -364,25 +365,12 @@
       </div>
     {/if}
 
-    <!-- Platform-exclusive -->
-    {#if platformExclusive.length > 0}
+    <!-- Other compatible options -->
+    {#if otherOptions.length > 0}
       <div class="layers-group">
-        <span class="layers-group-label">{isMac ? "macOS" : "Linux"} Only</span>
+        <span class="layers-group-label">Other Compatible Options</span>
         <div class="section-card">
-          {#each platformExclusive as layer, i}
-            {#if i > 0}<div class="card-divider"></div>{/if}
-            {@render layerRow(layer, false)}
-          {/each}
-        </div>
-      </div>
-    {/if}
-
-    <!-- Cross-platform -->
-    {#if crossPlatform.length > 0}
-      <div class="layers-group">
-        <span class="layers-group-label">Cross-Platform</span>
-        <div class="section-card">
-          {#each crossPlatform as layer, i}
+          {#each otherOptions as layer, i}
             {#if i > 0}<div class="card-divider"></div>{/if}
             {@render layerRow(layer, false)}
           {/each}
@@ -814,6 +802,26 @@
     font-weight: 500;
     color: var(--system-accent);
     margin-top: 1px;
+  }
+
+  .layer-download-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    margin-left: auto;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--system-accent);
+    text-decoration: none;
+    padding: 2px var(--space-2);
+    border-radius: var(--radius-sm);
+    transition: background var(--duration-fast) var(--ease);
+    flex-shrink: 0;
+  }
+
+  .layer-download-link:hover {
+    background: var(--system-accent-subtle);
+    text-decoration: none;
   }
 
   .section-action {

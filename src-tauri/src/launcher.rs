@@ -138,41 +138,56 @@ fn find_wine_binary_under(dir: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Resolve the Wine binary path for a given bottle source.
-///
-/// Returns `(wine_binary, extra_env)` where `extra_env` is a list of
-/// `(key, value)` environment variable pairs to set before spawning.
-fn resolve_wine_binary(bottle: &Bottle) -> Result<(PathBuf, Vec<(String, String)>)> {
+/// Resolved Wine command with binary, extra args (before exe), and environment.
+struct WineCommand {
+    /// Path to the Wine binary.
+    binary: PathBuf,
+    /// Arguments to insert before the exe path (e.g. CrossOver's `--bottle <name>`).
+    prefix_args: Vec<String>,
+    /// Environment variables to set.
+    env_vars: Vec<(String, String)>,
+}
+
+/// Resolve the Wine binary path and command structure for a given bottle source.
+fn resolve_wine_binary(bottle: &Bottle) -> Result<WineCommand> {
     let source = bottle.source.as_str();
     let mut env_vars: Vec<(String, String)> = Vec::new();
-
-    // Always set WINEPREFIX to the bottle path.
-    env_vars.push((
-        "WINEPREFIX".to_string(),
-        bottle.path.to_string_lossy().into_owned(),
-    ));
+    let mut prefix_args: Vec<String> = Vec::new();
 
     let wine_bin = match source {
         #[cfg(target_os = "macos")]
         "CrossOver" => {
-            find_crossover_wine().ok_or_else(|| LauncherError::WineNotFound {
+            let wine = find_crossover_wine().ok_or_else(|| LauncherError::WineNotFound {
                 bottle_source: source.to_string(),
                 tried: CROSSOVER_WINE.to_string(),
-            })?
+            })?;
+            // CrossOver uses --bottle <name> to target a specific bottle.
+            // The bottle name is the directory name under CrossOver/Bottles/.
+            prefix_args.push("--bottle".to_string());
+            prefix_args.push(bottle.name.clone());
+            wine
         }
 
         #[cfg(target_os = "macos")]
-        "Whisky" => find_whisky_wine().ok_or_else(|| LauncherError::WineNotFound {
-            bottle_source: source.to_string(),
-            tried: format!(
-                "~/{}",
-                WHISKY_CONTAINER
-            ),
-        })?,
+        "Whisky" | "Moonshine" => {
+            // Whisky/Moonshine use WINEPREFIX like standard Wine
+            env_vars.push((
+                "WINEPREFIX".to_string(),
+                bottle.path.to_string_lossy().into_owned(),
+            ));
+            find_whisky_wine().ok_or_else(|| LauncherError::WineNotFound {
+                bottle_source: source.to_string(),
+                tried: format!("~/{}", WHISKY_CONTAINER),
+            })?
+        }
 
-        // Native Wine, Lutris, Bottles, Heroic, Mythic, Moonshine — all use
+        // Native Wine, Lutris, Bottles, Heroic, Mythic — all use
         // the system `wine` binary (or a Wine binary on PATH) with WINEPREFIX.
-        "Wine" | "Lutris" | "Bottles" | "Heroic" | "Mythic" | "Moonshine" => {
+        "Wine" | "Lutris" | "Bottles" | "Heroic" | "Mythic" => {
+            env_vars.push((
+                "WINEPREFIX".to_string(),
+                bottle.path.to_string_lossy().into_owned(),
+            ));
             find_system_wine().ok_or_else(|| LauncherError::WineNotFound {
                 bottle_source: source.to_string(),
                 tried: "wine (system PATH)".to_string(),
@@ -180,19 +195,23 @@ fn resolve_wine_binary(bottle: &Bottle) -> Result<(PathBuf, Vec<(String, String)
         }
 
         // Proton behaves similarly to native Wine for our purposes.
-        // Steam's Proton prefixes use a `pfx` subdirectory as the actual
-        // WINEPREFIX, but our Bottle already points to the correct path.
         "Proton" => {
+            env_vars.push((
+                "WINEPREFIX".to_string(),
+                bottle.path.to_string_lossy().into_owned(),
+            ));
             let proton_wine = find_proton_wine(bottle);
             proton_wine.unwrap_or_else(|| {
-                // Fall back to system wine
                 find_system_wine().unwrap_or_else(|| PathBuf::from("wine"))
             })
         }
 
         #[cfg(not(target_os = "macos"))]
-        "CrossOver" | "Whisky" => {
-            // On Linux these sources are uncommon but we handle gracefully.
+        "CrossOver" | "Whisky" | "Moonshine" => {
+            env_vars.push((
+                "WINEPREFIX".to_string(),
+                bottle.path.to_string_lossy().into_owned(),
+            ));
             find_system_wine().ok_or_else(|| LauncherError::WineNotFound {
                 bottle_source: source.to_string(),
                 tried: "wine (system PATH)".to_string(),
@@ -204,6 +223,10 @@ fn resolve_wine_binary(bottle: &Bottle) -> Result<(PathBuf, Vec<(String, String)
                 "Unknown bottle source '{}', falling back to system wine",
                 source
             );
+            env_vars.push((
+                "WINEPREFIX".to_string(),
+                bottle.path.to_string_lossy().into_owned(),
+            ));
             find_system_wine().ok_or_else(|| LauncherError::WineNotFound {
                 bottle_source: source.to_string(),
                 tried: "wine (system PATH)".to_string(),
@@ -211,7 +234,11 @@ fn resolve_wine_binary(bottle: &Bottle) -> Result<(PathBuf, Vec<(String, String)
         }
     };
 
-    Ok((wine_bin, env_vars))
+    Ok(WineCommand {
+        binary: wine_bin,
+        prefix_args,
+        env_vars,
+    })
 }
 
 /// Locate `wine` on the system PATH.
@@ -345,22 +372,27 @@ pub fn launch_game(
         .unwrap_or_else(|| bottle.drive_c());
 
     // Resolve the Wine binary and environment.
-    let (wine_bin, env_vars) = resolve_wine_binary(bottle)?;
+    let wine_cmd = resolve_wine_binary(bottle)?;
 
     info!(
-        "Launching game: wine={} exe={} prefix={} workdir={}",
-        wine_bin.display(),
+        "Launching game: wine={} prefix_args={:?} exe={} prefix={} workdir={}",
+        wine_cmd.binary.display(),
+        wine_cmd.prefix_args,
         resolved_exe.display(),
         bottle.path.display(),
         work_dir.display(),
     );
 
     // Build and spawn the command.
-    let mut cmd = Command::new(&wine_bin);
+    let mut cmd = Command::new(&wine_cmd.binary);
+    // Add prefix args (e.g. CrossOver --bottle <name>) before the exe
+    for arg in &wine_cmd.prefix_args {
+        cmd.arg(arg);
+    }
     cmd.arg(&resolved_exe);
     cmd.current_dir(&work_dir);
 
-    for (key, value) in &env_vars {
+    for (key, value) in &wine_cmd.env_vars {
         cmd.env(key, value);
         debug!("  env: {}={}", key, value);
     }

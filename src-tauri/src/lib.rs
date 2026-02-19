@@ -317,11 +317,35 @@ fn launch_game_cmd(
         .unwrap_or_default()
     };
 
+    if exe_name.is_empty() {
+        return Err(format!(
+            "No executable configured for game '{}'. Cannot launch.",
+            game_id
+        ));
+    }
+
     let exe_path = launcher::find_executable(&game_path, &exe_name)
-        .ok_or_else(|| format!("Executable '{}' not found in {}", exe_name, game_path.display()))?;
+        .ok_or_else(|| {
+            if use_skse {
+                format!(
+                    "SKSE loader '{}' not found in {}. Is SKSE installed?",
+                    exe_name, game_path.display()
+                )
+            } else {
+                format!(
+                    "Game executable '{}' not found in {}",
+                    exe_name, game_path.display()
+                )
+            }
+        })?;
+
+    log::info!(
+        "launch_game_cmd: source={} bottle={} exe={} use_skse={}",
+        bottle.source, bottle.name, exe_path.display(), use_skse
+    );
 
     launcher::launch_game(&bottle, &exe_path, Some(&game_path))
-        .map_err(|e| e.to_string())
+        .map_err(|e| format!("Launch failed ({}): {}", bottle.source, e))
 }
 
 #[tauri::command]
@@ -439,17 +463,17 @@ async fn downgrade_skyrim(
         .and_then(|c| c.download_dir.map(PathBuf::from))
         .unwrap_or_else(config::downloads_dir);
 
-    // Create stock game copy first
-    let stock_dir = download_dir.parent().unwrap_or(&download_dir).join("stock_games");
-    let stock_game_path = downgrader::create_stock_game(&game_path, &stock_dir)
+    // Create a downgrade copy of the game files
+    let downgrade_dir = download_dir.parent().unwrap_or(&download_dir).join("downgraded_games");
+    let downgrade_path = downgrader::create_downgrade_copy(&game_path, &downgrade_dir)
         .map_err(|e| e.to_string())?;
 
-    // Store stock game path in config
-    let config_key = format!("stock_game:{}:{}", game_id, bottle_name);
-    let _ = config::set_config_value(&config_key, &stock_game_path.to_string_lossy());
+    // Store downgrade path in config
+    let config_key = format!("downgrade:{}:{}", game_id, bottle_name);
+    let _ = config::set_config_value(&config_key, &downgrade_path.to_string_lossy());
 
     // Return status (actual USSEDP patching is a future enhancement)
-    downgrader::detect_skyrim_version(&stock_game_path)
+    downgrader::detect_skyrim_version(&downgrade_path)
         .map_err(|e| e.to_string())
 }
 
