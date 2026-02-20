@@ -1592,36 +1592,36 @@
           <!-- Sticky Header — click to sort -->
           <div class="table-header">
             <span class="col-grip" title="Drag to reorder"></span>
-            <span class="col-toggle">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity: 0.5">
+            <span class="col-toggle header-sep-right">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity: 0.5" aria-hidden="true">
                 <rect x="1" y="5" width="22" height="14" rx="7" ry="7" />
                 <circle cx="16" cy="12" r="3" />
               </svg>
             </span>
-            <span class="col-name sortable-header" onclick={() => toggleSort("name")}>
-              Name
+            <button type="button" class="col-name sortable-header header-sep-right" onclick={() => toggleSort("name")}>
+              Mod Name
               {#if sortBy === "name"}
                 <span class="sort-arrow">{sortDir === "asc" ? "\u25B2" : "\u25BC"}</span>
               {/if}
-            </span>
-            <span class="col-version sortable-header" onclick={() => toggleSort("version")}>
-              Ver
+            </button>
+            <button type="button" class="col-version sortable-header header-sep-right" onclick={() => toggleSort("version")}>
+              Version
               {#if sortBy === "version"}
                 <span class="sort-arrow">{sortDir === "asc" ? "\u25B2" : "\u25BC"}</span>
               {/if}
-            </span>
-            <span class="col-files sortable-header" onclick={() => toggleSort("files")}>
+            </button>
+            <button type="button" class="col-files sortable-header header-sep-right" onclick={() => toggleSort("files")}>
               Files
               {#if sortBy === "files"}
                 <span class="sort-arrow">{sortDir === "asc" ? "\u25B2" : "\u25BC"}</span>
               {/if}
-            </span>
-            <span class="col-date sortable-header" onclick={() => toggleSort("date")}>
+            </button>
+            <button type="button" class="col-date sortable-header header-sep-right" onclick={() => toggleSort("date")}>
               Installed
               {#if sortBy === "date"}
                 <span class="sort-arrow">{sortDir === "asc" ? "\u25B2" : "\u25BC"}</span>
               {/if}
-            </span>
+            </button>
             <span class="col-actions">Actions</span>
           </div>
 
@@ -2690,23 +2690,44 @@
     z-index: 2;
   }
 
-  .table-header span {
+  .table-header span,
+  .table-header button {
     font-size: 11px;
-    font-weight: 500;
+    font-weight: 600;
     color: var(--text-secondary);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .header-sep-right {
+    border-right: 1px solid var(--separator);
   }
 
   .sortable-header {
     cursor: pointer;
     user-select: none;
-    transition: color var(--duration-fast) var(--ease);
+    transition: color var(--duration-fast) var(--ease), background var(--duration-fast) var(--ease);
+    background: none;
+    border: none;
+    padding: var(--space-1) var(--space-2);
+    margin: calc(-1 * var(--space-1)) 0;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-family: inherit;
+    text-align: left;
   }
 
   .sortable-header:hover {
     color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.05);
+  }
+
+  :global([data-theme="light"]) .sortable-header:hover {
+    background: rgba(0, 0, 0, 0.05);
   }
 
   .sort-arrow {
