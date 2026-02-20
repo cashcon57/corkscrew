@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onMount } from "svelte";
   import {
     listProfiles,
     createProfile,
@@ -21,8 +20,8 @@
 
   const game = $derived($selectedGame);
 
-  onMount(() => {
-    loadProfiles();
+  $effect(() => {
+    if (game) loadProfiles();
   });
 
   async function loadProfiles() {
@@ -56,6 +55,7 @@
 
   async function handleDelete(id: number) {
     if (!game) return;
+    if (!confirm("Are you sure you want to delete this profile?")) return;
     try {
       await deleteProfile(id);
       showSuccess("Profile deleted");

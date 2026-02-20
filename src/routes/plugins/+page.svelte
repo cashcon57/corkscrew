@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onMount } from "svelte";
   import {
     getPluginOrder,
     sortPluginsLoot,
@@ -7,7 +6,7 @@
     togglePlugin,
     movePlugin,
   } from "$lib/api";
-  import { selectedGame, games, showError } from "$lib/stores";
+  import { selectedGame, showError } from "$lib/stores";
   import type { PluginEntry, DetectedGame, PluginWarning } from "$lib/types";
 
   let plugins = $state<PluginEntry[]>([]);
@@ -17,9 +16,6 @@
   let updatingMasterlist = $state(false);
   let togglingPlugin = $state<string | null>(null);
   let sortMessage = $state<string | null>(null);
-
-  let gameList = $state<DetectedGame[]>([]);
-  games.subscribe((g) => (gameList = g));
 
   $effect(() => {
     if ($selectedGame) {

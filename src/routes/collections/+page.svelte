@@ -1,12 +1,11 @@
 <script lang="ts">
-  import { onMount } from "svelte";
-  import { selectedGame, games, showError, showSuccess } from "$lib/stores";
-  import type { DetectedGame, CollectionInfo, CollectionMod, CollectionRevision, CollectionSearchResult } from "$lib/types";
+  import { onMount, onDestroy } from "svelte";
+  import { selectedGame, showError, showSuccess } from "$lib/stores";
+  import type { CollectionInfo, CollectionMod, CollectionSearchResult } from "$lib/types";
   import {
     browseCollections,
     getCollection,
     getCollectionMods,
-    getCollectionRevisions,
     getNexusAccountStatus,
     setConfigValue,
     getConfig,
@@ -57,9 +56,8 @@
   let installProgress = $state({ current: 0, total: 0 });
   let installResult = $state<{ installed: number; skipped: number; failed: number; details: { name: string; status: string; error: string | null }[] } | null>(null);
   let renderedDescription = $state("");
-
-  let gameList = $state<DetectedGame[]>([]);
-  games.subscribe(g => gameList = g);
+  let userActions = $state<Array<{mod_name: string, action: string, url: string | null, instructions: string | null}>>([]);
+  let installUnlisten: (() => void) | null = null;
 
   const gameOptions = $derived.by(() => {
     const gamesSet = new Set(collections.map(c => c.game_domain));
@@ -92,6 +90,10 @@
 
   onMount(async () => {
     await checkAccount();
+  });
+
+  onDestroy(() => {
+    if (installUnlisten) { installUnlisten(); installUnlisten = null; }
   });
 
   async function checkAccount() {
@@ -206,11 +208,11 @@
     installModName = "";
     installProgress = { current: 0, total: 0 };
     installResult = null;
+    userActions = [];
 
-    let unlisten: (() => void) | null = null;
     try {
       // Subscribe to progress events
-      unlisten = await onInstallProgress((event: InstallProgressEvent) => {
+      installUnlisten = await onInstallProgress((event: InstallProgressEvent) => {
         if (event.kind === "modStarted") {
           installModName = event.mod_name;
           installProgress = { current: event.mod_index + 1, total: event.total_mods };
@@ -223,6 +225,8 @@
           installStep = "";
         } else if (event.kind === "modFailed") {
           installStep = "";
+        } else if (event.kind === "userActionRequired") {
+          userActions = [...userActions, { mod_name: event.mod_name, action: event.action, url: event.url, instructions: event.instructions }];
         } else if (event.kind === "collectionCompleted") {
           installStep = "complete";
         }
@@ -282,7 +286,7 @@
       installing = false;
       installStep = "";
       installModName = "";
-      if (unlisten) unlisten();
+      if (installUnlisten) { installUnlisten(); installUnlisten = null; }
     }
   }
 
@@ -518,7 +522,7 @@
                 </div>
                 <div class="mods-table-body">
                   {#each selectedMods as mod, i}
-                    <div class="mods-table-row" class:row-even={i % 2 === 0}>
+                    <div class="mods-table-row">
                       <span class="col-mod-name">
                         <span class="mod-name-text">{mod.name}</span>
                       </span>
@@ -581,6 +585,31 @@
                     class="install-progress-fill"
                     style="width: {(installProgress.current / installProgress.total) * 100}%"
                   ></div>
+                </div>
+              {/if}
+              {#if userActions.length > 0}
+                <div class="user-actions-list">
+                  <h4 class="user-actions-title">Manual Downloads Required</h4>
+                  {#each userActions as action}
+                    <div class="user-action-item">
+                      <div class="user-action-info">
+                        <span class="user-action-mod">{action.mod_name}</span>
+                        {#if action.instructions}
+                          <span class="user-action-instructions">{action.instructions}</span>
+                        {/if}
+                      </div>
+                      {#if action.url}
+                        <button class="btn btn-secondary btn-sm" onclick={() => openUrl(action.url!)}>
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                            <polyline points="15 3 21 3 21 9" />
+                            <line x1="10" y1="14" x2="21" y2="3" />
+                          </svg>
+                          Open in Browser
+                        </button>
+                      {/if}
+                    </div>
+                  {/each}
                 </div>
               {/if}
             </div>
@@ -676,7 +705,7 @@
             bind:value={searchQuery}
           />
         </div>
-        <select class="filter-select" bind:value={gameFilter}>
+        <select class="filter-select" bind:value={gameFilter} onchange={() => { if (gameFilter !== "all") loadCollections(gameFilter); }}>
           <option value="all">All Games</option>
           {#each gameOptions as game}
             <option value={game}>{gameDomainDisplay(game)}</option>
@@ -1383,6 +1412,16 @@
     box-shadow: 0 1px 6px rgba(0, 122, 255, 0.25);
   }
 
+  .btn-secondary {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+  }
+
+  .btn-secondary:hover {
+    background: var(--surface-active);
+  }
+
   .btn-ghost {
     background: transparent;
     color: var(--text-secondary);
@@ -1534,16 +1573,6 @@
     font-variant-numeric: tabular-nums;
   }
 
-  .detail-description {
-    background: var(--surface);
-    border-radius: var(--radius);
-    padding: var(--space-4) var(--space-5);
-    font-size: 13px;
-    color: var(--text-secondary);
-    line-height: 1.6;
-    box-shadow: var(--glass-edge-shadow);
-  }
-
   /* ---- Mod Table ---- */
 
   .mods-table-container {
@@ -1688,7 +1717,7 @@
 
   .install-progress-bar {
     height: 4px;
-    background: var(--surface-secondary);
+    background: var(--surface-hover);
     border-radius: 2px;
     overflow: hidden;
   }
@@ -1698,6 +1727,58 @@
     background: var(--system-accent, #007AFF);
     border-radius: 2px;
     transition: width 0.3s ease;
+  }
+
+  .user-actions-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    margin-top: var(--space-2);
+    padding: var(--space-3);
+    background: var(--surface);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius);
+  }
+
+  .user-actions-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: #FF9500;
+    margin-bottom: var(--space-1);
+  }
+
+  .user-action-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    padding: var(--space-2) 0;
+    border-top: 1px solid var(--separator);
+  }
+
+  .user-action-item:first-of-type {
+    border-top: none;
+  }
+
+  .user-action-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .user-action-mod {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .user-action-instructions {
+    font-size: 11px;
+    color: var(--text-tertiary);
   }
 
   .install-result-panel {

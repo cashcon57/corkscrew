@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onMount } from "svelte";
   import { selectedGame, showError, showSuccess } from "$lib/stores";
   import type {
     DetectedGame,
@@ -8,7 +7,6 @@
     CrashDiagnosis,
     SuggestedAction,
     CrashSeverity,
-    ActionType,
     Confidence,
   } from "$lib/types";
   import {
@@ -39,12 +37,6 @@
   );
 
   const game = $derived($selectedGame);
-
-  onMount(() => {
-    if (game) {
-      loadCrashLogs(game);
-    }
-  });
 
   $effect(() => {
     if (game) {
@@ -194,20 +186,6 @@
       case "High": return "var(--green-subtle)";
       case "Medium": return "var(--yellow-subtle)";
       case "Low": return "var(--surface)";
-    }
-  }
-
-  function actionIcon(actionType: ActionType): string {
-    switch (actionType) {
-      case "SortLoadOrder": return "sort";
-      case "UpdateMod": return "update";
-      case "VerifyIntegrity": return "verify";
-      case "DisableMod": return "disable";
-      case "ReinstallMod": return "reinstall";
-      case "CheckVRAM": return "vram";
-      case "UpdateDrivers": return "drivers";
-      case "CheckINI": return "ini";
-      case "ManualFix": return "manual";
     }
   }
 

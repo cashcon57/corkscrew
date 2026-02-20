@@ -191,7 +191,7 @@ impl ModDatabase {
         let files_json = serde_json::to_string(installed_files)?;
         let installed_at = Utc::now().to_rfc3339();
 
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "INSERT INTO installed_mods
                 (game_id, bottle_name, nexus_mod_id, name, version,
@@ -217,7 +217,7 @@ impl ModDatabase {
     pub fn remove_mod(&self, mod_id: i64) -> Result<Option<InstalledMod>> {
         let existing = self.get_mod(mod_id)?;
         if existing.is_some() {
-            let conn = self.conn.lock().unwrap();
+            let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
             conn.execute(
                 "DELETE FROM installed_mods WHERE id = ?1",
                 params![mod_id],
@@ -228,7 +228,7 @@ impl ModDatabase {
 
     /// Fetch a single mod by its primary key.
     pub fn get_mod(&self, mod_id: i64) -> Result<Option<InstalledMod>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(&format!(
             "SELECT {} FROM installed_mods WHERE id = ?1",
             Self::SELECT_COLUMNS,
@@ -247,7 +247,7 @@ impl ModDatabase {
         game_id: &str,
         bottle_name: &str,
     ) -> Result<Vec<InstalledMod>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(&format!(
             "SELECT {} FROM installed_mods \
              WHERE game_id = ?1 AND bottle_name = ?2 \
@@ -315,7 +315,7 @@ impl ModDatabase {
 
     /// Enable or disable a mod.
     pub fn set_enabled(&self, mod_id: i64, enabled: bool) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let rows_changed = conn.execute(
             "UPDATE installed_mods SET enabled = ?1 WHERE id = ?2",
             params![enabled as i64, mod_id],
@@ -329,7 +329,7 @@ impl ModDatabase {
 
     /// Set the staging path for a mod.
     pub fn set_staging_path(&self, mod_id: i64, staging_path: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "UPDATE installed_mods SET staging_path = ?1 WHERE id = ?2",
             params![staging_path, mod_id],
@@ -344,7 +344,7 @@ impl ModDatabase {
         nexus_mod_id: i64,
         nexus_file_id: Option<i64>,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "UPDATE installed_mods SET nexus_mod_id = ?1, nexus_file_id = ?2 WHERE id = ?3",
             params![nexus_mod_id, nexus_file_id, mod_id],
@@ -354,7 +354,7 @@ impl ModDatabase {
 
     /// Set the source URL for a mod.
     pub fn set_source_url(&self, mod_id: i64, url: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "UPDATE installed_mods SET source_url = ?1 WHERE id = ?2",
             params![url, mod_id],
@@ -364,7 +364,7 @@ impl ModDatabase {
 
     /// Set the install priority for a mod.
     pub fn set_mod_priority(&self, mod_id: i64, priority: i32) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "UPDATE installed_mods SET install_priority = ?1 WHERE id = ?2",
             params![priority, mod_id],
@@ -380,7 +380,7 @@ impl ModDatabase {
         bottle_name: &str,
         ordered_mod_ids: &[i64],
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         // Use a transaction so partial reorder failures roll back cleanly.
         conn.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| -> Result<()> {
@@ -418,7 +418,7 @@ impl ModDatabase {
         deploy_method: &str,
         sha256: Option<&str>,
     ) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let deployed_at = chrono::Utc::now().to_rfc3339();
         conn.execute(
             "INSERT OR REPLACE INTO deployment_manifest
@@ -431,7 +431,7 @@ impl ModDatabase {
 
     /// Remove all deployment manifest entries for a mod.
     pub fn remove_deployment_entries_for_mod(&self, mod_id: i64) -> Result<Vec<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
         // First collect the relative paths
         let mut stmt = conn.prepare(
@@ -457,7 +457,7 @@ impl ModDatabase {
         game_id: &str,
         bottle_name: &str,
     ) -> Result<Vec<DeploymentEntry>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT dm.id, dm.game_id, dm.bottle_name, dm.mod_id, dm.relative_path,
                     dm.staging_path, dm.deploy_method, dm.sha256, dm.deployed_at,
@@ -497,7 +497,7 @@ impl ModDatabase {
         bottle_name: &str,
         relative_path: &str,
     ) -> Result<Option<DeploymentEntry>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT dm.id, dm.game_id, dm.bottle_name, dm.mod_id, dm.relative_path,
                     dm.staging_path, dm.deploy_method, dm.sha256, dm.deployed_at,
@@ -539,7 +539,7 @@ impl ModDatabase {
         mod_id: i64,
         hashes: &[(String, String, u64)], // (relative_path, sha256, file_size)
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "INSERT OR REPLACE INTO file_hashes (mod_id, relative_path, sha256, file_size)
              VALUES (?1, ?2, ?3, ?4)",
@@ -556,7 +556,7 @@ impl ModDatabase {
         &self,
         mod_id: i64,
     ) -> Result<Vec<(String, String, u64)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT relative_path, sha256, file_size FROM file_hashes WHERE mod_id = ?1",
         )?;
@@ -578,7 +578,7 @@ impl ModDatabase {
     /// Update the installed_files JSON for a mod.
     pub fn update_installed_files(&self, mod_id: i64, files: &[String]) -> Result<()> {
         let files_json = serde_json::to_string(files)?;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "UPDATE installed_mods SET installed_files = ?1 WHERE id = ?2",
             params![files_json, mod_id],
@@ -588,7 +588,7 @@ impl ModDatabase {
 
     /// Get the next priority value for a game/bottle (current max + 1, or 0 if empty).
     pub fn get_next_priority(&self, game_id: &str, bottle_name: &str) -> Result<i32> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let max_priority: Option<i32> = conn
             .prepare(
                 "SELECT MAX(install_priority) FROM installed_mods

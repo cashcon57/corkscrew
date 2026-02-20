@@ -302,14 +302,16 @@ async fn install_nexus_mod(
         .await
         .map_err(|e| InstallError::Failed(format!("Download links failed: {}", e)))?;
 
-    let download_url = &links[0].uri;
+    let download_url = &links.first()
+        .ok_or_else(|| InstallError::Failed("No download links returned by NexusMods API".to_string()))?
+        .uri;
 
     // Step: download with progress
     let last_emit = std::sync::Mutex::new(std::time::Instant::now());
     let app_clone = app.clone();
     let archive_path = client
         .download_file(download_url, download_dir, Some(move |downloaded, total| {
-            let mut last = last_emit.lock().unwrap();
+            let mut last = last_emit.lock().unwrap_or_else(|e| e.into_inner());
             if last.elapsed().as_millis() >= 100 || downloaded == total {
                 let _ = app_clone.emit(INSTALL_PROGRESS_EVENT, InstallProgress::DownloadProgress {
                     mod_index,
@@ -368,7 +370,7 @@ async fn install_direct_mod(
     let last_emit = std::sync::Mutex::new(std::time::Instant::now());
     let archive_path = client
         .download_file(url, download_dir, Some(move |downloaded, total| {
-            let mut last = last_emit.lock().unwrap();
+            let mut last = last_emit.lock().unwrap_or_else(|e| e.into_inner());
             if last.elapsed().as_millis() >= 100 || downloaded == total {
                 let _ = app_clone.emit(INSTALL_PROGRESS_EVENT, InstallProgress::DownloadProgress {
                     mod_index,
@@ -513,20 +515,22 @@ fn apply_fomod_to_staging(
     for f in fomod_files {
         let src = staging_path.join(&f.source);
         if f.is_folder {
-            // Walk the folder and add all files
-            if let Ok(entries) = std::fs::read_dir(&src) {
-                for entry in entries.flatten() {
-                    if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
-                        let dest = if f.destination.is_empty() {
-                            entry.file_name().to_string_lossy().to_string()
-                        } else {
-                            format!(
-                                "{}/{}",
-                                f.destination,
-                                entry.file_name().to_string_lossy()
-                            )
-                        };
-                        files.push(dest);
+            // Recursively walk the folder and add all files
+            if src.is_dir() {
+                for entry in walkdir::WalkDir::new(&src).into_iter().filter_map(|e| e.ok()) {
+                    if entry.file_type().is_file() {
+                        if let Ok(rel) = entry.path().strip_prefix(&src) {
+                            let dest = if f.destination.is_empty() {
+                                rel.to_string_lossy().to_string()
+                            } else {
+                                format!(
+                                    "{}/{}",
+                                    f.destination,
+                                    rel.to_string_lossy()
+                                )
+                            };
+                            files.push(dest);
+                        }
                     }
                 }
             }

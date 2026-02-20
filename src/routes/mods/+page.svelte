@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { open } from "@tauri-apps/plugin-dialog";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import {
@@ -49,6 +49,7 @@
   let showDowngradeBanner = $state(false);
   let draggingOver = $state(false);
   let fixingDisplay = $state(false);
+  let installUnlisten: (() => void) | null = null;
 
   // Drag reorder state
   let dragRowIndex = $state<number | null>(null);
@@ -102,23 +103,23 @@
 
   // Game picker state
   let pickedGame = $state<DetectedGame | null>(null);
-  let gameList = $state<DetectedGame[]>([]);
   let hoveredGame = $state<string | null>(null);
 
-  games.subscribe((g) => (gameList = g));
+  onDestroy(() => { if (installUnlisten) { installUnlisten(); installUnlisten = null; } });
 
   // Sorted mods by install_priority ascending
   let sortedMods = $derived(
     [...$installedMods].sort((a, b) => a.install_priority - b.install_priority)
   );
 
+  const activeGame = $derived(pickedGame ?? $selectedGame);
+
   // Track the current load to avoid stale race conditions
   let loadGeneration = 0;
 
   $effect(() => {
-    const game = pickedGame ?? $selectedGame;
-    if (game) {
-      loadMods(game);
+    if (activeGame) {
+      loadMods(activeGame);
     }
   });
 
@@ -175,9 +176,8 @@
     installDetail = "";
 
     // Subscribe to progress events
-    let unlisten: (() => void) | null = null;
     try {
-      unlisten = await onInstallProgress((event: InstallProgressEvent) => {
+      installUnlisten = await onInstallProgress((event: InstallProgressEvent) => {
         if (event.kind === "stepChanged") {
           installStep = event.step;
           installDetail = event.detail ?? "";
@@ -203,7 +203,7 @@
       installing = false;
       installStep = "";
       installDetail = "";
-      if (unlisten) unlisten();
+      if (installUnlisten) { installUnlisten(); installUnlisten = null; }
     }
   }
 
@@ -241,11 +241,14 @@
   }
 
   // SKSE & version detection
+  let skseCheckGeneration = 0;
+
   $effect(() => {
-    const game = pickedGame ?? $selectedGame;
+    const game = activeGame;
+    const gen = ++skseCheckGeneration;
     if (game && game.game_id === "skyrimse") {
-      checkSkseStatus(game);
-      checkVersionStatus(game);
+      checkSkseStatus(game, gen);
+      checkVersionStatus(game, gen);
     } else {
       skse = null;
       showSksePrompt = false;
@@ -254,9 +257,11 @@
     }
   });
 
-  async function checkSkseStatus(game: DetectedGame) {
+  async function checkSkseStatus(game: DetectedGame, gen: number) {
     try {
-      skse = await checkSkse(game.game_id, game.bottle_name);
+      const status = await checkSkse(game.game_id, game.bottle_name);
+      if (gen !== skseCheckGeneration) return; // stale
+      skse = status;
       skseStatus.set(skse);
       if (!skse.installed) {
         const dismissed = localStorage.getItem(`skse_dismissed:${game.game_id}:${game.bottle_name}`);
@@ -334,9 +339,10 @@
     }
   }
 
-  async function checkVersionStatus(game: DetectedGame) {
+  async function checkVersionStatus(game: DetectedGame, gen: number) {
     try {
       const status = await checkSkyrimVersion(game.game_id, game.bottle_name);
+      if (gen !== skseCheckGeneration) return; // stale
       downgradeStatus = status;
       if (!status.is_downgraded) {
         const dismissed = localStorage.getItem(`downgrade_dismissed:${game.game_id}:${game.bottle_name}`);
@@ -409,7 +415,23 @@
     }
 
     installing = true;
+    installStep = "preparing";
+    installDetail = "";
+
     try {
+      installUnlisten = await onInstallProgress((event: InstallProgressEvent) => {
+        if (event.kind === "stepChanged") {
+          installStep = event.step;
+          installDetail = event.detail ?? "";
+        } else if (event.kind === "modCompleted") {
+          installStep = "complete";
+          installDetail = "";
+        } else if (event.kind === "modFailed") {
+          installStep = "failed";
+          installDetail = event.error;
+        }
+      });
+
       const mod = await installMod(filePath, game.game_id, game.bottle_name);
       showSuccess(`Installed "${(mod as InstalledMod).name}" successfully`);
       await loadMods(game);
@@ -417,6 +439,9 @@
       showError(`Install failed: ${e}`);
     } finally {
       installing = false;
+      installStep = "";
+      installDetail = "";
+      if (installUnlisten) { installUnlisten(); installUnlisten = null; }
     }
   }
 
@@ -541,7 +566,6 @@
     return `File conflicts with: ${[...names].join(", ")}`;
   }
 
-  const activeGame = $derived(pickedGame ?? $selectedGame);
   const modCount = $derived($installedMods.length);
   const enabledCount = $derived($installedMods.filter((m) => m.enabled).length);
 </script>
@@ -580,7 +604,7 @@
       <h2 class="picker-title">Select a Game</h2>
       <p class="picker-subtitle">Choose a game to view and manage its installed mods.</p>
 
-      {#if gameList.length === 0}
+      {#if $games.length === 0}
         <div class="picker-empty">
           <p>No games detected yet.</p>
           <p class="picker-empty-hint">Scan for bottles and games from the Dashboard first.</p>
@@ -590,7 +614,7 @@
         </div>
       {:else}
         <div class="game-cards">
-          {#each gameList as game (game.game_id + game.bottle_name)}
+          {#each $games as game (game.game_id + game.bottle_name)}
             <button
               class="game-card"
               class:game-card-hovered={hoveredGame === game.game_id + game.bottle_name}
@@ -859,7 +883,6 @@
               <div
                 class="table-row"
                 class:row-disabled={!mod.enabled}
-                class:row-even={i % 2 === 0}
                 class:row-dragging={dragRowIndex === i}
                 class:row-drag-over={dragOverIndex === i && dragRowIndex !== null && dragRowIndex !== i}
                 class:row-drag-above={dragOverIndex === i && dragRowIndex !== null && dragRowIndex > i}

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives } from "$lib/api";
-  import { config, showError, showSuccess, selectedGame, skseStatus } from "$lib/stores";
+  import { config, showError, showSuccess, selectedGame, skseStatus, currentPage } from "$lib/stores";
   import type { AppConfig } from "$lib/types";
   import ThemeToggle from "$lib/components/ThemeToggle.svelte";
   import SettingsAuthSection from "./settings-auth-section.svelte";
@@ -636,14 +636,14 @@
     <div class="section-card">
       <div class="card-row about-row">
         <span class="row-label">Version</span>
-        <span class="row-value">0.1.0</span>
+        <span class="row-value">v0.5.0</span>
       </div>
       <div class="card-divider"></div>
       <div class="card-row about-row">
         <span class="row-label">More Info & Credits</span>
         <button
           class="btn-link"
-          onclick={() => { import('$lib/stores').then(m => m.currentPage.set('about')); }}
+          onclick={() => currentPage.set('about')}
           type="button"
         >
           View About Page

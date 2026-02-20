@@ -6,7 +6,6 @@
     games,
     selectedGame,
     currentPage,
-    isLoading,
     showError,
   } from "$lib/stores";
   import type { Bottle, DetectedGame, BottleSettingDef } from "$lib/types";
@@ -29,6 +28,7 @@
     try {
       bottleSettingDefs = await getBottleSettingDefs(bottle.name);
     } catch (e: any) {
+      bottleSettingDefs = [];
       showError(`Failed to load bottle settings: ${e}`);
     }
     settingsLoading = false;
@@ -396,48 +396,64 @@
     <div class="page-loading"><div class="spinner"><div class="spinner-ring"></div></div></div>
   {:then mod}
     <mod.default />
+  {:catch}
+    <div class="page-loading"><p style="color: var(--text-tertiary)">Failed to load page. Try restarting the app.</p></div>
   {/await}
 {:else if $currentPage === "plugins"}
   {#await import("./plugins/+page.svelte")}
     <div class="page-loading"><div class="spinner"><div class="spinner-ring"></div></div></div>
   {:then mod}
     <mod.default />
+  {:catch}
+    <div class="page-loading"><p style="color: var(--text-tertiary)">Failed to load page. Try restarting the app.</p></div>
   {/await}
 {:else if $currentPage === "modlists"}
   {#await import("./modlists/+page.svelte")}
     <div class="page-loading"><div class="spinner"><div class="spinner-ring"></div></div></div>
   {:then mod}
     <mod.default />
+  {:catch}
+    <div class="page-loading"><p style="color: var(--text-tertiary)">Failed to load page. Try restarting the app.</p></div>
   {/await}
 {:else if $currentPage === "profiles"}
   {#await import("./profiles/+page.svelte")}
     <div class="page-loading"><div class="spinner"><div class="spinner-ring"></div></div></div>
   {:then mod}
     <mod.default />
+  {:catch}
+    <div class="page-loading"><p style="color: var(--text-tertiary)">Failed to load page. Try restarting the app.</p></div>
   {/await}
 {:else if $currentPage === "settings"}
   {#await import("./settings/+page.svelte")}
     <div class="page-loading"><div class="spinner"><div class="spinner-ring"></div></div></div>
   {:then mod}
     <mod.default />
+  {:catch}
+    <div class="page-loading"><p style="color: var(--text-tertiary)">Failed to load page. Try restarting the app.</p></div>
   {/await}
 {:else if $currentPage === "logs"}
   {#await import("./logs/+page.svelte")}
     <div class="page-loading"><div class="spinner"><div class="spinner-ring"></div></div></div>
   {:then mod}
     <mod.default />
+  {:catch}
+    <div class="page-loading"><p style="color: var(--text-tertiary)">Failed to load page. Try restarting the app.</p></div>
   {/await}
 {:else if $currentPage === "collections"}
   {#await import("./collections/+page.svelte")}
     <div class="page-loading"><div class="spinner"><div class="spinner-ring"></div></div></div>
   {:then mod}
     <mod.default />
+  {:catch}
+    <div class="page-loading"><p style="color: var(--text-tertiary)">Failed to load page. Try restarting the app.</p></div>
   {/await}
 {:else if $currentPage === "about"}
   {#await import("./about/+page.svelte")}
     <div class="page-loading"><div class="spinner"><div class="spinner-ring"></div></div></div>
   {:then mod}
     <mod.default />
+  {:catch}
+    <div class="page-loading"><p style="color: var(--text-tertiary)">Failed to load page. Try restarting the app.</p></div>
   {/await}
 {/if}
 

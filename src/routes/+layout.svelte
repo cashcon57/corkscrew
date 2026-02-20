@@ -126,7 +126,7 @@
         </svg>
         <span>GitHub</span>
       </button>
-      <span class="sidebar-version">v0.1.0</span>
+      <span class="sidebar-version">v0.5.0</span>
     </div>
   </nav>
 
@@ -438,6 +438,7 @@
     background: rgba(48, 209, 88, 0.18);
     border: 1px solid rgba(48, 209, 88, 0.25);
     color: var(--green);
+    top: calc(52px + var(--space-2) + 60px);
   }
 
   .toast-icon {

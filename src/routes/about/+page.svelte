@@ -1,21 +1,19 @@
 <script lang="ts">
-  function openUrl(url: string) {
-    window.open(url, "_blank");
-  }
+  import { openUrl } from "@tauri-apps/plugin-opener";
 </script>
 
 <div class="about-page">
   <!-- App Identity -->
   <div class="app-identity">
     <img
-      src="/icon-128.png"
+      src="/corkscrew-icon.png"
       alt="Corkscrew app icon"
       class="app-icon"
       width="80"
       height="80"
     />
     <h1 class="app-name">Corkscrew</h1>
-    <span class="app-version">v0.3.0-alpha</span>
+    <span class="app-version">v0.5.0</span>
     <p class="app-tagline">A native mod manager for Wine games</p>
   </div>
 
