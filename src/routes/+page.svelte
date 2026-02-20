@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { getBottles, getAllGames } from "$lib/api";
+  import { getBottles, getAllGames, getBottleSettingDefs, setBottleSetting } from "$lib/api";
   import {
     bottles,
     games,
@@ -9,10 +9,40 @@
     isLoading,
     showError,
   } from "$lib/stores";
-  import type { Bottle, DetectedGame } from "$lib/types";
+  import type { Bottle, DetectedGame, BottleSettingDef } from "$lib/types";
 
   let loadingState = $state<"idle" | "loading" | "done">("idle");
   const isMac = typeof navigator !== "undefined" && navigator.platform?.startsWith("Mac");
+
+  // Bottle settings panel
+  let selectedBottle = $state<Bottle | null>(null);
+  let bottleSettingDefs = $state<BottleSettingDef[]>([]);
+  let settingsLoading = $state(false);
+
+  async function openBottleSettings(bottle: Bottle) {
+    if (selectedBottle?.name === bottle.name) {
+      selectedBottle = null;
+      return;
+    }
+    selectedBottle = bottle;
+    settingsLoading = true;
+    try {
+      bottleSettingDefs = await getBottleSettingDefs(bottle.name);
+    } catch (e: any) {
+      showError(`Failed to load bottle settings: ${e}`);
+    }
+    settingsLoading = false;
+  }
+
+  async function updateSetting(key: string, value: string) {
+    if (!selectedBottle) return;
+    try {
+      await setBottleSetting(selectedBottle.name, key, value);
+      bottleSettingDefs = await getBottleSettingDefs(selectedBottle.name);
+    } catch (e: any) {
+      showError(`Failed to update setting: ${e}`);
+    }
+  }
 
   onMount(async () => {
     loadingState = "loading";
@@ -133,10 +163,15 @@
           <div class="card-grid">
             {#each $bottles as bottle, i}
               {@const style = getSourceStyle(bottle.source)}
-              <div
+              <button
                 class="card bottle-card"
+                class:selected={selectedBottle?.name === bottle.name}
                 style="animation-delay: {i * 40}ms"
+                onclick={() => openBottleSettings(bottle)}
               >
+                <svg class="card-chevron bottle-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="9 18 15 12 9 6" />
+                </svg>
                 <div class="bottle-card-inner">
                   <div class="bottle-icon" style="color: {style.color}; background: {style.bg};">
                     {#if bottle.source === "CrossOver"}
@@ -227,9 +262,74 @@
                     {/if}
                   </div>
                 </div>
-              </div>
+              </button>
             {/each}
           </div>
+
+          <!-- Bottle Settings Panel -->
+          {#if selectedBottle}
+            <div class="bottle-settings-panel">
+              <div class="settings-panel-header">
+                <h4 class="settings-panel-title">
+                  {selectedBottle.name}
+                  <span class="settings-panel-subtitle">Bottle Settings</span>
+                </h4>
+                <button class="settings-close-btn" onclick={() => selectedBottle = null}>
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+                    <line x1="3" y1="3" x2="11" y2="11" /><line x1="11" y1="3" x2="3" y2="11" />
+                  </svg>
+                </button>
+              </div>
+
+              {#if settingsLoading}
+                <div class="settings-loading">Loading settings...</div>
+              {:else}
+                <div class="settings-grid">
+                  {#each bottleSettingDefs as def}
+                    <div class="setting-row">
+                      <div class="setting-info">
+                        <span class="setting-label">
+                          {def.label}
+                          {#if def.recommended}
+                            <span class="setting-recommended">(recommended in most cases)</span>
+                          {/if}
+                        </span>
+                        <span class="setting-description">{def.description}</span>
+                      </div>
+                      <div class="setting-control">
+                        {#if def.setting_type.type === "Toggle"}
+                          {@const toggle = /** @type {import('$lib/types').SettingToggle} */ (def.setting_type)}
+                          <button
+                            class="toggle-switch"
+                            class:active={toggle.current}
+                            onclick={() => updateSetting(def.key, toggle.current ? "false" : "true")}
+                          >
+                            <span class="toggle-knob"></span>
+                          </button>
+                        {:else if def.setting_type.type === "Select"}
+                          {@const select = /** @type {import('$lib/types').SettingSelect} */ (def.setting_type)}
+                          <select
+                            class="setting-select"
+                            value={select.current}
+                            onchange={(e) => updateSetting(def.key, e.currentTarget.value)}
+                          >
+                            {#each select.options as opt}
+                              <option value={opt.value}>
+                                {opt.label}{opt.value === def.recommended ? " *" : ""}
+                              </option>
+                            {/each}
+                          </select>
+                        {:else if def.setting_type.type === "ReadOnly"}
+                          {@const ro = /** @type {import('$lib/types').SettingReadOnly} */ (def.setting_type)}
+                          <span class="setting-readonly">{ro.value}</span>
+                        {/if}
+                      </div>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+          {/if}
         {/if}
       </section>
 
@@ -321,6 +421,18 @@
   {:then mod}
     <mod.default />
   {/await}
+{:else if $currentPage === "logs"}
+  {#await import("./logs/+page.svelte")}
+    <div class="page-loading"><div class="spinner"><div class="spinner-ring"></div></div></div>
+  {:then mod}
+    <mod.default />
+  {/await}
+{:else if $currentPage === "collections"}
+  {#await import("./collections/+page.svelte")}
+    <div class="page-loading"><div class="spinner"><div class="spinner-ring"></div></div></div>
+  {:then mod}
+    <mod.default />
+  {/await}
 {:else if $currentPage === "about"}
   {#await import("./about/+page.svelte")}
     <div class="page-loading"><div class="spinner"><div class="spinner-ring"></div></div></div>
@@ -335,8 +447,7 @@
      ============================================ */
 
   .dashboard {
-    max-width: 1040px;
-    padding: var(--space-2) 0 var(--space-12) 0;
+    padding: 0 0 var(--space-12) 0;
   }
 
   /* ============================================
@@ -380,6 +491,7 @@
     border: 1px solid var(--separator);
     border-radius: var(--radius);
     padding: var(--space-2) var(--space-4);
+    box-shadow: var(--glass-edge-shadow);
   }
 
   .stat-value {
@@ -515,6 +627,18 @@
       transform var(--duration-fast) var(--ease);
     animation: cardFadeIn var(--duration-slow) var(--ease) both;
     position: relative;
+    overflow: hidden;
+  }
+
+  /* Glass edge glow — inset highlight simulating light catching the rim */
+  .card::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    box-shadow: var(--glass-edge-shadow);
+    pointer-events: none;
+    z-index: 1;
   }
 
   @keyframes cardFadeIn {
@@ -534,7 +658,21 @@
 
   .bottle-card:hover {
     background: var(--surface-hover);
-    border-color: rgba(255, 255, 255, 0.12);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px rgba(232, 128, 42, 0.08);
+  }
+
+  .bottle-chevron {
+    position: absolute;
+    top: var(--space-4);
+    right: var(--space-4);
+    z-index: 2;
+  }
+
+  .bottle-card:hover .bottle-chevron {
+    opacity: 1;
+    transform: translateX(2px);
+    color: var(--accent);
   }
 
   .bottle-card-inner {
@@ -753,5 +891,191 @@
     justify-content: center;
     min-height: 200px;
     flex: 1;
+  }
+
+  /* ============================================
+     Bottle Settings Panel
+     ============================================ */
+
+  .bottle-card {
+    cursor: pointer;
+    text-align: left;
+    transition: all var(--duration-fast) var(--ease);
+  }
+
+  .bottle-card.selected {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent), 0 2px 8px rgba(232, 128, 42, 0.15);
+  }
+
+  .bottle-settings-panel {
+    margin-top: var(--space-4);
+    background: var(--bg-grouped);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius-lg);
+    padding: var(--space-5);
+    animation: settingsSlideIn 0.2s var(--ease-out);
+    box-shadow: var(--glass-edge-shadow);
+  }
+
+  @keyframes settingsSlideIn {
+    from { opacity: 0; transform: translateY(-8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .settings-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: var(--space-5);
+    padding-bottom: var(--space-3);
+    border-bottom: 1px solid var(--separator);
+  }
+
+  .settings-panel-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-primary);
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+  }
+
+  .settings-panel-subtitle {
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--text-tertiary);
+  }
+
+  .settings-close-btn {
+    padding: var(--space-2);
+    border-radius: var(--radius-sm);
+    color: var(--text-tertiary);
+    transition: all var(--duration-fast) var(--ease);
+  }
+
+  .settings-close-btn:hover {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+  }
+
+  .settings-loading {
+    padding: var(--space-6);
+    text-align: center;
+    color: var(--text-tertiary);
+    font-size: 13px;
+  }
+
+  .settings-grid {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .setting-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-4);
+    padding: var(--space-3) var(--space-2);
+    border-radius: var(--radius-sm);
+    transition: background var(--duration-fast) var(--ease);
+  }
+
+  .setting-row:hover {
+    background: var(--surface-hover);
+  }
+
+  .setting-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    flex: 1;
+  }
+
+  .setting-label {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-primary);
+  }
+
+  .setting-recommended {
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--accent);
+    margin-left: var(--space-1);
+  }
+
+  .setting-description {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    line-height: 1.4;
+  }
+
+  .setting-control {
+    flex-shrink: 0;
+  }
+
+  /* Toggle switch */
+  .toggle-switch {
+    position: relative;
+    width: 40px;
+    height: 22px;
+    border-radius: 11px;
+    background: var(--surface-hover);
+    border: 1px solid var(--separator);
+    cursor: pointer;
+    transition: all var(--duration-fast) var(--ease);
+  }
+
+  .toggle-switch.active {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+
+  .toggle-knob {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: white;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+    transition: transform var(--duration-fast) var(--ease);
+  }
+
+  .toggle-switch.active .toggle-knob {
+    transform: translateX(18px);
+  }
+
+  /* Select dropdown */
+  .setting-select {
+    background: var(--bg-base);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius-sm);
+    padding: 4px 8px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-primary);
+    cursor: pointer;
+    min-width: 160px;
+  }
+
+  .setting-select:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-subtle);
+  }
+
+  /* Read-only value */
+  .setting-readonly {
+    font-size: 13px;
+    color: var(--text-secondary);
+    font-weight: 500;
+    padding: 2px 8px;
+    background: var(--surface-hover);
+    border-radius: var(--radius-sm);
   }
 </style>

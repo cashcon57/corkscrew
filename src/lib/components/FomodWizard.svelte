@@ -1,5 +1,8 @@
 <script lang="ts">
-  import type { FomodInstaller, FomodGroup } from "$lib/types";
+  import { getFomodDefaults } from "$lib/api";
+  import type { FomodInstaller, FomodGroup, FomodOption } from "$lib/types";
+
+  // ---- Props ----
 
   interface Props {
     installer: FomodInstaller;
@@ -9,28 +12,56 @@
 
   let { installer, onComplete, onCancel }: Props = $props();
 
+  // ---- State ----
+
   let currentStep = $state(0);
   let selections = $state<Record<string, string[]>>({});
+  let loading = $state(true);
+  let previewImage = $state<string | null>(null);
 
-  // Initialize selections with defaults
+  // ---- Derived ----
+
+  const step = $derived(installer.steps[currentStep]);
+  const totalSteps = $derived(installer.steps.length);
+  const isFirstStep = $derived(currentStep === 0);
+  const isLastStep = $derived(currentStep === installer.steps.length - 1);
+
+  // ---- Initialize from backend defaults ----
+
   $effect(() => {
-    const defaults: Record<string, string[]> = {};
-    for (const step of installer.steps) {
-      for (const group of step.groups) {
-        defaults[group.name] = getDefaultForGroup(group);
-      }
-    }
-    selections = defaults;
+    loadDefaults();
   });
 
-  function getDefaultForGroup(group: FomodGroup): string[] {
+  async function loadDefaults() {
+    loading = true;
+    try {
+      const defaults = await getFomodDefaults(installer);
+      selections = defaults;
+    } catch {
+      // Fall back to client-side defaults if backend call fails
+      const fallback: Record<string, string[]> = {};
+      for (const s of installer.steps) {
+        for (const group of s.groups) {
+          fallback[group.name] = computeFallbackDefaults(group);
+        }
+      }
+      selections = fallback;
+    } finally {
+      loading = false;
+    }
+  }
+
+  function computeFallbackDefaults(group: FomodGroup): string[] {
     if (group.group_type === "SelectAll") {
-      return group.options.map((o) => o.name);
+      return group.options
+        .filter((o) => o.type_descriptor !== "NotUsable")
+        .map((o) => o.name);
     }
     if (group.group_type === "SelectExactlyOne" || group.group_type === "SelectAtMostOne") {
-      const pick = group.options.find((o) => o.type_descriptor === "Required")
-        || group.options.find((o) => o.type_descriptor === "Recommended")
-        || group.options[0];
+      const pick =
+        group.options.find((o) => o.type_descriptor === "Required") ||
+        group.options.find((o) => o.type_descriptor === "Recommended") ||
+        (group.group_type === "SelectExactlyOne" ? group.options.find((o) => o.type_descriptor !== "NotUsable") : null);
       return pick ? [pick.name] : [];
     }
     if (group.group_type === "SelectAtLeastOne" || group.group_type === "SelectAny") {
@@ -38,35 +69,39 @@
         .filter((o) => o.type_descriptor === "Required" || o.type_descriptor === "Recommended")
         .map((o) => o.name);
       if (selected.length === 0 && group.group_type === "SelectAtLeastOne" && group.options.length > 0) {
-        return [group.options[0].name];
+        const first = group.options.find((o) => o.type_descriptor !== "NotUsable");
+        return first ? [first.name] : [];
       }
       return selected;
     }
     return [];
   }
 
-  const step = $derived(installer.steps[currentStep]);
-  const isLastStep = $derived(currentStep === installer.steps.length - 1);
-  const isFirstStep = $derived(currentStep === 0);
-  const totalSteps = $derived(installer.steps.length);
+  // ---- Selection logic ----
 
-  function toggleOption(groupName: string, optionName: string, groupType: string) {
+  function toggleOption(groupName: string, option: FomodOption, group: FomodGroup) {
+    if (isOptionDisabled(option, group)) return;
+
     const current = selections[groupName] || [];
 
-    if (groupType === "SelectExactlyOne") {
-      selections[groupName] = [optionName];
-    } else if (groupType === "SelectAtMostOne") {
-      if (current.includes(optionName)) {
+    if (group.group_type === "SelectExactlyOne") {
+      selections[groupName] = [option.name];
+    } else if (group.group_type === "SelectAtMostOne") {
+      if (current.includes(option.name)) {
         selections[groupName] = [];
       } else {
-        selections[groupName] = [optionName];
+        selections[groupName] = [option.name];
       }
     } else {
-      // Multi-select (SelectAny, SelectAtLeastOne, SelectAll)
-      if (current.includes(optionName)) {
-        selections[groupName] = current.filter((n) => n !== optionName);
+      // Multi-select: SelectAny, SelectAtLeastOne, SelectAll
+      if (current.includes(option.name)) {
+        // Prevent deselecting the last option in SelectAtLeastOne
+        if (group.group_type === "SelectAtLeastOne" && current.length <= 1) {
+          return;
+        }
+        selections[groupName] = current.filter((n) => n !== option.name);
       } else {
-        selections[groupName] = [...current, optionName];
+        selections[groupName] = [...current, option.name];
       }
     }
     // Force reactivity
@@ -76,6 +111,18 @@
   function isSelected(groupName: string, optionName: string): boolean {
     return (selections[groupName] || []).includes(optionName);
   }
+
+  function isOptionDisabled(option: FomodOption, group: FomodGroup): boolean {
+    if (option.type_descriptor === "NotUsable") return true;
+    if (group.group_type === "SelectAll") return true;
+    return false;
+  }
+
+  function isMultiSelect(type: string): boolean {
+    return type === "SelectAny" || type === "SelectAtLeastOne" || type === "SelectAll";
+  }
+
+  // ---- Navigation ----
 
   function next() {
     if (isLastStep) {
@@ -91,6 +138,18 @@
     }
   }
 
+  function handleKeydown(e: KeyboardEvent) {
+    if (e.key === "Escape") {
+      if (previewImage) {
+        previewImage = null;
+      } else {
+        onCancel();
+      }
+    }
+  }
+
+  // ---- Helpers ----
+
   function groupTypeLabel(type: string): string {
     switch (type) {
       case "SelectExactlyOne": return "Select one";
@@ -102,114 +161,253 @@
     }
   }
 
-  function isMultiSelect(type: string): boolean {
-    return type === "SelectAny" || type === "SelectAtLeastOne" || type === "SelectAll";
+  function descriptorColor(descriptor: string): string {
+    switch (descriptor) {
+      case "Required": return "var(--green)";
+      case "Recommended": return "var(--blue)";
+      case "Optional": return "var(--text-tertiary)";
+      case "NotUsable": return "var(--red)";
+      case "CouldBeUsable": return "var(--text-tertiary)";
+      default: return "var(--text-tertiary)";
+    }
+  }
+
+  function descriptorBg(descriptor: string): string {
+    switch (descriptor) {
+      case "Required": return "var(--green-subtle)";
+      case "Recommended": return "var(--blue-subtle)";
+      case "Optional": return "var(--surface-hover)";
+      case "NotUsable": return "var(--red-subtle)";
+      case "CouldBeUsable": return "var(--surface-hover)";
+      default: return "var(--surface-hover)";
+    }
   }
 </script>
 
-<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-<div class="fomod-overlay" onclick={onCancel}>
-  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div
+  class="fomod-overlay"
+  onkeydown={handleKeydown}
+  onclick={onCancel}
+>
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="fomod-wizard" onclick={(e) => e.stopPropagation()}>
-    <!-- Header -->
-    <div class="wizard-header">
-      <h2 class="wizard-title">{installer.module_name}</h2>
-      <div class="step-indicator">
-        Step {currentStep + 1} of {totalSteps}
+
+    {#if loading}
+      <!-- Loading State -->
+      <div class="wizard-loading">
+        <div class="spinner"></div>
+        <p class="loading-text">Loading installer options...</p>
       </div>
-      <button class="close-btn" onclick={onCancel} aria-label="Close">
-        <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-          <line x1="3" y1="3" x2="11" y2="11" />
-          <line x1="11" y1="3" x2="3" y2="11" />
-        </svg>
-      </button>
-    </div>
+    {:else}
+      <!-- Header -->
+      <div class="wizard-header">
+        <div class="header-top">
+          <h2 class="wizard-title">{installer.module_name}</h2>
+          <button class="close-btn" onclick={onCancel} aria-label="Close" type="button">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+              <line x1="2" y1="2" x2="10" y2="10" />
+              <line x1="10" y1="2" x2="2" y2="10" />
+            </svg>
+          </button>
+        </div>
 
-    <!-- Step name -->
-    <div class="step-name">{step.name}</div>
-
-    <!-- Step content -->
-    <div class="wizard-content">
-      {#each step.groups as group}
-        <div class="group-section">
-          <div class="group-header">
-            <h3 class="group-name">{group.name}</h3>
-            <span class="group-type">{groupTypeLabel(group.group_type)}</span>
+        <!-- Step progress -->
+        {#if totalSteps > 1}
+          <div class="step-progress">
+            <div class="step-dots">
+              {#each installer.steps as s, i}
+                <button
+                  class="step-dot"
+                  class:step-dot-active={i === currentStep}
+                  class:step-dot-complete={i < currentStep}
+                  disabled={i > currentStep}
+                  onclick={() => { if (i <= currentStep) currentStep = i; }}
+                  aria-label="Step {i + 1}: {s.name}"
+                  type="button"
+                >
+                  {#if i < currentStep}
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M20 6L9 17l-5-5" />
+                    </svg>
+                  {:else}
+                    {i + 1}
+                  {/if}
+                </button>
+                {#if i < totalSteps - 1}
+                  <div class="step-connector" class:step-connector-complete={i < currentStep}></div>
+                {/if}
+              {/each}
+            </div>
+            <span class="step-label">Step {currentStep + 1} of {totalSteps}</span>
           </div>
+        {/if}
+      </div>
 
-          <div class="options-list">
-            {#each group.options as option}
-              {@const selected = isSelected(group.name, option.name)}
-              {@const disabled = group.group_type === "SelectAll" || option.type_descriptor === "Required"}
-              <button
-                class="option-card"
-                class:selected
-                class:disabled
-                onclick={() => !disabled && toggleOption(group.name, option.name, group.group_type)}
-              >
-                <div class="option-check">
-                  {#if isMultiSelect(group.group_type)}
-                    <div class="checkbox" class:checked={selected}>
-                      {#if selected}
-                        <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                          <polyline points="2,5 4,7.5 8,2.5" />
-                        </svg>
+      <!-- Step name bar -->
+      <div class="step-name-bar">
+        <span class="step-name">{step.name}</span>
+      </div>
+
+      <!-- Content -->
+      <div class="wizard-content">
+        {#each step.groups as group (group.name)}
+          <div class="group-section">
+            <div class="group-header">
+              <h3 class="group-name">{group.name}</h3>
+              <span class="group-type-badge">{groupTypeLabel(group.group_type)}</span>
+            </div>
+
+            <div class="options-list">
+              {#each group.options as option (option.name)}
+                {@const selected = isSelected(group.name, option.name)}
+                {@const disabled = isOptionDisabled(option, group)}
+                <button
+                  class="option-card"
+                  class:option-selected={selected}
+                  class:option-disabled={disabled}
+                  class:option-not-usable={option.type_descriptor === "NotUsable"}
+                  onclick={() => toggleOption(group.name, option, group)}
+                  disabled={disabled}
+                  type="button"
+                >
+                  <!-- Selection indicator -->
+                  <div class="option-indicator">
+                    {#if isMultiSelect(group.group_type)}
+                      <div class="checkbox" class:checkbox-checked={selected}>
+                        {#if selected}
+                          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <polyline points="2,5 4,7.5 8,2.5" />
+                          </svg>
+                        {/if}
+                      </div>
+                    {:else}
+                      <div class="radio" class:radio-checked={selected}>
+                        {#if selected}
+                          <div class="radio-dot"></div>
+                        {/if}
+                      </div>
+                    {/if}
+                  </div>
+
+                  <!-- Option content -->
+                  <div class="option-body">
+                    <div class="option-title-row">
+                      <span class="option-name">{option.name}</span>
+                      {#if option.type_descriptor !== "Optional"}
+                        <span
+                          class="descriptor-badge"
+                          style="color: {descriptorColor(option.type_descriptor)}; background: {descriptorBg(option.type_descriptor)};"
+                        >
+                          {option.type_descriptor}
+                        </span>
                       {/if}
                     </div>
-                  {:else}
-                    <div class="radio" class:checked={selected}>
-                      {#if selected}<div class="radio-dot"></div>{/if}
-                    </div>
-                  {/if}
-                </div>
-                <div class="option-info">
-                  <span class="option-name">{option.name}</span>
-                  {#if option.type_descriptor !== "Optional"}
-                    <span class="type-badge" class:required={option.type_descriptor === "Required"} class:recommended={option.type_descriptor === "Recommended"}>
-                      {option.type_descriptor}
-                    </span>
-                  {/if}
-                  {#if option.description}
-                    <p class="option-desc">{option.description}</p>
-                  {/if}
-                </div>
-              </button>
-            {/each}
-          </div>
-        </div>
-      {/each}
-    </div>
+                    {#if option.description}
+                      <p class="option-description">{option.description}</p>
+                    {/if}
+                  </div>
 
-    <!-- Footer / Navigation -->
-    <div class="wizard-footer">
-      <button class="btn btn-ghost" onclick={onCancel}>Cancel</button>
-      <div class="footer-nav">
-        {#if !isFirstStep}
-          <button class="btn btn-secondary" onclick={prev}>Back</button>
-        {/if}
-        <button class="btn btn-accent" onclick={next}>
-          {isLastStep ? "Install" : "Next"}
-        </button>
+                  <!-- Option image thumbnail -->
+                  {#if option.image}
+                    <button
+                      class="option-thumbnail"
+                      onclick={(e) => { e.stopPropagation(); previewImage = option.image; }}
+                      type="button"
+                      aria-label="Preview image for {option.name}"
+                    >
+                      <img
+                        src={option.image}
+                        alt={option.name}
+                        loading="lazy"
+                      />
+                      <div class="thumbnail-overlay">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                          <circle cx="11" cy="11" r="8" />
+                          <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                          <line x1="11" y1="8" x2="11" y2="14" />
+                          <line x1="8" y1="11" x2="14" y2="11" />
+                        </svg>
+                      </div>
+                    </button>
+                  {/if}
+                </button>
+              {/each}
+            </div>
+          </div>
+        {/each}
       </div>
-    </div>
+
+      <!-- Footer -->
+      <div class="wizard-footer">
+        <button class="btn btn-ghost" onclick={onCancel} type="button">
+          Cancel
+        </button>
+        <div class="footer-nav">
+          {#if !isFirstStep}
+            <button class="btn btn-secondary" onclick={prev} type="button">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="15 18 9 12 15 6" />
+              </svg>
+              Back
+            </button>
+          {/if}
+          <button class="btn btn-accent" onclick={next} type="button">
+            {#if isLastStep}
+              Install
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="7 10 12 15 17 10" />
+                <line x1="12" y1="15" x2="12" y2="3" />
+              </svg>
+            {:else}
+              Next
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="9 18 15 12 9 6" />
+              </svg>
+            {/if}
+          </button>
+        </div>
+      </div>
+    {/if}
   </div>
 </div>
 
+<!-- Image preview lightbox -->
+{#if previewImage}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="lightbox-overlay" onclick={() => { previewImage = null; }}>
+    <div class="lightbox-content">
+      <img src={previewImage} alt="Preview" />
+      <button
+        class="lightbox-close"
+        onclick={() => { previewImage = null; }}
+        aria-label="Close preview"
+        type="button"
+      >
+        <svg width="16" height="16" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <line x1="2" y1="2" x2="10" y2="10" />
+          <line x1="10" y1="2" x2="2" y2="10" />
+        </svg>
+      </button>
+    </div>
+  </div>
+{/if}
+
 <style>
+  /* ---- Overlay ---- */
+
   .fomod-overlay {
     position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: rgba(0, 0, 0, 0.6);
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
     display: flex;
     align-items: center;
     justify-content: center;
     z-index: 2000;
-    animation: fadeIn 0.2s ease;
+    animation: fadeIn var(--duration) var(--ease);
   }
 
   @keyframes fadeIn {
@@ -217,51 +415,99 @@
     to { opacity: 1; }
   }
 
+  /* ---- Wizard Container ---- */
+
   .fomod-wizard {
-    background: var(--bg-base);
-    border: 1px solid var(--separator);
-    border-radius: var(--radius-lg);
-    width: 600px;
-    max-width: 90vw;
+    background: var(--bg-elevated);
+    border: 1px solid var(--separator-opaque);
+    border-radius: var(--radius-xl);
+    box-shadow: var(--shadow-lg);
+    width: 700px;
+    max-width: calc(100vw - var(--space-8));
     max-height: 80vh;
     display: flex;
     flex-direction: column;
-    box-shadow: var(--shadow-lg);
-    animation: slideUp 0.25s ease;
+    animation: dialogIn 0.25s var(--ease-out);
+    overflow: hidden;
   }
 
-  @keyframes slideUp {
-    from { transform: translateY(12px); opacity: 0; }
-    to { transform: translateY(0); opacity: 1; }
+  @keyframes dialogIn {
+    from {
+      transform: translateY(8px) scale(0.98);
+      opacity: 0;
+    }
+    to {
+      transform: translateY(0) scale(1);
+      opacity: 1;
+    }
   }
+
+  /* ---- Loading State ---- */
+
+  .wizard-loading {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-3);
+    padding: var(--space-12);
+  }
+
+  .spinner {
+    width: 28px;
+    height: 28px;
+    border: 2.5px solid var(--separator-opaque);
+    border-top-color: var(--system-accent);
+    border-radius: 50%;
+    animation: spin 0.75s linear infinite;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  .loading-text {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-tertiary);
+  }
+
+  /* ---- Header ---- */
 
   .wizard-header {
+    padding: var(--space-5) var(--space-6) var(--space-3);
+    border-bottom: 1px solid var(--separator);
+    flex-shrink: 0;
+  }
+
+  .header-top {
     display: flex;
     align-items: center;
+    justify-content: space-between;
     gap: var(--space-3);
-    padding: var(--space-5) var(--space-6);
-    border-bottom: 1px solid var(--separator);
   }
 
   .wizard-title {
-    font-size: 16px;
-    font-weight: 700;
+    font-size: 17px;
+    font-weight: 600;
     color: var(--text-primary);
+    letter-spacing: -0.01em;
     flex: 1;
-  }
-
-  .step-indicator {
-    font-size: 12px;
-    color: var(--text-tertiary);
-    font-weight: 500;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .close-btn {
-    padding: var(--space-1);
+    padding: var(--space-2);
     border-radius: var(--radius-sm);
     color: var(--text-tertiary);
     cursor: pointer;
     transition: all var(--duration-fast) var(--ease);
+    flex-shrink: 0;
+    background: none;
+    border: none;
   }
 
   .close-btn:hover {
@@ -269,20 +515,98 @@
     color: var(--text-primary);
   }
 
-  .step-name {
+  /* ---- Step Progress ---- */
+
+  .step-progress {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: var(--space-3);
+    gap: var(--space-3);
+  }
+
+  .step-dots {
+    display: flex;
+    align-items: center;
+    gap: 0;
+  }
+
+  .step-dot {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: var(--surface-hover);
+    color: var(--text-tertiary);
+    font-size: 10px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    border: none;
+    cursor: pointer;
+    transition: all var(--duration) var(--ease);
+  }
+
+  .step-dot:disabled {
+    cursor: default;
+  }
+
+  .step-dot-active {
+    background: var(--system-accent);
+    color: var(--system-accent-on);
+  }
+
+  .step-dot-complete {
+    background: var(--green);
+    color: white;
+  }
+
+  .step-connector {
+    width: 16px;
+    height: 2px;
+    background: var(--separator-opaque);
+    transition: background var(--duration) var(--ease);
+  }
+
+  .step-connector-complete {
+    background: var(--green);
+  }
+
+  .step-label {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-tertiary);
+    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ---- Step Name Bar ---- */
+
+  .step-name-bar {
     padding: var(--space-3) var(--space-6);
+    background: var(--surface);
+    border-bottom: 1px solid var(--separator);
+    flex-shrink: 0;
+  }
+
+  .step-name {
     font-size: 14px;
     font-weight: 600;
     color: var(--text-secondary);
-    background: var(--surface);
-    border-bottom: 1px solid var(--separator);
+    letter-spacing: -0.005em;
   }
+
+  /* ---- Content ---- */
 
   .wizard-content {
     flex: 1;
     overflow-y: auto;
     padding: var(--space-5) var(--space-6);
+    scroll-behavior: smooth;
   }
+
+  /* ---- Group Sections ---- */
 
   .group-section {
     margin-bottom: var(--space-6);
@@ -303,21 +627,28 @@
     font-size: 14px;
     font-weight: 600;
     color: var(--text-primary);
+    letter-spacing: -0.005em;
   }
 
-  .group-type {
+  .group-type-badge {
     font-size: 11px;
+    font-weight: 500;
     color: var(--text-tertiary);
     background: var(--surface);
     padding: 1px var(--space-2);
     border-radius: var(--radius-sm);
+    white-space: nowrap;
   }
+
+  /* ---- Options List ---- */
 
   .options-list {
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
   }
+
+  /* ---- Option Card ---- */
 
   .option-card {
     display: flex;
@@ -331,31 +662,48 @@
     text-align: left;
     transition: all var(--duration-fast) var(--ease);
     width: 100%;
+    font-family: var(--font-sans);
   }
 
-  .option-card:hover:not(.disabled) {
-    border-color: var(--text-quaternary);
+  .option-card:hover:not(:disabled) {
+    border-color: var(--text-tertiary);
+    background: var(--surface-hover);
   }
 
-  .option-card.selected {
+  .option-card.option-selected {
     border-color: var(--system-accent);
-    background: rgba(232, 128, 42, 0.04);
+    background: var(--system-accent-subtle);
   }
 
-  .option-card.disabled {
-    opacity: 0.7;
+  .option-card.option-selected:hover:not(:disabled) {
+    background: var(--system-accent-subtle);
+  }
+
+  .option-card.option-disabled {
+    cursor: default;
+  }
+
+  .option-card.option-disabled.option-selected {
+    opacity: 0.85;
+  }
+
+  .option-card.option-not-usable {
+    opacity: 0.4;
     cursor: not-allowed;
   }
 
-  .option-check {
+  /* ---- Selection Indicator ---- */
+
+  .option-indicator {
     flex-shrink: 0;
     margin-top: 2px;
   }
 
-  .checkbox, .radio {
+  .checkbox,
+  .radio {
     width: 16px;
     height: 16px;
-    border: 2px solid var(--text-quaternary);
+    border: 2px solid var(--text-tertiary);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -363,75 +711,124 @@
   }
 
   .checkbox {
-    border-radius: 3px;
+    border-radius: 4px;
   }
 
   .radio {
     border-radius: 50%;
   }
 
-  .checkbox.checked, .radio.checked {
+  .checkbox-checked,
+  .radio-checked {
     border-color: var(--system-accent);
     background: var(--system-accent);
   }
 
-  .checkbox.checked svg {
-    color: #fff;
+  .checkbox-checked svg {
+    color: var(--system-accent-on);
   }
 
   .radio-dot {
     width: 6px;
     height: 6px;
-    background: #fff;
+    background: var(--system-accent-on);
     border-radius: 50%;
   }
 
-  .option-info {
+  /* ---- Option Body ---- */
+
+  .option-body {
     flex: 1;
     min-width: 0;
+  }
+
+  .option-title-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
   }
 
   .option-name {
     font-size: 13px;
     font-weight: 600;
     color: var(--text-primary);
+    line-height: 1.3;
   }
 
-  .type-badge {
-    display: inline-block;
+  .descriptor-badge {
+    display: inline-flex;
+    align-items: center;
     font-size: 10px;
     font-weight: 600;
-    padding: 0px 4px;
+    padding: 0 5px;
     border-radius: 3px;
-    margin-left: var(--space-2);
-    vertical-align: middle;
+    line-height: 1.6;
+    letter-spacing: 0.01em;
+    white-space: nowrap;
   }
 
-  .type-badge.required {
-    color: var(--red);
-    background: var(--red-subtle);
-  }
-
-  .type-badge.recommended {
-    color: var(--green);
-    background: var(--green-subtle);
-  }
-
-  .option-desc {
+  .option-description {
     font-size: 12px;
     color: var(--text-tertiary);
-    margin-top: 2px;
-    line-height: 1.4;
+    margin-top: 3px;
+    line-height: 1.45;
   }
+
+  /* ---- Option Thumbnail ---- */
+
+  .option-thumbnail {
+    flex-shrink: 0;
+    width: 56px;
+    height: 56px;
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    border: 1px solid var(--separator);
+    cursor: pointer;
+    position: relative;
+    background: var(--bg-tertiary);
+    padding: 0;
+    transition: border-color var(--duration-fast) var(--ease);
+  }
+
+  .option-thumbnail:hover {
+    border-color: var(--system-accent);
+  }
+
+  .option-thumbnail img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+
+  .thumbnail-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    opacity: 0;
+    transition: opacity var(--duration-fast) var(--ease);
+  }
+
+  .option-thumbnail:hover .thumbnail-overlay {
+    opacity: 1;
+  }
+
+  /* ---- Footer ---- */
 
   .wizard-footer {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: var(--space-4) var(--space-6);
+    padding: var(--space-3) var(--space-6);
     border-top: 1px solid var(--separator);
     background: var(--surface);
-    border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+    border-radius: 0 0 var(--radius-xl) var(--radius-xl);
+    flex-shrink: 0;
   }
 
   .footer-nav {
@@ -439,11 +836,13 @@
     gap: var(--space-2);
   }
 
+  /* ---- Buttons ---- */
+
   .btn {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: var(--space-2);
+    gap: 5px;
     padding: var(--space-2) var(--space-4);
     border-radius: var(--radius);
     font-size: 13px;
@@ -451,14 +850,22 @@
     cursor: pointer;
     transition: all var(--duration-fast) var(--ease);
     min-height: 32px;
+    border: none;
+    font-family: var(--font-sans);
+    white-space: nowrap;
+  }
+
+  .btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .btn-accent {
     background: var(--system-accent);
-    color: #fff;
+    color: var(--system-accent-on);
   }
 
-  .btn-accent:hover {
+  .btn-accent:hover:not(:disabled) {
     filter: brightness(1.1);
   }
 
@@ -468,7 +875,7 @@
     border: 1px solid var(--separator);
   }
 
-  .btn-secondary:hover {
+  .btn-secondary:hover:not(:disabled) {
     background: var(--surface-active);
   }
 
@@ -477,8 +884,59 @@
     color: var(--text-secondary);
   }
 
-  .btn-ghost:hover {
+  .btn-ghost:hover:not(:disabled) {
     background: var(--surface-hover);
     color: var(--text-primary);
+  }
+
+  /* ---- Lightbox ---- */
+
+  .lightbox-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.8);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 3000;
+    animation: fadeIn 0.15s var(--ease);
+    cursor: pointer;
+  }
+
+  .lightbox-content {
+    position: relative;
+    max-width: 80vw;
+    max-height: 80vh;
+  }
+
+  .lightbox-content img {
+    max-width: 100%;
+    max-height: 80vh;
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-lg);
+    display: block;
+  }
+
+  .lightbox-close {
+    position: absolute;
+    top: var(--space-2);
+    right: var(--space-2);
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.6);
+    border: none;
+    color: white;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background var(--duration-fast) var(--ease);
+  }
+
+  .lightbox-close:hover {
+    background: rgba(0, 0, 0, 0.8);
   }
 </style>

@@ -1,17 +1,33 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { getConfig, setConfigValue, checkSkse, installSkse } from "$lib/api";
+  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives } from "$lib/api";
   import { config, showError, showSuccess, selectedGame, skseStatus } from "$lib/stores";
   import type { AppConfig } from "$lib/types";
   import ThemeToggle from "$lib/components/ThemeToggle.svelte";
+  import SettingsAuthSection from "./settings-auth-section.svelte";
+  import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
+  import { openUrl } from "@tauri-apps/plugin-opener";
 
-  let apiKey = $state("");
   let downloadDir = $state("");
-  let savingApiKey = $state(false);
   let savingDownloadDir = $state(false);
-  let showApiKey = $state(false);
+  let autoDeleteArchives = $state(false);
+  let savingAutoDelete = $state(false);
   let installingSkse = $state(false);
   let showComparisonDialog = $state(false);
+
+  // Download archive management
+  interface DownloadArchive {
+    filename: string;
+    path: string;
+    size_bytes: number;
+    modified_at: number;
+  }
+  let archives = $state<DownloadArchive[]>([]);
+  let loadingArchives = $state(false);
+  let deletingArchive = $state<string | null>(null);
+  let clearingAll = $state(false);
+  let showArchiveList = $state(false);
+  let downloadsStats = $state<{ total_size_bytes: number; archive_count: number; directory: string } | null>(null);
 
   const game = $derived($selectedGame);
   const skse = $derived($skseStatus);
@@ -63,30 +79,64 @@
       : layers.filter(l => l.platforms.includes("Linux"))
   );
 
+  function formatBytes(bytes: number): string {
+    if (bytes === 0) return "0 B";
+    const units = ["B", "KB", "MB", "GB"];
+    const i = Math.floor(Math.log(bytes) / Math.log(1024));
+    return `${(bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0)} ${units[i]}`;
+  }
+
+  function formatDate(unixSecs: number): string {
+    if (!unixSecs) return "";
+    return new Date(unixSecs * 1000).toLocaleDateString(undefined, {
+      month: "short", day: "numeric", year: "numeric",
+    });
+  }
+
   onMount(async () => {
     try {
       const cfg = await getConfig();
       config.set(cfg);
-      apiKey = cfg.nexus_api_key ?? "";
       downloadDir = cfg.download_dir ?? "";
+      autoDeleteArchives = (cfg as Record<string, unknown>).auto_delete_archives === "true";
     } catch (e: any) {
       showError(`Failed to load config: ${e}`);
     }
 
-    // Check SKSE status if Skyrim is selected
     if (game && isSkyrim) {
       try {
         const status = await checkSkse(game.game_id, game.bottle_name);
         skseStatus.set(status);
       } catch { /* ignore */ }
     }
+
+    // Load download stats
+    try {
+      downloadsStats = await getDownloadsStats();
+    } catch { /* ignore */ }
   });
 
-  async function handleInstallSkse() {
-    if (!game) return;
-    installingSkse = true;
+  async function handleOpenSkseDownload() {
     try {
-      const status = await installSkse(game.game_id, game.bottle_name);
+      const url = await getSkseDownloadUrl();
+      await openUrl(url);
+    } catch (e: any) {
+      showError(`Failed to open SKSE download page: ${e}`);
+    }
+  }
+
+  async function handleInstallSkseFromArchive() {
+    if (!game) return;
+    try {
+      const selected = await dialogOpen({
+        title: "Select SKSE Archive (.7z or .zip)",
+        filters: [{ name: "Archives", extensions: ["7z", "zip"] }],
+      });
+      if (!selected) return;
+
+      const archivePath = selected as string;
+      installingSkse = true;
+      const status = await installSkseFromArchive(game.game_id, game.bottle_name, archivePath);
       skseStatus.set(status);
       showSuccess("SKSE installed successfully");
     } catch (e: any) {
@@ -96,15 +146,19 @@
     }
   }
 
-  async function saveApiKey() {
-    savingApiKey = true;
+  async function browseDownloadDir() {
     try {
-      await setConfigValue("nexus_api_key", apiKey);
-      showSuccess("API key saved");
+      const selected = await dialogOpen({
+        directory: true,
+        title: "Choose Download Folder",
+        defaultPath: downloadDir || undefined,
+      });
+      if (selected) {
+        downloadDir = selected as string;
+        await saveDownloadDir();
+      }
     } catch (e: any) {
-      showError(`Failed to save: ${e}`);
-    } finally {
-      savingApiKey = false;
+      showError(`Failed to open folder picker: ${e}`);
     }
   }
 
@@ -112,11 +166,66 @@
     savingDownloadDir = true;
     try {
       await setConfigValue("download_dir", downloadDir);
+      downloadsStats = await getDownloadsStats();
       showSuccess("Download directory saved");
     } catch (e: any) {
       showError(`Failed to save: ${e}`);
     } finally {
       savingDownloadDir = false;
+    }
+  }
+
+  async function toggleAutoDelete() {
+    savingAutoDelete = true;
+    try {
+      autoDeleteArchives = !autoDeleteArchives;
+      await setConfigValue("auto_delete_archives", autoDeleteArchives ? "true" : "false");
+      showSuccess(autoDeleteArchives ? "Archives will be deleted after install" : "Archives will be kept after install");
+    } catch (e: any) {
+      autoDeleteArchives = !autoDeleteArchives; // revert
+      showError(`Failed to save setting: ${e}`);
+    } finally {
+      savingAutoDelete = false;
+    }
+  }
+
+  async function loadArchives() {
+    loadingArchives = true;
+    try {
+      archives = await listDownloadArchives();
+      showArchiveList = true;
+    } catch (e: any) {
+      showError(`Failed to load archives: ${e}`);
+    } finally {
+      loadingArchives = false;
+    }
+  }
+
+  async function handleDeleteArchive(archive: DownloadArchive) {
+    deletingArchive = archive.path;
+    try {
+      await deleteDownloadArchive(archive.path);
+      archives = archives.filter(a => a.path !== archive.path);
+      downloadsStats = await getDownloadsStats();
+      showSuccess(`Deleted ${archive.filename}`);
+    } catch (e: any) {
+      showError(`Failed to delete: ${e}`);
+    } finally {
+      deletingArchive = null;
+    }
+  }
+
+  async function handleClearAll() {
+    clearingAll = true;
+    try {
+      const count = await clearAllDownloadArchives();
+      archives = [];
+      downloadsStats = await getDownloadsStats();
+      showSuccess(`Deleted ${count} archive${count !== 1 ? "s" : ""}`);
+    } catch (e: any) {
+      showError(`Failed to clear archives: ${e}`);
+    } finally {
+      clearingAll = false;
     }
   }
 </script>
@@ -245,12 +354,21 @@
               <span class="badge badge-green">Installed</span>
             {:else}
               <button
+                class="btn-secondary"
+                onclick={handleOpenSkseDownload}
+                type="button"
+                title="Opens skse.silverlock.org in your browser"
+              >
+                Download SKSE
+              </button>
+              <button
                 class="btn-primary"
-                onclick={handleInstallSkse}
+                onclick={handleInstallSkseFromArchive}
                 disabled={installingSkse}
                 type="button"
+                title="Install from a .7z or .zip you already downloaded"
               >
-                {installingSkse ? "Installing..." : "Install SKSE"}
+                {installingSkse ? "Installing..." : "Install from Archive"}
               </button>
             {/if}
           </div>
@@ -259,82 +377,153 @@
     </div>
   {/if}
 
-  <!-- Nexus Mods -->
-  <div class="section">
-    <h2 class="section-title">Nexus Mods</h2>
-    <div class="section-card">
-      <div class="card-row">
-        <div class="row-content full">
-          <span class="row-description">
-            Connect your Nexus Mods account to download mods directly.
-            Get your API key from your
-            <a
-              href="https://www.nexusmods.com/users/myaccount?tab=api+access"
-              target="_blank"
-              rel="noopener noreferrer"
-            >Nexus Mods account settings</a>.
-          </span>
-        </div>
-      </div>
-      <div class="card-divider"></div>
-      <div class="card-row">
-        <label class="row-label" for="api-key">API Key</label>
-        <div class="row-control">
-          <div class="input-with-actions">
-            <input
-              id="api-key"
-              type={showApiKey ? "text" : "password"}
-              bind:value={apiKey}
-              placeholder="Enter your API key"
-              class="settings-input"
-            />
-            <button
-              class="btn-ghost"
-              onclick={() => (showApiKey = !showApiKey)}
-              type="button"
-            >
-              {showApiKey ? "Hide" : "Show"}
-            </button>
-            <button
-              class="btn-primary"
-              onclick={saveApiKey}
-              disabled={savingApiKey}
-              type="button"
-            >
-              {savingApiKey ? "Saving..." : "Save"}
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
+  <!-- Nexus Mods Account -->
+  <SettingsAuthSection />
 
   <!-- Downloads -->
   <div class="section">
     <h2 class="section-title">Downloads</h2>
     <div class="section-card">
+      <!-- Download Directory -->
       <div class="card-row">
-        <label class="row-label" for="download-dir">Download Directory</label>
+        <label class="row-label" for="download-dir">Download Folder</label>
         <div class="row-control">
           <div class="input-with-actions">
             <input
               id="download-dir"
               type="text"
               bind:value={downloadDir}
-              placeholder="~/.local/share/corkscrew/downloads"
+              placeholder={downloadsStats?.directory ?? "Default location"}
               class="settings-input"
             />
             <button
+              class="btn-ghost"
+              onclick={browseDownloadDir}
+              type="button"
+            >
+              Browse
+            </button>
+            <button
               class="btn-primary"
               onclick={saveDownloadDir}
-              disabled={savingDownloadDir}
+              disabled={savingDownloadDir || !downloadDir}
               type="button"
             >
               {savingDownloadDir ? "Saving..." : "Save"}
             </button>
           </div>
+          {#if !downloadDir && downloadsStats?.directory}
+            <span class="input-hint">Default: {downloadsStats.directory}</span>
+          {/if}
         </div>
       </div>
+      <div class="card-divider"></div>
+
+      <!-- Auto-Delete Setting -->
+      <div class="card-row toggle-row">
+        <div class="toggle-info">
+          <span class="row-label">Delete archives after install</span>
+          <span class="toggle-description">Automatically remove .zip/.7z files once mods are installed. Saves disk space but prevents reinstalling from local cache.</span>
+        </div>
+        <button
+          class="toggle-switch"
+          class:toggle-on={autoDeleteArchives}
+          onclick={toggleAutoDelete}
+          disabled={savingAutoDelete}
+          type="button"
+          role="switch"
+          aria-checked={autoDeleteArchives}
+        >
+          <span class="toggle-thumb"></span>
+        </button>
+      </div>
+      <div class="card-divider"></div>
+
+      <!-- Archives Management -->
+      <div class="card-row">
+        <div class="archives-summary">
+          <div class="archives-info">
+            <span class="row-label">Downloaded Archives</span>
+            {#if downloadsStats}
+              <span class="archives-stats">
+                {downloadsStats.archive_count} file{downloadsStats.archive_count !== 1 ? "s" : ""}
+                &middot;
+                {formatBytes(downloadsStats.total_size_bytes)}
+              </span>
+            {/if}
+          </div>
+          <div class="archives-actions">
+            {#if !showArchiveList}
+              <button
+                class="btn-ghost"
+                onclick={loadArchives}
+                disabled={loadingArchives}
+                type="button"
+              >
+                {loadingArchives ? "Loading..." : "Manage"}
+              </button>
+            {:else}
+              <button
+                class="btn-ghost"
+                onclick={() => showArchiveList = false}
+                type="button"
+              >
+                Hide
+              </button>
+              {#if archives.length > 0}
+                <button
+                  class="btn-danger"
+                  onclick={handleClearAll}
+                  disabled={clearingAll}
+                  type="button"
+                >
+                  {clearingAll ? "Deleting..." : "Delete All"}
+                </button>
+              {/if}
+            {/if}
+          </div>
+        </div>
+      </div>
+
+      {#if showArchiveList}
+        {#if archives.length === 0}
+          <div class="card-divider"></div>
+          <div class="card-row">
+            <span class="archives-empty">No downloaded archives found.</span>
+          </div>
+        {:else}
+          {#each archives as archive (archive.path)}
+            <div class="card-divider"></div>
+            <div class="card-row archive-row">
+              <div class="archive-info">
+                <span class="archive-name" title={archive.filename}>{archive.filename}</span>
+                <span class="archive-meta">
+                  {formatBytes(archive.size_bytes)}
+                  {#if archive.modified_at}
+                    &middot; {formatDate(archive.modified_at)}
+                  {/if}
+                </span>
+              </div>
+              <button
+                class="btn-delete-sm"
+                onclick={() => handleDeleteArchive(archive)}
+                disabled={deletingArchive === archive.path}
+                type="button"
+                aria-label="Delete {archive.filename}"
+              >
+                {#if deletingArchive === archive.path}
+                  <span class="spinner-xs"></span>
+                {:else}
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="3 6 5 6 21 6" />
+                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                  </svg>
+                {/if}
+              </button>
+            </div>
+          {/each}
+        {/if}
+      {/if}
     </div>
   </div>
 
@@ -498,6 +687,7 @@
     background: var(--bg-grouped-secondary);
     border-radius: var(--radius-lg);
     overflow: hidden;
+    box-shadow: var(--glass-edge-shadow);
   }
 
   /* --- Card rows --- */
@@ -598,6 +788,23 @@
     cursor: not-allowed;
   }
 
+  .btn-secondary {
+    padding: var(--space-1) var(--space-3);
+    background: var(--surface-hover);
+    color: var(--text-secondary);
+    font-size: 13px;
+    font-weight: 500;
+    border: 1px solid var(--separator);
+    border-radius: var(--radius-sm);
+    white-space: nowrap;
+    transition: all var(--duration-fast) var(--ease);
+  }
+
+  .btn-secondary:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+  }
+
   .btn-ghost {
     padding: var(--space-1) var(--space-3);
     background: transparent;
@@ -647,6 +854,9 @@
 
   .tool-action {
     flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
   }
 
   .badge-green {
@@ -866,7 +1076,7 @@
     background: var(--bg-elevated);
     border: 1px solid var(--separator-opaque);
     border-radius: var(--radius-xl);
-    box-shadow: var(--shadow-lg);
+    box-shadow: var(--glass-edge-shadow), var(--shadow-lg);
     width: 520px;
     max-width: calc(100vw - var(--space-8));
     max-height: calc(100vh - var(--space-12));
@@ -925,11 +1135,12 @@
     border-radius: var(--radius-lg);
     background: var(--surface);
     border: 1px solid var(--separator);
+    box-shadow: var(--glass-edge-shadow);
   }
 
   .comparison-item.recommended {
     border-color: var(--system-accent);
-    box-shadow: 0 0 0 1px rgba(0, 122, 255, 0.1);
+    box-shadow: var(--glass-edge-shadow), 0 0 0 1px rgba(0, 122, 255, 0.1);
   }
 
   .comparison-header {
@@ -997,6 +1208,209 @@
 
   .comparison-link:hover {
     text-decoration: underline;
+  }
+
+  /* --- Downloads Section --- */
+
+  .input-hint {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-top: var(--space-1);
+    word-break: break-all;
+  }
+
+  .toggle-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-4);
+  }
+
+  .toggle-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .toggle-description {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    line-height: 1.4;
+  }
+
+  .toggle-switch {
+    position: relative;
+    width: 42px;
+    height: 24px;
+    background: var(--separator-opaque);
+    border: none;
+    border-radius: 12px;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background var(--duration-fast) var(--ease);
+    padding: 0;
+  }
+
+  .toggle-switch:hover {
+    background: var(--surface-active);
+  }
+
+  .toggle-switch.toggle-on {
+    background: var(--system-accent);
+  }
+
+  .toggle-switch.toggle-on:hover {
+    background: var(--system-accent-hover);
+  }
+
+  .toggle-switch:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .toggle-thumb {
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 18px;
+    height: 18px;
+    background: #fff;
+    border-radius: 50%;
+    transition: transform var(--duration-fast) var(--ease);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  }
+
+  .toggle-on .toggle-thumb {
+    transform: translateX(18px);
+  }
+
+  /* --- Archives Management --- */
+
+  .archives-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    width: 100%;
+  }
+
+  .archives-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .archives-stats {
+    font-size: 12px;
+    color: var(--text-tertiary);
+  }
+
+  .archives-actions {
+    display: flex;
+    gap: var(--space-2);
+    flex-shrink: 0;
+  }
+
+  .archives-empty {
+    font-size: 13px;
+    color: var(--text-tertiary);
+    font-style: italic;
+  }
+
+  .archive-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+  }
+
+  .archive-info {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+    flex: 1;
+  }
+
+  .archive-name {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .archive-meta {
+    font-size: 11px;
+    color: var(--text-tertiary);
+  }
+
+  .btn-delete-sm {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    background: transparent;
+    color: var(--text-tertiary);
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: all var(--duration-fast) var(--ease);
+  }
+
+  .btn-delete-sm:hover {
+    color: var(--red);
+    background: rgba(255, 69, 58, 0.1);
+    border-color: rgba(255, 69, 58, 0.2);
+  }
+
+  .btn-delete-sm:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .btn-danger {
+    padding: var(--space-1) var(--space-3);
+    background: transparent;
+    color: var(--red);
+    font-size: 13px;
+    font-weight: 500;
+    border: 1px solid rgba(255, 69, 58, 0.3);
+    border-radius: var(--radius-sm);
+    white-space: nowrap;
+    cursor: pointer;
+    transition: all var(--duration-fast) var(--ease);
+  }
+
+  .btn-danger:hover {
+    background: rgba(255, 69, 58, 0.1);
+    border-color: rgba(255, 69, 58, 0.5);
+  }
+
+  .btn-danger:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .spinner-xs {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border: 2px solid var(--separator-opaque);
+    border-top-color: var(--text-tertiary);
+    border-radius: 50%;
+    animation: spin 0.75s linear infinite;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
   }
 
   @keyframes fadeIn {

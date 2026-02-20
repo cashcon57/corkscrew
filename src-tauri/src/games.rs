@@ -87,7 +87,7 @@ fn registry() -> &'static PluginRegistry {
 /// Plugins are typically registered at application startup. Duplicate
 /// registrations (same `game_id`) are silently ignored.
 pub fn register_plugin(plugin: Box<dyn GamePlugin + Send + Sync>) {
-    let mut plugins = registry().lock().expect("plugin registry lock poisoned");
+    let mut plugins = registry().lock().unwrap_or_else(|e| e.into_inner());
     // Prevent duplicate registrations.
     let id = plugin.game_id().to_owned();
     if plugins.iter().any(|p| p.game_id() == id) {
@@ -98,7 +98,7 @@ pub fn register_plugin(plugin: Box<dyn GamePlugin + Send + Sync>) {
 
 /// Scan a single bottle for all recognized games.
 pub fn detect_games(bottle: &Bottle) -> Vec<DetectedGame> {
-    let plugins = registry().lock().expect("plugin registry lock poisoned");
+    let plugins = registry().lock().unwrap_or_else(|e| e.into_inner());
     let mut found = Vec::new();
     for plugin in plugins.iter() {
         if let Some(detected) = plugin.detect(bottle) {
@@ -140,7 +140,7 @@ pub fn with_plugin<F, R>(game_id: &str, f: F) -> Option<R>
 where
     F: FnOnce(&dyn GamePlugin) -> R,
 {
-    let plugins = registry().lock().expect("plugin registry lock poisoned");
+    let plugins = registry().lock().unwrap_or_else(|e| e.into_inner());
     plugins
         .iter()
         .find(|p| p.game_id() == game_id)
@@ -153,7 +153,7 @@ where
 /// keeps the lock held until it is dropped. Prefer [`with_plugin`] for
 /// scoped access, or copy data out quickly.
 pub fn get_plugin_for_game(game_id: &str) -> Option<PluginRef> {
-    let plugins = registry().lock().expect("plugin registry lock poisoned");
+    let plugins = registry().lock().unwrap_or_else(|e| e.into_inner());
     // Check if any plugin matches before constructing the ref.
     let index = plugins.iter().position(|p| p.game_id() == game_id)?;
     Some(PluginRef {

@@ -144,11 +144,30 @@ fn extract_7z(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
         ))
     })?;
 
-    // Walk the destination to collect the list of extracted files.
+    // Canonicalize dest_dir for path traversal validation.
+    let canonical_dest = dest_dir.canonicalize().unwrap_or_else(|_| dest_dir.to_path_buf());
+
+    // Walk the destination to collect the list of extracted files,
+    // rejecting any that escape the destination directory (path traversal).
     let mut extracted: Vec<PathBuf> = Vec::new();
     for entry in WalkDir::new(dest_dir).into_iter().filter_map(|e| e.ok()) {
         if entry.file_type().is_file() {
-            extracted.push(entry.into_path());
+            let path = entry.into_path();
+            // Verify the file is actually within dest_dir (not a symlink escape)
+            if let Ok(canonical) = path.canonicalize() {
+                if canonical.starts_with(&canonical_dest) {
+                    extracted.push(path);
+                } else {
+                    warn!(
+                        "Skipping 7z entry outside destination: {}",
+                        canonical.display()
+                    );
+                    // Remove the offending file
+                    let _ = std::fs::remove_file(&path);
+                }
+            } else {
+                extracted.push(path);
+            }
         }
     }
 

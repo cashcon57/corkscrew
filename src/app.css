@@ -11,33 +11,33 @@
 :root,
 [data-theme="dark"] {
   /* Background layers */
-  --bg-base: #161618;
-  --bg-base-vibrancy: rgba(22, 22, 24, 0.55);
-  --bg-primary: #1c1c1e;
-  --bg-primary-vibrancy: rgba(28, 28, 30, 0.55);
+  --bg-base: #1c1c1f;
+  --bg-base-vibrancy: rgba(28, 28, 31, 0.50);
+  --bg-primary: #232326;
+  --bg-primary-vibrancy: rgba(35, 35, 38, 0.50);
   --bg-secondary: #2c2c2e;
   --bg-tertiary: #3a3a3c;
-  --bg-elevated: #1c1c1e;
+  --bg-elevated: #28282b;
 
   /* Grouped background (sidebar, panels) */
-  --bg-grouped: #1c1c1e;
-  --bg-grouped-vibrancy: rgba(28, 28, 30, 0.40);
+  --bg-grouped: #232326;
+  --bg-grouped-vibrancy: rgba(35, 35, 38, 0.35);
   --bg-grouped-secondary: #2c2c2e;
-  --bg-grouped-secondary-vibrancy: rgba(44, 44, 46, 0.45);
+  --bg-grouped-secondary-vibrancy: rgba(44, 44, 46, 0.40);
   --bg-grouped-tertiary: #3a3a3c;
 
   /* Surface layers (cards, sheets) */
-  --surface: rgba(255, 255, 255, 0.05);
-  --surface-vibrancy: rgba(255, 255, 255, 0.06);
-  --surface-hover: rgba(255, 255, 255, 0.08);
-  --surface-active: rgba(255, 255, 255, 0.12);
-  --surface-subtle: rgba(255, 255, 255, 0.015);
+  --surface: rgba(255, 255, 255, 0.06);
+  --surface-vibrancy: rgba(255, 255, 255, 0.08);
+  --surface-hover: rgba(255, 255, 255, 0.10);
+  --surface-active: rgba(255, 255, 255, 0.14);
+  --surface-subtle: rgba(255, 255, 255, 0.025);
 
   /* Text hierarchy (Apple's NSColor label colors, dark) */
-  --text-primary: rgba(255, 255, 255, 0.85);
-  --text-secondary: rgba(255, 255, 255, 0.55);
-  --text-tertiary: rgba(255, 255, 255, 0.25);
-  --text-quaternary: rgba(255, 255, 255, 0.10);
+  --text-primary: rgba(255, 255, 255, 0.88);
+  --text-secondary: rgba(255, 255, 255, 0.60);
+  --text-tertiary: rgba(255, 255, 255, 0.30);
+  --text-quaternary: rgba(255, 255, 255, 0.12);
 
   /* Brand accent — warm orange (decorative only) */
   --accent: #e8802a;
@@ -63,17 +63,23 @@
   --blue-subtle: rgba(10, 132, 255, 0.15);
 
   /* Separators */
-  --separator: rgba(255, 255, 255, 0.08);
-  --separator-opaque: #38383a;
+  --separator: rgba(255, 255, 255, 0.10);
+  --separator-opaque: #3d3d40;
 
   /* Shadows (subtle in dark mode — depth via surface color) */
-  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.20);
-  --shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
-  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.35);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.18);
+  --shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.30);
+
+  /* Glass edge glow (inset highlights simulating light catching a glass rim) */
+  --glass-edge-top: rgba(255, 255, 255, 0.12);
+  --glass-edge-glow: rgba(255, 255, 255, 0.04);
+  --glass-edge-shadow: inset 0 1px 0 0 var(--glass-edge-top),
+                        inset 0 0 6px 0 var(--glass-edge-glow);
 
   /* Scrollbar */
-  --scrollbar-thumb: rgba(255, 255, 255, 0.12);
-  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.2);
+  --scrollbar-thumb: rgba(255, 255, 255, 0.15);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.25);
 
   color-scheme: dark;
 }
@@ -143,6 +149,12 @@
   --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.08);
   --shadow: 0 2px 8px rgba(0, 0, 0, 0.10);
   --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.15);
+
+  /* Glass edge glow — brighter on light bg for visible highlight */
+  --glass-edge-top: rgba(255, 255, 255, 0.45);
+  --glass-edge-glow: rgba(255, 255, 255, 0.08);
+  --glass-edge-shadow: inset 0 1px 0 0 var(--glass-edge-top),
+                        inset 0 0 6px 0 var(--glass-edge-glow);
 
   /* Scrollbar */
   --scrollbar-thumb: rgba(0, 0, 0, 0.15);
@@ -306,6 +318,146 @@ button:focus-visible,
 ::selection {
   background: var(--system-accent-subtle);
   color: var(--text-primary);
+}
+
+/* --- Rendered Markdown --- */
+
+.rendered-markdown {
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--text-secondary);
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+.rendered-markdown h1 {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: var(--space-6) 0 var(--space-3) 0;
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--separator);
+}
+
+.rendered-markdown h2 {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: var(--space-5) 0 var(--space-2) 0;
+  padding-bottom: var(--space-1);
+  border-bottom: 1px solid var(--separator);
+}
+
+.rendered-markdown h3 {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: var(--space-4) 0 var(--space-2) 0;
+}
+
+.rendered-markdown h4, .rendered-markdown h5, .rendered-markdown h6 {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: var(--space-3) 0 var(--space-1) 0;
+}
+
+.rendered-markdown p {
+  margin: 0 0 var(--space-3) 0;
+}
+
+.rendered-markdown a {
+  color: var(--system-accent);
+  text-decoration: none;
+}
+
+.rendered-markdown a:hover {
+  text-decoration: underline;
+}
+
+.rendered-markdown code {
+  background: var(--surface);
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+  color: var(--text-primary);
+}
+
+.rendered-markdown pre {
+  background: var(--bg-secondary);
+  border: 1px solid var(--separator);
+  border-radius: var(--radius);
+  padding: var(--space-4);
+  overflow-x: auto;
+  margin: 0 0 var(--space-3) 0;
+}
+
+.rendered-markdown pre code {
+  background: none;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.rendered-markdown blockquote {
+  border-left: 3px solid var(--system-accent);
+  padding: var(--space-2) var(--space-4);
+  margin: 0 0 var(--space-3) 0;
+  color: var(--text-tertiary);
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+
+.rendered-markdown img {
+  max-width: 100%;
+  border-radius: var(--radius);
+  margin: var(--space-2) 0;
+}
+
+.rendered-markdown ul, .rendered-markdown ol {
+  padding-left: var(--space-5);
+  margin: 0 0 var(--space-3) 0;
+}
+
+.rendered-markdown li {
+  margin-bottom: var(--space-1);
+}
+
+.rendered-markdown table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 var(--space-3) 0;
+}
+
+.rendered-markdown th {
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--separator);
+  background: var(--surface);
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.rendered-markdown td {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--separator);
+  font-size: 13px;
+}
+
+.rendered-markdown hr {
+  border: none;
+  border-top: 1px solid var(--separator);
+  margin: var(--space-4) 0;
+}
+
+.rendered-markdown > :first-child {
+  margin-top: 0;
+}
+
+.rendered-markdown > :last-child {
+  margin-bottom: 0;
 }
 
 /* --- Accessibility: Reduced Motion --- */

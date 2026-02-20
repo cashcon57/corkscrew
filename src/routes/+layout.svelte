@@ -3,13 +3,16 @@
   import "../app.css";
   import { currentPage, errorMessage, successMessage } from "$lib/stores";
   import { initTheme } from "$lib/theme";
+  import { openUrl } from "@tauri-apps/plugin-opener";
 
   const navItems = [
     { id: "dashboard", label: "Dashboard" },
     { id: "mods", label: "Mods" },
     { id: "plugins", label: "Load Order" },
-    { id: "modlists", label: "Modlists" },
+    { id: "collections", label: "Collections" },
+    { id: "modlists", label: "Wabbajack Lists" },
     { id: "profiles", label: "Profiles" },
+    { id: "logs", label: "Crash Logs" },
     { id: "settings", label: "Settings" },
     { id: "about", label: "About" },
   ];
@@ -24,12 +27,20 @@
 </script>
 
 <div class="app-shell">
-  <!-- Full-width drag region at top of window for window movement -->
-  <div class="window-drag-region" data-tauri-drag-region></div>
-
   <nav class="sidebar">
-    <!-- Traffic light zone: spacer for macOS traffic lights -->
-    <div class="sidebar-traffic-zone"></div>
+    <!-- Traffic light zone (macOS window controls sit here) -->
+    <div class="sidebar-traffic-zone" data-tauri-drag-region></div>
+
+    <!-- Brand lockup: sits below traffic lights, above nav -->
+    <div class="sidebar-brand-section">
+      <button class="sidebar-brand-btn" onclick={() => navigate("dashboard")}>
+        <img class="brand-icon" src="/corkscrew-icon.png" alt="" width="28" height="28" draggable="false" />
+        <div class="brand-text">
+          <span class="brand-name">Corkscrew</span>
+          <span class="brand-tagline">Mod Manager</span>
+        </div>
+      </button>
+    </div>
 
     <ul class="nav-list">
       {#each navItems as item}
@@ -60,11 +71,23 @@
                   <rect x="2.5" y="6.5" width="11" height="3" rx="1" />
                   <rect x="2.5" y="11" width="11" height="3" rx="1" />
                 </svg>
+              {:else if item.id === "collections"}
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="2" y="3" width="12" height="10" rx="2" />
+                  <path d="M5 3V2M11 3V2" />
+                  <path d="M5 7h6M5 10h4" />
+                </svg>
               {:else if item.id === "modlists"}
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
                   <path d="M2 3h12M2 6.5h12M2 10h12M2 13.5h12" />
                   <circle cx="13" cy="3" r="1" fill="currentColor" stroke="none" />
                   <circle cx="13" cy="6.5" r="1" fill="currentColor" stroke="none" />
+                </svg>
+              {:else if item.id === "logs"}
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M8 1.5L1.5 5v6L8 14.5 14.5 11V5L8 1.5z" />
+                  <circle cx="8" cy="7.5" r="1.5" />
+                  <path d="M8 9v2.5" />
                 </svg>
               {:else if item.id === "profiles"}
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -93,50 +116,61 @@
     </ul>
 
     <div class="sidebar-footer">
-      <div class="sidebar-brand">
-        <span class="sidebar-title">Corkscrew</span>
-        <span class="sidebar-subtitle">v0.1.0</span>
-      </div>
+      <button
+        class="sidebar-gh-btn"
+        onclick={() => openUrl("https://github.com/cashcon57/corkscrew")}
+        title="View on GitHub"
+      >
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z" />
+        </svg>
+        <span>GitHub</span>
+      </button>
+      <span class="sidebar-version">v0.1.0</span>
     </div>
   </nav>
 
-  <main class="content">
+  <div class="content-column">
+    <!-- Drag region for window titlebar (no content, just draggable) -->
+    <div class="content-drag-region" data-tauri-drag-region></div>
 
-    {#if $errorMessage}
-      <div class="toast toast-error" role="alert">
-        <svg class="toast-icon" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="7" cy="7" r="6" />
-          <line x1="7" y1="4" x2="7" y2="7.5" />
-          <circle cx="7" cy="10" r="0.5" fill="currentColor" />
-        </svg>
-        <span class="toast-text">{$errorMessage}</span>
-        <button class="toast-dismiss" onclick={() => errorMessage.set(null)} aria-label="Dismiss error">
-          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-            <line x1="2" y1="2" x2="8" y2="8" />
-            <line x1="8" y1="2" x2="2" y2="8" />
+    <main class="content">
+      {#if $errorMessage}
+        <div class="toast toast-error" role="alert">
+          <svg class="toast-icon" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="7" cy="7" r="6" />
+            <line x1="7" y1="4" x2="7" y2="7.5" />
+            <circle cx="7" cy="10" r="0.5" fill="currentColor" />
           </svg>
-        </button>
-      </div>
-    {/if}
+          <span class="toast-text">{$errorMessage}</span>
+          <button class="toast-dismiss" onclick={() => errorMessage.set(null)} aria-label="Dismiss error">
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+              <line x1="2" y1="2" x2="8" y2="8" />
+              <line x1="8" y1="2" x2="2" y2="8" />
+            </svg>
+          </button>
+        </div>
+      {/if}
 
-    {#if $successMessage}
-      <div class="toast toast-success" role="status">
-        <svg class="toast-icon" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="7" cy="7" r="6" />
-          <path d="M4.5 7l2 2 3-3.5" />
-        </svg>
-        <span class="toast-text">{$successMessage}</span>
-        <button class="toast-dismiss" onclick={() => successMessage.set(null)} aria-label="Dismiss notification">
-          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-            <line x1="2" y1="2" x2="8" y2="8" />
-            <line x1="8" y1="2" x2="2" y2="8" />
+      {#if $successMessage}
+        <div class="toast toast-success" role="status">
+          <svg class="toast-icon" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="7" cy="7" r="6" />
+            <path d="M4.5 7l2 2 3-3.5" />
           </svg>
-        </button>
-      </div>
-    {/if}
+          <span class="toast-text">{$successMessage}</span>
+          <button class="toast-dismiss" onclick={() => successMessage.set(null)} aria-label="Dismiss notification">
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+              <line x1="2" y1="2" x2="8" y2="8" />
+              <line x1="8" y1="2" x2="2" y2="8" />
+            </svg>
+          </button>
+        </div>
+      {/if}
 
-    <slot />
-  </main>
+      <slot />
+    </main>
+  </div>
 </div>
 
 <style>
@@ -144,6 +178,17 @@
     display: flex;
     height: 100vh;
     overflow: hidden;
+    padding: 8px;
+    gap: 8px;
+    background: #18181b;
+  }
+
+  :global([data-theme="light"]) .app-shell {
+    background: #d2d2d7;
+  }
+
+  :global(html.vibrancy-active) .app-shell {
+    background: transparent;
   }
 
   /* --- Sidebar --- */
@@ -152,23 +197,94 @@
     width: 220px;
     min-width: 220px;
     background: var(--bg-grouped);
-    border-right: 1px solid var(--separator);
+    border-radius: 14px;
     display: flex;
     flex-direction: column;
+    overflow: hidden;
+    position: relative;
+    z-index: 10;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow:
+      inset 0 1px 0 0 rgba(255, 255, 255, 0.08),
+      0 0 0 0.5px rgba(255, 255, 255, 0.04),
+      0 1px 4px rgba(0, 0, 0, 0.12),
+      0 4px 16px rgba(0, 0, 0, 0.08);
+    backdrop-filter: blur(20px) saturate(1.2);
+    -webkit-backdrop-filter: blur(20px) saturate(1.2);
   }
 
-  /* Remove sidebar border when vibrancy provides visual separation */
+  :global([data-theme="light"]) .sidebar {
+    border-color: rgba(0, 0, 0, 0.08);
+    box-shadow:
+      0 0 0 0.5px rgba(0, 0, 0, 0.04),
+      0 1px 4px rgba(0, 0, 0, 0.06),
+      0 4px 16px rgba(0, 0, 0, 0.04);
+  }
+
   :global(html.vibrancy-active) .sidebar {
-    border-right: none;
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
+    border-color: rgba(255, 255, 255, 0.10);
   }
 
-  /* Traffic light zone — macOS overlay titlebar puts
-     close/minimize/maximize buttons in this area */
+  /* Traffic light spacer — clears macOS window controls.
+     With 8px app-shell padding, traffic lights sit at ~y=4 in sidebar,
+     ending at ~y=16. 28px gives clean clearance. */
   .sidebar-traffic-zone {
-    height: 52px;
+    height: 28px;
     flex-shrink: 0;
-    /* Entire zone is draggable for window movement */
   }
+
+  /* --- Brand lockup (below traffic lights) --- */
+
+  .sidebar-brand-section {
+    padding: 0 var(--space-3) var(--space-3);
+    border-bottom: 1px solid var(--separator);
+    margin-bottom: var(--space-2);
+  }
+
+  .sidebar-brand-btn {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-2);
+    border-radius: var(--radius);
+    transition: background var(--duration-fast) var(--ease);
+    cursor: pointer;
+    width: 100%;
+  }
+
+  .sidebar-brand-btn:hover {
+    background: var(--surface-hover);
+  }
+
+  .brand-icon {
+    flex-shrink: 0;
+    border-radius: 6px;
+  }
+
+  .brand-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  .brand-name {
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--text-primary);
+    line-height: 1.2;
+  }
+
+  .brand-tagline {
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--text-tertiary);
+    line-height: 1.2;
+  }
+
+  /* --- Nav list --- */
 
   .nav-list {
     list-style: none;
@@ -176,16 +292,16 @@
     flex: 1;
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 3px;
   }
 
   .nav-item {
     display: flex;
     align-items: center;
-    gap: var(--space-2);
+    gap: 10px;
     width: 100%;
-    padding: 6px 10px;
-    border-radius: var(--radius-sm);
+    padding: 8px 12px;
+    border-radius: var(--radius);
     color: var(--text-secondary);
     font-size: 13px;
     font-weight: 500;
@@ -199,8 +315,8 @@
   }
 
   .nav-item.active {
-    background: var(--system-accent-subtle);
-    color: var(--system-accent);
+    background: var(--accent-subtle);
+    color: var(--accent);
   }
 
   .nav-icon {
@@ -212,57 +328,87 @@
     flex-shrink: 0;
   }
 
-  /* --- Sidebar footer (brand) --- */
+  /* --- Sidebar footer --- */
 
   .sidebar-footer {
-    padding: var(--space-3) var(--space-4) var(--space-4);
+    padding: var(--space-2) var(--space-3) var(--space-3);
     border-top: 1px solid var(--separator);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
   }
 
-  .sidebar-brand {
+  .sidebar-gh-btn {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: 3px 8px 3px 6px;
+    border-radius: var(--radius-sm);
+    color: var(--text-tertiary);
+    font-size: 11px;
+    font-weight: 500;
+    transition: all var(--duration-fast) var(--ease);
+    cursor: pointer;
+  }
+
+  .sidebar-gh-btn:hover {
+    background: var(--surface-hover);
+    color: var(--text-secondary);
+  }
+
+  .sidebar-version {
+    font-size: 10px;
+    color: var(--text-quaternary);
+    font-weight: 500;
+    letter-spacing: 0.02em;
+  }
+
+  /* --- Content column --- */
+
+  .content-column {
+    flex: 1;
     display: flex;
     flex-direction: column;
+    min-width: 0;
+    border-radius: 14px;
+    overflow: hidden;
+    background: var(--bg-base);
+    border: 1px solid rgba(255, 255, 255, 0.04);
+    position: relative;
+    box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.06);
   }
 
-  .sidebar-title {
-    font-size: 12px;
-    font-weight: 600;
-    letter-spacing: -0.01em;
-    color: var(--text-secondary);
-    line-height: 1.2;
+  :global([data-theme="light"]) .content-column {
+    border-color: rgba(0, 0, 0, 0.06);
   }
 
-  .sidebar-subtitle {
-    font-size: 11px;
-    color: var(--text-tertiary);
-    font-weight: 400;
+  :global(html.vibrancy-active) .content-column {
+    backdrop-filter: blur(16px) saturate(1.1);
+    -webkit-backdrop-filter: blur(16px) saturate(1.1);
   }
 
-  /* --- Content --- */
+  /* Drag region overlays the top of the content area — doesn't take up flow space */
+  .content-drag-region {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 28px;
+    -webkit-app-region: drag;
+    z-index: 5;
+    pointer-events: auto;
+  }
+
+  /* --- Content area --- */
 
   .content {
     flex: 1;
     overflow-y: auto;
-    padding: var(--space-6);
-    padding-top: calc(52px + var(--space-4));
-    background: var(--bg-base);
+    padding: var(--space-3) var(--space-6) var(--space-6);
     position: relative;
   }
 
-  /* Full-width drag region — overlays the entire top of the window
-     for dragging. Sits above sidebar + content in a fixed position. */
-  .window-drag-region {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    height: 52px;
-    z-index: 100;
-    -webkit-app-region: drag;
-    /* Transparent — just a drag target, no visual element */
-  }
-
-  /* --- Toast notifications --- */
+  /* --- Toasts --- */
 
   .toast {
     position: fixed;
@@ -275,23 +421,22 @@
     align-items: center;
     gap: var(--space-2);
     z-index: 1000;
-    -webkit-app-region: no-drag;
-    box-shadow: var(--shadow-lg);
+    box-shadow: var(--glass-edge-shadow), var(--shadow-lg);
     animation: toastIn var(--duration-slow) var(--ease-out);
-    backdrop-filter: blur(20px);
-    -webkit-backdrop-filter: blur(20px);
+    backdrop-filter: blur(24px) saturate(1.3);
+    -webkit-backdrop-filter: blur(24px) saturate(1.3);
     max-width: 400px;
   }
 
   .toast-error {
-    background: var(--red-subtle);
-    border: 1px solid var(--red-subtle);
+    background: rgba(255, 69, 58, 0.18);
+    border: 1px solid rgba(255, 69, 58, 0.25);
     color: var(--red);
   }
 
   .toast-success {
-    background: var(--green-subtle);
-    border: 1px solid var(--green-subtle);
+    background: rgba(48, 209, 88, 0.18);
+    border: 1px solid rgba(48, 209, 88, 0.25);
     color: var(--green);
   }
 

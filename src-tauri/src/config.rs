@@ -8,9 +8,14 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+/// Global lock for config file read-modify-write operations.
+/// Prevents concurrent access from corrupting the JSON file.
+static CONFIG_LOCK: Mutex<()> = Mutex::new(());
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -103,15 +108,22 @@ pub fn downloads_dir() -> PathBuf {
     data_dir().join("downloads")
 }
 
+/// Returns the path to the cache directory.
+///
+/// - macOS:  `~/Library/Application Support/corkscrew/cache`
+/// - Linux:  `~/.local/share/corkscrew/cache`
+pub fn cache_dir() -> PathBuf {
+    data_dir().join("cache")
+}
+
 // ---------------------------------------------------------------------------
 // Config I/O
 // ---------------------------------------------------------------------------
 
-/// Loads the application configuration from disk.
-///
-/// If the config file does not exist yet, a default (empty) `AppConfig` is
-/// returned so callers never have to deal with a missing-file error.
-pub fn get_config() -> Result<AppConfig> {
+// Internal (unlocked) implementations — used by the public API to avoid
+// deadlocks when `set_config_value` calls both read and write internally.
+
+fn get_config_inner() -> Result<AppConfig> {
     let path = config_path();
 
     if !path.exists() {
@@ -119,13 +131,18 @@ pub fn get_config() -> Result<AppConfig> {
     }
 
     let contents = fs::read_to_string(&path)?;
-    let config: AppConfig = serde_json::from_str(&contents)?;
+
+    // Handle empty/whitespace-only files (e.g. from interrupted writes)
+    let trimmed = contents.trim_start_matches('\u{feff}').trim();
+    if trimmed.is_empty() {
+        return Ok(AppConfig::default());
+    }
+
+    let config: AppConfig = serde_json::from_str(trimmed)?;
     Ok(config)
 }
 
-/// Persists the given configuration to disk, creating parent directories as
-/// needed.
-pub fn save_config(config: &AppConfig) -> Result<()> {
+fn save_config_inner(config: &AppConfig) -> Result<()> {
     let path = config_path();
 
     if let Some(parent) = path.parent() {
@@ -133,17 +150,47 @@ pub fn save_config(config: &AppConfig) -> Result<()> {
     }
 
     let json = serde_json::to_string_pretty(config)?;
-    // Match the Python version's trailing newline.
-    fs::write(&path, format!("{json}\n"))?;
+    let data = format!("{json}\n");
+
+    // Atomic write: write to temp file then rename to avoid corruption
+    // if the process is interrupted mid-write.
+    let tmp_path = path.with_extension("json.tmp");
+    fs::write(&tmp_path, &data)?;
+    fs::rename(&tmp_path, &path)?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Public (locked) API
+// ---------------------------------------------------------------------------
+
+/// Loads the application configuration from disk.
+///
+/// If the config file does not exist yet, a default (empty) `AppConfig` is
+/// returned so callers never have to deal with a missing-file error.
+pub fn get_config() -> Result<AppConfig> {
+    let _lock = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    get_config_inner()
+}
+
+/// Persists the given configuration to disk, creating parent directories as
+/// needed.
+pub fn save_config(config: &AppConfig) -> Result<()> {
+    let _lock = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    save_config_inner(config)
 }
 
 /// Sets a single configuration value by key name and saves to disk.
 ///
 /// Known keys (`nexus_api_key`, `download_dir`) are written to their typed
 /// fields; any other key is stored in the extensible `extra` map.
+///
+/// This acquires the config lock for the entire read-modify-write cycle to
+/// prevent concurrent calls from corrupting the JSON file.
 pub fn set_config_value(key: &str, value: &str) -> Result<()> {
-    let mut config = get_config()?;
+    let _lock = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let mut config = get_config_inner()?;
 
     match key {
         "nexus_api_key" => {
@@ -160,7 +207,7 @@ pub fn set_config_value(key: &str, value: &str) -> Result<()> {
         }
     }
 
-    save_config(&config)
+    save_config_inner(&config)
 }
 
 /// Retrieves a single configuration value by key name.
@@ -169,7 +216,9 @@ pub fn set_config_value(key: &str, value: &str) -> Result<()> {
 /// exist. Known keys are read from their typed fields; unknown keys are looked
 /// up in the `extra` map.
 pub fn get_config_value(key: &str) -> Result<Option<String>> {
-    let config = get_config()?;
+    let _lock = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let config = get_config_inner()?;
 
     let value = match key {
         "nexus_api_key" => config.nexus_api_key,

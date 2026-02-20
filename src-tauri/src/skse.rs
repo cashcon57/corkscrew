@@ -1,10 +1,13 @@
-//! SKSE (Skyrim Script Extender) detection, download, and installation.
+//! SKSE (Skyrim Script Extender) detection and installation.
 //!
 //! Provides utilities for:
 //! - Detecting whether SKSE is installed in a Skyrim SE game directory
-//! - Downloading the latest SKSE build from the official site
-//! - Installing SKSE files (loader, DLLs, Data/Scripts) into a game directory
+//! - Installing SKSE files from a user-provided local archive
 //! - Persisting per-game SKSE preference in the Corkscrew config
+//!
+//! **NOTE:** SKSE's license prohibits automated redistribution. We do NOT
+//! auto-download SKSE. Instead, the user downloads the archive manually from
+//! the official site and we install from their local copy.
 
 use std::fs;
 use std::io;
@@ -25,12 +28,6 @@ use crate::installer;
 pub enum SkseError {
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
-
-    #[error("HTTP request failed: {0}")]
-    Http(#[from] reqwest::Error),
-
-    #[error("Could not find SKSE download link on the official page")]
-    DownloadLinkNotFound,
 
     #[error("Archive extraction failed: {0}")]
     Extraction(String),
@@ -137,83 +134,61 @@ fn detect_skse_version(game_path: &Path) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Download & Install
+// Install from local archive
 // ---------------------------------------------------------------------------
 
-/// Download and install SKSE from the official website.
+/// Return the official SKSE download page URL so the frontend can open it.
+pub fn skse_download_url() -> &'static str {
+    SKSE_URL
+}
+
+/// Install SKSE from a user-provided local archive (.7z or .zip).
 ///
-/// 1. Fetches the SKSE download page and parses the `.7z` link.
-/// 2. Downloads the archive into `download_dir`.
-/// 3. Extracts the archive.
-/// 4. Copies SKSE files into the game directory.
+/// The user downloads the archive manually from <https://skse.silverlock.org/>
+/// and then points Corkscrew at the file. This respects SKSE's redistribution
+/// license.
+///
+/// 1. Extracts the archive to a temporary directory.
+/// 2. Copies SKSE files into the game directory.
+/// 3. Cleans up the temp directory.
 ///
 /// Returns an updated [`SkseStatus`] reflecting the new installation.
-pub async fn download_and_install_skse(
+pub fn install_skse_from_archive(
     game_path: &Path,
-    download_dir: &Path,
+    archive_path: &Path,
 ) -> Result<SkseStatus> {
-    info!("Starting SKSE download and installation");
-
-    // 1. Fetch the SKSE page and find the download link.
-    let html = reqwest::get(SKSE_URL)
-        .await?
-        .text()
-        .await?;
-
-    let relative_url =
-        parse_skse_download_url(&html).ok_or(SkseError::DownloadLinkNotFound)?;
-
-    // Build the full URL (relative links on skse.silverlock.org).
-    let download_url = if relative_url.starts_with("http") {
-        relative_url.clone()
-    } else {
-        format!("{}{}", SKSE_URL.trim_end_matches('/'), relative_url)
-    };
-
-    info!("SKSE download URL: {}", download_url);
-
-    // 2. Download the archive.
-    fs::create_dir_all(download_dir)?;
-
-    let file_name = download_url
-        .rsplit('/')
-        .next()
-        .unwrap_or("skse64.7z")
-        .to_string();
-    let archive_path = download_dir.join(&file_name);
-
-    info!("Downloading SKSE to: {}", archive_path.display());
-
-    let response = reqwest::get(&download_url).await?;
-    let bytes = response.bytes().await?;
-    fs::write(&archive_path, &bytes)?;
+    if !archive_path.exists() {
+        return Err(SkseError::Io(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("Archive not found: {}", archive_path.display()),
+        )));
+    }
 
     info!(
-        "Downloaded {} bytes to {}",
-        bytes.len(),
+        "Installing SKSE from local archive: {}",
         archive_path.display()
     );
 
-    // 3. Extract the archive.
-    let extract_dir = download_dir.join("skse_extract");
+    // 1. Extract the archive to a temp directory.
+    let extract_dir = std::env::temp_dir().join("corkscrew_skse_extract");
     if extract_dir.exists() {
         fs::remove_dir_all(&extract_dir)?;
     }
     fs::create_dir_all(&extract_dir)?;
 
-    installer::extract_archive(&archive_path, &extract_dir).map_err(|e| {
+    installer::extract_archive(archive_path, &extract_dir).map_err(|e| {
         SkseError::Extraction(format!("Failed to extract SKSE archive: {}", e))
     })?;
 
-    // 4. Install SKSE files into the game directory.
+    // 2. Install SKSE files into the game directory.
     install_skse_files(&extract_dir, game_path)?;
 
-    // Clean up extraction directory.
+    // 3. Clean up extraction directory.
     if let Err(e) = fs::remove_dir_all(&extract_dir) {
         warn!("Failed to clean up SKSE extraction dir: {}", e);
     }
 
-    // 5. Return updated status.
+    // 4. Return updated status.
     let status = detect_skse(game_path);
     info!(
         "SKSE installation complete: installed={}, version={:?}",
@@ -340,6 +315,163 @@ pub fn set_skse_preference(game_id: &str, bottle_name: &str, enabled: bool) -> R
 }
 
 // ---------------------------------------------------------------------------
+// SKSE ↔ Game Version Compatibility
+// ---------------------------------------------------------------------------
+
+/// Result of checking SKSE + game version compatibility.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SkseCompatibility {
+    /// Overall compatibility verdict.
+    pub compatible: bool,
+    /// The detected SKSE version, if any.
+    pub skse_version: Option<String>,
+    /// The detected game version string.
+    pub game_version: String,
+    /// The expected game version range for this SKSE version (min, max).
+    pub expected_game_versions: Option<(String, String)>,
+    /// Human-readable summary.
+    pub message: String,
+    /// Severity: "ok", "warning", or "error".
+    pub severity: String,
+}
+
+/// Map a detected SKSE version to the Skyrim game version range it supports.
+///
+/// Returns `Some((min_game_version, max_game_version))` for known SKSE builds.
+pub fn skse_game_compatibility(skse_version: &str) -> Option<(&'static str, &'static str)> {
+    let parts: Vec<u32> = skse_version
+        .split('.')
+        .filter_map(|p| p.parse().ok())
+        .collect();
+
+    if parts.len() < 3 {
+        return None;
+    }
+
+    let (major, minor, patch) = (parts[0], parts[1], parts[2]);
+
+    match (major, minor) {
+        // SKSE 2.0.x and 2.1.x target Skyrim SE 1.5.97
+        (2, 0) | (2, 1) => Some(("1.5.97", "1.5.97")),
+        // SKSE 2.2.x targets AE versions
+        (2, 2) => {
+            if patch <= 2 {
+                // 2.2.0 – 2.2.2 → AE 1.6.317 – 1.6.659
+                Some(("1.6.317", "1.6.659"))
+            } else {
+                // 2.2.3+ → AE 1.6.1130+
+                Some(("1.6.1130", "1.6.1170"))
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Classify whether "Skyrim SE 1.5.97" or "Anniversary Edition" from a
+/// [`DowngradeStatus`] version string.
+fn classify_game_version(version_str: &str) -> &str {
+    if version_str.contains("1.5.97") {
+        "SE"
+    } else if version_str.contains("Anniversary")
+        || version_str.contains("1.6")
+    {
+        "AE"
+    } else {
+        "Unknown"
+    }
+}
+
+/// Run a combined SKSE + game version compatibility check.
+///
+/// Takes the SKSE detection result and the downgrade/version detection result
+/// and produces a single compatibility verdict.
+pub fn check_skse_compatibility(
+    skse_status: &SkseStatus,
+    downgrade_status: &crate::downgrader::DowngradeStatus,
+) -> SkseCompatibility {
+    let game_version = downgrade_status.current_version.clone();
+
+    // Case 1: SKSE is not installed at all
+    if !skse_status.installed {
+        return SkseCompatibility {
+            compatible: false,
+            skse_version: None,
+            game_version,
+            expected_game_versions: None,
+            message: "SKSE is not installed. Download it from the official site and install from the archive.".into(),
+            severity: "error".into(),
+        };
+    }
+
+    // Case 2: SKSE is installed but we couldn't detect the version
+    let skse_ver = match &skse_status.version {
+        Some(v) => v.clone(),
+        None => {
+            return SkseCompatibility {
+                compatible: true,
+                skse_version: None,
+                game_version,
+                expected_game_versions: None,
+                message: "SKSE is installed but the version could not be determined. Verify manually that it matches your game version.".into(),
+                severity: "warning".into(),
+            };
+        }
+    };
+
+    // Case 3: SKSE version detected — check against game version
+    let expected = skse_game_compatibility(&skse_ver);
+    let game_class = classify_game_version(&game_version).to_string();
+
+    match expected {
+        Some((min_ver, max_ver)) => {
+            let expected_class = if min_ver == "1.5.97" { "SE" } else { "AE" };
+
+            if game_class == expected_class || game_class == "Unknown" {
+                let message = format!(
+                    "SKSE {} is compatible with Skyrim {} ({} – {}).",
+                    skse_ver, game_class, min_ver, max_ver
+                );
+                SkseCompatibility {
+                    compatible: true,
+                    skse_version: Some(skse_ver),
+                    game_version,
+                    expected_game_versions: Some((min_ver.into(), max_ver.into())),
+                    message,
+                    severity: "ok".into(),
+                }
+            } else {
+                let message = format!(
+                    "SKSE {} targets Skyrim {} ({} – {}), but you have Skyrim {}. Install the correct SKSE build for your game version.",
+                    skse_ver, expected_class, min_ver, max_ver, game_class
+                );
+                SkseCompatibility {
+                    compatible: false,
+                    skse_version: Some(skse_ver),
+                    game_version,
+                    expected_game_versions: Some((min_ver.into(), max_ver.into())),
+                    message,
+                    severity: "error".into(),
+                }
+            }
+        }
+        None => {
+            let message = format!(
+                "SKSE {} is installed. Could not determine expected game version range — verify compatibility manually.",
+                skse_ver
+            );
+            SkseCompatibility {
+                compatible: true,
+                skse_version: Some(skse_ver),
+                game_version,
+                expected_game_versions: None,
+                message,
+                severity: "warning".into(),
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helper functions
 // ---------------------------------------------------------------------------
 
@@ -394,55 +526,6 @@ fn find_subdirectory_case_insensitive(dir: &Path, target: &str) -> Option<PathBu
             let name = entry.file_name().to_string_lossy().to_lowercase();
             if name == target_lower {
                 return Some(entry.path());
-            }
-        }
-    }
-
-    None
-}
-
-/// Parse the SKSE download page HTML and extract the `.7z` download URL
-/// for the 64-bit build (skse64).
-///
-/// Looks for `href="..."` attributes containing both "skse64" and ".7z".
-#[allow(dead_code)]
-fn parse_skse_download_url(html: &str) -> Option<String> {
-    // Simple HTML parsing: find href attributes that point to .7z files
-    // containing "skse64" in the filename.
-    //
-    // We avoid pulling in a full HTML parser for this one use case.
-    // The SKSE page has a straightforward structure with direct links.
-
-    for segment in html.split("href=\"") {
-        if let Some(end) = segment.find('"') {
-            let href = &segment[..end];
-
-            let href_lower = href.to_lowercase();
-            if href_lower.contains("skse64") && href_lower.ends_with(".7z") {
-                // Skip any "src" (source code) archives.
-                if href_lower.contains("_src") {
-                    continue;
-                }
-
-                debug!("Found SKSE download link: {}", href);
-                return Some(href.to_string());
-            }
-        }
-    }
-
-    // Also try looking for links with the pattern in single-quoted hrefs.
-    for segment in html.split("href='") {
-        if let Some(end) = segment.find('\'') {
-            let href = &segment[..end];
-
-            let href_lower = href.to_lowercase();
-            if href_lower.contains("skse64") && href_lower.ends_with(".7z") {
-                if href_lower.contains("_src") {
-                    continue;
-                }
-
-                debug!("Found SKSE download link (single-quoted): {}", href);
-                return Some(href.to_string());
             }
         }
     }
@@ -550,33 +633,115 @@ mod tests {
     }
 
     #[test]
-    fn parse_skse_download_url_finds_link() {
-        let html = r#"
-            <html><body>
-            <a href="/beta/skse64_2_02_06.7z">SKSE64 2.2.6</a>
-            <a href="/beta/skse64_2_02_06_src.7z">Source</a>
-            </body></html>
-        "#;
-
-        let url = parse_skse_download_url(html);
-        assert!(url.is_some());
-        let url = url.unwrap();
-        assert!(url.contains("skse64_2_02_06.7z"));
-        // Should NOT match the source archive.
-        assert!(!url.contains("_src"));
+    fn skse_compat_se_versions() {
+        // SKSE 2.0.x and 2.1.x should target SE 1.5.97
+        assert_eq!(
+            skse_game_compatibility("2.0.20"),
+            Some(("1.5.97", "1.5.97"))
+        );
+        assert_eq!(
+            skse_game_compatibility("2.1.5"),
+            Some(("1.5.97", "1.5.97"))
+        );
     }
 
     #[test]
-    fn parse_skse_download_url_returns_none_for_no_match() {
-        let html = r#"<html><body><p>No links here</p></body></html>"#;
-        assert!(parse_skse_download_url(html).is_none());
+    fn skse_compat_ae_early_versions() {
+        // SKSE 2.2.0–2.2.2 should target AE 1.6.317–1.6.659
+        assert_eq!(
+            skse_game_compatibility("2.2.0"),
+            Some(("1.6.317", "1.6.659"))
+        );
+        assert_eq!(
+            skse_game_compatibility("2.2.2"),
+            Some(("1.6.317", "1.6.659"))
+        );
     }
 
     #[test]
-    fn parse_skse_download_url_skips_source() {
-        let html = r#"<a href="/beta/skse64_2_02_06_src.7z">Source only</a>"#;
-        // Only source links, no binary.
-        assert!(parse_skse_download_url(html).is_none());
+    fn skse_compat_ae_late_versions() {
+        // SKSE 2.2.3+ should target AE 1.6.1130+
+        assert_eq!(
+            skse_game_compatibility("2.2.3"),
+            Some(("1.6.1130", "1.6.1170"))
+        );
+        assert_eq!(
+            skse_game_compatibility("2.2.6"),
+            Some(("1.6.1130", "1.6.1170"))
+        );
+    }
+
+    #[test]
+    fn skse_compat_unknown_version() {
+        assert_eq!(skse_game_compatibility("3.0.0"), None);
+        assert_eq!(skse_game_compatibility("invalid"), None);
+    }
+
+    #[test]
+    fn check_compat_no_skse() {
+        let skse_status = SkseStatus {
+            installed: false,
+            loader_path: None,
+            version: None,
+            use_skse: false,
+        };
+        let downgrade_status = crate::downgrader::DowngradeStatus {
+            current_version: "1.5.97 (Special Edition)".into(),
+            target_version: "1.5.97".into(),
+            is_downgraded: true,
+            downgrade_path: None,
+        };
+
+        let result = check_skse_compatibility(&skse_status, &downgrade_status);
+        assert!(!result.compatible);
+        assert_eq!(result.severity, "error");
+    }
+
+    #[test]
+    fn check_compat_matching_se() {
+        let skse_status = SkseStatus {
+            installed: true,
+            loader_path: Some("/game/skse64_loader.exe".into()),
+            version: Some("2.0.20".into()),
+            use_skse: true,
+        };
+        let downgrade_status = crate::downgrader::DowngradeStatus {
+            current_version: "1.5.97 (Special Edition)".into(),
+            target_version: "1.5.97".into(),
+            is_downgraded: true,
+            downgrade_path: None,
+        };
+
+        let result = check_skse_compatibility(&skse_status, &downgrade_status);
+        assert!(result.compatible);
+        assert_eq!(result.severity, "ok");
+    }
+
+    #[test]
+    fn check_compat_mismatch_ae_skse_on_se_game() {
+        let skse_status = SkseStatus {
+            installed: true,
+            loader_path: Some("/game/skse64_loader.exe".into()),
+            version: Some("2.2.6".into()),
+            use_skse: true,
+        };
+        let downgrade_status = crate::downgrader::DowngradeStatus {
+            current_version: "1.5.97 (Special Edition)".into(),
+            target_version: "1.5.97".into(),
+            is_downgraded: true,
+            downgrade_path: None,
+        };
+
+        let result = check_skse_compatibility(&skse_status, &downgrade_status);
+        assert!(!result.compatible);
+        assert_eq!(result.severity, "error");
+    }
+
+    #[test]
+    fn skse_download_url_is_valid() {
+        let url = skse_download_url();
+        assert!(url.starts_with("https://"));
+        assert!(url.contains("skse"));
     }
 
     #[test]

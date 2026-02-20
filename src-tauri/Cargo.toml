@@ -1,6 +1,6 @@
 [package]
 name = "corkscrew"
-version = "0.1.0"
+version = "0.4.0"
 description = "A mod manager for CrossOver/Wine games on macOS and Linux"
 authors = ["cashconway"]
 edition = "2021"
@@ -67,6 +67,9 @@ sha2 = "0.10"
 
 # LOOT integration (plugin sorting + load order)
 libloot = "0.29"
+
+# WebSocket (Nexus Mods SSO)
+tungstenite = { version = "0.24", features = ["native-tls"] }
 
 [dev-dependencies]
 tempfile = "3"

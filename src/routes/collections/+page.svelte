@@ -1,0 +1,1519 @@
+<script lang="ts">
+  import { onMount } from "svelte";
+  import { selectedGame, games, showError, showSuccess } from "$lib/stores";
+  import type { DetectedGame, CollectionInfo, CollectionMod, CollectionRevision, CollectionSearchResult } from "$lib/types";
+  import {
+    browseCollections,
+    getCollection,
+    getCollectionMods,
+    getCollectionRevisions,
+    getNexusAccountStatus,
+    setConfigValue,
+    getConfig,
+  } from "$lib/api";
+  import { config } from "$lib/stores";
+  import { openUrl } from "@tauri-apps/plugin-opener";
+  import { marked } from "marked";
+  import DOMPurify from "dompurify";
+  import CompatibilityPanel from "$lib/components/CompatibilityPanel.svelte";
+
+  const NEXUS_API_KEY_URL = "https://www.nexusmods.com/users/myaccount?tab=api+access";
+
+  // ---- Account State ----
+
+  interface AccountStatus {
+    connected: boolean;
+    auth_type?: string;
+    name?: string;
+    is_premium?: boolean;
+    avatar?: string | null;
+  }
+
+  let account = $state<AccountStatus | null>(null);
+  let checkingAuth = $state(true);
+  let signingIn = $state(false);
+  let apiKeyInput = $state("");
+  let validationError = $state<string | null>(null);
+
+  // ---- Collections State ----
+
+  let collections = $state<CollectionInfo[]>([]);
+  let filtered = $state<CollectionInfo[]>([]);
+  let loading = $state(false);
+  let searchQuery = $state("");
+  let gameFilter = $state("all");
+  let showNsfw = $state(false);
+  let sortField = $state<"endorsements" | "downloads" | "name" | "rating" | "created">("endorsements");
+  let sortDirection = $state<"asc" | "desc">("desc");
+  let selectedCollection = $state<CollectionInfo | null>(null);
+  let selectedMods = $state<CollectionMod[]>([]);
+  let loadingDetail = $state(false);
+  let installing = $state(false);
+  let renderedDescription = $state("");
+
+  let gameList = $state<DetectedGame[]>([]);
+  games.subscribe(g => gameList = g);
+
+  const gameOptions = $derived.by(() => {
+    const gamesSet = new Set(collections.map(c => c.game_domain));
+    return Array.from(gamesSet).sort();
+  });
+
+  $effect(() => {
+    let result = collections;
+
+    if (gameFilter !== "all") {
+      result = result.filter(c => c.game_domain === gameFilter);
+    }
+
+    if (!showNsfw) {
+      result = result.filter(c => !c.adult_content);
+    }
+
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      result = result.filter(c =>
+        c.name.toLowerCase().includes(q) ||
+        c.author.toLowerCase().includes(q) ||
+        c.summary.toLowerCase().includes(q) ||
+        c.tags.some(t => t.toLowerCase().includes(q))
+      );
+    }
+
+    filtered = result;
+  });
+
+  onMount(async () => {
+    await checkAccount();
+  });
+
+  async function checkAccount() {
+    checkingAuth = true;
+    try {
+      account = await getNexusAccountStatus();
+      if (account.connected) {
+        await loadCollections();
+      }
+    } catch {
+      account = { connected: false };
+    } finally {
+      checkingAuth = false;
+    }
+  }
+
+  async function openNexusApiPage() {
+    try {
+      await openUrl(NEXUS_API_KEY_URL);
+    } catch { /* fallback: link is visible in UI */ }
+  }
+
+  async function handleConnect() {
+    if (!apiKeyInput.trim()) return;
+    signingIn = true;
+    validationError = null;
+    try {
+      await setConfigValue("nexus_api_key", apiKeyInput.trim());
+      const cfg = await getConfig();
+      config.set(cfg);
+      const status = await getNexusAccountStatus();
+      if (status.connected) {
+        account = status;
+        apiKeyInput = "";
+        showSuccess(`Connected as ${status.name}`);
+        await loadCollections();
+      } else {
+        await setConfigValue("nexus_api_key", "");
+        const cfg2 = await getConfig();
+        config.set(cfg2);
+        validationError = "Invalid API key. Please check and try again.";
+      }
+    } catch (e: any) {
+      try {
+        await setConfigValue("nexus_api_key", "");
+        const cfg2 = await getConfig();
+        config.set(cfg2);
+      } catch { /* ignore */ }
+      const msg = typeof e === "string" ? e : e?.message ?? String(e);
+      validationError = `Connection failed: ${msg}`;
+    } finally {
+      signingIn = false;
+    }
+  }
+
+  async function loadCollections(gameDomain: string = "skyrimspecialedition") {
+    loading = true;
+    try {
+      const result: CollectionSearchResult = await browseCollections(gameDomain, 50, 0, sortField, sortDirection);
+      collections = result.collections;
+    } catch (e: any) {
+      showError(`Failed to load collections: ${e}`);
+    } finally {
+      loading = false;
+    }
+  }
+
+  function reloadWithSort() {
+    const gd = gameFilter !== "all" ? gameFilter : "skyrimspecialedition";
+    loadCollections(gd);
+  }
+
+  async function viewCollectionDetail(collection: CollectionInfo) {
+    loadingDetail = true;
+    renderedDescription = "";
+    try {
+      const [detail, mods] = await Promise.all([
+        getCollection(collection.slug, collection.game_domain),
+        getCollectionMods(collection.slug, collection.latest_revision),
+      ]);
+      selectedCollection = detail;
+      selectedMods = mods;
+
+      // Pre-render the description as markdown
+      if (detail.description) {
+        const html = await marked.parse(detail.description);
+        renderedDescription = DOMPurify.sanitize(html);
+      }
+    } catch (e: any) {
+      showError(`Failed to load collection details: ${e}`);
+    } finally {
+      loadingDetail = false;
+    }
+  }
+
+  async function handleInstallCollection() {
+    if (!selectedCollection) return;
+    showSuccess(`Collection installation coming soon. "${selectedCollection.name}" cannot be installed yet.`);
+  }
+
+  function backToBrowse() {
+    selectedCollection = null;
+    selectedMods = [];
+    renderedDescription = "";
+  }
+
+  function formatSize(bytes: number): string {
+    if (bytes >= 1073741824) return `${(bytes / 1073741824).toFixed(1)} GB`;
+    if (bytes >= 1048576) return `${(bytes / 1048576).toFixed(0)} MB`;
+    if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+    return `${bytes} B`;
+  }
+
+  function formatNumber(n: number): string {
+    if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
+    if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
+    return n.toString();
+  }
+
+  function gameDomainDisplay(domain: string): string {
+    const map: Record<string, string> = {
+      skyrim: "Skyrim LE",
+      skyrimspecialedition: "Skyrim SE",
+      skyrimvr: "Skyrim VR",
+      fallout4: "Fallout 4",
+      fallout4vr: "Fallout 4 VR",
+      falloutnewvegas: "Fallout NV",
+      fallout3: "Fallout 3",
+      oblivion: "Oblivion",
+      morrowind: "Morrowind",
+      enderal: "Enderal",
+      enderalspecialedition: "Enderal SE",
+      cyberpunk2077: "Cyberpunk 2077",
+      stardewvalley: "Stardew Valley",
+      witcher3: "Witcher 3",
+      starfield: "Starfield",
+      baldursgate3: "BG3",
+    };
+    return map[domain] || domain;
+  }
+
+  function sourceTypeLabel(type: string): string {
+    switch (type) {
+      case "nexus": return "Nexus";
+      case "manual": return "Manual";
+      case "bundled": return "Bundled";
+      case "direct": return "Direct";
+      case "browse": return "Browse";
+      default: return type.charAt(0).toUpperCase() + type.slice(1);
+    }
+  }
+
+  function sourceTypeColor(type: string): string {
+    switch (type) {
+      case "nexus": return "var(--system-accent)";
+      case "manual": return "var(--yellow)";
+      case "bundled": return "var(--green)";
+      case "direct": return "var(--green)";
+      case "browse": return "var(--yellow)";
+      default: return "var(--text-tertiary)";
+    }
+  }
+
+  function sourceTypeBg(type: string): string {
+    switch (type) {
+      case "nexus": return "var(--system-accent-subtle)";
+      case "manual": return "var(--yellow-subtle)";
+      case "bundled": return "var(--green-subtle)";
+      case "direct": return "var(--green-subtle)";
+      case "browse": return "var(--yellow-subtle)";
+      default: return "var(--surface-hover)";
+    }
+  }
+</script>
+
+<div class="collections-page">
+  {#if checkingAuth}
+    <!-- Checking account status -->
+    <header class="page-header">
+      <div class="header-text">
+        <h2 class="page-title">Collections</h2>
+        <p class="page-subtitle">Browse and install curated mod collections from Nexus Mods</p>
+      </div>
+    </header>
+    <div class="loading-container">
+      <div class="loading-card">
+        <div class="spinner"><div class="spinner-ring"></div></div>
+        <div class="loading-text">
+          <p class="loading-title">Checking account</p>
+          <p class="loading-detail">Verifying Nexus Mods connection...</p>
+        </div>
+      </div>
+    </div>
+  {:else if !account?.connected}
+    <!-- Not connected — show connect prompt -->
+    <header class="page-header">
+      <div class="header-text">
+        <h2 class="page-title">Collections</h2>
+        <p class="page-subtitle">Browse and install curated mod collections from Nexus Mods</p>
+      </div>
+    </header>
+    <div class="connect-prompt">
+      <div class="connect-card">
+        <div class="connect-icon">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+            <line x1="8" y1="21" x2="16" y2="21" />
+            <line x1="12" y1="17" x2="12" y2="21" />
+          </svg>
+        </div>
+        <h3 class="connect-title">Connect to Nexus Mods</h3>
+        <p class="connect-desc">
+          Connect your Nexus Mods account to browse and install curated mod collections.
+          Premium members get faster downloads.
+        </p>
+        <div class="connect-steps">
+          <button
+            class="btn btn-secondary btn-step"
+            onclick={openNexusApiPage}
+            type="button"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+              <polyline points="15 3 21 3 21 9" />
+              <line x1="10" y1="14" x2="21" y2="3" />
+            </svg>
+            Get API Key from Nexus Mods
+          </button>
+          <div class="connect-input-row">
+            <input
+              type="password"
+              class="connect-input"
+              placeholder="Paste your API key here"
+              bind:value={apiKeyInput}
+              onkeydown={(e) => { if (e.key === "Enter") handleConnect(); }}
+              oninput={() => { validationError = null; }}
+            />
+            <button
+              class="btn btn-primary btn-connect"
+              onclick={handleConnect}
+              disabled={signingIn || !apiKeyInput.trim()}
+            >
+              {#if signingIn}
+                <span class="spinner-sm"></span>
+                Verifying...
+              {:else}
+                Connect
+              {/if}
+            </button>
+          </div>
+          {#if validationError}
+            <span class="connect-error">{validationError}</span>
+          {/if}
+        </div>
+      </div>
+    </div>
+  {:else if selectedCollection && !loadingDetail}
+    <!-- Collection Detail View -->
+    <div class="detail-view">
+      <div class="detail-header">
+        <button class="btn btn-ghost" onclick={backToBrowse}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M19 12H5" />
+            <polyline points="12 19 5 12 12 5" />
+          </svg>
+          Back to Browse
+        </button>
+      </div>
+
+      <div class="detail-content">
+        <div class="detail-title-section">
+          <div class="detail-title-row">
+            <h2 class="detail-name">{selectedCollection.name}</h2>
+            <span class="game-badge">{gameDomainDisplay(selectedCollection.game_domain)}</span>
+          </div>
+          <p class="detail-author">by {selectedCollection.author}</p>
+          <span class="detail-revision">Revision {selectedCollection.latest_revision}</span>
+        </div>
+
+        <!-- Stats Bar -->
+        <div class="detail-stats-bar">
+          <div class="detail-stat">
+            <span class="detail-stat-value">{selectedCollection.total_mods}</span>
+            <span class="detail-stat-label">Mods</span>
+          </div>
+          <div class="detail-stat">
+            <span class="detail-stat-value">{formatNumber(selectedCollection.total_downloads)}</span>
+            <span class="detail-stat-label">Downloads</span>
+          </div>
+          <div class="detail-stat">
+            <span class="detail-stat-value">{formatNumber(selectedCollection.endorsements)}</span>
+            <span class="detail-stat-label">Endorsements</span>
+          </div>
+          {#if selectedCollection.download_size}
+            <div class="detail-stat">
+              <span class="detail-stat-value">{formatSize(selectedCollection.download_size)}</span>
+              <span class="detail-stat-label">Download Size</span>
+            </div>
+          {/if}
+          <div class="detail-stat">
+            <span class="detail-stat-value">Rev. {selectedCollection.latest_revision}</span>
+            <span class="detail-stat-label">Latest</span>
+          </div>
+        </div>
+
+        <!-- Description -->
+        {#if renderedDescription}
+          <div class="detail-section">
+            <h3 class="detail-section-title">Description</h3>
+            <div class="rendered-markdown">
+              {@html renderedDescription}
+            </div>
+          </div>
+        {/if}
+
+        <!-- Mod List Table -->
+        {#if selectedMods.length > 0}
+          <div class="detail-section">
+            <h3 class="detail-section-title">
+              Mods
+              <span class="title-count">{selectedMods.length}</span>
+            </h3>
+            <div class="mods-table-container">
+              <div class="mods-table">
+                <div class="mods-table-header">
+                  <span class="col-mod-name">Name</span>
+                  <span class="col-mod-version">Version</span>
+                  <span class="col-mod-source">Source</span>
+                  <span class="col-mod-optional">Required</span>
+                </div>
+                <div class="mods-table-body">
+                  {#each selectedMods as mod, i}
+                    <div class="mods-table-row" class:row-even={i % 2 === 0}>
+                      <span class="col-mod-name">
+                        <span class="mod-name-text">{mod.name}</span>
+                      </span>
+                      <span class="col-mod-version">{mod.version || "\u2014"}</span>
+                      <span class="col-mod-source">
+                        <span
+                          class="source-badge"
+                          style="color: {sourceTypeColor(mod.source_type)}; background: {sourceTypeBg(mod.source_type)};"
+                        >
+                          {sourceTypeLabel(mod.source_type)}
+                        </span>
+                      </span>
+                      <span class="col-mod-optional">
+                        {#if mod.optional}
+                          <span class="optional-badge">Optional</span>
+                        {:else}
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--green)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M20 6L9 17l-5-5" />
+                          </svg>
+                        {/if}
+                      </span>
+                    </div>
+                  {/each}
+                </div>
+              </div>
+            </div>
+          </div>
+        {/if}
+
+        <!-- Compatibility Check (Skyrim SE only) -->
+        {#if selectedCollection.game_domain === "skyrimspecialedition" && $selectedGame}
+          <div class="detail-section">
+            <CompatibilityPanel gameId={$selectedGame.game_id} bottleName={$selectedGame.bottle_name} />
+          </div>
+        {/if}
+
+        <!-- Install Button -->
+        <div class="detail-install-bar">
+          <button
+            class="btn btn-primary btn-lg"
+            onclick={handleInstallCollection}
+            disabled={installing || !$selectedGame}
+          >
+            {#if installing}
+              <span class="spinner-sm"></span>
+              Installing...
+            {:else}
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="7 10 12 15 17 10" />
+                <line x1="12" y1="15" x2="12" y2="3" />
+              </svg>
+              Install Collection
+            {/if}
+          </button>
+          {#if !$selectedGame}
+            <span class="install-hint">Select a game from the Mods page first</span>
+          {/if}
+        </div>
+      </div>
+    </div>
+
+  {:else}
+    <!-- Browse View -->
+    <header class="page-header">
+      <div class="header-text">
+        <h2 class="page-title">Collections</h2>
+        <p class="page-subtitle">Browse and install curated mod collections from Nexus Mods</p>
+      </div>
+      <div class="header-right">
+        {#if account?.connected}
+          <div class="account-badge">
+            <div class="account-avatar-sm">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+                <circle cx="12" cy="7" r="4" />
+              </svg>
+            </div>
+            <span class="account-name">{account.name}</span>
+            {#if account.is_premium}
+              <span class="premium-pill">Premium</span>
+            {/if}
+          </div>
+        {/if}
+        {#if !loading}
+          <div class="stat-pill">
+            <span class="stat-value">{filtered.length}</span>
+            <span class="stat-label">{filtered.length === 1 ? "Collection" : "Collections"}</span>
+          </div>
+        {/if}
+      </div>
+    </header>
+
+    {#if loading || loadingDetail}
+      <div class="loading-container">
+        <div class="loading-card">
+          <div class="spinner"><div class="spinner-ring"></div></div>
+          <div class="loading-text">
+            <p class="loading-title">{loadingDetail ? "Loading collection" : "Fetching collections"}</p>
+            <p class="loading-detail">{loadingDetail ? "Loading collection details..." : "Loading collections from Nexus Mods..."}</p>
+          </div>
+        </div>
+      </div>
+    {:else}
+      <!-- Filters -->
+      <div class="filters-bar">
+        <div class="search-wrapper">
+          <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="8" />
+            <line x1="21" y1="21" x2="16.65" y2="16.65" />
+          </svg>
+          <input
+            type="text"
+            class="search-input"
+            placeholder="Search collections..."
+            bind:value={searchQuery}
+          />
+        </div>
+        <select class="filter-select" bind:value={gameFilter}>
+          <option value="all">All Games</option>
+          {#each gameOptions as game}
+            <option value={game}>{gameDomainDisplay(game)}</option>
+          {/each}
+        </select>
+        <label class="nsfw-toggle">
+          <input type="checkbox" bind:checked={showNsfw} />
+          <span>NSFW</span>
+        </label>
+        <div class="sort-group">
+          <select class="filter-select" bind:value={sortField} onchange={reloadWithSort}>
+            <option value="endorsements">Sort: Endorsements</option>
+            <option value="downloads">Sort: Downloads</option>
+            <option value="name">Sort: Name</option>
+            <option value="rating">Sort: Rating</option>
+            <option value="created">Sort: Newest</option>
+          </select>
+          <button
+            class="sort-direction-btn"
+            onclick={() => { sortDirection = sortDirection === "asc" ? "desc" : "asc"; reloadWithSort(); }}
+            title={sortDirection === "asc" ? "Ascending" : "Descending"}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              {#if sortDirection === "asc"}
+                <path d="M12 5v14M5 12l7-7 7 7" />
+              {:else}
+                <path d="M12 5v14M5 12l7 7 7-7" />
+              {/if}
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      {#if filtered.length === 0}
+        <div class="empty-state">
+          <div class="empty-icon">
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+              <line x1="3" y1="9" x2="21" y2="9" />
+              <line x1="9" y1="21" x2="9" y2="9" />
+            </svg>
+          </div>
+          <p class="empty-title">No collections found</p>
+          <p class="empty-detail">
+            {#if searchQuery || gameFilter !== "all"}
+              Try adjusting your search or filters.
+            {:else}
+              No collections are currently available. Connect your Nexus Mods API key in Settings.
+            {/if}
+          </p>
+        </div>
+      {:else}
+        <div class="collection-grid">
+          {#each filtered as collection, i (collection.slug)}
+            <div
+              class="collection-card"
+              style="animation-delay: {Math.min(i, 20) * 30}ms"
+            >
+              {#if collection.image_url}
+                <div class="card-image">
+                  <img src={collection.image_url} alt={collection.name} loading="lazy" />
+                </div>
+              {:else}
+                <div class="card-image card-image-placeholder">
+                  <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                    <circle cx="8.5" cy="8.5" r="1.5" />
+                    <polyline points="21 15 16 10 5 21" />
+                  </svg>
+                </div>
+              {/if}
+
+              <div class="card-body">
+                <div class="card-top">
+                  <span class="game-badge">{gameDomainDisplay(collection.game_domain)}</span>
+                  <span class="revision-badge">Rev {collection.latest_revision}</span>
+                </div>
+
+                <h3 class="card-title">{collection.name}</h3>
+                <p class="card-author">by {collection.author}</p>
+
+                {#if collection.summary}
+                  <p class="card-desc">{collection.summary}</p>
+                {/if}
+
+                {#if collection.tags.length > 0}
+                  <div class="card-tags">
+                    {#each collection.tags.slice(0, 5) as tag}
+                      <span class="tag">{tag}</span>
+                    {/each}
+                  </div>
+                {/if}
+
+                <div class="card-stats">
+                  <div class="stat-item">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <rect x="3" y="3" width="7" height="7" />
+                      <rect x="14" y="3" width="7" height="7" />
+                      <rect x="3" y="14" width="7" height="7" />
+                      <rect x="14" y="14" width="7" height="7" />
+                    </svg>
+                    <span class="stat-num">{collection.total_mods}</span>
+                    <span class="stat-lbl">mods</span>
+                  </div>
+                  <div class="stat-item">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                      <polyline points="7 10 12 15 17 10" />
+                      <line x1="12" y1="15" x2="12" y2="3" />
+                    </svg>
+                    <span class="stat-num">{formatNumber(collection.total_downloads)}</span>
+                  </div>
+                  <div class="stat-item">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3" />
+                    </svg>
+                    <span class="stat-num">{formatNumber(collection.endorsements)}</span>
+                  </div>
+                  {#if collection.download_size}
+                    <div class="stat-item">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+                      </svg>
+                      <span class="stat-num">{formatSize(collection.download_size)}</span>
+                    </div>
+                  {/if}
+                </div>
+
+                <div class="card-actions">
+                  <button
+                    class="btn btn-accent btn-sm"
+                    onclick={() => viewCollectionDetail(collection)}
+                  >
+                    View Details
+                  </button>
+                </div>
+              </div>
+            </div>
+          {/each}
+        </div>
+      {/if}
+    {/if}
+  {/if}
+</div>
+
+<style>
+  /* ---- Page Layout ---- */
+
+  .collections-page {
+    padding: var(--space-2) 0 var(--space-12) 0;
+  }
+
+  /* ---- Connect Prompt ---- */
+
+  .connect-prompt {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 400px;
+  }
+
+  .connect-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: var(--space-4);
+    padding: var(--space-12) var(--space-10);
+    max-width: 420px;
+  }
+
+  .connect-icon {
+    color: var(--text-quaternary);
+    margin-bottom: var(--space-2);
+  }
+
+  .connect-title {
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--text-primary);
+  }
+
+  .connect-desc {
+    font-size: 14px;
+    color: var(--text-secondary);
+    line-height: 1.6;
+  }
+
+  .connect-steps {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-3);
+    width: 100%;
+    margin-top: var(--space-2);
+  }
+
+  .btn-step {
+    padding: var(--space-2) var(--space-4);
+    font-size: 13px;
+  }
+
+  .connect-input-row {
+    display: flex;
+    gap: var(--space-2);
+    width: 100%;
+  }
+
+  .connect-input {
+    flex: 1;
+    min-width: 0;
+    padding: var(--space-2) var(--space-3);
+    background: var(--bg-base);
+    border: 1px solid var(--separator-opaque);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-size: 13px;
+    font-family: var(--font-sans);
+    outline: none;
+    transition: border-color var(--duration) var(--ease);
+  }
+
+  .connect-input:focus {
+    border-color: var(--system-accent);
+    box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.15);
+  }
+
+  .connect-input::placeholder {
+    color: var(--text-tertiary);
+  }
+
+  .btn-connect {
+    padding: var(--space-2) var(--space-4);
+    font-size: 13px;
+    flex-shrink: 0;
+  }
+
+  .connect-error {
+    font-size: 12px;
+    color: var(--red);
+  }
+
+  /* ---- Header ---- */
+
+  .page-header {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    margin-bottom: var(--space-8);
+    padding-bottom: var(--space-4);
+    border-bottom: 1px solid var(--separator);
+  }
+
+  .page-title {
+    font-size: 28px;
+    font-weight: 700;
+    color: var(--text-primary);
+    letter-spacing: -0.025em;
+  }
+
+  .page-subtitle {
+    font-size: 14px;
+    color: var(--text-secondary);
+    margin-top: var(--space-1);
+  }
+
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+  }
+
+  .account-badge {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    background: var(--surface);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius);
+    padding: var(--space-2) var(--space-3);
+  }
+
+  .account-avatar-sm {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: var(--surface-hover);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-tertiary);
+    flex-shrink: 0;
+  }
+
+  .account-name {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-secondary);
+  }
+
+  .premium-pill {
+    font-size: 9px;
+    font-weight: 700;
+    color: #ff9f0a;
+    background: rgba(255, 159, 10, 0.15);
+    padding: 1px 5px;
+    border-radius: 100px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
+  .stat-pill {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-1);
+    background: var(--surface);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius);
+    padding: var(--space-2) var(--space-4);
+  }
+
+  .stat-value {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .stat-label {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    font-weight: 500;
+  }
+
+  /* ---- Loading ---- */
+
+  .loading-container {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 280px;
+  }
+
+  .loading-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-6);
+    padding: var(--space-12) var(--space-10);
+  }
+
+  .spinner { width: 36px; height: 36px; }
+
+  .spinner-ring {
+    width: 100%;
+    height: 100%;
+    border: 2.5px solid var(--separator);
+    border-top-color: var(--system-accent);
+    border-radius: 50%;
+    animation: spin 0.9s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  }
+
+  .spinner-sm {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border: 2px solid rgba(255, 255, 255, 0.3);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin 0.75s linear infinite;
+    flex-shrink: 0;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .loading-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-primary);
+    text-align: center;
+  }
+
+  .loading-detail {
+    font-size: 13px;
+    color: var(--text-tertiary);
+    text-align: center;
+    margin-top: var(--space-1);
+  }
+
+  /* ---- Filters ---- */
+
+  .filters-bar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    margin-bottom: var(--space-6);
+  }
+
+  .search-wrapper {
+    flex: 1;
+    position: relative;
+  }
+
+  .search-icon {
+    position: absolute;
+    left: var(--space-3);
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--text-tertiary);
+    pointer-events: none;
+  }
+
+  .search-input {
+    width: 100%;
+    padding: var(--space-2) var(--space-3) var(--space-2) 36px;
+    background: var(--surface);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius);
+    color: var(--text-primary);
+    font-size: 14px;
+    outline: none;
+    transition: border-color var(--duration-fast) var(--ease);
+  }
+
+  .search-input:focus {
+    border-color: var(--system-accent);
+  }
+
+  .search-input::placeholder {
+    color: var(--text-tertiary);
+  }
+
+  .filter-select {
+    padding: var(--space-2) var(--space-3);
+    background: var(--surface);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius);
+    color: var(--text-primary);
+    font-size: 13px;
+    outline: none;
+    cursor: pointer;
+    min-width: 140px;
+  }
+
+  .filter-select:focus {
+    border-color: var(--system-accent);
+  }
+
+  .nsfw-toggle {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: 13px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .nsfw-toggle input {
+    accent-color: var(--system-accent);
+  }
+
+  .sort-group {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    margin-left: auto;
+  }
+
+  .sort-direction-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    border: 1px solid var(--separator);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all var(--duration-fast) var(--ease);
+  }
+
+  .sort-direction-btn:hover {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+  }
+
+  /* ---- Grid ---- */
+
+  .collection-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: var(--space-4);
+  }
+
+  /* ---- Cards ---- */
+
+  .collection-card {
+    background: var(--surface);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    box-shadow: var(--glass-edge-shadow);
+    transition: border-color var(--duration-fast) var(--ease),
+                box-shadow var(--duration-fast) var(--ease);
+    animation: cardFadeIn var(--duration-slow) var(--ease) both;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .collection-card:hover {
+    border-color: rgba(255, 255, 255, 0.12);
+    box-shadow: var(--glass-edge-shadow), var(--shadow-sm);
+  }
+
+  @keyframes cardFadeIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .card-image {
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    overflow: hidden;
+    background: var(--bg-secondary);
+  }
+
+  .card-image img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .card-image-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-quaternary);
+  }
+
+  .card-body {
+    padding: var(--space-4) var(--space-5);
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+  }
+
+  .card-top {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-bottom: var(--space-2);
+    flex-wrap: wrap;
+  }
+
+  .game-badge {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--system-accent);
+    background: var(--system-accent-subtle);
+    padding: 1px var(--space-2);
+    border-radius: var(--radius-sm);
+  }
+
+  .revision-badge {
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--text-tertiary);
+    background: var(--surface-hover);
+    padding: 1px var(--space-2);
+    border-radius: var(--radius-sm);
+  }
+
+  .card-title {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--text-primary);
+    line-height: 1.3;
+    margin-bottom: 2px;
+  }
+
+  .card-author {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-bottom: var(--space-2);
+  }
+
+  .card-desc {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    line-height: 1.5;
+    margin-bottom: var(--space-3);
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .card-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-bottom: var(--space-3);
+  }
+
+  .tag {
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    background: rgba(255, 255, 255, 0.06);
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+  }
+
+  .card-stats {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+    padding: var(--space-3) 0;
+    border-top: 1px solid var(--separator);
+    margin-bottom: var(--space-3);
+  }
+
+  .stat-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--text-tertiary);
+  }
+
+  .stat-num {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .stat-lbl {
+    font-size: 11px;
+    color: var(--text-tertiary);
+  }
+
+  /* removed .size-estimate — replaced by actual download sizes */
+
+  .card-actions {
+    display: flex;
+    gap: var(--space-2);
+    margin-top: auto;
+  }
+
+  /* ---- Buttons ---- */
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    border-radius: var(--radius);
+    font-weight: 600;
+    cursor: pointer;
+    transition: all var(--duration-fast) var(--ease);
+    white-space: nowrap;
+  }
+
+  .btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .btn-sm {
+    padding: var(--space-1) var(--space-3);
+    font-size: 12px;
+    min-height: 28px;
+  }
+
+  .btn-lg {
+    padding: var(--space-3) var(--space-6);
+    font-size: 14px;
+  }
+
+  .btn-accent {
+    background: var(--system-accent);
+    color: #fff;
+    flex: 1;
+  }
+
+  .btn-accent:hover:not(:disabled) {
+    filter: brightness(1.1);
+    box-shadow: 0 1px 6px rgba(0, 122, 255, 0.25);
+  }
+
+  .btn-primary {
+    background: var(--system-accent);
+    color: var(--system-accent-on);
+    padding: var(--space-2) var(--space-5);
+    border-radius: var(--radius);
+  }
+
+  .btn-primary:hover:not(:disabled) {
+    background: var(--system-accent-hover);
+    box-shadow: 0 1px 6px rgba(0, 122, 255, 0.25);
+  }
+
+  .btn-ghost {
+    background: transparent;
+    color: var(--text-secondary);
+    padding: var(--space-2) var(--space-3);
+    font-size: 13px;
+    font-weight: 500;
+  }
+
+  .btn-ghost:hover {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+  }
+
+  /* ---- Empty State ---- */
+
+  .empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-3);
+    text-align: center;
+    padding: var(--space-12) var(--space-8);
+    border: 1px dashed rgba(255, 255, 255, 0.1);
+    border-radius: var(--radius-lg);
+    background: rgba(255, 255, 255, 0.015);
+    box-shadow: var(--glass-edge-shadow);
+  }
+
+  .empty-icon {
+    color: var(--text-quaternary);
+    margin-bottom: var(--space-1);
+  }
+
+  .empty-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-secondary);
+  }
+
+  .empty-detail {
+    font-size: 13px;
+    color: var(--text-tertiary);
+    max-width: 360px;
+    line-height: 1.55;
+  }
+
+  /* ---- Detail View ---- */
+
+  .detail-view {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+
+  .detail-header {
+    display: flex;
+    align-items: center;
+  }
+
+  .detail-content {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-6);
+  }
+
+  .detail-title-section {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .detail-title-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    flex-wrap: wrap;
+  }
+
+  .detail-name {
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: -0.025em;
+  }
+
+  .detail-author {
+    font-size: 14px;
+    color: var(--text-secondary);
+  }
+
+  .detail-revision {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    font-weight: 500;
+  }
+
+  .detail-stats-bar {
+    display: flex;
+    gap: var(--space-6);
+    padding: var(--space-4) var(--space-5);
+    background: var(--surface);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius-lg);
+  }
+
+  .detail-stat {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .detail-stat-value {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--text-primary);
+  }
+
+  .detail-stat-label {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .detail-section {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .detail-section-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .title-count {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-tertiary);
+    background: var(--surface);
+    padding: 0 var(--space-2);
+    border-radius: 100px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .detail-description {
+    background: var(--surface);
+    border-radius: var(--radius);
+    padding: var(--space-4) var(--space-5);
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.6;
+    box-shadow: var(--glass-edge-shadow);
+  }
+
+  /* ---- Mod Table ---- */
+
+  .mods-table-container {
+    background: var(--surface);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    box-shadow: var(--glass-edge-shadow);
+  }
+
+  .mods-table {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .mods-table-header {
+    display: grid;
+    grid-template-columns: 1fr 80px 80px 80px;
+    padding: var(--space-2) var(--space-4);
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--separator);
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    align-items: center;
+  }
+
+  .mods-table-body {
+    max-height: 400px;
+    overflow-y: auto;
+  }
+
+  .mods-table-row {
+    display: grid;
+    grid-template-columns: 1fr 80px 80px 80px;
+    padding: var(--space-2) var(--space-4);
+    align-items: center;
+    font-size: 13px;
+    transition: background var(--duration-fast) var(--ease);
+  }
+
+  .mods-table-row:nth-child(even) {
+    background: rgba(255, 255, 255, 0.025);
+  }
+
+  :global([data-theme="light"]) .mods-table-row:nth-child(even) {
+    background: rgba(0, 0, 0, 0.025);
+  }
+
+  .mods-table-row:hover {
+    background: var(--surface-hover);
+  }
+
+  .col-mod-name {
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .mod-name-text {
+    font-weight: 500;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: block;
+  }
+
+  .col-mod-version {
+    font-size: 12px;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    letter-spacing: 0;
+  }
+
+  .source-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+  }
+
+  .col-mod-optional {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .optional-badge {
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--text-tertiary);
+    background: var(--surface-hover);
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
+
+  /* ---- Install Bar ---- */
+
+  .detail-install-bar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-4) 0;
+    border-top: 1px solid var(--separator);
+  }
+
+  .install-hint {
+    font-size: 12px;
+    color: var(--text-tertiary);
+  }
+</style>

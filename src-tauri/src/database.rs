@@ -116,6 +116,9 @@ impl ModDatabase {
         // Enable foreign key enforcement.
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
 
+        // Wait up to 5 seconds if database is locked by another connection.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+
         // Run schema migrations
         crate::migrations::migrate(&conn).map_err(|e| {
             DatabaseError::Other(format!("Schema migration failed: {}", e))
@@ -353,15 +356,28 @@ impl ModDatabase {
         ordered_mod_ids: &[i64],
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "UPDATE installed_mods SET install_priority = ?1
-             WHERE id = ?2 AND game_id = ?3 AND bottle_name = ?4",
-        )?;
-
-        for (i, mod_id) in ordered_mod_ids.iter().enumerate() {
-            stmt.execute(params![i as i32, mod_id, game_id, bottle_name])?;
+        // Use a transaction so partial reorder failures roll back cleanly.
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> Result<()> {
+            let mut stmt = conn.prepare(
+                "UPDATE installed_mods SET install_priority = ?1
+                 WHERE id = ?2 AND game_id = ?3 AND bottle_name = ?4",
+            )?;
+            for (i, mod_id) in ordered_mod_ids.iter().enumerate() {
+                stmt.execute(params![i as i32, mod_id, game_id, bottle_name])?;
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
         }
-        Ok(())
     }
 
     // -- Deployment manifest ------------------------------------------------

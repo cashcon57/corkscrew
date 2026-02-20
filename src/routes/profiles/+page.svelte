@@ -320,6 +320,7 @@
     background: var(--surface);
     border: 1px solid var(--separator);
     border-radius: var(--radius-lg);
+    box-shadow: var(--glass-edge-shadow);
     transition: border-color var(--duration-fast) var(--ease);
   }
 
@@ -459,6 +460,7 @@
     border: 1px dashed rgba(255, 255, 255, 0.1);
     border-radius: var(--radius-lg);
     background: rgba(255, 255, 255, 0.015);
+    box-shadow: var(--glass-edge-shadow);
   }
 
   .empty-title {

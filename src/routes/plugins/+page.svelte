@@ -357,7 +357,6 @@
   /* ---- Page layout ---- */
 
   .plugins-page {
-    max-width: 760px;
     display: flex;
     flex-direction: column;
     gap: var(--space-5);
@@ -510,6 +509,7 @@
     background: var(--surface);
     border-radius: var(--radius-lg);
     overflow: hidden;
+    box-shadow: var(--glass-edge-shadow);
   }
 
   /* ---- List header ---- */
@@ -774,6 +774,7 @@
     padding: var(--space-12) var(--space-8);
     background: var(--surface);
     border-radius: var(--radius-lg);
+    box-shadow: var(--glass-edge-shadow);
     text-align: center;
   }
 

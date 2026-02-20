@@ -293,6 +293,7 @@
     background: var(--bg-grouped-secondary);
     border-radius: var(--radius-lg);
     overflow: hidden;
+    box-shadow: var(--glass-edge-shadow);
   }
 
   /* --- Card rows --- */

@@ -171,10 +171,13 @@ impl NexusClient {
     /// Create a new client using the supplied personal API key.
     pub fn new(api_key: String) -> Self {
         let mut headers = HeaderMap::new();
-        headers.insert(
-            "apikey",
-            HeaderValue::from_str(&api_key).expect("invalid API key characters"),
-        );
+        // HeaderValue::from_str accepts visible ASCII (0x20..=0x7E) + tab.
+        // If the key somehow contains invalid chars, fall back to from_bytes
+        // which is more permissive.
+        let header_val = HeaderValue::from_str(&api_key)
+            .or_else(|_| HeaderValue::from_bytes(api_key.as_bytes()))
+            .expect("API key contains non-ASCII bytes");
+        headers.insert("apikey", header_val);
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
         headers.insert(
             USER_AGENT,
@@ -249,10 +252,26 @@ impl NexusClient {
         Ok(files)
     }
 
+    /// Check if the current API key belongs to a premium/supporter user.
+    ///
+    /// Returns `true` for premium or supporter accounts, `false` otherwise.
+    pub async fn is_premium(&self) -> bool {
+        match self.validate_key().await {
+            Ok(info) => {
+                let premium = info.get("is_premium").and_then(|v| v.as_bool()).unwrap_or(false);
+                let supporter = info.get("is_supporter").and_then(|v| v.as_bool()).unwrap_or(false);
+                premium || supporter
+            }
+            Err(_) => false,
+        }
+    }
+
     /// Retrieve CDN download links for a specific file.
     ///
-    /// For premium users the `key` and `expires` parameters may be `None`.
-    /// Free-tier users must supply the values received through the NXM link.
+    /// **NexusMods policy:** Free users CANNOT automate downloads. They must
+    /// click "Slow Download" on the website, which provides an NXM link with
+    /// `key` and `expires` parameters. If key/expires are missing, this
+    /// function verifies the user has premium status before proceeding.
     pub async fn get_download_links(
         &self,
         game_slug: &str,
@@ -264,6 +283,20 @@ impl NexusClient {
         let mut url = format!(
             "{NEXUS_API_BASE}/games/{game_slug}/mods/{mod_id}/files/{file_id}/download_link.json"
         );
+
+        // NexusMods compliance: free users MUST provide key/expires from
+        // clicking "Slow Download" on the website. Only premium users may
+        // request download links without these parameters.
+        if key.is_none() || expires.is_none() {
+            if !self.is_premium().await {
+                return Err(NexusError::Api {
+                    status: 403,
+                    message: "Free users must download from the NexusMods website. \
+                              Please click the download button on the mod page."
+                        .to_string(),
+                });
+            }
+        }
 
         // Attach query parameters when present.
         if let (Some(k), Some(e)) = (key, expires) {

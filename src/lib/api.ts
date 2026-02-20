@@ -1,12 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   Bottle,
+  BottleSettings,
+  BottleSettingDef,
   DetectedGame,
   InstalledMod,
   PluginEntry,
   AppConfig,
   LaunchResult,
   SkseStatus,
+  SkseCompatibility,
   DowngradeStatus,
   CustomExecutable,
   DeploymentEntry,
@@ -21,11 +24,40 @@ import type {
   FomodFile,
   ModlistSummary,
   ParsedModlist,
+  TokenPair,
+  NexusUserInfo,
+  AuthMethodInfo,
+  CrashLogEntry,
+  CrashReport,
+  CollectionSearchResult,
+  CollectionInfo,
+  CollectionRevision,
+  CollectionMod,
+  CollectionManifest,
+  PluginRule,
+  PluginRuleType,
+  ModVersion,
+  ModSnapshot,
+  ImportPlan,
+  ModlistDiff,
+  DisplayFixResult,
 } from "./types";
 
 // Bottles
 export async function getBottles(): Promise<Bottle[]> {
   return invoke("get_bottles");
+}
+
+export async function getBottleSettings(bottleName: string): Promise<BottleSettings> {
+  return invoke("get_bottle_settings", { bottleName });
+}
+
+export async function getBottleSettingDefs(bottleName: string): Promise<BottleSettingDef[]> {
+  return invoke("get_bottle_setting_defs", { bottleName });
+}
+
+export async function setBottleSetting(bottleName: string, key: string, value: string): Promise<void> {
+  return invoke("set_bottle_setting", { bottleName, key, value });
 }
 
 // Games
@@ -101,6 +133,10 @@ export async function downloadFromNexus(
   });
 }
 
+export async function isNexusPremium(): Promise<boolean> {
+  return invoke("is_nexus_premium");
+}
+
 // Config
 export async function getConfig(): Promise<AppConfig> {
   return invoke("get_config");
@@ -111,6 +147,10 @@ export async function setConfigValue(
   value: string
 ): Promise<void> {
   return invoke("set_config_value", { key, value });
+}
+
+export async function getGameLogo(gameId: string): Promise<string | null> {
+  return invoke("get_game_logo", { gameId });
 }
 
 // Game Launching
@@ -130,11 +170,16 @@ export async function checkSkse(
   return invoke("check_skse", { gameId, bottleName });
 }
 
-export async function installSkse(
+export async function getSkseDownloadUrl(): Promise<string> {
+  return invoke("get_skse_download_url");
+}
+
+export async function installSkseFromArchive(
   gameId: string,
-  bottleName: string
+  bottleName: string,
+  archivePath: string
 ): Promise<SkseStatus> {
-  return invoke("install_skse_cmd", { gameId, bottleName });
+  return invoke("install_skse_from_archive_cmd", { gameId, bottleName, archivePath });
 }
 
 export async function setSksePreference(
@@ -143,6 +188,21 @@ export async function setSksePreference(
   enabled: boolean
 ): Promise<void> {
   return invoke("set_skse_preference_cmd", { gameId, bottleName, enabled });
+}
+
+// SKSE Compatibility
+export async function checkSkseCompatibility(
+  gameId: string,
+  bottleName: string
+): Promise<SkseCompatibility> {
+  return invoke("check_skse_compatibility_cmd", { gameId, bottleName });
+}
+
+// Display Fix
+export async function fixSkyrimDisplay(
+  bottleName: string
+): Promise<DisplayFixResult> {
+  return invoke("fix_skyrim_display", { bottleName });
 }
 
 // Skyrim Downgrade
@@ -398,8 +458,262 @@ export async function getWabbajackModlists(): Promise<ModlistSummary[]> {
   return invoke("get_wabbajack_modlists");
 }
 
+// Utility
+export async function fetchUrlText(url: string): Promise<string> {
+  return invoke("fetch_url_text", { url });
+}
+
 export async function parseWabbajackFile(
   filePath: string
 ): Promise<ParsedModlist> {
   return invoke("parse_wabbajack_file", { filePath });
+}
+
+// Download Archive Management
+export async function listDownloadArchives(): Promise<{
+  filename: string;
+  path: string;
+  size_bytes: number;
+  modified_at: number;
+}[]> {
+  return invoke("list_download_archives");
+}
+
+export async function deleteDownloadArchive(path: string): Promise<void> {
+  return invoke("delete_download_archive", { path });
+}
+
+export async function getDownloadsStats(): Promise<{
+  total_size_bytes: number;
+  archive_count: number;
+  directory: string;
+}> {
+  return invoke("get_downloads_stats");
+}
+
+export async function clearAllDownloadArchives(): Promise<number> {
+  return invoke("clear_all_download_archives");
+}
+
+// Nexus SSO (WebSocket-based, returns API key)
+export async function startNexusSso(): Promise<string> {
+  return invoke("start_nexus_sso");
+}
+
+// OAuth (legacy)
+export async function startNexusOAuth(
+  clientId: string
+): Promise<TokenPair> {
+  return invoke("start_nexus_oauth", { clientId });
+}
+
+export async function refreshNexusTokens(
+  clientId: string,
+  refreshToken: string
+): Promise<TokenPair> {
+  return invoke("refresh_nexus_tokens", { clientId, refreshToken });
+}
+
+export async function saveOAuthTokens(tokens: TokenPair): Promise<void> {
+  return invoke("save_oauth_tokens", { tokens });
+}
+
+export async function loadOAuthTokens(): Promise<TokenPair | null> {
+  return invoke("load_oauth_tokens");
+}
+
+export async function clearOAuthTokens(): Promise<void> {
+  return invoke("clear_oauth_tokens");
+}
+
+export async function getNexusUserInfo(
+  accessToken: string
+): Promise<NexusUserInfo> {
+  return invoke("get_nexus_user_info", { accessToken });
+}
+
+export async function getAuthMethod(): Promise<AuthMethodInfo> {
+  return invoke("get_auth_method_cmd");
+}
+
+export async function getNexusAccountStatus(): Promise<{
+  connected: boolean;
+  auth_type?: string;
+  name?: string;
+  email?: string | null;
+  avatar?: string | null;
+  is_premium?: boolean;
+  membership_roles?: string[];
+}> {
+  return invoke("get_nexus_account_status");
+}
+
+// Crash Logs
+export async function findCrashLogs(
+  gameId: string,
+  bottleName: string
+): Promise<CrashLogEntry[]> {
+  return invoke("find_crash_logs_cmd", { gameId, bottleName });
+}
+
+export async function analyzeCrashLog(
+  logPath: string
+): Promise<CrashReport> {
+  return invoke("analyze_crash_log_cmd", { logPath });
+}
+
+// Collections
+export async function browseCollections(
+  gameDomain: string,
+  count: number,
+  offset: number,
+  sortField?: string,
+  sortDirection?: string,
+): Promise<CollectionSearchResult> {
+  return invoke("browse_collections_cmd", {
+    gameDomain, count, offset,
+    sortField: sortField ?? null,
+    sortDirection: sortDirection ?? null,
+  });
+}
+
+export async function getCollection(
+  slug: string,
+  gameDomain: string
+): Promise<CollectionInfo> {
+  return invoke("get_collection_cmd", { slug, gameDomain });
+}
+
+export async function getCollectionRevisions(
+  slug: string
+): Promise<CollectionRevision[]> {
+  return invoke("get_collection_revisions", { slug });
+}
+
+export async function getCollectionMods(
+  slug: string,
+  revision: number
+): Promise<CollectionMod[]> {
+  return invoke("get_collection_mods", { slug, revision });
+}
+
+export async function parseCollectionBundle(
+  bundlePath: string
+): Promise<CollectionManifest> {
+  return invoke("parse_collection_bundle_cmd", { bundlePath });
+}
+
+// Plugin Load Order Rules
+export async function addPluginRule(
+  gameId: string,
+  bottleName: string,
+  pluginName: string,
+  ruleType: PluginRuleType,
+  referencePlugin: string
+): Promise<number> {
+  return invoke("add_plugin_rule", {
+    gameId, bottleName, pluginName, ruleType, referencePlugin,
+  });
+}
+
+export async function removePluginRule(ruleId: number): Promise<void> {
+  return invoke("remove_plugin_rule", { ruleId });
+}
+
+export async function listPluginRules(
+  gameId: string,
+  bottleName: string
+): Promise<PluginRule[]> {
+  return invoke("list_plugin_rules", { gameId, bottleName });
+}
+
+export async function clearPluginRules(
+  gameId: string,
+  bottleName: string
+): Promise<void> {
+  return invoke("clear_plugin_rules", { gameId, bottleName });
+}
+
+// Mod Rollback & Snapshots
+export async function saveModVersion(
+  modId: number,
+  version: string,
+  stagingPath: string,
+  archiveName: string
+): Promise<number> {
+  return invoke("save_mod_version_cmd", {
+    modId, version, stagingPath, archiveName,
+  });
+}
+
+export async function listModVersions(
+  modId: number
+): Promise<ModVersion[]> {
+  return invoke("list_mod_versions_cmd", { modId });
+}
+
+export async function rollbackModVersion(
+  modId: number,
+  versionId: number
+): Promise<ModVersion> {
+  return invoke("rollback_mod_version", { modId, versionId });
+}
+
+export async function cleanupModVersions(
+  modId: number,
+  keepCount: number
+): Promise<number> {
+  return invoke("cleanup_mod_versions", { modId, keepCount });
+}
+
+export async function createModSnapshot(
+  gameId: string,
+  bottleName: string,
+  name: string,
+  description?: string
+): Promise<number> {
+  return invoke("create_mod_snapshot", {
+    gameId, bottleName, name, description: description ?? null,
+  });
+}
+
+export async function listModSnapshots(
+  gameId: string,
+  bottleName: string
+): Promise<ModSnapshot[]> {
+  return invoke("list_mod_snapshots", { gameId, bottleName });
+}
+
+export async function deleteModSnapshot(
+  snapshotId: number
+): Promise<void> {
+  return invoke("delete_mod_snapshot", { snapshotId });
+}
+
+// Modlist Export/Import
+export async function exportModlist(
+  gameId: string,
+  bottleName: string,
+  outputPath: string,
+  notes?: string
+): Promise<string> {
+  return invoke("export_modlist_cmd", {
+    gameId, bottleName, outputPath, notes: notes ?? null,
+  });
+}
+
+export async function importModlistPlan(
+  filePath: string,
+  gameId: string,
+  bottleName: string
+): Promise<ImportPlan> {
+  return invoke("import_modlist_plan", { filePath, gameId, bottleName });
+}
+
+export async function diffModlists(
+  filePath: string,
+  gameId: string,
+  bottleName: string
+): Promise<ModlistDiff> {
+  return invoke("diff_modlists_cmd", { filePath, gameId, bottleName });
 }

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { open } from "@tauri-apps/plugin-dialog";
+  import { openUrl } from "@tauri-apps/plugin-opener";
   import {
     getInstalledMods,
     installMod,
@@ -8,10 +9,15 @@
     toggleMod,
     launchGame,
     checkSkse,
-    installSkse,
+    getSkseDownloadUrl,
+    installSkseFromArchive,
     setSksePreference,
     checkSkyrimVersion,
     downgradeSkyrim,
+    reorderMods,
+    getConflicts,
+    checkModUpdates,
+    fixSkyrimDisplay,
   } from "$lib/api";
   import {
     selectedGame,
@@ -22,7 +28,8 @@
     showSuccess,
     skseStatus,
   } from "$lib/stores";
-  import type { InstalledMod, DetectedGame, SkseStatus, DowngradeStatus } from "$lib/types";
+  import type { InstalledMod, DetectedGame, SkseStatus, DowngradeStatus, FileConflict, ModUpdateInfo } from "$lib/types";
+  import GameIcon from "$lib/components/GameIcon.svelte";
 
   let installing = $state(false);
   let loadingMods = $state(false);
@@ -37,6 +44,57 @@
   let downgrading = $state(false);
   let showDowngradeBanner = $state(false);
   let draggingOver = $state(false);
+  let fixingDisplay = $state(false);
+
+  // Drag reorder state
+  let dragRowIndex = $state<number | null>(null);
+  let dragOverIndex = $state<number | null>(null);
+  let reordering = $state(false);
+
+  // Conflict state
+  let conflicts = $state<FileConflict[]>([]);
+
+  // Update check state
+  let modUpdates = $state<ModUpdateInfo[]>([]);
+  let checkingUpdates = $state(false);
+
+  // Derived: set of mod IDs that have conflicts
+  let conflictModIds = $derived((() => {
+    const ids = new Set<number>();
+    for (const conflict of conflicts) {
+      for (const mod of conflict.mods) {
+        ids.add(mod.mod_id);
+      }
+    }
+    return ids;
+  })());
+
+  // Derived: map from mod_id to list of conflicting mod names (excluding self)
+  let conflictDetails = $derived((() => {
+    const details = new Map<number, Set<string>>();
+    for (const conflict of conflicts) {
+      for (const mod of conflict.mods) {
+        if (!details.has(mod.mod_id)) {
+          details.set(mod.mod_id, new Set());
+        }
+        for (const other of conflict.mods) {
+          if (other.mod_id !== mod.mod_id) {
+            details.get(mod.mod_id)!.add(other.mod_name);
+          }
+        }
+      }
+    }
+    return details;
+  })());
+
+  // Derived: map from mod_id to ModUpdateInfo
+  let updateMap = $derived((() => {
+    const map = new Map<number, ModUpdateInfo>();
+    for (const update of modUpdates) {
+      map.set(update.mod_id, update);
+    }
+    return map;
+  })());
 
   // Game picker state
   let pickedGame = $state<DetectedGame | null>(null);
@@ -44,6 +102,14 @@
   let hoveredGame = $state<string | null>(null);
 
   games.subscribe((g) => (gameList = g));
+
+  // Sorted mods by install_priority ascending
+  let sortedMods = $derived(
+    [...$installedMods].sort((a, b) => a.install_priority - b.install_priority)
+  );
+
+  // Track the current load to avoid stale race conditions
+  let loadGeneration = 0;
 
   $effect(() => {
     const game = pickedGame ?? $selectedGame;
@@ -53,14 +119,26 @@
   });
 
   async function loadMods(game: DetectedGame) {
+    const thisLoad = ++loadGeneration;
     loadingMods = true;
     try {
       const mods = await getInstalledMods(game.game_id, game.bottle_name);
+      // Only update state if this is still the latest load request
+      if (thisLoad !== loadGeneration) return;
       installedMods.set(mods);
+      // Also load conflicts
+      try {
+        conflicts = await getConflicts(game.game_id, game.bottle_name);
+      } catch {
+        conflicts = [];
+      }
     } catch (e: any) {
+      if (thisLoad !== loadGeneration) return;
       showError(`Failed to load mods: ${e}`);
     } finally {
-      loadingMods = false;
+      if (thisLoad === loadGeneration) {
+        loadingMods = false;
+      }
     }
   }
 
@@ -173,12 +251,46 @@
     }
   }
 
+  async function handleFixDisplay() {
+    const game = pickedGame ?? $selectedGame;
+    if (!game) return;
+    fixingDisplay = true;
+    try {
+      const result = await fixSkyrimDisplay(game.bottle_name);
+      if (result.fixed) {
+        showSuccess(`Display fixed: ${result.applied.width}x${result.applied.height} borderless fullscreen (was ${result.previous.width}x${result.previous.height})`);
+      } else {
+        showSuccess(`Display settings already correct: ${result.applied.width}x${result.applied.height}`);
+      }
+    } catch (e: any) {
+      showError(`Display fix failed: ${e}`);
+    } finally {
+      fixingDisplay = false;
+    }
+  }
+
+  async function handleOpenSkseDownload() {
+    try {
+      const url = await getSkseDownloadUrl();
+      await openUrl(url);
+    } catch (e: any) {
+      showError(`Failed to open SKSE download page: ${e}`);
+    }
+  }
+
   async function handleInstallSkse() {
     const game = pickedGame ?? $selectedGame;
     if (!game) return;
-    installingSkse = true;
     try {
-      skse = await installSkse(game.game_id, game.bottle_name);
+      const selected = await open({
+        title: "Select SKSE Archive (.7z or .zip)",
+        filters: [{ name: "Archives", extensions: ["7z", "zip"] }],
+      });
+      if (!selected) return;
+
+      const archivePath = typeof selected === "string" ? selected : (selected as any).path;
+      installingSkse = true;
+      skse = await installSkseFromArchive(game.game_id, game.bottle_name, archivePath);
       skseStatus.set(skse);
       showSksePrompt = false;
       showSuccess("SKSE installed successfully");
@@ -228,6 +340,8 @@
 
   // Drag-and-drop mod install
   function handleDragOver(e: DragEvent) {
+    // Only activate the file drop overlay if files are being dragged (not row reorder)
+    if (dragRowIndex !== null) return;
     e.preventDefault();
     draggingOver = true;
   }
@@ -237,8 +351,12 @@
   }
 
   async function handleDrop(e: DragEvent) {
+    // Don't intercept row reorder drops
+    if (dragRowIndex !== null) return;
     e.preventDefault();
     draggingOver = false;
+    // Prevent concurrent installs
+    if (installing) return;
     const game = pickedGame ?? $selectedGame;
     if (!game || !e.dataTransfer?.files?.length) return;
 
@@ -297,6 +415,97 @@
       day: "numeric",
       year: "numeric",
     });
+  }
+
+  // --- Drag reorder handlers ---
+  function handleRowDragStart(e: DragEvent, index: number) {
+    dragRowIndex = index;
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = "move";
+      // Set minimal drag data so HTML5 DnD works
+      e.dataTransfer.setData("text/plain", String(index));
+    }
+    // Add a small delay so the browser captures the row as drag image
+    requestAnimationFrame(() => {
+      // The row being dragged gets a class via dragRowIndex
+    });
+  }
+
+  function handleRowDragOver(e: DragEvent, index: number) {
+    if (dragRowIndex === null) return;
+    e.preventDefault();
+    if (e.dataTransfer) {
+      e.dataTransfer.dropEffect = "move";
+    }
+    dragOverIndex = index;
+  }
+
+  function handleRowDragEnd() {
+    dragRowIndex = null;
+    dragOverIndex = null;
+  }
+
+  async function handleRowDrop(e: DragEvent, dropIndex: number) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (dragRowIndex === null || dragRowIndex === dropIndex) {
+      dragRowIndex = null;
+      dragOverIndex = null;
+      return;
+    }
+
+    const game = pickedGame ?? $selectedGame;
+    if (!game) {
+      dragRowIndex = null;
+      dragOverIndex = null;
+      return;
+    }
+
+    // Reorder the local array
+    const items = [...sortedMods];
+    const [moved] = items.splice(dragRowIndex, 1);
+    items.splice(dropIndex, 0, moved);
+
+    // Persist new order
+    const orderedIds = items.map((m) => m.id);
+
+    dragRowIndex = null;
+    dragOverIndex = null;
+    reordering = true;
+
+    try {
+      await reorderMods(game.game_id, game.bottle_name, orderedIds);
+      await loadMods(game);
+    } catch (e: any) {
+      showError(`Failed to reorder mods: ${e}`);
+    } finally {
+      reordering = false;
+    }
+  }
+
+  // --- Check for updates ---
+  async function handleCheckUpdates() {
+    const game = pickedGame ?? $selectedGame;
+    if (!game) return;
+    checkingUpdates = true;
+    try {
+      modUpdates = await checkModUpdates(game.game_id, game.bottle_name);
+      if (modUpdates.length === 0) {
+        showSuccess("All mods are up to date");
+      } else {
+        showSuccess(`${modUpdates.length} update${modUpdates.length > 1 ? "s" : ""} available`);
+      }
+    } catch (e: any) {
+      showError(`Failed to check for updates: ${e}`);
+    } finally {
+      checkingUpdates = false;
+    }
+  }
+
+  function getConflictTooltip(modId: number): string {
+    const names = conflictDetails.get(modId);
+    if (!names || names.size === 0) return "File conflicts detected";
+    return `File conflicts with: ${[...names].join(", ")}`;
   }
 
   const activeGame = $derived(pickedGame ?? $selectedGame);
@@ -371,22 +580,43 @@
       {/if}
     </div>
   {:else}
-    <!-- Page Header -->
-    <div class="page-header">
-      <div class="header-info">
-        <div class="header-title-row">
-          <h2>Mods</h2>
+    <!-- Game Banner Header -->
+    <div class="game-banner">
+      <div class="game-banner-icon">
+        <GameIcon gameId={activeGame.game_id} size={56} />
+      </div>
+      <div class="game-banner-info">
+        <h2 class="game-banner-title">{activeGame.display_name}</h2>
+        <div class="game-banner-meta">
+          <span class="meta-bottle">{activeGame.bottle_name}</span>
           {#if modCount > 0}
-            <span class="mod-count-badge">{enabledCount}/{modCount} active</span>
+            <span class="meta-separator">&middot;</span>
+            <span class="meta-mods">{enabledCount}/{modCount} mods active</span>
+          {/if}
+          {#if skse?.installed}
+            <span class="meta-separator">&middot;</span>
+            <span class="meta-skse">SKSE {skse.version ?? ""}</span>
           {/if}
         </div>
-        <div class="header-meta">
-          <span class="meta-game">{activeGame.display_name}</span>
-          <span class="meta-separator">/</span>
-          <span class="meta-bottle">{activeGame.bottle_name}</span>
-        </div>
       </div>
-      <div class="header-actions">
+      <div class="game-banner-actions">
+        <button
+          class="btn btn-ghost"
+          onclick={handleCheckUpdates}
+          disabled={checkingUpdates}
+          title="Check Nexus for mod updates"
+        >
+          {#if checkingUpdates}
+            <span class="spinner spinner-sm"></span>
+            Checking...
+          {:else}
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="23 4 23 10 17 10" />
+              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+            </svg>
+            Updates
+          {/if}
+        </button>
         <a
           href="https://www.nexusmods.com/{activeGame.nexus_slug}"
           target="_blank"
@@ -399,65 +629,88 @@
             <path d="M8 2h4v4" />
             <path d="M6 8L12 2" />
           </svg>
-          Nexus Mods
+          Nexus
         </a>
+        {#if activeGame.game_id === "skyrimse"}
+          <button
+            class="btn btn-ghost"
+            onclick={handleFixDisplay}
+            disabled={fixingDisplay}
+            title="Fix zoomed-in or improperly scaled display in CrossOver"
+          >
+            {#if fixingDisplay}
+              <span class="spinner spinner-sm"></span>
+            {:else}
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+                <line x1="8" y1="21" x2="16" y2="21" />
+                <line x1="12" y1="17" x2="12" y2="21" />
+              </svg>
+            {/if}
+            Fix Display
+          </button>
+        {/if}
         <button class="btn btn-ghost" onclick={() => { pickedGame = null; selectedGame.set(null); }}>
           Change Game
         </button>
-        <button class="btn btn-primary" onclick={handleInstall} disabled={installing}>
-          {#if installing}
-            <span class="spinner"></span>
-            Installing...
+      </div>
+    </div>
+
+    <!-- Action Bar -->
+    <div class="action-bar">
+      <button class="btn btn-primary" onclick={handleInstall} disabled={installing}>
+        {#if installing}
+          <span class="spinner"></span>
+          Installing...
+        {:else}
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <line x1="7" y1="2" x2="7" y2="12" />
+            <line x1="2" y1="7" x2="12" y2="7" />
+          </svg>
+          Install Mod
+        {/if}
+      </button>
+      <div class="play-button-group">
+        <button class="btn btn-play" onclick={handlePlay} disabled={launching}>
+          {#if launching}
+            <span class="spinner spinner-play"></span>
+            Launching...
           {:else}
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-              <line x1="7" y1="2" x2="7" y2="12" />
-              <line x1="2" y1="7" x2="12" y2="7" />
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
+              <path d="M3 1.5v11l9-5.5L3 1.5z" />
             </svg>
-            Install Mod
+            Play{#if skse?.installed && skse?.use_skse} (SKSE){/if}
           {/if}
         </button>
-        <div class="play-button-group">
-          <button class="btn btn-play" onclick={handlePlay} disabled={launching}>
-            {#if launching}
-              <span class="spinner spinner-play"></span>
-              Launching...
-            {:else}
-              <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
-                <path d="M3 1.5v11l9-5.5L3 1.5z" />
-              </svg>
-              Play{#if skse?.installed && skse?.use_skse} (SKSE){/if}
-            {/if}
+        {#if activeGame?.game_id === "skyrimse" && skse?.installed}
+          <button
+            class="btn btn-play-dropdown"
+            onclick={() => showSkseMenu = !showSkseMenu}
+            aria-label="SKSE options"
+          >
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
+              <path d="M2 3.5L5 7L8 3.5H2z" />
+            </svg>
           </button>
-          {#if activeGame?.game_id === "skyrimse" && skse?.installed}
-            <button
-              class="btn btn-play-dropdown"
-              onclick={() => showSkseMenu = !showSkseMenu}
-              aria-label="SKSE options"
-            >
-              <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
-                <path d="M2 3.5L5 7L8 3.5H2z" />
-              </svg>
+        {/if}
+        {#if showSkseMenu}
+          <div class="skse-dropdown">
+            <button class="dropdown-item" onclick={toggleSksePreference}>
+              <span class="dropdown-check">
+                {#if skse?.use_skse}
+                  <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M10 3L4.5 8.5L2 6" />
+                  </svg>
+                {/if}
+              </span>
+              Launch via SKSE
             </button>
-          {/if}
-          {#if showSkseMenu}
-            <div class="skse-dropdown">
-              <button class="dropdown-item" onclick={toggleSksePreference}>
-                <span class="dropdown-check">
-                  {#if skse?.use_skse}
-                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                      <path d="M10 3L4.5 8.5L2 6" />
-                    </svg>
-                  {/if}
-                </span>
-                Launch via SKSE
-              </button>
-              <div class="dropdown-divider"></div>
-              <div class="dropdown-info">
-                SKSE {skse?.version ?? ""}
-              </div>
+            <div class="dropdown-divider"></div>
+            <div class="dropdown-info">
+              SKSE {skse?.version ?? ""}
             </div>
-          {/if}
-        </div>
+          </div>
+        {/if}
       </div>
     </div>
 
@@ -475,12 +728,15 @@
           <p class="skse-banner-title">SKSE Not Installed</p>
           <p class="skse-banner-text">
             Skyrim Script Extender (SKSE) is required by most Skyrim mods.
-            Would you like to download and install it?
+            Download it from the official site, then install from the archive.
           </p>
         </div>
         <div class="skse-banner-actions">
+          <button class="btn btn-secondary btn-sm" onclick={handleOpenSkseDownload}>
+            Download SKSE
+          </button>
           <button class="btn btn-primary btn-sm" onclick={handleInstallSkse} disabled={installingSkse}>
-            {installingSkse ? "Installing..." : "Install SKSE"}
+            {installingSkse ? "Installing..." : "Install from Archive"}
           </button>
           <button class="btn btn-ghost btn-sm" onclick={dismissSksePrompt}>
             Dismiss
@@ -551,10 +807,11 @@
         </button>
       </div>
     {:else}
-      <div class="mod-table-container">
+      <div class="mod-table-container" class:reordering-active={reordering}>
         <div class="mod-table">
           <!-- Sticky Header -->
           <div class="table-header">
+            <span class="col-grip"></span>
             <span class="col-toggle"></span>
             <span class="col-name">Name</span>
             <span class="col-version">Version</span>
@@ -565,12 +822,35 @@
 
           <!-- Mod Rows -->
           <div class="table-body">
-            {#each $installedMods as mod, i (mod.id)}
+            {#each sortedMods as mod, i (mod.id)}
               <div
                 class="table-row"
                 class:row-disabled={!mod.enabled}
                 class:row-even={i % 2 === 0}
+                class:row-dragging={dragRowIndex === i}
+                class:row-drag-over={dragOverIndex === i && dragRowIndex !== null && dragRowIndex !== i}
+                class:row-drag-above={dragOverIndex === i && dragRowIndex !== null && dragRowIndex > i}
+                class:row-drag-below={dragOverIndex === i && dragRowIndex !== null && dragRowIndex < i}
+                draggable="true"
+                ondragstart={(e) => handleRowDragStart(e, i)}
+                ondragover={(e) => handleRowDragOver(e, i)}
+                ondragend={handleRowDragEnd}
+                ondrop={(e) => handleRowDrop(e, i)}
               >
+                <!-- Drag Handle -->
+                <span class="col-grip">
+                  <span class="drag-handle" title="Drag to reorder">
+                    <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
+                      <circle cx="4" cy="2.5" r="1" />
+                      <circle cx="8" cy="2.5" r="1" />
+                      <circle cx="4" cy="6" r="1" />
+                      <circle cx="8" cy="6" r="1" />
+                      <circle cx="4" cy="9.5" r="1" />
+                      <circle cx="8" cy="9.5" r="1" />
+                    </svg>
+                  </span>
+                </span>
+
                 <!-- Toggle Switch -->
                 <span class="col-toggle">
                   <button
@@ -589,6 +869,15 @@
                 <!-- Name -->
                 <span class="col-name">
                   <span class="mod-name">{mod.name}</span>
+                  {#if conflictModIds.has(mod.id)}
+                    <span class="conflict-icon" title={getConflictTooltip(mod.id)}>
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+                        <line x1="12" y1="9" x2="12" y2="13" />
+                        <line x1="12" y1="17" x2="12.01" y2="17" />
+                      </svg>
+                    </span>
+                  {/if}
                   {#if mod.nexus_mod_id}
                     <span class="nexus-badge">Nexus</span>
                   {/if}
@@ -596,7 +885,13 @@
 
                 <!-- Version -->
                 <span class="col-version">
-                  {mod.version || "\u2014"}
+                  <span class="version-text">{mod.version || "\u2014"}</span>
+                  {#if updateMap.has(mod.id)}
+                    {@const update = updateMap.get(mod.id)!}
+                    <span class="update-badge" title={`Update available: v${update.latest_version}`}>
+                      Update
+                    </span>
+                  {/if}
                 </span>
 
                 <!-- File Count -->
@@ -652,7 +947,6 @@
     display: flex;
     flex-direction: column;
     height: 100%;
-    max-width: 1000px;
     padding: var(--space-6);
     gap: var(--space-6);
   }
@@ -725,6 +1019,7 @@
     background: var(--surface);
     border: 1px solid var(--separator);
     border-radius: var(--radius);
+    box-shadow: var(--glass-edge-shadow);
     text-align: left;
     transition:
       background var(--duration) var(--ease),
@@ -735,7 +1030,7 @@
   .game-card:hover {
     background: var(--surface-hover);
     border-color: var(--accent-muted);
-    box-shadow: var(--shadow-sm);
+    box-shadow: var(--glass-edge-shadow), var(--shadow-sm);
   }
 
   .game-card:active {
@@ -773,60 +1068,49 @@
   }
 
   /* ============================
-     Page Header
+     Game Banner Header
      ============================ */
-  .page-header {
+  .game-banner {
     display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
+    align-items: center;
     gap: var(--space-4);
+    padding: var(--space-4) var(--space-5);
+    background: var(--surface);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--glass-edge-shadow);
     flex-shrink: 0;
   }
 
-  .header-info {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
-  }
-
-  .header-title-row {
+  .game-banner-icon {
+    flex-shrink: 0;
+    color: var(--text-primary);
     display: flex;
     align-items: center;
-    gap: var(--space-3);
+    justify-content: center;
+    width: 56px;
+    height: 56px;
   }
 
-  .header-title-row h2 {
+  .game-banner-info {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .game-banner-title {
     font-size: 22px;
     font-weight: 700;
     letter-spacing: -0.02em;
+    color: var(--text-primary);
+    line-height: 1.2;
   }
 
-  .mod-count-badge {
-    display: inline-flex;
-    align-items: center;
-    padding: 2px 10px;
-    background: var(--surface);
-    border-radius: 100px;
-    font-size: 12px;
-    font-weight: 500;
-    color: var(--text-secondary);
-    letter-spacing: 0;
-  }
-
-  .header-meta {
+  .game-banner-meta {
     display: flex;
     align-items: center;
     gap: var(--space-2);
+    margin-top: 2px;
     font-size: 13px;
-  }
-
-  .meta-game {
-    color: var(--text-secondary);
-    font-weight: 500;
-  }
-
-  .meta-separator {
-    color: var(--text-quaternary);
   }
 
   .meta-bottle {
@@ -836,9 +1120,35 @@
     letter-spacing: 0;
   }
 
-  .header-actions {
+  .meta-separator {
+    color: var(--text-quaternary);
+  }
+
+  .meta-mods {
+    color: var(--text-secondary);
+    font-weight: 500;
+  }
+
+  .meta-skse {
+    color: var(--green);
+    font-size: 12px;
+    font-weight: 500;
+  }
+
+  .game-banner-actions {
     display: flex;
     align-items: center;
+    gap: var(--space-2);
+    flex-shrink: 0;
+  }
+
+  /* ============================
+     Action Bar
+     ============================ */
+  .action-bar {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
     gap: var(--space-2);
     flex-shrink: 0;
   }
@@ -914,6 +1224,11 @@
     color: var(--text-primary);
   }
 
+  .btn-ghost:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
   .btn-ghost-danger {
     background: transparent;
     color: var(--text-tertiary);
@@ -944,6 +1259,14 @@
     animation: spin 0.6s linear infinite;
   }
 
+  .spinner-sm {
+    width: 12px;
+    height: 12px;
+    border-width: 1.5px;
+    border-color: var(--text-tertiary);
+    border-top-color: var(--text-primary);
+  }
+
   @keyframes spin {
     to { transform: rotate(360deg); }
   }
@@ -961,6 +1284,7 @@
     background: var(--surface);
     border: 1px dashed var(--separator-opaque);
     border-radius: var(--radius-lg);
+    box-shadow: var(--glass-edge-shadow);
     text-align: center;
     gap: var(--space-3);
   }
@@ -993,6 +1317,12 @@
     overflow: hidden;
     border-radius: var(--radius-lg);
     background: var(--bg-primary);
+    box-shadow: var(--glass-edge-shadow);
+  }
+
+  .reordering-active {
+    opacity: 0.7;
+    pointer-events: none;
   }
 
   .mod-table {
@@ -1003,7 +1333,7 @@
 
   .table-header {
     display: grid;
-    grid-template-columns: 52px 1fr 80px 64px 110px 120px;
+    grid-template-columns: 32px 52px 1fr 100px 64px 110px 120px;
     padding: var(--space-3) var(--space-4);
     background: var(--bg-secondary);
     border-bottom: 1px solid var(--separator);
@@ -1025,11 +1355,14 @@
 
   .table-row {
     display: grid;
-    grid-template-columns: 52px 1fr 80px 64px 110px 120px;
+    grid-template-columns: 32px 52px 1fr 100px 64px 110px 120px;
     padding: var(--space-3) var(--space-4);
     align-items: center;
     font-size: 13px;
-    transition: background var(--duration-fast) var(--ease);
+    transition:
+      background var(--duration-fast) var(--ease),
+      opacity var(--duration-fast) var(--ease),
+      box-shadow var(--duration-fast) var(--ease);
   }
 
   .table-row:nth-child(even) {
@@ -1050,6 +1383,52 @@
 
   .table-row.row-disabled:hover {
     opacity: 0.6;
+  }
+
+  /* --- Drag reorder visual feedback --- */
+
+  .table-row.row-dragging {
+    opacity: 0.35;
+    background: var(--surface-active);
+  }
+
+  .table-row.row-drag-above {
+    box-shadow: inset 0 2px 0 0 var(--system-accent);
+  }
+
+  .table-row.row-drag-below {
+    box-shadow: inset 0 -2px 0 0 var(--system-accent);
+  }
+
+  /* ============================
+     Drag Handle
+     ============================ */
+  .col-grip {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .drag-handle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    color: var(--text-quaternary);
+    cursor: grab;
+    border-radius: 4px;
+    transition: color var(--duration-fast) var(--ease), background var(--duration-fast) var(--ease);
+  }
+
+  .drag-handle:hover {
+    color: var(--text-secondary);
+    background: var(--surface-hover);
+  }
+
+  .drag-handle:active {
+    cursor: grabbing;
+    color: var(--text-primary);
   }
 
   /* ============================
@@ -1100,7 +1479,7 @@
   }
 
   /* ============================
-     Mod Name & Badge
+     Mod Name & Badges
      ============================ */
   .col-name {
     display: flex;
@@ -1132,6 +1511,61 @@
   }
 
   /* ============================
+     Conflict Indicator
+     ============================ */
+  .conflict-icon {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--yellow);
+    cursor: help;
+    position: relative;
+  }
+
+  .conflict-icon:hover {
+    color: #ffcc00;
+  }
+
+  /* ============================
+     Update Badge
+     ============================ */
+  .col-version {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .version-text {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .update-badge {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 7px;
+    border-radius: 100px;
+    background: var(--system-accent-subtle);
+    color: var(--system-accent);
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    cursor: help;
+    transition: background var(--duration-fast) var(--ease);
+  }
+
+  .update-badge:hover {
+    background: rgba(10, 132, 255, 0.25);
+  }
+
+  /* ============================
      Table Columns
      ============================ */
   .col-toggle {
@@ -1140,7 +1574,6 @@
     justify-content: center;
   }
 
-  .col-version,
   .col-files,
   .col-date {
     color: var(--text-secondary);

@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Corkscrew Brand Kit Preview</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, system-ui, sans-serif; background: #1c1c1f; color: #fff; padding: 40px; }
+    h1 { font-size: 32px; margin-bottom: 8px; font-weight: 700; }
+    h2 { font-size: 20px; margin: 40px 0 16px; color: #e8802a; font-weight: 600; }
+    .subtitle { color: rgba(255,255,255,0.5); margin-bottom: 40px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 24px; margin-bottom: 40px; }
+    .preview-card { background: #232326; border-radius: 14px; padding: 24px; display: flex; flex-direction: column; align-items: center; gap: 12px; border: 1px solid rgba(255,255,255,0.08); }
+    .preview-card.light { background: #f2f2f7; border-color: rgba(0,0,0,0.08); }
+    .preview-card img { max-width: 100%; height: auto; }
+    .label { font-size: 12px; color: rgba(255,255,255,0.4); font-weight: 500; }
+    .preview-card.light .label { color: rgba(0,0,0,0.4); }
+    .color-row { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 24px; }
+    .swatch { width: 80px; height: 80px; border-radius: 14px; display: flex; align-items: flex-end; padding: 8px; font-size: 10px; font-weight: 600; color: white; text-shadow: 0 1px 2px rgba(0,0,0,0.5); }
+    .checker { background-image: repeating-conic-gradient(#333 0% 25%, #444 0% 50%); background-size: 16px 16px; }
+    .sidebar-mock { background: #232326; border-radius: 14px; padding: 16px; width: 220px; border: 1px solid rgba(255,255,255,0.08); }
+    .brand-lockup { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; }
+    .brand-lockup img { flex-shrink: 0; border-radius: 4px; }
+    .brand-lockup span { font-size: 14px; font-weight: 700; letter-spacing: -0.02em; }
+    .nav-mock { display: flex; flex-direction: column; gap: 2px; }
+    .nav-mock-item { padding: 6px 10px; border-radius: 6px; font-size: 13px; font-weight: 500; color: rgba(255,255,255,0.6); }
+    .nav-mock-item.active { background: rgba(232,128,42,0.15); color: #e8802a; }
+  </style>
+</head>
+<body>
+  <h1>Corkscrew Brand Kit</h1>
+  <p class="subtitle">Brand assets, colors, and identity system</p>
+
+  <h2>Transparent Icon</h2>
+  <div class="grid">
+    <div class="preview-card">
+      <img src="corkscrew-icon-256.png" width="200" height="200" alt="Icon on dark" />
+      <span class="label">On Dark (#1c1c1f)</span>
+    </div>
+    <div class="preview-card light">
+      <img src="corkscrew-icon-256.png" width="200" height="200" alt="Icon on light" />
+      <span class="label">On Light (#f2f2f7)</span>
+    </div>
+    <div class="preview-card checker" style="border-style: dashed;">
+      <img src="corkscrew-icon-256.png" width="200" height="200" alt="Icon transparent" />
+      <span class="label" style="color: rgba(255,255,255,0.7);">Transparent</span>
+    </div>
+  </div>
+
+  <h2>Icon Sizes</h2>
+  <div class="grid">
+    <div class="preview-card">
+      <img src="corkscrew-icon-128.png" width="128" height="128" alt="128px" />
+      <span class="label">128px</span>
+    </div>
+    <div class="preview-card">
+      <img src="corkscrew-icon-64.png" width="64" height="64" alt="64px" />
+      <span class="label">64px</span>
+    </div>
+    <div class="preview-card">
+      <img src="corkscrew-icon-48.png" width="48" height="48" alt="48px" />
+      <span class="label">48px</span>
+    </div>
+    <div class="preview-card">
+      <img src="corkscrew-icon-32.png" width="32" height="32" alt="32px" />
+      <span class="label">32px</span>
+    </div>
+    <div class="preview-card">
+      <img src="corkscrew-icon-24.png" width="24" height="24" alt="24px" />
+      <span class="label">24px</span>
+    </div>
+    <div class="preview-card">
+      <img src="corkscrew-icon-16.png" width="16" height="16" alt="16px" />
+      <span class="label">16px</span>
+    </div>
+  </div>
+
+  <h2>Original Source (Reference)</h2>
+  <div class="grid">
+    <div class="preview-card">
+      <img src="../src-tauri/icons/icon.png" width="128" height="128" alt="Tauri app icon" />
+      <span class="label">Tauri App Icon</span>
+    </div>
+  </div>
+
+  <h2>Brand Colors</h2>
+  <div class="color-row">
+    <div class="swatch" style="background: #e8802a;">#e8802a<br>Primary</div>
+    <div class="swatch" style="background: #f09040;">#f09040<br>Hover</div>
+    <div class="swatch" style="background: #d06820;">#d06820<br>Dark</div>
+    <div class="swatch" style="background: #a85818;">#a85818<br>Deep</div>
+    <div class="swatch" style="background: rgba(232,128,42,0.15); border: 1px solid rgba(232,128,42,0.3);">.15 alpha<br>Subtle</div>
+  </div>
+
+  <h2>Sidebar Brand Lockup</h2>
+  <div class="sidebar-mock">
+    <div class="brand-lockup">
+      <img src="corkscrew-icon-32.png" width="22" height="22" alt="Brand icon" />
+      <span>Corkscrew</span>
+    </div>
+    <div class="nav-mock">
+      <div class="nav-mock-item">Dashboard</div>
+      <div class="nav-mock-item active">Mods</div>
+      <div class="nav-mock-item">Load Order</div>
+      <div class="nav-mock-item">Collections</div>
+      <div class="nav-mock-item">Settings</div>
+    </div>
+  </div>
+
+  <h2>Wordmark</h2>
+  <div style="display: flex; gap: 40px; align-items: center; margin-bottom: 40px;">
+    <div>
+      <svg width="200" height="40" viewBox="0 0 200 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <linearGradient id="wordGrad" x1="0" y1="0" x2="200" y2="40" gradientUnits="userSpaceOnUse">
+            <stop offset="0" stop-color="#f0a050" />
+            <stop offset="1" stop-color="#d06820" />
+          </linearGradient>
+        </defs>
+        <text x="0" y="32" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', system-ui, sans-serif" font-size="36" font-weight="800" letter-spacing="-1.5" fill="url(#wordGrad)">Corkscrew</text>
+      </svg>
+      <p class="label" style="margin-top: 8px;">Gradient wordmark</p>
+    </div>
+    <div>
+      <svg width="200" height="40" viewBox="0 0 200 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <text x="0" y="32" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', system-ui, sans-serif" font-size="36" font-weight="800" letter-spacing="-1.5" fill="white">Corkscrew</text>
+      </svg>
+      <p class="label" style="margin-top: 8px;">White wordmark</p>
+    </div>
+  </div>
+</body>
+</html>
