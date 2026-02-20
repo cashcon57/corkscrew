@@ -71,6 +71,27 @@ pub struct ModTool {
     pub license: String,
     /// Wine compatibility notes.
     pub wine_notes: Option<String>,
+    /// Wine compatibility level: "good", "limited", or "not_recommended".
+    pub wine_compat: String,
+    /// Alternative tool ID to recommend (e.g., Nemesis → Pandora).
+    pub recommended_alternative: Option<String>,
+    /// INI edits to apply when this tool is installed/run.
+    pub recommended_ini_edits: Vec<IniEdit>,
+}
+
+/// A recommended INI edit for a tool.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IniEdit {
+    /// INI file name (e.g., "Skyrim.ini", "SkyrimPrefs.ini").
+    pub file: String,
+    /// INI section (e.g., "General", "Animation").
+    pub section: String,
+    /// Key name.
+    pub key: String,
+    /// Recommended value.
+    pub value: String,
+    /// Description of what this edit does.
+    pub description: String,
 }
 
 /// Minimal GitHub release JSON shape.
@@ -94,6 +115,7 @@ struct GitHubAsset {
 /// Built-in tool definitions for Skyrim SE modding.
 fn builtin_tools() -> Vec<ModTool> {
     vec![
+        // ---- Recommended tools (good Wine compatibility) ----
         ModTool {
             id: "sseedit".into(),
             name: "SSEEdit (xEdit)".into(),
@@ -111,6 +133,30 @@ fn builtin_tools() -> Vec<ModTool> {
             download_url: None,
             license: "MPL-2.0".into(),
             wine_notes: Some("Works well under Wine/Proton".into()),
+            wine_compat: "good".into(),
+            recommended_alternative: None,
+            recommended_ini_edits: vec![],
+        },
+        ModTool {
+            id: "pandora".into(),
+            name: "Pandora Behaviour Engine+".into(),
+            description: "Animation engine — replaces FNIS and Nemesis with better Wine support"
+                .into(),
+            exe_names: vec![
+                "Pandora Behaviour Engine.exe".into(),
+                "Pandora.exe".into(),
+            ],
+            detected_path: None,
+            requires_wine: true,
+            category: "Animation".into(),
+            can_auto_install: true,
+            github_repo: Some("Monitor221hz/Pandora-Behaviour-Engine-Plus".into()),
+            download_url: None,
+            license: "MIT".into(),
+            wine_notes: Some("Works under Wine/Proton; backwards-compatible with FNIS and Nemesis animation mods".into()),
+            wine_compat: "good".into(),
+            recommended_alternative: None,
+            recommended_ini_edits: vec![],
         },
         ModTool {
             id: "bodyslide".into(),
@@ -125,6 +171,9 @@ fn builtin_tools() -> Vec<ModTool> {
             download_url: None,
             license: "GPL-3.0".into(),
             wine_notes: Some("Works under Wine with some setup".into()),
+            wine_compat: "good".into(),
+            recommended_alternative: None,
+            recommended_ini_edits: vec![],
         },
         ModTool {
             id: "cao".into(),
@@ -139,6 +188,9 @@ fn builtin_tools() -> Vec<ModTool> {
             download_url: None,
             license: "MPL-2.0".into(),
             wine_notes: Some("Generally works under Wine".into()),
+            wine_compat: "good".into(),
+            recommended_alternative: None,
+            recommended_ini_edits: vec![],
         },
         ModTool {
             id: "nifoptimizer".into(),
@@ -153,6 +205,9 @@ fn builtin_tools() -> Vec<ModTool> {
             download_url: None,
             license: "GPL-3.0".into(),
             wine_notes: None,
+            wine_compat: "good".into(),
+            recommended_alternative: None,
+            recommended_ini_edits: vec![],
         },
         ModTool {
             id: "wryebash".into(),
@@ -167,22 +222,11 @@ fn builtin_tools() -> Vec<ModTool> {
             download_url: None,
             license: "GPL-3.0".into(),
             wine_notes: Some("Native Linux support since v312; also works via Wine".into()),
+            wine_compat: "good".into(),
+            recommended_alternative: None,
+            recommended_ini_edits: vec![],
         },
-        ModTool {
-            id: "loot".into(),
-            name: "LOOT".into(),
-            description: "Load order optimization (standalone GUI)".into(),
-            exe_names: vec!["LOOT.exe".into()],
-            detected_path: None,
-            requires_wine: true,
-            category: "Load Order".into(),
-            can_auto_install: true,
-            github_repo: Some("loot/loot".into()),
-            download_url: None,
-            license: "GPL-3.0".into(),
-            wine_notes: Some("Native Linux builds available on Flathub".into()),
-        },
-        // --- Tools that cannot be auto-installed (proprietary / NC license) ---
+        // ---- Tools with limited Wine compatibility ----
         ModTool {
             id: "bethini".into(),
             name: "BethINI Pie".into(),
@@ -195,7 +239,10 @@ fn builtin_tools() -> Vec<ModTool> {
             github_repo: None,
             download_url: Some("https://www.nexusmods.com/site/mods/631".into()),
             license: "CC BY-NC-SA 4.0".into(),
-            wine_notes: Some("Python-based; may work under Wine".into()),
+            wine_notes: Some("Python-based; may work under Wine. Corkscrew's built-in INI editor provides similar functionality natively.".into()),
+            wine_compat: "limited".into(),
+            recommended_alternative: None,
+            recommended_ini_edits: vec![],
         },
         ModTool {
             id: "dyndolod".into(),
@@ -210,7 +257,11 @@ fn builtin_tools() -> Vec<ModTool> {
             download_url: Some("https://www.nexusmods.com/skyrimspecialedition/mods/68518".into()),
             license: "Proprietary".into(),
             wine_notes: Some("Texconv issues under Wine; limited functionality on Linux".into()),
+            wine_compat: "limited".into(),
+            recommended_alternative: None,
+            recommended_ini_edits: vec![],
         },
+        // ---- Not recommended via Wine — use Pandora instead ----
         ModTool {
             id: "nemesis".into(),
             name: "Nemesis".into(),
@@ -223,7 +274,10 @@ fn builtin_tools() -> Vec<ModTool> {
             github_repo: None,
             download_url: Some("https://www.nexusmods.com/skyrimspecialedition/mods/60033".into()),
             license: "GPL-3.0".into(),
-            wine_notes: Some("Poor Wine compatibility; consider Pandora as alternative".into()),
+            wine_notes: Some("Poor Wine compatibility. Use Pandora instead — it is backwards-compatible with Nemesis animation mods.".into()),
+            wine_compat: "not_recommended".into(),
+            recommended_alternative: Some("pandora".into()),
+            recommended_ini_edits: vec![],
         },
         ModTool {
             id: "fnis".into(),
@@ -238,8 +292,11 @@ fn builtin_tools() -> Vec<ModTool> {
             download_url: Some("https://www.nexusmods.com/skyrimspecialedition/mods/3038".into()),
             license: "Proprietary".into(),
             wine_notes: Some(
-                "Works with workarounds; deprecated in favor of Nemesis/Pandora".into(),
+                "Deprecated and poor Wine compatibility. Use Pandora instead — it is backwards-compatible with FNIS animation mods.".into(),
             ),
+            wine_compat: "not_recommended".into(),
+            recommended_alternative: Some("pandora".into()),
+            recommended_ini_edits: vec![],
         },
     ]
 }
@@ -591,6 +648,130 @@ pub fn uninstall_tool(tool_id: &str, game_data_dir: &Path) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Reinstallation
+// ---------------------------------------------------------------------------
+
+/// Reinstall a tool by uninstalling and re-installing from GitHub.
+///
+/// Returns the path to the newly installed tool's executable.
+pub async fn reinstall_tool(tool_id: &str, game_data_dir: &Path) -> Result<String> {
+    info!("Reinstalling mod tool '{}'", tool_id);
+    uninstall_tool(tool_id, game_data_dir)?;
+    install_tool(tool_id, game_data_dir).await
+}
+
+// ---------------------------------------------------------------------------
+// INI Edit Application
+// ---------------------------------------------------------------------------
+
+/// Apply the recommended INI edits for a given tool to the game's INI files.
+///
+/// Returns the number of edits applied.
+pub fn apply_tool_ini_edits(tool_id: &str, game_data_dir: &Path) -> Result<usize> {
+    let tool_def = find_tool_def(tool_id)?;
+
+    if tool_def.recommended_ini_edits.is_empty() {
+        return Ok(0);
+    }
+
+    let game_dir = game_data_dir.parent().unwrap_or(game_data_dir);
+    let mut applied = 0;
+
+    for edit in &tool_def.recommended_ini_edits {
+        let ini_path = game_dir.join(&edit.file);
+        if !ini_path.exists() {
+            debug!("INI file not found for edit: {}", ini_path.display());
+            continue;
+        }
+
+        match apply_single_ini_edit(&ini_path, &edit.section, &edit.key, &edit.value) {
+            Ok(true) => {
+                info!(
+                    "Applied INI edit: [{}]{} = {} in {}",
+                    edit.section, edit.key, edit.value, edit.file
+                );
+                applied += 1;
+            }
+            Ok(false) => {
+                debug!("INI edit already applied: [{}]{}", edit.section, edit.key);
+            }
+            Err(e) => {
+                log::warn!("Failed to apply INI edit [{}]{}: {}", edit.section, edit.key, e);
+            }
+        }
+    }
+
+    Ok(applied)
+}
+
+/// Apply a single key=value edit to an INI file within [section].
+/// Returns Ok(true) if the edit was applied, Ok(false) if already set.
+fn apply_single_ini_edit(
+    ini_path: &Path,
+    section: &str,
+    key: &str,
+    value: &str,
+) -> std::result::Result<bool, std::io::Error> {
+    let content = fs::read_to_string(ini_path)?;
+    let section_header = format!("[{}]", section);
+    let key_lower = key.to_lowercase();
+
+    let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+    let mut in_section = false;
+    let mut found = false;
+    let mut section_end = lines.len();
+
+    for (i, line) in lines.iter_mut().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.eq_ignore_ascii_case(&section_header) {
+            in_section = true;
+            continue;
+        }
+        if in_section && trimmed.starts_with('[') {
+            section_end = i;
+            break;
+        }
+        if in_section {
+            if let Some(eq_pos) = trimmed.find('=') {
+                let k = trimmed[..eq_pos].trim().to_lowercase();
+                if k == key_lower {
+                    let existing_val = trimmed[eq_pos + 1..].trim();
+                    if existing_val == value {
+                        return Ok(false); // Already set
+                    }
+                    *line = format!("{}={}", key, value);
+                    found = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    if !found {
+        // If section exists, insert the key at the end of it
+        let mut section_found = false;
+        for line in &lines {
+            if line.trim().eq_ignore_ascii_case(&section_header) {
+                section_found = true;
+                break;
+            }
+        }
+
+        if section_found {
+            lines.insert(section_end, format!("{}={}", key, value));
+        } else {
+            // Add section at the end
+            lines.push(String::new());
+            lines.push(section_header);
+            lines.push(format!("{}={}", key, value));
+        }
+    }
+
+    fs::write(ini_path, lines.join("\n"))?;
+    Ok(true)
+}
+
+// ---------------------------------------------------------------------------
 // Launching
 // ---------------------------------------------------------------------------
 
@@ -603,6 +784,38 @@ pub fn launch_tool(
     bottle: &crate::bottles::Bottle,
 ) -> std::result::Result<crate::launcher::LaunchResult, String> {
     crate::launcher::launch_game(bottle, exe_path, exe_path.parent()).map_err(|e| e.to_string())
+}
+
+/// Launch a tool and log the result to the notification/crash log system.
+///
+/// Returns the launch result and logs any crash or error to the database.
+pub fn launch_tool_with_logging(
+    exe_path: &Path,
+    bottle: &crate::bottles::Bottle,
+    tool_id: &str,
+    tool_name: &str,
+    db: &crate::database::ModDatabase,
+) -> std::result::Result<crate::launcher::LaunchResult, String> {
+    let result = launch_tool(exe_path, bottle)?;
+
+    if result.success {
+        let _ = db.log_notification(
+            "info",
+            &format!("Launched {}", tool_name),
+            Some(&format!("Tool: {} | Bottle: {}", tool_id, result.bottle_name)),
+        );
+    } else {
+        let _ = db.log_notification(
+            "error",
+            &format!("{} failed to launch", tool_name),
+            Some(&format!(
+                "Tool: {} | Bottle: {} | Check Wine compatibility",
+                tool_id, result.bottle_name
+            )),
+        );
+    }
+
+    Ok(result)
 }
 
 // ---------------------------------------------------------------------------
@@ -619,8 +832,46 @@ mod tests {
         assert!(tools.len() >= 10);
         assert!(tools.iter().any(|t| t.id == "sseedit"));
         assert!(tools.iter().any(|t| t.id == "bethini"));
-        assert!(tools.iter().any(|t| t.id == "loot"));
+        assert!(tools.iter().any(|t| t.id == "pandora"));
         assert!(tools.iter().any(|t| t.id == "nifoptimizer"));
+        // LOOT should NOT be in registry (integrated into Corkscrew)
+        assert!(!tools.iter().any(|t| t.id == "loot"));
+    }
+
+    #[test]
+    fn test_wine_compat_field_values() {
+        for tool in builtin_tools() {
+            assert!(
+                ["good", "limited", "not_recommended"].contains(&tool.wine_compat.as_str()),
+                "Tool '{}' has invalid wine_compat: '{}'",
+                tool.id,
+                tool.wine_compat
+            );
+        }
+    }
+
+    #[test]
+    fn test_not_recommended_tools_have_alternative() {
+        for tool in builtin_tools() {
+            if tool.wine_compat == "not_recommended" {
+                assert!(
+                    tool.recommended_alternative.is_some(),
+                    "Tool '{}' is not_recommended but has no recommended_alternative",
+                    tool.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_pandora_replaces_nemesis_and_fnis() {
+        let tools = builtin_tools();
+        let nemesis = tools.iter().find(|t| t.id == "nemesis").unwrap();
+        let fnis = tools.iter().find(|t| t.id == "fnis").unwrap();
+        assert_eq!(nemesis.recommended_alternative.as_deref(), Some("pandora"));
+        assert_eq!(fnis.recommended_alternative.as_deref(), Some("pandora"));
+        assert_eq!(nemesis.wine_compat, "not_recommended");
+        assert_eq!(fnis.wine_compat, "not_recommended");
     }
 
     #[test]

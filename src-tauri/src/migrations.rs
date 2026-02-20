@@ -19,7 +19,7 @@ pub enum MigrationError {
 pub type Result<T> = std::result::Result<T, MigrationError>;
 
 /// The current target schema version. Bump this when adding a new migration.
-const TARGET_VERSION: u32 = 6;
+const TARGET_VERSION: u32 = 7;
 
 /// Get the current schema version (0 if no version table exists).
 pub fn current_version(conn: &Connection) -> Result<u32> {
@@ -74,6 +74,11 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     if version == 5 {
         migrate_v5_to_v6(conn)?;
         version = 6;
+    }
+
+    if version == 6 {
+        migrate_v6_to_v7(conn)?;
+        version = 7;
     }
 
     let _ = version; // suppress unused warning when TARGET_VERSION == current
@@ -465,6 +470,45 @@ fn migrate_v5_to_v6(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Migration 6 → 7: Auto-category + notification log.
+///
+/// Adds auto_category column to installed_mods for heuristic-based mod
+/// classification, and creates a notification_log table for persistent
+/// UI notifications.
+fn migrate_v6_to_v7(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+
+    // Add auto_category column
+    match tx.execute_batch("ALTER TABLE installed_mods ADD COLUMN auto_category TEXT") {
+        Ok(_) => {}
+        Err(e) => {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column") {
+                return Err(MigrationError::Sqlite(e));
+            }
+        }
+    }
+
+    // Persistent notification log
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS notification_log (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            level       TEXT    NOT NULL,
+            message     TEXT    NOT NULL,
+            detail      TEXT,
+            created_at  TEXT    NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_notif_created
+            ON notification_log (created_at);",
+    )?;
+
+    tx.execute("UPDATE schema_version SET version = 7", [])?;
+    tx.commit()?;
+    log::info!("Migration 6 → 7 complete (auto_category, notification_log)");
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -503,6 +547,7 @@ mod tests {
         assert!(tables.contains(&"download_registry".to_string()));
         assert!(tables.contains(&"download_collection_refs".to_string()));
         assert!(tables.contains(&"collection_metadata".to_string()));
+        assert!(tables.contains(&"notification_log".to_string()));
     }
 
     #[test]

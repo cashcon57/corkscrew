@@ -239,6 +239,23 @@ pub fn redeploy_all(
     bottle_name: &str,
     data_dir: &Path,
 ) -> Result<DeployResult> {
+    redeploy_all_with_progress(db, game_id, bottle_name, data_dir, None::<fn(usize, usize, &str)>)
+}
+
+/// Full redeploy with optional progress callback.
+///
+/// The callback receives `(current_index, total_mods, mod_name)` after each
+/// mod is deployed, allowing the frontend to display a progress indicator.
+pub fn redeploy_all_with_progress<F>(
+    db: &ModDatabase,
+    game_id: &str,
+    bottle_name: &str,
+    data_dir: &Path,
+    on_progress: Option<F>,
+) -> Result<DeployResult>
+where
+    F: Fn(usize, usize, &str),
+{
     if !test_hardlink_support(data_dir, data_dir) {
         let total_staging: u64 = db
             .list_mods(game_id, bottle_name)
@@ -261,11 +278,16 @@ pub fn redeploy_all(
     let mut enabled_mods: Vec<_> = mods.into_iter().filter(|m| m.enabled).collect();
     enabled_mods.sort_by_key(|m| m.install_priority);
 
+    let total = enabled_mods.len();
     let mut total_deployed = 0;
     let mut total_skipped = 0;
     let mut any_fallback = false;
 
-    for m in &enabled_mods {
+    for (i, m) in enabled_mods.iter().enumerate() {
+        if let Some(ref on_progress) = on_progress {
+            on_progress(i, total, &m.name);
+        }
+
         if let Some(ref staging_path_str) = m.staging_path {
             let staging_path = PathBuf::from(staging_path_str);
             if staging_path.exists() {

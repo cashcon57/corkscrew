@@ -15,6 +15,7 @@ use crate::games;
 use crate::nexus::NexusClient;
 use crate::plugins;
 use crate::progress::{InstallProgress, INSTALL_PROGRESS_EVENT};
+use crate::profiles;
 use crate::staging;
 
 #[derive(Clone, Debug, Serialize)]
@@ -270,6 +271,33 @@ pub async fn install_collection(
         installed_at: chrono::Utc::now().to_rfc3339(),
         manifest_json,
     });
+
+    // Auto-create a profile snapshot for the installed collection
+    let profile_name = format!("{} (auto)", manifest.name);
+    if let Ok(profile_id) = profiles::create_profile(db, game_id, bottle_name, &profile_name) {
+        // Try to find plugins file for snapshot (Skyrim SE only)
+        let plugins_file = if game_id == "skyrimse" {
+            let bottle = bottles::detect_bottles()
+                .into_iter()
+                .find(|b| b.name == bottle_name);
+            bottle.and_then(|b| {
+                games::with_plugin(game_id, |plugin| {
+                    plugin.get_plugins_file(Path::new(&game.game_path), &b)
+                })
+                .flatten()
+            })
+        } else {
+            None
+        };
+        let _ = profiles::snapshot_current_state(
+            db,
+            profile_id,
+            game_id,
+            bottle_name,
+            plugins_file.as_deref(),
+        );
+        log::info!("Auto-created profile '{}' for collection", profile_name);
+    }
 
     // Emit collection completed summary
     let _ = app.emit(

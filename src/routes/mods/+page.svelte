@@ -27,8 +27,10 @@
     setModPriority,
     analyzeConflicts,
     resolveAllConflicts,
+    onDeployProgress,
+    backfillCategories,
   } from "$lib/api";
-  import type { InstallProgressEvent, DeploymentHealth, ConflictSuggestion, ResolutionResult } from "$lib/types";
+  import type { InstallProgressEvent, DeploymentHealth, ConflictSuggestion, ResolutionResult, DeployProgress } from "$lib/types";
   import {
     selectedGame,
     installedMods,
@@ -44,6 +46,7 @@
   import PreflightPanel from "$lib/components/PreflightPanel.svelte";
   import DependencyPanel from "$lib/components/DependencyPanel.svelte";
   import SessionHistoryPanel from "$lib/components/SessionHistoryPanel.svelte";
+  import ModCategoryView from "$lib/components/mods/ModCategoryView.svelte";
 
   let installing = $state(false);
   let installStep = $state("");
@@ -109,6 +112,19 @@
   // Selected mod for dependency panel
   let selectedModId = $state<number | undefined>(undefined);
 
+  // Deploy progress
+  let deployProgress = $state(0);
+  let deployProgressText = $state("");
+  let deployUnlisten: (() => void) | null = null;
+
+  // Keyboard focus tracking
+  let focusedIndex = $state<number>(-1);
+
+  // Context menu state
+  let contextMenuMod = $state<InstalledMod | null>(null);
+  let contextMenuX = $state(0);
+  let contextMenuY = $state(0);
+
   // Collapsible panels
   let showPreflightPanel = $state(false);
   let showSessionPanel = $state(false);
@@ -166,19 +182,57 @@
     return () => document.removeEventListener("click", closeOverflow);
   });
 
-  onDestroy(() => { if (installUnlisten) { installUnlisten(); installUnlisten = null; } });
+  onDestroy(() => {
+    if (installUnlisten) { installUnlisten(); installUnlisten = null; }
+    if (deployUnlisten) { deployUnlisten(); deployUnlisten = null; }
+  });
 
-  // Sorted mods
+  // View mode state
+  let viewMode = $state<"flat" | "collection" | "category">("flat");
+
+  // Semantic version comparison
+  function compareVersions(a: string, b: string): number {
+    const pa = a.split(".").map(Number);
+    const pb = b.split(".").map(Number);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+      const diff = (pa[i] || 0) - (pb[i] || 0);
+      if (diff !== 0) return diff;
+    }
+    return 0;
+  }
+
+  // Toggle sort: click same column toggles direction, different column sets ascending
+  function toggleSort(key: typeof sortBy) {
+    if (sortBy === key) {
+      sortDir = sortDir === "asc" ? "desc" : "asc";
+    } else {
+      sortBy = key;
+      sortDir = "asc";
+    }
+  }
+
+  // Sorted mods with secondary sort keys for stability
   let sortedMods = $derived((() => {
     const mods = [...$installedMods];
     const dir = sortDir === "asc" ? 1 : -1;
     mods.sort((a, b) => {
+      let primary: number;
       switch (sortBy) {
-        case "name": return dir * a.name.localeCompare(b.name);
-        case "date": return dir * (new Date(a.installed_at).getTime() - new Date(b.installed_at).getTime());
-        case "version": return dir * (a.version || "").localeCompare(b.version || "");
-        case "files": return dir * (a.installed_files.length - b.installed_files.length);
-        default: return dir * (a.install_priority - b.install_priority);
+        case "name":
+          primary = a.name.localeCompare(b.name);
+          return dir * primary || (a.install_priority - b.install_priority);
+        case "date":
+          primary = new Date(a.installed_at).getTime() - new Date(b.installed_at).getTime();
+          return dir * primary || a.name.localeCompare(b.name);
+        case "version":
+          primary = compareVersions(a.version || "0", b.version || "0");
+          return dir * primary || a.name.localeCompare(b.name);
+        case "files":
+          primary = a.installed_files.length - b.installed_files.length;
+          return dir * primary || a.name.localeCompare(b.name);
+        default:
+          primary = a.install_priority - b.install_priority;
+          return dir * primary || a.name.localeCompare(b.name);
       }
     });
     return mods;
@@ -226,6 +280,26 @@
     }
     return [...names].sort();
   })());
+
+  // Collection-grouped mods for collection view mode
+  let collapsedGroups = $state<Set<string>>(new Set());
+  let groupedMods = $derived((() => {
+    if (viewMode !== "collection") return null;
+    const groups = new Map<string, typeof filteredMods>();
+    for (const mod of filteredMods) {
+      const key = mod.collection_name || "Standalone";
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(mod);
+    }
+    return groups;
+  })());
+
+  function toggleGroup(name: string) {
+    const next = new Set(collapsedGroups);
+    if (next.has(name)) next.delete(name);
+    else next.add(name);
+    collapsedGroups = next;
+  }
 
   const activeGame = $derived(pickedGame ?? $selectedGame);
 
@@ -680,7 +754,13 @@
     const game = pickedGame ?? $selectedGame;
     if (!game) return;
     deploying = true;
+    deployProgress = 0;
+    deployProgressText = "Starting...";
     try {
+      deployUnlisten = await onDeployProgress((p: DeployProgress) => {
+        deployProgress = p.total > 0 ? Math.round((p.current / p.total) * 100) : 0;
+        deployProgressText = `${p.current}/${p.total} ${p.mod_name}`;
+      });
       const result = await redeployAllMods(game.game_id, game.bottle_name);
       showSuccess(`Deployed ${result.deployed_count} files${result.fallback_used ? " (copy fallback used)" : ""}`);
       await refreshHealth(game);
@@ -688,6 +768,9 @@
       showError(`Deploy failed: ${e}`);
     } finally {
       deploying = false;
+      deployProgress = 0;
+      deployProgressText = "";
+      if (deployUnlisten) { deployUnlisten(); deployUnlisten = null; }
     }
   }
 
@@ -815,8 +898,117 @@
 
   const modCount = $derived($installedMods.length);
   const enabledCount = $derived($installedMods.filter((m) => m.enabled).length);
+
+  // Keyboard shortcuts
+  function handleKeydown(e: KeyboardEvent) {
+    const isCmd = e.metaKey || e.ctrlKey;
+    const target = e.target as HTMLElement;
+    // Don't intercept if user is typing in an input
+    if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT") return;
+
+    if (isCmd && e.key === "f") {
+      e.preventDefault();
+      const input = document.querySelector<HTMLInputElement>(".search-input");
+      if (input) input.focus();
+      return;
+    }
+    if (isCmd && e.key === "d") {
+      e.preventDefault();
+      handleDeploy();
+      return;
+    }
+    if (e.key === "Escape") {
+      if (contextMenuMod) { contextMenuMod = null; return; }
+      if (detailMod) { detailMod = null; selectedModId = undefined; return; }
+      focusedIndex = -1;
+      return;
+    }
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      if (focusedIndex < filteredMods.length - 1) focusedIndex++;
+      scrollFocusedIntoView();
+      return;
+    }
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      if (focusedIndex > 0) focusedIndex--;
+      scrollFocusedIntoView();
+      return;
+    }
+    if (e.key === " " && focusedIndex >= 0 && focusedIndex < filteredMods.length) {
+      e.preventDefault();
+      handleToggle(filteredMods[focusedIndex]);
+      return;
+    }
+    if (e.key === "Enter" && focusedIndex >= 0 && focusedIndex < filteredMods.length) {
+      e.preventDefault();
+      const mod = filteredMods[focusedIndex];
+      selectedModId = mod.id;
+      detailMod = mod;
+      return;
+    }
+  }
+
+  function scrollFocusedIntoView() {
+    requestAnimationFrame(() => {
+      const rows = document.querySelectorAll(".table-row");
+      if (rows[focusedIndex]) {
+        rows[focusedIndex].scrollIntoView({ block: "nearest" });
+      }
+    });
+  }
+
+  // Context menu handler
+  function handleRowContextMenu(e: MouseEvent, mod: InstalledMod) {
+    e.preventDefault();
+    e.stopPropagation();
+    contextMenuMod = mod;
+    contextMenuX = e.clientX;
+    contextMenuY = e.clientY;
+  }
+
+  function closeContextMenu() {
+    contextMenuMod = null;
+  }
+
+  // Search highlighting
+  function highlightMatch(text: string, query: string): string {
+    if (!query) return text;
+    const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return text.replace(new RegExp(`(${escaped})`, "gi"), "<mark>$1</mark>");
+  }
+
+  // Category chip colors
+  const categoryColors: Record<string, string> = {
+    "Plugins": "#6366f1",
+    "Textures": "#22c55e",
+    "Models": "#f59e0b",
+    "SKSE Plugins": "#ef4444",
+    "Audio": "#8b5cf6",
+    "UI": "#06b6d4",
+    "Scripts": "#f97316",
+    "ENB": "#ec4899",
+    "ReShade": "#14b8a6",
+    "Miscellaneous": "#6b7280",
+  };
+
+  // Auto-backfill categories on first load
+  let categoriesBackfilled = false;
+  $effect(() => {
+    if (activeGame && !categoriesBackfilled && $installedMods.length > 0) {
+      const hasNull = $installedMods.some(m => m.auto_category === null);
+      if (hasNull) {
+        categoriesBackfilled = true;
+        backfillCategories(activeGame.game_id, activeGame.bottle_name)
+          .then(() => loadMods(activeGame!))
+          .catch(() => {});
+      }
+    }
+  });
 </script>
 
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<svelte:window onkeydown={handleKeydown} />
 <div
   class="mods-page"
   class:drag-active={draggingOver}
@@ -902,6 +1094,17 @@
             <span class="meta-skse">SKSE {skse.version ?? ""}</span>
           {/if}
         </div>
+        {#if collectionNames.length > 0}
+          <div class="modlist-selector">
+            <select class="modlist-dropdown" bind:value={filterCollection}>
+              <option value={null}>All Mods ({modCount})</option>
+              <option value="__standalone__">Standalone ({$installedMods.filter(m => !m.collection_name).length})</option>
+              {#each collectionNames as name}
+                <option value={name}>{name} ({$installedMods.filter(m => m.collection_name === name).length})</option>
+              {/each}
+            </select>
+          </div>
+        {/if}
       </div>
       <div class="game-banner-actions">
         <button
@@ -978,14 +1181,16 @@
       <!-- Deploy / Purge Buttons -->
       {#if $installedMods.length > 0}
         <button
-          class="btn btn-secondary"
+          class="btn btn-secondary btn-deploy"
           onclick={handleDeploy}
           disabled={deploying || purging}
           title="Deploy all enabled mods to the game directory"
         >
           {#if deploying}
-            <span class="spinner spinner-sm"></span>
-            Deploying...
+            <div class="deploy-progress-track">
+              <div class="deploy-progress-fill" style="width: {deployProgress}%"></div>
+            </div>
+            <span class="deploy-progress-text">{deployProgressText || "Deploying..."}</span>
           {:else}
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <polyline points="20 6 9 17 4 12" />
@@ -1289,26 +1494,41 @@
           <option value="conflicts">Has Conflicts</option>
           <option value="has-updates">Has Updates</option>
         </select>
-        {#if collectionNames.length > 0}
-          <select class="filter-select" bind:value={filterCollection}>
-            <option value={null}>All Sources</option>
-            <option value="__standalone__">Standalone</option>
-            {#each collectionNames as name}
-              <option value={name}>{name}</option>
-            {/each}
-          </select>
-        {/if}
-        <select class="filter-select" bind:value={sortBy}>
-          <option value="priority">Sort: Priority</option>
-          <option value="name">Sort: Name</option>
-          <option value="date">Sort: Date</option>
-          <option value="files">Sort: File Count</option>
-        </select>
-        <button class="sort-dir-btn" onclick={() => sortDir = sortDir === "asc" ? "desc" : "asc"} title={sortDir === "asc" ? "Ascending" : "Descending"}>
-          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="transform: {sortDir === 'desc' ? 'rotate(180deg)' : 'none'}">
-            <path d="M6 2v8M3 7l3 3 3-3" />
-          </svg>
-        </button>
+        <!-- View mode toggle -->
+        <div class="view-mode-toggle">
+          <button
+            class="view-mode-btn"
+            class:active={viewMode === "flat"}
+            onclick={() => viewMode = "flat"}
+            title="List view"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="8" y1="6" x2="21" y2="6" /><line x1="8" y1="12" x2="21" y2="12" /><line x1="8" y1="18" x2="21" y2="18" />
+              <line x1="3" y1="6" x2="3.01" y2="6" /><line x1="3" y1="12" x2="3.01" y2="12" /><line x1="3" y1="18" x2="3.01" y2="18" />
+            </svg>
+          </button>
+          <button
+            class="view-mode-btn"
+            class:active={viewMode === "collection"}
+            onclick={() => viewMode = "collection"}
+            title="Group by collection"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+            </svg>
+          </button>
+          <button
+            class="view-mode-btn"
+            class:active={viewMode === "category"}
+            onclick={() => viewMode = "category"}
+            title="Group by category"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="3" width="7" height="7" /><rect x="14" y="3" width="7" height="7" />
+              <rect x="14" y="14" width="7" height="7" /><rect x="3" y="14" width="7" height="7" />
+            </svg>
+          </button>
+        </div>
         {#if searchQuery || filterStatus !== "all" || filterCollection !== null}
           <span class="filter-count">{filteredMods.length} of {$installedMods.length}</span>
         {/if}
@@ -1336,42 +1556,154 @@
         <p class="empty-description">
           Install mods from .zip, .7z, or .rar archives, or use NXM links via Settings.
         </p>
-        <button class="btn btn-primary" onclick={handleInstall}>
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-            <line x1="7" y1="2" x2="7" y2="12" />
-            <line x1="2" y1="7" x2="12" y2="7" />
-          </svg>
-          Install Your First Mod
-        </button>
+        <div class="empty-actions">
+          <button class="btn btn-primary" onclick={handleInstall}>
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+              <line x1="7" y1="2" x2="7" y2="12" />
+              <line x1="2" y1="7" x2="12" y2="7" />
+            </svg>
+            Install from Archive
+          </button>
+          {#if activeGame}
+            <a
+              href="https://www.nexusmods.com/{activeGame.nexus_slug}"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="btn btn-secondary"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" />
+              </svg>
+              Browse NexusMods
+            </a>
+          {/if}
+          <button class="btn btn-ghost" onclick={() => currentPage.set("collections")}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+            </svg>
+            Install a Collection
+          </button>
+        </div>
       </div>
     {:else}
       <div class="mod-layout" class:has-detail={detailMod !== null}>
       <div class="mod-table-container" class:reordering-active={reordering}>
         <div class="mod-table">
-          <!-- Sticky Header -->
+          <!-- Sticky Header — click to sort -->
           <div class="table-header">
-            <span class="col-grip"></span>
-            <span class="col-toggle"></span>
-            <span class="col-name">Name</span>
-            <span class="col-version">Version</span>
-            <span class="col-files">Files</span>
-            <span class="col-date">Installed</span>
-            <span class="col-actions"></span>
+            <span class="col-grip" title="Drag to reorder"></span>
+            <span class="col-toggle">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity: 0.5">
+                <rect x="1" y="5" width="22" height="14" rx="7" ry="7" />
+                <circle cx="16" cy="12" r="3" />
+              </svg>
+            </span>
+            <span class="col-name sortable-header" onclick={() => toggleSort("name")}>
+              Name
+              {#if sortBy === "name"}
+                <span class="sort-arrow">{sortDir === "asc" ? "\u25B2" : "\u25BC"}</span>
+              {/if}
+            </span>
+            <span class="col-version sortable-header" onclick={() => toggleSort("version")}>
+              Ver
+              {#if sortBy === "version"}
+                <span class="sort-arrow">{sortDir === "asc" ? "\u25B2" : "\u25BC"}</span>
+              {/if}
+            </span>
+            <span class="col-files sortable-header" onclick={() => toggleSort("files")}>
+              Files
+              {#if sortBy === "files"}
+                <span class="sort-arrow">{sortDir === "asc" ? "\u25B2" : "\u25BC"}</span>
+              {/if}
+            </span>
+            <span class="col-date sortable-header" onclick={() => toggleSort("date")}>
+              Installed
+              {#if sortBy === "date"}
+                <span class="sort-arrow">{sortDir === "asc" ? "\u25B2" : "\u25BC"}</span>
+              {/if}
+            </span>
+            <span class="col-actions">Actions</span>
           </div>
 
           <!-- Mod Rows -->
           <div class="table-body">
+            {#if filteredMods.length === 0 && $installedMods.length > 0}
+              <div class="empty-filter-state">
+                <p>No mods match your filters.</p>
+                <button class="btn btn-ghost btn-sm" onclick={() => { searchQuery = ""; filterStatus = "all"; filterCollection = null; }}>
+                  Clear Filters
+                </button>
+              </div>
+            {:else if viewMode === "category"}
+              <ModCategoryView mods={filteredMods} />
+            {:else if viewMode === "collection" && groupedMods}
+              {#each [...groupedMods.entries()] as [groupName, groupMods]}
+                <button class="group-header" onclick={() => toggleGroup(groupName)}>
+                  <svg
+                    class="group-chevron"
+                    class:expanded={!collapsedGroups.has(groupName)}
+                    width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                  >
+                    <path d="M4 2l4 4-4 4" />
+                  </svg>
+                  <span class="group-name">{groupName}</span>
+                  <span class="group-count">{groupMods.length}</span>
+                </button>
+                {#if !collapsedGroups.has(groupName)}
+                  {#each groupMods as mod, i (mod.id)}
+                    {@const globalIndex = filteredMods.indexOf(mod)}
+                    <!-- Re-use the same row markup with global index for DnD -->
+                    <div
+                      class="table-row"
+                      class:row-disabled={!mod.enabled}
+                      class:row-selected={selectedModId === mod.id}
+                      class:row-dragging={dragRowIndex === globalIndex}
+                      class:row-drag-over={dragOverIndex === globalIndex && dragRowIndex !== null && dragRowIndex !== globalIndex}
+                      class:row-drag-above={dragOverIndex === globalIndex && dragRowIndex !== null && dragRowIndex > globalIndex}
+                      class:row-drag-below={dragOverIndex === globalIndex && dragRowIndex !== null && dragRowIndex < globalIndex}
+                      draggable="true"
+                      onclick={() => { selectedModId = selectedModId === mod.id ? undefined : mod.id; detailMod = detailMod?.id === mod.id ? null : mod; }}
+                      ondragstart={(e) => handleRowDragStart(e, globalIndex)}
+                      ondragover={(e) => handleRowDragOver(e, globalIndex)}
+                      ondragend={handleRowDragEnd}
+                      ondrop={(e) => handleRowDrop(e, globalIndex)}
+                    >
+                      <span class="col-grip"><span class="drag-handle" title="Drag to reorder"><svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><circle cx="4" cy="2.5" r="1" /><circle cx="8" cy="2.5" r="1" /><circle cx="4" cy="6" r="1" /><circle cx="8" cy="6" r="1" /><circle cx="4" cy="9.5" r="1" /><circle cx="8" cy="9.5" r="1" /></svg></span></span>
+                      <span class="col-toggle"><button class="toggle-switch" class:toggle-on={mod.enabled} class:toggle-busy={togglingMod === mod.id} onclick={() => handleToggle(mod)} title={mod.enabled ? "Disable mod" : "Enable mod"}><span class="toggle-track"><span class="toggle-thumb"></span></span></button></span>
+                      <span class="col-name"><span class="mod-name">{mod.name}</span>{#if conflictModIds.has(mod.id)}<span class="conflict-icon" title={getConflictTooltip(mod.id)}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg></span>{/if}{#if mod.nexus_mod_id}<span class="nexus-badge">Nexus</span>{/if}{#if mod.user_notes}<span class="notes-icon" title={mod.user_notes}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /></svg></span>{/if}</span>
+                      <span class="col-version"><span class="version-text">{mod.version || "\u2014"}</span>{#if updateMap.has(mod.id)}{@const update = updateMap.get(mod.id)!}<span class="update-badge" title={`Update available: v${update.latest_version}`}>Update</span>{/if}</span>
+                      <span class="col-files">{mod.installed_files.length}</span>
+                      <span class="col-date">{formatDate(mod.installed_at)}</span>
+                      <span class="col-actions">
+                        {#if confirmUninstall === mod.id}
+                          <div class="confirm-actions"><button class="btn btn-danger btn-sm" onclick={() => handleUninstall(mod.id)}>Yes</button><button class="btn btn-ghost btn-sm" onclick={() => (confirmUninstall = null)}>No</button></div>
+                        {:else}
+                          <div class="mod-action-group">
+                            <button class="mod-uninstall-btn" onclick={(e) => { e.stopPropagation(); confirmUninstall = mod.id; }} title="Uninstall mod"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg></button>
+                            <div class="mod-overflow-wrap">
+                              <button class="mod-overflow-btn" onclick={(e) => { e.stopPropagation(); overflowMenuModId = overflowMenuModId === mod.id ? null : mod.id; }} title="More actions"><svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2" /><circle cx="12" cy="12" r="2" /><circle cx="12" cy="19" r="2" /></svg></button>
+                            </div>
+                          </div>
+                        {/if}
+                      </span>
+                    </div>
+                  {/each}
+                {/if}
+              {/each}
+            {:else}
             {#each filteredMods as mod, i (mod.id)}
               <div
                 class="table-row"
                 class:row-disabled={!mod.enabled}
                 class:row-selected={selectedModId === mod.id}
+                class:row-focused={focusedIndex === i}
                 class:row-dragging={dragRowIndex === i}
                 class:row-drag-over={dragOverIndex === i && dragRowIndex !== null && dragRowIndex !== i}
                 class:row-drag-above={dragOverIndex === i && dragRowIndex !== null && dragRowIndex > i}
                 class:row-drag-below={dragOverIndex === i && dragRowIndex !== null && dragRowIndex < i}
                 draggable="true"
-                onclick={() => { selectedModId = selectedModId === mod.id ? undefined : mod.id; detailMod = detailMod?.id === mod.id ? null : mod; }}
+                onclick={() => { focusedIndex = i; selectedModId = selectedModId === mod.id ? undefined : mod.id; detailMod = detailMod?.id === mod.id ? null : mod; }}
+                oncontextmenu={(e) => handleRowContextMenu(e, mod)}
                 ondragstart={(e) => handleRowDragStart(e, i)}
                 ondragover={(e) => handleRowDragOver(e, i)}
                 ondragend={handleRowDragEnd}
@@ -1408,7 +1740,14 @@
 
                 <!-- Name -->
                 <span class="col-name">
-                  <span class="mod-name">{mod.name}</span>
+                  <!-- eslint-disable-next-line svelte/no-at-html-tags -->
+                  <span class="mod-name">{@html highlightMatch(mod.name, searchQuery)}</span>
+                  {#if mod.auto_category && viewMode === "flat"}
+                    <span
+                      class="category-chip"
+                      style="background: color-mix(in srgb, {categoryColors[mod.auto_category] ?? '#6b7280'} 15%, transparent); color: {categoryColors[mod.auto_category] ?? '#6b7280'};"
+                    >{mod.auto_category}</span>
+                  {/if}
                   {#if conflictModIds.has(mod.id)}
                     <span class="conflict-icon" title={getConflictTooltip(mod.id)}>
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1526,6 +1865,7 @@
                 </span>
               </div>
             {/each}
+            {/if}
           </div>
         </div>
       </div>
@@ -1746,6 +2086,37 @@
       </div><!-- end content-sidebar -->
     {/if}
     </div><!-- end content-grid -->
+  {/if}
+
+  <!-- Context Menu -->
+  {#if contextMenuMod}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="context-overlay" onclick={closeContextMenu}></div>
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="context-menu" style="left: {contextMenuX}px; top: {contextMenuY}px;" onclick={(e) => e.stopPropagation()}>
+      <button class="context-item" onclick={() => { handleToggle(contextMenuMod!); closeContextMenu(); }}>
+        {contextMenuMod.enabled ? "Disable" : "Enable"}
+      </button>
+      <button class="context-item" onclick={() => { detailMod = contextMenuMod; selectedModId = contextMenuMod!.id; editingNotesId = contextMenuMod!.id; editingNotesValue = contextMenuMod!.user_notes ?? ""; closeContextMenu(); }}>
+        Edit Notes
+      </button>
+      <div class="context-separator"></div>
+      <button class="context-item" onclick={() => { handleInstallOverMod(contextMenuMod!); closeContextMenu(); }}>
+        Reinstall
+      </button>
+      {#if contextMenuMod.nexus_mod_id}
+        <button class="context-item" onclick={() => { handleCheckSingleUpdate(contextMenuMod!); closeContextMenu(); }}>
+          Check for Update
+        </button>
+        <button class="context-item" onclick={() => { openUrl(`https://www.nexusmods.com/skyrimspecialedition/mods/${contextMenuMod!.nexus_mod_id}`); closeContextMenu(); }}>
+          Open on Nexus
+        </button>
+      {/if}
+      <div class="context-separator"></div>
+      <button class="context-item context-danger" onclick={() => { confirmUninstall = contextMenuMod!.id; closeContextMenu(); }}>
+        Uninstall
+      </button>
+    </div>
   {/if}
 </div>
 
@@ -2074,6 +2445,27 @@
     font-weight: 500;
   }
 
+  .modlist-selector {
+    margin-top: 4px;
+  }
+
+  .modlist-dropdown {
+    padding: 3px 8px;
+    background: var(--surface);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    min-width: 140px;
+  }
+
+  .modlist-dropdown:focus {
+    outline: none;
+    border-color: var(--accent-muted);
+  }
+
   .game-banner-actions {
     display: flex;
     align-items: center;
@@ -2305,6 +2697,22 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .sortable-header {
+    cursor: pointer;
+    user-select: none;
+    transition: color var(--duration-fast) var(--ease);
+  }
+
+  .sortable-header:hover {
+    color: var(--text-primary);
+  }
+
+  .sort-arrow {
+    font-size: 8px;
+    margin-left: 2px;
+    color: var(--accent);
   }
 
   .table-body {
@@ -3408,6 +3816,86 @@
   }
 
   /* ============================
+     View Mode Toggle
+     ============================ */
+  .view-mode-toggle {
+    display: flex;
+    gap: 0;
+    border: 1px solid var(--separator);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+
+  .view-mode-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 28px;
+    color: var(--text-tertiary);
+    cursor: pointer;
+    transition: all var(--duration-fast) var(--ease);
+    border-right: 1px solid var(--separator);
+  }
+
+  .view-mode-btn:last-child {
+    border-right: none;
+  }
+
+  .view-mode-btn:hover {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+  }
+
+  .view-mode-btn.active {
+    background: var(--accent-subtle);
+    color: var(--accent);
+  }
+
+  /* ============================
+     Collection Group Headers
+     ============================ */
+  .group-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    width: 100%;
+    padding: var(--space-2) var(--space-3);
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--separator);
+    cursor: pointer;
+    text-align: left;
+    transition: background var(--duration-fast) var(--ease);
+  }
+
+  .group-header:hover {
+    background: var(--surface-hover);
+  }
+
+  .group-chevron {
+    color: var(--text-tertiary);
+    transition: transform var(--duration-fast) var(--ease);
+    flex-shrink: 0;
+  }
+
+  .group-chevron.expanded {
+    transform: rotate(90deg);
+  }
+
+  .group-name {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .group-count {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    font-weight: 500;
+  }
+
+  /* ============================
      Detail Panel
      ============================ */
   .mod-detail-panel {
@@ -3621,5 +4109,154 @@
     gap: var(--space-2);
     border-top: 1px solid var(--separator);
     padding-top: var(--space-3);
+  }
+
+  /* ============================
+     Context Menu
+     ============================ */
+  .context-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 199;
+  }
+
+  .context-menu {
+    position: fixed;
+    z-index: 200;
+    min-width: 180px;
+    background: var(--bg-primary);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius-md);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    padding: var(--space-1) 0;
+    animation: contextFadeIn 0.1s var(--ease-out);
+  }
+
+  @keyframes contextFadeIn {
+    from { opacity: 0; transform: scale(0.96); }
+    to { opacity: 1; transform: scale(1); }
+  }
+
+  .context-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    width: 100%;
+    padding: var(--space-2) var(--space-3);
+    font-size: 13px;
+    color: var(--text-primary);
+    cursor: pointer;
+    text-align: left;
+    transition: background var(--duration-fast) var(--ease);
+  }
+
+  .context-item:hover {
+    background: var(--surface-hover);
+  }
+
+  .context-danger {
+    color: var(--red);
+  }
+
+  .context-separator {
+    height: 1px;
+    background: var(--separator);
+    margin: var(--space-1) 0;
+  }
+
+  /* ============================
+     Deploy Progress
+     ============================ */
+  .btn-deploy {
+    position: relative;
+    overflow: hidden;
+    min-width: 100px;
+  }
+
+  .deploy-progress-track {
+    position: absolute;
+    inset: 0;
+    background: transparent;
+  }
+
+  .deploy-progress-fill {
+    height: 100%;
+    background: var(--accent-subtle);
+    transition: width 0.2s var(--ease);
+  }
+
+  .deploy-progress-text {
+    position: relative;
+    z-index: 1;
+    font-size: 12px;
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* ============================
+     Row Focus + Hover Actions
+     ============================ */
+  .table-row.row-focused {
+    outline: 1px solid var(--accent-muted);
+    outline-offset: -1px;
+  }
+
+  .table-row .mod-action-group {
+    opacity: 0;
+    transition: opacity 0.15s var(--ease);
+  }
+
+  .table-row:hover .mod-action-group,
+  .table-row.row-focused .mod-action-group,
+  .table-row.row-selected .mod-action-group {
+    opacity: 1;
+  }
+
+  /* ============================
+     Category Chips
+     ============================ */
+  .category-chip {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    padding: 0 5px;
+    border-radius: 3px;
+    font-size: 10px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  /* ============================
+     Search Highlight
+     ============================ */
+  .mod-name :global(mark) {
+    background: rgba(255, 214, 10, 0.3);
+    color: inherit;
+    border-radius: 2px;
+    padding: 0 1px;
+  }
+
+  /* ============================
+     Empty Filter State
+     ============================ */
+  .empty-filter-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-3);
+    padding: var(--space-8) var(--space-4);
+    color: var(--text-tertiary);
+    font-size: 13px;
+  }
+
+  .empty-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+    justify-content: center;
   }
 </style>

@@ -64,6 +64,10 @@ export function setUpdateCheckFn(fn: () => Promise<void>) {
   triggerUpdateCheck = fn;
 }
 
+// Notification log (persistent — backed by SQLite)
+export const notificationCount = writable<number>(0);
+export const showNotificationLog = writable<boolean>(false);
+
 // Notification helpers
 export function showError(msg: string) {
   errorMessage.set(msg);

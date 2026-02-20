@@ -22,8 +22,10 @@
 
 <p align="center">
   <a href="#features">Features</a>&nbsp;&nbsp;&bull;&nbsp;&nbsp;
+  <a href="#screenshots">Screenshots</a>&nbsp;&nbsp;&bull;&nbsp;&nbsp;
   <a href="#installation">Installation</a>&nbsp;&nbsp;&bull;&nbsp;&nbsp;
   <a href="#supported-platforms">Platforms</a>&nbsp;&nbsp;&bull;&nbsp;&nbsp;
+  <a href="#keyboard-shortcuts">Keyboard Shortcuts</a>&nbsp;&nbsp;&bull;&nbsp;&nbsp;
   <a href="#architecture">Architecture</a>&nbsp;&nbsp;&bull;&nbsp;&nbsp;
   <a href="#acknowledgments">Acknowledgments</a>&nbsp;&nbsp;&bull;&nbsp;&nbsp;
   <a href="#contributing">Contributing</a>&nbsp;&nbsp;&bull;&nbsp;&nbsp;
@@ -36,7 +38,7 @@ Corkscrew installs, manages, and organizes mods for Windows games running throug
 
 It works by reading and writing directly to your Wine bottle's filesystem, the same way the game itself sees it. Your bottles, your mods, no middleman.
 
-> **Status:** v0.6.0 — Skyrim Special Edition is the first fully supported game. More games coming soon.
+> **Status:** v0.8.0 — Skyrim Special Edition is the first fully supported game. More games coming soon.
 
 ---
 
@@ -55,6 +57,22 @@ It works by reading and writing directly to your Wine bottle's filesystem, the s
 - **Contextual mod recommendations** — Get suggestions for commonly co-installed mods based on what others use in similar setups.
 - **Pre-flight installation checks** — Run a comprehensive pre-deployment check covering disk space, staging integrity, bottle health, and file conflicts before deploying.
 - **Disk space budget** — Real-time disk usage dashboard showing staging, deployment, and available space with per-install impact estimates.
+- **Auto-categorization** — Mods are automatically classified by content type (Plugins, Textures, Models, SKSE Plugins, UI, Audio, Scripts, ENB, ReShade) using file-path heuristics.
+
+### Mods Page UX
+- **Sortable column headers** — Click any column header (Name, Version, Files, Date) to sort. Click again to reverse. Semantic version comparison handles `1.2.3` vs `1.10.0` correctly.
+- **Three view modes** — Switch between Flat (standard table), Collection (grouped by collection with collapsible headers), and Category (MO2-style tree grouped by auto-category).
+- **Collection dropdown** — Filter the mod list by installed collection or view standalone mods, via a dropdown below the game banner.
+- **Category chips** — Color-coded pills next to mod names showing their auto-detected content category.
+- **Search highlighting** — Search terms are highlighted in mod names as you type.
+- **Right-click context menu** — Right-click any mod row for quick access to Toggle, Edit Tags, Edit Notes, Reinstall, Check for Update, Open on Nexus, and Uninstall.
+- **Batch selection** — Select multiple mods with checkboxes for bulk Enable All, Disable All, or Uninstall via a floating action bar.
+- **Keyboard navigation** — Full keyboard support: arrow keys to navigate rows, Space to toggle, Enter for details, Ctrl/Cmd+F to search, Ctrl/Cmd+A to select all, Ctrl/Cmd+D to deploy.
+- **Deploy progress** — The Deploy button shows a real-time progress bar with mod-by-mod status during deployment.
+- **Persistent notification log** — All success/error/warning notifications are logged to a persistent database. Click the bell icon in the sidebar to review past notifications with timestamps.
+- **Hover actions** — Action buttons appear on row hover for a cleaner table appearance.
+- **Empty state guidance** — Contextual CTAs when no mods are installed: Install from Archive, Browse NexusMods, or Install a Collection.
+- **Auto-profile on collection install** — A named profile snapshot is automatically created after each collection installation.
 
 ### Nexus Mods Integration
 - **API key authentication** — Connect your Nexus Mods account to access premium features.
@@ -96,7 +114,7 @@ It works by reading and writing directly to your Wine bottle's filesystem, the s
 - **Game launching** — Play your modded game straight from Corkscrew, through whatever Wine layer the bottle uses.
 - **SKSE integration** — Auto-detect, download, and install the Skyrim Script Extender; launch through SKSE with one click. Compatibility checks against your game version.
 - **Skyrim SE downgrade** — Detect your Skyrim version via SHA-256 hash and create a "Stock Game" copy to lock v1.5.97 and prevent Steam auto-updates (same approach pioneered by Wabbajack).
-- **Display scaling fix** — Automatically fix Skyrim SE display scaling issues in CrossOver on macOS by detecting your screen resolution and setting proper INI values for borderless windowed mode.
+- **Display scaling fix** — Automatically fix Skyrim SE display scaling issues in CrossOver on macOS by detecting your screen resolution and forcing exclusive fullscreen mode to bypass Wine/Retina DPI scaling issues.
 - **INI settings manager** — Browse, search, and edit game INI files (Skyrim.ini, SkyrimPrefs.ini, etc.) with built-in presets for common configurations like Steam Deck optimization, ultra graphics, and performance profiles.
 - **Wine bottle diagnostics** — Comprehensive health check for Wine bottles: validates drive_c, AppData, DXVK (Linux) / D3DMetal (macOS), DLL overrides, Visual C++ redistributables, .NET, Windows version, Retina/HiDPI display, and user directories, with one-click auto-fixes for common issues.
 - **Mod tools detection** — Automatically scans for known modding tools (SSEEdit, BethINI, DynDOLOD, BodySlide, Nemesis, Wrye Bash, etc.) in your game directory.
@@ -110,55 +128,24 @@ It works by reading and writing directly to your Wine bottle's filesystem, the s
 - **macOS vibrancy** — Native translucent materials that follow the active window state.
 - **Light and dark themes** — System-following by default with manual toggle.
 - **Cross-platform** — Native app for both macOS and Linux (SteamOS, Fedora, Ubuntu).
+- **Unified icon system** — Consistent SVG icon component used across the entire UI.
+- **In-app auto-updater** — Check for and install updates directly from within Corkscrew.
 
-### What Works
+---
 
-Everything listed above is implemented and functional. The app has been tested primarily on macOS (Apple Silicon) with CrossOver and Whisky bottles running Skyrim SE via Steam. Key workflows that are end-to-end tested:
+## Screenshots
 
-- Bottle discovery and game detection across all supported Wine sources
-- Full mod lifecycle: install from archive → stage → deploy → enable/disable → uninstall
-- Drag-and-drop mod installation with real-time progress events
-- NXM protocol link handling (click on Nexus website → mod downloads in Corkscrew)
-- FOMOD installer wizard for mods with complex install options
-- NexusMods Collection installation (premium: automated download + deploy; free: guided manual download)
-- LOOT-powered plugin sorting with masterlist fetching
-- Profile save/load/switch with full deployment cycling
-- Crash log analysis with actionable diagnosis
-- SKSE detection, download, install, and launch-through-SKSE
-- Collection browsing, filtering by game, and metadata viewing
-- Pre-flight checks and disk space budgeting before deployment
-- INI file browsing, editing, and preset application
-- Wine bottle diagnostics with automated fixes
-- Mod dependency tracking and conflict detection
-- Game session logging with stability summaries
-- FOMOD choice recipes (save, export, import, replay)
+> Screenshots coming soon — Corkscrew features a dark-themed native UI with translucent vibrancy on macOS.
 
-### Known Limitations
+**Mods Page** — The primary workspace with sortable table, search highlighting, category chips, view mode toggle (Flat / Collection / Category), and collection dropdown filter.
 
-- **Linux testing is limited** — The app builds and the code handles Linux paths, but testing has been primarily on macOS. SteamOS/Proton testing is planned.
-- **Single game support** — Only Skyrim SE is supported currently. The plugin architecture is ready for more games, but each needs a detection plugin.
-- **Wabbajack installation** — You can browse the Wabbajack gallery and parse `.wabbajack` files, but automated installation of Wabbajack modlists is not yet implemented.
-- **NexusMods SSO** — The SSO module is built but requires NexusMods to approve the "Corkscrew" application slug. Currently uses API key authentication.
-- **OAuth flow** — OAuth 2.0 + PKCE module is implemented but depends on the same NexusMods app approval as SSO.
+**Collections Browser** — Browse NexusMods Collections with search, sort by endorsements or downloads, and one-click install for premium users.
 
-### Roadmap
+**Plugin Load Order** — Drag-and-drop reordering with LOOT-powered auto-sort, inline plugin warnings, and custom rules.
 
-**Near-term:**
-- Multi-panel mods page — side-by-side layout with mod list and contextual detail panel
-- Advanced mod filtering and sorting — by category, state, source, update status
-- Mod tools launching — run detected tools (SSEEdit, DynDOLOD, etc.) through Wine from within Corkscrew
-- SKSE/Address Library pre-flight compatibility checks
+**FOMOD Wizard** — Step-by-step interactive installer with radio/checkbox groups, descriptions, and type badges.
 
-**Medium-term:**
-- Wabbajack modlist installation (FromArchive directives, download orchestration)
-- More game plugins (Fallout 4, Oblivion, Starfield, etc.)
-- NexusMods SSO/OAuth authentication (pending NM app approval)
-- Same-volume staging for reliable hardlink deployment
-
-**Long-term:**
-- Linux/SteamOS testing and distribution (AppImage, .deb, .rpm)
-- Collection update installation from diff view
-- UI/UX refinement with modular panel-based layout
+**Settings** — Nexus API key auth, INI editor with presets, Wine bottle diagnostics with auto-fixes, display scaling configuration, and mod tools detection.
 
 ---
 
@@ -224,6 +211,24 @@ Adding a new game is a matter of writing a small plugin — see [`plugins/skyrim
 
 ---
 
+## Keyboard Shortcuts
+
+These shortcuts are available on the Mods page:
+
+| Shortcut | Action |
+|----------|--------|
+| `Ctrl/Cmd + F` | Focus search input |
+| `Ctrl/Cmd + A` | Select all visible mods |
+| `Ctrl/Cmd + D` | Deploy all mods |
+| `↑` / `↓` | Navigate between mod rows |
+| `Space` | Toggle enable/disable on focused mod |
+| `Enter` | Open detail panel for focused mod |
+| `Escape` | Clear selection / close panels |
+| `Delete` / `Backspace` | Uninstall selected mods |
+| Right-click | Open context menu on mod row |
+
+---
+
 ## Architecture
 
 ### Why these technologies
@@ -234,71 +239,81 @@ Adding a new game is a matter of writing a small plugin — see [`plugins/skyrim
 
 **Rust** handles everything that touches the filesystem or network: bottle discovery across nine different Wine sources, archive extraction, staging-based mod deployment via hardlinks, LOOT plugin sorting, Nexus Mods API calls, NexusMods Collections GraphQL queries, SKSE downloads, Skyrim SE version detection, crash log analysis, and Wabbajack modlist gallery fetching. The plugin-based game detection system (`GamePlugin` trait) makes adding new game support straightforward.
 
-**SQLite** (via `rusqlite`) with a versioned migration system (v1→v6) tracks installed mods, deployment manifests, file hashes, profiles, plugin rules, conflict rules, mod version history, game file snapshots, mod dependencies, FOMOD recipes, game sessions, and collection metadata.
+**SQLite** (via `rusqlite`) with a versioned migration system (v1→v7) tracks installed mods, deployment manifests, file hashes, profiles, plugin rules, conflict rules, mod version history, game file snapshots, mod dependencies, FOMOD recipes, game sessions, collection metadata, auto-categories, and notification logs.
 
 ### Project structure
 
 ```
 src/                          Svelte frontend
 ├── lib/
-│   ├── api.ts                Tauri IPC bindings (~100 typed invoke wrappers)
-│   ├── types.ts              Shared TypeScript interfaces (~100 types)
-│   ├── stores.ts             Svelte stores (game selection, mods, toasts)
+│   ├── api.ts                Tauri IPC bindings (~110 typed invoke wrappers)
+│   ├── types.ts              Shared TypeScript interfaces (~110 types)
+│   ├── stores.ts             Svelte stores (game selection, mods, toasts, notifications)
 │   ├── theme.ts              Theme detection, persistence, and vibrancy
 │   └── components/
-│       ├── ThemeToggle.svelte         Light / Auto / Dark segmented control
-│       ├── FomodWizard.svelte         Multi-step FOMOD installer wizard
-│       ├── ConflictPanel.svelte       Mod file conflict visualization
+│       ├── Icon.svelte              Unified SVG icon component (15+ icons)
+│       ├── ThemeToggle.svelte       Light / Auto / Dark segmented control
+│       ├── FomodWizard.svelte       Multi-step FOMOD installer wizard
+│       ├── ConflictPanel.svelte     Mod file conflict visualization
 │       ├── CompatibilityPanel.svelte  SKSE + game version compatibility
-│       ├── GameIcon.svelte            Per-game icon component
-│       ├── ModVersionHistory.svelte   Version rollback UI
+│       ├── GameIcon.svelte          Per-game icon component
+│       ├── ModVersionHistory.svelte Version rollback UI
 │       ├── ModlistImportWizard.svelte Modlist import + diff wizard
-│       ├── PluginRulesPanel.svelte    Custom plugin load order rules
-│       ├── DiskBudgetPanel.svelte     Disk space budget + impact estimates
-│       ├── PreflightPanel.svelte      Pre-deployment health checks
-│       ├── DependencyPanel.svelte     Mod dependency graph + issue checker
+│       ├── PluginRulesPanel.svelte  Custom plugin load order rules
+│       ├── DiskBudgetPanel.svelte   Disk space budget + impact estimates
+│       ├── PreflightPanel.svelte    Pre-deployment health checks
+│       ├── DependencyPanel.svelte   Mod dependency graph + issue checker
 │       ├── SessionHistoryPanel.svelte Game session log + stability summary
-│       ├── IniManagerPanel.svelte     INI file editor with presets
-│       └── WineDiagnosticsPanel.svelte Wine bottle health diagnostics
+│       ├── IniManagerPanel.svelte   INI file editor with presets
+│       ├── WineDiagnosticsPanel.svelte Wine bottle health diagnostics
+│       └── mods/
+│           ├── ModTableHeader.svelte    Sortable column headers
+│           ├── ModTableRow.svelte       Single mod row with hover actions
+│           ├── ModFilterBar.svelte      Search, filters, view mode toggle
+│           ├── ModDetailSidebar.svelte  Right-side detail panel
+│           ├── ModBatchBar.svelte       Floating batch action toolbar
+│           ├── ModContextMenu.svelte    Right-click context menu
+│           ├── ModCategoryView.svelte   Category tree with collapsible groups
+│           └── NotificationLog.svelte   Persistent notification panel
 ├── routes/
-│   ├── +layout.svelte        Shell: sidebar nav, toast system, theme init
+│   ├── +layout.svelte        Shell: sidebar nav, toast system, notification bell
 │   ├── +page.svelte          Dashboard (bottle scanning, game discovery)
-│   ├── mods/+page.svelte     Mod management, Play button, SKSE, drag-and-drop
+│   ├── mods/+page.svelte     Mod management with sortable table, view modes, keyboard nav
 │   ├── plugins/+page.svelte  Plugin load order editor with LOOT sorting
 │   ├── collections/+page.svelte  NexusMods Collections browser
 │   ├── modlists/+page.svelte Wabbajack modlist gallery browser
 │   ├── logs/+page.svelte     Crash log analysis and diagnosis
 │   ├── profiles/+page.svelte Mod profile management
-│   ├── settings/+page.svelte Config, appearance, game tools, auth, INI, diagnostics
-│   └── about/+page.svelte    Version, credits, acknowledgments
+│   └── settings/+page.svelte Config, appearance, game tools, auth, INI, diagnostics
 └── app.css                   Design system (tokens, themes, vibrancy, animations)
 
-src-tauri/src/                Rust backend (~42 modules, 464 tests)
-├── lib.rs              Tauri command handlers (~95 IPC commands)
+src-tauri/src/                Rust backend (~45 modules, 483 tests)
+├── lib.rs              Tauri command handlers (~100 IPC commands)
 ├── bottles.rs          Bottle detection (9 sources, macOS + Linux)
 ├── bottle_config.rs    Wine bottle settings (MSync, MetalFX, env vars)
 ├── games.rs            Game detection framework + plugin registry
 ├── installer.rs        Archive extraction (.zip, .7z, .rar, .tar.gz/xz/bz2) + data root detection
 ├── staging.rs          Staging folder management + SHA-256 hashing
-├── deployer.rs         Hardlink/copy deployment engine + manifest tracking
-├── database.rs         SQLite mod tracking with versioned migrations
-├── migrations.rs       Schema versioning + migration runner (v1→v6)
+├── deployer.rs         Hardlink/copy deployment engine + manifest tracking + progress events
+├── database.rs         SQLite mod tracking with versioned migrations + notification log
+├── migrations.rs       Schema versioning + migration runner (v1→v7)
 ├── loot.rs             libloot wrapper + masterlist management
 ├── loot_rules.rs       Custom plugin load order rules
 ├── profiles.rs         Mod profile CRUD + activation flow
 ├── integrity.rs        Game file snapshots + integrity verification
 ├── collections.rs      NexusMods Collections GraphQL API client
+├── collection_installer.rs  Collection install orchestrator + auto-profile creation
 ├── wabbajack.rs        Wabbajack gallery fetching + .wabbajack file parsing
 ├── launcher.rs         Game launching through Wine/CrossOver/Whisky/Proton
 ├── skse.rs             SKSE detection, download, installation + compat checks
 ├── downgrader.rs       Skyrim version detection + Stock Game creation
-├── display_fix.rs      Skyrim display scaling fix for CrossOver/macOS
+├── display_fix.rs      Skyrim display scaling fix (exclusive fullscreen for Wine/Retina)
 ├── nexus.rs            Nexus Mods API client + update checking
 ├── nexus_sso.rs        WebSocket SSO authentication (pending NM approval)
 ├── oauth.rs            OAuth 2.0 + PKCE authentication
 ├── crashlog.rs         Crash log parser + diagnosis engine
+├── conflict_resolver.rs Automated conflict resolution heuristics
 ├── progress.rs         Install progress event types (Tauri event system)
-├── collection_installer.rs  NexusMods Collection install orchestrator
 ├── rollback.rs         Mod version rollback + snapshot management
 ├── modlist_io.rs       Modlist export/import + diff comparison
 ├── executables.rs      Custom executable management
@@ -331,7 +346,64 @@ src-tauri/src/                Rust backend (~42 modules, 464 tests)
 8. Re-enabling re-creates the hardlinks from staging
 9. Uninstalling removes both deployment and staging, cascading all DB records
 
-For **NexusMods Collections**, the `collection_installer` orchestrator handles the full pipeline: resolving install order via topological sort, downloading each mod (premium only), applying FOMOD selections from the collection manifest, staging and deploying each mod, and applying the collection's plugin load order.
+For **NexusMods Collections**, the `collection_installer` orchestrator handles the full pipeline: resolving install order via topological sort, downloading each mod (premium only), applying FOMOD selections from the collection manifest, staging and deploying each mod, and applying the collection's plugin load order. A profile snapshot is automatically created after successful collection installs.
+
+---
+
+## What Works
+
+Everything listed above is implemented and functional. The app has been tested primarily on macOS (Apple Silicon) with CrossOver and Whisky bottles running Skyrim SE via Steam. Key workflows that are end-to-end tested:
+
+- Bottle discovery and game detection across all supported Wine sources
+- Full mod lifecycle: install from archive → stage → deploy → enable/disable → uninstall
+- Drag-and-drop mod installation with real-time progress events
+- NXM protocol link handling (click on Nexus website → mod downloads in Corkscrew)
+- FOMOD installer wizard for mods with complex install options
+- NexusMods Collection installation (premium: automated download + deploy; free: guided manual download)
+- LOOT-powered plugin sorting with masterlist fetching
+- Profile save/load/switch with full deployment cycling
+- Crash log analysis with actionable diagnosis
+- SKSE detection, download, install, and launch-through-SKSE
+- Collection browsing, filtering by game, and metadata viewing
+- Pre-flight checks and disk space budgeting before deployment
+- INI file browsing, editing, and preset application
+- Wine bottle diagnostics with automated fixes
+- Mod dependency tracking and conflict detection
+- Game session logging with stability summaries
+- FOMOD choice recipes (save, export, import, replay)
+- Sortable columns with semantic version comparison
+- Keyboard navigation and batch mod operations
+- Context menus and search highlighting
+- View modes: flat table, collection grouping, category tree
+- Deploy progress bar with real-time feedback
+- Persistent notification logging
+
+### Known Limitations
+
+- **Linux testing is limited** — The app builds and the code handles Linux paths, but testing has been primarily on macOS. SteamOS/Proton testing is planned.
+- **Single game support** — Only Skyrim SE is supported currently. The plugin architecture is ready for more games, but each needs a detection plugin.
+- **Wabbajack installation** — You can browse the Wabbajack gallery and parse `.wabbajack` files, but automated installation of Wabbajack modlists is not yet implemented.
+- **NexusMods SSO** — The SSO module is built but requires NexusMods to approve the "Corkscrew" application slug. Currently uses API key authentication.
+- **OAuth flow** — OAuth 2.0 + PKCE module is implemented but depends on the same NexusMods app approval as SSO.
+
+### Roadmap
+
+**Near-term:**
+- Resizable table columns with persistent widths
+- Inline conflict resolution popovers
+- Enhanced dependency visualization with tree view
+- Mod tools launching — run detected tools (SSEEdit, DynDOLOD, etc.) through Wine from within Corkscrew
+- SKSE/Address Library pre-flight compatibility checks
+
+**Medium-term:**
+- Wabbajack modlist installation (FromArchive directives, download orchestration)
+- More game plugins (Fallout 4, Oblivion, Starfield, etc.)
+- NexusMods SSO/OAuth authentication (pending NM app approval)
+- Same-volume staging for reliable hardlink deployment
+
+**Long-term:**
+- Linux/SteamOS testing and distribution (AppImage, .deb, .rpm)
+- Collection update installation from diff view
 
 ---
 
@@ -344,7 +416,7 @@ Corkscrew stands on the shoulders of many open source projects. We are deeply gr
 - **[LOOT](https://loot.github.io/) / [libloot](https://github.com/loot/libloot)** — The Load Order Optimization Tool provides the plugin sorting engine that powers Corkscrew's automatic load order management. libloot (GPL-3.0, pure Rust) is integrated directly into Corkscrew for sorting Bethesda game plugins. Created by [WrinklyNinja](https://github.com/Ortham).
 - **[Wabbajack](https://www.wabbajack.org/)** ([GitHub](https://github.com/wabbajack-tools/wabbajack)) — Pioneered automated modlist compilation and installation, and developed the "Stock Game" approach for version-locked game copies. Corkscrew's modlist gallery browses Wabbajack's repository index, and the downgrade/Stock Game feature follows the approach Wabbajack popularized. GPL-3.0.
 - **[Vortex](https://github.com/Nexus-Mods/Vortex)** by Nexus Mods — Vortex's deployment model, conflict resolution patterns, and the Nexus Collections format informed Corkscrew's staging-based deployment engine and priority system. GPL-3.0.
-- **[Mod Organizer 2](https://github.com/ModOrganizer2/modorganizer)** — MO2's virtual filesystem concept and profile system inspired Corkscrew's staging/deploy architecture and mod profiles. GPL-3.0.
+- **[Mod Organizer 2](https://github.com/ModOrganizer2/modorganizer)** — MO2's virtual filesystem concept, profile system, and category view inspired Corkscrew's staging/deploy architecture, mod profiles, and category grouping. GPL-3.0.
 
 ### Libraries & Tools
 

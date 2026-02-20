@@ -32,6 +32,21 @@ export interface InstalledMod {
   collection_name: string | null;
   user_notes: string | null;
   user_tags: string[];
+  auto_category: string | null;
+}
+
+export interface NotificationEntry {
+  id: number;
+  level: string;
+  message: string;
+  detail: string | null;
+  created_at: string;
+}
+
+export interface DeployProgress {
+  current: number;
+  total: number;
+  mod_name: string;
 }
 
 export interface PluginEntry {
@@ -651,6 +666,14 @@ export interface DiffUpdate {
   source_type: string;
 }
 
+export interface IniEdit {
+  file: string;
+  section: string;
+  key: string;
+  value: string;
+  description: string;
+}
+
 export interface ModTool {
   id: string;
   name: string;
@@ -664,6 +687,9 @@ export interface ModTool {
   download_url: string | null;
   license: string;
   wine_notes: string | null;
+  wine_compat: "good" | "limited" | "not_recommended";
+  recommended_alternative: string | null;
+  recommended_ini_edits: IniEdit[];
 }
 
 export interface DeploymentHealth {

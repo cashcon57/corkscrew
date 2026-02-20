@@ -54,6 +54,7 @@ pub struct InstalledMod {
     pub collection_name: Option<String>,
     pub user_notes: Option<String>,
     pub user_tags: Vec<String>,
+    pub auto_category: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -104,6 +105,19 @@ pub struct CollectionSummary {
     pub image_url: Option<String>,
     pub game_domain: Option<String>,
     pub installed_revision: Option<u32>,
+}
+
+// ---------------------------------------------------------------------------
+// NotificationEntry
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NotificationEntry {
+    pub id: i64,
+    pub level: String,
+    pub message: String,
+    pub detail: Option<String>,
+    pub created_at: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -214,6 +228,7 @@ impl ModDatabase {
             collection_name: row.get(14)?,
             user_notes: row.get(15)?,
             user_tags,
+            auto_category: row.get(17)?,
         })
     }
 
@@ -221,7 +236,7 @@ impl ModDatabase {
     const SELECT_COLUMNS: &'static str = "id, game_id, bottle_name, nexus_mod_id, name, version, \
          archive_name, installed_files, installed_at, enabled, \
          nexus_file_id, source_url, staging_path, install_priority, \
-         collection_name, user_notes, user_tags";
+         collection_name, user_notes, user_tags, auto_category";
 
     // -- public API ---------------------------------------------------------
 
@@ -1067,6 +1082,145 @@ impl ModDatabase {
             params![game_id, bottle_name, collection_name],
         )?;
         Ok(())
+    }
+
+    // -- Auto-category -------------------------------------------------------
+
+    /// Classify a mod into a category based on its installed file paths.
+    pub fn classify_mod_category(installed_files: &[String]) -> Option<String> {
+        let mut counts: HashMap<&str, usize> = HashMap::new();
+
+        for file in installed_files {
+            let lower = file.to_lowercase();
+            let cat = if lower.contains("skse/plugins/") || lower.contains("skse\\plugins\\") {
+                "SKSE Plugins"
+            } else if lower.contains("enbseries") || lower.starts_with("d3d") {
+                "ENB"
+            } else if lower.contains("shaderfx") || lower.contains("reshade") {
+                "ReShade"
+            } else if lower.contains("textures/") || lower.contains("textures\\") || lower.ends_with(".dds") {
+                "Textures"
+            } else if lower.contains("meshes/") || lower.contains("meshes\\") || lower.ends_with(".nif") {
+                "Models"
+            } else if lower.ends_with(".esp") || lower.ends_with(".esm") || lower.ends_with(".esl") {
+                "Plugins"
+            } else if lower.contains("interface/") || lower.contains("interface\\") || lower.ends_with(".swf") {
+                "UI"
+            } else if lower.contains("sound/") || lower.contains("sound\\")
+                || lower.contains("music/") || lower.contains("music\\") {
+                "Audio"
+            } else if lower.contains("scripts/") || lower.contains("scripts\\") || lower.ends_with(".pex") {
+                "Scripts"
+            } else {
+                "Miscellaneous"
+            };
+            *counts.entry(cat).or_insert(0) += 1;
+        }
+
+        counts
+            .into_iter()
+            .filter(|(cat, _)| *cat != "Miscellaneous")
+            .max_by_key(|(_, count)| *count)
+            .map(|(cat, _)| cat.to_string())
+            .or(Some("Miscellaneous".to_string()))
+    }
+
+    /// Set the auto_category for a mod.
+    pub fn set_auto_category(&self, mod_id: i64, category: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let rows = conn.execute(
+            "UPDATE installed_mods SET auto_category = ?1 WHERE id = ?2",
+            params![category, mod_id],
+        )?;
+        if rows == 0 {
+            return Err(DatabaseError::ModNotFound(mod_id));
+        }
+        Ok(())
+    }
+
+    /// Get all distinct categories with counts for a game/bottle.
+    pub fn get_categories(&self, game_id: &str, bottle_name: &str) -> Result<Vec<(String, usize)>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT COALESCE(auto_category, 'Uncategorized'), COUNT(*)
+             FROM installed_mods
+             WHERE game_id = ?1 AND bottle_name = ?2
+             GROUP BY COALESCE(auto_category, 'Uncategorized')
+             ORDER BY COUNT(*) DESC",
+        )?;
+
+        let rows = stmt.query_map(params![game_id, bottle_name], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, usize>(1)?))
+        })?;
+
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Backfill auto_category for all mods that don't have one yet.
+    pub fn backfill_categories(&self, game_id: &str, bottle_name: &str) -> Result<usize> {
+        let mods = self.list_mods(game_id, bottle_name)?;
+        let mut updated = 0;
+        for m in &mods {
+            if m.auto_category.is_none() {
+                if let Some(cat) = Self::classify_mod_category(&m.installed_files) {
+                    self.set_auto_category(m.id, Some(&cat))?;
+                    updated += 1;
+                }
+            }
+        }
+        Ok(updated)
+    }
+
+    // -- Notification log ----------------------------------------------------
+
+    /// Log a notification to the persistent notification table.
+    pub fn log_notification(&self, level: &str, message: &str, detail: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "INSERT INTO notification_log (level, message, detail, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![level, message, detail, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Get recent notifications, most recent first.
+    pub fn get_notifications(&self, limit: usize) -> Result<Vec<NotificationEntry>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT id, level, message, detail, created_at
+             FROM notification_log
+             ORDER BY created_at DESC
+             LIMIT ?1",
+        )?;
+
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            Ok(NotificationEntry {
+                id: row.get(0)?,
+                level: row.get(1)?,
+                message: row.get(2)?,
+                detail: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })?;
+
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Clear all notifications.
+    pub fn clear_notifications(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute("DELETE FROM notification_log", [])?;
+        Ok(())
+    }
+
+    /// Get notification count.
+    pub fn notification_count(&self) -> Result<usize> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let count: i64 = conn
+            .prepare("SELECT COUNT(*) FROM notification_log")?
+            .query_row([], |row| row.get(0))?;
+        Ok(count as usize)
     }
 }
 

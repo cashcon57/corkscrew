@@ -62,6 +62,8 @@ import type {
   FomodRecipe,
   ConflictSuggestion,
   ResolutionResult,
+  NotificationEntry,
+  DeployProgress,
 } from "./types";
 
 // Bottles
@@ -848,6 +850,22 @@ export async function launchModTool(
   return invoke("launch_mod_tool", { toolId, gameId, bottleName });
 }
 
+export async function reinstallModTool(
+  toolId: string,
+  gameId: string,
+  bottleName: string
+): Promise<string> {
+  return invoke("reinstall_mod_tool", { toolId, gameId, bottleName });
+}
+
+export async function applyToolIniEdits(
+  toolId: string,
+  gameId: string,
+  bottleName: string
+): Promise<number> {
+  return invoke("apply_tool_ini_edits_cmd", { toolId, gameId, bottleName });
+}
+
 // Notes & Tags
 export async function setModNotes(
   modId: number,
@@ -1117,4 +1135,42 @@ export async function hasCompatibleFomodRecipe(
   return invoke("has_compatible_fomod_recipe", {
     modId, currentHash: currentHash ?? null,
   });
+}
+
+// Auto-categories
+export async function backfillCategories(
+  gameId: string,
+  bottleName: string
+): Promise<number> {
+  return invoke("backfill_categories", { gameId, bottleName });
+}
+
+// Notification log
+export async function getNotificationLog(limit: number = 50): Promise<NotificationEntry[]> {
+  return invoke("get_notification_log", { limit });
+}
+
+export async function clearNotificationLog(): Promise<void> {
+  return invoke("clear_notification_log");
+}
+
+export async function logNotification(
+  level: string,
+  message: string,
+  detail?: string
+): Promise<void> {
+  return invoke("log_notification", { level, message, detail: detail ?? null });
+}
+
+export async function getNotificationCount(): Promise<number> {
+  return invoke("get_notification_count");
+}
+
+// Deploy progress events
+export function onDeployProgress(
+  callback: (progress: DeployProgress) => void
+): Promise<UnlistenFn> {
+  return listen<DeployProgress>("deploy-progress", (e) =>
+    callback(e.payload)
+  );
 }

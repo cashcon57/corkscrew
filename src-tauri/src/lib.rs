@@ -1281,6 +1281,7 @@ fn reorder_mods(
 
 #[tauri::command]
 fn redeploy_all_mods(
+    app: AppHandle,
     game_id: String,
     bottle_name: String,
     state: State<AppState>,
@@ -1288,8 +1289,24 @@ fn redeploy_all_mods(
     let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
     let db = &state.db;
 
-    let result =
-        deployer::redeploy_all(db, &game_id, &bottle_name, &data_dir).map_err(|e| e.to_string())?;
+    let app_clone = app.clone();
+    let result = deployer::redeploy_all_with_progress(
+        db,
+        &game_id,
+        &bottle_name,
+        &data_dir,
+        Some(move |current: usize, total: usize, mod_name: &str| {
+            let _ = app_clone.emit(
+                "deploy-progress",
+                serde_json::json!({
+                    "current": current,
+                    "total": total,
+                    "mod_name": mod_name,
+                }),
+            );
+        }),
+    )
+    .map_err(|e| e.to_string())?;
 
     if game_id == "skyrimse" {
         let _ = sync_skyrim_plugins_for_game(&game, &bottle);
@@ -1618,6 +1635,55 @@ fn get_all_tags(
     let db = &state.db;
     db.get_all_user_tags(&game_id, &bottle_name)
         .map_err(|e| e.to_string())
+}
+
+// --- Auto-category ---
+
+#[tauri::command]
+fn backfill_categories(
+    game_id: String,
+    bottle_name: String,
+    state: State<AppState>,
+) -> Result<usize, String> {
+    let db = &state.db;
+    db.backfill_categories(&game_id, &bottle_name)
+        .map_err(|e| e.to_string())
+}
+
+// --- Notification Log ---
+
+#[tauri::command]
+fn get_notification_log(
+    limit: Option<usize>,
+    state: State<AppState>,
+) -> Result<Vec<database::NotificationEntry>, String> {
+    let db = &state.db;
+    db.get_notifications(limit.unwrap_or(50))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn clear_notification_log(state: State<AppState>) -> Result<(), String> {
+    let db = &state.db;
+    db.clear_notifications().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn log_notification(
+    level: String,
+    message: String,
+    detail: Option<String>,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let db = &state.db;
+    db.log_notification(&level, &message, detail.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_notification_count(state: State<AppState>) -> Result<usize, String> {
+    let db = &state.db;
+    db.notification_count().map_err(|e| e.to_string())
 }
 
 // --- Download Queue ---
@@ -2036,6 +2102,7 @@ fn launch_mod_tool(
     tool_id: String,
     game_id: String,
     bottle_name: String,
+    state: State<AppState>,
 ) -> Result<LaunchResult, String> {
     let (bottle, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
     let tools = mod_tools::detect_tools(&data_dir);
@@ -2047,7 +2114,35 @@ fn launch_mod_tool(
         .detected_path
         .as_ref()
         .ok_or_else(|| format!("Tool '{}' is not installed", tool_id))?;
-    mod_tools::launch_tool(Path::new(exe_path), &bottle)
+    mod_tools::launch_tool_with_logging(
+        Path::new(exe_path),
+        &bottle,
+        &tool_id,
+        &tool.name,
+        &state.db,
+    )
+}
+
+#[tauri::command]
+async fn reinstall_mod_tool(
+    tool_id: String,
+    game_id: String,
+    bottle_name: String,
+) -> Result<String, String> {
+    let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
+    mod_tools::reinstall_tool(&tool_id, &data_dir)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn apply_tool_ini_edits_cmd(
+    tool_id: String,
+    game_id: String,
+    bottle_name: String,
+) -> Result<usize, String> {
+    let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
+    mod_tools::apply_tool_ini_edits(&tool_id, &data_dir).map_err(|e| e.to_string())
 }
 
 // --- FOMOD ---
@@ -2985,6 +3080,8 @@ pub fn run() {
             install_mod_tool,
             uninstall_mod_tool,
             launch_mod_tool,
+            reinstall_mod_tool,
+            apply_tool_ini_edits_cmd,
             detect_fomod,
             get_fomod_defaults,
             get_fomod_files,
@@ -3048,6 +3145,13 @@ pub fn run() {
             set_mod_notes,
             set_mod_tags,
             get_all_tags,
+            // Auto-category
+            backfill_categories,
+            // Notification Log
+            get_notification_log,
+            clear_notification_log,
+            log_notification,
+            get_notification_count,
             // Download Queue
             get_download_queue,
             get_download_queue_counts,

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import "../app.css";
-  import { currentPage, errorMessage, successMessage, selectedGame, selectedBottle, showError, showSuccess, appVersion, collectionInstallStatus, updateReady as updateReadyStore, updateVersion as updateVersionStore, updateChecking as updateCheckingStore, updateError as updateErrorStore, setUpdateCheckFn } from "$lib/stores";
+  import { currentPage, errorMessage, successMessage, selectedGame, selectedBottle, showError, showSuccess, appVersion, collectionInstallStatus, updateReady as updateReadyStore, updateVersion as updateVersionStore, updateChecking as updateCheckingStore, updateError as updateErrorStore, setUpdateCheckFn, notificationCount, showNotificationLog } from "$lib/stores";
   import { initTheme } from "$lib/theme";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
@@ -12,6 +12,8 @@
   import { get } from "svelte/store";
   import type { DetectedGame, QueueItem } from "$lib/types";
   import GameIcon from "$lib/components/GameIcon.svelte";
+  import NotificationLog from "$lib/components/mods/NotificationLog.svelte";
+  import { getNotificationCount, logNotification } from "$lib/api";
 
   const navItems = [
     { id: "dashboard", label: "Dashboard" },
@@ -51,10 +53,29 @@
     }
   });
 
+  // Log toasts to persistent notification log
+  function logToast(level: string, message: string) {
+    logNotification(level, message).catch(() => {});
+    getNotificationCount().then(c => notificationCount.set(c)).catch(() => {});
+  }
+
+  // Override showError/showSuccess to also persist
+  const originalShowError = showError;
+  const originalShowSuccess = showSuccess;
+  function wrappedShowError(msg: string) {
+    originalShowError(msg);
+    logToast("error", msg);
+  }
+  function wrappedShowSuccess(msg: string) {
+    originalShowSuccess(msg);
+    logToast("success", msg);
+  }
+
   onMount(() => {
     initTheme();
     loadDetectedGames();
     getVersion().then(v => appVersion.set(v)).catch(() => {});
+    getNotificationCount().then(c => notificationCount.set(c)).catch(() => {});
 
     // Check for app updates on startup
     checkForUpdates();
@@ -426,6 +447,21 @@
 
       </div>
 
+      <!-- Notification Bell -->
+      <button
+        class="queue-btn"
+        onclick={(e) => { e.stopPropagation(); showNotificationLog.update(v => !v); }}
+        title="Notification Log"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+          <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+        </svg>
+        {#if $notificationCount > 0}
+          <span class="queue-badge queue-badge-active">{$notificationCount}</span>
+        {/if}
+      </button>
+
       {#if updateReady}
         <button class="update-btn update-ready" onclick={handleRelaunch} title="Restart to apply update">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -563,6 +599,8 @@
       {/if}
     </div>
   {/if}
+
+  <NotificationLog />
 </div>
 
 <style>

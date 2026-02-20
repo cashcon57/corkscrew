@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, detectModTools, installModTool, uninstallModTool, launchModTool } from "$lib/api";
+  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, applyToolIniEdits } from "$lib/api";
   import { config, showError, showSuccess, selectedGame, skseStatus, currentPage, appVersion, updateReady, updateVersion, updateChecking, updateError, triggerUpdateCheck } from "$lib/stores";
   import type { AppConfig, ModTool } from "$lib/types";
   import ThemeToggle from "$lib/components/ThemeToggle.svelte";
@@ -48,12 +48,14 @@
   let installingTool = $state<string | null>(null);
   let launchingTool = $state<string | null>(null);
   let uninstallingTool = $state<string | null>(null);
+  let reinstallingTool = $state<string | null>(null);
 
   const game = $derived($selectedGame);
   const skse = $derived($skseStatus);
   const isSkyrim = $derived(game?.game_id === "skyrimse");
-  const autoInstallTools = $derived(modTools.filter(t => t.can_auto_install));
-  const manualTools = $derived(modTools.filter(t => !t.can_auto_install));
+  const recommendedTools = $derived(modTools.filter(t => t.wine_compat === "good"));
+  const limitedTools = $derived(modTools.filter(t => t.wine_compat === "limited"));
+  const notRecommendedTools = $derived(modTools.filter(t => t.wine_compat === "not_recommended"));
 
   // Detect platform for comparison dialog
   const isMac = typeof navigator !== "undefined" && navigator.platform?.startsWith("Mac");
@@ -216,6 +218,34 @@
       showError(`Failed to launch tool: ${e}`);
     } finally {
       launchingTool = null;
+    }
+  }
+
+  async function handleReinstallTool(toolId: string) {
+    if (!game) return;
+    reinstallingTool = toolId;
+    try {
+      await reinstallModTool(toolId, game.game_id, game.bottle_name);
+      modTools = await detectModTools(game.game_id, game.bottle_name);
+      showSuccess("Tool reinstalled successfully");
+    } catch (e: unknown) {
+      showError(`Failed to reinstall tool: ${e}`);
+    } finally {
+      reinstallingTool = null;
+    }
+  }
+
+  async function handleApplyIniEdits(toolId: string) {
+    if (!game) return;
+    try {
+      const count = await applyToolIniEdits(toolId, game.game_id, game.bottle_name);
+      if (count > 0) {
+        showSuccess(`Applied ${count} recommended INI edit${count === 1 ? "" : "s"}`);
+      } else {
+        showSuccess("No INI edits needed — settings already applied");
+      }
+    } catch (e: unknown) {
+      showError(`Failed to apply INI edits: ${e}`);
     }
   }
 
@@ -464,12 +494,12 @@
           <div class="card-row"><span class="tool-description">No game selected or no tools available.</span></div>
         </div>
       {:else}
-        <!-- Auto-installable tools -->
-        {#if autoInstallTools.length > 0}
+        <!-- Recommended tools (good Wine compat) -->
+        {#if recommendedTools.length > 0}
           <div class="layers-group">
-            <span class="layers-group-label">Auto-Install from GitHub</span>
+            <span class="layers-group-label">Recommended</span>
             <div class="section-card">
-              {#each autoInstallTools as tool, i (tool.id)}
+              {#each recommendedTools as tool, i (tool.id)}
                 {#if i > 0}<div class="card-divider"></div>{/if}
                 <div class="card-row tool-row">
                   <div class="tool-info">
@@ -480,6 +510,90 @@
                     </span>
                     {#if tool.wine_notes}
                       <span class="tool-wine-note">{tool.wine_notes}</span>
+                    {/if}
+                  </div>
+                  <div class="tool-action">
+                    {#if tool.detected_path}
+                      <span class="badge badge-green">Installed</span>
+                      <button
+                        class="btn-primary btn-sm"
+                        onclick={() => handleLaunchTool(tool.id)}
+                        disabled={launchingTool === tool.id}
+                        type="button"
+                      >
+                        {launchingTool === tool.id ? "..." : "Launch"}
+                      </button>
+                      {#if tool.can_auto_install}
+                        <button
+                          class="btn-secondary btn-sm"
+                          onclick={() => handleReinstallTool(tool.id)}
+                          disabled={reinstallingTool === tool.id}
+                          type="button"
+                          title="Reinstall {tool.name}"
+                        >
+                          {reinstallingTool === tool.id ? "..." : "Reinstall"}
+                        </button>
+                      {/if}
+                      <button
+                        class="btn-delete-sm"
+                        onclick={() => handleUninstallTool(tool.id)}
+                        disabled={uninstallingTool === tool.id}
+                        type="button"
+                        aria-label="Uninstall {tool.name}"
+                      >
+                        {#if uninstallingTool === tool.id}
+                          <span class="spinner-xs"></span>
+                        {:else}
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                          </svg>
+                        {/if}
+                      </button>
+                    {:else if tool.can_auto_install}
+                      <button
+                        class="btn-primary btn-sm"
+                        onclick={() => handleInstallTool(tool.id)}
+                        disabled={installingTool === tool.id}
+                        type="button"
+                      >
+                        {#if installingTool === tool.id}
+                          <span class="spinner-xs"></span> Installing...
+                        {:else}
+                          Install
+                        {/if}
+                      </button>
+                    {:else if tool.download_url}
+                      <button
+                        class="btn-secondary btn-sm"
+                        onclick={() => openUrl(tool.download_url!)}
+                        type="button"
+                      >
+                        Download
+                      </button>
+                    {/if}
+                  </div>
+                </div>
+              {/each}
+            </div>
+          </div>
+        {/if}
+
+        <!-- Limited Wine compatibility tools -->
+        {#if limitedTools.length > 0}
+          <div class="layers-group">
+            <span class="layers-group-label">Limited Wine Compatibility</span>
+            <div class="section-card">
+              {#each limitedTools as tool, i (tool.id)}
+                {#if i > 0}<div class="card-divider"></div>{/if}
+                <div class="card-row tool-row">
+                  <div class="tool-info">
+                    <span class="row-label">{tool.name}</span>
+                    <span class="tool-description">
+                      {tool.description}
+                      <span class="tool-license">{tool.license}</span>
+                    </span>
+                    {#if tool.wine_notes}
+                      <span class="tool-wine-note tool-wine-warn">{tool.wine_notes}</span>
                     {/if}
                   </div>
                   <div class="tool-action">
@@ -508,18 +622,13 @@
                           </svg>
                         {/if}
                       </button>
-                    {:else}
+                    {:else if tool.download_url}
                       <button
-                        class="btn-primary btn-sm"
-                        onclick={() => handleInstallTool(tool.id)}
-                        disabled={installingTool === tool.id}
+                        class="btn-secondary btn-sm"
+                        onclick={() => openUrl(tool.download_url!)}
                         type="button"
                       >
-                        {#if installingTool === tool.id}
-                          <span class="spinner-xs"></span> Installing...
-                        {:else}
-                          Install
-                        {/if}
+                        Download
                       </button>
                     {/if}
                   </div>
@@ -529,27 +638,40 @@
           </div>
         {/if}
 
-        <!-- Manual download tools -->
-        {#if manualTools.length > 0}
+        <!-- Not recommended via Wine -->
+        {#if notRecommendedTools.length > 0}
           <div class="layers-group">
-            <span class="layers-group-label">Manual Download Required</span>
-            <div class="section-card">
-              {#each manualTools as tool, i (tool.id)}
+            <span class="layers-group-label tool-warn-label">Not Recommended via Wine</span>
+            <div class="section-card tool-warn-card">
+              {#each notRecommendedTools as tool, i (tool.id)}
                 {#if i > 0}<div class="card-divider"></div>{/if}
                 <div class="card-row tool-row">
                   <div class="tool-info">
-                    <span class="row-label">{tool.name}</span>
+                    <span class="row-label tool-warn-name">{tool.name}</span>
                     <span class="tool-description">
                       {tool.description}
                       <span class="tool-license">{tool.license}</span>
                     </span>
                     {#if tool.wine_notes}
-                      <span class="tool-wine-note">{tool.wine_notes}</span>
+                      <span class="tool-wine-note tool-wine-danger">{tool.wine_notes}</span>
+                    {/if}
+                    {#if tool.recommended_alternative}
+                      {@const alt = modTools.find(t => t.id === tool.recommended_alternative)}
+                      {#if alt}
+                        <span class="tool-alternative">
+                          Use <strong>{alt.name}</strong> instead
+                          {#if !alt.detected_path && alt.can_auto_install}
+                            — <button class="tool-alt-link" onclick={() => handleInstallTool(alt.id)} type="button">Install it</button>
+                          {:else if alt.detected_path}
+                            — already installed
+                          {/if}
+                        </span>
+                      {/if}
                     {/if}
                   </div>
                   <div class="tool-action">
                     {#if tool.detected_path}
-                      <span class="badge badge-green">Installed</span>
+                      <span class="badge badge-amber">Installed</span>
                       <button
                         class="btn-primary btn-sm"
                         onclick={() => handleLaunchTool(tool.id)}
@@ -557,6 +679,21 @@
                         type="button"
                       >
                         {launchingTool === tool.id ? "..." : "Launch"}
+                      </button>
+                      <button
+                        class="btn-delete-sm"
+                        onclick={() => handleUninstallTool(tool.id)}
+                        disabled={uninstallingTool === tool.id}
+                        type="button"
+                        aria-label="Uninstall {tool.name}"
+                      >
+                        {#if uninstallingTool === tool.id}
+                          <span class="spinner-xs"></span>
+                        {:else}
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                          </svg>
+                        {/if}
                       </button>
                     {:else if tool.download_url}
                       <button
@@ -1726,5 +1863,51 @@
     font-size: 11px;
     color: var(--yellow);
     opacity: 0.8;
+  }
+
+  .tool-wine-warn {
+    color: var(--amber, #f59e0b);
+  }
+
+  .tool-wine-danger {
+    color: var(--red);
+    opacity: 1;
+  }
+
+  .tool-warn-label {
+    color: var(--red) !important;
+  }
+
+  .tool-warn-card {
+    border-color: color-mix(in srgb, var(--red) 25%, var(--separator));
+  }
+
+  .tool-warn-name {
+    opacity: 0.7;
+  }
+
+  .tool-alternative {
+    font-size: 12px;
+    color: var(--green);
+    margin-top: 2px;
+  }
+
+  .tool-alt-link {
+    background: none;
+    border: none;
+    color: var(--system-accent);
+    font-size: 12px;
+    cursor: pointer;
+    padding: 0;
+    text-decoration: underline;
+  }
+
+  .tool-alt-link:hover {
+    color: var(--text-primary);
+  }
+
+  .badge-amber {
+    background: color-mix(in srgb, var(--amber, #f59e0b) 15%, transparent);
+    color: var(--amber, #f59e0b);
   }
 </style>

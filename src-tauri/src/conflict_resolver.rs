@@ -386,6 +386,7 @@ mod tests {
             collection_name: collection.map(String::from),
             user_notes: None,
             user_tags: vec![],
+            auto_category: None,
         }
     }
 
