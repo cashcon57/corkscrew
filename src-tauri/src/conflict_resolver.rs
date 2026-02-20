@@ -135,16 +135,17 @@ fn suggest_winner(
     loot_positions: &HashMap<String, usize>,
     current_winner_id: i64,
 ) -> (ConflictStatus, i64, String) {
-    let collections: HashSet<Option<&str>> = mods
-        .iter()
-        .map(|m| m.collection_name.as_deref())
-        .collect();
+    let collections: HashSet<Option<&str>> =
+        mods.iter().map(|m| m.collection_name.as_deref()).collect();
     if collections.len() == 1 {
         if let Some(Some(col_name)) = collections.into_iter().next() {
             return (
                 ConflictStatus::AuthorResolved,
                 current_winner_id,
-                format!("All mods from collection \"{}\". Author's priority order applies.", col_name),
+                format!(
+                    "All mods from collection \"{}\". Author's priority order applies.",
+                    col_name
+                ),
             );
         }
     }
@@ -544,15 +545,24 @@ mod tests {
         // We can't call apply_suggestions without a real DB, but we can
         // verify the suggestion categorization.
         assert_eq!(
-            suggestions.iter().filter(|s| s.status == ConflictStatus::AuthorResolved).count(),
+            suggestions
+                .iter()
+                .filter(|s| s.status == ConflictStatus::AuthorResolved)
+                .count(),
             1
         );
         assert_eq!(
-            suggestions.iter().filter(|s| s.status == ConflictStatus::Suggested).count(),
+            suggestions
+                .iter()
+                .filter(|s| s.status == ConflictStatus::Suggested)
+                .count(),
             1
         );
         assert_eq!(
-            suggestions.iter().filter(|s| s.status == ConflictStatus::Manual).count(),
+            suggestions
+                .iter()
+                .filter(|s| s.status == ConflictStatus::Manual)
+                .count(),
             1
         );
     }

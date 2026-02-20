@@ -14,8 +14,8 @@ use crate::fomod;
 use crate::games;
 use crate::nexus::NexusClient;
 use crate::plugins;
-use crate::progress::{InstallProgress, INSTALL_PROGRESS_EVENT};
 use crate::profiles;
+use crate::progress::{InstallProgress, INSTALL_PROGRESS_EVENT};
 use crate::staging;
 
 #[derive(Clone, Debug, Serialize)]

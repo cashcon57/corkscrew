@@ -2,8 +2,8 @@ pub mod bottle_config;
 pub mod bottles;
 pub mod collection_installer;
 pub mod collections;
-pub mod conflict_resolver;
 pub mod config;
+pub mod conflict_resolver;
 pub mod crashlog;
 pub mod database;
 pub mod deployer;
@@ -1051,14 +1051,13 @@ fn get_skse_builds(
     let downgrade_status =
         downgrader::detect_skyrim_version(&game_path).map_err(|e| e.to_string())?;
 
-    Ok(skse::get_available_skse_builds(&downgrade_status.current_version))
+    Ok(skse::get_available_skse_builds(
+        &downgrade_status.current_version,
+    ))
 }
 
 #[tauri::command]
-async fn install_skse_auto_cmd(
-    game_id: String,
-    bottle_name: String,
-) -> Result<SkseStatus, String> {
+async fn install_skse_auto_cmd(game_id: String, bottle_name: String) -> Result<SkseStatus, String> {
     if game_id != "skyrimse" {
         return Err("SKSE is only available for Skyrim Special Edition".into());
     }
@@ -1269,8 +1268,7 @@ fn resolve_all_conflicts_cmd(
     // Redeploy to apply new priorities if any changed.
     if result.priorities_changed > 0 {
         let (_bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
-        deployer::redeploy_all(db, &game_id, &bottle_name, &data_dir)
-            .map_err(|e| e.to_string())?;
+        deployer::redeploy_all(db, &game_id, &bottle_name, &data_dir).map_err(|e| e.to_string())?;
         if game_id == "skyrimse" {
             let bottle = resolve_bottle(&bottle_name)?;
             let _ = sync_skyrim_plugins_for_game(&game, &bottle);
@@ -2196,10 +2194,12 @@ fn detect_collection_tools(
     game_id: String,
     bottle_name: String,
 ) -> Result<Vec<mod_tools::RequiredTool>, String> {
-    let manifest: collections::CollectionManifest =
-        serde_json::from_str(&manifest_json).map_err(|e| format!("Invalid manifest JSON: {}", e))?;
+    let manifest: collections::CollectionManifest = serde_json::from_str(&manifest_json)
+        .map_err(|e| format!("Invalid manifest JSON: {}", e))?;
     let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
-    Ok(mod_tools::detect_required_tools_collection(&manifest, &data_dir))
+    Ok(mod_tools::detect_required_tools_collection(
+        &manifest, &data_dir,
+    ))
 }
 
 #[tauri::command]
@@ -2211,7 +2211,9 @@ fn detect_wabbajack_tools(
     let parsed = wabbajack::parse_wabbajack_file(std::path::Path::new(&wj_path))
         .map_err(|e| format!("Failed to parse .wabbajack: {}", e))?;
     let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
-    Ok(mod_tools::detect_required_tools_wabbajack(&parsed, &data_dir))
+    Ok(mod_tools::detect_required_tools_wabbajack(
+        &parsed, &data_dir,
+    ))
 }
 
 // --- Platform Detection ---
@@ -2226,8 +2228,7 @@ struct PlatformInfo {
 fn get_platform_detail() -> PlatformInfo {
     let os = std::env::consts::OS.to_string();
     let is_steam_os = if cfg!(target_os = "linux") {
-        std::path::Path::new("/etc/steamos-release").exists()
-            || std::env::var("SteamOS").is_ok()
+        std::path::Path::new("/etc/steamos-release").exists() || std::env::var("SteamOS").is_ok()
     } else {
         false
     };

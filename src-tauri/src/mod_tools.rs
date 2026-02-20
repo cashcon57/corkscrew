@@ -275,9 +275,7 @@ pub fn detect_required_tools_wabbajack(
 
 /// Build a RequiredTool from a signature, enriching with builtin tool metadata.
 fn build_required_tool(sig: &ToolSignature, detected_tools: &[ModTool]) -> RequiredTool {
-    let builtin = builtin_tools()
-        .into_iter()
-        .find(|t| t.id == sig.tool_id);
+    let builtin = builtin_tools().into_iter().find(|t| t.id == sig.tool_id);
 
     let is_detected = detected_tools
         .iter()
@@ -919,7 +917,12 @@ pub fn apply_tool_ini_edits(tool_id: &str, game_data_dir: &Path) -> Result<usize
                 debug!("INI edit already applied: [{}]{}", edit.section, edit.key);
             }
             Err(e) => {
-                log::warn!("Failed to apply INI edit [{}]{}: {}", edit.section, edit.key, e);
+                log::warn!(
+                    "Failed to apply INI edit [{}]{}: {}",
+                    edit.section,
+                    edit.key,
+                    e
+                );
             }
         }
     }
@@ -1025,7 +1028,10 @@ pub fn launch_tool_with_logging(
         let _ = db.log_notification(
             "info",
             &format!("Launched {}", tool_name),
-            Some(&format!("Tool: {} | Bottle: {}", tool_id, result.bottle_name)),
+            Some(&format!(
+                "Tool: {} | Bottle: {}",
+                tool_id, result.bottle_name
+            )),
         );
     } else {
         let _ = db.log_notification(
@@ -1308,12 +1314,9 @@ mod tests {
 
     #[test]
     fn test_detect_collection_tools_by_mod_id() {
-        let manifest = mock_collection_manifest(vec![
-            ("SKSE64", Some(30379)),
-            ("SkyUI", Some(12604)),
-        ]);
-        let tools =
-            detect_required_tools_collection(&manifest, Path::new("/nonexistent"));
+        let manifest =
+            mock_collection_manifest(vec![("SKSE64", Some(30379)), ("SkyUI", Some(12604))]);
+        let tools = detect_required_tools_collection(&manifest, Path::new("/nonexistent"));
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].tool_id, "skse");
     }
@@ -1324,8 +1327,7 @@ mod tests {
             ("Nemesis Unlimited Behavior Engine", None),
             ("SkyUI", None),
         ]);
-        let tools =
-            detect_required_tools_collection(&manifest, Path::new("/nonexistent"));
+        let tools = detect_required_tools_collection(&manifest, Path::new("/nonexistent"));
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].tool_id, "nemesis");
         assert_eq!(tools[0].recommended_alternative.as_deref(), Some("pandora"));
@@ -1334,11 +1336,8 @@ mod tests {
     #[test]
     fn test_detect_collection_tools_dedup() {
         // Same tool matched by both mod_id and name
-        let manifest = mock_collection_manifest(vec![
-            ("SSEEdit xEdit", Some(164)),
-        ]);
-        let tools =
-            detect_required_tools_collection(&manifest, Path::new("/nonexistent"));
+        let manifest = mock_collection_manifest(vec![("SSEEdit xEdit", Some(164))]);
+        let tools = detect_required_tools_collection(&manifest, Path::new("/nonexistent"));
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].tool_id, "sseedit");
     }
@@ -1349,32 +1348,24 @@ mod tests {
             ("skse64_2_02_06.7z", Some(30379)),
             ("SkyUI_5_2_SE.7z", Some(12604)),
         ]);
-        let tools =
-            detect_required_tools_wabbajack(&modlist, Path::new("/nonexistent"));
+        let tools = detect_required_tools_wabbajack(&modlist, Path::new("/nonexistent"));
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].tool_id, "skse");
     }
 
     #[test]
     fn test_detect_wabbajack_tools_by_name() {
-        let modlist = mock_parsed_modlist(vec![
-            ("skse64_2_02_06.7z", None),
-            ("random_mod.zip", None),
-        ]);
-        let tools =
-            detect_required_tools_wabbajack(&modlist, Path::new("/nonexistent"));
+        let modlist =
+            mock_parsed_modlist(vec![("skse64_2_02_06.7z", None), ("random_mod.zip", None)]);
+        let tools = detect_required_tools_wabbajack(&modlist, Path::new("/nonexistent"));
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].tool_id, "skse");
     }
 
     #[test]
     fn test_detect_no_tools() {
-        let manifest = mock_collection_manifest(vec![
-            ("SkyUI", Some(12604)),
-            ("USSEP", Some(266)),
-        ]);
-        let tools =
-            detect_required_tools_collection(&manifest, Path::new("/nonexistent"));
+        let manifest = mock_collection_manifest(vec![("SkyUI", Some(12604)), ("USSEP", Some(266))]);
+        let tools = detect_required_tools_collection(&manifest, Path::new("/nonexistent"));
         assert!(tools.is_empty());
     }
 
@@ -1393,11 +1384,8 @@ mod tests {
 
     #[test]
     fn test_required_tool_enriches_from_builtin() {
-        let manifest = mock_collection_manifest(vec![
-            ("SSEEdit", Some(164)),
-        ]);
-        let tools =
-            detect_required_tools_collection(&manifest, Path::new("/nonexistent"));
+        let manifest = mock_collection_manifest(vec![("SSEEdit", Some(164))]);
+        let tools = detect_required_tools_collection(&manifest, Path::new("/nonexistent"));
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].tool_name, "SSEEdit (xEdit)");
         assert!(tools[0].can_auto_install);

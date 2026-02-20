@@ -239,7 +239,13 @@ pub fn redeploy_all(
     bottle_name: &str,
     data_dir: &Path,
 ) -> Result<DeployResult> {
-    redeploy_all_with_progress(db, game_id, bottle_name, data_dir, None::<fn(usize, usize, &str)>)
+    redeploy_all_with_progress(
+        db,
+        game_id,
+        bottle_name,
+        data_dir,
+        None::<fn(usize, usize, &str)>,
+    )
 }
 
 /// Full redeploy with optional progress callback.

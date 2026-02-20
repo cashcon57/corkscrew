@@ -92,20 +92,76 @@ struct SkseVersionEntry {
 /// Known SKSE releases mapped to their target Skyrim versions.
 /// Ordered newest-first for priority matching.
 const SKSE_VERSION_DB: &[SkseVersionEntry] = &[
-    SkseVersionEntry { tag: "v2.2.6", game_version: "1.6.1170", has_gog_variant: false },
-    SkseVersionEntry { tag: "v2.2.5", game_version: "1.6.1130", has_gog_variant: false },
-    SkseVersionEntry { tag: "v2.2.4", game_version: "1.6.1130", has_gog_variant: false },
-    SkseVersionEntry { tag: "v2.2.3", game_version: "1.6.640", has_gog_variant: true },
-    SkseVersionEntry { tag: "v2.2.2", game_version: "1.6.640", has_gog_variant: false },
-    SkseVersionEntry { tag: "v2.2.1", game_version: "1.6.640", has_gog_variant: false },
-    SkseVersionEntry { tag: "v2.2.0", game_version: "1.6.629", has_gog_variant: false },
-    SkseVersionEntry { tag: "v2.1.5", game_version: "1.6.353", has_gog_variant: false },
-    SkseVersionEntry { tag: "v2.1.4", game_version: "1.6.342", has_gog_variant: false },
-    SkseVersionEntry { tag: "v2.1.3", game_version: "1.6.323", has_gog_variant: false },
-    SkseVersionEntry { tag: "v2.1.2", game_version: "1.6.318", has_gog_variant: false },
-    SkseVersionEntry { tag: "v2.1.1", game_version: "1.6.318", has_gog_variant: false },
-    SkseVersionEntry { tag: "v2.1.0", game_version: "1.6.317", has_gog_variant: false },
-    SkseVersionEntry { tag: "v2.0.20", game_version: "1.5.97", has_gog_variant: false },
+    SkseVersionEntry {
+        tag: "v2.2.6",
+        game_version: "1.6.1170",
+        has_gog_variant: false,
+    },
+    SkseVersionEntry {
+        tag: "v2.2.5",
+        game_version: "1.6.1130",
+        has_gog_variant: false,
+    },
+    SkseVersionEntry {
+        tag: "v2.2.4",
+        game_version: "1.6.1130",
+        has_gog_variant: false,
+    },
+    SkseVersionEntry {
+        tag: "v2.2.3",
+        game_version: "1.6.640",
+        has_gog_variant: true,
+    },
+    SkseVersionEntry {
+        tag: "v2.2.2",
+        game_version: "1.6.640",
+        has_gog_variant: false,
+    },
+    SkseVersionEntry {
+        tag: "v2.2.1",
+        game_version: "1.6.640",
+        has_gog_variant: false,
+    },
+    SkseVersionEntry {
+        tag: "v2.2.0",
+        game_version: "1.6.629",
+        has_gog_variant: false,
+    },
+    SkseVersionEntry {
+        tag: "v2.1.5",
+        game_version: "1.6.353",
+        has_gog_variant: false,
+    },
+    SkseVersionEntry {
+        tag: "v2.1.4",
+        game_version: "1.6.342",
+        has_gog_variant: false,
+    },
+    SkseVersionEntry {
+        tag: "v2.1.3",
+        game_version: "1.6.323",
+        has_gog_variant: false,
+    },
+    SkseVersionEntry {
+        tag: "v2.1.2",
+        game_version: "1.6.318",
+        has_gog_variant: false,
+    },
+    SkseVersionEntry {
+        tag: "v2.1.1",
+        game_version: "1.6.318",
+        has_gog_variant: false,
+    },
+    SkseVersionEntry {
+        tag: "v2.1.0",
+        game_version: "1.6.317",
+        has_gog_variant: false,
+    },
+    SkseVersionEntry {
+        tag: "v2.0.20",
+        game_version: "1.5.97",
+        has_gog_variant: false,
+    },
 ];
 
 /// Available SKSE builds for a specific game version, returned to frontend.
@@ -270,7 +326,10 @@ fn tag_to_asset_name(tag: &str) -> Option<String> {
     if parts.len() != 3 {
         return None;
     }
-    Some(format!("skse64_{}_{:02}_{:02}.7z", parts[0], parts[1], parts[2]))
+    Some(format!(
+        "skse64_{}_{:02}_{:02}.7z",
+        parts[0], parts[1], parts[2]
+    ))
 }
 
 /// Parse a game version string like "1.6.1170" into a comparable tuple.
@@ -357,10 +416,7 @@ pub fn get_available_skse_builds(game_version: &str) -> SkseAvailableBuilds {
 ///
 /// Fetches the .7z archive from GitHub releases, extracts it, and copies
 /// the SKSE files into the game directory.
-pub async fn install_skse_auto(
-    game_path: &Path,
-    game_version: &str,
-) -> Result<SkseStatus> {
+pub async fn install_skse_auto(game_path: &Path, game_version: &str) -> Result<SkseStatus> {
     let builds = get_available_skse_builds(game_version);
     let build = builds.recommended.ok_or_else(|| {
         SkseError::Other(format!(
@@ -1090,9 +1146,18 @@ mod tests {
 
     #[test]
     fn tag_to_asset_name_works() {
-        assert_eq!(tag_to_asset_name("v2.2.6"), Some("skse64_2_02_06.7z".into()));
-        assert_eq!(tag_to_asset_name("v2.0.20"), Some("skse64_2_00_20.7z".into()));
-        assert_eq!(tag_to_asset_name("v2.1.0"), Some("skse64_2_01_00.7z".into()));
+        assert_eq!(
+            tag_to_asset_name("v2.2.6"),
+            Some("skse64_2_02_06.7z".into())
+        );
+        assert_eq!(
+            tag_to_asset_name("v2.0.20"),
+            Some("skse64_2_00_20.7z".into())
+        );
+        assert_eq!(
+            tag_to_asset_name("v2.1.0"),
+            Some("skse64_2_01_00.7z".into())
+        );
         assert_eq!(tag_to_asset_name("invalid"), None);
     }
 

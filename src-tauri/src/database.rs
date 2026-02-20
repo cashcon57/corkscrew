@@ -1098,18 +1098,34 @@ impl ModDatabase {
                 "ENB Preset"
             } else if lower.contains("shaderfx") || lower.contains("reshade") {
                 "ReShade Preset"
-            } else if lower.contains("textures/") || lower.contains("textures\\") || lower.ends_with(".dds") {
+            } else if lower.contains("textures/")
+                || lower.contains("textures\\")
+                || lower.ends_with(".dds")
+            {
                 "Texture"
-            } else if lower.contains("meshes/") || lower.contains("meshes\\") || lower.ends_with(".nif") {
+            } else if lower.contains("meshes/")
+                || lower.contains("meshes\\")
+                || lower.ends_with(".nif")
+            {
                 "3D Model"
-            } else if lower.ends_with(".esp") || lower.ends_with(".esm") || lower.ends_with(".esl") {
+            } else if lower.ends_with(".esp") || lower.ends_with(".esm") || lower.ends_with(".esl")
+            {
                 "Plugin"
-            } else if lower.contains("interface/") || lower.contains("interface\\") || lower.ends_with(".swf") {
+            } else if lower.contains("interface/")
+                || lower.contains("interface\\")
+                || lower.ends_with(".swf")
+            {
                 "UI Mod"
-            } else if lower.contains("sound/") || lower.contains("sound\\")
-                || lower.contains("music/") || lower.contains("music\\") {
+            } else if lower.contains("sound/")
+                || lower.contains("sound\\")
+                || lower.contains("music/")
+                || lower.contains("music\\")
+            {
                 "Audio"
-            } else if lower.contains("scripts/") || lower.contains("scripts\\") || lower.ends_with(".pex") {
+            } else if lower.contains("scripts/")
+                || lower.contains("scripts\\")
+                || lower.ends_with(".pex")
+            {
                 "Script"
             } else {
                 "Misc"
