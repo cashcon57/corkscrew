@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, detectModTools, installModTool, uninstallModTool, launchModTool } from "$lib/api";
-  import { config, showError, showSuccess, selectedGame, skseStatus, currentPage, appVersion } from "$lib/stores";
+  import { config, showError, showSuccess, selectedGame, skseStatus, currentPage, appVersion, updateReady, updateVersion, updateChecking, triggerUpdateCheck } from "$lib/stores";
   import type { AppConfig, ModTool } from "$lib/types";
   import ThemeToggle from "$lib/components/ThemeToggle.svelte";
   import SettingsAuthSection from "./settings-auth-section.svelte";
@@ -9,6 +9,17 @@
   import WineDiagnosticsPanel from "$lib/components/WineDiagnosticsPanel.svelte";
   import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
   import { openUrl } from "@tauri-apps/plugin-opener";
+  import { relaunch } from "@tauri-apps/plugin-process";
+
+  let manualCheckDone = $state(false);
+
+  async function handleCheckForUpdates() {
+    manualCheckDone = false;
+    if (triggerUpdateCheck) {
+      await triggerUpdateCheck();
+    }
+    manualCheckDone = true;
+  }
 
   let downloadDir = $state("");
   let savingDownloadDir = $state(false);
@@ -841,7 +852,29 @@
     <div class="section-card">
       <div class="card-row about-row">
         <span class="row-label">Version</span>
-        <span class="row-value">v{$appVersion}</span>
+        <div class="version-row-right">
+          <span class="row-value">v{$appVersion}</span>
+          {#if $updateReady}
+            <button class="btn-update-ready" onclick={() => relaunch()} type="button">
+              Restart for v{$updateVersion}
+            </button>
+          {:else}
+            <button
+              class="btn-ghost btn-sm"
+              onclick={handleCheckForUpdates}
+              disabled={$updateChecking}
+              type="button"
+            >
+              {#if $updateChecking}
+                <span class="spinner-xs"></span> Checking...
+              {:else if manualCheckDone && !$updateReady}
+                Up to date
+              {:else}
+                Check for Updates
+              {/if}
+            </button>
+          {/if}
+        </div>
       </div>
       <div class="card-divider"></div>
       <div class="card-row about-row">
@@ -1644,6 +1677,28 @@
   .about-links {
     display: flex;
     gap: var(--space-3);
+  }
+
+  .version-row-right {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+  }
+
+  .btn-update-ready {
+    padding: 2px var(--space-3);
+    background: var(--green);
+    color: #fff;
+    font-size: 12px;
+    font-weight: 600;
+    border: none;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: opacity var(--duration-fast) var(--ease);
+  }
+
+  .btn-update-ready:hover {
+    opacity: 0.85;
   }
 
   /* --- Mod Tools --- */

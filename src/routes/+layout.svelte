@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import "../app.css";
-  import { currentPage, errorMessage, successMessage, selectedGame, selectedBottle, showError, showSuccess, appVersion, collectionInstallStatus } from "$lib/stores";
+  import { currentPage, errorMessage, successMessage, selectedGame, selectedBottle, showError, showSuccess, appVersion, collectionInstallStatus, updateReady as updateReadyStore, updateVersion as updateVersionStore, updateChecking as updateCheckingStore, setUpdateCheckFn } from "$lib/stores";
   import { initTheme } from "$lib/theme";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
@@ -175,11 +175,13 @@
   }
 
   async function checkForUpdates() {
+    updateCheckingStore.set(true);
     try {
       const update = await check();
       if (update) {
         updateAvailable = true;
         updateVersion = update.version;
+        updateVersionStore.set(update.version);
         // Auto-download the update in the background
         update.downloadAndInstall((progress) => {
           if (progress.event === "Started" && progress.data.contentLength) {
@@ -189,18 +191,25 @@
           } else if (progress.event === "Finished") {
             updateReady = true;
             updateDownloading = false;
+            updateReadyStore.set(true);
           }
         }).then(() => {
           updateReady = true;
           updateDownloading = false;
+          updateReadyStore.set(true);
         }).catch(() => {
           updateDownloading = false;
         });
       }
     } catch {
       // Update check failed silently — network error or no endpoint yet
+    } finally {
+      updateCheckingStore.set(false);
     }
   }
+
+  // Register so settings page can trigger manual checks
+  setUpdateCheckFn(checkForUpdates);
 
   async function handleRelaunch() {
     await relaunch();

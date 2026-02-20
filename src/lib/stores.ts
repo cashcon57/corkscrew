@@ -53,6 +53,16 @@ export const skseStatus = writable<SkseStatus | null>(null);
 // App version (loaded at startup from Tauri config)
 export const appVersion = writable<string>("0.0.0");
 
+// Auto-update state (shared between layout and settings)
+export const updateReady = writable(false);
+export const updateVersion = writable("");
+export const updateChecking = writable(false);
+// Set by layout to allow settings page to trigger a manual check
+export let triggerUpdateCheck: (() => Promise<void>) | null = null;
+export function setUpdateCheckFn(fn: () => Promise<void>) {
+  triggerUpdateCheck = fn;
+}
+
 // Notification helpers
 export function showError(msg: string) {
   errorMessage.set(msg);
