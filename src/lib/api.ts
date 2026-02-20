@@ -60,6 +60,8 @@ import type {
   GameSession,
   StabilitySummary,
   FomodRecipe,
+  ConflictSuggestion,
+  ResolutionResult,
 } from "./types";
 
 // Bottles
@@ -289,6 +291,20 @@ export async function getConflicts(
   bottleName: string
 ): Promise<FileConflict[]> {
   return invoke("get_conflicts", { gameId, bottleName });
+}
+
+export async function analyzeConflicts(
+  gameId: string,
+  bottleName: string
+): Promise<ConflictSuggestion[]> {
+  return invoke("analyze_conflicts_cmd", { gameId, bottleName });
+}
+
+export async function resolveAllConflicts(
+  gameId: string,
+  bottleName: string
+): Promise<ResolutionResult> {
+  return invoke("resolve_all_conflicts_cmd", { gameId, bottleName });
 }
 
 export async function getDeploymentManifest(

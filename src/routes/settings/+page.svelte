@@ -110,7 +110,7 @@
       config.set(cfg);
       downloadDir = cfg.download_dir ?? "";
       autoDeleteArchives = (cfg as Record<string, unknown>).auto_delete_archives === "true";
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to load config: ${e}`);
     }
 
@@ -141,7 +141,7 @@
     try {
       const url = await getSkseDownloadUrl();
       await openUrl(url);
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to open SKSE download page: ${e}`);
     }
   }
@@ -160,7 +160,7 @@
       const status = await installSkseFromArchive(game.game_id, game.bottle_name, archivePath);
       skseStatus.set(status);
       showSuccess("SKSE installed successfully");
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to install SKSE: ${e}`);
     } finally {
       installingSkse = false;
@@ -174,7 +174,7 @@
       await installModTool(toolId, game.game_id, game.bottle_name);
       modTools = await detectModTools(game.game_id, game.bottle_name);
       showSuccess("Tool installed successfully");
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to install tool: ${e}`);
     } finally {
       installingTool = null;
@@ -188,7 +188,7 @@
       await uninstallModTool(toolId, game.game_id, game.bottle_name);
       modTools = await detectModTools(game.game_id, game.bottle_name);
       showSuccess("Tool removed");
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to uninstall tool: ${e}`);
     } finally {
       uninstallingTool = null;
@@ -201,7 +201,7 @@
     try {
       await launchModTool(toolId, game.game_id, game.bottle_name);
       showSuccess("Tool launched");
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to launch tool: ${e}`);
     } finally {
       launchingTool = null;
@@ -219,7 +219,7 @@
         downloadDir = selected as string;
         await saveDownloadDir();
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to open folder picker: ${e}`);
     }
   }
@@ -230,7 +230,7 @@
       await setConfigValue("download_dir", downloadDir);
       downloadsStats = await getDownloadsStats();
       showSuccess("Download directory saved");
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to save: ${e}`);
     } finally {
       savingDownloadDir = false;
@@ -243,7 +243,7 @@
       autoDeleteArchives = !autoDeleteArchives;
       await setConfigValue("auto_delete_archives", autoDeleteArchives ? "true" : "false");
       showSuccess(autoDeleteArchives ? "Archives will be deleted after install" : "Archives will be kept after install");
-    } catch (e: any) {
+    } catch (e: unknown) {
       autoDeleteArchives = !autoDeleteArchives; // revert
       showError(`Failed to save setting: ${e}`);
     } finally {
@@ -256,7 +256,7 @@
     try {
       archives = await listDownloadArchives();
       showArchiveList = true;
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to load archives: ${e}`);
     } finally {
       loadingArchives = false;
@@ -270,7 +270,7 @@
       archives = archives.filter(a => a.path !== archive.path);
       downloadsStats = await getDownloadsStats();
       showSuccess(`Deleted ${archive.filename}`);
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to delete: ${e}`);
     } finally {
       deletingArchive = null;
@@ -284,7 +284,7 @@
       archives = [];
       downloadsStats = await getDownloadsStats();
       showSuccess(`Deleted ${count} archive${count !== 1 ? "s" : ""}`);
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to clear archives: ${e}`);
     } finally {
       clearingAll = false;

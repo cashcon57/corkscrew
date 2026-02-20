@@ -505,6 +505,26 @@ fn extract_7z(data: &[u8], target: &Path) -> Result<()> {
 
     // Clean up temp file
     let _ = fs::remove_file(&tmp_path);
+
+    // Validate extracted files stay within the target directory (path traversal check)
+    let canonical_target = target
+        .canonicalize()
+        .unwrap_or_else(|_| target.to_path_buf());
+    for entry in WalkDir::new(target).into_iter().filter_map(|e| e.ok()) {
+        if entry.file_type().is_file() {
+            let path = entry.into_path();
+            if let Ok(canonical) = path.canonicalize() {
+                if !canonical.starts_with(&canonical_target) {
+                    log::warn!(
+                        "Removing 7z entry outside target directory: {}",
+                        canonical.display()
+                    );
+                    let _ = fs::remove_file(&path);
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 

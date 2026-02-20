@@ -61,7 +61,7 @@
       // });
       // rules = savedRules as CustomRule[];
       rules = []; // placeholder
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to load plugins: ${e}`);
     } finally {
       loading = false;
@@ -177,7 +177,7 @@
       rules = [...rules, { id: ruleId, ...newRule }];
       showSuccess("Rule added");
       cancelAddForm();
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to save rule: ${e}`);
     } finally {
       savingRule = false;
@@ -192,7 +192,7 @@
       // await invoke("remove_custom_plugin_rule", { ruleId });
       rules = rules.filter(r => r.id !== ruleId);
       showSuccess("Rule removed");
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to remove rule: ${e}`);
     } finally {
       deletingRuleId = null;

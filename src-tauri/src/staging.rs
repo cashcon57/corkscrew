@@ -107,22 +107,26 @@ pub fn stage_mod(
     mod_id: i64,
     mod_name: &str,
 ) -> Result<StagingResult> {
+    // Estimate ~3x archive size for extracted content.
+    let archive_size = fs::metadata(archive_path).map(|m| m.len()).unwrap_or(0);
+    let estimated_extracted = archive_size.saturating_mul(3);
+    let staging_root = staging_root();
+    crate::disk_budget::check_space_guard(&staging_root, estimated_extracted)
+        .map_err(|e| StagingError::Other(e))?;
+
     let staging_dir = mod_staging_dir(game_id, bottle_name, mod_id, mod_name);
 
-    // Clean up any previous staging for this mod
     if staging_dir.exists() {
         fs::remove_dir_all(&staging_dir)?;
     }
     fs::create_dir_all(&staging_dir)?;
 
-    // Extract to a temp directory first (reuses existing extraction logic)
     let temp_dir = std::env::temp_dir().join(format!("corkscrew_stage_{}", std::process::id()));
     if temp_dir.exists() {
         fs::remove_dir_all(&temp_dir)?;
     }
     fs::create_dir_all(&temp_dir)?;
 
-    // Clean up temp dir on scope exit
     let _temp_guard = TempDirGuard(temp_dir.clone());
 
     info!(
@@ -132,14 +136,11 @@ pub fn stage_mod(
         staging_dir.display()
     );
 
-    // Extract the archive
     installer::extract_archive(archive_path, &temp_dir)?;
 
-    // Find the data root within the extracted tree
     let data_root = installer::find_data_root(&temp_dir);
     debug!("Data root for staging: {}", data_root.display());
 
-    // Copy files from data root to staging directory
     let mut files: Vec<String> = Vec::new();
     let mut hashes: Vec<(String, String, u64)> = Vec::new();
 
@@ -161,7 +162,6 @@ pub fn stage_mod(
 
         fs::copy(abs_src, &dest_path)?;
 
-        // Compute hash of the staged file
         let hash = compute_sha256(&dest_path)?;
         let file_size = fs::metadata(&dest_path)?.len();
 
@@ -340,11 +340,9 @@ mod tests {
         let original_hash = compute_sha256(&staging.join("test.esp")).unwrap();
         let hashes = vec![("test.esp".to_string(), original_hash, 8)];
 
-        // Good case: no mismatches
         let bad = verify_staging_integrity(&staging, &hashes).unwrap();
         assert!(bad.is_empty());
 
-        // Corrupt the file
         fs::write(staging.join("test.esp"), b"corrupted").unwrap();
         let bad = verify_staging_integrity(&staging, &hashes).unwrap();
         assert_eq!(bad.len(), 1);

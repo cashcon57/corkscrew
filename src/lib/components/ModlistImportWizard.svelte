@@ -125,7 +125,7 @@
       } else {
         gameCompatible = true;
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       validationError = `Failed to validate file: ${e}`;
     } finally {
       validating = false;
@@ -154,7 +154,7 @@
         manualCount: 0,
         mismatchCount: 0,
       };
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to generate import plan: ${e}`);
       currentStep = 1;
     } finally {
@@ -190,7 +190,7 @@
       if (oncomplete) {
         oncomplete();
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       importErrors = [...importErrors, `Import failed: ${e}`];
     } finally {
       importing = false;

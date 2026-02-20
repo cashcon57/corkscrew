@@ -322,6 +322,12 @@ fn extract_tar<R: io::Read>(
             continue;
         }
 
+        // Reject symlinks to prevent symlink-based escape attacks
+        if entry.header().entry_type().is_symlink() {
+            warn!("Skipping symlink in tar archive: {}", rel_path.display());
+            continue;
+        }
+
         if entry.header().entry_type().is_dir() {
             fs::create_dir_all(&out_path)?;
         } else if entry.header().entry_type().is_file() {

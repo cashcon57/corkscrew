@@ -156,6 +156,14 @@ fn save_config_inner(config: &AppConfig) -> Result<()> {
     // if the process is interrupted mid-write.
     let tmp_path = path.with_extension("json.tmp");
     fs::write(&tmp_path, &data)?;
+
+    // Set restrictive permissions (owner-only) since config may contain API keys
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600));
+    }
+
     fs::rename(&tmp_path, &path)?;
     Ok(())
 }

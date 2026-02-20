@@ -67,7 +67,7 @@
   onMount(async () => {
     try {
       modlists = await getWabbajackModlists();
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to load modlists: ${e}`);
     } finally {
       loading = false;
@@ -122,8 +122,10 @@
           const html = await marked.parse(raw);
           readmeContent = DOMPurify.sanitize(html);
         }
-      } catch (e: any) {
-        readmeContent = `<p style="color: var(--text-tertiary)">Could not load readme: ${e}</p>`;
+      } catch (e: unknown) {
+        readmeContent = DOMPurify.sanitize(
+          `<p style="color: var(--text-tertiary)">Could not load readme: ${e}</p>`,
+        );
       }
     }
 

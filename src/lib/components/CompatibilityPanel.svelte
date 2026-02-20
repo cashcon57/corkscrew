@@ -43,7 +43,7 @@
       skseStatus = skse;
       gameVersion = version;
       compatibility = compat;
-    } catch (e: any) {
+    } catch (e: unknown) {
       error = `Compatibility check failed: ${e}`;
     } finally {
       loading = false;
@@ -74,7 +74,7 @@
       await installSkseFromArchive(gameId, bottleName, archivePath);
       // Re-run all checks after installation
       await runChecks();
-    } catch (e: any) {
+    } catch (e: unknown) {
       error = `SKSE installation failed: ${e}`;
     } finally {
       installing = false;

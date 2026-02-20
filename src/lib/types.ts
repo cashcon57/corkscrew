@@ -126,6 +126,33 @@ export interface DeployResult {
   fallback_used: boolean;
 }
 
+export type ConflictStatus = "AuthorResolved" | "Suggested" | "Manual";
+
+export interface ConflictSuggestion {
+  relative_path: string;
+  current_winner_id: number;
+  suggested_winner_id: number;
+  suggested_winner_name: string;
+  status: ConflictStatus;
+  reason: string;
+  mods: ConflictModBrief[];
+}
+
+export interface ConflictModBrief {
+  mod_id: number;
+  mod_name: string;
+  priority: number;
+  collection_name: string | null;
+}
+
+export interface ResolutionResult {
+  total_conflicts: number;
+  author_resolved: number;
+  auto_suggested: number;
+  manual_needed: number;
+  priorities_changed: number;
+}
+
 export interface FomodInstaller {
   module_name: string;
   steps: FomodStep[];

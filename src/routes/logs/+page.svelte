@@ -48,7 +48,7 @@
     loading = true;
     try {
       logs = await findCrashLogs(g.game_id, g.bottle_name);
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to load crash logs: ${e}`);
     } finally {
       loading = false;
@@ -69,7 +69,7 @@
     analyzingLog = true;
     try {
       selectedReport = await analyzeCrashLog(log.filename);
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to analyze crash log: ${e}`);
     } finally {
       analyzingLog = false;
@@ -84,7 +84,7 @@
       selectedLogFilename = null;
       selectedReport = null;
       showSuccess("Crash logs refreshed");
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to refresh crash logs: ${e}`);
     } finally {
       refreshing = false;
@@ -130,7 +130,7 @@
           showSuccess(action.description);
           break;
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Action failed: ${e}`);
     } finally {
       actionInProgress = null;

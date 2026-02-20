@@ -29,7 +29,7 @@
     sortMessage = null;
     try {
       plugins = await getPluginOrder(game.game_id, game.bottle_name);
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to load plugins: ${e}`);
       plugins = [];
     } finally {
@@ -58,7 +58,7 @@
       } else {
         sortMessage = "Load order is already optimal";
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`LOOT sort failed: ${e}`);
     } finally {
       sorting = false;
@@ -71,7 +71,7 @@
     try {
       await updateLootMasterlist($selectedGame.game_id);
       sortMessage = "Masterlist updated";
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Masterlist update failed: ${e}`);
     } finally {
       updatingMasterlist = false;
@@ -88,7 +88,7 @@
         plugin.filename,
         !plugin.enabled
       );
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to toggle plugin: ${e}`);
     } finally {
       togglingPlugin = null;
@@ -116,7 +116,7 @@
         pluginName,
         newIndex
       );
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to move plugin: ${e}`);
     }
   }

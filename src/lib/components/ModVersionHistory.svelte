@@ -63,7 +63,7 @@
           isCurrent: true,
         },
       ];
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to load version history: ${e}`);
     } finally {
       loading = false;
@@ -100,7 +100,7 @@
 
       // Reload versions
       await loadVersionHistory();
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Rollback failed: ${e}`);
     } finally {
       rollingBack = false;

@@ -44,7 +44,7 @@
     loading = true;
     try {
       conflicts = await getConflicts(game.game_id, game.bottle_name);
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to load conflicts: ${e}`);
     } finally {
       loading = false;
@@ -100,7 +100,7 @@
       await setModPriority(draggingModId, targetMod.priority);
       showSuccess("Priority updated");
       await loadConflicts();
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to update priority: ${e}`);
     } finally {
       draggingModId = null;
@@ -122,7 +122,7 @@
       const result = await redeployAllMods(game.game_id, game.bottle_name);
       showSuccess(`Redeployed ${result.deployed_count} files`);
       await loadConflicts();
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Redeploy failed: ${e}`);
     } finally {
       redeploying = false;

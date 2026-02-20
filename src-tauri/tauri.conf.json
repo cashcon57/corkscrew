@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Corkscrew",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "identifier": "com.cashconway.corkscrew",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -30,7 +30,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data:; connect-src 'self' https://api.nexusmods.com https://users.nexusmods.com https://data.nexusmods.com wss://sso.nexusmods.com https://api.github.com https://objects.githubusercontent.com ipc: http://ipc.localhost; font-src 'self' data:; object-src 'none'"
     }
   },
   "plugins": {

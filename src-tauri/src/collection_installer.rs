@@ -886,6 +886,15 @@ fn parse_fomod_choices(
     Some(result)
 }
 
+/// Check if a path component is safe (no traversal or absolute paths).
+fn is_safe_relative_path(path: &str) -> bool {
+    !path.contains("..")
+        && !path.starts_with('/')
+        && !path.starts_with('\\')
+        && !path.contains(":/")
+        && !path.contains(":\\")
+}
+
 /// Apply FOMOD selections to staging by returning the list of files to deploy.
 fn apply_fomod_to_staging(
     staging_path: &Path,
@@ -893,6 +902,19 @@ fn apply_fomod_to_staging(
 ) -> Option<Vec<String>> {
     let mut files = Vec::new();
     for f in fomod_files {
+        // Validate source and destination paths to prevent path traversal
+        if !is_safe_relative_path(&f.source) {
+            log::warn!("Skipping FOMOD file with unsafe source path: {}", f.source);
+            continue;
+        }
+        if !f.destination.is_empty() && !is_safe_relative_path(&f.destination) {
+            log::warn!(
+                "Skipping FOMOD file with unsafe destination path: {}",
+                f.destination
+            );
+            continue;
+        }
+
         let src = staging_path.join(&f.source);
         if f.is_folder {
             // Recursively walk the folder and add all files

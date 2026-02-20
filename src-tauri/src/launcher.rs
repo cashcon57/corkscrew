@@ -170,6 +170,18 @@ fn resolve_wine_binary(bottle: &Bottle) -> Result<WineCommand> {
             })?;
             // CrossOver uses --bottle <name> to target a specific bottle.
             // The bottle name is the directory name under CrossOver/Bottles/.
+            // Validate bottle name to prevent argument injection
+            if bottle.name.starts_with('-')
+                || !bottle
+                    .name
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.' || c == ' ')
+            {
+                return Err(LauncherError::Other(format!(
+                    "Invalid bottle name: {}",
+                    bottle.name
+                )));
+            }
             prefix_args.push("--bottle".to_string());
             prefix_args.push(bottle.name.clone());
             wine

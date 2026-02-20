@@ -63,15 +63,12 @@ pub fn test_hardlink_support(staging_dir: &Path, data_dir: &Path) -> bool {
     let test_src = staging_dir.join(".corkscrew_hardlink_test");
     let test_dst = data_dir.join(".corkscrew_hardlink_test");
 
-    // Create test file
     if fs::write(&test_src, b"test").is_err() {
         return false;
     }
 
-    // Attempt hardlink
     let result = fs::hard_link(&test_src, &test_dst).is_ok();
 
-    // Cleanup
     let _ = fs::remove_file(&test_src);
     let _ = fs::remove_file(&test_dst);
 
@@ -79,12 +76,7 @@ pub fn test_hardlink_support(staging_dir: &Path, data_dir: &Path) -> bool {
 }
 
 /// Deploy a single mod's files from staging to data_dir.
-///
-/// For each file in the mod's staging directory:
-/// 1. Check if another mod already deployed a file at this path.
-/// 2. If so, compare priorities. Higher priority wins.
-/// 3. Deploy via hardlink, falling back to copy if needed.
-/// 4. Record each deployment in the manifest.
+/// Higher-priority mods win file conflicts.
 pub fn deploy_mod(
     db: &ModDatabase,
     game_id: &str,
@@ -98,7 +90,13 @@ pub fn deploy_mod(
         return Err(DeployerError::StagingNotFound(staging_path.to_path_buf()));
     }
 
-    // Get this mod's priority
+    // Hardlinks are free; only check space for copy-based deployment.
+    if !test_hardlink_support(staging_path, data_dir) {
+        let deploy_size = crate::disk_budget::dir_size(staging_path);
+        crate::disk_budget::check_space_guard(data_dir, deploy_size)
+            .map_err(DeployerError::Other)?;
+    }
+
     let mod_info = db
         .get_mod(mod_id)
         .map_err(|e| DeployerError::Database(e.to_string()))?
@@ -118,25 +116,21 @@ pub fn deploy_mod(
             continue;
         }
 
-        // Check if another mod already deployed at this path
         let existing = db
             .get_deployed_file(game_id, bottle_name, rel_path)
             .map_err(|e| DeployerError::Database(e.to_string()))?;
 
         if let Some(entry) = &existing {
             if entry.mod_id == mod_id {
-                // Already deployed by us, skip
                 continue;
             }
 
-            // Another mod owns this path — check priority
             let other_mod = db
                 .get_mod(entry.mod_id)
                 .map_err(|e| DeployerError::Database(e.to_string()))?;
 
             if let Some(other) = other_mod {
                 if other.install_priority > my_priority {
-                    // Other mod has higher priority, skip
                     debug!(
                         "Skipping {} (owned by higher-priority mod '{}')",
                         rel_path, other.name
@@ -146,18 +140,22 @@ pub fn deploy_mod(
                 }
             }
 
-            // We win — remove the existing file
             if dst.exists() {
                 fs::remove_file(&dst)?;
             }
         }
 
-        // Ensure parent directory exists
         if let Some(parent) = dst.parent() {
             fs::create_dir_all(parent)?;
         }
 
-        // Try hardlink first, fall back to copy
+        // Prevent symlink-following attacks
+        if dst.exists() && fs::symlink_metadata(&dst)?.file_type().is_symlink() {
+            warn!("Skipping deployment to symlink target: {}", dst.display());
+            skipped_count += 1;
+            continue;
+        }
+
         let method = match fs::hard_link(&src, &dst) {
             Ok(_) => "hardlink",
             Err(_) => {
@@ -167,7 +165,6 @@ pub fn deploy_mod(
             }
         };
 
-        // Record in manifest
         db.add_deployment_entry(
             game_id,
             bottle_name,
@@ -205,7 +202,6 @@ pub fn undeploy_mod(
     mod_id: i64,
     data_dir: &Path,
 ) -> Result<Vec<String>> {
-    // Get all manifest entries for this mod
     let removed_paths = db
         .remove_deployment_entries_for_mod(mod_id)
         .map_err(|e| DeployerError::Database(e.to_string()))?;
@@ -219,11 +215,9 @@ pub fn undeploy_mod(
             fs::remove_file(&file_path)?;
             actually_removed.push(rel_path.clone());
 
-            // Prune empty parent directories
             prune_empty_dirs(&file_path, data_dir);
         }
 
-        // Check if another enabled mod has a file at this path — restore it
         restore_next_winner(db, game_id, bottle_name, rel_path, data_dir)?;
     }
 
@@ -245,10 +239,21 @@ pub fn redeploy_all(
     bottle_name: &str,
     data_dir: &Path,
 ) -> Result<DeployResult> {
-    // Step 1: Purge all deployed files
+    if !test_hardlink_support(data_dir, data_dir) {
+        let total_staging: u64 = db
+            .list_mods(game_id, bottle_name)
+            .unwrap_or_default()
+            .iter()
+            .filter(|m| m.enabled)
+            .filter_map(|m| m.staging_path.as_ref())
+            .map(|p| crate::disk_budget::dir_size(std::path::Path::new(p)))
+            .sum();
+        crate::disk_budget::check_space_guard(data_dir, total_staging)
+            .map_err(DeployerError::Other)?;
+    }
+
     purge_deployment(db, game_id, bottle_name, data_dir)?;
 
-    // Step 2: Get all enabled mods, sorted by priority (lowest first)
     let mods = db
         .list_mods(game_id, bottle_name)
         .map_err(|e| DeployerError::Database(e.to_string()))?;
@@ -260,7 +265,6 @@ pub fn redeploy_all(
     let mut total_skipped = 0;
     let mut any_fallback = false;
 
-    // Step 3: Deploy each mod in priority order
     for m in &enabled_mods {
         if let Some(ref staging_path_str) = m.staging_path {
             let staging_path = PathBuf::from(staging_path_str);
@@ -313,7 +317,7 @@ pub fn purge_deployment(
     let mut removed = Vec::new();
 
     for entry in &manifest {
-        // Skip 'direct' (legacy) entries — don't purge files we didn't stage
+        // Legacy direct-installed files are not ours to purge
         if entry.deploy_method == "direct" {
             continue;
         }
@@ -328,7 +332,6 @@ pub fn purge_deployment(
             }
         }
 
-        // Remove from manifest
         db.remove_deployment_entries_for_mod(entry.mod_id)
             .map_err(|e| DeployerError::Database(e.to_string()))?;
     }
@@ -376,7 +379,6 @@ fn restore_next_winner(
     rel_path: &str,
     data_dir: &Path,
 ) -> Result<()> {
-    // Find all enabled mods that have this file in their staging
     let mods = db
         .list_mods(game_id, bottle_name)
         .map_err(|e| DeployerError::Database(e.to_string()))?;
@@ -390,7 +392,6 @@ fn restore_next_winner(
         })
         .collect();
 
-    // Sort by priority (highest first) — the winner gets deployed
     candidates.sort_by(|a, b| b.install_priority.cmp(&a.install_priority));
 
     if let Some(winner) = candidates.first() {
@@ -470,7 +471,6 @@ mod tests {
     fn deploy_creates_files_in_data_dir() {
         let (db, _tmp, staging, data_dir) = setup();
 
-        // Create a mod in DB
         let mod_id = db
             .add_mod(
                 "skyrimse",
@@ -483,7 +483,6 @@ mod tests {
             )
             .unwrap();
 
-        // Create staging files
         create_staging_file(&staging, "meshes/test.nif", b"nif data");
         create_staging_file(&staging, "mod.esp", b"esp data");
 
@@ -549,19 +548,16 @@ mod tests {
         db.set_mod_priority(mod2, 10).unwrap();
         create_staging_file(&staging2, "shared.esp", b"high priority data");
 
-        // Deploy low priority first
         deploy_mod(
             &db, "skyrimse", "Gaming", mod1, &staging1, &data_dir, &files,
         )
         .unwrap();
 
-        // Deploy high priority — should overwrite
         deploy_mod(
             &db, "skyrimse", "Gaming", mod2, &staging2, &data_dir, &files,
         )
         .unwrap();
 
-        // Verify high priority content is in data_dir
         let content = fs::read_to_string(data_dir.join("shared.esp")).unwrap();
         assert_eq!(content, "high priority data");
     }
@@ -574,7 +570,6 @@ mod tests {
         fs::create_dir_all(&dir_a).unwrap();
         fs::create_dir_all(&dir_b).unwrap();
 
-        // Same volume, hardlinks should work
         assert!(test_hardlink_support(&dir_a, &dir_b));
     }
 }

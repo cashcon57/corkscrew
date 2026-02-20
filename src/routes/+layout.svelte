@@ -78,7 +78,7 @@
       if (!target.closest(".sidebar-game-section")) {
         gameDropdownOpen = false;
       }
-      if (!target.closest(".queue-section")) {
+      if (!target.closest(".queue-section") && !target.closest(".queue-popover")) {
         showQueue = false;
       }
     }
@@ -413,61 +413,6 @@
           {/if}
         </button>
 
-        {#if showQueue}
-          <div class="queue-popover" style={popoverStyle}>
-            <div class="queue-popover-header">
-              <span class="queue-popover-title">Downloads</span>
-              {#if queueItems.some(i => i.status === "completed" || i.status === "cancelled")}
-                <button class="queue-clear-btn" onclick={handleClearFinished}>Clear Finished</button>
-              {/if}
-            </div>
-            {#if queueItems.length === 0}
-              <div class="queue-empty">No downloads</div>
-            {:else}
-              <div class="queue-list">
-                {#each queueItems as item (item.id)}
-                  <div class="queue-item" class:queue-item-failed={item.status === "failed"} class:queue-item-done={item.status === "completed"}>
-                    <div class="queue-item-info">
-                      <span class="queue-item-name">{item.mod_name}</span>
-                      <span class="queue-item-status">
-                        {#if item.status === "downloading" && item.total_bytes > 0}
-                          {formatBytes(item.downloaded_bytes)} / {formatBytes(item.total_bytes)}
-                        {:else if item.status === "failed"}
-                          Failed{#if item.error}: {item.error}{/if}
-                        {:else}
-                          {item.status}
-                        {/if}
-                      </span>
-                    </div>
-                    {#if item.status === "downloading" && item.total_bytes > 0}
-                      <div class="queue-progress-bar">
-                        <div class="queue-progress-fill" style="width: {Math.round((item.downloaded_bytes / item.total_bytes) * 100)}%"></div>
-                      </div>
-                    {/if}
-                    <div class="queue-item-actions">
-                      {#if item.status === "failed" && item.attempt < item.max_attempts}
-                        <button class="queue-action-btn" onclick={() => handleRetryDownload(item.id)} title="Retry">
-                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <polyline points="23 4 23 10 17 10" />
-                            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
-                          </svg>
-                        </button>
-                      {/if}
-                      {#if item.status === "pending" || item.status === "downloading"}
-                        <button class="queue-action-btn" onclick={() => handleCancelDownload(item.id)} title="Cancel">
-                          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-                            <line x1="3" y1="3" x2="9" y2="9" />
-                            <line x1="9" y1="3" x2="3" y2="9" />
-                          </svg>
-                        </button>
-                      {/if}
-                    </div>
-                  </div>
-                {/each}
-              </div>
-            {/if}
-          </div>
-        {/if}
       </div>
 
       {#if updateReady}
@@ -552,6 +497,59 @@
             : 0}%">
         </div>
       </div>
+    </div>
+  {/if}
+
+  <!-- Download queue popover — rendered at app-shell level to escape sidebar overflow:hidden -->
+  {#if showQueue}
+    <div class="queue-popover" style={popoverStyle}>
+      <div class="queue-popover-header">
+        <span class="queue-popover-title">Downloads</span>
+        {#if queueItems.some(i => i.status === "completed" || i.status === "failed")}
+          <button class="queue-clear-btn" onclick={handleClearFinished}>Clear finished</button>
+        {/if}
+      </div>
+      {#if queueItems.length === 0}
+        <div class="queue-empty">No downloads</div>
+      {:else}
+        <div class="queue-list">
+          {#each queueItems as item}
+            <div class="queue-item" class:queue-item-failed={item.status === "failed"} class:queue-item-done={item.status === "completed"}>
+              <div class="queue-item-info">
+                <span class="queue-item-name">{item.file_name}</span>
+                <span class="queue-item-status">
+                  {#if item.status === "downloading"}
+                    {formatBytes(item.downloaded_bytes)} / {formatBytes(item.total_bytes)}
+                  {:else if item.status === "pending"}
+                    Waiting...
+                  {:else if item.status === "completed"}
+                    Done
+                  {:else if item.status === "failed"}
+                    Failed{item.error ? `: ${item.error}` : ""}
+                  {/if}
+                </span>
+              </div>
+              {#if item.status === "downloading" && item.total_bytes > 0}
+                <div class="queue-progress-bar">
+                  <div class="queue-progress-fill" style="width: {(item.downloaded_bytes / item.total_bytes) * 100}%"></div>
+                </div>
+              {/if}
+              {#if item.status === "failed"}
+                <div class="queue-item-actions">
+                  <button class="queue-action-btn" title="Retry" onclick={() => handleRetryDownload(item.id)}>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+                    </svg>
+                  </button>
+                  <button class="queue-action-btn" title="Cancel" onclick={() => handleCancelDownload(item.id)}>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+                  </button>
+                </div>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      {/if}
     </div>
   {/if}
 </div>

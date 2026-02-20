@@ -11,6 +11,33 @@ use walkdir::WalkDir;
 use crate::deployer;
 use crate::staging;
 
+/// Minimum free disk space (5 GB) required before any write operation.
+/// Filling a drive on SteamOS can cause boot loops; on macOS it degrades badly.
+pub const MIN_FREE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+
+/// Check whether a write of `bytes_needed` to the volume containing `path`
+/// would leave at least `MIN_FREE_BYTES` free. Returns `Ok(())` on success,
+/// or an `Err` describing the shortfall.
+pub fn check_space_guard(path: &Path, bytes_needed: u64) -> std::result::Result<(), String> {
+    let avail = available_space(path);
+    if avail == 0 {
+        return Ok(());
+    }
+    let remaining_after = avail.saturating_sub(bytes_needed);
+    if remaining_after < MIN_FREE_BYTES {
+        Err(format!(
+            "Not enough disk space. This operation needs {} but only {} is available \
+             ({} free after write, minimum {} required to keep your system safe).",
+            format_bytes(bytes_needed),
+            format_bytes(avail),
+            format_bytes(remaining_after),
+            format_bytes(MIN_FREE_BYTES),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 /// Disk budget summary for a game/bottle.
 #[derive(Clone, Debug, Serialize)]
 pub struct DiskBudget {
@@ -260,5 +287,31 @@ mod tests {
             budget.total_impact_bytes,
             budget.staging_bytes + budget.deployment_bytes
         );
+    }
+
+    #[test]
+    fn space_guard_allows_small_write() {
+        // Writing 1 byte to /tmp should always pass (plenty of space)
+        assert!(check_space_guard(Path::new("/tmp"), 1).is_ok());
+    }
+
+    #[test]
+    fn space_guard_rejects_impossible_write() {
+        // Requesting more bytes than any drive could have
+        let result = check_space_guard(Path::new("/tmp"), u64::MAX);
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(msg.contains("Not enough disk space"));
+    }
+
+    #[test]
+    fn space_guard_allows_nonexistent_path() {
+        // Non-existent path returns 0 available space — guard allows it (can't determine)
+        assert!(check_space_guard(Path::new("/nonexistent/xyz"), 1000).is_ok());
+    }
+
+    #[test]
+    fn min_free_bytes_is_5gb() {
+        assert_eq!(MIN_FREE_BYTES, 5 * 1024 * 1024 * 1024);
     }
 }

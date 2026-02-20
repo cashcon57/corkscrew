@@ -294,9 +294,29 @@ impl NexusClient {
             });
         }
 
-        // Attach query parameters when present.
+        // Attach query parameters when present (URL-encoded for safety).
         if let (Some(k), Some(e)) = (key, expires) {
-            url.push_str(&format!("?key={k}&expires={e}"));
+            let encoded_key: String = k
+                .chars()
+                .map(|c| {
+                    if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '~' {
+                        c.to_string()
+                    } else {
+                        format!("%{:02X}", c as u8)
+                    }
+                })
+                .collect();
+            let encoded_expires: String = e
+                .chars()
+                .map(|c| {
+                    if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '~' {
+                        c.to_string()
+                    } else {
+                        format!("%{:02X}", c as u8)
+                    }
+                })
+                .collect();
+            url.push_str(&format!("?key={encoded_key}&expires={encoded_expires}"));
         }
 
         let response = self.client.get(&url).send().await?;

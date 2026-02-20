@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from "svelte";
   import { goto } from "$app/navigation";
   import { selectedGame, showError, showSuccess, collectionInstallStatus } from "$lib/stores";
-  import type { CollectionInfo, CollectionMod, CollectionSearchResult } from "$lib/types";
+  import type { CollectionInfo, CollectionMod, CollectionSearchResult, InstalledMod } from "$lib/types";
   import {
     browseCollections,
     getCollection,
@@ -16,6 +16,7 @@
     switchCollection,
     deleteCollection,
     getCollectionDiff,
+    getInstalledMods,
   } from "$lib/api";
   import type { CollectionSummary, CollectionDiff } from "$lib/types";
   import type { InstallProgressEvent } from "$lib/types";
@@ -27,6 +28,21 @@
 
   const NEXUS_API_KEY_URL = "https://www.nexusmods.com/users/myaccount?tab=api+access";
 
+  /** Validate that a URL is a safe HTTP(S) URL before opening in browser. */
+  function safeOpenUrl(url: string | null | undefined) {
+    if (!url) return;
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+        openUrl(url);
+      } else {
+        showError(`Blocked unsafe URL scheme: ${parsed.protocol}`);
+      }
+    } catch {
+      showError("Invalid URL");
+    }
+  }
+
   // ---- Tab State ----
   let activeTab = $state<"browse" | "my" | "wabbajack">("browse");
   let myCollections = $state<CollectionSummary[]>([]);
@@ -36,6 +52,43 @@
   let confirmDeleteCollection = $state<string | null>(null);
   let deleteKeepDownloads = $state(true);
   let collectionDiffs = $state<Record<string, CollectionDiff | "loading" | "error">>({});
+
+  // Local detail view
+  let selectedMyCollection = $state<CollectionSummary | null>(null);
+  let localCollectionMods = $state<InstalledMod[]>([]);
+  let loadingLocalDetail = $state(false);
+  let localDiff = $state<CollectionDiff | "loading" | "error" | null>(null);
+
+  async function viewLocalCollection(col: CollectionSummary) {
+    const game = $selectedGame;
+    if (!game) return;
+    selectedMyCollection = col;
+    loadingLocalDetail = true;
+    localDiff = null;
+    try {
+      const allMods = await getInstalledMods(game.game_id, game.bottle_name);
+      localCollectionMods = allMods.filter(m => m.collection_name === col.name);
+    } catch {
+      localCollectionMods = [];
+    } finally {
+      loadingLocalDetail = false;
+    }
+    // Auto-check diff if slug is available
+    if (col.slug) {
+      localDiff = "loading";
+      try {
+        localDiff = await getCollectionDiff(game.game_id, game.bottle_name, col.name);
+      } catch {
+        localDiff = "error";
+      }
+    }
+  }
+
+  function backToMyCollections() {
+    selectedMyCollection = null;
+    localCollectionMods = [];
+    localDiff = null;
+  }
 
   async function handleCheckDiff(colName: string) {
     const game = $selectedGame;
@@ -70,7 +123,7 @@
       await switchCollection(game.game_id, game.bottle_name, name);
       showSuccess(`Switched to "${name}" — mods deployed`);
       await loadMyCollections();
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to switch: ${e}`);
     } finally {
       switchingCollection = null;
@@ -86,7 +139,7 @@
       showSuccess(`Removed "${name}" (${result.mods_removed} mods${result.downloads_removed > 0 ? `, ${result.downloads_removed} downloads` : ""})`);
       confirmDeleteCollection = null;
       await loadMyCollections();
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to delete: ${e}`);
     } finally {
       deletingCollection = null;
@@ -218,13 +271,13 @@
         config.set(cfg2);
         validationError = "Invalid API key. Please check and try again.";
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       try {
         await setConfigValue("nexus_api_key", "");
         const cfg2 = await getConfig();
         config.set(cfg2);
       } catch { /* ignore */ }
-      const msg = typeof e === "string" ? e : e?.message ?? String(e);
+      const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
       validationError = `Connection failed: ${msg}`;
     } finally {
       signingIn = false;
@@ -236,7 +289,7 @@
     try {
       const result: CollectionSearchResult = await browseCollections(gameDomain, 50, 0, sortField, sortDirection);
       collections = result.collections;
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to load collections: ${e}`);
     } finally {
       loading = false;
@@ -264,7 +317,7 @@
         const html = await marked.parse(detail.description);
         renderedDescription = DOMPurify.sanitize(html);
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to load collection details: ${e}`);
     } finally {
       loadingDetail = false;
@@ -385,7 +438,7 @@
       if (result.failed === 0 && result.skipped === 0) {
         showSuccess(`Collection "${selectedCollection.name}" installed successfully`);
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Collection install failed: ${e}`);
     } finally {
       installing = false;
@@ -491,6 +544,211 @@
 
   {#if activeTab === "my"}
     <!-- My Collections Tab -->
+    {#if selectedMyCollection}
+      <!-- Local Collection Detail View -->
+      <div class="detail-view">
+        <div class="detail-header">
+          <button class="btn btn-ghost" onclick={backToMyCollections}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M19 12H5" />
+              <polyline points="12 19 5 12 12 5" />
+            </svg>
+            Back to My Collections
+          </button>
+        </div>
+
+        {#if selectedMyCollection.image_url}
+          <div class="local-detail-hero">
+            <img src={selectedMyCollection.image_url} alt={selectedMyCollection.name} />
+          </div>
+        {/if}
+
+        <div class="detail-content">
+          <div class="detail-title-section">
+            <div class="detail-title-row">
+              <h2 class="detail-name">{selectedMyCollection.name}</h2>
+              {#if selectedMyCollection.game_domain}
+                <span class="game-badge">{gameDomainDisplay(selectedMyCollection.game_domain)}</span>
+              {/if}
+            </div>
+            {#if selectedMyCollection.author}
+              <p class="detail-author">by {selectedMyCollection.author}</p>
+            {/if}
+            {#if selectedMyCollection.installed_revision}
+              <span class="detail-revision">Revision {selectedMyCollection.installed_revision}</span>
+            {/if}
+          </div>
+
+          <!-- Stats Bar -->
+          <div class="detail-stats-bar">
+            <div class="detail-stat">
+              <span class="detail-stat-value">{selectedMyCollection.mod_count}</span>
+              <span class="detail-stat-label">Total Mods</span>
+            </div>
+            <div class="detail-stat">
+              <span class="detail-stat-value">{selectedMyCollection.enabled_count}</span>
+              <span class="detail-stat-label">Active</span>
+            </div>
+            <div class="detail-stat">
+              <span class="detail-stat-value">{selectedMyCollection.mod_count - selectedMyCollection.enabled_count}</span>
+              <span class="detail-stat-label">Disabled</span>
+            </div>
+          </div>
+
+          <!-- Diff Panel -->
+          {#if localDiff && localDiff !== "loading" && localDiff !== "error"}
+            {@const diff = localDiff}
+            <div class="detail-section">
+              <h3 class="detail-section-title">
+                Update Status
+                {#if diff.added.length === 0 && diff.removed.length === 0 && diff.updated.length === 0}
+                  <span class="diff-badge diff-badge-ok">Up to date</span>
+                {:else}
+                  <span class="diff-badge diff-badge-changes">{diff.added.length + diff.removed.length + diff.updated.length} changes</span>
+                {/if}
+              </h3>
+              <div class="local-diff-panel">
+                <div class="diff-header">
+                  <span class="diff-revisions">
+                    {#if diff.installed_revision}Rev {diff.installed_revision}{:else}Installed{/if}
+                    &rarr; Rev {diff.latest_revision}
+                  </span>
+                </div>
+                {#if diff.added.length > 0}
+                  <div class="diff-section diff-added">
+                    <span class="diff-label">+ {diff.added.length} added</span>
+                    {#each diff.added as entry}
+                      <span class="diff-item">{entry.name} {entry.version}</span>
+                    {/each}
+                  </div>
+                {/if}
+                {#if diff.removed.length > 0}
+                  <div class="diff-section diff-removed">
+                    <span class="diff-label">- {diff.removed.length} removed</span>
+                    {#each diff.removed as entry}
+                      <span class="diff-item">{entry.name} {entry.version}</span>
+                    {/each}
+                  </div>
+                {/if}
+                {#if diff.updated.length > 0}
+                  <div class="diff-section diff-updated">
+                    <span class="diff-label">~ {diff.updated.length} updated</span>
+                    {#each diff.updated as entry}
+                      <span class="diff-item">{entry.name}: {entry.installed_version} &rarr; {entry.latest_version}</span>
+                    {/each}
+                  </div>
+                {/if}
+                {#if diff.unchanged > 0}
+                  <span class="diff-unchanged">{diff.unchanged} unchanged</span>
+                {/if}
+              </div>
+            </div>
+          {:else if localDiff === "loading"}
+            <div class="detail-section">
+              <h3 class="detail-section-title">Update Status</h3>
+              <div class="local-diff-panel">
+                <div class="diff-loading">
+                  <span class="spinner-sm"></span>
+                  <span>Checking for updates...</span>
+                </div>
+              </div>
+            </div>
+          {:else if localDiff === "error"}
+            <div class="detail-section">
+              <h3 class="detail-section-title">Update Status</h3>
+              <div class="local-diff-panel diff-error">
+                <span>Could not check for updates.</span>
+              </div>
+            </div>
+          {/if}
+
+          <!-- Installed Mods List -->
+          <div class="detail-section">
+            <h3 class="detail-section-title">
+              Installed Mods
+              <span class="title-count">{localCollectionMods.length}</span>
+            </h3>
+            {#if loadingLocalDetail}
+              <div class="local-mods-loading">
+                <div class="spinner"><div class="spinner-ring"></div></div>
+                <span>Loading mods...</span>
+              </div>
+            {:else if localCollectionMods.length === 0}
+              <div class="local-mods-empty">
+                <span>No mods found for this collection.</span>
+              </div>
+            {:else}
+              <div class="mods-table-container">
+                <div class="mods-table">
+                  <div class="mods-table-header local-mods-header">
+                    <span class="col-mod-name">Name</span>
+                    <span class="col-mod-version">Version</span>
+                    <span class="col-local-status">Status</span>
+                    <span class="col-local-priority">Priority</span>
+                  </div>
+                  <div class="mods-table-body">
+                    {#each localCollectionMods as mod}
+                      <div class="mods-table-row local-mods-row">
+                        <span class="col-mod-name">
+                          <span class="mod-name-text">{mod.name}</span>
+                        </span>
+                        <span class="col-mod-version">{mod.version || "\u2014"}</span>
+                        <span class="col-local-status">
+                          {#if mod.enabled}
+                            <span class="local-status-badge local-status-enabled">Enabled</span>
+                          {:else}
+                            <span class="local-status-badge local-status-disabled">Disabled</span>
+                          {/if}
+                        </span>
+                        <span class="col-local-priority">{mod.install_priority}</span>
+                      </div>
+                    {/each}
+                  </div>
+                </div>
+              </div>
+            {/if}
+          </div>
+
+          <!-- Actions -->
+          <div class="local-detail-actions">
+            <button
+              class="btn btn-primary"
+              onclick={() => { handleSwitchCollection(selectedMyCollection!.name); }}
+              disabled={switchingCollection === selectedMyCollection.name}
+            >
+              {switchingCollection === selectedMyCollection.name ? "Activating..." : "Activate Collection"}
+            </button>
+            {#if confirmDeleteCollection === selectedMyCollection.name}
+              <div class="delete-confirm">
+                <label class="keep-downloads-label">
+                  <input type="checkbox" bind:checked={deleteKeepDownloads} />
+                  Keep shared downloads
+                </label>
+                <button
+                  class="btn btn-danger btn-sm"
+                  onclick={() => { handleDeleteCollection(selectedMyCollection!.name); backToMyCollections(); }}
+                  disabled={deletingCollection === selectedMyCollection.name}
+                >
+                  {deletingCollection === selectedMyCollection.name ? "Deleting..." : "Confirm Delete"}
+                </button>
+                <button class="btn btn-ghost btn-sm" onclick={() => confirmDeleteCollection = null}>
+                  Cancel
+                </button>
+              </div>
+            {:else}
+              <button
+                class="btn btn-ghost-danger"
+                onclick={() => confirmDeleteCollection = selectedMyCollection!.name}
+              >
+                Delete Collection
+              </button>
+            {/if}
+          </div>
+        </div>
+      </div>
+
+    {:else}
+    <!-- My Collections Grid View -->
     <header class="page-header">
       <div class="header-text">
         <h2 class="page-title">My Collections</h2>
@@ -518,7 +776,8 @@
     {:else}
       <div class="my-collections-grid">
         {#each myCollections as col}
-          <div class="my-collection-card">
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div class="my-collection-card" role="button" tabindex="0" onclick={() => viewLocalCollection(col)} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') viewLocalCollection(col); }}>
             <div class="my-card-image">
               {#if col.image_url}
                 <img src={col.image_url} alt={col.name} loading="lazy" />
@@ -544,102 +803,26 @@
                   <span>Rev {col.installed_revision}</span>
                 {/if}
               </div>
-              <div class="my-collection-actions">
-                {#if confirmDeleteCollection === col.name}
-                  <div class="delete-confirm">
-                    <label class="keep-downloads-label">
-                      <input type="checkbox" bind:checked={deleteKeepDownloads} />
-                      Keep shared downloads
-                    </label>
-                    <button
-                      class="btn btn-danger btn-sm"
-                      onclick={() => handleDeleteCollection(col.name)}
-                      disabled={deletingCollection === col.name}
-                    >
-                      {deletingCollection === col.name ? "Deleting..." : "Confirm Delete"}
-                    </button>
-                    <button class="btn btn-ghost btn-sm" onclick={() => confirmDeleteCollection = null}>
-                      Cancel
-                    </button>
-                  </div>
-                {:else}
-                  <button
-                    class="btn btn-primary btn-sm"
-                    onclick={() => handleSwitchCollection(col.name)}
-                    disabled={switchingCollection === col.name}
-                  >
-                    {switchingCollection === col.name ? "Switching..." : "Activate"}
-                  </button>
-                  {#if col.slug}
-                    <button
-                      class="btn btn-secondary btn-sm"
-                      onclick={() => handleCheckDiff(col.name)}
-                      disabled={collectionDiffs[col.name] === "loading"}
-                    >
-                      {collectionDiffs[col.name] === "loading" ? "Checking..." : "Check Updates"}
-                    </button>
-                  {/if}
-                  <button
-                    class="btn btn-ghost-danger btn-sm"
-                    onclick={() => confirmDeleteCollection = col.name}
-                  >
-                    Delete
-                  </button>
-                {/if}
+              <div class="my-collection-actions" onclick={(e) => e.stopPropagation()}>
+                <button
+                  class="btn btn-primary btn-sm"
+                  onclick={() => handleSwitchCollection(col.name)}
+                  disabled={switchingCollection === col.name}
+                >
+                  {switchingCollection === col.name ? "Switching..." : "Activate"}
+                </button>
+                <button
+                  class="btn btn-ghost-danger btn-sm"
+                  onclick={(e) => { e.stopPropagation(); confirmDeleteCollection = col.name; viewLocalCollection(col); }}
+                >
+                  Delete
+                </button>
               </div>
-              {#if collectionDiffs[col.name] && collectionDiffs[col.name] !== "loading" && collectionDiffs[col.name] !== "error"}
-                {@const diff = collectionDiffs[col.name] as CollectionDiff}
-                <div class="diff-panel">
-                  <div class="diff-header">
-                    <span class="diff-revisions">
-                      {#if diff.installed_revision}Rev {diff.installed_revision}{:else}Installed{/if}
-                      &rarr; Rev {diff.latest_revision}
-                    </span>
-                    {#if diff.added.length === 0 && diff.removed.length === 0 && diff.updated.length === 0}
-                      <span class="diff-badge diff-badge-ok">Up to date</span>
-                    {:else}
-                      <span class="diff-badge diff-badge-changes">
-                        {diff.added.length + diff.removed.length + diff.updated.length} changes
-                      </span>
-                    {/if}
-                  </div>
-                  {#if diff.added.length > 0}
-                    <div class="diff-section diff-added">
-                      <span class="diff-label">+ {diff.added.length} added</span>
-                      {#each diff.added as entry}
-                        <span class="diff-item">{entry.name} {entry.version}</span>
-                      {/each}
-                    </div>
-                  {/if}
-                  {#if diff.removed.length > 0}
-                    <div class="diff-section diff-removed">
-                      <span class="diff-label">- {diff.removed.length} removed</span>
-                      {#each diff.removed as entry}
-                        <span class="diff-item">{entry.name} {entry.version}</span>
-                      {/each}
-                    </div>
-                  {/if}
-                  {#if diff.updated.length > 0}
-                    <div class="diff-section diff-updated">
-                      <span class="diff-label">~ {diff.updated.length} updated</span>
-                      {#each diff.updated as entry}
-                        <span class="diff-item">{entry.name}: {entry.installed_version} &rarr; {entry.latest_version}</span>
-                      {/each}
-                    </div>
-                  {/if}
-                  {#if diff.unchanged > 0}
-                    <span class="diff-unchanged">{diff.unchanged} unchanged</span>
-                  {/if}
-                </div>
-              {:else if collectionDiffs[col.name] === "error"}
-                <div class="diff-panel diff-error">
-                  <span>Could not fetch diff — collection slug may not be stored.</span>
-                </div>
-              {/if}
             </div>
           </div>
         {/each}
       </div>
+    {/if}
     {/if}
   {:else if checkingAuth}
     <!-- Checking account status -->
@@ -886,7 +1069,7 @@
                         {/if}
                       </div>
                       {#if action.url}
-                        <button class="btn btn-secondary btn-sm" onclick={() => openUrl(action.url!)}>
+                        <button class="btn btn-secondary btn-sm" onclick={() => safeOpenUrl(action.url)}>
                           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                             <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
                             <polyline points="15 3 21 3 21 9" />
@@ -974,7 +1157,7 @@
                       <p class="result-mod-instructions">{detail.error}</p>
                     {/if}
                     {#if detail.url}
-                      <button class="btn btn-secondary btn-sm" onclick={() => openUrl(detail.url!)}>
+                      <button class="btn btn-secondary btn-sm" onclick={() => safeOpenUrl(detail.url)}>
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                           <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
                           <polyline points="15 3 21 3 21 9" />
@@ -2482,6 +2665,8 @@
     border: 1px solid var(--separator);
     border-radius: var(--radius);
     overflow: hidden;
+    cursor: pointer;
+    text-align: left;
     transition: background var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease);
   }
 
@@ -2576,6 +2761,126 @@
 
   .keep-downloads-label input {
     accent-color: var(--system-accent);
+  }
+
+  /* ---- Local Detail View ---- */
+
+  .local-detail-hero {
+    width: 100%;
+    max-height: 200px;
+    overflow: hidden;
+    border-radius: var(--radius-lg);
+    background: var(--bg-secondary);
+  }
+
+  .local-detail-hero img {
+    width: 100%;
+    height: 200px;
+    object-fit: cover;
+  }
+
+  .local-diff-panel {
+    padding: var(--space-3);
+    background: var(--surface);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius);
+    font-size: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .diff-loading {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: 12px;
+    color: var(--text-tertiary);
+  }
+
+  .local-mods-header {
+    grid-template-columns: 1fr 80px 80px 60px;
+  }
+
+  .local-mods-row {
+    grid-template-columns: 1fr 80px 80px 60px;
+  }
+
+  .col-local-status {
+    display: flex;
+    align-items: center;
+  }
+
+  .col-local-priority {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .local-status-badge {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
+
+  .local-status-enabled {
+    color: var(--green);
+    background: rgba(52, 199, 89, 0.12);
+  }
+
+  .local-status-disabled {
+    color: var(--text-tertiary);
+    background: var(--surface-hover);
+  }
+
+  .local-mods-loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-3);
+    padding: var(--space-8);
+    color: var(--text-tertiary);
+    font-size: 13px;
+  }
+
+  .local-mods-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: var(--space-8);
+    color: var(--text-tertiary);
+    font-size: 13px;
+  }
+
+  .local-detail-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-4) 0;
+    border-top: 1px solid var(--separator);
+  }
+
+  .btn-ghost-danger {
+    background: transparent;
+    color: var(--red);
+    padding: var(--space-2) var(--space-4);
+    font-size: 13px;
+    font-weight: 500;
+  }
+
+  .btn-ghost-danger:hover {
+    background: rgba(255, 59, 48, 0.08);
+  }
+
+  .btn-danger {
+    background: var(--red);
+    color: #fff;
+  }
+
+  .btn-danger:hover:not(:disabled) {
+    filter: brightness(1.1);
   }
 
   /* ---- Collection Diff ---- */

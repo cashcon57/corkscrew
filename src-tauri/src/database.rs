@@ -145,6 +145,13 @@ impl ModDatabase {
 
         let conn = Connection::open(db_path)?;
 
+        // Set restrictive permissions on the database file (owner-only)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(db_path, std::fs::Permissions::from_mode(0o600));
+        }
+
         // Enable WAL mode for better concurrent-read performance.
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
 

@@ -2,6 +2,7 @@ pub mod bottle_config;
 pub mod bottles;
 pub mod collection_installer;
 pub mod collections;
+pub mod conflict_resolver;
 pub mod config;
 pub mod crashlog;
 pub mod database;
@@ -74,6 +75,27 @@ struct AppState {
     download_queue: Arc<download_queue::DownloadQueue>,
 }
 
+/// Resolve a bottle by name, returning a useful error if not found.
+fn resolve_bottle(bottle_name: &str) -> Result<Bottle, String> {
+    bottles::find_bottle_by_name(bottle_name)
+        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))
+}
+
+/// Resolve a bottle + game pair, returning both plus the data directory.
+fn resolve_game(
+    game_id: &str,
+    bottle_name: &str,
+) -> Result<(Bottle, DetectedGame, PathBuf), String> {
+    let bottle = resolve_bottle(bottle_name)?;
+    let detected_games = games::detect_games(&bottle);
+    let game = detected_games
+        .into_iter()
+        .find(|g| g.game_id == game_id)
+        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
+    let data_dir = PathBuf::from(&game.data_dir);
+    Ok((bottle, game, data_dir))
+}
+
 // --- Tauri Commands ---
 
 #[tauri::command]
@@ -85,8 +107,7 @@ fn get_bottles() -> Result<Vec<Bottle>, String> {
 fn get_games(bottle_name: Option<String>) -> Result<Vec<DetectedGame>, String> {
     match bottle_name {
         Some(name) => {
-            let bottle = bottles::find_bottle_by_name(&name)
-                .ok_or_else(|| format!("Bottle '{}' not found", name))?;
+            let bottle = resolve_bottle(&name)?;
             Ok(games::detect_games(&bottle))
         }
         None => Ok(games::detect_all_games()),
@@ -100,8 +121,7 @@ fn get_all_games() -> Result<Vec<DetectedGame>, String> {
 
 #[tauri::command]
 fn get_bottle_settings(bottle_name: String) -> Result<bottle_config::BottleSettings, String> {
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
+    let bottle = resolve_bottle(&bottle_name)?;
     bottle_config::get_bottle_settings(&bottle).map_err(|e| e.to_string())
 }
 
@@ -109,16 +129,14 @@ fn get_bottle_settings(bottle_name: String) -> Result<bottle_config::BottleSetti
 fn get_bottle_setting_defs(
     bottle_name: String,
 ) -> Result<Vec<bottle_config::BottleSettingDef>, String> {
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
+    let bottle = resolve_bottle(&bottle_name)?;
     let settings = bottle_config::get_bottle_settings(&bottle).map_err(|e| e.to_string())?;
     Ok(bottle_config::get_setting_definitions(&settings))
 }
 
 #[tauri::command]
 fn set_bottle_setting(bottle_name: String, key: String, value: String) -> Result<(), String> {
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
+    let bottle = resolve_bottle(&bottle_name)?;
     bottle_config::set_bottle_setting(&bottle, &key, &value).map_err(|e| e.to_string())
 }
 
@@ -150,16 +168,7 @@ fn install_mod_cmd(
         return Err(format!("Archive not found: {}", archive_path));
     }
 
-    // Find the game
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
-    let detected_games = games::detect_games(&bottle);
-    let game = detected_games
-        .iter()
-        .find(|g| g.game_id == game_id)
-        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
-
-    let data_dir = PathBuf::from(&game.data_dir);
+    let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
     let name = mod_name.unwrap_or_else(|| {
         archive
             .file_stem()
@@ -305,7 +314,7 @@ fn install_mod_cmd(
                 detail: Some("Syncing plugin load order...".to_string()),
             },
         );
-        let _ = sync_skyrim_plugins_for_game(game, &bottle);
+        let _ = sync_skyrim_plugins_for_game(&game, &bottle);
     }
 
     // Emit: mod completed
@@ -337,16 +346,7 @@ fn uninstall_mod(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Mod with ID {} not found", mod_id))?;
 
-    // Find the game to get the data dir
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
-    let detected_games = games::detect_games(&bottle);
-    let game = detected_games
-        .iter()
-        .find(|g| g.game_id == game_id)
-        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
-
-    let data_dir = PathBuf::from(&game.data_dir);
+    let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
 
     // Remove deployed files from game directory
     let removed = if installed_mod.staging_path.is_some() {
@@ -369,7 +369,7 @@ fn uninstall_mod(
 
     // Sync Skyrim plugins if applicable
     if game_id == "skyrimse" {
-        let _ = sync_skyrim_plugins_for_game(game, &bottle);
+        let _ = sync_skyrim_plugins_for_game(&game, &bottle);
     }
 
     Ok(removed)
@@ -395,15 +395,7 @@ fn toggle_mod(
 
     // For staged mods, actually deploy/undeploy files
     if let Some(ref staging_path_str) = installed_mod.staging_path {
-        let bottle = bottles::find_bottle_by_name(&bottle_name)
-            .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
-        let detected_games = games::detect_games(&bottle);
-        let game = detected_games
-            .iter()
-            .find(|g| g.game_id == game_id)
-            .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
-
-        let data_dir = PathBuf::from(&game.data_dir);
+        let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
         let staging_path = PathBuf::from(staging_path_str);
 
         if enabled {
@@ -427,7 +419,7 @@ fn toggle_mod(
 
         // Sync Skyrim plugins if applicable
         if game_id == "skyrimse" {
-            let _ = sync_skyrim_plugins_for_game(game, &bottle);
+            let _ = sync_skyrim_plugins_for_game(&game, &bottle);
         }
     }
     // Legacy mods (no staging_path): only the DB flag changes
@@ -441,14 +433,7 @@ fn get_plugin_order(game_id: String, bottle_name: String) -> Result<Vec<PluginEn
         return Ok(vec![]);
     }
 
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
-
-    let detected_games = games::detect_games(&bottle);
-    let game = detected_games
-        .iter()
-        .find(|g| g.game_id == game_id)
-        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
+    let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
 
     // Get plugins file path via the plugin
     let plugins_file = games::with_plugin(&game_id, |plugin| {
@@ -509,15 +494,7 @@ async fn download_from_nexus(
         .map_err(|e| e.to_string())?;
 
     if auto_install {
-        let bottle = bottles::find_bottle_by_name(&bottle_name)
-            .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
-        let detected_games = games::detect_games(&bottle);
-        let game = detected_games
-            .iter()
-            .find(|g| g.game_id == game_id)
-            .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
-
-        let data_dir = PathBuf::from(&game.data_dir);
+        let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
         let db = &state.db;
 
         // 1. Add mod to DB with Nexus ID
@@ -572,7 +549,7 @@ async fn download_from_nexus(
         }
 
         if game_id == "skyrimse" {
-            let _ = sync_skyrim_plugins_for_game(game, &bottle);
+            let _ = sync_skyrim_plugins_for_game(&game, &bottle);
         }
 
         // Auto-delete archive if setting is enabled
@@ -900,14 +877,7 @@ fn launch_game_cmd(
     use_skse: bool,
     state: State<AppState>,
 ) -> Result<LaunchResult, String> {
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
-    let detected_games = games::detect_games(&bottle);
-    let game = detected_games
-        .iter()
-        .find(|g| g.game_id == game_id)
-        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
-
+    let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
     let game_path = PathBuf::from(&game.game_path);
 
     // Check for a custom default executable first
@@ -988,14 +958,7 @@ fn check_skse(game_id: String, bottle_name: String) -> Result<SkseStatus, String
         });
     }
 
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
-    let detected_games = games::detect_games(&bottle);
-    let game = detected_games
-        .iter()
-        .find(|g| g.game_id == game_id)
-        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
-
+    let (_, game, _) = resolve_game(&game_id, &bottle_name)?;
     let game_path = PathBuf::from(&game.game_path);
     let mut status = skse::detect_skse(&game_path);
     status.use_skse = skse::get_skse_preference(&game_id, &bottle_name);
@@ -1018,14 +981,7 @@ fn install_skse_from_archive_cmd(
         return Err("SKSE is only available for Skyrim Special Edition".to_string());
     }
 
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
-    let detected_games = games::detect_games(&bottle);
-    let game = detected_games
-        .iter()
-        .find(|g| g.game_id == game_id)
-        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
-
+    let (_, game, _) = resolve_game(&game_id, &bottle_name)?;
     let game_path = PathBuf::from(&game.game_path);
     let archive = PathBuf::from(&archive_path);
 
@@ -1056,16 +1012,8 @@ fn check_skyrim_version(game_id: String, bottle_name: String) -> Result<Downgrad
         return Err("Version check is only available for Skyrim SE".to_string());
     }
 
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
-    let detected_games = games::detect_games(&bottle);
-    let game = detected_games
-        .iter()
-        .find(|g| g.game_id == game_id)
-        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
-
-    let game_path = PathBuf::from(&game.game_path);
-    downgrader::detect_skyrim_version(&game_path).map_err(|e| e.to_string())
+    let (_, game, _) = resolve_game(&game_id, &bottle_name)?;
+    downgrader::detect_skyrim_version(Path::new(&game.game_path)).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1077,16 +1025,8 @@ fn check_skse_compatibility_cmd(
         return Err("SKSE compatibility check is only for Skyrim SE".into());
     }
 
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
-    let detected_games = games::detect_games(&bottle);
-    let game = detected_games
-        .iter()
-        .find(|g| g.game_id == game_id)
-        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
-
+    let (_, game, _) = resolve_game(&game_id, &bottle_name)?;
     let game_path = PathBuf::from(&game.game_path);
-
     let skse_status = skse::detect_skse(&game_path);
     let downgrade_status =
         downgrader::detect_skyrim_version(&game_path).map_err(|e| e.to_string())?;
@@ -1099,9 +1039,7 @@ fn check_skse_compatibility_cmd(
 
 #[tauri::command]
 fn fix_skyrim_display(bottle_name: String) -> Result<display_fix::DisplayFixResult, String> {
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
-
+    let bottle = resolve_bottle(&bottle_name)?;
     display_fix::auto_fix_display(&bottle)
 }
 
@@ -1115,14 +1053,7 @@ async fn downgrade_skyrim(
         return Err("Downgrade is only available for Skyrim SE".to_string());
     }
 
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
-    let detected_games = games::detect_games(&bottle);
-    let game = detected_games
-        .iter()
-        .find(|g| g.game_id == game_id)
-        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
-
+    let (_, game, _) = resolve_game(&game_id, &bottle_name)?;
     let game_path = PathBuf::from(&game.game_path);
     let download_dir = config::get_config()
         .ok()
@@ -1240,6 +1171,73 @@ fn get_conflicts(
 }
 
 #[tauri::command]
+fn analyze_conflicts_cmd(
+    game_id: String,
+    bottle_name: String,
+    state: State<AppState>,
+) -> Result<Vec<conflict_resolver::ConflictSuggestion>, String> {
+    let db = &state.db;
+    let conflicts = db
+        .find_all_conflicts(&game_id, &bottle_name)
+        .map_err(|e| e.to_string())?;
+    let mods = db
+        .list_mods(&game_id, &bottle_name)
+        .map_err(|e| e.to_string())?;
+
+    // Try to get LOOT sort order for smarter suggestions.
+    let loot_order = get_current_plugins(&game_id, &bottle_name);
+    let loot_names: Vec<String> = loot_order.iter().map(|p| p.filename.clone()).collect();
+    let loot_ref = if loot_names.is_empty() {
+        None
+    } else {
+        Some(loot_names.as_slice())
+    };
+
+    Ok(conflict_resolver::analyze_conflicts(
+        &conflicts, &mods, loot_ref,
+    ))
+}
+
+#[tauri::command]
+fn resolve_all_conflicts_cmd(
+    game_id: String,
+    bottle_name: String,
+    state: State<AppState>,
+) -> Result<conflict_resolver::ResolutionResult, String> {
+    let db = &state.db;
+    let conflicts = db
+        .find_all_conflicts(&game_id, &bottle_name)
+        .map_err(|e| e.to_string())?;
+    let mods = db
+        .list_mods(&game_id, &bottle_name)
+        .map_err(|e| e.to_string())?;
+
+    let loot_order = get_current_plugins(&game_id, &bottle_name);
+    let loot_names: Vec<String> = loot_order.iter().map(|p| p.filename.clone()).collect();
+    let loot_ref = if loot_names.is_empty() {
+        None
+    } else {
+        Some(loot_names.as_slice())
+    };
+
+    let suggestions = conflict_resolver::analyze_conflicts(&conflicts, &mods, loot_ref);
+    let result = conflict_resolver::apply_suggestions(db, &game_id, &bottle_name, &suggestions)?;
+
+    // Redeploy to apply new priorities if any changed.
+    if result.priorities_changed > 0 {
+        let (_bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
+        deployer::redeploy_all(db, &game_id, &bottle_name, &data_dir)
+            .map_err(|e| e.to_string())?;
+        if game_id == "skyrimse" {
+            let bottle = resolve_bottle(&bottle_name)?;
+            let _ = sync_skyrim_plugins_for_game(&game, &bottle);
+        }
+    }
+
+    Ok(result)
+}
+
+#[tauri::command]
 fn get_deployment_manifest_cmd(
     game_id: String,
     bottle_name: String,
@@ -1268,23 +1266,14 @@ fn reorder_mods(
     db.reorder_priorities(&game_id, &bottle_name, &ordered_mod_ids)
         .map_err(|e| e.to_string())?;
 
-    // Find the game for data_dir
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
-    let detected_games = games::detect_games(&bottle);
-    let game = detected_games
-        .iter()
-        .find(|g| g.game_id == game_id)
-        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
-
-    let data_dir = PathBuf::from(&game.data_dir);
+    let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
 
     // Redeploy to reflect new priority order
     deployer::redeploy_all(db, &game_id, &bottle_name, &data_dir).map_err(|e| e.to_string())?;
 
     // Sync plugins after redeploy
     if game_id == "skyrimse" {
-        let _ = sync_skyrim_plugins_for_game(game, &bottle);
+        let _ = sync_skyrim_plugins_for_game(&game, &bottle);
     }
 
     Ok(())
@@ -1296,22 +1285,14 @@ fn redeploy_all_mods(
     bottle_name: String,
     state: State<AppState>,
 ) -> Result<serde_json::Value, String> {
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
-    let detected_games = games::detect_games(&bottle);
-    let game = detected_games
-        .iter()
-        .find(|g| g.game_id == game_id)
-        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
-
-    let data_dir = PathBuf::from(&game.data_dir);
+    let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
     let db = &state.db;
 
     let result =
         deployer::redeploy_all(db, &game_id, &bottle_name, &data_dir).map_err(|e| e.to_string())?;
 
     if game_id == "skyrimse" {
-        let _ = sync_skyrim_plugins_for_game(game, &bottle);
+        let _ = sync_skyrim_plugins_for_game(&game, &bottle);
     }
 
     Ok(serde_json::json!({
@@ -1327,22 +1308,14 @@ fn purge_deployment_cmd(
     bottle_name: String,
     state: State<AppState>,
 ) -> Result<Vec<String>, String> {
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
-    let detected_games = games::detect_games(&bottle);
-    let game = detected_games
-        .iter()
-        .find(|g| g.game_id == game_id)
-        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
-
-    let data_dir = PathBuf::from(&game.data_dir);
+    let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
     let db = &state.db;
 
     let removed = deployer::purge_deployment(db, &game_id, &bottle_name, &data_dir)
         .map_err(|e| e.to_string())?;
 
     if game_id == "skyrimse" {
-        let _ = sync_skyrim_plugins_for_game(game, &bottle);
+        let _ = sync_skyrim_plugins_for_game(&game, &bottle);
     }
 
     Ok(removed)
@@ -1392,23 +1365,16 @@ fn get_deployment_health(
     let total_deployed = manifest.len();
     let conflict_count = conflicts.len();
 
-    // Check deployment method by looking at the game's data dir
     let deploy_method = if is_deployed {
-        let bottle = bottles::find_bottle_by_name(&bottle_name);
-        if let Some(b) = bottle {
-            let detected = games::detect_games(&b);
-            if let Some(game) = detected.iter().find(|g| g.game_id == game_id) {
-                let data_dir = PathBuf::from(&game.data_dir);
+        match resolve_game(&game_id, &bottle_name) {
+            Ok((_, _, data_dir)) => {
                 if deployer::test_hardlink_support(&data_dir, &data_dir) {
                     "hardlink"
                 } else {
                     "copy"
                 }
-            } else {
-                "unknown"
             }
-        } else {
-            "unknown"
+            Err(_) => "unknown",
         }
     } else {
         "none"
@@ -1464,15 +1430,7 @@ fn switch_collection_cmd(
     collection_name: String,
     state: State<AppState>,
 ) -> Result<serde_json::Value, String> {
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
-    let detected_games = games::detect_games(&bottle);
-    let game = detected_games
-        .iter()
-        .find(|g| g.game_id == game_id)
-        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
-
-    let data_dir = PathBuf::from(&game.data_dir);
+    let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
     let db = &state.db;
 
     // 1. Purge current deployment
@@ -1505,7 +1463,7 @@ fn switch_collection_cmd(
 
     // 5. Sync plugins if Skyrim SE
     if game_id == "skyrimse" {
-        let _ = sync_skyrim_plugins_for_game(game, &bottle);
+        let _ = sync_skyrim_plugins_for_game(&game, &bottle);
     }
 
     Ok(serde_json::json!({
@@ -1522,15 +1480,7 @@ fn delete_collection_cmd(
     delete_unique_downloads: bool,
     state: State<AppState>,
 ) -> Result<serde_json::Value, String> {
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
-    let detected_games = games::detect_games(&bottle);
-    let game = detected_games
-        .iter()
-        .find(|g| g.game_id == game_id)
-        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
-
-    let data_dir = PathBuf::from(&game.data_dir);
+    let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
     let db = &state.db;
 
     // Get mods in this collection
@@ -1580,7 +1530,7 @@ fn delete_collection_cmd(
     let _ = deployer::redeploy_all(db, &game_id, &bottle_name, &data_dir);
 
     if game_id == "skyrimse" {
-        let _ = sync_skyrim_plugins_for_game(game, &bottle);
+        let _ = sync_skyrim_plugins_for_game(&game, &bottle);
     }
 
     Ok(serde_json::json!({
@@ -1702,16 +1652,8 @@ fn clear_finished_downloads(state: State<AppState>) -> usize {
 
 #[tauri::command]
 async fn sort_plugins_loot(game_id: String, bottle_name: String) -> Result<SortResult, String> {
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
-    let detected_games = games::detect_games(&bottle);
-    let game = detected_games
-        .iter()
-        .find(|g| g.game_id == game_id)
-        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
-
+    let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
     let game_path = PathBuf::from(&game.game_path);
-    let data_dir = PathBuf::from(&game.data_dir);
     let local_path = loot::local_game_path(&bottle, &game_id)
         .ok_or_else(|| format!("Cannot determine local path for game '{}'", game_id))?;
 
@@ -1777,13 +1719,7 @@ fn reorder_plugins_cmd(
     bottle_name: String,
     ordered_plugins: Vec<String>,
 ) -> Result<Vec<PluginEntry>, String> {
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
-    let detected_games = games::detect_games(&bottle);
-    let game = detected_games
-        .iter()
-        .find(|g| g.game_id == game_id)
-        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
+    let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
 
     let plugins_file = games::with_plugin(&game_id, |plugin| {
         plugin.get_plugins_file(Path::new(&game.game_path), &bottle)
@@ -1807,13 +1743,7 @@ fn toggle_plugin_cmd(
     plugin_name: String,
     enabled: bool,
 ) -> Result<Vec<PluginEntry>, String> {
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
-    let detected_games = games::detect_games(&bottle);
-    let game = detected_games
-        .iter()
-        .find(|g| g.game_id == game_id)
-        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
+    let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
 
     let plugins_file = games::with_plugin(&game_id, |plugin| {
         plugin.get_plugins_file(Path::new(&game.game_path), &bottle)
@@ -1837,13 +1767,7 @@ fn move_plugin_cmd(
     plugin_name: String,
     new_index: usize,
 ) -> Result<Vec<PluginEntry>, String> {
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
-    let detected_games = games::detect_games(&bottle);
-    let game = detected_games
-        .iter()
-        .find(|g| g.game_id == game_id)
-        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
+    let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
 
     let plugins_file = games::with_plugin(&game_id, |plugin| {
         plugin.get_plugins_file(Path::new(&game.game_path), &bottle)
@@ -1866,16 +1790,9 @@ fn get_plugin_messages(
     bottle_name: String,
     plugin_name: String,
 ) -> Result<Vec<PluginWarning>, String> {
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
-    let detected_games = games::detect_games(&bottle);
-    let game = detected_games
-        .iter()
-        .find(|g| g.game_id == game_id)
-        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
+    let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
 
     let game_path = PathBuf::from(&game.game_path);
-    let data_dir = PathBuf::from(&game.data_dir);
     let local_path = loot::local_game_path(&bottle, &game_id)
         .ok_or_else(|| format!("Cannot determine local path for game '{}'", game_id))?;
 
@@ -1933,13 +1850,7 @@ fn save_profile_snapshot(
 
     // Determine plugins file path
     let plugins_file = if game_id == "skyrimse" {
-        let bottle = bottles::find_bottle_by_name(&bottle_name)
-            .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
-        let detected_games = games::detect_games(&bottle);
-        let game = detected_games
-            .iter()
-            .find(|g| g.game_id == game_id)
-            .ok_or_else(|| format!("Game '{}' not found", game_id))?;
+        let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
 
         games::with_plugin(&game_id, |plugin| {
             plugin.get_plugins_file(Path::new(&game.game_path), &bottle)
@@ -1969,15 +1880,7 @@ fn activate_profile(
     let db = &state.db;
 
     // Look up the game
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
-    let detected_games = games::detect_games(&bottle);
-    let game = detected_games
-        .iter()
-        .find(|g| g.game_id == game_id)
-        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
-
-    let data_dir = PathBuf::from(&game.data_dir);
+    let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
 
     // 1. Save current state to the currently active profile (if any)
     if let Ok(Some(current_active)) = profiles::get_active_profile(db, &game_id, &bottle_name) {
@@ -2100,25 +2003,13 @@ async fn check_mod_updates(
 
 // --- Mod Tools ---
 
-/// Helper to resolve game data dir from game_id + bottle_name.
-fn resolve_game_data_dir(game_id: &str, bottle_name: &str) -> std::result::Result<PathBuf, String> {
-    let bottle = bottles::find_bottle_by_name(bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
-    let detected_games = games::detect_games(&bottle);
-    let game = detected_games
-        .iter()
-        .find(|g| g.game_id == game_id)
-        .ok_or_else(|| format!("Game '{}' not found", game_id))?;
-    Ok(PathBuf::from(&game.data_dir))
-}
-
 #[tauri::command]
 fn detect_mod_tools_cmd(
     game_id: String,
     bottle_name: String,
     _state: State<AppState>,
 ) -> Result<Vec<mod_tools::ModTool>, String> {
-    let data_dir = resolve_game_data_dir(&game_id, &bottle_name)?;
+    let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
     Ok(mod_tools::detect_tools(&data_dir))
 }
 
@@ -2128,7 +2019,7 @@ async fn install_mod_tool(
     game_id: String,
     bottle_name: String,
 ) -> Result<String, String> {
-    let data_dir = resolve_game_data_dir(&game_id, &bottle_name)?;
+    let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
     mod_tools::install_tool(&tool_id, &data_dir)
         .await
         .map_err(|e| e.to_string())
@@ -2136,7 +2027,7 @@ async fn install_mod_tool(
 
 #[tauri::command]
 fn uninstall_mod_tool(tool_id: String, game_id: String, bottle_name: String) -> Result<(), String> {
-    let data_dir = resolve_game_data_dir(&game_id, &bottle_name)?;
+    let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
     mod_tools::uninstall_tool(&tool_id, &data_dir).map_err(|e| e.to_string())
 }
 
@@ -2146,9 +2037,7 @@ fn launch_mod_tool(
     game_id: String,
     bottle_name: String,
 ) -> Result<LaunchResult, String> {
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
-    let data_dir = resolve_game_data_dir(&game_id, &bottle_name)?;
+    let (bottle, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
     let tools = mod_tools::detect_tools(&data_dir);
     let tool = tools
         .iter()
@@ -2192,15 +2081,7 @@ fn create_game_snapshot(
     bottle_name: String,
     state: State<AppState>,
 ) -> Result<usize, String> {
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
-    let detected_games = games::detect_games(&bottle);
-    let game = detected_games
-        .iter()
-        .find(|g| g.game_id == game_id)
-        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
-
-    let data_dir = PathBuf::from(&game.data_dir);
+    let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
     let db = &state.db;
 
     integrity::create_game_snapshot(db, &game_id, &bottle_name, &data_dir)
@@ -2213,15 +2094,7 @@ fn check_game_integrity(
     bottle_name: String,
     state: State<AppState>,
 ) -> Result<IntegrityReport, String> {
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
-    let detected_games = games::detect_games(&bottle);
-    let game = detected_games
-        .iter()
-        .find(|g| g.game_id == game_id)
-        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
-
-    let data_dir = PathBuf::from(&game.data_dir);
+    let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
     let db = &state.db;
 
     integrity::check_game_integrity(db, &game_id, &bottle_name, &data_dir)
@@ -2257,14 +2130,9 @@ fn get_current_plugins(game_id: &str, bottle_name: &str) -> Vec<PluginEntry> {
         return Vec::new();
     }
 
-    let bottle = match bottles::find_bottle_by_name(bottle_name) {
-        Some(b) => b,
-        None => return Vec::new(),
-    };
-    let detected_games = games::detect_games(&bottle);
-    let game = match detected_games.iter().find(|g| g.game_id == game_id) {
-        Some(g) => g,
-        None => return Vec::new(),
+    let (bottle, game, _) = match resolve_game(game_id, bottle_name) {
+        Ok(result) => result,
+        Err(_) => return Vec::new(),
     };
 
     let plugins_file = games::with_plugin(game_id, |plugin| {
@@ -2430,13 +2298,7 @@ async fn get_nexus_account_status() -> Result<serde_json::Value, String> {
 
 #[tauri::command]
 fn find_crash_logs_cmd(game_id: String, bottle_name: String) -> Result<Vec<CrashLogEntry>, String> {
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
-    let detected_games = games::detect_games(&bottle);
-    let game = detected_games
-        .iter()
-        .find(|g| g.game_id == game_id)
-        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
+    let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
 
     let game_path = PathBuf::from(&game.game_path);
     Ok(crashlog::find_crash_logs(&game_path, &bottle.path))
@@ -2744,14 +2606,7 @@ fn get_disk_budget(
     game_id: String,
     bottle_name: String,
 ) -> Result<disk_budget::DiskBudget, String> {
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
-    let detected = games::detect_games(&bottle);
-    let game = detected
-        .iter()
-        .find(|g| g.game_id == game_id)
-        .ok_or_else(|| format!("Game '{}' not found", game_id))?;
-    let data_dir = PathBuf::from(&game.data_dir);
+    let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
     Ok(disk_budget::compute_budget(
         &game_id,
         &bottle_name,
@@ -2765,14 +2620,7 @@ fn estimate_install_impact_cmd(
     game_id: String,
     bottle_name: String,
 ) -> Result<disk_budget::InstallImpact, String> {
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
-    let detected = games::detect_games(&bottle);
-    let game = detected
-        .iter()
-        .find(|g| g.game_id == game_id)
-        .ok_or_else(|| format!("Game '{}' not found", game_id))?;
-    let data_dir = PathBuf::from(&game.data_dir);
+    let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
     Ok(disk_budget::estimate_install_impact(
         archive_size,
         &data_dir,
@@ -2786,8 +2634,7 @@ fn get_ini_settings(
     game_id: String,
     bottle_name: String,
 ) -> Result<Vec<ini_manager::IniFile>, String> {
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
+    let bottle = resolve_bottle(&bottle_name)?;
     Ok(ini_manager::read_all_ini(&bottle, &game_id))
 }
 
@@ -2813,8 +2660,7 @@ fn apply_ini_preset(
     bottle_name: String,
     preset_name: String,
 ) -> Result<usize, String> {
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
+    let bottle = resolve_bottle(&bottle_name)?;
     let presets = ini_manager::builtin_presets(&game_id);
     let preset = presets
         .iter()
@@ -2830,15 +2676,13 @@ fn run_wine_diagnostics(
     game_id: String,
     bottle_name: String,
 ) -> Result<wine_diagnostic::DiagnosticResult, String> {
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
+    let bottle = resolve_bottle(&bottle_name)?;
     Ok(wine_diagnostic::run_diagnostics(&bottle, &game_id))
 }
 
 #[tauri::command]
 fn fix_wine_appdata(bottle_name: String) -> Result<(), String> {
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
+    let bottle = resolve_bottle(&bottle_name)?;
     wine_diagnostic::fix_appdata(&bottle).map_err(|e| e.to_string())
 }
 
@@ -2848,15 +2692,13 @@ fn fix_wine_dll_override(
     dll_name: String,
     override_type: String,
 ) -> Result<(), String> {
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
+    let bottle = resolve_bottle(&bottle_name)?;
     wine_diagnostic::fix_dll_override(&bottle, &dll_name, &override_type).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn fix_wine_retina_mode(bottle_name: String) -> Result<(), String> {
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
+    let bottle = resolve_bottle(&bottle_name)?;
     wine_diagnostic::fix_retina_mode(&bottle).map_err(|e| e.to_string())
 }
 
@@ -2868,14 +2710,7 @@ fn run_preflight_check(
     bottle_name: String,
     state: State<AppState>,
 ) -> Result<preflight::PreflightResult, String> {
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
-    let detected = games::detect_games(&bottle);
-    let game = detected
-        .iter()
-        .find(|g| g.game_id == game_id)
-        .ok_or_else(|| format!("Game '{}' not found", game_id))?;
-    let data_dir = PathBuf::from(&game.data_dir);
+    let (bottle, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
     let db = &state.db;
     Ok(preflight::run_preflight(
         db,
@@ -3125,6 +2960,8 @@ pub fn run() {
             list_custom_exes,
             set_default_exe,
             get_conflicts,
+            analyze_conflicts_cmd,
+            resolve_all_conflicts_cmd,
             get_deployment_manifest_cmd,
             set_mod_priority,
             reorder_mods,

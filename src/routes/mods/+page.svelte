@@ -25,8 +25,10 @@
     setModNotes,
     setModTags,
     setModPriority,
+    analyzeConflicts,
+    resolveAllConflicts,
   } from "$lib/api";
-  import type { InstallProgressEvent, DeploymentHealth } from "$lib/types";
+  import type { InstallProgressEvent, DeploymentHealth, ConflictSuggestion, ResolutionResult } from "$lib/types";
   import {
     selectedGame,
     installedMods,
@@ -97,6 +99,13 @@
   let showConflictPanel = $state(false);
   let makingWinner = $state<number | null>(null);
 
+  // Mod overflow menu state
+  let overflowMenuModId = $state<number | null>(null);
+  let suggestions = $state<ConflictSuggestion[]>([]);
+  let analyzingConflicts = $state(false);
+  let resolvingAll = $state(false);
+  let resolutionResult = $state<ResolutionResult | null>(null);
+
   // Selected mod for dependency panel
   let selectedModId = $state<number | undefined>(undefined);
 
@@ -146,6 +155,16 @@
   // Game picker state
   let pickedGame = $state<DetectedGame | null>(null);
   let hoveredGame = $state<string | null>(null);
+
+  onMount(() => {
+    function closeOverflow(e: MouseEvent) {
+      if (overflowMenuModId !== null && !(e.target as HTMLElement)?.closest(".mod-overflow-wrap")) {
+        overflowMenuModId = null;
+      }
+    }
+    document.addEventListener("click", closeOverflow);
+    return () => document.removeEventListener("click", closeOverflow);
+  });
 
   onDestroy(() => { if (installUnlisten) { installUnlisten(); installUnlisten = null; } });
 
@@ -233,7 +252,7 @@
       } catch {
         conflicts = [];
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       if (thisLoad !== loadGeneration) return;
       showError(`Failed to load mods: ${e}`);
     } finally {
@@ -293,7 +312,7 @@
       );
       showSuccess(`Installed "${(mod as InstalledMod).name}" successfully`);
       await loadMods(game);
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Install failed: ${e}`);
     } finally {
       installing = false;
@@ -312,7 +331,7 @@
       showSuccess(`Uninstalled — ${(removed as string[]).length} files removed`);
       confirmUninstall = null;
       await loadMods(game);
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Uninstall failed: ${e}`);
     }
   }
@@ -324,7 +343,7 @@
     try {
       await toggleMod(mod.id, game.game_id, game.bottle_name, !mod.enabled);
       await loadMods(game);
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to toggle mod: ${e}`);
     } finally {
       togglingMod = null;
@@ -378,7 +397,7 @@
       if (result.success) {
         showSuccess(`Launched ${game.display_name}${useSkse ? " via SKSE" : ""}`);
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to launch: ${e}`);
     } finally {
       launching = false;
@@ -396,7 +415,7 @@
       } else {
         showSuccess(`Display settings already correct: ${result.applied.width}x${result.applied.height}`);
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Display fix failed: ${e}`);
     } finally {
       fixingDisplay = false;
@@ -407,7 +426,7 @@
     try {
       const url = await getSkseDownloadUrl();
       await openUrl(url);
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to open SKSE download page: ${e}`);
     }
   }
@@ -428,7 +447,7 @@
       skseStatus.set(skse);
       showSksePrompt = false;
       showSuccess("SKSE installed successfully");
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`SKSE installation failed: ${e}`);
     } finally {
       installingSkse = false;
@@ -458,7 +477,7 @@
       downgradeStatus = status;
       showDowngradeBanner = false;
       showSuccess(`Game downgraded to v${status.target_version}`);
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Downgrade failed: ${e}`);
     } finally {
       downgrading = false;
@@ -531,7 +550,7 @@
       const mod = await installMod(filePath, game.game_id, game.bottle_name);
       showSuccess(`Installed "${(mod as InstalledMod).name}" successfully`);
       await loadMods(game);
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Install failed: ${e}`);
     } finally {
       installing = false;
@@ -557,7 +576,7 @@
       await setSksePreference(game.game_id, game.bottle_name, newValue);
       skse = { ...skse, use_skse: newValue };
       skseStatus.set(skse);
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to update SKSE preference: ${e}`);
     }
     showSkseMenu = false;
@@ -630,7 +649,7 @@
     try {
       await reorderMods(game.game_id, game.bottle_name, orderedIds);
       await loadMods(game);
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to reorder mods: ${e}`);
     } finally {
       reordering = false;
@@ -649,7 +668,7 @@
       } else {
         showSuccess(`${modUpdates.length} update${modUpdates.length > 1 ? "s" : ""} available`);
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to check for updates: ${e}`);
     } finally {
       checkingUpdates = false;
@@ -665,7 +684,7 @@
       const result = await redeployAllMods(game.game_id, game.bottle_name);
       showSuccess(`Deployed ${result.deployed_count} files${result.fallback_used ? " (copy fallback used)" : ""}`);
       await refreshHealth(game);
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Deploy failed: ${e}`);
     } finally {
       deploying = false;
@@ -680,7 +699,7 @@
       const removed = await purgeDeployment(game.game_id, game.bottle_name);
       showSuccess(`Purged ${removed.length} deployed files`);
       await refreshHealth(game);
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Purge failed: ${e}`);
     } finally {
       purging = false;
@@ -709,8 +728,30 @@
       editingNotesId = null;
       const game = pickedGame ?? $selectedGame;
       if (game) await loadMods(game);
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to save notes: ${e}`);
+    }
+  }
+
+  async function handleInstallOverMod(mod: InstalledMod) {
+    // Re-install: open file picker and install over the same mod
+    showSuccess(`Select a new archive to reinstall "${mod.name}"`);
+    await handleInstall();
+  }
+
+  async function handleCheckSingleUpdate(mod: InstalledMod) {
+    const game = pickedGame ?? $selectedGame;
+    if (!game || !mod.nexus_mod_id) return;
+    try {
+      const updates = await checkModUpdates(game.game_id, game.bottle_name);
+      const update = updates.find(u => u.mod_id === mod.id);
+      if (update) {
+        showSuccess(`Update available for "${mod.name}": v${update.latest_version}`);
+      } else {
+        showSuccess(`"${mod.name}" is up to date`);
+      }
+    } catch (e: unknown) {
+      showError(`Update check failed: ${e}`);
     }
   }
 
@@ -726,10 +767,43 @@
       await redeployAllMods(game.game_id, game.bottle_name);
       await loadMods(game);
       await refreshHealth(game);
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to set winner: ${e}`);
     } finally {
       makingWinner = null;
+    }
+  }
+
+  async function handleAnalyzeConflicts() {
+    const game = pickedGame ?? $selectedGame;
+    if (!game) return;
+    analyzingConflicts = true;
+    resolutionResult = null;
+    try {
+      suggestions = await analyzeConflicts(game.game_id, game.bottle_name);
+    } catch (e: unknown) {
+      showError(`Conflict analysis failed: ${e}`);
+    } finally {
+      analyzingConflicts = false;
+    }
+  }
+
+  async function handleMagicResolve() {
+    const game = pickedGame ?? $selectedGame;
+    if (!game) return;
+    resolvingAll = true;
+    resolutionResult = null;
+    try {
+      resolutionResult = await resolveAllConflicts(game.game_id, game.bottle_name);
+      await loadMods(game);
+      await refreshHealth(game);
+      // Re-analyze to show updated state
+      suggestions = await analyzeConflicts(game.game_id, game.bottle_name);
+      showSuccess(`Resolved ${resolutionResult.author_resolved + resolutionResult.auto_suggested} conflicts automatically`);
+    } catch (e: unknown) {
+      showError(`Magic resolver failed: ${e}`);
+    } finally {
+      resolvingAll = false;
     }
   }
 
@@ -813,7 +887,7 @@
     <!-- Game Banner Header -->
     <div class="game-banner">
       <div class="game-banner-icon">
-        <GameIcon gameId={activeGame.game_id} size={56} />
+        <GameIcon gameId={activeGame.game_id} size={36} />
       </div>
       <div class="game-banner-info">
         <h2 class="game-banner-title">{activeGame.display_name}</h2>
@@ -986,7 +1060,7 @@
       </div>
     </div>
 
-    <!-- SKSE Prompt Banner -->
+    <!-- Banners (full-width, above the main content grid) -->
     {#if showSksePrompt && activeGame?.game_id === "skyrimse"}
       <div class="skse-banner">
         <div class="skse-banner-icon">
@@ -999,25 +1073,19 @@
         <div class="skse-banner-content">
           <p class="skse-banner-title">SKSE Not Installed</p>
           <p class="skse-banner-text">
-            Skyrim Script Extender (SKSE) is required by most Skyrim mods.
-            Download it from the official site, then install from the archive.
+            SKSE is required by most Skyrim mods.
           </p>
         </div>
         <div class="skse-banner-actions">
-          <button class="btn btn-secondary btn-sm" onclick={handleOpenSkseDownload}>
-            Download SKSE
-          </button>
+          <button class="btn btn-secondary btn-sm" onclick={handleOpenSkseDownload}>Download</button>
           <button class="btn btn-primary btn-sm" onclick={handleInstallSkse} disabled={installingSkse}>
             {installingSkse ? "Installing..." : "Install from Archive"}
           </button>
-          <button class="btn btn-ghost btn-sm" onclick={dismissSksePrompt}>
-            Dismiss
-          </button>
+          <button class="btn btn-ghost btn-sm" onclick={dismissSksePrompt}>Dismiss</button>
         </div>
       </div>
     {/if}
 
-    <!-- Skyrim Downgrade Banner -->
     {#if showDowngradeBanner && activeGame?.game_id === "skyrimse" && downgradeStatus && !downgradeStatus.is_downgraded}
       <div class="downgrade-banner">
         <div class="skse-banner-icon">
@@ -1030,155 +1098,170 @@
         <div class="skse-banner-content">
           <p class="skse-banner-title">
             Skyrim SE {downgradeStatus.current_version}
-            {#if downgradeStatus.current_version !== "1.5.97"}
-              — Downgrade Available
-            {/if}
+            {#if downgradeStatus.current_version !== "1.5.97"} — Downgrade Available{/if}
           </p>
-          <p class="skse-banner-text">
-            Most mods target v1.5.97. Downgrade creates a protected copy of your game files that won't be overwritten by Steam updates.
-          </p>
+          <p class="skse-banner-text">Most mods target v1.5.97.</p>
         </div>
         <div class="skse-banner-actions">
           <button class="btn btn-primary btn-sm" onclick={handleDowngrade} disabled={downgrading}>
-            {downgrading ? "Downgrading..." : "Downgrade to v1.5.97"}
+            {downgrading ? "Downgrading..." : "Downgrade"}
           </button>
-          <button class="btn btn-ghost btn-sm" onclick={dismissDowngradeBanner}>
-            Dismiss
-          </button>
+          <button class="btn btn-ghost btn-sm" onclick={dismissDowngradeBanner}>Dismiss</button>
         </div>
       </div>
     {/if}
 
-    <!-- Deployment Health Panel -->
-    {#if deployHealth && $installedMods.length > 0}
-      <button class="health-toggle" onclick={() => showHealthPanel = !showHealthPanel}>
-        <div class="health-summary">
-          <span class="health-chip" class:chip-green={deployHealth.is_deployed} class:chip-amber={!deployHealth.is_deployed}>
-            {deployHealth.is_deployed ? "Deployed" : "Purged"}
-          </span>
-          <span class="health-stat">{deployHealth.total_enabled}/{deployHealth.total_mods} enabled</span>
-          {#if deployHealth.conflict_count > 0}
-            <button class="health-stat health-warning conflict-link" onclick={(e) => { e.stopPropagation(); showConflictPanel = !showConflictPanel; }}>
-              {deployHealth.conflict_count} conflicts
-            </button>
-          {/if}
-          {#if deployHealth.deploy_method && deployHealth.deploy_method !== "none"}
-            <span class="health-stat health-method">{deployHealth.deploy_method === "hardlink" ? "Hardlinks" : "Copies"}</span>
-          {/if}
-        </div>
-        <svg class="health-chevron" class:open={showHealthPanel} width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M3 4.5L6 7.5L9 4.5" />
-        </svg>
-      </button>
-      {#if showHealthPanel}
-        <div class="health-details">
-          <div class="health-grid">
-            <div class="health-item">
-              <span class="health-label">Deployed Files</span>
-              <span class="health-value">{deployHealth.total_deployed}</span>
-            </div>
-            <div class="health-item">
-              <span class="health-label">Active Mods</span>
-              <span class="health-value">{deployHealth.total_enabled} / {deployHealth.total_mods}</span>
-            </div>
-            <div class="health-item">
-              <span class="health-label">File Conflicts</span>
-              <span class="health-value" class:health-warning={deployHealth.conflict_count > 0}>{deployHealth.conflict_count}</span>
-            </div>
-            <div class="health-item">
-              <span class="health-label">Deploy Method</span>
-              <span class="health-value">{deployHealth.deploy_method === "hardlink" ? "Hardlinks (0 extra disk)" : deployHealth.deploy_method === "copy" ? "File copies" : "None"}</span>
-            </div>
-          </div>
-        </div>
-      {/if}
-    {/if}
-
-    <!-- Disk Budget Panel -->
-    {#if activeGame && $installedMods.length > 0}
-      <DiskBudgetPanel gameId={activeGame.game_id} bottleName={activeGame.bottle_name} />
-    {/if}
-
-    <!-- Pre-flight Checks (collapsible) -->
-    {#if activeGame && $installedMods.length > 0}
-      <button class="panel-section-toggle" onclick={() => showPreflightPanel = !showPreflightPanel}>
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-        </svg>
-        <span>Pre-Deployment Checks</span>
-        <svg class="section-chevron" class:open={showPreflightPanel} width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M3 4.5L6 7.5L9 4.5" />
-        </svg>
-      </button>
-      {#if showPreflightPanel}
-        <PreflightPanel gameId={activeGame.game_id} bottleName={activeGame.bottle_name} />
-      {/if}
-    {/if}
-
-    <!-- Conflict Resolution Panel -->
-    {#if showConflictPanel && conflicts.length > 0}
-      <div class="conflict-panel">
-        <div class="conflict-panel-header">
-          <h3 class="conflict-panel-title">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-              <line x1="12" y1="9" x2="12" y2="13" />
-              <line x1="12" y1="17" x2="12.01" y2="17" />
-            </svg>
-            File Conflicts ({conflicts.length})
-          </h3>
-          <button class="btn btn-ghost btn-sm" onclick={() => showConflictPanel = false}>
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-              <line x1="3" y1="3" x2="11" y2="11" />
-              <line x1="11" y1="3" x2="3" y2="11" />
-            </svg>
-          </button>
-        </div>
-        <div class="conflict-list">
-          {#each conflicts as conflict (conflict.relative_path)}
-            <div class="conflict-item">
-              <div class="conflict-path">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
-                  <polyline points="13 2 13 9 20 9" />
+    <!-- Two-column content area -->
+    <div class="content-grid">
+      <!-- LEFT: Mod list (primary focus) -->
+      <div class="content-main">
+        <!-- Smart Conflict Resolution Panel -->
+        {#if showConflictPanel && conflicts.length > 0}
+          <div class="conflict-panel">
+            <div class="conflict-panel-header">
+              <h3 class="conflict-panel-title">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+                  <line x1="12" y1="9" x2="12" y2="13" />
+                  <line x1="12" y1="17" x2="12.01" y2="17" />
                 </svg>
-                <span class="conflict-filepath">{conflict.relative_path}</span>
+                File Conflicts ({conflicts.length})
+              </h3>
+              <div class="conflict-panel-actions">
+                <button
+                  class="btn btn-accent btn-sm magic-resolve-btn"
+                  onclick={handleMagicResolve}
+                  disabled={resolvingAll || analyzingConflicts}
+                  title="Automatically resolve all conflicts using LOOT data and collection authorship"
+                >
+                  {#if resolvingAll}
+                    <span class="spinner spinner-sm"></span>
+                    Resolving...
+                  {:else}
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
+                    </svg>
+                    Magic Resolver
+                  {/if}
+                </button>
+                <button
+                  class="btn btn-ghost btn-sm"
+                  onclick={handleAnalyzeConflicts}
+                  disabled={analyzingConflicts}
+                  title="Analyze conflicts without applying changes"
+                >
+                  {#if analyzingConflicts}
+                    <span class="spinner spinner-sm"></span>
+                  {:else}
+                    Analyze
+                  {/if}
+                </button>
+                <button class="btn btn-ghost btn-sm" onclick={() => { showConflictPanel = false; suggestions = []; resolutionResult = null; }}>
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+                    <line x1="3" y1="3" x2="11" y2="11" />
+                    <line x1="11" y1="3" x2="3" y2="11" />
+                  </svg>
+                </button>
               </div>
-              <div class="conflict-mods">
-                {#each conflict.mods as mod (mod.mod_id)}
-                  <div class="conflict-mod" class:conflict-winner={mod.mod_id === conflict.winner_mod_id}>
-                    <span class="conflict-mod-name">
-                      {mod.mod_name}
-                      {#if mod.mod_id === conflict.winner_mod_id}
-                        <span class="winner-badge">Winner</span>
-                      {/if}
-                    </span>
-                    <span class="conflict-mod-priority">Priority {mod.priority}</span>
-                    {#if mod.mod_id !== conflict.winner_mod_id}
-                      <button
-                        class="btn btn-ghost btn-sm make-winner-btn"
-                        onclick={() => handleMakeWinner(conflict, mod.mod_id)}
-                        disabled={makingWinner !== null}
-                      >
-                        {#if makingWinner === mod.mod_id}
-                          <span class="spinner spinner-sm"></span>
-                        {:else}
-                          Make Winner
-                        {/if}
-                      </button>
-                    {/if}
+            </div>
+
+            <!-- Resolution summary banner -->
+            {#if resolutionResult}
+              <div class="resolution-banner">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+                  <polyline points="22 4 12 14.01 9 11.01" />
+                </svg>
+                <span>
+                  {resolutionResult.author_resolved} author-resolved,
+                  {resolutionResult.auto_suggested} auto-fixed,
+                  {resolutionResult.manual_needed} need review
+                  {#if resolutionResult.priorities_changed > 0}
+                    &mdash; {resolutionResult.priorities_changed} priorities adjusted
+                  {/if}
+                </span>
+              </div>
+            {/if}
+
+            <!-- Smart suggestions view -->
+            {#if suggestions.length > 0}
+              <div class="conflict-list">
+                {#each suggestions as s (s.relative_path)}
+                  <div class="conflict-item" class:conflict-resolved={s.status === "AuthorResolved"} class:conflict-suggested={s.status === "Suggested"}>
+                    <div class="conflict-path">
+                      <span class="conflict-status-badge" class:status-author={s.status === "AuthorResolved"} class:status-suggested={s.status === "Suggested"} class:status-manual={s.status === "Manual"}>
+                        {#if s.status === "AuthorResolved"}OK
+                        {:else if s.status === "Suggested"}Auto
+                        {:else}Manual{/if}
+                      </span>
+                      <span class="conflict-filepath">{s.relative_path}</span>
+                    </div>
+                    <div class="conflict-reason">{s.reason}</div>
+                    <div class="conflict-mods">
+                      {#each s.mods as mod (mod.mod_id)}
+                        <div class="conflict-mod" class:conflict-winner={mod.mod_id === s.suggested_winner_id}>
+                          <span class="conflict-mod-name">
+                            {mod.mod_name}
+                            {#if mod.mod_id === s.suggested_winner_id}
+                              <span class="winner-badge">{s.status === "AuthorResolved" ? "Author" : s.status === "Suggested" ? "Suggested" : "Winner"}</span>
+                            {/if}
+                          </span>
+                          <span class="conflict-mod-priority">Priority {mod.priority}</span>
+                        </div>
+                      {/each}
+                    </div>
                   </div>
                 {/each}
               </div>
-            </div>
-          {/each}
-        </div>
-      </div>
-    {/if}
 
-    <!-- Search & Filter Bar -->
-    {#if $installedMods.length > 0}
-      <div class="filter-bar">
+            <!-- Fallback: raw conflict view (before analysis) -->
+            {:else}
+              <div class="conflict-list">
+                {#each conflicts as conflict (conflict.relative_path)}
+                  <div class="conflict-item">
+                    <div class="conflict-path">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
+                        <polyline points="13 2 13 9 20 9" />
+                      </svg>
+                      <span class="conflict-filepath">{conflict.relative_path}</span>
+                    </div>
+                    <div class="conflict-mods">
+                      {#each conflict.mods as mod (mod.mod_id)}
+                        <div class="conflict-mod" class:conflict-winner={mod.mod_id === conflict.winner_mod_id}>
+                          <span class="conflict-mod-name">
+                            {mod.mod_name}
+                            {#if mod.mod_id === conflict.winner_mod_id}
+                              <span class="winner-badge">Winner</span>
+                            {/if}
+                          </span>
+                          <span class="conflict-mod-priority">Priority {mod.priority}</span>
+                          {#if mod.mod_id !== conflict.winner_mod_id}
+                            <button
+                              class="btn btn-ghost btn-sm make-winner-btn"
+                              onclick={() => handleMakeWinner(conflict, mod.mod_id)}
+                              disabled={makingWinner !== null}
+                            >
+                              {#if makingWinner === mod.mod_id}
+                                <span class="spinner spinner-sm"></span>
+                              {:else}
+                                Make Winner
+                              {/if}
+                            </button>
+                          {/if}
+                        </div>
+                      {/each}
+                    </div>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          </div>
+        {/if}
+
+        <!-- Search & Filter Bar -->
+        {#if $installedMods.length > 0}
+          <div class="filter-bar">
         <div class="search-box">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="11" cy="11" r="8" />
@@ -1378,26 +1461,67 @@
                 <span class="col-actions">
                   {#if confirmUninstall === mod.id}
                     <div class="confirm-actions">
-                      <button
-                        class="btn btn-danger btn-sm"
-                        onclick={() => handleUninstall(mod.id)}
-                      >
-                        Confirm
-                      </button>
-                      <button
-                        class="btn btn-ghost btn-sm"
-                        onclick={() => (confirmUninstall = null)}
-                      >
-                        Cancel
-                      </button>
+                      <button class="btn btn-danger btn-sm" onclick={() => handleUninstall(mod.id)}>Yes</button>
+                      <button class="btn btn-ghost btn-sm" onclick={() => (confirmUninstall = null)}>No</button>
                     </div>
                   {:else}
-                    <button
-                      class="btn btn-ghost-danger btn-sm"
-                      onclick={() => (confirmUninstall = mod.id)}
-                    >
-                      Uninstall
-                    </button>
+                    <div class="mod-action-group">
+                      <button
+                        class="mod-uninstall-btn"
+                        onclick={(e) => { e.stopPropagation(); confirmUninstall = mod.id; }}
+                        title="Uninstall mod"
+                      >
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                          <polyline points="3 6 5 6 21 6" />
+                          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                        </svg>
+                      </button>
+                      <div class="mod-overflow-wrap">
+                        <button
+                          class="mod-overflow-btn"
+                          onclick={(e) => { e.stopPropagation(); overflowMenuModId = overflowMenuModId === mod.id ? null : mod.id; }}
+                          title="More actions"
+                        >
+                          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
+                            <circle cx="12" cy="5" r="2" />
+                            <circle cx="12" cy="12" r="2" />
+                            <circle cx="12" cy="19" r="2" />
+                          </svg>
+                        </button>
+                        {#if overflowMenuModId === mod.id}
+                          <div class="mod-overflow-menu">
+                            <button class="overflow-item" onclick={(e) => { e.stopPropagation(); overflowMenuModId = null; handleInstallOverMod(mod); }}>
+                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+                              </svg>
+                              Reinstall
+                            </button>
+                            {#if mod.nexus_mod_id}
+                              <button class="overflow-item" onclick={(e) => { e.stopPropagation(); overflowMenuModId = null; handleCheckSingleUpdate(mod); }}>
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                  <circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" />
+                                </svg>
+                                Check for Update
+                              </button>
+                              <button class="overflow-item" onclick={(e) => { e.stopPropagation(); overflowMenuModId = null; openUrl(`https://www.nexusmods.com/skyrimspecialedition/mods/${mod.nexus_mod_id}`); }}>
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                  <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" />
+                                </svg>
+                                Open on Nexus
+                              </button>
+                            {/if}
+                            {#if mod.staging_path}
+                              <button class="overflow-item" onclick={(e) => { e.stopPropagation(); overflowMenuModId = null; /* TODO: reconfigure FOMOD */ }}>
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                  <circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                                </svg>
+                                Reconfigure FOMOD
+                              </button>
+                            {/if}
+                          </div>
+                        {/if}
+                      </div>
+                    </div>
                   {/if}
                 </span>
               </div>
@@ -1521,45 +1645,107 @@
         </div>
       {/if}
       </div>
-
-      <!-- Dependency Panel (collapsible) -->
-      <button class="panel-section-toggle" onclick={() => showDependencyPanel = !showDependencyPanel}>
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="18" cy="5" r="3" />
-          <circle cx="6" cy="12" r="3" />
-          <circle cx="18" cy="19" r="3" />
-          <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
-          <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
-        </svg>
-        <span>Dependencies</span>
-        <svg class="section-chevron" class:open={showDependencyPanel} width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M3 4.5L6 7.5L9 4.5" />
-        </svg>
-      </button>
-      {#if showDependencyPanel && activeGame}
-        <DependencyPanel
-          gameId={activeGame.game_id}
-          bottleName={activeGame.bottle_name}
-          mods={$installedMods}
-          {selectedModId}
-        />
-      {/if}
-
-      <!-- Session History (collapsible) -->
-      <button class="panel-section-toggle" onclick={() => showSessionPanel = !showSessionPanel}>
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="12" cy="12" r="10" />
-          <polyline points="12 6 12 12 16 14" />
-        </svg>
-        <span>Session History & Stability</span>
-        <svg class="section-chevron" class:open={showSessionPanel} width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M3 4.5L6 7.5L9 4.5" />
-        </svg>
-      </button>
-      {#if showSessionPanel && activeGame}
-        <SessionHistoryPanel gameId={activeGame.game_id} bottleName={activeGame.bottle_name} />
-      {/if}
     {/if}
+    </div><!-- end content-main -->
+
+    <!-- RIGHT: Info sidebar -->
+    {#if !loadingMods && $installedMods.length > 0}
+      <div class="content-sidebar">
+        <!-- Deployment Status Card -->
+        {#if deployHealth}
+          <div class="sidebar-card">
+            <div class="sidebar-card-header">
+              <span class="sidebar-card-title">Deployment</span>
+              <span class="sidebar-chip" class:chip-green={deployHealth.is_deployed} class:chip-amber={!deployHealth.is_deployed}>
+                {deployHealth.is_deployed ? "Active" : "Purged"}
+              </span>
+            </div>
+            <div class="sidebar-stats">
+              <div class="sidebar-stat">
+                <span class="sidebar-stat-value">{deployHealth.total_enabled}</span>
+                <span class="sidebar-stat-label">Enabled</span>
+              </div>
+              <div class="sidebar-stat">
+                <span class="sidebar-stat-value">{deployHealth.total_deployed}</span>
+                <span class="sidebar-stat-label">Files</span>
+              </div>
+              <div class="sidebar-stat">
+                <span class="sidebar-stat-value" class:health-warning={deployHealth.conflict_count > 0}>{deployHealth.conflict_count}</span>
+                <span class="sidebar-stat-label">Conflicts</span>
+              </div>
+            </div>
+            {#if deployHealth.deploy_method && deployHealth.deploy_method !== "none"}
+              <span class="sidebar-detail">{deployHealth.deploy_method === "hardlink" ? "Hardlinks (0 extra disk)" : "File copies"}</span>
+            {/if}
+            {#if deployHealth.conflict_count > 0}
+              <button class="sidebar-link" onclick={() => showConflictPanel = !showConflictPanel}>
+                Resolve conflicts
+              </button>
+            {/if}
+          </div>
+        {/if}
+
+        <!-- Disk Budget -->
+        {#if activeGame}
+          <DiskBudgetPanel gameId={activeGame.game_id} bottleName={activeGame.bottle_name} />
+        {/if}
+
+        <!-- Pre-flight Checks -->
+        {#if activeGame}
+          <button class="panel-section-toggle" onclick={() => showPreflightPanel = !showPreflightPanel}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+            </svg>
+            <span>Pre-Deployment Checks</span>
+            <svg class="section-chevron" class:open={showPreflightPanel} width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 4.5L6 7.5L9 4.5" />
+            </svg>
+          </button>
+          {#if showPreflightPanel}
+            <PreflightPanel gameId={activeGame.game_id} bottleName={activeGame.bottle_name} />
+          {/if}
+        {/if}
+
+        <!-- Dependencies -->
+        <button class="panel-section-toggle" onclick={() => showDependencyPanel = !showDependencyPanel}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="18" cy="5" r="3" />
+            <circle cx="6" cy="12" r="3" />
+            <circle cx="18" cy="19" r="3" />
+            <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
+            <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
+          </svg>
+          <span>Dependencies</span>
+          <svg class="section-chevron" class:open={showDependencyPanel} width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 4.5L6 7.5L9 4.5" />
+          </svg>
+        </button>
+        {#if showDependencyPanel && activeGame}
+          <DependencyPanel
+            gameId={activeGame.game_id}
+            bottleName={activeGame.bottle_name}
+            mods={$installedMods}
+            {selectedModId}
+          />
+        {/if}
+
+        <!-- Session History -->
+        <button class="panel-section-toggle" onclick={() => showSessionPanel = !showSessionPanel}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10" />
+            <polyline points="12 6 12 12 16 14" />
+          </svg>
+          <span>Session History</span>
+          <svg class="section-chevron" class:open={showSessionPanel} width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 4.5L6 7.5L9 4.5" />
+          </svg>
+        </button>
+        {#if showSessionPanel && activeGame}
+          <SessionHistoryPanel gameId={activeGame.game_id} bottleName={activeGame.bottle_name} />
+        {/if}
+      </div><!-- end content-sidebar -->
+    {/if}
+    </div><!-- end content-grid -->
   {/if}
 </div>
 
@@ -1571,8 +1757,137 @@
     display: flex;
     flex-direction: column;
     height: 100%;
-    padding: var(--space-6);
-    gap: var(--space-6);
+    padding: var(--space-4) var(--space-5);
+    gap: var(--space-3);
+    overflow: hidden;
+    position: relative;
+  }
+
+  /* Two-column content grid */
+  .content-grid {
+    display: grid;
+    grid-template-columns: 1fr 260px;
+    gap: var(--space-4);
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  @media (max-width: 1100px) {
+    .content-grid {
+      grid-template-columns: 1fr 220px;
+      gap: var(--space-3);
+    }
+  }
+
+  @media (max-width: 900px) {
+    .content-grid {
+      grid-template-columns: 1fr;
+    }
+    .content-sidebar {
+      display: none;
+    }
+  }
+
+  .content-main {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .content-sidebar {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    overflow-y: auto;
+    min-height: 0;
+  }
+
+  /* Sidebar cards */
+  .sidebar-card {
+    background: var(--surface);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius);
+    padding: var(--space-3) var(--space-4);
+  }
+
+  .sidebar-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: var(--space-3);
+  }
+
+  .sidebar-card-title {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-secondary);
+  }
+
+  .sidebar-chip {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 1px 8px;
+    border-radius: 999px;
+  }
+
+  .sidebar-chip.chip-green {
+    color: var(--green);
+    background: rgba(48, 209, 88, 0.12);
+  }
+
+  .sidebar-chip.chip-amber {
+    color: var(--yellow);
+    background: rgba(255, 214, 10, 0.12);
+  }
+
+  .sidebar-stats {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--space-2);
+    text-align: center;
+  }
+
+  .sidebar-stat-value {
+    display: block;
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text-primary);
+    line-height: 1.2;
+  }
+
+  .sidebar-stat-label {
+    display: block;
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-top: 1px;
+  }
+
+  .sidebar-detail {
+    display: block;
+    font-size: 11px;
+    color: var(--text-tertiary);
+    text-align: center;
+    margin-top: var(--space-2);
+  }
+
+  .sidebar-link {
+    display: block;
+    font-size: 12px;
+    color: var(--accent);
+    text-align: center;
+    margin-top: var(--space-2);
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0;
+  }
+
+  .sidebar-link:hover {
+    text-decoration: underline;
   }
 
   /* ============================
@@ -1697,11 +2012,11 @@
   .game-banner {
     display: flex;
     align-items: center;
-    gap: var(--space-4);
-    padding: var(--space-4) var(--space-5);
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
     background: var(--surface);
     border: 1px solid var(--separator);
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius);
     box-shadow: var(--glass-edge-shadow);
     flex-shrink: 0;
   }
@@ -1712,8 +2027,8 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 56px;
-    height: 56px;
+    width: 40px;
+    height: 40px;
   }
 
   .game-banner-info {
@@ -1722,7 +2037,7 @@
   }
 
   .game-banner-title {
-    font-size: 22px;
+    font-size: 16px;
     font-weight: 700;
     letter-spacing: -0.02em;
     color: var(--text-primary);
@@ -1941,6 +2256,7 @@
     gap: var(--space-4);
     flex: 1;
     min-height: 0;
+    overflow: hidden;
   }
 
   .mod-layout.has-detail .mod-table-container {
@@ -1957,6 +2273,7 @@
     border-radius: var(--radius-lg);
     background: var(--bg-primary);
     box-shadow: var(--glass-edge-shadow);
+    min-height: 200px;
   }
 
   .reordering-active {
@@ -1972,8 +2289,8 @@
 
   .table-header {
     display: grid;
-    grid-template-columns: 32px 52px 1fr 100px 64px 110px 120px;
-    padding: var(--space-3) var(--space-4);
+    grid-template-columns: 28px 48px minmax(0, 1fr) 72px 48px 90px 64px;
+    padding: var(--space-2) var(--space-3);
     background: var(--bg-secondary);
     border-bottom: 1px solid var(--separator);
     position: sticky;
@@ -1985,6 +2302,9 @@
     font-size: 11px;
     font-weight: 500;
     color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .table-body {
@@ -1994,14 +2314,26 @@
 
   .table-row {
     display: grid;
-    grid-template-columns: 32px 52px 1fr 100px 64px 110px 120px;
-    padding: var(--space-3) var(--space-4);
+    grid-template-columns: 28px 48px minmax(0, 1fr) 72px 48px 90px 64px;
+    padding: var(--space-2) var(--space-3);
     align-items: center;
     font-size: 13px;
     transition:
       background var(--duration-fast) var(--ease),
       opacity var(--duration-fast) var(--ease),
       box-shadow var(--duration-fast) var(--ease);
+  }
+
+  /* Narrow window: hide Files and Date columns, shrink right sidebar */
+  @media (max-width: 1100px) {
+    .table-header,
+    .table-row {
+      grid-template-columns: 28px 48px minmax(0, 1fr) 64px 0px 0px 60px;
+    }
+    .col-files,
+    .col-date {
+      display: none;
+    }
   }
 
   .table-row:nth-child(even) {
@@ -2133,6 +2465,8 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    min-width: 0;
+    flex: 1;
   }
 
   .nexus-badge {
@@ -2176,6 +2510,13 @@
     color: var(--text-secondary);
     font-size: 12px;
     font-variant-numeric: tabular-nums;
+    overflow: hidden;
+  }
+
+  .version-text {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .version-text {
@@ -2218,6 +2559,9 @@
     color: var(--text-secondary);
     font-size: 12px;
     font-variant-numeric: tabular-nums;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
   }
 
   .col-files {
@@ -2230,6 +2574,95 @@
     display: flex;
     justify-content: flex-end;
     align-items: center;
+    overflow: visible;
+    position: relative;
+  }
+
+  .mod-action-group {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .mod-uninstall-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    border-radius: var(--radius-sm);
+    color: var(--red);
+    background: transparent;
+    border: 1px solid color-mix(in srgb, var(--red) 30%, transparent);
+    cursor: pointer;
+    transition: all var(--duration-fast) var(--ease);
+  }
+
+  .mod-uninstall-btn:hover {
+    background: color-mix(in srgb, var(--red) 12%, transparent);
+    border-color: color-mix(in srgb, var(--red) 50%, transparent);
+  }
+
+  .mod-overflow-wrap {
+    position: relative;
+  }
+
+  .mod-overflow-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    border-radius: var(--radius-sm);
+    color: var(--text-quaternary);
+    background: transparent;
+    cursor: pointer;
+    transition: all var(--duration-fast) var(--ease);
+  }
+
+  .mod-overflow-btn:hover {
+    background: var(--surface-hover);
+    color: var(--text-secondary);
+  }
+
+  .mod-overflow-menu {
+    position: absolute;
+    right: 0;
+    top: 100%;
+    margin-top: 4px;
+    min-width: 180px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--separator-opaque);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-lg);
+    z-index: 100;
+    padding: 4px;
+    animation: dropdownIn var(--duration-fast) var(--ease-out);
+  }
+
+  @keyframes dropdownIn {
+    from { transform: translateY(-4px); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
+  }
+
+  .overflow-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 6px 10px;
+    border-radius: calc(var(--radius) - 2px);
+    font-size: 12px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all var(--duration-fast) var(--ease);
+    text-align: left;
+    white-space: nowrap;
+  }
+
+  .overflow-item:hover {
+    background: var(--surface-hover);
+    color: var(--text-primary);
   }
 
   .confirm-actions {
@@ -2412,9 +2845,7 @@
 
   /* --- Drag & Drop Overlay --- */
 
-  .mods-page {
-    position: relative;
-  }
+  /* position: relative merged into main .mods-page rule */
 
   .drag-active {
     outline: 2px dashed var(--accent);
@@ -2873,6 +3304,88 @@
     background: var(--accent-subtle) !important;
   }
 
+  .conflict-panel-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .magic-resolve-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    background: var(--accent);
+    color: #fff;
+    border-radius: var(--radius-sm);
+    padding: 4px 10px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity var(--duration-fast) var(--ease);
+  }
+
+  .magic-resolve-btn:hover:not(:disabled) {
+    opacity: 0.85;
+  }
+
+  .magic-resolve-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+
+  .resolution-banner {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-4);
+    background: color-mix(in srgb, var(--green) 8%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, var(--green) 20%, transparent);
+    color: var(--green);
+    font-size: 12px;
+    font-weight: 500;
+    flex-shrink: 0;
+  }
+
+  .conflict-status-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    flex-shrink: 0;
+  }
+
+  .status-author {
+    background: color-mix(in srgb, var(--green) 15%, transparent);
+    color: var(--green);
+  }
+
+  .status-suggested {
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    color: var(--accent);
+  }
+
+  .status-manual {
+    background: color-mix(in srgb, var(--yellow) 15%, transparent);
+    color: var(--yellow);
+  }
+
+  .conflict-resolved {
+    opacity: 0.6;
+  }
+
+  .conflict-reason {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    padding-left: var(--space-5);
+    margin-bottom: var(--space-1);
+    font-style: italic;
+  }
+
   /* ============================
      Sort Direction Button
      ============================ */
@@ -2898,8 +3411,9 @@
      Detail Panel
      ============================ */
   .mod-detail-panel {
-    width: 300px;
-    min-width: 300px;
+    width: 280px;
+    min-width: 240px;
+    flex-shrink: 0;
     border-radius: var(--radius-lg);
     background: var(--bg-primary);
     box-shadow: var(--glass-edge-shadow);

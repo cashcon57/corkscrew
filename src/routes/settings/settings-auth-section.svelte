@@ -78,14 +78,14 @@
         config.set(cfg2);
         validationError = "Invalid API key. Please check and try again.";
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       // Key was invalid — clear it
       try {
         await setConfigValue("nexus_api_key", "");
         const cfg2 = await getConfig();
         config.set(cfg2);
       } catch { /* ignore cleanup errors */ }
-      const msg = typeof e === "string" ? e : e?.message ?? String(e);
+      const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
       validationError = `Connection failed: ${msg}`;
     } finally {
       connecting = false;
@@ -101,7 +101,7 @@
       config.set(cfg);
       account = { connected: false };
       showSuccess("Signed out of Nexus Mods");
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Sign-out failed: ${e}`);
     } finally {
       signingOut = false;

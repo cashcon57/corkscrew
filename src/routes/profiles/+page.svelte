@@ -29,7 +29,7 @@
     loading = true;
     try {
       profiles = await listProfiles(game.game_id, game.bottle_name);
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to load profiles: ${e}`);
     } finally {
       loading = false;
@@ -46,7 +46,7 @@
       newProfileName = "";
       showSuccess("Profile created");
       await loadProfiles();
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to create profile: ${e}`);
     } finally {
       creating = false;
@@ -60,7 +60,7 @@
       await deleteProfile(id);
       showSuccess("Profile deleted");
       await loadProfiles();
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to delete profile: ${e}`);
     }
   }
@@ -72,7 +72,7 @@
       await activateProfile(id, game.game_id, game.bottle_name);
       showSuccess("Profile activated");
       await loadProfiles();
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to activate profile: ${e}`);
     } finally {
       activating = null;
@@ -84,7 +84,7 @@
     try {
       await saveProfileSnapshot(id, game.game_id, game.bottle_name);
       showSuccess("Profile state saved");
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to save profile: ${e}`);
     }
   }
@@ -103,7 +103,7 @@
       await renameProfile(editingId, editingName.trim());
       editingId = null;
       await loadProfiles();
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to rename: ${e}`);
       editingId = null;
     }

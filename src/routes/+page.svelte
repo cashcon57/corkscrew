@@ -28,7 +28,7 @@
     settingsLoading = true;
     try {
       bottleSettingDefs = await getBottleSettingDefs(bottle.name);
-    } catch (e: any) {
+    } catch (e: unknown) {
       bottleSettingDefs = [];
       showError(`Failed to load bottle settings: ${e}`);
     }
@@ -40,7 +40,7 @@
     try {
       await setBottleSetting(selectedBottle.name, key, value);
       bottleSettingDefs = await getBottleSettingDefs(selectedBottle.name);
-    } catch (e: any) {
+    } catch (e: unknown) {
       showError(`Failed to update setting: ${e}`);
     }
   }
@@ -52,7 +52,7 @@
       bottles.set(b);
       games.set(g);
       loadingState = "done";
-    } catch (e: any) {
+    } catch (e: unknown) {
       loadingState = "done";
       showError(`Failed to scan: ${e}`);
     }
