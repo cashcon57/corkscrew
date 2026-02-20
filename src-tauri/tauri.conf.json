@@ -40,7 +40,7 @@
       }
     },
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM4QjNDNzVGQUI3Nzg2ODkKUldTSmhuZXJYOGV6T0pwVHVlRis5NzdCVDkwREUvaTAxTzRNUm1QTkVZM1JlcUVqcXJrMENyRzQK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDdBMzhEMDdFOUM4MDRBMDAKUldRQVNvQ2NmdEE0ZW1YWWdsZjFkMEdTTWxFeHd4Y1IwTHhaV1M5VmU4VEJGb3lWdDhIbGNkWWsK",
       "endpoints": [
         "https://github.com/cashcon57/corkscrew/releases/latest/download/latest.json"
       ]
