@@ -45,9 +45,10 @@ def find_files(artifact_dir: Path) -> dict:
         tar_file = None
 
         for f in sorted(dir_path.rglob("*")):
-            if f.suffix == ".sig":
+            name = f.name
+            if name.endswith(".tar.gz.sig"):
                 sig_file = f
-            elif f.name.endswith(".tar.gz"):
+            elif name.endswith(".tar.gz") and not name.endswith(".tar.gz.sig"):
                 tar_file = f
 
         if sig_file and tar_file:
