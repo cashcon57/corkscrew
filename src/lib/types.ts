@@ -584,3 +584,14 @@ export interface SelectOption {
   value: string;
   label: string;
 }
+
+// Install Progress Events
+
+export type InstallProgressEvent =
+  | { kind: "modStarted"; mod_index: number; total_mods: number; mod_name: string }
+  | { kind: "stepChanged"; mod_index: number; step: string; detail: string | null }
+  | { kind: "downloadProgress"; mod_index: number; downloaded: number; total: number }
+  | { kind: "modCompleted"; mod_index: number; mod_name: string; mod_id: number }
+  | { kind: "modFailed"; mod_index: number; mod_name: string; error: string }
+  | { kind: "collectionCompleted"; installed: number; skipped: number; failed: number }
+  | { kind: "userActionRequired"; mod_index: number; mod_name: string; action: string; url: string | null; instructions: string | null };

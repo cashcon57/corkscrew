@@ -337,6 +337,31 @@ impl ModDatabase {
         Ok(())
     }
 
+    /// Set Nexus Mods IDs for a mod (used when installing from collections).
+    pub fn set_nexus_ids(
+        &self,
+        mod_id: i64,
+        nexus_mod_id: i64,
+        nexus_file_id: Option<i64>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE installed_mods SET nexus_mod_id = ?1, nexus_file_id = ?2 WHERE id = ?3",
+            params![nexus_mod_id, nexus_file_id, mod_id],
+        )?;
+        Ok(())
+    }
+
+    /// Set the source URL for a mod.
+    pub fn set_source_url(&self, mod_id: i64, url: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE installed_mods SET source_url = ?1 WHERE id = ?2",
+            params![url, mod_id],
+        )?;
+        Ok(())
+    }
+
     /// Set the install priority for a mod.
     pub fn set_mod_priority(&self, mod_id: i64, priority: i32) -> Result<()> {
         let conn = self.conn.lock().unwrap();

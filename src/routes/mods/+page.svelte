@@ -18,7 +18,9 @@
     getConflicts,
     checkModUpdates,
     fixSkyrimDisplay,
+    onInstallProgress,
   } from "$lib/api";
+  import type { InstallProgressEvent } from "$lib/types";
   import {
     selectedGame,
     installedMods,
@@ -32,6 +34,8 @@
   import GameIcon from "$lib/components/GameIcon.svelte";
 
   let installing = $state(false);
+  let installStep = $state("");
+  let installDetail = $state("");
   let loadingMods = $state(false);
   let confirmUninstall = $state<number | null>(null);
   let togglingMod = $state<number | null>(null);
@@ -142,6 +146,14 @@
     }
   }
 
+  const stepLabels: Record<string, string> = {
+    preparing: "Preparing...",
+    extracting: "Extracting archive...",
+    registering: "Recording files...",
+    deploying: "Deploying to game...",
+    "syncing-plugins": "Syncing plugins...",
+  };
+
   async function handleInstall() {
     const game = pickedGame ?? $selectedGame;
     if (!game) return;
@@ -159,7 +171,25 @@
     if (!filePath) return;
 
     installing = true;
+    installStep = "preparing";
+    installDetail = "";
+
+    // Subscribe to progress events
+    let unlisten: (() => void) | null = null;
     try {
+      unlisten = await onInstallProgress((event: InstallProgressEvent) => {
+        if (event.kind === "stepChanged") {
+          installStep = event.step;
+          installDetail = event.detail ?? "";
+        } else if (event.kind === "modCompleted") {
+          installStep = "complete";
+          installDetail = "";
+        } else if (event.kind === "modFailed") {
+          installStep = "failed";
+          installDetail = event.error;
+        }
+      });
+
       const mod = await installMod(
         filePath as string,
         game.game_id,
@@ -171,6 +201,9 @@
       showError(`Install failed: ${e}`);
     } finally {
       installing = false;
+      installStep = "";
+      installDetail = "";
+      if (unlisten) unlisten();
     }
   }
 
@@ -661,7 +694,7 @@
       <button class="btn btn-primary" onclick={handleInstall} disabled={installing}>
         {#if installing}
           <span class="spinner"></span>
-          Installing...
+          {stepLabels[installStep] ?? "Installing..."}
         {:else}
           <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
             <line x1="7" y1="2" x2="7" y2="12" />

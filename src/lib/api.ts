@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Bottle,
   BottleSettings,
@@ -41,6 +42,7 @@ import type {
   ImportPlan,
   ModlistDiff,
   DisplayFixResult,
+  InstallProgressEvent,
 } from "./types";
 
 // Bottles
@@ -603,6 +605,19 @@ export async function parseCollectionBundle(
   return invoke("parse_collection_bundle_cmd", { bundlePath });
 }
 
+export async function installCollection(
+  manifest: CollectionManifest,
+  gameId: string,
+  bottleName: string
+): Promise<{
+  installed: number;
+  skipped: number;
+  failed: number;
+  details: { name: string; status: string; error: string | null }[];
+}> {
+  return invoke("install_collection_cmd", { manifest, gameId, bottleName });
+}
+
 // Plugin Load Order Rules
 export async function addPluginRule(
   gameId: string,
@@ -716,4 +731,13 @@ export async function diffModlists(
   bottleName: string
 ): Promise<ModlistDiff> {
   return invoke("diff_modlists_cmd", { filePath, gameId, bottleName });
+}
+
+// Install Progress Events
+export function onInstallProgress(
+  callback: (event: InstallProgressEvent) => void
+): Promise<UnlistenFn> {
+  return listen<InstallProgressEvent>("install-progress", (e) =>
+    callback(e.payload)
+  );
 }

@@ -10,7 +10,10 @@
     getNexusAccountStatus,
     setConfigValue,
     getConfig,
+    installCollection,
+    onInstallProgress,
   } from "$lib/api";
+  import type { InstallProgressEvent } from "$lib/types";
   import { config } from "$lib/stores";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { marked } from "marked";
@@ -49,6 +52,10 @@
   let selectedMods = $state<CollectionMod[]>([]);
   let loadingDetail = $state(false);
   let installing = $state(false);
+  let installStep = $state("");
+  let installModName = $state("");
+  let installProgress = $state({ current: 0, total: 0 });
+  let installResult = $state<{ installed: number; skipped: number; failed: number; details: { name: string; status: string; error: string | null }[] } | null>(null);
   let renderedDescription = $state("");
 
   let gameList = $state<DetectedGame[]>([]);
@@ -180,9 +187,103 @@
     }
   }
 
+  const installStepLabels: Record<string, string> = {
+    preparing: "Preparing...",
+    downloading: "Downloading...",
+    extracting: "Extracting...",
+    registering: "Recording files...",
+    deploying: "Deploying...",
+    "syncing-plugins": "Syncing plugins...",
+  };
+
   async function handleInstallCollection() {
-    if (!selectedCollection) return;
-    showSuccess(`Collection installation coming soon. "${selectedCollection.name}" cannot be installed yet.`);
+    if (!selectedCollection || !$selectedGame) return;
+
+    // We need a manifest to install. For now, fetch the latest revision mods
+    // and construct a simplified manifest from the collection info.
+    installing = true;
+    installStep = "preparing";
+    installModName = "";
+    installProgress = { current: 0, total: 0 };
+    installResult = null;
+
+    let unlisten: (() => void) | null = null;
+    try {
+      // Subscribe to progress events
+      unlisten = await onInstallProgress((event: InstallProgressEvent) => {
+        if (event.kind === "modStarted") {
+          installModName = event.mod_name;
+          installProgress = { current: event.mod_index + 1, total: event.total_mods };
+          installStep = "preparing";
+        } else if (event.kind === "stepChanged") {
+          installStep = event.step;
+        } else if (event.kind === "downloadProgress") {
+          installStep = "downloading";
+        } else if (event.kind === "modCompleted") {
+          installStep = "";
+        } else if (event.kind === "modFailed") {
+          installStep = "";
+        } else if (event.kind === "collectionCompleted") {
+          installStep = "complete";
+        }
+      });
+
+      // Build a minimal manifest from the collection metadata + mods
+      const manifest = {
+        name: selectedCollection.name,
+        author: selectedCollection.author,
+        description: selectedCollection.summary,
+        game_domain: selectedCollection.game_domain,
+        mods: selectedMods.map((m) => ({
+          name: m.name,
+          version: m.version,
+          optional: m.optional,
+          source: {
+            source_type: m.source_type,
+            url: m.download_url ?? null,
+            instructions: m.instructions ?? null,
+            mod_id: m.nexus_mod_id ?? null,
+            file_id: m.nexus_file_id ?? null,
+            update_policy: null,
+            md5: null,
+            file_size: m.file_size ?? null,
+          },
+          choices: null,
+          patches: null,
+          instructions: m.instructions ?? null,
+          phase: null,
+          file_overrides: [],
+        })),
+        mod_rules: [],
+        plugins: [],
+        install_instructions: null,
+      };
+
+      const result = await installCollection(
+        manifest,
+        $selectedGame.game_id,
+        $selectedGame.bottle_name
+      );
+
+      installResult = result;
+
+      if (result.failed === 0 && result.skipped === 0) {
+        showSuccess(
+          `Installed "${selectedCollection.name}" — ${result.installed} mods deployed`
+        );
+      } else {
+        showSuccess(
+          `Collection "${selectedCollection.name}": ${result.installed} installed, ${result.skipped} need manual download, ${result.failed} failed`
+        );
+      }
+    } catch (e: any) {
+      showError(`Collection install failed: ${e}`);
+    } finally {
+      installing = false;
+      installStep = "";
+      installModName = "";
+      if (unlisten) unlisten();
+    }
   }
 
   function backToBrowse() {
@@ -456,25 +557,64 @@
 
         <!-- Install Button -->
         <div class="detail-install-bar">
-          <button
-            class="btn btn-primary btn-lg"
-            onclick={handleInstallCollection}
-            disabled={installing || !$selectedGame}
-          >
-            {#if installing}
-              <span class="spinner-sm"></span>
-              Installing...
-            {:else}
+          {#if installing}
+            <div class="install-progress-panel">
+              <div class="install-progress-header">
+                <span class="spinner-sm"></span>
+                <span>
+                  {#if installProgress.total > 0}
+                    Installing mod {installProgress.current} of {installProgress.total}
+                  {:else}
+                    Preparing...
+                  {/if}
+                </span>
+              </div>
+              {#if installModName}
+                <div class="install-progress-mod">{installModName}</div>
+              {/if}
+              {#if installStep && installStepLabels[installStep]}
+                <div class="install-progress-step">{installStepLabels[installStep]}</div>
+              {/if}
+              {#if installProgress.total > 0}
+                <div class="install-progress-bar">
+                  <div
+                    class="install-progress-fill"
+                    style="width: {(installProgress.current / installProgress.total) * 100}%"
+                  ></div>
+                </div>
+              {/if}
+            </div>
+          {:else if installResult}
+            <div class="install-result-panel">
+              <div class="install-result-summary">
+                <span class="result-installed">{installResult.installed} installed</span>
+                {#if installResult.skipped > 0}
+                  <span class="result-skipped">{installResult.skipped} need manual download</span>
+                {/if}
+                {#if installResult.failed > 0}
+                  <span class="result-failed">{installResult.failed} failed</span>
+                {/if}
+              </div>
+              <button class="btn btn-ghost btn-sm" onclick={() => installResult = null}>
+                Dismiss
+              </button>
+            </div>
+          {:else}
+            <button
+              class="btn btn-primary btn-lg"
+              onclick={handleInstallCollection}
+              disabled={!$selectedGame}
+            >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
                 <polyline points="7 10 12 15 17 10" />
                 <line x1="12" y1="15" x2="12" y2="3" />
               </svg>
               Install Collection
+            </button>
+            {#if !$selectedGame}
+              <span class="install-hint">Select a game from the Mods page first</span>
             {/if}
-          </button>
-          {#if !$selectedGame}
-            <span class="install-hint">Select a game from the Mods page first</span>
           {/if}
         </div>
       </div>
@@ -1515,5 +1655,75 @@
   .install-hint {
     font-size: 12px;
     color: var(--text-tertiary);
+  }
+
+  .install-progress-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .install-progress-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .install-progress-mod {
+    font-size: 12px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .install-progress-step {
+    font-size: 11px;
+    color: var(--text-tertiary);
+  }
+
+  .install-progress-bar {
+    height: 4px;
+    background: var(--surface-secondary);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .install-progress-fill {
+    height: 100%;
+    background: var(--system-accent, #007AFF);
+    border-radius: 2px;
+    transition: width 0.3s ease;
+  }
+
+  .install-result-panel {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+  }
+
+  .install-result-summary {
+    display: flex;
+    gap: var(--space-3);
+    font-size: 13px;
+  }
+
+  .result-installed {
+    color: #34C759;
+    font-weight: 600;
+  }
+
+  .result-skipped {
+    color: #FF9500;
+  }
+
+  .result-failed {
+    color: #FF3B30;
   }
 </style>
