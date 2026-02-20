@@ -320,6 +320,13 @@ button:focus-visible,
   color: var(--text-primary);
 }
 
+/* Prevent text selection on app chrome (headers, nav, toolbars).
+   This avoids accidental selection when dragging the window. */
+:where(.page-header, .page-header *, nav, nav *) {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
 /* --- Rendered Markdown --- */
 
 .rendered-markdown {
