@@ -72,6 +72,7 @@ pub fn dir_size(path: &Path) -> u64 {
 }
 
 /// Get available disk space on the volume containing `path`.
+#[allow(clippy::unnecessary_cast)] // f_bavail is u32 on macOS, u64 on Linux
 pub fn available_space(path: &Path) -> u64 {
     #[cfg(unix)]
     {
@@ -98,7 +99,7 @@ pub fn available_space(path: &Path) -> u64 {
             let mut stat = MaybeUninit::<libc::statvfs>::uninit();
             if libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) == 0 {
                 let stat = stat.assume_init();
-                stat.f_bavail as u64 * stat.f_frsize
+                (stat.f_bavail as u64) * stat.f_frsize
             } else {
                 0
             }

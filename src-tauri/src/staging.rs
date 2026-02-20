@@ -112,7 +112,7 @@ pub fn stage_mod(
     let estimated_extracted = archive_size.saturating_mul(3);
     let staging_root = staging_root();
     crate::disk_budget::check_space_guard(&staging_root, estimated_extracted)
-        .map_err(|e| StagingError::Other(e))?;
+        .map_err(StagingError::Other)?;
 
     let staging_dir = mod_staging_dir(game_id, bottle_name, mod_id, mod_name);
 

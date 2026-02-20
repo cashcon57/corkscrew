@@ -159,6 +159,7 @@ struct WineCommand {
 fn resolve_wine_binary(bottle: &Bottle) -> Result<WineCommand> {
     let source = bottle.source.as_str();
     let mut env_vars: Vec<(String, String)> = Vec::new();
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut prefix_args: Vec<String> = Vec::new();
 
     let wine_bin = match source {
