@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="static/corkscrew-icon.png" width="200" alt="Corkscrew">
+  <img src="brand-kit/corkscrew-icon-256.png" width="200" alt="Corkscrew">
 </p>
 
 <h1 align="center">Corkscrew</h1>
