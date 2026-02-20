@@ -36,7 +36,7 @@ HIGHLIGHT_COLOR = (255, 255, 255)
 # - Squircle body: ~824x824 (80.5% of canvas)
 # - Transparent padding: ~100px per side (9.75%)
 # - Corner radius: ~185px on 824px body (~22.5%)
-BODY_PCT = 0.805       # squircle body as fraction of canvas
+BODY_PCT = 0.826       # squircle body as fraction of canvas (matches Claude, Discord)
 CORNER_RADIUS_PCT = 0.225  # corner radius as fraction of body size
 ARTWORK_FILL = 0.65    # artwork fills 65% of squircle body
 
