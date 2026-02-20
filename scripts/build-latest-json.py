@@ -6,18 +6,17 @@ Usage: python3 scripts/build-latest-json.py artifacts/ > latest.json
 Expects artifact directories laid out by actions/download-artifact:
   artifacts/
     macos-aarch64-apple-darwin/
-      *.tar.gz
-      *.sig
+      Corkscrew_aarch64.app.tar.gz
+      Corkscrew_aarch64.app.tar.gz.sig
     macos-x86_64-apple-darwin/
-      *.tar.gz
-      *.sig
+      Corkscrew_x86_64.app.tar.gz
+      Corkscrew_x86_64.app.tar.gz.sig
     linux-x86_64-unknown-linux-gnu/
-      *.tar.gz
-      *.sig
+      *.AppImage.tar.gz       (or *.AppImage with *.AppImage.sig)
+      *.AppImage.tar.gz.sig
 """
 
 import json
-import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,8 +31,38 @@ PLATFORM_MAP = {
 }
 
 
+def find_updater_pair(dir_path: Path):
+    """Find the updater artifact (.tar.gz) and its signature (.sig) in a directory.
+
+    Handles two formats:
+    - macOS: Corkscrew_ARCH.app.tar.gz + .sig
+    - Linux: *.AppImage.tar.gz + .sig  (or *.AppImage + *.AppImage.sig)
+    """
+    sig_file = None
+    bundle_file = None
+
+    for f in sorted(dir_path.rglob("*")):
+        name = f.name
+        # Prefer .tar.gz updater bundles (macOS .app.tar.gz, Linux .AppImage.tar.gz)
+        if name.endswith(".tar.gz.sig"):
+            sig_file = f
+        elif name.endswith(".tar.gz") and not name.endswith(".tar.gz.sig"):
+            bundle_file = f
+
+    # Fallback for Linux: use .AppImage + .AppImage.sig directly
+    if not (sig_file and bundle_file):
+        for f in sorted(dir_path.rglob("*")):
+            name = f.name
+            if name.endswith(".AppImage.sig") and not name.endswith(".tar.gz.sig"):
+                sig_file = f
+            elif name.endswith(".AppImage") and not name.endswith(".sig"):
+                bundle_file = f
+
+    return bundle_file, sig_file
+
+
 def find_files(artifact_dir: Path) -> dict:
-    """Walk artifact directories and collect .tar.gz + .sig pairs."""
+    """Walk artifact directories and collect updater bundle + sig pairs."""
     platforms = {}
 
     for dir_name, platform_key in PLATFORM_MAP.items():
@@ -41,21 +70,12 @@ def find_files(artifact_dir: Path) -> dict:
         if not dir_path.is_dir():
             continue
 
-        sig_file = None
-        tar_file = None
+        bundle_file, sig_file = find_updater_pair(dir_path)
 
-        for f in sorted(dir_path.rglob("*")):
-            name = f.name
-            if name.endswith(".tar.gz.sig"):
-                sig_file = f
-            elif name.endswith(".tar.gz") and not name.endswith(".tar.gz.sig"):
-                tar_file = f
-
-        if sig_file and tar_file:
+        if sig_file and bundle_file:
             platforms[platform_key] = {
                 "signature": sig_file.read_text().strip(),
-                "url": f"https://github.com/{REPO}/releases/download/{{{{version}}}}/{tar_file.name}",
-                "tar_name": tar_file.name,
+                "url": f"https://github.com/{REPO}/releases/download/{{{{version}}}}/{bundle_file.name}",
             }
 
     return platforms
@@ -86,7 +106,6 @@ def main():
     tag = f"v{version}"
     for key in platforms:
         platforms[key]["url"] = platforms[key]["url"].replace("{{version}}", tag)
-        del platforms[key]["tar_name"]
 
     result = {
         "version": version,
