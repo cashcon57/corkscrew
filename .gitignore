@@ -35,6 +35,9 @@ Thumbs.db
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 
+# Release artifacts
+latest.json
+
 # Brand kit source (too large for git)
 brand-kit/source-highres.png
 brand-kit/*.xcf
