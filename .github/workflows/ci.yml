@@ -56,7 +56,7 @@ jobs:
         run: cargo clippy -- -D warnings
 
       - name: Svelte type check
-        run: npx svelte-check --threshold error
+        run: npx svelte-kit sync && npx svelte-check --threshold error
 
   # Rust tests
   test-rust:
