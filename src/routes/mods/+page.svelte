@@ -978,31 +978,52 @@
     return text.replace(new RegExp(`(${escaped})`, "gi"), "<mark>$1</mark>");
   }
 
-  // Category chip colors
+  // Category colors keyed by new descriptive names
   const categoryColors: Record<string, string> = {
-    "Plugins": "#6366f1",
-    "Textures": "#22c55e",
-    "Models": "#f59e0b",
-    "SKSE Plugins": "#ef4444",
+    "Plugin": "#6366f1",
+    "Texture": "#22c55e",
+    "3D Model": "#f59e0b",
+    "SKSE Plugin": "#ef4444",
     "Audio": "#8b5cf6",
-    "UI": "#06b6d4",
-    "Scripts": "#f97316",
-    "ENB": "#ec4899",
-    "ReShade": "#14b8a6",
-    "Miscellaneous": "#6b7280",
+    "UI Mod": "#06b6d4",
+    "Script": "#f97316",
+    "ENB Preset": "#ec4899",
+    "ReShade Preset": "#14b8a6",
+    "Misc": "#6b7280",
   };
 
-  // Auto-backfill categories on first load
+  // Category SVG icon paths (monochrome, 16x16 viewBox="0 0 24 24")
+  const categoryIcons: Record<string, string> = {
+    // Plug icon for Plugin
+    "Plugin": '<path d="M12 2v6m-4-2v4m8-4v4M8 10h8v4a4 4 0 0 1-4 4 4 4 0 0 1-4-4v-4zM12 18v4" />',
+    // Plug with S badge for SKSE Plugin
+    "SKSE Plugin": '<path d="M12 2v6m-4-2v4m8-4v4M8 10h8v4a4 4 0 0 1-4 4 4 4 0 0 1-4-4v-4zM12 18v4" />',
+    // Texture/image icon
+    "Texture": '<rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="m21 15-5-5L5 21" />',
+    // Wireframe cube for 3D Model
+    "3D Model": '<path d="M12 2 2 7l10 5 10-5-10-5z" /><path d="m2 17 10 5 10-5" /><path d="m2 12 10 5 10-5" />',
+    // Music note for Audio
+    "Audio": '<path d="M9 18V5l12-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="18" cy="16" r="3" />',
+    // Layout icon for UI Mod
+    "UI Mod": '<rect x="3" y="3" width="18" height="18" rx="2" /><line x1="3" y1="9" x2="21" y2="9" /><line x1="9" y1="21" x2="9" y2="9" />',
+    // Code/script icon
+    "Script": '<polyline points="16 18 22 12 16 6" /><polyline points="8 6 2 12 8 18" />',
+    // Palette icon for ENB
+    "ENB Preset": '<circle cx="13.5" cy="6.5" r="2.5" /><circle cx="17.5" cy="10.5" r="2.5" /><circle cx="8.5" cy="7.5" r="2.5" /><circle cx="6.5" cy="12" r="2.5" /><path d="M12 22c5.5 0 10-4.5 10-10S17.5 2 12 2 2 6.5 2 12c0 1.8.5 3.5 1.2 5L12 22z" />',
+    // Sliders for ReShade
+    "ReShade Preset": '<line x1="4" y1="21" x2="4" y2="14" /><line x1="4" y1="10" x2="4" y2="3" /><line x1="12" y1="21" x2="12" y2="12" /><line x1="12" y1="8" x2="12" y2="3" /><line x1="20" y1="21" x2="20" y2="16" /><line x1="20" y1="12" x2="20" y2="3" /><line x1="1" y1="14" x2="7" y2="14" /><line x1="9" y1="8" x2="15" y2="8" /><line x1="17" y1="16" x2="23" y2="16" />',
+    // Puzzle piece for Misc
+    "Misc": '<path d="M19.439 7.85c-.049.322.059.648.289.878l1.568 1.568c.47.47.706 1.087.706 1.704s-.235 1.233-.706 1.704l-1.611 1.611a.98.98 0 0 1-.837.276c-.47-.07-.802-.48-.968-.925a2.501 2.501 0 1 0-3.214 3.214c.446.166.855.497.925.968a.979.979 0 0 1-.276.837l-1.61 1.611a2.404 2.404 0 0 1-1.705.706 2.404 2.404 0 0 1-1.704-.706l-1.568-1.568a1.026 1.026 0 0 0-.877-.29c-.493.074-.84.504-1.02.968a2.5 2.5 0 1 1-3.237-3.237c.464-.18.894-.527.967-1.02a1.026 1.026 0 0 0-.289-.877l-1.568-1.568A2.404 2.404 0 0 1 1.998 12c0-.617.236-1.234.706-1.704L4.315 8.685a.98.98 0 0 1 .837-.276c.47.07.802.48.968.925a2.501 2.501 0 1 0 3.214-3.214c-.446-.166-.855-.497-.925-.968a.979.979 0 0 1 .276-.837l1.611-1.611a2.404 2.404 0 0 1 1.704-.706c.617 0 1.234.236 1.704.706l1.568 1.568c.23.23.556.338.877.29.493-.074.84-.504 1.02-.968a2.5 2.5 0 1 1 3.237 3.237c-.464.18-.894.527-.967 1.02z" />',
+  };
+
+  // Auto-backfill/reclassify categories on load
   let categoriesBackfilled = false;
   $effect(() => {
     if (activeGame && !categoriesBackfilled && $installedMods.length > 0) {
-      const hasNull = $installedMods.some(m => m.auto_category === null);
-      if (hasNull) {
-        categoriesBackfilled = true;
-        backfillCategories(activeGame.game_id, activeGame.bottle_name)
-          .then(() => loadMods(activeGame!))
-          .catch(() => {});
-      }
+      categoriesBackfilled = true;
+      backfillCategories(activeGame.game_id, activeGame.bottle_name)
+        .then((count) => { if (count > 0) loadMods(activeGame!); })
+        .catch(() => {});
     }
   });
 </script>
@@ -1604,6 +1625,9 @@
                 <span class="sort-arrow">{sortDir === "asc" ? "\u25B2" : "\u25BC"}</span>
               {/if}
             </button>
+            <span class="col-category header-sep-right">Category</span>
+            <span class="col-origin header-sep-right">DL Origin</span>
+            <span class="col-source header-sep-right">Installed By</span>
             <button type="button" class="col-version sortable-header header-sep-right" onclick={() => toggleSort("version")}>
               Version
               {#if sortBy === "version"}
@@ -1670,7 +1694,10 @@
                     >
                       <span class="col-grip"><span class="drag-handle" title="Drag to reorder"><svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><circle cx="4" cy="2.5" r="1" /><circle cx="8" cy="2.5" r="1" /><circle cx="4" cy="6" r="1" /><circle cx="8" cy="6" r="1" /><circle cx="4" cy="9.5" r="1" /><circle cx="8" cy="9.5" r="1" /></svg></span></span>
                       <span class="col-toggle"><button class="toggle-switch" class:toggle-on={mod.enabled} class:toggle-busy={togglingMod === mod.id} onclick={() => handleToggle(mod)} title={mod.enabled ? "Disable mod" : "Enable mod"}><span class="toggle-track"><span class="toggle-thumb"></span></span></button></span>
-                      <span class="col-name"><span class="mod-name">{mod.name}</span>{#if conflictModIds.has(mod.id)}<span class="conflict-icon" title={getConflictTooltip(mod.id)}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg></span>{/if}{#if mod.nexus_mod_id}<span class="nexus-badge">Nexus</span>{/if}{#if mod.user_notes}<span class="notes-icon" title={mod.user_notes}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /></svg></span>{/if}</span>
+                      <span class="col-name"><span class="mod-name">{mod.name}</span>{#if conflictModIds.has(mod.id)}<span class="conflict-icon" title={getConflictTooltip(mod.id)}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg></span>{/if}{#if mod.user_notes}<span class="notes-icon" title={mod.user_notes}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /></svg></span>{/if}</span>
+                      <span class="col-category">{#if mod.auto_category}<span class="category-cell" style="color: {categoryColors[mod.auto_category] ?? '#6b7280'};" title={mod.auto_category}>{#if categoryIcons[mod.auto_category]}<svg class="category-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{@html categoryIcons[mod.auto_category]}</svg>{/if}<span class="category-label">{mod.auto_category}</span></span>{:else}<span class="text-muted">&mdash;</span>{/if}</span>
+                      <span class="col-origin">{#if mod.nexus_mod_id}<span class="origin-label origin-nexus">Nexus</span>{:else}<span class="origin-label origin-manual">Manual</span>{/if}</span>
+                      <span class="col-source">{#if mod.collection_name}<span class="source-label source-collection" title={mod.collection_name}>{mod.collection_name}</span>{:else}<span class="source-label source-user">User</span>{/if}</span>
                       <span class="col-version"><span class="version-text">{mod.version || "\u2014"}</span>{#if updateMap.has(mod.id)}{@const update = updateMap.get(mod.id)!}<span class="update-badge" title={`Update available: v${update.latest_version}`}>Update</span>{/if}</span>
                       <span class="col-files">{mod.installed_files.length}</span>
                       <span class="col-date">{formatDate(mod.installed_at)}</span>
@@ -1742,12 +1769,6 @@
                 <span class="col-name">
                   <!-- eslint-disable-next-line svelte/no-at-html-tags -->
                   <span class="mod-name">{@html highlightMatch(mod.name, searchQuery)}</span>
-                  {#if mod.auto_category && viewMode === "flat"}
-                    <span
-                      class="category-chip"
-                      style="background: color-mix(in srgb, {categoryColors[mod.auto_category] ?? '#6b7280'} 15%, transparent); color: {categoryColors[mod.auto_category] ?? '#6b7280'};"
-                    >{mod.auto_category}</span>
-                  {/if}
                   {#if conflictModIds.has(mod.id)}
                     <span class="conflict-icon" title={getConflictTooltip(mod.id)}>
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1756,12 +1777,6 @@
                         <line x1="12" y1="17" x2="12.01" y2="17" />
                       </svg>
                     </span>
-                  {/if}
-                  {#if mod.nexus_mod_id}
-                    <span class="nexus-badge">Nexus</span>
-                  {/if}
-                  {#if mod.collection_name}
-                    <span class="collection-badge" title={mod.collection_name}>{mod.collection_name}</span>
                   {/if}
                   {#if mod.user_notes}
                     <span class="notes-icon" title={mod.user_notes}>
@@ -1772,6 +1787,40 @@
                         <line x1="16" y1="17" x2="8" y2="17" />
                       </svg>
                     </span>
+                  {/if}
+                </span>
+
+                <!-- Category -->
+                <span class="col-category">
+                  {#if mod.auto_category}
+                    {@const catColor = categoryColors[mod.auto_category] ?? '#6b7280'}
+                    <span class="category-cell" style="color: {catColor};" title={mod.auto_category}>
+                      {#if categoryIcons[mod.auto_category]}
+                        <!-- eslint-disable-next-line svelte/no-at-html-tags -->
+                        <svg class="category-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{@html categoryIcons[mod.auto_category]}</svg>
+                      {/if}
+                      <span class="category-label">{mod.auto_category}</span>
+                    </span>
+                  {:else}
+                    <span class="text-muted">\u2014</span>
+                  {/if}
+                </span>
+
+                <!-- DL Origin -->
+                <span class="col-origin">
+                  {#if mod.nexus_mod_id}
+                    <span class="origin-label origin-nexus">Nexus</span>
+                  {:else}
+                    <span class="origin-label origin-manual">Manual</span>
+                  {/if}
+                </span>
+
+                <!-- Installed By -->
+                <span class="col-source">
+                  {#if mod.collection_name}
+                    <span class="source-label source-collection" title={mod.collection_name}>{mod.collection_name}</span>
+                  {:else}
+                    <span class="source-label source-user">User</span>
                   {/if}
                 </span>
 
@@ -2681,7 +2730,7 @@
 
   .table-header {
     display: grid;
-    grid-template-columns: 28px 48px minmax(0, 1fr) 72px 48px 90px 64px;
+    grid-template-columns: 28px 48px minmax(0, 1fr) 100px 68px 110px 72px 48px 90px 64px;
     padding: var(--space-2) var(--space-3);
     background: var(--bg-secondary);
     border-bottom: 1px solid var(--separator);
@@ -2743,7 +2792,7 @@
 
   .table-row {
     display: grid;
-    grid-template-columns: 28px 48px minmax(0, 1fr) 72px 48px 90px 64px;
+    grid-template-columns: 28px 48px minmax(0, 1fr) 100px 68px 110px 72px 48px 90px 64px;
     padding: var(--space-2) var(--space-3);
     align-items: center;
     font-size: 13px;
@@ -2753,12 +2802,15 @@
       box-shadow var(--duration-fast) var(--ease);
   }
 
-  /* Narrow window: hide Files and Date columns, shrink right sidebar */
-  @media (max-width: 1100px) {
+  /* Narrow window: hide Category, Origin, Source, Files, Date columns */
+  @media (max-width: 1200px) {
     .table-header,
     .table-row {
-      grid-template-columns: 28px 48px minmax(0, 1fr) 64px 0px 0px 60px;
+      grid-template-columns: 28px 48px minmax(0, 1fr) 0px 0px 0px 64px 0px 0px 60px;
     }
+    .col-category,
+    .col-origin,
+    .col-source,
     .col-files,
     .col-date {
       display: none;
@@ -3496,6 +3548,7 @@
     align-items: center;
     gap: var(--space-2);
     flex-shrink: 0;
+    margin-bottom: var(--space-3);
   }
 
   .search-box {
@@ -4236,17 +4289,85 @@
   }
 
   /* ============================
-     Category Chips
+     Category Column
      ============================ */
-  .category-chip {
-    flex-shrink: 0;
+  .col-category {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .category-cell {
     display: inline-flex;
     align-items: center;
-    padding: 0 5px;
-    border-radius: 3px;
-    font-size: 10px;
-    font-weight: 600;
+    gap: 4px;
+    font-size: 11px;
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .category-icon {
+    flex-shrink: 0;
+    opacity: 0.85;
+  }
+
+  .category-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* ============================
+     DL Origin Column
+     ============================ */
+  .col-origin {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .origin-label {
+    font-size: 11px;
+    font-weight: 500;
+  }
+
+  .origin-nexus {
+    color: var(--accent, #d98f40);
+  }
+
+  .origin-manual {
+    color: var(--text-tertiary);
+  }
+
+  /* ============================
+     Installed By Column
+     ============================ */
+  .col-source {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .source-label {
+    font-size: 11px;
+    font-weight: 500;
+  }
+
+  .source-collection {
+    color: var(--blue, #60a5fa);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .source-user {
+    color: var(--text-tertiary);
+  }
+
+  .text-muted {
+    color: var(--text-tertiary);
+    font-size: 11px;
   }
 
   /* ============================

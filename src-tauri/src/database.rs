@@ -1093,36 +1093,36 @@ impl ModDatabase {
         for file in installed_files {
             let lower = file.to_lowercase();
             let cat = if lower.contains("skse/plugins/") || lower.contains("skse\\plugins\\") {
-                "SKSE Plugins"
+                "SKSE Plugin"
             } else if lower.contains("enbseries") || lower.starts_with("d3d") {
-                "ENB"
+                "ENB Preset"
             } else if lower.contains("shaderfx") || lower.contains("reshade") {
-                "ReShade"
+                "ReShade Preset"
             } else if lower.contains("textures/") || lower.contains("textures\\") || lower.ends_with(".dds") {
-                "Textures"
+                "Texture"
             } else if lower.contains("meshes/") || lower.contains("meshes\\") || lower.ends_with(".nif") {
-                "Models"
+                "3D Model"
             } else if lower.ends_with(".esp") || lower.ends_with(".esm") || lower.ends_with(".esl") {
-                "Plugins"
+                "Plugin"
             } else if lower.contains("interface/") || lower.contains("interface\\") || lower.ends_with(".swf") {
-                "UI"
+                "UI Mod"
             } else if lower.contains("sound/") || lower.contains("sound\\")
                 || lower.contains("music/") || lower.contains("music\\") {
                 "Audio"
             } else if lower.contains("scripts/") || lower.contains("scripts\\") || lower.ends_with(".pex") {
-                "Scripts"
+                "Script"
             } else {
-                "Miscellaneous"
+                "Misc"
             };
             *counts.entry(cat).or_insert(0) += 1;
         }
 
         counts
             .into_iter()
-            .filter(|(cat, _)| *cat != "Miscellaneous")
+            .filter(|(cat, _)| *cat != "Misc")
             .max_by_key(|(_, count)| *count)
             .map(|(cat, _)| cat.to_string())
-            .or(Some("Miscellaneous".to_string()))
+            .or(Some("Misc".to_string()))
     }
 
     /// Set the auto_category for a mod.
@@ -1156,13 +1156,13 @@ impl ModDatabase {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
-    /// Backfill auto_category for all mods that don't have one yet.
+    /// Reclassify auto_category for all mods (updates stale names too).
     pub fn backfill_categories(&self, game_id: &str, bottle_name: &str) -> Result<usize> {
         let mods = self.list_mods(game_id, bottle_name)?;
         let mut updated = 0;
         for m in &mods {
-            if m.auto_category.is_none() {
-                if let Some(cat) = Self::classify_mod_category(&m.installed_files) {
+            if let Some(cat) = Self::classify_mod_category(&m.installed_files) {
+                if m.auto_category.as_deref() != Some(&cat) {
                     self.set_auto_category(m.id, Some(&cat))?;
                     updated += 1;
                 }
