@@ -13,7 +13,7 @@
       height="80"
     />
     <h1 class="app-name">Corkscrew</h1>
-    <span class="app-version">v0.5.0</span>
+    <span class="app-version">v0.5.1</span>
     <p class="app-tagline">A native mod manager for Wine games</p>
   </div>
 

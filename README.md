@@ -34,7 +34,7 @@ Corkscrew installs, manages, and organizes mods for Windows games running throug
 
 It works by reading and writing directly to your Wine bottle's filesystem, the same way the game itself sees it. Your bottles, your mods, no middleman.
 
-> **Status:** v0.5.0 — First functional release. Skyrim Special Edition is the first fully supported game. More games coming soon.
+> **Status:** v0.5.1 — Skyrim Special Edition is the first fully supported game. More games coming soon.
 
 ---
 

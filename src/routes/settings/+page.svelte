@@ -636,7 +636,7 @@
     <div class="section-card">
       <div class="card-row about-row">
         <span class="row-label">Version</span>
-        <span class="row-value">v0.5.0</span>
+        <span class="row-value">v0.5.1</span>
       </div>
       <div class="card-divider"></div>
       <div class="card-row about-row">

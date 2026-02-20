@@ -1,9 +1,12 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import "../app.css";
-  import { currentPage, errorMessage, successMessage } from "$lib/stores";
+  import { currentPage, errorMessage, successMessage, selectedGame, selectedBottle, showError, showSuccess } from "$lib/stores";
   import { initTheme } from "$lib/theme";
   import { openUrl } from "@tauri-apps/plugin-opener";
+  import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
+  import { downloadFromNexus } from "$lib/api";
+  import { get } from "svelte/store";
 
   const navItems = [
     { id: "dashboard", label: "Dashboard" },
@@ -19,7 +22,37 @@
 
   onMount(() => {
     initTheme();
+
+    // Listen for NXM deep-link URLs (e.g. nxm://skyrimspecialedition/mods/123/files/456?key=abc&expires=123)
+    onOpenUrl((urls) => {
+      for (const url of urls) {
+        if (url.startsWith("nxm://")) {
+          handleNxmLink(url);
+        }
+      }
+    });
   });
+
+  async function handleNxmLink(nxmUrl: string) {
+    const game = get(selectedGame);
+    const bottle = get(selectedBottle);
+
+    if (!game || !bottle) {
+      showError("Select a game first before installing from NexusMods links.");
+      return;
+    }
+
+    // Navigate to mods page so user sees progress
+    currentPage.set("mods");
+    showSuccess("Downloading mod from NexusMods...");
+
+    try {
+      await downloadFromNexus(nxmUrl, game.game_id, bottle, true);
+      showSuccess("Mod installed from NexusMods link!");
+    } catch (err: unknown) {
+      showError(`NXM download failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
 
   function navigate(page: string) {
     currentPage.set(page);
@@ -126,7 +159,7 @@
         </svg>
         <span>GitHub</span>
       </button>
-      <span class="sidebar-version">v0.5.0</span>
+      <span class="sidebar-version">v0.5.1</span>
     </div>
   </nav>
 
