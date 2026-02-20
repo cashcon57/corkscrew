@@ -2,18 +2,22 @@
 """
 Corkscrew Brand Kit Generator
 
-Generates transparent PNG icon variants from the high-res source icon.
-Uses numpy for fast processing at full resolution (5695x5695).
-Removes gray background, defrings edges, and downscales to all needed sizes.
+Generates macOS-native icon with dark gradient background, specular edge
+highlighting, and proper padding. Creates all sizes for Tauri (macOS, Windows, Linux).
+
+The icon uses a dark charcoal-to-deep-gray gradient background that matches
+the app's dark theme, with a subtle specular highlight along the top edge
+for that native macOS dock feel.
 
 Requirements: pip install Pillow numpy
 """
 
+import math
 import sys
 from pathlib import Path
 
 try:
-    from PIL import Image, ImageFilter
+    from PIL import Image, ImageDraw, ImageFilter
     import numpy as np
 except ImportError as e:
     print(f"Missing dependency: {e}")
@@ -21,213 +25,241 @@ except ImportError as e:
     sys.exit(1)
 
 
-def remove_background(img: Image.Image) -> Image.Image:
-    """Remove gray background using warmth/saturation masking with aggressive cleanup."""
-    img = img.convert("RGBA")
+# --- Color palette (matches app.css dark theme) ---
+BG_TOP = (58, 58, 62)       # Lighter charcoal (top of gradient)
+BG_BOTTOM = (28, 28, 31)    # Deep dark (bottom of gradient, --bg-base)
+HIGHLIGHT_COLOR = (255, 255, 255)  # Specular highlight
+EDGE_GLOW = (200, 140, 60)  # Warm amber edge glow (complements corkscrew orange)
+
+
+def make_squircle_mask(size: int, radius_pct: float = 0.225) -> Image.Image:
+    """Create a macOS-style continuous squircle (superellipse) mask.
+
+    macOS Big Sur+ uses a specific superellipse shape for icons.
+    radius_pct ~22.5% matches the macOS icon corner radius.
+    """
+    mask = Image.new("L", (size, size), 0)
+    draw = ImageDraw.Draw(mask)
+    radius = int(size * radius_pct)
+    draw.rounded_rectangle([0, 0, size - 1, size - 1], radius=radius, fill=255)
+    return mask
+
+
+def make_gradient_background(size: int) -> Image.Image:
+    """Create a dark vertical gradient background matching the app's theme."""
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     arr = np.array(img, dtype=np.float32)
-    h, w = arr.shape[:2]
-    r, g, b = arr[:, :, 0], arr[:, :, 1], arr[:, :, 2]
 
-    # Sample background color for defringe later
-    sample = max(50, min(w, h) // 20)
-    bg_r = np.mean([arr[:sample, :sample, 0].mean(), arr[:sample, -sample:, 0].mean()])
-    bg_g = np.mean([arr[:sample, :sample, 1].mean(), arr[:sample, -sample:, 1].mean()])
-    bg_b = np.mean([arr[:sample, :sample, 2].mean(), arr[:sample, -sample:, 2].mean()])
-    print(f"  Sampled background: RGB({bg_r:.0f}, {bg_g:.0f}, {bg_b:.0f})")
+    for y in range(size):
+        t = y / max(size - 1, 1)
+        # Slight ease-in curve for more natural gradient
+        t = t * t * (3 - 2 * t)  # smoothstep
+        r = BG_TOP[0] + (BG_BOTTOM[0] - BG_TOP[0]) * t
+        g = BG_TOP[1] + (BG_BOTTOM[1] - BG_TOP[1]) * t
+        b = BG_TOP[2] + (BG_BOTTOM[2] - BG_TOP[2]) * t
+        arr[y, :, 0] = r
+        arr[y, :, 1] = g
+        arr[y, :, 2] = b
+        arr[y, :, 3] = 255
 
-    # Core discriminator: saturation + warmth (R-B)
-    max_c = np.maximum(np.maximum(r, g), b)
-    min_c = np.minimum(np.minimum(r, g), b)
-    chroma = max_c - min_c
-    saturation = np.divide(chroma, np.maximum(max_c, 1.0))
-    warmth = np.clip((r - b) / 255.0, 0.0, None)
+    return Image.fromarray(arr.clip(0, 255).astype(np.uint8))
 
-    # Foreground score: high saturation AND warm
-    score = np.clip(saturation * 3.0, 0.0, 1.0) * np.clip(warmth * 4.0, 0.0, 1.0)
 
-    # Kill anything with very low saturation (gray background)
-    score[saturation < 0.10] = 0.0
+def add_specular_highlight(img: Image.Image) -> Image.Image:
+    """Add a subtle specular highlight along the top edge, like native macOS icons."""
+    size = img.width
+    arr = np.array(img, dtype=np.float32)
 
-    # Catch darker warm-orange areas (shadows on the corkscrew)
-    warm_dark = (warmth > 0.06) & (saturation > 0.15)
-    score[warm_dark] = np.maximum(score[warm_dark], np.clip(saturation[warm_dark] * 2.5, 0.0, 1.0))
+    # Top specular band — bright highlight fading down
+    highlight_height = int(size * 0.35)
+    for y in range(highlight_height):
+        t = 1.0 - (y / max(highlight_height - 1, 1))
+        # Strong at top, fades quickly
+        intensity = t * t * t * 0.18  # max 18% white overlay at very top
+        for c in range(3):
+            arr[y, :, c] = arr[y, :, c] + (255 - arr[y, :, c]) * intensity
 
-    # Convert to 8-bit mask
-    mask_arr = (score * 255.0).clip(0, 255).astype(np.uint8)
-    mask = Image.fromarray(mask_arr)
+    # Subtle radial highlight from top-center (simulates light source)
+    cx, cy = size // 2, int(size * 0.15)
+    max_radius = size * 0.55
+    y_coords, x_coords = np.mgrid[0:size, 0:size]
+    dist = np.sqrt((x_coords - cx) ** 2 + ((y_coords - cy) * 1.4) ** 2)
+    radial = np.clip(1.0 - dist / max_radius, 0, 1)
+    radial = radial ** 2.5 * 0.08  # Subtle — max 8% at center
 
-    # Smooth proportionally to image size
-    scale = max(w, h) / 1024.0
-    mask = mask.filter(ImageFilter.GaussianBlur(radius=max(1.0, 1.0 * scale)))
+    for c in range(3):
+        arr[:, :, c] = arr[:, :, c] + (255 - arr[:, :, c]) * radial
 
-    # Hard threshold: push toward fully transparent or fully opaque
-    mask_arr = np.array(mask, dtype=np.float32)
-    result_mask = np.zeros_like(mask_arr)
-    result_mask[mask_arr < 35] = 0.0
-    mid = (mask_arr >= 35) & (mask_arr < 90)
-    result_mask[mid] = ((mask_arr[mid] - 35) / 55.0) * 255.0
-    result_mask[mask_arr >= 90] = 255.0
-    mask = Image.fromarray(result_mask.clip(0, 255).astype(np.uint8))
+    return Image.fromarray(arr.clip(0, 255).astype(np.uint8))
 
-    # Edge smooth
-    mask = mask.filter(ImageFilter.GaussianBlur(radius=max(0.5, 0.5 * scale)))
 
-    # Two-pass erosion to aggressively eat gray fringe
-    erode_size = max(3, int(3 * scale)) | 1  # must be odd
+def add_edge_highlight(img: Image.Image, mask: Image.Image) -> Image.Image:
+    """Add a subtle inner edge glow along the squircle border."""
+    size = img.width
+    arr = np.array(img, dtype=np.float32)
+    mask_arr = np.array(mask, dtype=np.float32) / 255.0
+
+    # Create inner edge by eroding the mask and subtracting
+    erode_size = max(3, int(size * 0.015)) | 1
     eroded = mask.filter(ImageFilter.MinFilter(size=erode_size))
-    eroded = eroded.filter(ImageFilter.MinFilter(size=3))
+    eroded_arr = np.array(eroded, dtype=np.float32) / 255.0
 
-    # Use eroded values for all non-interior pixels
-    mask_arr = np.array(mask, dtype=np.float32)
-    eroded_arr = np.array(eroded, dtype=np.float32)
-    mask_arr[mask_arr < 250] = np.minimum(mask_arr[mask_arr < 250], eroded_arr[mask_arr < 250])
-    mask = Image.fromarray(mask_arr.clip(0, 255).astype(np.uint8))
+    # Edge band: where mask is solid but eroded mask falls off
+    edge = mask_arr - eroded_arr
+    edge = np.clip(edge * 2.0, 0, 1)
 
-    # Final gentle smooth
-    mask = mask.filter(ImageFilter.GaussianBlur(radius=max(0.3, 0.3 * scale)))
+    # Blur the edge for a soft glow
+    edge_img = Image.fromarray((edge * 255).astype(np.uint8))
+    blur_radius = max(1, size * 0.008)
+    edge_img = edge_img.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+    edge = np.array(edge_img, dtype=np.float32) / 255.0
 
-    # Apply mask
-    result = img.copy()
-    result.putalpha(mask)
+    # Apply as a subtle white inner highlight (stronger at top)
+    for y in range(size):
+        t = 1.0 - (y / max(size - 1, 1))
+        intensity = 0.15 + t * 0.25  # 15% at bottom, 40% at top
+        for c in range(3):
+            arr[y, :, c] = arr[y, :, c] + (HIGHLIGHT_COLOR[c] - arr[y, :, c]) * edge[y, :] * intensity
 
-    # Defringe: un-premultiply background contamination from semi-transparent edges
-    result_arr = np.array(result, dtype=np.float32)
-    alpha_arr = np.array(mask, dtype=np.float32)
-
-    edge = (alpha_arr > 0) & (alpha_arr < 240)
-    if np.any(edge):
-        er = result_arr[:, :, 0][edge]
-        eg = result_arr[:, :, 1][edge]
-        eb = result_arr[:, :, 2][edge]
-        ea = alpha_arr[edge]
-
-        bg_blend = 1.0 - (ea / 255.0)
-        a_safe = np.maximum(ea / 255.0, 0.05)
-
-        # Remove background contamination: pixel = fg*a + bg*(1-a), so fg = (pixel - bg*(1-a))/a
-        er_clean = np.clip((er - bg_r * bg_blend) / a_safe, 0, 255)
-        eg_clean = np.clip((eg - bg_g * bg_blend) / a_safe, 0, 255)
-        eb_clean = np.clip((eb - bg_b * bg_blend) / a_safe, 0, 255)
-
-        # Blend toward cleaned color based on contamination level
-        blend = np.clip(bg_blend * 1.2, 0, 1)
-        result_arr[:, :, 0][edge] = er * (1 - blend) + er_clean * blend
-        result_arr[:, :, 1][edge] = eg * (1 - blend) + eg_clean * blend
-        result_arr[:, :, 2][edge] = eb * (1 - blend) + eb_clean * blend
-
-    return Image.fromarray(result_arr.clip(0, 255).astype(np.uint8))
+    return Image.fromarray(arr.clip(0, 255).astype(np.uint8))
 
 
-def trim_transparent(img: Image.Image, padding: int = 8) -> Image.Image:
-    """Crop to content bounding box with padding."""
-    bbox = img.getbbox()
-    if bbox is None:
-        return img
-    x1, y1, x2, y2 = bbox
-    x1 = max(0, x1 - padding)
-    y1 = max(0, y1 - padding)
-    x2 = min(img.width, x2 + padding)
-    y2 = min(img.height, y2 + padding)
-    return img.crop((x1, y1, x2, y2))
+def add_shadow(img: Image.Image, mask: Image.Image) -> Image.Image:
+    """Add a subtle drop shadow beneath the icon (visible at large sizes)."""
+    size = img.width
+    pad = int(size * 0.05)
+    canvas_size = size + pad * 2
+
+    # Create shadow from mask
+    shadow = Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
+    shadow_offset = max(2, int(size * 0.01))
+    shadow.paste(Image.new("L", (size, size), 40), (pad, pad + shadow_offset), mask)
+    shadow = shadow.filter(ImageFilter.GaussianBlur(radius=max(2, size * 0.02)))
+
+    # Paste icon on top
+    shadow.paste(img, (pad, pad), mask)
+
+    # Crop back to icon size with a bit of shadow visible
+    crop_pad = max(1, pad // 3)
+    result = shadow.crop((crop_pad, crop_pad, canvas_size - crop_pad, canvas_size - crop_pad))
+    return result.resize((size, size), Image.Resampling.LANCZOS)
 
 
-def make_square(img: Image.Image) -> Image.Image:
-    """Center image on a square transparent canvas."""
-    w, h = img.size
-    size = max(w, h)
-    result = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    result.paste(img, ((size - w) // 2, (size - h) // 2), img)
-    return result
+def build_macos_icon(transparent_artwork: Image.Image, size: int) -> Image.Image:
+    """Compose the final macOS-style icon at the given size.
+
+    Layers (bottom to top):
+    1. Dark gradient background (squircle shaped)
+    2. Specular highlight overlay
+    3. Inner edge glow
+    4. Corkscrew artwork (centered, ~70% of canvas)
+    """
+    # 1. Gradient background
+    bg = make_gradient_background(size)
+
+    # 2. Apply specular highlight to background
+    bg = add_specular_highlight(bg)
+
+    # 3. Squircle mask
+    mask = make_squircle_mask(size)
+
+    # 4. Apply mask to background
+    bg.putalpha(mask)
+
+    # 5. Add edge highlight
+    bg = add_edge_highlight(bg, mask)
+
+    # 6. Composite artwork on top (70% of canvas, centered)
+    art_size = int(size * 0.70)
+    art_pad = (size - art_size) // 2
+    artwork = transparent_artwork.resize((art_size, art_size), Image.Resampling.LANCZOS)
+
+    # Paste artwork centered on the background
+    bg.paste(artwork, (art_pad, art_pad), artwork)
+
+    # 7. Re-apply squircle mask to clip everything cleanly
+    bg.putalpha(mask)
+
+    return bg
 
 
 def main():
     brand_dir = Path(__file__).parent
     project_dir = brand_dir.parent
 
-    # Use the high-res source in brand-kit/
-    source_icon = brand_dir / "source-highres.png"
-    if not source_icon.exists():
-        # Fallback to Tauri icon
-        source_icon = project_dir / "src-tauri" / "icons" / "icon.png"
-
-    if not source_icon.exists():
-        print(f"Source icon not found. Place source-highres.png in brand-kit/.")
+    # Load the transparent artwork
+    transparent_path = brand_dir / "corkscrew-transparent.png"
+    if not transparent_path.exists():
+        print(f"Transparent artwork not found at {transparent_path}")
+        print("Run the background removal first or place corkscrew-transparent.png in brand-kit/")
         sys.exit(1)
 
-    print(f"Loading source: {source_icon}")
-    source = Image.open(source_icon)
-    print(f"  Size: {source.size[0]}x{source.size[1]}, Mode: {source.mode}")
+    print(f"Loading transparent artwork: {transparent_path}")
+    artwork = Image.open(transparent_path).convert("RGBA")
+    print(f"  Size: {artwork.size[0]}x{artwork.size[1]}")
 
-    print("\nRemoving background (numpy-accelerated)...")
-    transparent = remove_background(source)
+    # Generate the master icon at high resolution
+    print("\nBuilding macOS-style icon (1024x1024)...")
+    master = build_macos_icon(artwork, 1024)
+    master_path = brand_dir / "corkscrew-icon-1024.png"
+    master.save(master_path, "PNG", optimize=True)
+    print(f"  Saved: {master_path.name} ({master_path.stat().st_size:,} bytes)")
 
-    print("Trimming and centering...")
-    # Scale padding proportionally to image size
-    pad = max(16, source.size[0] // 100)
-    trimmed = trim_transparent(transparent, padding=pad)
-    squared = make_square(trimmed)
-
-    full_path = brand_dir / "corkscrew-transparent.png"
-    squared.save(full_path, "PNG", optimize=True)
-    print(f"  Full transparent: {full_path.name} ({squared.size[0]}x{squared.size[1]})")
-
-    # Generate standard icon sizes
-    sizes = [1024, 512, 256, 128, 64, 48, 32, 24, 16]
-    print("\nGenerating icon sizes...")
+    # Generate brand-kit sizes from master
+    sizes = [512, 256, 128, 64, 48, 32, 24, 16]
+    print("\nGenerating brand-kit icon sizes...")
     for size in sizes:
-        resized = squared.resize((size, size), Image.Resampling.LANCZOS)
+        # For small sizes, rebuild from scratch for sharpness
+        if size >= 64:
+            icon = build_macos_icon(artwork, size)
+        else:
+            # Very small: downscale from 256 for better quality
+            icon = build_macos_icon(artwork, 256).resize((size, size), Image.Resampling.LANCZOS)
         out_path = brand_dir / f"corkscrew-icon-{size}.png"
-        resized.save(out_path, "PNG", optimize=True)
+        icon.save(out_path, "PNG", optimize=True)
         print(f"  {out_path.name} ({out_path.stat().st_size:,} bytes)")
 
-    # Copy to static/ for app use
+    # --- Copy to static/ for in-app use ---
     static_dir = project_dir / "static"
+    print("\nCopying to static/...")
 
-    # 128px for sidebar (displayed at 28px, crisp on 3x+ retina)
-    icon_128 = squared.resize((128, 128), Image.Resampling.LANCZOS)
+    # 128px for sidebar/header
+    icon_128 = build_macos_icon(artwork, 128)
     icon_128.save(static_dir / "corkscrew-icon.png", "PNG", optimize=True)
-    print(f"\n  -> static/corkscrew-icon.png (128x128)")
+    print(f"  -> static/corkscrew-icon.png (128x128)")
 
     # 64px small variant
-    icon_64 = squared.resize((64, 64), Image.Resampling.LANCZOS)
+    icon_64 = build_macos_icon(artwork, 64)
     icon_64.save(static_dir / "corkscrew-icon-sm.png", "PNG", optimize=True)
     print(f"  -> static/corkscrew-icon-sm.png (64x64)")
 
-    # --- Generate Tauri app icons with proper macOS padding ---
-    # macOS HIG: icon artwork should fill ~80% of canvas (10% padding per side)
-    # This prevents the icon from appearing oversized vs other dock icons
+    # --- Generate Tauri app icons ---
+    # macOS: The system applies the squircle mask automatically on Big Sur+
+    # So icon.png should be the full square with background (system clips it)
+    # We bake in our own squircle so it looks perfect on all platforms
     icons_dir = project_dir / "src-tauri" / "icons"
-    print("\nGenerating Tauri app icons (with macOS padding)...")
+    print("\nGenerating Tauri app icons...")
 
-    def make_padded_icon(source_img: Image.Image, target_size: int, padding_pct: float = 0.10) -> Image.Image:
-        """Create an icon with macOS-appropriate padding around the artwork."""
-        pad = int(target_size * padding_pct)
-        content_size = target_size - (2 * pad)
-        content = source_img.resize((content_size, content_size), Image.Resampling.LANCZOS)
-        canvas = Image.new("RGBA", (target_size, target_size), (0, 0, 0, 0))
-        canvas.paste(content, (pad, pad), content)
-        return canvas
-
-    # icon.png — 512x512 main icon (used by Tauri for .icns generation)
-    padded_512 = make_padded_icon(squared, 512)
-    padded_512.save(icons_dir / "icon.png", "PNG", optimize=True)
-    print(f"  icon.png (512x512, 80% fill)")
+    # icon.png — 512x512 main icon
+    icon_512 = build_macos_icon(artwork, 512)
+    icon_512.save(icons_dir / "icon.png", "PNG", optimize=True)
+    print(f"  icon.png (512x512)")
 
     # 128x128 and 128x128@2x (256x256)
-    padded_128 = make_padded_icon(squared, 128)
-    padded_128.save(icons_dir / "128x128.png", "PNG", optimize=True)
+    icon_128_tauri = build_macos_icon(artwork, 128)
+    icon_128_tauri.save(icons_dir / "128x128.png", "PNG", optimize=True)
     print(f"  128x128.png")
 
-    padded_256 = make_padded_icon(squared, 256)
-    padded_256.save(icons_dir / "128x128@2x.png", "PNG", optimize=True)
+    icon_256 = build_macos_icon(artwork, 256)
+    icon_256.save(icons_dir / "128x128@2x.png", "PNG", optimize=True)
     print(f"  128x128@2x.png (256x256)")
 
     # 32x32
-    padded_32 = make_padded_icon(squared, 32)
-    padded_32.save(icons_dir / "32x32.png", "PNG", optimize=True)
+    icon_32 = build_macos_icon(artwork, 32)
+    icon_32.save(icons_dir / "32x32.png", "PNG", optimize=True)
     print(f"  32x32.png")
 
-    # Windows Square logos (no extra padding — Windows tiles are edge-to-edge)
+    # Windows Square logos — use same styled icon
     win_sizes = [
         ("Square30x30Logo.png", 30),
         ("Square44x44Logo.png", 44),
@@ -240,16 +272,67 @@ def main():
         ("Square310x310Logo.png", 310),
         ("StoreLogo.png", 50),
     ]
+    print("  Windows logos...")
     for name, size in win_sizes:
-        resized = squared.resize((size, size), Image.Resampling.LANCZOS)
-        resized.save(icons_dir / name, "PNG", optimize=True)
+        if size >= 64:
+            icon = build_macos_icon(artwork, size)
+        else:
+            icon = build_macos_icon(artwork, 256).resize((size, size), Image.Resampling.LANCZOS)
+        icon.save(icons_dir / name, "PNG", optimize=True)
+    print(f"  {len(win_sizes)} Windows icons generated")
 
-    # icon.ico — 256x256 with padding
-    padded_ico = make_padded_icon(squared, 256)
-    padded_ico.save(icons_dir / "icon.ico", format="ICO", sizes=[(256, 256)])
+    # icon.ico — 256x256
+    icon_ico = build_macos_icon(artwork, 256)
+    icon_ico.save(icons_dir / "icon.ico", format="ICO", sizes=[(256, 256)])
     print(f"  icon.ico (256x256)")
 
-    print(f"\nDone! Brand kit at: {brand_dir}")
+    # icon.icns — macOS native format
+    # Tauri generates this from icon.png during build, but we can also
+    # create it manually for best quality
+    try:
+        import subprocess
+        # Use iconutil on macOS to create .icns from iconset
+        iconset_dir = icons_dir / "icon.iconset"
+        iconset_dir.mkdir(exist_ok=True)
+
+        icns_sizes = [
+            ("icon_16x16.png", 16),
+            ("icon_16x16@2x.png", 32),
+            ("icon_32x32.png", 32),
+            ("icon_32x32@2x.png", 64),
+            ("icon_128x128.png", 128),
+            ("icon_128x128@2x.png", 256),
+            ("icon_256x256.png", 256),
+            ("icon_256x256@2x.png", 512),
+            ("icon_512x512.png", 512),
+            ("icon_512x512@2x.png", 1024),
+        ]
+
+        for name, size in icns_sizes:
+            icon = build_macos_icon(artwork, size) if size >= 64 else \
+                   build_macos_icon(artwork, 256).resize((size, size), Image.Resampling.LANCZOS)
+            icon.save(iconset_dir / name, "PNG", optimize=True)
+
+        result = subprocess.run(
+            ["iconutil", "-c", "icns", str(iconset_dir), "-o", str(icons_dir / "icon.icns")],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            print(f"  icon.icns (native macOS, {(icons_dir / 'icon.icns').stat().st_size:,} bytes)")
+        else:
+            print(f"  icon.icns generation failed: {result.stderr}")
+
+        # Clean up iconset
+        import shutil
+        shutil.rmtree(iconset_dir, ignore_errors=True)
+
+    except (FileNotFoundError, ImportError):
+        print("  icon.icns — skipped (iconutil not available, Tauri will generate from icon.png)")
+
+    print(f"\nDone! All icons generated.")
+    print(f"  Brand kit: {brand_dir}")
+    print(f"  Static:    {static_dir}")
+    print(f"  Tauri:     {icons_dir}")
 
 
 if __name__ == "__main__":

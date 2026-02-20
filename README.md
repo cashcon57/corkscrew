@@ -34,7 +34,7 @@ Corkscrew installs, manages, and organizes mods for Windows games running throug
 
 It works by reading and writing directly to your Wine bottle's filesystem, the same way the game itself sees it. Your bottles, your mods, no middleman.
 
-> **Status:** Alpha (v0.4.0-alpha). Skyrim Special Edition is the first fully supported game. More games coming soon.
+> **Status:** Alpha (v0.5.0). Skyrim Special Edition is the first fully supported game. More games coming soon.
 
 ---
 
@@ -54,7 +54,9 @@ It works by reading and writing directly to your Wine bottle's filesystem, the s
 - **NXM link handling** — Download mods directly from NXM links on the Nexus Mods website.
 - **Update checking** — Check installed mods against Nexus for available updates.
 - **Collections browser** — Browse NexusMods Collections with search, sorting, filtering, and detailed mod/revision views. Download sizes and mod counts shown per collection.
+- **Collection installation** — Premium users can install entire NexusMods Collections with one click. The orchestrator resolves install order, downloads mods, handles FOMOD selections from the collection manifest, deploys files, and applies the collection's plugin load order. Free users see a list of mods to download manually from the Nexus website.
 - **Premium enforcement** — Free users are directed to the Nexus Mods website for downloads; only premium users get API-initiated downloads, in full compliance with NexusMods policies.
+- **Install progress events** — Real-time step-by-step progress feedback during mod and collection installation (preparing, extracting, deploying, syncing plugins) via Tauri event system.
 
 ### Plugin Load Order
 - **LOOT-powered sorting** — Automatic plugin sorting using [libloot](https://github.com/loot/libloot) (the same engine behind LOOT), with masterlist fetching from GitHub.
@@ -95,11 +97,34 @@ It works by reading and writing directly to your Wine bottle's filesystem, the s
 - **Light and dark themes** — System-following by default with manual toggle.
 - **Cross-platform** — Native app for both macOS and Linux (SteamOS, Fedora, Ubuntu).
 
+### What Works
+
+Everything listed above is implemented and functional. The app has been tested primarily on macOS (Apple Silicon) with CrossOver and Whisky bottles running Skyrim SE via Steam. Key workflows that are end-to-end tested:
+
+- Bottle discovery and game detection across all supported Wine sources
+- Full mod lifecycle: install from archive → stage → deploy → enable/disable → uninstall
+- NXM protocol link handling (click on Nexus website → mod downloads in Corkscrew)
+- FOMOD installer wizard for mods with complex install options
+- LOOT-powered plugin sorting with masterlist fetching
+- Profile save/load/switch with full deployment cycling
+- Crash log analysis with actionable diagnosis
+- SKSE detection, download, install, and launch-through-SKSE
+- Collection browsing and metadata viewing
+
+### Known Limitations
+
+- **Linux testing is limited** — The app builds and the code handles Linux paths, but testing has been primarily on macOS. SteamOS/Proton testing is planned.
+- **Single game support** — Only Skyrim SE is supported currently. The plugin architecture is ready for more games, but each needs a detection plugin.
+- **Wabbajack installation** — You can browse the Wabbajack gallery and parse `.wabbajack` files, but automated installation of Wabbajack modlists is not yet implemented.
+- **NexusMods SSO** — The SSO module is built but requires NexusMods to approve the "Corkscrew" application slug. Currently uses API key authentication.
+- **OAuth flow** — OAuth 2.0 + PKCE module is implemented but depends on the same NexusMods app approval as SSO.
+
 ### Planned
 
-- NexusMods Collection installation (download orchestration for premium users)
 - Wabbajack modlist installation (FromArchive directives, download queue)
-- More game plugins (Fallout 4, Oblivion, etc.)
+- More game plugins (Fallout 4, Oblivion, Starfield, etc.)
+- NexusMods SSO/OAuth authentication (pending NM app approval)
+- Linux/SteamOS testing and distribution (AppImage, .deb, .rpm)
 
 ---
 
@@ -202,8 +227,8 @@ src/                          Svelte frontend
 │   └── about/+page.svelte    Version, credits, acknowledgments
 └── app.css                   Design system (tokens, themes, vibrancy)
 
-src-tauri/src/                Rust backend (~30 modules)
-├── lib.rs              Tauri command handlers (~70 IPC commands)
+src-tauri/src/                Rust backend (~32 modules)
+├── lib.rs              Tauri command handlers (~70+ IPC commands)
 ├── bottles.rs          Bottle detection (9 sources, macOS + Linux)
 ├── bottle_config.rs    Wine bottle settings (MSync, MetalFX, env vars)
 ├── games.rs            Game detection framework + plugin registry
@@ -226,6 +251,8 @@ src-tauri/src/                Rust backend (~30 modules)
 ├── nexus_sso.rs        WebSocket SSO authentication (pending NM approval)
 ├── oauth.rs            OAuth 2.0 + PKCE authentication
 ├── crashlog.rs         Crash log parser + diagnosis engine
+├── progress.rs         Install progress event types (Tauri event system)
+├── collection_installer.rs  NexusMods Collection install orchestrator
 ├── rollback.rs         Mod version rollback + snapshot management
 ├── modlist_io.rs       Modlist export/import + diff comparison
 ├── executables.rs      Custom executable management
@@ -239,13 +266,16 @@ src-tauri/src/                Rust backend (~30 modules)
 ### How mods are installed
 
 1. User drops an archive or clicks Install — the frontend calls `install_mod_cmd` via Tauri IPC
-2. The `staging` module extracts the archive to a staging folder and uses heuristics to find the mod root (looking for `Data/`, `.esp`/`.esm` files, or a single wrapper folder)
-3. SHA-256 hashes are computed for every file in staging and stored in the database
-4. The `deployer` module creates hardlinks from the staging folder to the game's `Data/` directory (with copy fallback for cross-volume installs)
-5. Every deployed file path is recorded in the `deployment_manifest` table
-6. Disabling a mod removes its hardlinks from the game directory while keeping staging intact
-7. Re-enabling re-creates the hardlinks from staging
-8. Uninstalling removes both deployment and staging, cascading all DB records
+2. Progress events are emitted at each step via the Tauri event system, providing real-time UI feedback
+3. The `staging` module extracts the archive to a staging folder and uses heuristics to find the mod root (looking for `Data/`, `.esp`/`.esm` files, or a single wrapper folder)
+4. SHA-256 hashes are computed for every file in staging and stored in the database
+5. The `deployer` module creates hardlinks from the staging folder to the game's `Data/` directory (with copy fallback for cross-volume installs)
+6. Every deployed file path is recorded in the `deployment_manifest` table
+7. Disabling a mod removes its hardlinks from the game directory while keeping staging intact
+8. Re-enabling re-creates the hardlinks from staging
+9. Uninstalling removes both deployment and staging, cascading all DB records
+
+For **NexusMods Collections**, the `collection_installer` orchestrator handles the full pipeline: resolving install order via topological sort, downloading each mod (premium only), applying FOMOD selections from the collection manifest, staging and deploying each mod, and applying the collection's plugin load order.
 
 ---
 
@@ -283,7 +313,7 @@ Corkscrew stands on the shoulders of many open source projects. We are deeply gr
 
 This is a young project and there's plenty to do. If you're a Mac or Linux gamer who's tired of manually dragging files into Wine prefixes, you're the target audience — and probably the ideal contributor.
 
-Bug reports, feature requests, and pull requests are all welcome.
+Bug reports, feature requests, and pull requests are all welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, PR guidelines, and coding conventions.
 
 ## License
 
