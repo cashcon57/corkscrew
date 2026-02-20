@@ -1,5 +1,6 @@
 <script lang="ts">
   import { openUrl } from "@tauri-apps/plugin-opener";
+  import { appVersion } from "$lib/stores";
 </script>
 
 <div class="about-page">
@@ -13,8 +14,18 @@
       height="80"
     />
     <h1 class="app-name">Corkscrew</h1>
-    <span class="app-version">v0.5.1</span>
+    <span class="app-version">v{$appVersion}</span>
     <p class="app-tagline">A native mod manager for Wine games</p>
+    <button
+      class="kofi-btn"
+      onclick={() => openUrl("https://ko-fi.com/cash508287")}
+      title="Support Corkscrew on Ko-fi"
+    >
+      <svg class="kofi-icon" width="16" height="16" viewBox="0 0 24 24" fill="none">
+        <path d="M12 4.5C7 4.5 4 8 4 11c0 3.5 3.5 7.5 8 11 4.5-3.5 8-7.5 8-11 0-3-3-6.5-8-6.5z" fill="#FF5E5B" />
+      </svg>
+      <span>Support this Project</span>
+    </button>
   </div>
 
   <!-- Project Info -->
@@ -218,7 +229,8 @@
 
 <style>
   .about-page {
-    max-width: 540px;
+    width: 100%;
+    max-width: 860px;
     margin: 0 auto;
     padding: var(--space-8) var(--space-6);
   }
@@ -261,6 +273,32 @@
     color: var(--text-secondary);
     margin-top: var(--space-2);
     line-height: 1.45;
+  }
+
+  .kofi-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 18px;
+    margin-top: var(--space-4);
+    background: rgba(255, 94, 91, 0.1);
+    border: 1px solid rgba(255, 94, 91, 0.2);
+    border-radius: var(--radius);
+    color: #FF5E5B;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all var(--duration-fast) var(--ease);
+    white-space: nowrap;
+  }
+
+  .kofi-btn:hover {
+    background: rgba(255, 94, 91, 0.18);
+    border-color: rgba(255, 94, 91, 0.35);
+  }
+
+  .kofi-icon {
+    flex-shrink: 0;
   }
 
   /* --- Sections --- */

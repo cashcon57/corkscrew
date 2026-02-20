@@ -324,10 +324,11 @@ pub async fn browse_collections(
     };
     let gql_direction = if sort_direction == "asc" { "ASC" } else { "DESC" };
 
-    // Build sort array with dynamic key (can't use json! macro for this)
-    // NexusMods v2 CollectionsSearchSort expects: [{ "fieldName": "ASC"|"DESC" }]
+    // Build sort array: NexusMods expects [{ "fieldName": { "direction": "DESC" } }]
+    let mut direction_obj = serde_json::Map::new();
+    direction_obj.insert("direction".to_string(), serde_json::Value::String(gql_direction.to_string()));
     let mut sort_obj = serde_json::Map::new();
-    sort_obj.insert(gql_sort_key.to_string(), serde_json::Value::String(gql_direction.to_string()));
+    sort_obj.insert(gql_sort_key.to_string(), serde_json::Value::Object(direction_obj));
     let sort_array = serde_json::Value::Array(vec![serde_json::Value::Object(sort_obj)]);
 
     let variables = serde_json::json!({

@@ -39,6 +39,9 @@ export const activeMods = derived(
 // SKSE state
 export const skseStatus = writable<SkseStatus | null>(null);
 
+// App version (loaded at startup from Tauri config)
+export const appVersion = writable<string>("0.0.0");
+
 // Notification helpers
 export function showError(msg: string) {
   errorMessage.set(msg);

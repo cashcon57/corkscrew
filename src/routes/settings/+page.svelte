@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives } from "$lib/api";
-  import { config, showError, showSuccess, selectedGame, skseStatus, currentPage } from "$lib/stores";
+  import { config, showError, showSuccess, selectedGame, skseStatus, currentPage, appVersion } from "$lib/stores";
   import type { AppConfig } from "$lib/types";
   import ThemeToggle from "$lib/components/ThemeToggle.svelte";
   import SettingsAuthSection from "./settings-auth-section.svelte";
@@ -636,7 +636,7 @@
     <div class="section-card">
       <div class="card-row about-row">
         <span class="row-label">Version</span>
-        <span class="row-value">v0.5.1</span>
+        <span class="row-value">v{$appVersion}</span>
       </div>
       <div class="card-divider"></div>
       <div class="card-row about-row">
@@ -655,7 +655,8 @@
 
 <style>
   .settings-page {
-    max-width: 620px;
+    width: 100%;
+    max-width: 860px;
     padding: var(--space-8) var(--space-6);
   }
 

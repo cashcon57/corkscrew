@@ -249,7 +249,7 @@
 
 <style>
   .profiles-page {
-    max-width: 720px;
+    width: 100%;
     padding: var(--space-2) 0 var(--space-12) 0;
   }
 

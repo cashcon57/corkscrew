@@ -17,6 +17,7 @@
   <img src="https://img.shields.io/badge/macOS-10.15+-000000?logo=apple&logoColor=white" alt="macOS">
   <img src="https://img.shields.io/badge/Linux-SteamOS%20%7C%20Fedora%20%7C%20Ubuntu-FCC624?logo=linux&logoColor=black" alt="Linux">
   <img src="https://img.shields.io/badge/License-GPL--3.0-blue" alt="License">
+  <a href="https://ko-fi.com/cash508287"><img src="https://img.shields.io/badge/Ko--fi-Support%20Corkscrew-FF5E5B?logo=ko-fi&logoColor=white" alt="Ko-fi"></a>
 </p>
 
 <p align="center">
@@ -25,7 +26,8 @@
   <a href="#supported-platforms">Platforms</a>&nbsp;&nbsp;&bull;&nbsp;&nbsp;
   <a href="#architecture">Architecture</a>&nbsp;&nbsp;&bull;&nbsp;&nbsp;
   <a href="#acknowledgments">Acknowledgments</a>&nbsp;&nbsp;&bull;&nbsp;&nbsp;
-  <a href="#contributing">Contributing</a>
+  <a href="#contributing">Contributing</a>&nbsp;&nbsp;&bull;&nbsp;&nbsp;
+  <a href="#support">Support</a>
 </p>
 
 <br>
@@ -34,7 +36,7 @@ Corkscrew installs, manages, and organizes mods for Windows games running throug
 
 It works by reading and writing directly to your Wine bottle's filesystem, the same way the game itself sees it. Your bottles, your mods, no middleman.
 
-> **Status:** v0.5.1 — Skyrim Special Edition is the first fully supported game. More games coming soon.
+> **Status:** v0.5.2 — Skyrim Special Edition is the first fully supported game. More games coming soon.
 
 ---
 
@@ -357,6 +359,12 @@ Copyright (c) Mozilla Foundation and contributors. Licensed under Mozilla Public
 This is a young project and there's plenty to do. If you're a Mac or Linux gamer who's tired of manually dragging files into Wine prefixes, you're the target audience — and probably the ideal contributor.
 
 Bug reports, feature requests, and pull requests are all welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, PR guidelines, and coding conventions.
+
+## Support
+
+If Corkscrew is useful to you, consider buying me a coffee:
+
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20Corkscrew-FF5E5B?logo=ko-fi&logoColor=white&style=for-the-badge)](https://ko-fi.com/cash508287)
 
 ## License
 

@@ -1,12 +1,15 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import "../app.css";
-  import { currentPage, errorMessage, successMessage, selectedGame, selectedBottle, showError, showSuccess } from "$lib/stores";
+  import { currentPage, errorMessage, successMessage, selectedGame, selectedBottle, showError, showSuccess, appVersion } from "$lib/stores";
   import { initTheme } from "$lib/theme";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
+  import { getVersion } from "@tauri-apps/api/app";
   import { downloadFromNexus, getAllGames } from "$lib/api";
   import { get } from "svelte/store";
+  import type { DetectedGame } from "$lib/types";
+  import GameIcon from "$lib/components/GameIcon.svelte";
 
   const navItems = [
     { id: "dashboard", label: "Dashboard" },
@@ -20,8 +23,13 @@
     { id: "about", label: "About" },
   ];
 
+  let detectedGames = $state<DetectedGame[]>([]);
+  let gameDropdownOpen = $state(false);
+
   onMount(() => {
     initTheme();
+    loadDetectedGames();
+    getVersion().then(v => appVersion.set(v)).catch(() => {});
 
     // Listen for NXM deep-link URLs (e.g. nxm://skyrimspecialedition/mods/123/files/456?key=abc&expires=123)
     onOpenUrl((urls) => {
@@ -31,7 +39,39 @@
         }
       }
     });
+
+    // Close dropdown on click outside
+    function handleClickOutside(e: MouseEvent) {
+      const target = e.target as HTMLElement;
+      if (!target.closest(".sidebar-game-section")) {
+        gameDropdownOpen = false;
+      }
+    }
+    document.addEventListener("click", handleClickOutside);
+    return () => document.removeEventListener("click", handleClickOutside);
   });
+
+  async function loadDetectedGames() {
+    try {
+      detectedGames = await getAllGames();
+      // Auto-select the first game if none is selected
+      if (!get(selectedGame) && detectedGames.length > 0) {
+        pickGame(detectedGames[0]);
+      }
+    } catch {
+      // Games will load when user navigates to Dashboard
+    }
+  }
+
+  function pickGame(game: DetectedGame) {
+    selectedGame.set(game);
+    selectedBottle.set(game.bottle_name);
+    gameDropdownOpen = false;
+  }
+
+  function toggleGameDropdown() {
+    gameDropdownOpen = !gameDropdownOpen;
+  }
 
   async function handleNxmLink(nxmUrl: string) {
     // Extract game slug from nxm://skyrimspecialedition/mods/...
@@ -102,6 +142,53 @@
           <span class="brand-tagline">Mod Manager</span>
         </div>
       </button>
+    </div>
+
+    <!-- Game selector -->
+    <div class="sidebar-game-section">
+      {#if detectedGames.length > 0}
+        <button class="game-selector-btn" onclick={toggleGameDropdown}>
+          {#if $selectedGame}
+            <GameIcon gameId={$selectedGame.game_id} size={22} />
+            <div class="game-selector-text">
+              <span class="game-selector-name">{$selectedGame.display_name}</span>
+              <span class="game-selector-bottle">{$selectedGame.bottle_name}</span>
+            </div>
+          {:else}
+            <svg class="game-selector-placeholder-icon" width="22" height="22" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="2" y="4" width="12" height="8" rx="2" opacity="0.4" />
+              <circle cx="6" cy="8" r="1.5" opacity="0.4" />
+              <circle cx="10" cy="8" r="1.5" opacity="0.4" />
+            </svg>
+            <span class="game-selector-placeholder">Select a game</span>
+          {/if}
+          <svg class="game-selector-chevron" class:open={gameDropdownOpen} width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 4l2 2 2-2" />
+          </svg>
+        </button>
+
+        {#if gameDropdownOpen}
+          <div class="game-dropdown">
+            {#each detectedGames as game}
+              <button
+                class="game-dropdown-item"
+                class:active={$selectedGame?.game_id === game.game_id && $selectedGame?.bottle_name === game.bottle_name}
+                onclick={() => pickGame(game)}
+              >
+                <GameIcon gameId={game.game_id} size={18} />
+                <div class="game-dropdown-text">
+                  <span class="game-dropdown-name">{game.display_name}</span>
+                  <span class="game-dropdown-bottle">{game.bottle_name}</span>
+                </div>
+              </button>
+            {/each}
+          </div>
+        {/if}
+      {:else}
+        <div class="game-selector-empty">
+          <span class="game-selector-placeholder">No games detected</span>
+        </div>
+      {/if}
     </div>
 
     <ul class="nav-list">
@@ -188,7 +275,7 @@
         </svg>
         <span>GitHub</span>
       </button>
-      <span class="sidebar-version">v0.5.1</span>
+      <span class="sidebar-version">v{$appVersion}</span>
     </div>
   </nav>
 
@@ -344,6 +431,175 @@
     font-weight: 400;
     color: var(--text-tertiary);
     line-height: 1.2;
+  }
+
+  /* --- Game selector --- */
+
+  .sidebar-game-section {
+    padding: 0 var(--space-2) var(--space-2);
+    border-bottom: 1px solid var(--separator);
+    margin-bottom: var(--space-2);
+    position: relative;
+  }
+
+  .game-selector-btn {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 8px 10px;
+    border-radius: var(--radius);
+    color: var(--text-primary);
+    font-size: 13px;
+    transition: background var(--duration-fast) var(--ease);
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .game-selector-btn:hover {
+    background: var(--surface-hover);
+  }
+
+  .game-selector-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    flex: 1;
+  }
+
+  .game-selector-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    line-height: 1.3;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .game-selector-bottle {
+    font-size: 10px;
+    font-weight: 400;
+    color: var(--text-tertiary);
+    line-height: 1.3;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .game-selector-chevron {
+    flex-shrink: 0;
+    color: var(--text-quaternary);
+    transition: transform var(--duration-fast) var(--ease);
+    margin-left: auto;
+  }
+
+  .game-selector-chevron.open {
+    transform: rotate(180deg);
+  }
+
+  .game-selector-placeholder {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-tertiary);
+  }
+
+  .game-selector-placeholder-icon {
+    color: var(--text-quaternary);
+    flex-shrink: 0;
+  }
+
+  .game-selector-empty {
+    padding: 8px 10px;
+  }
+
+  /* Dropdown */
+
+  .game-dropdown {
+    position: absolute;
+    top: 100%;
+    left: var(--space-2);
+    right: var(--space-2);
+    background: var(--bg-grouped);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: var(--radius);
+    padding: 4px;
+    z-index: 100;
+    box-shadow:
+      0 4px 24px rgba(0, 0, 0, 0.3),
+      0 1px 4px rgba(0, 0, 0, 0.15),
+      inset 0 1px 0 0 rgba(255, 255, 255, 0.06);
+    backdrop-filter: blur(24px) saturate(1.3);
+    -webkit-backdrop-filter: blur(24px) saturate(1.3);
+    animation: dropdownIn var(--duration-fast) var(--ease-out);
+    max-height: 240px;
+    overflow-y: auto;
+  }
+
+  :global([data-theme="light"]) .game-dropdown {
+    border-color: rgba(0, 0, 0, 0.12);
+    box-shadow:
+      0 4px 24px rgba(0, 0, 0, 0.12),
+      0 1px 4px rgba(0, 0, 0, 0.06);
+  }
+
+  @keyframes dropdownIn {
+    from { transform: translateY(-4px); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
+  }
+
+  .game-dropdown-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 7px 8px;
+    border-radius: calc(var(--radius) - 2px);
+    color: var(--text-secondary);
+    font-size: 12px;
+    transition: all var(--duration-fast) var(--ease);
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .game-dropdown-item:hover {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+  }
+
+  .game-dropdown-item.active {
+    background: var(--accent-subtle);
+    color: var(--accent);
+  }
+
+  .game-dropdown-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  .game-dropdown-name {
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1.3;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .game-dropdown-bottle {
+    font-size: 10px;
+    font-weight: 400;
+    color: var(--text-tertiary);
+    line-height: 1.3;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .game-dropdown-item.active .game-dropdown-bottle {
+    color: var(--accent);
+    opacity: 0.7;
   }
 
   /* --- Nav list --- */
