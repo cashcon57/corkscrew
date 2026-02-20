@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, detectModTools, installModTool, uninstallModTool, launchModTool } from "$lib/api";
-  import { config, showError, showSuccess, selectedGame, skseStatus, currentPage, appVersion, updateReady, updateVersion, updateChecking, triggerUpdateCheck } from "$lib/stores";
+  import { config, showError, showSuccess, selectedGame, skseStatus, currentPage, appVersion, updateReady, updateVersion, updateChecking, updateError, triggerUpdateCheck } from "$lib/stores";
   import type { AppConfig, ModTool } from "$lib/types";
   import ThemeToggle from "$lib/components/ThemeToggle.svelte";
   import SettingsAuthSection from "./settings-auth-section.svelte";
@@ -867,6 +867,8 @@
             >
               {#if $updateChecking}
                 <span class="spinner-xs"></span> Checking...
+              {:else if manualCheckDone && $updateError}
+                <span title={$updateError}>Check failed</span>
               {:else if manualCheckDone && !$updateReady}
                 Up to date
               {:else}

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import "../app.css";
-  import { currentPage, errorMessage, successMessage, selectedGame, selectedBottle, showError, showSuccess, appVersion, collectionInstallStatus, updateReady as updateReadyStore, updateVersion as updateVersionStore, updateChecking as updateCheckingStore, setUpdateCheckFn } from "$lib/stores";
+  import { currentPage, errorMessage, successMessage, selectedGame, selectedBottle, showError, showSuccess, appVersion, collectionInstallStatus, updateReady as updateReadyStore, updateVersion as updateVersionStore, updateChecking as updateCheckingStore, updateError as updateErrorStore, setUpdateCheckFn } from "$lib/stores";
   import { initTheme } from "$lib/theme";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
@@ -176,13 +176,13 @@
 
   async function checkForUpdates() {
     updateCheckingStore.set(true);
+    updateErrorStore.set(null);
     try {
       const update = await check();
       if (update) {
         updateAvailable = true;
         updateVersion = update.version;
         updateVersionStore.set(update.version);
-        // Auto-download the update in the background
         update.downloadAndInstall((progress) => {
           if (progress.event === "Started" && progress.data.contentLength) {
             updateDownloading = true;
@@ -197,12 +197,14 @@
           updateReady = true;
           updateDownloading = false;
           updateReadyStore.set(true);
-        }).catch(() => {
+        }).catch((e) => {
           updateDownloading = false;
+          console.warn("[updater] Download failed:", e);
         });
       }
-    } catch {
-      // Update check failed silently — network error or no endpoint yet
+    } catch (e) {
+      console.warn("[updater] Check failed:", e);
+      updateErrorStore.set(String(e));
     } finally {
       updateCheckingStore.set(false);
     }

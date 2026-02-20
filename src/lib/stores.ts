@@ -57,6 +57,7 @@ export const appVersion = writable<string>("0.0.0");
 export const updateReady = writable(false);
 export const updateVersion = writable("");
 export const updateChecking = writable(false);
+export const updateError = writable<string | null>(null);
 // Set by layout to allow settings page to trigger a manual check
 export let triggerUpdateCheck: (() => Promise<void>) | null = null;
 export function setUpdateCheckFn(fn: () => Promise<void>) {

@@ -42,7 +42,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE4QTM0RTk4RUIwM0JCNzQKUldSMHV3UHJtRTZqR1B5YnM2ZDZnSVZoVndnVUg2MGlwYXc1VG1uaXdGRE9na1ZBQTY1U0x6RGMK",
       "endpoints": [
-        "https://github.com/cashconway/Corkscrew/releases/latest/download/latest.json"
+        "https://github.com/cashcon57/corkscrew/releases/latest/download/latest.json"
       ]
     }
   },
