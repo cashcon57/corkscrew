@@ -146,6 +146,12 @@ Download the latest release for your platform from the [Releases page](https://g
 | macOS | `.dmg` (drag to Applications) |
 | Linux | AppImage, `.deb`, `.rpm` |
 
+> **IMPORTANT (macOS):** The app is not yet code-signed with an Apple Developer certificate. macOS Gatekeeper will show "Corkscrew is damaged" when you first open it. After dragging to Applications, run:
+> ```bash
+> xattr -cr /Applications/Corkscrew.app
+> ```
+> Or: right-click the app → **Open** → click "Open" in the dialog.
+
 ### From Source
 
 ```bash
