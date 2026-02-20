@@ -78,7 +78,17 @@ pub fn available_space(path: &Path) -> u64 {
         use std::ffi::CString;
         use std::mem::MaybeUninit;
 
-        let path_str = path.to_string_lossy();
+        // Walk up to the nearest existing ancestor so we can check the volume
+        // even when the target directory hasn't been created yet.
+        let mut check = path.to_path_buf();
+        while !check.exists() {
+            match check.parent() {
+                Some(p) => check = p.to_path_buf(),
+                None => return 0,
+            }
+        }
+
+        let path_str = check.to_string_lossy();
         let c_path = match CString::new(path_str.as_bytes()) {
             Ok(p) => p,
             Err(_) => return 0,
@@ -242,9 +252,11 @@ mod tests {
     }
 
     #[test]
-    fn available_space_nonexistent_returns_zero() {
+    fn available_space_nonexistent_walks_to_ancestor() {
+        // A nonexistent path should resolve to the nearest existing ancestor
+        // (e.g. /) and report its available space rather than returning 0.
         let space = available_space(Path::new("/nonexistent/volume/xyz"));
-        assert_eq!(space, 0);
+        assert!(space > 0, "Should report space from nearest ancestor");
     }
 
     #[test]
