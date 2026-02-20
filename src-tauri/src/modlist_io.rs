@@ -322,11 +322,7 @@ pub fn diff_modlists(current: &ExportedModlist, imported: &ExportedModlist) -> M
             }
             Some(cm) => {
                 if cm.version != im.version {
-                    version_changed.push((
-                        im.name.clone(),
-                        cm.version.clone(),
-                        im.version.clone(),
-                    ));
+                    version_changed.push((im.name.clone(), cm.version.clone(), im.version.clone()));
                 }
                 if cm.priority != im.priority {
                     priority_changed.push((im.name.clone(), cm.priority, im.priority));
@@ -469,22 +465,16 @@ mod tests {
             game_name: game_display_name(game_id).to_string(),
             mod_count,
             mods,
-            plugin_order: vec![
-                ExportedPlugin {
-                    filename: "Skyrim.esm".to_string(),
-                    enabled: true,
-                },
-            ],
+            plugin_order: vec![ExportedPlugin {
+                filename: "Skyrim.esm".to_string(),
+                enabled: true,
+            }],
             notes: Some("Test modlist".to_string()),
         }
     }
 
     /// Helper: build a sample ExportedMod.
-    fn sample_exported_mod(
-        name: &str,
-        version: &str,
-        nexus_mod_id: Option<i64>,
-    ) -> ExportedMod {
+    fn sample_exported_mod(name: &str, version: &str, nexus_mod_id: Option<i64>) -> ExportedMod {
         ExportedMod {
             name: name.to_string(),
             version: version.to_string(),
@@ -494,9 +484,10 @@ mod tests {
             nexus_file_id: None,
             archive_name: format!("{}.zip", name.to_lowercase().replace(' ', "_")),
             source_url: None,
-            installed_files: vec![
-                format!("data/meshes/{}.nif", name.to_lowercase().replace(' ', "_")),
-            ],
+            installed_files: vec![format!(
+                "data/meshes/{}.nif",
+                name.to_lowercase().replace(' ', "_")
+            )],
             fomod_selections: None,
         }
     }
@@ -512,20 +503,29 @@ mod tests {
             "data/textures/armor.dds".to_string(),
         ];
         db.add_mod(
-            "skyrimse", "default", Some(1234),
-            "Cool Armor", "2.1", "cool_armor.zip", &files,
+            "skyrimse",
+            "default",
+            Some(1234),
+            "Cool Armor",
+            "2.1",
+            "cool_armor.zip",
+            &files,
         )
         .unwrap();
 
         let plugins = vec![
-            PluginEntry { filename: "Skyrim.esm".to_string(), enabled: true },
-            PluginEntry { filename: "CoolArmor.esp".to_string(), enabled: true },
+            PluginEntry {
+                filename: "Skyrim.esm".to_string(),
+                enabled: true,
+            },
+            PluginEntry {
+                filename: "CoolArmor.esp".to_string(),
+                enabled: true,
+            },
         ];
 
-        let modlist = export_modlist(
-            &db, "skyrimse", "default", &plugins, Some("My setup"),
-        )
-        .unwrap();
+        let modlist =
+            export_modlist(&db, "skyrimse", "default", &plugins, Some("My setup")).unwrap();
 
         // Serialize to JSON and parse back to verify it is valid.
         let json = serde_json::to_string_pretty(&modlist).unwrap();
@@ -550,25 +550,43 @@ mod tests {
         let (db, tmp) = test_db();
 
         db.add_mod(
-            "skyrimse", "default", Some(5678),
-            "Magic Overhaul", "3.0", "magic_overhaul.7z",
+            "skyrimse",
+            "default",
+            Some(5678),
+            "Magic Overhaul",
+            "3.0",
+            "magic_overhaul.7z",
             &["data/scripts/magic.pex".to_string()],
         )
         .unwrap();
         db.add_mod(
-            "skyrimse", "default", None,
-            "Texture Pack", "1.2", "textures.zip",
+            "skyrimse",
+            "default",
+            None,
+            "Texture Pack",
+            "1.2",
+            "textures.zip",
             &["data/textures/landscape.dds".to_string()],
         )
         .unwrap();
 
         let plugins = vec![
-            PluginEntry { filename: "Skyrim.esm".to_string(), enabled: true },
-            PluginEntry { filename: "MagicOverhaul.esp".to_string(), enabled: true },
+            PluginEntry {
+                filename: "Skyrim.esm".to_string(),
+                enabled: true,
+            },
+            PluginEntry {
+                filename: "MagicOverhaul.esp".to_string(),
+                enabled: true,
+            },
         ];
 
         let original = export_modlist(
-            &db, "skyrimse", "default", &plugins, Some("Round trip test"),
+            &db,
+            "skyrimse",
+            "default",
+            &plugins,
+            Some("Round trip test"),
         )
         .unwrap();
 
@@ -606,13 +624,23 @@ mod tests {
 
         // Install two mods in the DB.
         db.add_mod(
-            "skyrimse", "default", Some(100),
-            "Already Here", "1.0", "already_here.zip", &[],
+            "skyrimse",
+            "default",
+            Some(100),
+            "Already Here",
+            "1.0",
+            "already_here.zip",
+            &[],
         )
         .unwrap();
         db.add_mod(
-            "skyrimse", "default", Some(200),
-            "Version Mismatch", "1.0", "version_mismatch.zip", &[],
+            "skyrimse",
+            "default",
+            Some(200),
+            "Version Mismatch",
+            "1.0",
+            "version_mismatch.zip",
+            &[],
         )
         .unwrap();
 
@@ -653,57 +681,63 @@ mod tests {
 
     #[test]
     fn test_diff_detection() {
-        let current = sample_modlist("skyrimse", vec![
-            {
-                let mut m = sample_exported_mod("Shared Mod", "1.0", Some(10));
-                m.priority = 0;
-                m.enabled = true;
-                m
-            },
-            sample_exported_mod("Removed Mod", "1.0", Some(20)),
-            {
-                let mut m = sample_exported_mod("Version Changed", "1.0", Some(30));
-                m.priority = 2;
-                m
-            },
-            {
-                let mut m = sample_exported_mod("Priority Changed", "1.0", Some(40));
-                m.priority = 3;
-                m.enabled = true;
-                m
-            },
-            {
-                let mut m = sample_exported_mod("Enabled Changed", "1.0", Some(50));
-                m.enabled = true;
-                m
-            },
-        ]);
+        let current = sample_modlist(
+            "skyrimse",
+            vec![
+                {
+                    let mut m = sample_exported_mod("Shared Mod", "1.0", Some(10));
+                    m.priority = 0;
+                    m.enabled = true;
+                    m
+                },
+                sample_exported_mod("Removed Mod", "1.0", Some(20)),
+                {
+                    let mut m = sample_exported_mod("Version Changed", "1.0", Some(30));
+                    m.priority = 2;
+                    m
+                },
+                {
+                    let mut m = sample_exported_mod("Priority Changed", "1.0", Some(40));
+                    m.priority = 3;
+                    m.enabled = true;
+                    m
+                },
+                {
+                    let mut m = sample_exported_mod("Enabled Changed", "1.0", Some(50));
+                    m.enabled = true;
+                    m
+                },
+            ],
+        );
 
-        let imported = sample_modlist("skyrimse", vec![
-            {
-                let mut m = sample_exported_mod("Shared Mod", "1.0", Some(10));
-                m.priority = 0;
-                m.enabled = true;
-                m
-            },
-            sample_exported_mod("Added Mod", "1.0", Some(60)),
-            {
-                let mut m = sample_exported_mod("Version Changed", "2.0", Some(30));
-                m.priority = 2;
-                m
-            },
-            {
-                let mut m = sample_exported_mod("Priority Changed", "1.0", Some(40));
-                m.priority = 10;
-                m.enabled = true;
-                m
-            },
-            {
-                let mut m = sample_exported_mod("Enabled Changed", "1.0", Some(50));
-                m.enabled = false;
-                m
-            },
-        ]);
+        let imported = sample_modlist(
+            "skyrimse",
+            vec![
+                {
+                    let mut m = sample_exported_mod("Shared Mod", "1.0", Some(10));
+                    m.priority = 0;
+                    m.enabled = true;
+                    m
+                },
+                sample_exported_mod("Added Mod", "1.0", Some(60)),
+                {
+                    let mut m = sample_exported_mod("Version Changed", "2.0", Some(30));
+                    m.priority = 2;
+                    m
+                },
+                {
+                    let mut m = sample_exported_mod("Priority Changed", "1.0", Some(40));
+                    m.priority = 10;
+                    m.enabled = true;
+                    m
+                },
+                {
+                    let mut m = sample_exported_mod("Enabled Changed", "1.0", Some(50));
+                    m.enabled = false;
+                    m
+                },
+            ],
+        );
 
         let diff = diff_modlists(&current, &imported);
 
@@ -711,7 +745,11 @@ mod tests {
         assert_eq!(diff.removed, vec!["Removed Mod"]);
         assert_eq!(
             diff.version_changed,
-            vec![("Version Changed".to_string(), "1.0".to_string(), "2.0".to_string())]
+            vec![(
+                "Version Changed".to_string(),
+                "1.0".to_string(),
+                "2.0".to_string()
+            )]
         );
         assert_eq!(
             diff.priority_changed,
@@ -737,8 +775,14 @@ mod tests {
         assert!(result.is_err());
         match result {
             Err(ModlistError::Validation(msg)) => {
-                assert!(msg.contains("skyrimse"), "Error should mention the modlist game_id");
-                assert!(msg.contains("fallout4"), "Error should mention the target game_id");
+                assert!(
+                    msg.contains("skyrimse"),
+                    "Error should mention the modlist game_id"
+                );
+                assert!(
+                    msg.contains("fallout4"),
+                    "Error should mention the target game_id"
+                );
             }
             other => panic!("Expected Validation error, got: {:?}", other),
         }
@@ -754,9 +798,8 @@ mod tests {
         }
 
         // Should fail for mismatched mod count.
-        let mut bad_count = sample_modlist("skyrimse", vec![
-            sample_exported_mod("Test", "1.0", None),
-        ]);
+        let mut bad_count =
+            sample_modlist("skyrimse", vec![sample_exported_mod("Test", "1.0", None)]);
         bad_count.mod_count = 5; // Claims 5 but only has 1.
         let result = validate_modlist(&bad_count, "skyrimse");
         assert!(result.is_err());
@@ -816,8 +859,13 @@ mod tests {
 
         // Install a mod without a Nexus ID.
         db.add_mod(
-            "skyrimse", "default", None,
-            "Handcrafted Mod", "1.0", "handcrafted.zip", &[],
+            "skyrimse",
+            "default",
+            None,
+            "Handcrafted Mod",
+            "1.0",
+            "handcrafted.zip",
+            &[],
         )
         .unwrap();
 
@@ -843,8 +891,7 @@ mod tests {
         assert_eq!(plan_exact.mods[0].status, ImportStatus::AlreadyInstalled);
 
         let modlist_mismatch = sample_modlist("skyrimse", vec![mods[1].clone()]);
-        let plan_mismatch =
-            plan_import(&db, &modlist_mismatch, "skyrimse", "default").unwrap();
+        let plan_mismatch = plan_import(&db, &modlist_mismatch, "skyrimse", "default").unwrap();
         assert_eq!(plan_mismatch.mods[0].status, ImportStatus::VersionMismatch);
     }
 

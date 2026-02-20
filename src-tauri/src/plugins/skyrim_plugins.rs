@@ -205,7 +205,7 @@ pub fn discover_plugins(data_dir: &Path) -> Result<Vec<String>> {
         }
     }
 
-    plugins.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    plugins.sort_by_key(|a| a.to_lowercase());
     Ok(plugins)
 }
 
@@ -230,11 +230,7 @@ fn is_plugin_file(filename: &str) -> bool {
 /// 4. Removes entries for plugins no longer on disk.
 /// 5. Ensures implicit (base game) plugins are present and enabled.
 /// 6. Writes the updated `plugins.txt` and `loadorder.txt`.
-pub fn sync_plugins(
-    data_dir: &Path,
-    plugins_file: &Path,
-    loadorder_file: &Path,
-) -> Result<()> {
+pub fn sync_plugins(data_dir: &Path, plugins_file: &Path, loadorder_file: &Path) -> Result<()> {
     let on_disk = discover_plugins(data_dir)?;
 
     // Build a set of filenames on disk for quick lookup (case-insensitive).
@@ -294,10 +290,7 @@ pub fn sync_plugins(
         let key = plugin_name.to_lowercase();
 
         // Skip implicit plugins already added.
-        if IMPLICIT_PLUGINS
-            .iter()
-            .any(|&i| i.to_lowercase() == key)
-        {
+        if IMPLICIT_PLUGINS.iter().any(|&i| i.to_lowercase() == key) {
             continue;
         }
 
@@ -307,10 +300,10 @@ pub fn sync_plugins(
                 enabled: existing_entry.enabled,
             }
         } else {
-            // Newly discovered plugin, default to disabled.
+            // Newly discovered plugin, default to enabled (matches Vortex/MO2 behavior).
             PluginEntry {
                 filename: plugin_name.clone(),
-                enabled: false,
+                enabled: true,
             }
         };
 
@@ -633,9 +626,12 @@ mod tests {
         assert_eq!(entries[4].filename, "Dragonborn.esm");
         assert!(entries[4].enabled);
 
-        // User mod should be present but disabled.
-        let user_mod = entries.iter().find(|e| e.filename == "UserMod.esp").unwrap();
-        assert!(!user_mod.enabled);
+        // User mod should be present and enabled by default (matches Vortex/MO2 behavior).
+        let user_mod = entries
+            .iter()
+            .find(|e| e.filename == "UserMod.esp")
+            .unwrap();
+        assert!(user_mod.enabled);
 
         // Verify loadorder.txt was created.
         let load_order = read_loadorder_txt(&loadorder_file).unwrap();
@@ -673,8 +669,14 @@ mod tests {
         sync_plugins(&data_dir, &plugins_file, &loadorder_file).unwrap();
 
         let entries = read_plugins_txt(&plugins_file).unwrap();
-        let user_mod = entries.iter().find(|e| e.filename == "UserMod.esp").unwrap();
-        assert!(user_mod.enabled, "UserMod.esp should remain enabled after sync");
+        let user_mod = entries
+            .iter()
+            .find(|e| e.filename == "UserMod.esp")
+            .unwrap();
+        assert!(
+            user_mod.enabled,
+            "UserMod.esp should remain enabled after sync"
+        );
     }
 
     #[test]
@@ -722,10 +724,17 @@ mod tests {
         write_plugins_txt(
             &pf,
             &[
-                PluginEntry { filename: "Skyrim.esm".into(), enabled: true },
-                PluginEntry { filename: "MyMod.esp".into(), enabled: false },
+                PluginEntry {
+                    filename: "Skyrim.esm".into(),
+                    enabled: true,
+                },
+                PluginEntry {
+                    filename: "MyMod.esp".into(),
+                    enabled: false,
+                },
             ],
-        ).unwrap();
+        )
+        .unwrap();
 
         // Enable MyMod.esp
         let result = toggle_plugin(&pf, &lo, "MyMod.esp", true).unwrap();
@@ -747,11 +756,21 @@ mod tests {
         write_plugins_txt(
             &pf,
             &[
-                PluginEntry { filename: "A.esm".into(), enabled: true },
-                PluginEntry { filename: "B.esp".into(), enabled: true },
-                PluginEntry { filename: "C.esp".into(), enabled: true },
+                PluginEntry {
+                    filename: "A.esm".into(),
+                    enabled: true,
+                },
+                PluginEntry {
+                    filename: "B.esp".into(),
+                    enabled: true,
+                },
+                PluginEntry {
+                    filename: "C.esp".into(),
+                    enabled: true,
+                },
             ],
-        ).unwrap();
+        )
+        .unwrap();
 
         // Move C to position 1 (between A and B)
         let result = move_plugin(&pf, &lo, "C.esp", 1).unwrap();
@@ -769,13 +788,27 @@ mod tests {
         write_plugins_txt(
             &pf,
             &[
-                PluginEntry { filename: "A.esm".into(), enabled: true },
-                PluginEntry { filename: "B.esp".into(), enabled: false },
-                PluginEntry { filename: "C.esp".into(), enabled: true },
+                PluginEntry {
+                    filename: "A.esm".into(),
+                    enabled: true,
+                },
+                PluginEntry {
+                    filename: "B.esp".into(),
+                    enabled: false,
+                },
+                PluginEntry {
+                    filename: "C.esp".into(),
+                    enabled: true,
+                },
             ],
-        ).unwrap();
+        )
+        .unwrap();
 
-        let new_order = vec!["C.esp".to_string(), "A.esm".to_string(), "B.esp".to_string()];
+        let new_order = vec![
+            "C.esp".to_string(),
+            "A.esm".to_string(),
+            "B.esp".to_string(),
+        ];
         let result = reorder_plugins(&pf, &lo, &new_order).unwrap();
 
         assert_eq!(result[0].filename, "C.esp");

@@ -28,7 +28,10 @@ pub enum LauncherError {
     BottleNotFound(String),
 
     #[error("Wine binary not found for source '{bottle_source}': tried {tried}")]
-    WineNotFound { bottle_source: String, tried: String },
+    WineNotFound {
+        bottle_source: String,
+        tried: String,
+    },
 
     #[error("Failed to launch process: {0}")]
     ProcessSpawn(#[from] std::io::Error),
@@ -102,7 +105,11 @@ fn find_whisky_wine() -> Option<PathBuf> {
     // Whisky bundles Wine under its container; search for the binary.
     // Common locations within the container:
     let candidates = [
-        container.join("Bottles").join("Wine").join("bin").join("wine"),
+        container
+            .join("Bottles")
+            .join("Wine")
+            .join("bin")
+            .join("wine"),
         container.join("Wine").join("bin").join("wine"),
     ];
 
@@ -201,9 +208,8 @@ fn resolve_wine_binary(bottle: &Bottle) -> Result<WineCommand> {
                 bottle.path.to_string_lossy().into_owned(),
             ));
             let proton_wine = find_proton_wine(bottle);
-            proton_wine.unwrap_or_else(|| {
-                find_system_wine().unwrap_or_else(|| PathBuf::from("wine"))
-            })
+            proton_wine
+                .unwrap_or_else(|| find_system_wine().unwrap_or_else(|| PathBuf::from("wine")))
         }
 
         #[cfg(not(target_os = "macos"))]
@@ -355,9 +361,8 @@ pub fn launch_game(
         exe_path.to_path_buf()
     } else if let Some(parent) = exe_path.parent() {
         if let Some(fname) = exe_path.file_name().and_then(|n| n.to_str()) {
-            find_executable(parent, fname).ok_or_else(|| {
-                LauncherError::ExecutableNotFound(exe_path.to_path_buf())
-            })?
+            find_executable(parent, fname)
+                .ok_or_else(|| LauncherError::ExecutableNotFound(exe_path.to_path_buf()))?
         } else {
             return Err(LauncherError::ExecutableNotFound(exe_path.to_path_buf()));
         }
@@ -563,11 +568,7 @@ mod tests {
             source: "Wine".to_string(),
         };
 
-        let result = launch_game(
-            &bottle,
-            Path::new("/tmp/some.exe"),
-            None,
-        );
+        let result = launch_game(&bottle, Path::new("/tmp/some.exe"), None);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -582,11 +583,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let bottle = create_fake_bottle(tmp.path(), "TestBottle", "Wine");
 
-        let result = launch_game(
-            &bottle,
-            Path::new("/tmp/corkscrew_no_such_game.exe"),
-            None,
-        );
+        let result = launch_game(&bottle, Path::new("/tmp/corkscrew_no_such_game.exe"), None);
         assert!(result.is_err());
     }
 

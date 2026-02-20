@@ -19,12 +19,7 @@ use crate::games::{DetectedGame, GamePlugin};
 const EXECUTABLES: &[&str] = &["SkyrimSE.exe", "SkyrimSELauncher.exe"];
 
 /// Relative path components from `drive_c` to the default Steam library.
-const STEAM_COMMON: &[&str] = &[
-    "Program Files (x86)",
-    "Steam",
-    "steamapps",
-    "common",
-];
+const STEAM_COMMON: &[&str] = &["Program Files (x86)", "Steam", "steamapps", "common"];
 
 /// The game's directory name inside a Steam library.
 const STEAM_GAME_DIR: &str = "Skyrim Special Edition";
@@ -32,8 +27,18 @@ const STEAM_GAME_DIR: &str = "Skyrim Special Edition";
 /// GOG installation paths to check (relative to `drive_c`).
 const GOG_PATHS: &[&[&str]] = &[
     &["GOG Games", "Skyrim Special Edition"],
-    &["Program Files", "GOG Galaxy", "Games", "Skyrim Special Edition"],
-    &["Program Files (x86)", "GOG Galaxy", "Games", "Skyrim Special Edition"],
+    &[
+        "Program Files",
+        "GOG Galaxy",
+        "Games",
+        "Skyrim Special Edition",
+    ],
+    &[
+        "Program Files (x86)",
+        "GOG Galaxy",
+        "Games",
+        "Skyrim Special Edition",
+    ],
     &["Games", "Skyrim Special Edition"],
 ];
 
@@ -344,10 +349,7 @@ mod tests {
 
         let paths = parse_library_folders_vdf(&vdf).unwrap();
         assert_eq!(paths.len(), 2);
-        assert_eq!(
-            paths[0],
-            PathBuf::from("C:/Program Files (x86)/Steam")
-        );
+        assert_eq!(paths[0], PathBuf::from("C:/Program Files (x86)/Steam"));
         assert_eq!(paths[1], PathBuf::from("D:/SteamLibrary"));
     }
 

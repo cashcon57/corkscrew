@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
-  import { selectedGame, showError, showSuccess } from "$lib/stores";
+  import { goto } from "$app/navigation";
+  import { selectedGame, showError, showSuccess, collectionInstallStatus } from "$lib/stores";
   import type { CollectionInfo, CollectionMod, CollectionSearchResult } from "$lib/types";
   import {
     browseCollections,
@@ -11,7 +12,12 @@
     getConfig,
     installCollection,
     onInstallProgress,
+    listInstalledCollections,
+    switchCollection,
+    deleteCollection,
+    getCollectionDiff,
   } from "$lib/api";
+  import type { CollectionSummary, CollectionDiff } from "$lib/types";
   import type { InstallProgressEvent } from "$lib/types";
   import { config } from "$lib/stores";
   import { openUrl } from "@tauri-apps/plugin-opener";
@@ -20,6 +26,78 @@
   import CompatibilityPanel from "$lib/components/CompatibilityPanel.svelte";
 
   const NEXUS_API_KEY_URL = "https://www.nexusmods.com/users/myaccount?tab=api+access";
+
+  // ---- Tab State ----
+  let activeTab = $state<"browse" | "my">("browse");
+  let myCollections = $state<CollectionSummary[]>([]);
+  let loadingMyCollections = $state(false);
+  let switchingCollection = $state<string | null>(null);
+  let deletingCollection = $state<string | null>(null);
+  let confirmDeleteCollection = $state<string | null>(null);
+  let deleteKeepDownloads = $state(true);
+  let collectionDiffs = $state<Record<string, CollectionDiff | "loading" | "error">>({});
+
+  async function handleCheckDiff(colName: string) {
+    const game = $selectedGame;
+    if (!game) return;
+    collectionDiffs = { ...collectionDiffs, [colName]: "loading" };
+    try {
+      const diff = await getCollectionDiff(game.game_id, game.bottle_name, colName);
+      collectionDiffs = { ...collectionDiffs, [colName]: diff };
+    } catch {
+      collectionDiffs = { ...collectionDiffs, [colName]: "error" };
+    }
+  }
+
+  async function loadMyCollections() {
+    const game = $selectedGame;
+    if (!game) return;
+    loadingMyCollections = true;
+    try {
+      myCollections = await listInstalledCollections(game.game_id, game.bottle_name);
+    } catch {
+      myCollections = [];
+    } finally {
+      loadingMyCollections = false;
+    }
+  }
+
+  async function handleSwitchCollection(name: string) {
+    const game = $selectedGame;
+    if (!game) return;
+    switchingCollection = name;
+    try {
+      await switchCollection(game.game_id, game.bottle_name, name);
+      showSuccess(`Switched to "${name}" — mods deployed`);
+      await loadMyCollections();
+    } catch (e: any) {
+      showError(`Failed to switch: ${e}`);
+    } finally {
+      switchingCollection = null;
+    }
+  }
+
+  async function handleDeleteCollection(name: string) {
+    const game = $selectedGame;
+    if (!game) return;
+    deletingCollection = name;
+    try {
+      const result = await deleteCollection(game.game_id, game.bottle_name, name, !deleteKeepDownloads);
+      showSuccess(`Removed "${name}" (${result.mods_removed} mods${result.downloads_removed > 0 ? `, ${result.downloads_removed} downloads` : ""})`);
+      confirmDeleteCollection = null;
+      await loadMyCollections();
+    } catch (e: any) {
+      showError(`Failed to delete: ${e}`);
+    } finally {
+      deletingCollection = null;
+    }
+  }
+
+  $effect(() => {
+    if (activeTab === "my" && $selectedGame) {
+      loadMyCollections();
+    }
+  });
 
   // ---- Account State ----
 
@@ -54,7 +132,10 @@
   let installStep = $state("");
   let installModName = $state("");
   let installProgress = $state({ current: 0, total: 0 });
-  let installResult = $state<{ installed: number; skipped: number; failed: number; details: { name: string; status: string; error: string | null }[] } | null>(null);
+  let installResult = $state<{ installed: number; already_installed: number; skipped: number; failed: number; details: { name: string; status: string; error: string | null; url: string | null; instructions: string | null }[] } | null>(null);
+  let installStartTime = $state<number>(0);
+  let installElapsed = $state("");
+  let elapsedInterval: ReturnType<typeof setInterval> | null = null;
   let renderedDescription = $state("");
   let userActions = $state<Array<{mod_name: string, action: string, url: string | null, instructions: string | null}>>([]);
   let installUnlisten: (() => void) | null = null;
@@ -94,6 +175,7 @@
 
   onDestroy(() => {
     if (installUnlisten) { installUnlisten(); installUnlisten = null; }
+    if (elapsedInterval) { clearInterval(elapsedInterval); elapsedInterval = null; }
   });
 
   async function checkAccount() {
@@ -209,6 +291,21 @@
     installProgress = { current: 0, total: 0 };
     installResult = null;
     userActions = [];
+    installStartTime = Date.now();
+    collectionInstallStatus.set({
+      active: true,
+      collectionName: selectedCollection.name,
+      currentMod: "",
+      step: "preparing",
+      current: 0,
+      total: 0,
+    });
+    installElapsed = "0s";
+    elapsedInterval = setInterval(() => {
+      const secs = Math.floor((Date.now() - installStartTime) / 1000);
+      if (secs < 60) installElapsed = `${secs}s`;
+      else installElapsed = `${Math.floor(secs / 60)}m ${secs % 60}s`;
+    }, 1000);
 
     try {
       // Subscribe to progress events
@@ -217,10 +314,20 @@
           installModName = event.mod_name;
           installProgress = { current: event.mod_index + 1, total: event.total_mods };
           installStep = "preparing";
+          collectionInstallStatus.set({
+            active: true,
+            collectionName: selectedCollection!.name,
+            currentMod: event.mod_name,
+            step: "preparing",
+            current: event.mod_index + 1,
+            total: event.total_mods,
+          });
         } else if (event.kind === "stepChanged") {
           installStep = event.step;
+          collectionInstallStatus.update(s => s ? { ...s, step: event.step } : s);
         } else if (event.kind === "downloadProgress") {
           installStep = "downloading";
+          collectionInstallStatus.update(s => s ? { ...s, step: "downloading" } : s);
         } else if (event.kind === "modCompleted") {
           installStep = "";
         } else if (event.kind === "modFailed") {
@@ -229,6 +336,7 @@
           userActions = [...userActions, { mod_name: event.mod_name, action: event.action, url: event.url, instructions: event.instructions }];
         } else if (event.kind === "collectionCompleted") {
           installStep = "complete";
+          collectionInstallStatus.set(null);
         }
       });
 
@@ -261,6 +369,8 @@
         modRules: [],
         plugins: [],
         installInstructions: null,
+        slug: selectedCollection.slug ?? null,
+        image_url: selectedCollection.image_url ?? null,
       };
 
       const result = await installCollection(
@@ -271,14 +381,9 @@
 
       installResult = result;
 
+      // Toast is minimal — details shown in the result panel below
       if (result.failed === 0 && result.skipped === 0) {
-        showSuccess(
-          `Installed "${selectedCollection.name}" — ${result.installed} mods deployed`
-        );
-      } else {
-        showSuccess(
-          `Collection "${selectedCollection.name}": ${result.installed} installed, ${result.skipped} need manual download, ${result.failed} failed`
-        );
+        showSuccess(`Collection "${selectedCollection.name}" installed successfully`);
       }
     } catch (e: any) {
       showError(`Collection install failed: ${e}`);
@@ -286,6 +391,8 @@
       installing = false;
       installStep = "";
       installModName = "";
+      collectionInstallStatus.set(null);
+      if (elapsedInterval) { clearInterval(elapsedInterval); elapsedInterval = null; }
       if (installUnlisten) { installUnlisten(); installUnlisten = null; }
     }
   }
@@ -366,7 +473,172 @@
 </script>
 
 <div class="collections-page">
-  {#if checkingAuth}
+  <!-- Tab Switcher -->
+  <div class="tab-bar">
+    <button class="tab-btn" class:tab-active={activeTab === "browse"} onclick={() => activeTab = "browse"}>
+      Browse
+    </button>
+    <button class="tab-btn" class:tab-active={activeTab === "my"} onclick={() => activeTab = "my"}>
+      My Collections
+      {#if myCollections.length > 0}
+        <span class="tab-count">{myCollections.length}</span>
+      {/if}
+    </button>
+  </div>
+
+  {#if activeTab === "my"}
+    <!-- My Collections Tab -->
+    <header class="page-header">
+      <div class="header-text">
+        <h2 class="page-title">My Collections</h2>
+        <p class="page-subtitle">Manage installed mod collections — switch between them or remove ones you no longer need</p>
+      </div>
+    </header>
+
+    {#if !$selectedGame}
+      <div class="my-collections-empty">
+        <p>Select a game from the Mods page first to view your installed collections.</p>
+      </div>
+    {:else if loadingMyCollections}
+      <div class="my-collections-empty">
+        <div class="spinner"><div class="spinner-ring"></div></div>
+        <p>Loading collections...</p>
+      </div>
+    {:else if myCollections.length === 0}
+      <div class="my-collections-empty">
+        <p>No collections installed yet.</p>
+        <p class="muted">Install a collection from the Browse tab to get started.</p>
+        <button class="btn btn-secondary" onclick={() => activeTab = "browse"}>
+          Browse Collections
+        </button>
+      </div>
+    {:else}
+      <div class="my-collections-grid">
+        {#each myCollections as col}
+          <div class="my-collection-card">
+            <div class="my-card-image">
+              {#if col.image_url}
+                <img src={col.image_url} alt={col.name} loading="lazy" />
+              {:else}
+                <div class="my-card-image-placeholder">
+                  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/>
+                  </svg>
+                </div>
+              {/if}
+            </div>
+            <div class="my-collection-body">
+              <h3 class="my-collection-name">{col.name}</h3>
+              {#if col.author}
+                <p class="my-collection-author">by {col.author}</p>
+              {/if}
+              <div class="my-collection-stats">
+                <span>{col.mod_count} mods</span>
+                <span class="stat-separator">&middot;</span>
+                <span class:stat-active={col.enabled_count > 0}>{col.enabled_count} active</span>
+                {#if col.installed_revision}
+                  <span class="stat-separator">&middot;</span>
+                  <span>Rev {col.installed_revision}</span>
+                {/if}
+              </div>
+              <div class="my-collection-actions">
+                {#if confirmDeleteCollection === col.name}
+                  <div class="delete-confirm">
+                    <label class="keep-downloads-label">
+                      <input type="checkbox" bind:checked={deleteKeepDownloads} />
+                      Keep shared downloads
+                    </label>
+                    <button
+                      class="btn btn-danger btn-sm"
+                      onclick={() => handleDeleteCollection(col.name)}
+                      disabled={deletingCollection === col.name}
+                    >
+                      {deletingCollection === col.name ? "Deleting..." : "Confirm Delete"}
+                    </button>
+                    <button class="btn btn-ghost btn-sm" onclick={() => confirmDeleteCollection = null}>
+                      Cancel
+                    </button>
+                  </div>
+                {:else}
+                  <button
+                    class="btn btn-primary btn-sm"
+                    onclick={() => handleSwitchCollection(col.name)}
+                    disabled={switchingCollection === col.name}
+                  >
+                    {switchingCollection === col.name ? "Switching..." : "Activate"}
+                  </button>
+                  {#if col.slug}
+                    <button
+                      class="btn btn-secondary btn-sm"
+                      onclick={() => handleCheckDiff(col.name)}
+                      disabled={collectionDiffs[col.name] === "loading"}
+                    >
+                      {collectionDiffs[col.name] === "loading" ? "Checking..." : "Check Updates"}
+                    </button>
+                  {/if}
+                  <button
+                    class="btn btn-ghost-danger btn-sm"
+                    onclick={() => confirmDeleteCollection = col.name}
+                  >
+                    Delete
+                  </button>
+                {/if}
+              </div>
+              {#if collectionDiffs[col.name] && collectionDiffs[col.name] !== "loading" && collectionDiffs[col.name] !== "error"}
+                {@const diff = collectionDiffs[col.name] as CollectionDiff}
+                <div class="diff-panel">
+                  <div class="diff-header">
+                    <span class="diff-revisions">
+                      {#if diff.installed_revision}Rev {diff.installed_revision}{:else}Installed{/if}
+                      &rarr; Rev {diff.latest_revision}
+                    </span>
+                    {#if diff.added.length === 0 && diff.removed.length === 0 && diff.updated.length === 0}
+                      <span class="diff-badge diff-badge-ok">Up to date</span>
+                    {:else}
+                      <span class="diff-badge diff-badge-changes">
+                        {diff.added.length + diff.removed.length + diff.updated.length} changes
+                      </span>
+                    {/if}
+                  </div>
+                  {#if diff.added.length > 0}
+                    <div class="diff-section diff-added">
+                      <span class="diff-label">+ {diff.added.length} added</span>
+                      {#each diff.added as entry}
+                        <span class="diff-item">{entry.name} {entry.version}</span>
+                      {/each}
+                    </div>
+                  {/if}
+                  {#if diff.removed.length > 0}
+                    <div class="diff-section diff-removed">
+                      <span class="diff-label">- {diff.removed.length} removed</span>
+                      {#each diff.removed as entry}
+                        <span class="diff-item">{entry.name} {entry.version}</span>
+                      {/each}
+                    </div>
+                  {/if}
+                  {#if diff.updated.length > 0}
+                    <div class="diff-section diff-updated">
+                      <span class="diff-label">~ {diff.updated.length} updated</span>
+                      {#each diff.updated as entry}
+                        <span class="diff-item">{entry.name}: {entry.installed_version} &rarr; {entry.latest_version}</span>
+                      {/each}
+                    </div>
+                  {/if}
+                  {#if diff.unchanged > 0}
+                    <span class="diff-unchanged">{diff.unchanged} unchanged</span>
+                  {/if}
+                </div>
+              {:else if collectionDiffs[col.name] === "error"}
+                <div class="diff-panel diff-error">
+                  <span>Could not fetch diff — collection slug may not be stored.</span>
+                </div>
+              {/if}
+            </div>
+          </div>
+        {/each}
+      </div>
+    {/if}
+  {:else if checkingAuth}
     <!-- Checking account status -->
     <header class="page-header">
       <div class="header-text">
@@ -572,19 +844,31 @@
                     Preparing...
                   {/if}
                 </span>
+                {#if installProgress.total > 0}
+                  <span class="install-progress-pct">
+                    {Math.round((installProgress.current / installProgress.total) * 100)}%
+                  </span>
+                {/if}
               </div>
               {#if installModName}
-                <div class="install-progress-mod">{installModName}</div>
-              {/if}
-              {#if installStep && installStepLabels[installStep]}
+                <div class="install-progress-mod">
+                  {installModName}
+                  {#if installStep && installStepLabels[installStep]}
+                    <span class="install-progress-step-inline">{installStepLabels[installStep]}</span>
+                  {/if}
+                </div>
+              {:else if installStep && installStepLabels[installStep]}
                 <div class="install-progress-step">{installStepLabels[installStep]}</div>
               {/if}
               {#if installProgress.total > 0}
-                <div class="install-progress-bar">
-                  <div
-                    class="install-progress-fill"
-                    style="width: {(installProgress.current / installProgress.total) * 100}%"
-                  ></div>
+                <div class="install-progress-bar-row">
+                  <div class="install-progress-bar">
+                    <div
+                      class="install-progress-fill"
+                      style="width: {(installProgress.current / installProgress.total) * 100}%"
+                    ></div>
+                  </div>
+                  <span class="install-progress-elapsed">{installElapsed}</span>
                 </div>
               {/if}
               {#if userActions.length > 0}
@@ -615,18 +899,114 @@
             </div>
           {:else if installResult}
             <div class="install-result-panel">
-              <div class="install-result-summary">
-                <span class="result-installed">{installResult.installed} installed</span>
-                {#if installResult.skipped > 0}
-                  <span class="result-skipped">{installResult.skipped} need manual download</span>
+              <!-- Header -->
+              <div class="result-header">
+                {#if installResult.failed === 0 && installResult.skipped === 0}
+                  <svg class="result-header-icon result-header-icon--success" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+                    <polyline points="22 4 12 14.01 9 11.01" />
+                  </svg>
+                {:else}
+                  <svg class="result-header-icon result-header-icon--warning" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10" />
+                    <line x1="12" y1="8" x2="12" y2="12" />
+                    <line x1="12" y1="16" x2="12.01" y2="16" />
+                  </svg>
                 {/if}
-                {#if installResult.failed > 0}
-                  <span class="result-failed">{installResult.failed} failed</span>
-                {/if}
+                <div class="result-header-text">
+                  <h3 class="result-title">
+                    {installResult.failed === 0 && installResult.skipped === 0
+                      ? "Collection Installed"
+                      : "Install Complete"}
+                  </h3>
+                  <div class="result-counts">
+                    {#if installResult.installed > 0}
+                      <span class="result-count result-count--installed">{installResult.installed} installed</span>
+                    {/if}
+                    {#if installResult.already_installed > 0}
+                      <span class="result-count result-count--existing">{installResult.already_installed} already installed</span>
+                    {/if}
+                    {#if installResult.skipped > 0}
+                      <span class="result-count result-count--action">{installResult.skipped} need action</span>
+                    {/if}
+                    {#if installResult.failed > 0}
+                      <span class="result-count result-count--failed">{installResult.failed} failed</span>
+                    {/if}
+                  </div>
+                </div>
               </div>
-              <button class="btn btn-ghost btn-sm" onclick={() => installResult = null}>
-                Dismiss
-              </button>
+
+              <!-- Per-mod details -->
+              <div class="result-mod-list">
+                {#each installResult.details.filter(d => d.status === "installed") as detail}
+                  <div class="result-mod-row">
+                    <svg class="result-mod-icon result-mod-icon--installed" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                      <polyline points="20 6 9 17 4 12" />
+                    </svg>
+                    <span class="result-mod-name">{detail.name}</span>
+                  </div>
+                {/each}
+                {#each installResult.details.filter(d => d.status === "already_installed") as detail}
+                  <div class="result-mod-row">
+                    <svg class="result-mod-icon result-mod-icon--existing" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                      <polyline points="20 6 9 17 4 12" />
+                    </svg>
+                    <span class="result-mod-name">{detail.name}</span>
+                    <span class="result-mod-badge result-mod-badge--existing">Already installed</span>
+                  </div>
+                {/each}
+                {#each installResult.details.filter(d => d.status === "user_action") as detail}
+                  <div class="result-mod-card result-mod-card--action">
+                    <div class="result-mod-card-header">
+                      <svg class="result-mod-icon result-mod-icon--action" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+                        <line x1="12" y1="9" x2="12" y2="13" />
+                        <line x1="12" y1="17" x2="12.01" y2="17" />
+                      </svg>
+                      <span class="result-mod-name">{detail.name}</span>
+                    </div>
+                    {#if detail.instructions}
+                      <p class="result-mod-instructions">{detail.instructions}</p>
+                    {:else if detail.error}
+                      <p class="result-mod-instructions">{detail.error}</p>
+                    {/if}
+                    {#if detail.url}
+                      <button class="btn btn-secondary btn-sm" onclick={() => openUrl(detail.url!)}>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                          <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                          <polyline points="15 3 21 3 21 9" />
+                          <line x1="10" y1="14" x2="21" y2="3" />
+                        </svg>
+                        Open in Browser
+                      </button>
+                    {/if}
+                  </div>
+                {/each}
+                {#each installResult.details.filter(d => d.status === "failed") as detail}
+                  <div class="result-mod-card result-mod-card--failed">
+                    <div class="result-mod-card-header">
+                      <svg class="result-mod-icon result-mod-icon--failed" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="18" y1="6" x2="6" y2="18" />
+                        <line x1="6" y1="6" x2="18" y2="18" />
+                      </svg>
+                      <span class="result-mod-name">{detail.name}</span>
+                    </div>
+                    {#if detail.error}
+                      <p class="result-mod-error">{detail.error}</p>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+
+              <!-- Post-install actions -->
+              <div class="result-actions">
+                <button class="btn btn-primary btn-sm" onclick={() => goto("/mods")}>
+                  View Installed Mods
+                </button>
+                <button class="btn btn-ghost btn-sm" onclick={() => installResult = null}>
+                  Dismiss
+                </button>
+              </div>
             </div>
           {:else}
             <button
@@ -1710,12 +2090,42 @@
     text-overflow: ellipsis;
   }
 
+  .install-progress-pct {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--system-accent);
+    margin-left: auto;
+    font-variant-numeric: tabular-nums;
+  }
+
   .install-progress-step {
     font-size: 11px;
     color: var(--text-tertiary);
   }
 
+  .install-progress-step-inline {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-left: var(--space-2);
+  }
+
+  .install-progress-bar-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .install-progress-elapsed {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+    min-width: 32px;
+    text-align: right;
+  }
+
   .install-progress-bar {
+    flex: 1;
     height: 4px;
     background: var(--surface-hover);
     border-radius: 2px;
@@ -1784,27 +2194,446 @@
   .install-result-panel {
     flex: 1;
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-3);
+    flex-direction: column;
+    gap: var(--space-4);
+    padding: var(--space-4);
+    background: var(--surface);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius-lg);
   }
 
-  .install-result-summary {
+  .result-header {
     display: flex;
+    align-items: flex-start;
     gap: var(--space-3);
-    font-size: 13px;
   }
 
-  .result-installed {
+  .result-header-icon {
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+
+  .result-header-icon--success {
     color: #34C759;
-    font-weight: 600;
   }
 
-  .result-skipped {
+  .result-header-icon--warning {
     color: #FF9500;
   }
 
-  .result-failed {
+  .result-header-text {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .result-title {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--text-primary);
+  }
+
+  .result-counts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+
+  .result-count {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
+
+  .result-count--installed {
+    color: #34C759;
+    background: rgba(52, 199, 89, 0.12);
+  }
+
+  .result-count--existing {
+    color: var(--system-accent);
+    background: var(--system-accent-subtle);
+  }
+
+  .result-count--action {
+    color: #FF9500;
+    background: rgba(255, 149, 0, 0.12);
+  }
+
+  .result-count--failed {
     color: #FF3B30;
+    background: rgba(255, 59, 48, 0.12);
+  }
+
+  .result-mod-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    max-height: 300px;
+    overflow-y: auto;
+  }
+
+  .result-mod-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
+  }
+
+  .result-mod-row:hover {
+    background: var(--surface-hover);
+  }
+
+  .result-mod-icon--installed {
+    color: #34C759;
+    flex-shrink: 0;
+  }
+
+  .result-mod-icon--existing {
+    color: var(--system-accent);
+    flex-shrink: 0;
+  }
+
+  .result-mod-icon--action {
+    color: #FF9500;
+    flex-shrink: 0;
+  }
+
+  .result-mod-icon--failed {
+    color: #FF3B30;
+    flex-shrink: 0;
+  }
+
+  .result-mod-name {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
+
+  .result-mod-badge {
+    font-size: 10px;
+    font-weight: 500;
+    padding: 1px 5px;
+    border-radius: 4px;
+    flex-shrink: 0;
+  }
+
+  .result-mod-badge--existing {
+    color: var(--system-accent);
+    background: var(--system-accent-subtle);
+  }
+
+  .result-mod-card {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-3);
+    border-radius: var(--radius);
+    border: 1px solid var(--separator);
+  }
+
+  .result-mod-card--action {
+    background: rgba(255, 149, 0, 0.04);
+    border-color: rgba(255, 149, 0, 0.2);
+  }
+
+  .result-mod-card--failed {
+    background: rgba(255, 59, 48, 0.04);
+    border-color: rgba(255, 59, 48, 0.2);
+  }
+
+  .result-mod-card-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .result-mod-instructions {
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+    margin: 0;
+    padding-left: 22px;
+  }
+
+  .result-mod-error {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    line-height: 1.5;
+    margin: 0;
+    padding-left: 22px;
+  }
+
+  .result-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding-top: var(--space-2);
+    border-top: 1px solid var(--separator);
+  }
+
+  /* ============================
+     Tab Bar
+     ============================ */
+  .tab-bar {
+    display: flex;
+    gap: var(--space-1);
+    padding: var(--space-1);
+    background: var(--surface);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius);
+    flex-shrink: 0;
+  }
+
+  .tab-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-4);
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    background: transparent;
+    cursor: pointer;
+    transition: background var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease);
+  }
+
+  .tab-btn:hover {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+  }
+
+  .tab-active {
+    background: var(--system-accent);
+    color: var(--system-accent-on);
+  }
+
+  .tab-active:hover {
+    background: var(--system-accent-hover);
+    color: var(--system-accent-on);
+  }
+
+  .tab-count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 100px;
+    font-size: 10px;
+    font-weight: 700;
+    background: rgba(255, 255, 255, 0.2);
+  }
+
+  /* ============================
+     My Collections
+     ============================ */
+  .my-collections-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    flex: 1;
+    gap: var(--space-3);
+    padding: var(--space-12);
+    text-align: center;
+    color: var(--text-secondary);
+    font-size: 14px;
+  }
+
+  .my-collections-empty .muted {
+    color: var(--text-tertiary);
+    font-size: 13px;
+  }
+
+  .my-collections-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: var(--space-4);
+  }
+
+  .my-collection-card {
+    display: flex;
+    flex-direction: column;
+    background: var(--surface);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius);
+    overflow: hidden;
+    transition: background var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease);
+  }
+
+  .my-collection-card:hover {
+    background: var(--surface-hover);
+    border-color: var(--accent-muted);
+  }
+
+  .my-card-image {
+    width: 100%;
+    height: 120px;
+    overflow: hidden;
+    background: var(--bg-tertiary);
+  }
+
+  .my-card-image img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .my-card-image-placeholder {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-quaternary);
+  }
+
+  .my-collection-body {
+    padding: var(--space-3) var(--space-4);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .my-collection-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .my-collection-author {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin: 0;
+  }
+
+  .my-collection-stats {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: 12px;
+    color: var(--text-tertiary);
+    margin-top: 2px;
+  }
+
+  .stat-separator {
+    color: var(--text-quaternary);
+  }
+
+  .stat-active {
+    color: var(--green);
+    font-weight: 500;
+  }
+
+  .my-collection-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-top: var(--space-2);
+  }
+
+  .delete-confirm {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .keep-downloads-label {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    font-size: 12px;
+    color: var(--text-secondary);
+    cursor: pointer;
+  }
+
+  .keep-downloads-label input {
+    accent-color: var(--system-accent);
+  }
+
+  /* ---- Collection Diff ---- */
+  .diff-panel {
+    margin-top: var(--space-3);
+    padding: var(--space-3);
+    background: var(--bg-tertiary);
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .diff-error {
+    color: var(--text-tertiary);
+    font-style: italic;
+  }
+
+  .diff-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+  }
+
+  .diff-revisions {
+    font-weight: 500;
+    color: var(--text-secondary);
+  }
+
+  .diff-badge {
+    padding: 1px 6px;
+    border-radius: 8px;
+    font-size: 11px;
+    font-weight: 500;
+  }
+
+  .diff-badge-ok {
+    background: rgba(52, 199, 89, 0.15);
+    color: var(--green);
+  }
+
+  .diff-badge-changes {
+    background: rgba(255, 159, 10, 0.15);
+    color: var(--yellow);
+  }
+
+  .diff-section {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .diff-label {
+    font-weight: 600;
+    font-size: 11px;
+  }
+
+  .diff-added .diff-label { color: var(--green); }
+  .diff-removed .diff-label { color: var(--red); }
+  .diff-updated .diff-label { color: var(--yellow); }
+
+  .diff-item {
+    color: var(--text-secondary);
+    padding-left: var(--space-3);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .diff-unchanged {
+    color: var(--text-tertiary);
+    font-size: 11px;
   }
 </style>

@@ -173,11 +173,7 @@ fn parse_files_block(reader: &mut Reader<&[u8]>, buf: &mut Vec<u8>) -> Vec<Fomod
 }
 
 /// Parse a `<plugin>` element into a [`FomodOption`].
-fn parse_plugin(
-    reader: &mut Reader<&[u8]>,
-    buf: &mut Vec<u8>,
-    name: String,
-) -> FomodOption {
+fn parse_plugin(reader: &mut Reader<&[u8]>, buf: &mut Vec<u8>, name: String) -> FomodOption {
     let mut option = FomodOption {
         name,
         description: String::new(),
@@ -280,11 +276,7 @@ fn parse_group(
 }
 
 /// Parse an `<installStep>` element into a [`FomodStep`].
-fn parse_step(
-    reader: &mut Reader<&[u8]>,
-    buf: &mut Vec<u8>,
-    name: String,
-) -> FomodStep {
+fn parse_step(reader: &mut Reader<&[u8]>, buf: &mut Vec<u8>, name: String) -> FomodStep {
     let mut step = FomodStep {
         name,
         groups: Vec::new(),
@@ -662,14 +654,8 @@ mod tests {
     fn get_files_includes_required_and_selected() {
         let installer = parse_fomod_xml(SAMPLE_XML).unwrap();
         let mut selections = HashMap::new();
-        selections.insert(
-            "Textures".to_string(),
-            vec!["Low Res".to_string()],
-        );
-        selections.insert(
-            "Extras".to_string(),
-            vec!["ENB Preset".to_string()],
-        );
+        selections.insert("Textures".to_string(), vec!["Low Res".to_string()]);
+        selections.insert("Extras".to_string(), vec!["ENB Preset".to_string()]);
 
         let files = get_files_for_selections(&installer, &selections);
 
@@ -686,14 +672,8 @@ mod tests {
     fn files_sorted_by_priority() {
         let installer = parse_fomod_xml(SAMPLE_XML).unwrap();
         let mut selections = HashMap::new();
-        selections.insert(
-            "Textures".to_string(),
-            vec!["High Res".to_string()],
-        );
-        selections.insert(
-            "Extras".to_string(),
-            vec!["ENB Preset".to_string()],
-        );
+        selections.insert("Textures".to_string(), vec!["High Res".to_string()]);
+        selections.insert("Extras".to_string(), vec!["ENB Preset".to_string()]);
 
         let files = get_files_for_selections(&installer, &selections);
         let priorities: Vec<i32> = files.iter().map(|f| f.priority).collect();

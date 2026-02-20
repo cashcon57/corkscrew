@@ -36,7 +36,7 @@ Corkscrew installs, manages, and organizes mods for Windows games running throug
 
 It works by reading and writing directly to your Wine bottle's filesystem, the same way the game itself sees it. Your bottles, your mods, no middleman.
 
-> **Status:** v0.5.2 — Skyrim Special Edition is the first fully supported game. More games coming soon.
+> **Status:** v0.6.0 — Skyrim Special Edition is the first fully supported game. More games coming soon.
 
 ---
 
@@ -44,12 +44,17 @@ It works by reading and writing directly to your Wine bottle's filesystem, the s
 
 ### Mod Management
 - **Staging-based deployment** — Mods are extracted to a staging folder first, then deployed to the game directory via hardlinks (with copy fallback). Toggle mods on/off without re-downloading or re-extracting.
-- **Mod installation** — Handles `.zip` and `.7z` archives with smart data root detection, or drag-and-drop files directly onto the app.
+- **Mod installation** — Handles `.zip`, `.7z`, `.rar`, `.tar.gz`, `.tar.xz`, and `.tar.bz2` archives with smart data root detection, or drag-and-drop files directly onto the app.
 - **Priority-based conflict resolution** — Drag-reorder mods to set deployment priority. Higher-priority mods win when files overlap, with a visual conflict panel showing which mods override which files.
 - **FOMOD wizard** — Step-by-step interactive installer for mods using the FOMOD XML format, with radio/checkbox groups, option descriptions, and type badges.
+- **FOMOD choice replay** — Save and export FOMOD installer choices as shareable JSON recipes, then replay them on reinstall or share with others.
 - **Mod integrity verification** — SHA-256 hashes are stored per file; verify staging integrity on demand.
 - **Mod version rollback** — Track mod versions and roll back to previous versions with snapshot support.
 - **Modlist export/import** — Export your mod setup as a portable JSON modlist and import it on another machine or share it with others, with diff comparison between modlists.
+- **Mod dependency tracking** — Define requires/conflicts/patches relationships between mods. The dependency checker surfaces missing requirements and active conflicts before you launch.
+- **Contextual mod recommendations** — Get suggestions for commonly co-installed mods based on what others use in similar setups.
+- **Pre-flight installation checks** — Run a comprehensive pre-deployment check covering disk space, staging integrity, bottle health, and file conflicts before deploying.
+- **Disk space budget** — Real-time disk usage dashboard showing staging, deployment, and available space with per-install impact estimates.
 
 ### Nexus Mods Integration
 - **API key authentication** — Connect your Nexus Mods account to access premium features.
@@ -57,6 +62,9 @@ It works by reading and writing directly to your Wine bottle's filesystem, the s
 - **Update checking** — Check installed mods against Nexus for available updates.
 - **Collections browser** — Browse NexusMods Collections with search, sorting, filtering, and detailed mod/revision views. Download sizes and mod counts shown per collection.
 - **Collection installation** — Premium users can install entire NexusMods Collections with one click. The orchestrator resolves install order, downloads mods, handles FOMOD selections from the collection manifest, deploys files, and applies the collection's plugin load order. Free users see a list of mods to download manually from the Nexus website.
+- **Collection diff** — Compare your locally installed collection against the author's latest revision to see added, removed, and updated mods at a glance.
+- **My Collections** — Card grid with collection thumbnails, author info, and revision tracking. Check for updates with one click.
+- **Global install status bar** — Collection install progress is visible from any page via a persistent status bar overlay.
 - **Premium enforcement** — Free users are directed to the Nexus Mods website for downloads; only premium users get API-initiated downloads, in full compliance with NexusMods policies.
 - **Install progress events** — Real-time step-by-step progress feedback during mod and collection installation (preparing, extracting, deploying, syncing plugins) via Tauri event system.
 
@@ -82,12 +90,16 @@ It works by reading and writing directly to your Wine bottle's filesystem, the s
 - **Crash diagnosis** — Parses crash logs to identify exception types, faulting modules, involved plugins, and SKSE plugins.
 - **Suggested actions** — Provides actionable recommendations (update mod, disable mod, sort load order, check VRAM, etc.) with confidence ratings.
 - **System info extraction** — Displays OS, CPU, GPU, RAM, and VRAM usage at crash time.
+- **Game session tracking** — Log play sessions with automatic duration tracking, crash detection, and stability summaries. Track which mods were changed between sessions to correlate changes with crashes.
 
 ### Game Launching & Tools
 - **Game launching** — Play your modded game straight from Corkscrew, through whatever Wine layer the bottle uses.
 - **SKSE integration** — Auto-detect, download, and install the Skyrim Script Extender; launch through SKSE with one click. Compatibility checks against your game version.
 - **Skyrim SE downgrade** — Detect your Skyrim version via SHA-256 hash and create a "Stock Game" copy to lock v1.5.97 and prevent Steam auto-updates (same approach pioneered by Wabbajack).
 - **Display scaling fix** — Automatically fix Skyrim SE display scaling issues in CrossOver on macOS by detecting your screen resolution and setting proper INI values for borderless windowed mode.
+- **INI settings manager** — Browse, search, and edit game INI files (Skyrim.ini, SkyrimPrefs.ini, etc.) with built-in presets for common configurations like Steam Deck optimization, ultra graphics, and performance profiles.
+- **Wine bottle diagnostics** — Comprehensive health check for Wine bottles: validates drive_c, AppData, DXVK (Linux) / D3DMetal (macOS), DLL overrides, Visual C++ redistributables, .NET, Windows version, Retina/HiDPI display, and user directories, with one-click auto-fixes for common issues.
+- **Mod tools detection** — Automatically scans for known modding tools (SSEEdit, BethINI, DynDOLOD, BodySlide, Nemesis, Wrye Bash, etc.) in your game directory.
 - **Custom executables** — Define custom .exe launch targets per game.
 - **Game file integrity** — Take snapshots of your game directory to detect modified, unknown, or missing files later.
 - **Bottle configuration** — View and modify Wine bottle settings (Windows version, MSync, MetalFX, DXMT, environment variables) directly from Corkscrew.
@@ -114,6 +126,12 @@ Everything listed above is implemented and functional. The app has been tested p
 - Crash log analysis with actionable diagnosis
 - SKSE detection, download, install, and launch-through-SKSE
 - Collection browsing, filtering by game, and metadata viewing
+- Pre-flight checks and disk space budgeting before deployment
+- INI file browsing, editing, and preset application
+- Wine bottle diagnostics with automated fixes
+- Mod dependency tracking and conflict detection
+- Game session logging with stability summaries
+- FOMOD choice recipes (save, export, import, replay)
 
 ### Known Limitations
 
@@ -123,12 +141,24 @@ Everything listed above is implemented and functional. The app has been tested p
 - **NexusMods SSO** — The SSO module is built but requires NexusMods to approve the "Corkscrew" application slug. Currently uses API key authentication.
 - **OAuth flow** — OAuth 2.0 + PKCE module is implemented but depends on the same NexusMods app approval as SSO.
 
-### Planned
+### Roadmap
 
-- Wabbajack modlist installation (FromArchive directives, download queue)
+**Near-term:**
+- Multi-panel mods page — side-by-side layout with mod list and contextual detail panel
+- Advanced mod filtering and sorting — by category, state, source, update status
+- Mod tools launching — run detected tools (SSEEdit, DynDOLOD, etc.) through Wine from within Corkscrew
+- SKSE/Address Library pre-flight compatibility checks
+
+**Medium-term:**
+- Wabbajack modlist installation (FromArchive directives, download orchestration)
 - More game plugins (Fallout 4, Oblivion, Starfield, etc.)
 - NexusMods SSO/OAuth authentication (pending NM app approval)
+- Same-volume staging for reliable hardlink deployment
+
+**Long-term:**
 - Linux/SteamOS testing and distribution (AppImage, .deb, .rpm)
+- Collection update installation from diff view
+- UI/UX refinement with modular panel-based layout
 
 ---
 
@@ -204,15 +234,15 @@ Adding a new game is a matter of writing a small plugin — see [`plugins/skyrim
 
 **Rust** handles everything that touches the filesystem or network: bottle discovery across nine different Wine sources, archive extraction, staging-based mod deployment via hardlinks, LOOT plugin sorting, Nexus Mods API calls, NexusMods Collections GraphQL queries, SKSE downloads, Skyrim SE version detection, crash log analysis, and Wabbajack modlist gallery fetching. The plugin-based game detection system (`GamePlugin` trait) makes adding new game support straightforward.
 
-**SQLite** (via `rusqlite`) with a versioned migration system tracks installed mods, deployment manifests, file hashes, profiles, plugin rules, conflict rules, mod version history, and game file snapshots.
+**SQLite** (via `rusqlite`) with a versioned migration system (v1→v6) tracks installed mods, deployment manifests, file hashes, profiles, plugin rules, conflict rules, mod version history, game file snapshots, mod dependencies, FOMOD recipes, game sessions, and collection metadata.
 
 ### Project structure
 
 ```
 src/                          Svelte frontend
 ├── lib/
-│   ├── api.ts                Tauri IPC bindings (~80 typed invoke wrappers)
-│   ├── types.ts              Shared TypeScript interfaces (~80 types)
+│   ├── api.ts                Tauri IPC bindings (~100 typed invoke wrappers)
+│   ├── types.ts              Shared TypeScript interfaces (~100 types)
 │   ├── stores.ts             Svelte stores (game selection, mods, toasts)
 │   ├── theme.ts              Theme detection, persistence, and vibrancy
 │   └── components/
@@ -223,7 +253,13 @@ src/                          Svelte frontend
 │       ├── GameIcon.svelte            Per-game icon component
 │       ├── ModVersionHistory.svelte   Version rollback UI
 │       ├── ModlistImportWizard.svelte Modlist import + diff wizard
-│       └── PluginRulesPanel.svelte    Custom plugin load order rules
+│       ├── PluginRulesPanel.svelte    Custom plugin load order rules
+│       ├── DiskBudgetPanel.svelte     Disk space budget + impact estimates
+│       ├── PreflightPanel.svelte      Pre-deployment health checks
+│       ├── DependencyPanel.svelte     Mod dependency graph + issue checker
+│       ├── SessionHistoryPanel.svelte Game session log + stability summary
+│       ├── IniManagerPanel.svelte     INI file editor with presets
+│       └── WineDiagnosticsPanel.svelte Wine bottle health diagnostics
 ├── routes/
 │   ├── +layout.svelte        Shell: sidebar nav, toast system, theme init
 │   ├── +page.svelte          Dashboard (bottle scanning, game discovery)
@@ -233,20 +269,20 @@ src/                          Svelte frontend
 │   ├── modlists/+page.svelte Wabbajack modlist gallery browser
 │   ├── logs/+page.svelte     Crash log analysis and diagnosis
 │   ├── profiles/+page.svelte Mod profile management
-│   ├── settings/+page.svelte Config, appearance, game tools, auth
+│   ├── settings/+page.svelte Config, appearance, game tools, auth, INI, diagnostics
 │   └── about/+page.svelte    Version, credits, acknowledgments
-└── app.css                   Design system (tokens, themes, vibrancy)
+└── app.css                   Design system (tokens, themes, vibrancy, animations)
 
-src-tauri/src/                Rust backend (~32 modules)
-├── lib.rs              Tauri command handlers (~70+ IPC commands)
+src-tauri/src/                Rust backend (~42 modules, 464 tests)
+├── lib.rs              Tauri command handlers (~95 IPC commands)
 ├── bottles.rs          Bottle detection (9 sources, macOS + Linux)
 ├── bottle_config.rs    Wine bottle settings (MSync, MetalFX, env vars)
 ├── games.rs            Game detection framework + plugin registry
-├── installer.rs        Archive extraction (.zip, .7z) + data root detection
+├── installer.rs        Archive extraction (.zip, .7z, .rar, .tar.gz/xz/bz2) + data root detection
 ├── staging.rs          Staging folder management + SHA-256 hashing
 ├── deployer.rs         Hardlink/copy deployment engine + manifest tracking
 ├── database.rs         SQLite mod tracking with versioned migrations
-├── migrations.rs       Schema versioning + migration runner
+├── migrations.rs       Schema versioning + migration runner (v1→v6)
 ├── loot.rs             libloot wrapper + masterlist management
 ├── loot_rules.rs       Custom plugin load order rules
 ├── profiles.rs         Mod profile CRUD + activation flow
@@ -268,6 +304,16 @@ src-tauri/src/                Rust backend (~32 modules)
 ├── executables.rs      Custom executable management
 ├── config.rs           JSON configuration (dirs crate for platform paths)
 ├── fomod.rs            FOMOD XML installer parser (quick-xml)
+├── fomod_recipes.rs    FOMOD choice save/export/import/replay
+├── disk_budget.rs      Disk space tracking + install impact estimates
+├── ini_manager.rs      INI file parser/editor + game-specific presets
+├── wine_diagnostic.rs  Wine bottle health checks + automated fixes
+├── preflight.rs        Pre-deployment validation checks
+├── mod_dependencies.rs Mod dependency graph + issue detection
+├── mod_recommendations.rs  Co-install recommendations engine
+├── mod_tools.rs        Mod tool detection (SSEEdit, BethINI, DynDOLOD, etc.)
+├── session_tracker.rs  Game session logging + stability analysis
+├── download_queue.rs   Download queue with retry + progress events
 └── plugins/
     ├── skyrim_se.rs          Skyrim SE detection (Steam + GOG paths)
     └── skyrim_plugins.rs     Plugin load order management

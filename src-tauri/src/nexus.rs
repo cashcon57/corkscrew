@@ -69,8 +69,8 @@ impl NXMLink {
     pub fn parse(url: &str) -> Result<Self> {
         // url::Url does not recognise `nxm` as a scheme with authority,
         // so we swap it for `http` to leverage its parser.
-        let normalised = if url.starts_with("nxm://") {
-            format!("http://{}", &url[6..])
+        let normalised = if let Some(stripped) = url.strip_prefix("nxm://") {
+            format!("http://{}", stripped)
         } else {
             return Err(NexusError::InvalidNxmLink(format!(
                 "URL does not start with nxm://: {url}"
@@ -97,13 +97,13 @@ impl NXMLink {
             )));
         }
 
-        let mod_id: i64 = segments[1].parse().map_err(|_| {
-            NexusError::InvalidNxmLink(format!("invalid mod_id: {}", segments[1]))
-        })?;
+        let mod_id: i64 = segments[1]
+            .parse()
+            .map_err(|_| NexusError::InvalidNxmLink(format!("invalid mod_id: {}", segments[1])))?;
 
-        let file_id: i64 = segments[3].parse().map_err(|_| {
-            NexusError::InvalidNxmLink(format!("invalid file_id: {}", segments[3]))
-        })?;
+        let file_id: i64 = segments[3]
+            .parse()
+            .map_err(|_| NexusError::InvalidNxmLink(format!("invalid file_id: {}", segments[3])))?;
 
         // Optional query parameters.
         let mut key: Option<String> = None;
@@ -179,10 +179,7 @@ impl NexusClient {
             .expect("API key contains non-ASCII bytes");
         headers.insert("apikey", header_val);
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
-        headers.insert(
-            USER_AGENT,
-            HeaderValue::from_static("Corkscrew/0.1.0"),
-        );
+        headers.insert(USER_AGENT, HeaderValue::from_static("Corkscrew/0.1.0"));
 
         let client = reqwest::Client::builder()
             .default_headers(headers)
@@ -223,11 +220,7 @@ impl NexusClient {
     }
 
     /// Fetch metadata for a single mod.
-    pub async fn get_mod(
-        &self,
-        game_slug: &str,
-        mod_id: i64,
-    ) -> Result<serde_json::Value> {
+    pub async fn get_mod(&self, game_slug: &str, mod_id: i64) -> Result<serde_json::Value> {
         let url = format!("{NEXUS_API_BASE}/games/{game_slug}/mods/{mod_id}.json");
         self.get_json(&url).await
     }
@@ -238,8 +231,7 @@ impl NexusClient {
         game_slug: &str,
         mod_id: i64,
     ) -> Result<Vec<serde_json::Value>> {
-        let url =
-            format!("{NEXUS_API_BASE}/games/{game_slug}/mods/{mod_id}/files.json");
+        let url = format!("{NEXUS_API_BASE}/games/{game_slug}/mods/{mod_id}/files.json");
         let json = self.get_json(&url).await?;
 
         // The API wraps the file list inside a `files` key.
@@ -258,8 +250,14 @@ impl NexusClient {
     pub async fn is_premium(&self) -> bool {
         match self.validate_key().await {
             Ok(info) => {
-                let premium = info.get("is_premium").and_then(|v| v.as_bool()).unwrap_or(false);
-                let supporter = info.get("is_supporter").and_then(|v| v.as_bool()).unwrap_or(false);
+                let premium = info
+                    .get("is_premium")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let supporter = info
+                    .get("is_supporter")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 premium || supporter
             }
             Err(_) => false,
@@ -287,15 +285,13 @@ impl NexusClient {
         // NexusMods compliance: free users MUST provide key/expires from
         // clicking "Slow Download" on the website. Only premium users may
         // request download links without these parameters.
-        if key.is_none() || expires.is_none() {
-            if !self.is_premium().await {
-                return Err(NexusError::Api {
-                    status: 403,
-                    message: "Free users must download from the NexusMods website. \
+        if (key.is_none() || expires.is_none()) && !self.is_premium().await {
+            return Err(NexusError::Api {
+                status: 403,
+                message: "Free users must download from the NexusMods website. \
                               Please click the download button on the mod page."
-                        .to_string(),
-                });
-            }
+                    .to_string(),
+            });
         }
 
         // Attach query parameters when present.
@@ -359,7 +355,7 @@ impl NexusClient {
             .ok()
             .and_then(|u| {
                 u.path_segments()
-                    .and_then(|seg| seg.last().map(|s| s.to_string()))
+                    .and_then(|mut seg| seg.next_back().map(|s| s.to_string()))
             })
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| "download".to_string());
@@ -411,10 +407,16 @@ impl NexusClient {
                 .iter()
                 .filter_map(|f| {
                     let file_id = f.get("file_id").and_then(|v| v.as_i64())?;
-                    let version = f.get("version").and_then(|v| v.as_str())
-                        .unwrap_or("").to_string();
-                    let name = f.get("name").and_then(|v| v.as_str())
-                        .unwrap_or("").to_string();
+                    let version = f
+                        .get("version")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let name = f
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     let category = f.get("category_id").and_then(|v| v.as_i64());
                     Some((file_id, version, name, category))
                 })
@@ -425,7 +427,7 @@ impl NexusClient {
                         Some(4) => 500000,  // update files
                         _ => 0,
                     };
-                    cat_weight + *id as i64
+                    cat_weight + *id
                 });
 
             if let Some((latest_file_id, latest_version, latest_name, _)) = latest {

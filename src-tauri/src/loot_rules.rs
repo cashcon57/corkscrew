@@ -140,10 +140,7 @@ pub fn add_rule(
 pub fn remove_rule(db: &ModDatabase, rule_id: i64) -> Result<(), String> {
     let conn = db.conn().map_err(|e| e.to_string())?;
     let rows = conn
-        .execute(
-            "DELETE FROM plugin_rules WHERE id = ?1",
-            params![rule_id],
-        )
+        .execute("DELETE FROM plugin_rules WHERE id = ?1", params![rule_id])
         .map_err(|e| format!("Failed to remove rule: {}", e))?;
 
     if rows == 0 {
@@ -172,7 +169,8 @@ pub fn list_rules(
     let rows = stmt
         .query_map(params![game_id, bottle_name], |row| {
             let rule_type_str: String = row.get(4)?;
-            let rule_type = PluginRuleType::from_str(&rule_type_str).unwrap_or(PluginRuleType::LoadAfter);
+            let rule_type =
+                PluginRuleType::from_str(&rule_type_str).unwrap_or(PluginRuleType::LoadAfter);
             Ok(PluginRule {
                 id: row.get(0)?,
                 game_id: row.get(1)?,
@@ -193,11 +191,7 @@ pub fn list_rules(
 }
 
 /// Clear all rules for a given game/bottle combination.
-pub fn clear_rules(
-    db: &ModDatabase,
-    game_id: &str,
-    bottle_name: &str,
-) -> Result<(), String> {
+pub fn clear_rules(db: &ModDatabase, game_id: &str, bottle_name: &str) -> Result<(), String> {
     let conn = db.conn().map_err(|e| e.to_string())?;
     conn.execute(
         "DELETE FROM plugin_rules WHERE game_id = ?1 AND bottle_name = ?2",
@@ -317,7 +311,10 @@ pub fn apply_rules(sorted_order: &[String], rules: &[PluginRule]) -> Vec<String>
 
     // Validate for cycles first.
     if let Err(msg) = validate_rules(rules) {
-        log::warn!("Cannot apply custom rules: {}. Returning original order.", msg);
+        log::warn!(
+            "Cannot apply custom rules: {}. Returning original order.",
+            msg
+        );
         return sorted_order.to_vec();
     }
 
@@ -350,12 +347,18 @@ pub fn apply_rules(sorted_order: &[String], rules: &[PluginRule]) -> Vec<String>
         match rule.rule_type {
             PluginRuleType::LoadAfter => {
                 // plugin loads after reference => reference -> plugin
-                graph.entry(reference.clone()).or_default().push(plugin.clone());
+                graph
+                    .entry(reference.clone())
+                    .or_default()
+                    .push(plugin.clone());
                 *in_degree.entry(plugin).or_insert(0) += 1;
             }
             PluginRuleType::LoadBefore => {
                 // plugin loads before reference => plugin -> reference
-                graph.entry(plugin.clone()).or_default().push(reference.clone());
+                graph
+                    .entry(plugin.clone())
+                    .or_default()
+                    .push(reference.clone());
                 *in_degree.entry(reference).or_insert(0) += 1;
             }
             PluginRuleType::Group => {}
@@ -401,10 +404,8 @@ pub fn apply_rules(sorted_order: &[String], rules: &[PluginRule]) -> Vec<String>
     }
 
     // Map back to original-case names.
-    let lower_to_original: HashMap<String, &String> = plugins
-        .iter()
-        .map(|p| (p.to_lowercase(), p))
-        .collect();
+    let lower_to_original: HashMap<String, &String> =
+        plugins.iter().map(|p| (p.to_lowercase(), p)).collect();
 
     topo_order
         .iter()
@@ -624,9 +625,33 @@ mod tests {
     fn test_clear_rules() {
         let (db, _tmp) = test_db();
 
-        add_rule(&db, "skyrimse", "Gaming", "A.esp", PluginRuleType::LoadAfter, "B.esp").unwrap();
-        add_rule(&db, "skyrimse", "Gaming", "C.esp", PluginRuleType::LoadBefore, "D.esp").unwrap();
-        add_rule(&db, "fallout4", "Gaming", "X.esp", PluginRuleType::LoadAfter, "Y.esp").unwrap();
+        add_rule(
+            &db,
+            "skyrimse",
+            "Gaming",
+            "A.esp",
+            PluginRuleType::LoadAfter,
+            "B.esp",
+        )
+        .unwrap();
+        add_rule(
+            &db,
+            "skyrimse",
+            "Gaming",
+            "C.esp",
+            PluginRuleType::LoadBefore,
+            "D.esp",
+        )
+        .unwrap();
+        add_rule(
+            &db,
+            "fallout4",
+            "Gaming",
+            "X.esp",
+            PluginRuleType::LoadAfter,
+            "Y.esp",
+        )
+        .unwrap();
 
         clear_rules(&db, "skyrimse", "Gaming").unwrap();
 

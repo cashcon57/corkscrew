@@ -200,10 +200,9 @@ pub fn set_config_value(key: &str, value: &str) -> Result<()> {
             config.download_dir = Some(value.to_owned());
         }
         _ => {
-            config.extra.insert(
-                key.to_owned(),
-                serde_json::Value::String(value.to_owned()),
-            );
+            config
+                .extra
+                .insert(key.to_owned(), serde_json::Value::String(value.to_owned()));
         }
     }
 
@@ -223,9 +222,9 @@ pub fn get_config_value(key: &str) -> Result<Option<String>> {
     let value = match key {
         "nexus_api_key" => config.nexus_api_key,
         "download_dir" => config.download_dir,
-        _ => config.extra.get(key).and_then(|v| match v {
-            serde_json::Value::String(s) => Some(s.clone()),
-            other => Some(other.to_string()),
+        _ => config.extra.get(key).map(|v| match v {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
         }),
     };
 

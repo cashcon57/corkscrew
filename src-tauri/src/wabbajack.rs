@@ -300,8 +300,7 @@ async fn fetch_single_repo(
 
 /// Parse a local .wabbajack file and return a summary.
 pub fn parse_wabbajack_file(path: &Path) -> Result<ParsedModlist, String> {
-    let file = std::fs::File::open(path)
-        .map_err(|e| format!("Cannot open file: {}", e))?;
+    let file = std::fs::File::open(path).map_err(|e| format!("Cannot open file: {}", e))?;
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|e| format!("Not a valid ZIP/.wabbajack file: {}", e))?;
 
@@ -354,7 +353,10 @@ pub fn parse_wabbajack_file(path: &Path) -> Result<ParsedModlist, String> {
     })
 }
 
-fn read_zip_entry(archive: &mut zip::ZipArchive<std::fs::File>, name: &str) -> Result<String, String> {
+fn read_zip_entry(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+    name: &str,
+) -> Result<String, String> {
     let mut entry = archive
         .by_name(name)
         .map_err(|e| format!("Entry '{}' not found: {}", name, e))?;
@@ -394,8 +396,14 @@ fn classify_archive_source(state: &serde_json::Value) -> (String, Option<i64>, O
     if let Some(type_str) = state.get("$type").and_then(|v| v.as_str()) {
         let lower = type_str.to_lowercase();
         if lower.contains("nexus") {
-            let mod_id = state.get("ModID").or(state.get("modID")).and_then(|v| v.as_i64());
-            let file_id = state.get("FileID").or(state.get("fileID")).and_then(|v| v.as_i64());
+            let mod_id = state
+                .get("ModID")
+                .or(state.get("modID"))
+                .and_then(|v| v.as_i64());
+            let file_id = state
+                .get("FileID")
+                .or(state.get("fileID"))
+                .and_then(|v| v.as_i64());
             ("Nexus".to_string(), mod_id, file_id)
         } else if lower.contains("http") {
             ("HTTP".to_string(), None, None)

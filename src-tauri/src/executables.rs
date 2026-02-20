@@ -228,9 +228,15 @@ mod tests {
         let (db, _tmp) = test_db();
 
         let id = add_executable(
-            &db, "skyrimse", "Gaming", "SKSE Manual",
-            "/path/to/skse64_loader.exe", None, None,
-        ).unwrap();
+            &db,
+            "skyrimse",
+            "Gaming",
+            "SKSE Manual",
+            "/path/to/skse64_loader.exe",
+            None,
+            None,
+        )
+        .unwrap();
         assert!(id > 0);
 
         let exes = list_executables(&db, "skyrimse", "Gaming").unwrap();
@@ -245,13 +251,25 @@ mod tests {
         let (db, _tmp) = test_db();
 
         let id1 = add_executable(
-            &db, "skyrimse", "Gaming", "Exe A",
-            "/path/a.exe", None, None,
-        ).unwrap();
+            &db,
+            "skyrimse",
+            "Gaming",
+            "Exe A",
+            "/path/a.exe",
+            None,
+            None,
+        )
+        .unwrap();
         let _id2 = add_executable(
-            &db, "skyrimse", "Gaming", "Exe B",
-            "/path/b.exe", None, None,
-        ).unwrap();
+            &db,
+            "skyrimse",
+            "Gaming",
+            "Exe B",
+            "/path/b.exe",
+            None,
+            None,
+        )
+        .unwrap();
 
         // No default initially
         let def = get_default_executable(&db, "skyrimse", "Gaming").unwrap();
@@ -269,15 +287,25 @@ mod tests {
         let (db, _tmp) = test_db();
 
         let id = add_executable(
-            &db, "skyrimse", "Gaming", "Test",
-            "/path/test.exe", None, None,
-        ).unwrap();
+            &db,
+            "skyrimse",
+            "Gaming",
+            "Test",
+            "/path/test.exe",
+            None,
+            None,
+        )
+        .unwrap();
 
         set_default_executable(&db, "skyrimse", "Gaming", id).unwrap();
-        assert!(get_default_executable(&db, "skyrimse", "Gaming").unwrap().is_some());
+        assert!(get_default_executable(&db, "skyrimse", "Gaming")
+            .unwrap()
+            .is_some());
 
         clear_default_executable(&db, "skyrimse", "Gaming").unwrap();
-        assert!(get_default_executable(&db, "skyrimse", "Gaming").unwrap().is_none());
+        assert!(get_default_executable(&db, "skyrimse", "Gaming")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -285,13 +313,25 @@ mod tests {
         let (db, _tmp) = test_db();
 
         let id = add_executable(
-            &db, "skyrimse", "Gaming", "To Remove",
-            "/path/remove.exe", None, None,
-        ).unwrap();
+            &db,
+            "skyrimse",
+            "Gaming",
+            "To Remove",
+            "/path/remove.exe",
+            None,
+            None,
+        )
+        .unwrap();
 
-        assert_eq!(list_executables(&db, "skyrimse", "Gaming").unwrap().len(), 1);
+        assert_eq!(
+            list_executables(&db, "skyrimse", "Gaming").unwrap().len(),
+            1
+        );
         remove_executable(&db, id).unwrap();
-        assert_eq!(list_executables(&db, "skyrimse", "Gaming").unwrap().len(), 0);
+        assert_eq!(
+            list_executables(&db, "skyrimse", "Gaming").unwrap().len(),
+            0
+        );
     }
 
     #[test]
@@ -302,8 +342,17 @@ mod tests {
         add_executable(&db, "skyrimse", "Bottle2", "B", "/b.exe", None, None).unwrap();
         add_executable(&db, "fallout4", "Bottle1", "C", "/c.exe", None, None).unwrap();
 
-        assert_eq!(list_executables(&db, "skyrimse", "Bottle1").unwrap().len(), 1);
-        assert_eq!(list_executables(&db, "skyrimse", "Bottle2").unwrap().len(), 1);
-        assert_eq!(list_executables(&db, "fallout4", "Bottle1").unwrap().len(), 1);
+        assert_eq!(
+            list_executables(&db, "skyrimse", "Bottle1").unwrap().len(),
+            1
+        );
+        assert_eq!(
+            list_executables(&db, "skyrimse", "Bottle2").unwrap().len(),
+            1
+        );
+        assert_eq!(
+            list_executables(&db, "fallout4", "Bottle1").unwrap().len(),
+            1
+        );
     }
 }

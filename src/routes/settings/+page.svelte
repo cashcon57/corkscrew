@@ -5,6 +5,8 @@
   import type { AppConfig } from "$lib/types";
   import ThemeToggle from "$lib/components/ThemeToggle.svelte";
   import SettingsAuthSection from "./settings-auth-section.svelte";
+  import IniManagerPanel from "$lib/components/IniManagerPanel.svelte";
+  import WineDiagnosticsPanel from "$lib/components/WineDiagnosticsPanel.svelte";
   import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
   import { openUrl } from "@tauri-apps/plugin-opener";
 
@@ -374,6 +376,22 @@
           </div>
         </div>
       </div>
+    </div>
+  {/if}
+
+  <!-- INI Settings (Skyrim) -->
+  {#if isSkyrim && game}
+    <div class="section">
+      <h2 class="section-title">INI Settings</h2>
+      <IniManagerPanel gameId={game.game_id} bottleName={game.bottle_name} />
+    </div>
+  {/if}
+
+  <!-- Wine Diagnostics -->
+  {#if game}
+    <div class="section">
+      <h2 class="section-title">Wine Diagnostics</h2>
+      <WineDiagnosticsPanel gameId={game.game_id} bottleName={game.bottle_name} />
     </div>
   {/if}
 

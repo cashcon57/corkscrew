@@ -32,6 +32,115 @@ pub enum CollectionsError {
 }
 
 // ---------------------------------------------------------------------------
+// Diff types
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CollectionDiff {
+    pub collection_name: String,
+    pub installed_revision: Option<u32>,
+    pub latest_revision: u32,
+    pub added: Vec<DiffEntry>,
+    pub removed: Vec<DiffEntry>,
+    pub updated: Vec<DiffUpdate>,
+    pub unchanged: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DiffEntry {
+    pub name: String,
+    pub version: String,
+    pub source_type: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DiffUpdate {
+    pub name: String,
+    pub installed_version: String,
+    pub latest_version: String,
+    pub source_type: String,
+}
+
+/// Compare an installed manifest against the latest revision mods from the API.
+pub fn compute_diff(
+    collection_name: &str,
+    installed_revision: Option<u32>,
+    latest_revision: u32,
+    installed_mods: &[CollectionModEntry],
+    latest_mods: &[CollectionMod],
+) -> CollectionDiff {
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    let mut updated = Vec::new();
+    let mut unchanged = 0usize;
+
+    // Index latest mods by nexus_mod_id (primary) and name (fallback)
+    let mut latest_by_id: HashMap<i64, &CollectionMod> = HashMap::new();
+    let mut latest_by_name: HashMap<String, &CollectionMod> = HashMap::new();
+    for m in latest_mods {
+        if let Some(id) = m.nexus_mod_id {
+            latest_by_id.insert(id, m);
+        }
+        latest_by_name.insert(m.name.to_lowercase(), m);
+    }
+
+    // Track which latest mods have been matched
+    let mut matched_latest: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Check each installed mod against latest
+    for inst in installed_mods {
+        let inst_mod_id = inst.source.mod_id;
+        let matched = inst_mod_id
+            .and_then(|id| latest_by_id.get(&id))
+            .or_else(|| latest_by_name.get(&inst.name.to_lowercase()));
+
+        if let Some(latest) = matched {
+            matched_latest.insert(latest.name.to_lowercase());
+            if inst.version != latest.version
+                && !latest.version.is_empty()
+                && !inst.version.is_empty()
+            {
+                updated.push(DiffUpdate {
+                    name: latest.name.clone(),
+                    installed_version: inst.version.clone(),
+                    latest_version: latest.version.clone(),
+                    source_type: latest.source_type.clone(),
+                });
+            } else {
+                unchanged += 1;
+            }
+        } else {
+            removed.push(DiffEntry {
+                name: inst.name.clone(),
+                version: inst.version.clone(),
+                source_type: inst.source.source_type.clone(),
+            });
+        }
+    }
+
+    // Find mods in latest that aren't in installed
+    for latest in latest_mods {
+        if !matched_latest.contains(&latest.name.to_lowercase()) {
+            added.push(DiffEntry {
+                name: latest.name.clone(),
+                version: latest.version.clone(),
+                source_type: latest.source_type.clone(),
+            });
+        }
+    }
+
+    CollectionDiff {
+        collection_name: collection_name.to_string(),
+        installed_revision,
+        latest_revision,
+        added,
+        removed,
+        updated,
+        unchanged,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
@@ -93,6 +202,10 @@ pub struct CollectionManifest {
     pub plugins: Vec<CollectionPlugin>,
     #[serde(default, rename = "installInstructions")]
     pub install_instructions: Option<String>,
+    #[serde(default)]
+    pub slug: Option<String>,
+    #[serde(default)]
+    pub image_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -155,10 +268,14 @@ pub struct ModReference {
     pub id_hint: Option<String>,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CollectionPlugin {
     pub name: String,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub enabled: bool,
 }
 
@@ -322,13 +439,23 @@ pub async fn browse_collections(
         "created" => "createdAt",
         _ => "endorsements",
     };
-    let gql_direction = if sort_direction == "asc" { "ASC" } else { "DESC" };
+    let gql_direction = if sort_direction == "asc" {
+        "ASC"
+    } else {
+        "DESC"
+    };
 
     // Build sort array: NexusMods expects [{ "fieldName": { "direction": "DESC" } }]
     let mut direction_obj = serde_json::Map::new();
-    direction_obj.insert("direction".to_string(), serde_json::Value::String(gql_direction.to_string()));
+    direction_obj.insert(
+        "direction".to_string(),
+        serde_json::Value::String(gql_direction.to_string()),
+    );
     let mut sort_obj = serde_json::Map::new();
-    sort_obj.insert(gql_sort_key.to_string(), serde_json::Value::Object(direction_obj));
+    sort_obj.insert(
+        gql_sort_key.to_string(),
+        serde_json::Value::Object(direction_obj),
+    );
     let sort_array = serde_json::Value::Array(vec![serde_json::Value::Object(sort_obj)]);
 
     let variables = serde_json::json!({
@@ -382,8 +509,7 @@ pub async fn get_collection(
         "viewAdultContent": true,
     });
 
-    let data: serde_json::Value =
-        graphql_query(api_key, GET_COLLECTION_QUERY, variables).await?;
+    let data: serde_json::Value = graphql_query(api_key, GET_COLLECTION_QUERY, variables).await?;
 
     let node = data
         .get("collection")
@@ -406,8 +532,7 @@ pub async fn get_revisions(
         "viewAdultContent": true,
     });
 
-    let data: serde_json::Value =
-        graphql_query(api_key, GET_REVISIONS_QUERY, variables).await?;
+    let data: serde_json::Value = graphql_query(api_key, GET_REVISIONS_QUERY, variables).await?;
 
     let collection = data
         .get("collection")
@@ -448,10 +573,7 @@ pub async fn get_revisions(
                     .map(String::from),
                 changelog: None,
                 mod_count: mod_files,
-                download_size: rev
-                    .get("totalSize")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0),
+                download_size: rev.get("totalSize").and_then(|v| v.as_u64()).unwrap_or(0),
             }
         })
         .collect();
@@ -487,7 +609,10 @@ pub async fn get_revision_mods(
     // Parse Nexus mod files
     if let Some(mod_files) = revision_node.get("modFiles").and_then(|v| v.as_array()) {
         for mf in mod_files {
-            let optional = mf.get("optional").and_then(|v| v.as_bool()).unwrap_or(false);
+            let optional = mf
+                .get("optional")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let file_id = mf.get("fileId").and_then(|v| v.as_i64());
 
             if let Some(file) = mf.get("file") {
@@ -541,7 +666,10 @@ pub async fn get_revision_mods(
     }
 
     // Parse external resources
-    if let Some(externals) = revision_node.get("externalResources").and_then(|v| v.as_array()) {
+    if let Some(externals) = revision_node
+        .get("externalResources")
+        .and_then(|v| v.as_array())
+    {
         for ext in externals {
             let name = ext
                 .get("name")
@@ -597,9 +725,7 @@ pub fn parse_collection_bundle(bundle_path: &Path) -> Result<CollectionManifest,
          _dest: &PathBuf|
          -> Result<bool, sevenz_rust::Error> {
             let entry_name = entry.name();
-            if entry_name == "collection.json"
-                || entry_name.ends_with("/collection.json")
-            {
+            if entry_name == "collection.json" || entry_name.ends_with("/collection.json") {
                 let mut data = Vec::new();
                 reader.read_to_end(&mut data)?;
                 json_data = Some(data);
@@ -615,12 +741,12 @@ pub fn parse_collection_bundle(bundle_path: &Path) -> Result<CollectionManifest,
     // Clean up temp dir (best-effort)
     let _ = std::fs::remove_dir_all(&temp_dir);
 
-    let data = json_data.ok_or_else(|| {
-        CollectionsError::Archive("No collection.json found in archive".into())
-    })?;
+    let data = json_data
+        .ok_or_else(|| CollectionsError::Archive("No collection.json found in archive".into()))?;
 
-    let json_str = String::from_utf8(data)
-        .map_err(|e| CollectionsError::Archive(format!("Invalid UTF-8 in collection.json: {}", e)))?;
+    let json_str = String::from_utf8(data).map_err(|e| {
+        CollectionsError::Archive(format!("Invalid UTF-8 in collection.json: {}", e))
+    })?;
 
     parse_collection_json(&json_str)
 }
@@ -1087,7 +1213,10 @@ mod tests {
 
         let ebt = &manifest.mods[3];
         assert!(ebt.optional);
-        assert_eq!(ebt.instructions.as_deref(), Some("Choose 'Lite' preset during FOMOD"));
+        assert_eq!(
+            ebt.instructions.as_deref(),
+            Some("Choose 'Lite' preset during FOMOD")
+        );
     }
 
     #[test]
@@ -1224,10 +1353,7 @@ mod tests {
 
         // Check disabled plugin
         let disabled = &manifest.plugins[7];
-        assert_eq!(
-            disabled.name,
-            "dD-No Twitching Dragon Death ESPFE.esp"
-        );
+        assert_eq!(disabled.name, "dD-No Twitching Dragon Death ESPFE.esp");
         assert!(!disabled.enabled);
 
         // Verify we can count enabled vs disabled

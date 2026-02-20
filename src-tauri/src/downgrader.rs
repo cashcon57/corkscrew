@@ -72,8 +72,7 @@ const TARGET_VERSION: &str = "1.5.97";
 
 /// Known SHA-256 hash of SkyrimSE.exe v1.5.97.0 (the final pre-AE build).
 /// This is the most widely-modded version.
-const HASH_SE_1_5_97: &str =
-    "1a0b7a68e0ba935c26a8e220ea63b2edb68e20fbb3e41f52fc1e4f2790a198e6";
+const HASH_SE_1_5_97: &str = "1a0b7a68e0ba935c26a8e220ea63b2edb68e20fbb3e41f52fc1e4f2790a198e6";
 
 /// File size of SkyrimSE.exe v1.5.97.0 in bytes.
 /// Used as a fast heuristic before falling back to SHA-256.
@@ -280,10 +279,7 @@ pub fn create_downgrade_copy(game_path: &Path, target_dir: &Path) -> Result<Path
     let mut files_copied: u64 = 0;
     let mut bytes_copied: u64 = 0;
 
-    for entry in WalkDir::new(game_path)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in WalkDir::new(game_path).into_iter().filter_map(|e| e.ok()) {
         let relative = entry
             .path()
             .strip_prefix(game_path)
@@ -301,7 +297,7 @@ pub fn create_downgrade_copy(game_path: &Path, target_dir: &Path) -> Result<Path
             files_copied += 1;
             bytes_copied += size;
 
-            if files_copied % 100 == 0 {
+            if files_copied.is_multiple_of(100) {
                 debug!(
                     "Downgrade copy progress: {} files ({:.1} MB)",
                     files_copied,
@@ -315,7 +311,9 @@ pub fn create_downgrade_copy(game_path: &Path, target_dir: &Path) -> Result<Path
     let total_mb = bytes_copied as f64 / (1024.0 * 1024.0);
     info!(
         "Downgrade copy created: {} files, {:.1} MB at {}",
-        files_copied, total_mb, downgrade_path.display()
+        files_copied,
+        total_mb,
+        downgrade_path.display()
     );
 
     // Store the downgrade copy path in config.
@@ -366,13 +364,7 @@ fn downgrade_config_key(game_path: &Path) -> String {
     let path_str = game_path.to_string_lossy();
     let sanitized: String = path_str
         .chars()
-        .map(|c| {
-            if c.is_alphanumeric() {
-                c
-            } else {
-                '_'
-            }
-        })
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
         .collect();
     format!("downgrade_path_{}", sanitized)
 }
@@ -491,7 +483,11 @@ mod tests {
         assert_eq!(downgrade_path, target.join("DowngradedGame"));
         assert!(downgrade_path.join("SkyrimSE.exe").exists());
         assert!(downgrade_path.join("SkyrimSE.ini").exists());
-        assert!(downgrade_path.join("Data").join("Meshes").join("mesh.nif").exists());
+        assert!(downgrade_path
+            .join("Data")
+            .join("Meshes")
+            .join("mesh.nif")
+            .exists());
 
         // Verify file contents.
         assert_eq!(

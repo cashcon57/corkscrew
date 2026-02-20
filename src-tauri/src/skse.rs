@@ -116,9 +116,7 @@ fn detect_skse_version(game_path: &Path) -> Option<String> {
 
         // Match pattern: skse64_X_Y_Z.dll
         if name.starts_with("skse64_") && name.ends_with(".dll") {
-            let stem = name
-                .trim_start_matches("skse64_")
-                .trim_end_matches(".dll");
+            let stem = name.trim_start_matches("skse64_").trim_end_matches(".dll");
 
             // Parse "X_Y_Z" into "X.Y.Z"
             let parts: Vec<&str> = stem.split('_').collect();
@@ -153,10 +151,7 @@ pub fn skse_download_url() -> &'static str {
 /// 3. Cleans up the temp directory.
 ///
 /// Returns an updated [`SkseStatus`] reflecting the new installation.
-pub fn install_skse_from_archive(
-    game_path: &Path,
-    archive_path: &Path,
-) -> Result<SkseStatus> {
+pub fn install_skse_from_archive(game_path: &Path, archive_path: &Path) -> Result<SkseStatus> {
     if !archive_path.exists() {
         return Err(SkseError::Io(io::Error::new(
             io::ErrorKind::NotFound,
@@ -176,9 +171,8 @@ pub fn install_skse_from_archive(
     }
     fs::create_dir_all(&extract_dir)?;
 
-    installer::extract_archive(archive_path, &extract_dir).map_err(|e| {
-        SkseError::Extraction(format!("Failed to extract SKSE archive: {}", e))
-    })?;
+    installer::extract_archive(archive_path, &extract_dir)
+        .map_err(|e| SkseError::Extraction(format!("Failed to extract SKSE archive: {}", e)))?;
 
     // 2. Install SKSE files into the game directory.
     install_skse_files(&extract_dir, game_path)?;
@@ -263,11 +257,7 @@ fn find_skse_root(extracted_dir: &Path) -> Result<PathBuf> {
         .map_err(SkseError::Io)?
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
-        .filter(|e| {
-            !e.file_name()
-                .to_string_lossy()
-                .starts_with('.')
-        })
+        .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
         .collect();
 
     // If there's exactly one top-level directory, that's our SKSE root.
@@ -372,9 +362,7 @@ pub fn skse_game_compatibility(skse_version: &str) -> Option<(&'static str, &'st
 fn classify_game_version(version_str: &str) -> &str {
     if version_str.contains("1.5.97") {
         "SE"
-    } else if version_str.contains("Anniversary")
-        || version_str.contains("1.6")
-    {
+    } else if version_str.contains("Anniversary") || version_str.contains("1.6") {
         "AE"
     } else {
         "Unknown"
@@ -639,10 +627,7 @@ mod tests {
             skse_game_compatibility("2.0.20"),
             Some(("1.5.97", "1.5.97"))
         );
-        assert_eq!(
-            skse_game_compatibility("2.1.5"),
-            Some(("1.5.97", "1.5.97"))
-        );
+        assert_eq!(skse_game_compatibility("2.1.5"), Some(("1.5.97", "1.5.97")));
     }
 
     #[test]
@@ -778,10 +763,7 @@ mod tests {
         // Verify.
         assert!(dst.join("file1.txt").exists());
         assert!(dst.join("subdir").join("file2.txt").exists());
-        assert_eq!(
-            fs::read_to_string(dst.join("file1.txt")).unwrap(),
-            "hello"
-        );
+        assert_eq!(fs::read_to_string(dst.join("file1.txt")).unwrap(), "hello");
         assert_eq!(
             fs::read_to_string(dst.join("subdir").join("file2.txt")).unwrap(),
             "world"
@@ -822,11 +804,7 @@ mod tests {
         fs::create_dir_all(&skse_data).unwrap();
         fs::write(skse_root.join("skse64_loader.exe"), b"loader").unwrap();
         fs::write(skse_root.join("skse64_2_2_6.dll"), b"main dll").unwrap();
-        fs::write(
-            skse_root.join("skse64_steam_loader.dll"),
-            b"steam loader",
-        )
-        .unwrap();
+        fs::write(skse_root.join("skse64_steam_loader.dll"), b"steam loader").unwrap();
         fs::write(skse_data.join("SKSE.pex"), b"script").unwrap();
 
         // Create a fake game directory.
@@ -842,7 +820,11 @@ mod tests {
         assert!(game_dir.join("skse64_steam_loader.dll").exists());
 
         // Verify Data/Scripts was copied.
-        assert!(game_dir.join("Data").join("Scripts").join("SKSE.pex").exists());
+        assert!(game_dir
+            .join("Data")
+            .join("Scripts")
+            .join("SKSE.pex")
+            .exists());
     }
 
     #[test]

@@ -467,6 +467,56 @@ button:focus-visible,
   margin-bottom: 0;
 }
 
+/* --- Shared Loading Skeleton --- */
+
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--surface) 25%,
+    var(--surface-hover) 50%,
+    var(--surface) 75%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-pulse 1.5s var(--ease) infinite;
+  border-radius: var(--radius-sm);
+}
+
+.skeleton-text {
+  height: 12px;
+  width: 100%;
+  border-radius: 3px;
+}
+
+.skeleton-text-sm {
+  height: 10px;
+  width: 60%;
+  border-radius: 3px;
+}
+
+@keyframes skeleton-pulse {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* --- Smooth Panel Transitions --- */
+
+.panel-transition-enter {
+  animation: panel-slide-in var(--duration) var(--ease-out);
+}
+
+@keyframes panel-slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+    max-height: 0;
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    max-height: 1000px;
+  }
+}
+
 /* --- Accessibility: Reduced Motion --- */
 
 @media (prefers-reduced-motion: reduce) {

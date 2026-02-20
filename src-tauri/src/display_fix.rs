@@ -61,15 +61,12 @@ pub fn detect_screen_resolution() -> Result<(u32, u32), String> {
             if let Some(screens) = gpu.get("spdisplays_ndrvs").and_then(|v| v.as_array()) {
                 for screen in screens {
                     // Check if this is the main display
-                    let is_main = screen
-                        .get("_spdisplays_displayID")
-                        .is_some()
-                        || screen.get("spdisplays_main").and_then(|v| v.as_str()) == Some("spdisplays_yes");
+                    let is_main = screen.get("_spdisplays_displayID").is_some()
+                        || screen.get("spdisplays_main").and_then(|v| v.as_str())
+                            == Some("spdisplays_yes");
 
                     // Try _spdisplays_pixels first (e.g. "2560 x 1440")
-                    if let Some(pixels) = screen
-                        .get("_spdisplays_pixels")
-                        .and_then(|v| v.as_str())
+                    if let Some(pixels) = screen.get("_spdisplays_pixels").and_then(|v| v.as_str())
                     {
                         if let Some((w, h)) = parse_resolution_string(pixels) {
                             return Ok((w, h));
@@ -158,8 +155,16 @@ pub fn find_skyrim_prefs(bottle: &Bottle) -> Option<PathBuf> {
 
             // Try standard Documents path (case-insensitive)
             let candidates = [
-                user_dir.join("Documents").join("My Games").join("Skyrim Special Edition").join("SkyrimPrefs.ini"),
-                user_dir.join("My Documents").join("My Games").join("Skyrim Special Edition").join("SkyrimPrefs.ini"),
+                user_dir
+                    .join("Documents")
+                    .join("My Games")
+                    .join("Skyrim Special Edition")
+                    .join("SkyrimPrefs.ini"),
+                user_dir
+                    .join("My Documents")
+                    .join("My Games")
+                    .join("Skyrim Special Edition")
+                    .join("SkyrimPrefs.ini"),
             ];
 
             for candidate in &candidates {
@@ -181,8 +186,8 @@ pub fn find_skyrim_prefs(bottle: &Bottle) -> Option<PathBuf> {
 
 /// Case-insensitive search for SkyrimPrefs.ini under a user directory.
 fn find_prefs_case_insensitive(user_dir: &Path) -> Option<PathBuf> {
-    let docs = find_dir_ci(user_dir, "documents")
-        .or_else(|| find_dir_ci(user_dir, "my documents"))?;
+    let docs =
+        find_dir_ci(user_dir, "documents").or_else(|| find_dir_ci(user_dir, "my documents"))?;
     let my_games = find_dir_ci(&docs, "my games")?;
     let skyrim_dir = find_dir_ci(&my_games, "skyrim special edition")?;
     find_file_ci(&skyrim_dir, "skyrimprefs.ini")
@@ -336,7 +341,11 @@ pub fn read_display_settings(prefs_path: &Path) -> Result<DisplaySettings, Strin
 
 /// Apply display fix: set resolution to Mac's native resolution in borderless
 /// fullscreen mode.
-pub fn fix_display_settings(prefs_path: &Path, width: u32, height: u32) -> Result<DisplaySettings, String> {
+pub fn fix_display_settings(
+    prefs_path: &Path,
+    width: u32,
+    height: u32,
+) -> Result<DisplaySettings, String> {
     let content = fs::read_to_string(prefs_path)
         .map_err(|e| format!("Failed to read {}: {}", prefs_path.display(), e))?;
 
@@ -348,10 +357,8 @@ pub fn fix_display_settings(prefs_path: &Path, width: u32, height: u32) -> Resul
 
     // Write via temp file + rename for atomicity
     let temp_path = prefs_path.with_extension("ini.tmp");
-    fs::write(&temp_path, &updated)
-        .map_err(|e| format!("Failed to write temp file: {}", e))?;
-    fs::rename(&temp_path, prefs_path)
-        .map_err(|e| format!("Failed to rename temp file: {}", e))?;
+    fs::write(&temp_path, &updated).map_err(|e| format!("Failed to write temp file: {}", e))?;
+    fs::rename(&temp_path, prefs_path).map_err(|e| format!("Failed to rename temp file: {}", e))?;
 
     Ok(DisplaySettings {
         width,
@@ -502,7 +509,13 @@ fMusicVolume=0.5
     #[test]
     fn case_insensitive_key_read() {
         let ini = "[display]\nisize h=900\nisize w=1600\nbfull screen=1\n";
-        assert_eq!(read_ini_display_value(ini, "iSize H"), Some("900".to_string()));
-        assert_eq!(read_ini_display_value(ini, "iSize W"), Some("1600".to_string()));
+        assert_eq!(
+            read_ini_display_value(ini, "iSize H"),
+            Some("900".to_string())
+        );
+        assert_eq!(
+            read_ini_display_value(ini, "iSize W"),
+            Some("1600".to_string())
+        );
     }
 }

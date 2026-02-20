@@ -134,11 +134,7 @@ pub fn create_profile(
 }
 
 /// List all profiles for a game/bottle.
-pub fn list_profiles(
-    db: &ModDatabase,
-    game_id: &str,
-    bottle_name: &str,
-) -> Result<Vec<Profile>> {
+pub fn list_profiles(db: &ModDatabase, game_id: &str, bottle_name: &str) -> Result<Vec<Profile>> {
     let conn = db.conn().map_err(|e| ProfileError::Other(e.to_string()))?;
     let mut stmt = conn.prepare(
         "SELECT id, game_id, bottle_name, name, is_active, created_at
@@ -169,10 +165,7 @@ pub fn list_profiles(
 /// Delete a profile by ID.
 pub fn delete_profile(db: &ModDatabase, profile_id: i64) -> Result<()> {
     let conn = db.conn().map_err(|e| ProfileError::Other(e.to_string()))?;
-    let rows = conn.execute(
-        "DELETE FROM profiles WHERE id = ?1",
-        params![profile_id],
-    )?;
+    let rows = conn.execute("DELETE FROM profiles WHERE id = ?1", params![profile_id])?;
     if rows == 0 {
         return Err(ProfileError::NotFound(profile_id));
     }
@@ -489,8 +482,16 @@ mod tests {
         let profile_id = create_profile(&db, "skyrimse", "Gaming", "Test").unwrap();
 
         let states = vec![
-            ProfileModState { mod_id: 1, enabled: true, priority: 0 },
-            ProfileModState { mod_id: 2, enabled: false, priority: 1 },
+            ProfileModState {
+                mod_id: 1,
+                enabled: true,
+                priority: 0,
+            },
+            ProfileModState {
+                mod_id: 2,
+                enabled: false,
+                priority: 1,
+            },
         ];
 
         save_mod_states(&db, profile_id, &states).unwrap();

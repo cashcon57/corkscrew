@@ -19,8 +19,14 @@
     checkModUpdates,
     fixSkyrimDisplay,
     onInstallProgress,
+    redeployAllMods,
+    purgeDeployment,
+    getDeploymentHealth,
+    setModNotes,
+    setModTags,
+    setModPriority,
   } from "$lib/api";
-  import type { InstallProgressEvent } from "$lib/types";
+  import type { InstallProgressEvent, DeploymentHealth } from "$lib/types";
   import {
     selectedGame,
     installedMods,
@@ -32,6 +38,10 @@
   } from "$lib/stores";
   import type { InstalledMod, DetectedGame, SkseStatus, DowngradeStatus, FileConflict, ModUpdateInfo } from "$lib/types";
   import GameIcon from "$lib/components/GameIcon.svelte";
+  import DiskBudgetPanel from "$lib/components/DiskBudgetPanel.svelte";
+  import PreflightPanel from "$lib/components/PreflightPanel.svelte";
+  import DependencyPanel from "$lib/components/DependencyPanel.svelte";
+  import SessionHistoryPanel from "$lib/components/SessionHistoryPanel.svelte";
 
   let installing = $state(false);
   let installStep = $state("");
@@ -62,6 +72,33 @@
   // Update check state
   let modUpdates = $state<ModUpdateInfo[]>([]);
   let checkingUpdates = $state(false);
+
+  // Deploy/purge state
+  let deploying = $state(false);
+  let purging = $state(false);
+  let deployHealth = $state<DeploymentHealth | null>(null);
+  let showHealthPanel = $state(false);
+
+  // Search/filter state
+  let searchQuery = $state("");
+  let filterStatus = $state<"all" | "enabled" | "disabled" | "conflicts">("all");
+  let filterCollection = $state<string | null>(null);
+
+  // Notes/tags editing
+  let editingNotesId = $state<number | null>(null);
+  let editingNotesValue = $state("");
+
+  // Conflict panel state
+  let showConflictPanel = $state(false);
+  let makingWinner = $state<number | null>(null);
+
+  // Selected mod for dependency panel
+  let selectedModId = $state<number | undefined>(undefined);
+
+  // Collapsible panels
+  let showPreflightPanel = $state(false);
+  let showSessionPanel = $state(false);
+  let showDependencyPanel = $state(false);
 
   // Derived: set of mod IDs that have conflicts
   let conflictModIds = $derived((() => {
@@ -111,6 +148,42 @@
   let sortedMods = $derived(
     [...$installedMods].sort((a, b) => a.install_priority - b.install_priority)
   );
+
+  // Filtered mods based on search and filters
+  let filteredMods = $derived((() => {
+    let mods = sortedMods;
+    // Text search
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      mods = mods.filter(m => m.name.toLowerCase().includes(q));
+    }
+    // Status filter
+    if (filterStatus === "enabled") {
+      mods = mods.filter(m => m.enabled);
+    } else if (filterStatus === "disabled") {
+      mods = mods.filter(m => !m.enabled);
+    } else if (filterStatus === "conflicts") {
+      mods = mods.filter(m => conflictModIds.has(m.id));
+    }
+    // Collection filter
+    if (filterCollection !== null) {
+      if (filterCollection === "__standalone__") {
+        mods = mods.filter(m => !m.collection_name);
+      } else {
+        mods = mods.filter(m => m.collection_name === filterCollection);
+      }
+    }
+    return mods;
+  })());
+
+  // Unique collection names for filter dropdown
+  let collectionNames = $derived((() => {
+    const names = new Set<string>();
+    for (const m of $installedMods) {
+      if (m.collection_name) names.add(m.collection_name);
+    }
+    return [...names].sort();
+  })());
 
   const activeGame = $derived(pickedGame ?? $selectedGame);
 
@@ -560,6 +633,83 @@
     }
   }
 
+  // --- Deploy / Purge / Health ---
+  async function handleDeploy() {
+    const game = pickedGame ?? $selectedGame;
+    if (!game) return;
+    deploying = true;
+    try {
+      const result = await redeployAllMods(game.game_id, game.bottle_name);
+      showSuccess(`Deployed ${result.deployed_count} files${result.fallback_used ? " (copy fallback used)" : ""}`);
+      await refreshHealth(game);
+    } catch (e: any) {
+      showError(`Deploy failed: ${e}`);
+    } finally {
+      deploying = false;
+    }
+  }
+
+  async function handlePurge() {
+    const game = pickedGame ?? $selectedGame;
+    if (!game) return;
+    purging = true;
+    try {
+      const removed = await purgeDeployment(game.game_id, game.bottle_name);
+      showSuccess(`Purged ${removed.length} deployed files`);
+      await refreshHealth(game);
+    } catch (e: any) {
+      showError(`Purge failed: ${e}`);
+    } finally {
+      purging = false;
+    }
+  }
+
+  async function refreshHealth(game: DetectedGame) {
+    try {
+      deployHealth = await getDeploymentHealth(game.game_id, game.bottle_name);
+    } catch {
+      deployHealth = null;
+    }
+  }
+
+  // Load health on game change
+  $effect(() => {
+    if (activeGame) {
+      refreshHealth(activeGame);
+    }
+  });
+
+  // --- Notes ---
+  async function handleSaveNotes(modId: number) {
+    try {
+      await setModNotes(modId, editingNotesValue || null);
+      editingNotesId = null;
+      const game = pickedGame ?? $selectedGame;
+      if (game) await loadMods(game);
+    } catch (e: any) {
+      showError(`Failed to save notes: ${e}`);
+    }
+  }
+
+  async function handleMakeWinner(conflict: FileConflict, modId: number) {
+    const game = pickedGame ?? $selectedGame;
+    if (!game) return;
+    makingWinner = modId;
+    try {
+      // Find current winner's priority and set this mod 1 higher
+      const winner = conflict.mods.find(m => m.mod_id === conflict.winner_mod_id);
+      const newPriority = winner ? winner.priority + 1 : 999;
+      await setModPriority(modId, newPriority);
+      await redeployAllMods(game.game_id, game.bottle_name);
+      await loadMods(game);
+      await refreshHealth(game);
+    } catch (e: any) {
+      showError(`Failed to set winner: ${e}`);
+    } finally {
+      makingWinner = null;
+    }
+  }
+
   function getConflictTooltip(modId: number): string {
     const names = conflictDetails.get(modId);
     if (!names || names.size === 0) return "File conflicts detected";
@@ -727,6 +877,48 @@
           Install Mod
         {/if}
       </button>
+
+      <!-- Deploy / Purge Buttons -->
+      {#if $installedMods.length > 0}
+        <button
+          class="btn btn-secondary"
+          onclick={handleDeploy}
+          disabled={deploying || purging}
+          title="Deploy all enabled mods to the game directory"
+        >
+          {#if deploying}
+            <span class="spinner spinner-sm"></span>
+            Deploying...
+          {:else}
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="20 6 9 17 4 12" />
+            </svg>
+            Deploy
+          {/if}
+        </button>
+        <button
+          class="btn btn-ghost-danger"
+          onclick={handlePurge}
+          disabled={deploying || purging}
+          title="Remove all deployed files from the game directory"
+        >
+          {#if purging}
+            <span class="spinner spinner-sm"></span>
+            Purging...
+          {:else}
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="3 6 5 6 21 6" />
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+            </svg>
+            Purge
+          {/if}
+        </button>
+        {#if deployHealth}
+          <span class="deploy-status" class:status-deployed={deployHealth.is_deployed} class:status-purged={!deployHealth.is_deployed}>
+            {deployHealth.is_deployed ? "Deployed" : "Purged"}
+          </span>
+        {/if}
+      {/if}
       <div class="play-button-group">
         <button class="btn btn-play" onclick={handlePlay} disabled={launching}>
           {#if launching}
@@ -834,6 +1026,177 @@
       </div>
     {/if}
 
+    <!-- Deployment Health Panel -->
+    {#if deployHealth && $installedMods.length > 0}
+      <button class="health-toggle" onclick={() => showHealthPanel = !showHealthPanel}>
+        <div class="health-summary">
+          <span class="health-chip" class:chip-green={deployHealth.is_deployed} class:chip-amber={!deployHealth.is_deployed}>
+            {deployHealth.is_deployed ? "Deployed" : "Purged"}
+          </span>
+          <span class="health-stat">{deployHealth.total_enabled}/{deployHealth.total_mods} enabled</span>
+          {#if deployHealth.conflict_count > 0}
+            <button class="health-stat health-warning conflict-link" onclick={(e) => { e.stopPropagation(); showConflictPanel = !showConflictPanel; }}>
+              {deployHealth.conflict_count} conflicts
+            </button>
+          {/if}
+          {#if deployHealth.deploy_method && deployHealth.deploy_method !== "none"}
+            <span class="health-stat health-method">{deployHealth.deploy_method === "hardlink" ? "Hardlinks" : "Copies"}</span>
+          {/if}
+        </div>
+        <svg class="health-chevron" class:open={showHealthPanel} width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 4.5L6 7.5L9 4.5" />
+        </svg>
+      </button>
+      {#if showHealthPanel}
+        <div class="health-details">
+          <div class="health-grid">
+            <div class="health-item">
+              <span class="health-label">Deployed Files</span>
+              <span class="health-value">{deployHealth.total_deployed}</span>
+            </div>
+            <div class="health-item">
+              <span class="health-label">Active Mods</span>
+              <span class="health-value">{deployHealth.total_enabled} / {deployHealth.total_mods}</span>
+            </div>
+            <div class="health-item">
+              <span class="health-label">File Conflicts</span>
+              <span class="health-value" class:health-warning={deployHealth.conflict_count > 0}>{deployHealth.conflict_count}</span>
+            </div>
+            <div class="health-item">
+              <span class="health-label">Deploy Method</span>
+              <span class="health-value">{deployHealth.deploy_method === "hardlink" ? "Hardlinks (0 extra disk)" : deployHealth.deploy_method === "copy" ? "File copies" : "None"}</span>
+            </div>
+          </div>
+        </div>
+      {/if}
+    {/if}
+
+    <!-- Disk Budget Panel -->
+    {#if activeGame && $installedMods.length > 0}
+      <DiskBudgetPanel gameId={activeGame.game_id} bottleName={activeGame.bottle_name} />
+    {/if}
+
+    <!-- Pre-flight Checks (collapsible) -->
+    {#if activeGame && $installedMods.length > 0}
+      <button class="panel-section-toggle" onclick={() => showPreflightPanel = !showPreflightPanel}>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+        </svg>
+        <span>Pre-Deployment Checks</span>
+        <svg class="section-chevron" class:open={showPreflightPanel} width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 4.5L6 7.5L9 4.5" />
+        </svg>
+      </button>
+      {#if showPreflightPanel}
+        <PreflightPanel gameId={activeGame.game_id} bottleName={activeGame.bottle_name} />
+      {/if}
+    {/if}
+
+    <!-- Conflict Resolution Panel -->
+    {#if showConflictPanel && conflicts.length > 0}
+      <div class="conflict-panel">
+        <div class="conflict-panel-header">
+          <h3 class="conflict-panel-title">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+              <line x1="12" y1="9" x2="12" y2="13" />
+              <line x1="12" y1="17" x2="12.01" y2="17" />
+            </svg>
+            File Conflicts ({conflicts.length})
+          </h3>
+          <button class="btn btn-ghost btn-sm" onclick={() => showConflictPanel = false}>
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+              <line x1="3" y1="3" x2="11" y2="11" />
+              <line x1="11" y1="3" x2="3" y2="11" />
+            </svg>
+          </button>
+        </div>
+        <div class="conflict-list">
+          {#each conflicts as conflict (conflict.relative_path)}
+            <div class="conflict-item">
+              <div class="conflict-path">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
+                  <polyline points="13 2 13 9 20 9" />
+                </svg>
+                <span class="conflict-filepath">{conflict.relative_path}</span>
+              </div>
+              <div class="conflict-mods">
+                {#each conflict.mods as mod (mod.mod_id)}
+                  <div class="conflict-mod" class:conflict-winner={mod.mod_id === conflict.winner_mod_id}>
+                    <span class="conflict-mod-name">
+                      {mod.mod_name}
+                      {#if mod.mod_id === conflict.winner_mod_id}
+                        <span class="winner-badge">Winner</span>
+                      {/if}
+                    </span>
+                    <span class="conflict-mod-priority">Priority {mod.priority}</span>
+                    {#if mod.mod_id !== conflict.winner_mod_id}
+                      <button
+                        class="btn btn-ghost btn-sm make-winner-btn"
+                        onclick={() => handleMakeWinner(conflict, mod.mod_id)}
+                        disabled={makingWinner !== null}
+                      >
+                        {#if makingWinner === mod.mod_id}
+                          <span class="spinner spinner-sm"></span>
+                        {:else}
+                          Make Winner
+                        {/if}
+                      </button>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            </div>
+          {/each}
+        </div>
+      </div>
+    {/if}
+
+    <!-- Search & Filter Bar -->
+    {#if $installedMods.length > 0}
+      <div class="filter-bar">
+        <div class="search-box">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="8" />
+            <line x1="21" y1="21" x2="16.65" y2="16.65" />
+          </svg>
+          <input
+            type="text"
+            placeholder="Search mods..."
+            bind:value={searchQuery}
+            class="search-input"
+          />
+          {#if searchQuery}
+            <button class="search-clear" onclick={() => searchQuery = ""}>
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+                <line x1="3" y1="3" x2="9" y2="9" />
+                <line x1="9" y1="3" x2="3" y2="9" />
+              </svg>
+            </button>
+          {/if}
+        </div>
+        <select class="filter-select" bind:value={filterStatus}>
+          <option value="all">All Status</option>
+          <option value="enabled">Enabled</option>
+          <option value="disabled">Disabled</option>
+          <option value="conflicts">Has Conflicts</option>
+        </select>
+        {#if collectionNames.length > 0}
+          <select class="filter-select" bind:value={filterCollection}>
+            <option value={null}>All Sources</option>
+            <option value="__standalone__">Standalone</option>
+            {#each collectionNames as name}
+              <option value={name}>{name}</option>
+            {/each}
+          </select>
+        {/if}
+        {#if searchQuery || filterStatus !== "all" || filterCollection !== null}
+          <span class="filter-count">{filteredMods.length} of {$installedMods.length}</span>
+        {/if}
+      </div>
+    {/if}
+
     <!-- Content Area -->
     {#if loadingMods}
       <div class="empty-state">
@@ -879,15 +1242,17 @@
 
           <!-- Mod Rows -->
           <div class="table-body">
-            {#each sortedMods as mod, i (mod.id)}
+            {#each filteredMods as mod, i (mod.id)}
               <div
                 class="table-row"
                 class:row-disabled={!mod.enabled}
+                class:row-selected={selectedModId === mod.id}
                 class:row-dragging={dragRowIndex === i}
                 class:row-drag-over={dragOverIndex === i && dragRowIndex !== null && dragRowIndex !== i}
                 class:row-drag-above={dragOverIndex === i && dragRowIndex !== null && dragRowIndex > i}
                 class:row-drag-below={dragOverIndex === i && dragRowIndex !== null && dragRowIndex < i}
                 draggable="true"
+                onclick={() => selectedModId = selectedModId === mod.id ? undefined : mod.id}
                 ondragstart={(e) => handleRowDragStart(e, i)}
                 ondragover={(e) => handleRowDragOver(e, i)}
                 ondragend={handleRowDragEnd}
@@ -936,6 +1301,19 @@
                   {/if}
                   {#if mod.nexus_mod_id}
                     <span class="nexus-badge">Nexus</span>
+                  {/if}
+                  {#if mod.collection_name}
+                    <span class="collection-badge" title={mod.collection_name}>{mod.collection_name}</span>
+                  {/if}
+                  {#if mod.user_notes}
+                    <span class="notes-icon" title={mod.user_notes}>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                        <polyline points="14 2 14 8 20 8" />
+                        <line x1="16" y1="13" x2="8" y2="13" />
+                        <line x1="16" y1="17" x2="8" y2="17" />
+                      </svg>
+                    </span>
                   {/if}
                 </span>
 
@@ -991,6 +1369,44 @@
           </div>
         </div>
       </div>
+
+      <!-- Dependency Panel (collapsible) -->
+      <button class="panel-section-toggle" onclick={() => showDependencyPanel = !showDependencyPanel}>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="18" cy="5" r="3" />
+          <circle cx="6" cy="12" r="3" />
+          <circle cx="18" cy="19" r="3" />
+          <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
+          <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
+        </svg>
+        <span>Dependencies</span>
+        <svg class="section-chevron" class:open={showDependencyPanel} width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 4.5L6 7.5L9 4.5" />
+        </svg>
+      </button>
+      {#if showDependencyPanel && activeGame}
+        <DependencyPanel
+          gameId={activeGame.game_id}
+          bottleName={activeGame.bottle_name}
+          mods={$installedMods}
+          {selectedModId}
+        />
+      {/if}
+
+      <!-- Session History (collapsible) -->
+      <button class="panel-section-toggle" onclick={() => showSessionPanel = !showSessionPanel}>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10" />
+          <polyline points="12 6 12 12 16 14" />
+        </svg>
+        <span>Session History & Stability</span>
+        <svg class="section-chevron" class:open={showSessionPanel} width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 4.5L6 7.5L9 4.5" />
+        </svg>
+      </button>
+      {#if showSessionPanel && activeGame}
+        <SessionHistoryPanel gameId={activeGame.game_id} bottleName={activeGame.bottle_name} />
+      {/if}
     {/if}
   {/if}
 </div>
@@ -1863,5 +2279,430 @@
     font-size: 16px;
     font-weight: 600;
     letter-spacing: -0.01em;
+  }
+
+  /* ============================
+     Deploy Status Badge
+     ============================ */
+  .deploy-status {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    border-radius: 100px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
+  .status-deployed {
+    background: color-mix(in srgb, var(--green) 15%, transparent);
+    color: var(--green);
+  }
+
+  .status-purged {
+    background: color-mix(in srgb, var(--yellow) 15%, transparent);
+    color: var(--yellow);
+  }
+
+  /* ============================
+     Deployment Health Panel
+     ============================ */
+  .health-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding: var(--space-2) var(--space-4);
+    background: var(--surface);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: background var(--duration-fast) var(--ease);
+  }
+
+  .health-toggle:hover {
+    background: var(--surface-hover);
+  }
+
+  .health-summary {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    font-size: 12px;
+  }
+
+  .health-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 8px;
+    border-radius: 100px;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
+  .chip-green {
+    background: color-mix(in srgb, var(--green) 15%, transparent);
+    color: var(--green);
+  }
+
+  .chip-amber {
+    background: color-mix(in srgb, var(--yellow) 15%, transparent);
+    color: var(--yellow);
+  }
+
+  .health-stat {
+    color: var(--text-secondary);
+    font-weight: 500;
+  }
+
+  .health-warning {
+    color: var(--yellow) !important;
+  }
+
+  .health-method {
+    color: var(--green);
+  }
+
+  .health-chevron {
+    color: var(--text-tertiary);
+    transition: transform var(--duration-fast) var(--ease);
+  }
+
+  .health-chevron.open {
+    transform: rotate(180deg);
+  }
+
+  .health-details {
+    padding: var(--space-3) var(--space-4);
+    background: var(--surface);
+    border: 1px solid var(--separator);
+    border-top: none;
+    border-radius: 0 0 var(--radius) var(--radius);
+    margin-top: -1px;
+  }
+
+  .health-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: var(--space-4);
+  }
+
+  .health-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .health-label {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    font-weight: 500;
+  }
+
+  .health-value {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ============================
+     Panel Section Toggles
+     ============================ */
+  .panel-section-toggle {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    width: 100%;
+    padding: var(--space-2) var(--space-4);
+    background: var(--surface);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius);
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    transition: background var(--duration-fast) var(--ease);
+  }
+
+  .panel-section-toggle:hover {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+  }
+
+  .panel-section-toggle > svg:first-child {
+    color: var(--accent);
+    flex-shrink: 0;
+  }
+
+  .panel-section-toggle > span {
+    flex: 1;
+    text-align: left;
+  }
+
+  .section-chevron {
+    color: var(--text-tertiary);
+    transition: transform var(--duration-fast) var(--ease);
+    flex-shrink: 0;
+  }
+
+  .section-chevron.open {
+    transform: rotate(180deg);
+  }
+
+  /* ============================
+     Selected Row
+     ============================ */
+  .row-selected {
+    background: color-mix(in srgb, var(--system-accent) 8%, transparent) !important;
+    border-left: 2px solid var(--system-accent);
+  }
+
+  /* ============================
+     Search & Filter Bar
+     ============================ */
+  .filter-bar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-shrink: 0;
+  }
+
+  .search-box {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--surface);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius-sm);
+    flex: 1;
+    max-width: 280px;
+    color: var(--text-tertiary);
+    transition: border-color var(--duration-fast) var(--ease);
+  }
+
+  .search-box:focus-within {
+    border-color: var(--accent-muted);
+  }
+
+  .search-input {
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--text-primary);
+    font-size: 13px;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .search-input::placeholder {
+    color: var(--text-quaternary);
+  }
+
+  .search-clear {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    color: var(--text-tertiary);
+    cursor: pointer;
+    border-radius: 50%;
+    transition: color var(--duration-fast) var(--ease);
+  }
+
+  .search-clear:hover {
+    color: var(--text-primary);
+  }
+
+  .filter-select {
+    padding: var(--space-2) var(--space-3);
+    background: var(--surface);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .filter-select:focus {
+    outline: none;
+    border-color: var(--accent-muted);
+  }
+
+  .filter-count {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    font-weight: 500;
+    white-space: nowrap;
+  }
+
+  /* ============================
+     Collection & Notes Badges
+     ============================ */
+  .collection-badge {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--purple, #bf5af2) 15%, transparent);
+    color: var(--purple, #bf5af2);
+    font-size: 10px;
+    font-weight: 600;
+    max-width: 100px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .notes-icon {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    color: var(--text-quaternary);
+    cursor: help;
+  }
+
+  .notes-icon:hover {
+    color: var(--text-secondary);
+  }
+
+  /* ============================
+     Conflict Resolution Panel
+     ============================ */
+  .conflict-link {
+    background: none;
+    border: none;
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    font-size: 12px;
+    padding: 0;
+  }
+
+  .conflict-link:hover {
+    color: #ffcc00 !important;
+  }
+
+  .conflict-panel {
+    background: var(--surface);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius);
+    max-height: 360px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .conflict-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-3) var(--space-4);
+    border-bottom: 1px solid var(--separator);
+    flex-shrink: 0;
+  }
+
+  .conflict-panel-title {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--yellow);
+  }
+
+  .conflict-list {
+    overflow-y: auto;
+    padding: var(--space-2);
+  }
+
+  .conflict-item {
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-sm);
+    margin-bottom: var(--space-1);
+  }
+
+  .conflict-item:hover {
+    background: var(--surface-hover);
+  }
+
+  .conflict-path {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    color: var(--text-tertiary);
+    margin-bottom: var(--space-2);
+  }
+
+  .conflict-filepath {
+    font-size: 11px;
+    font-family: var(--font-mono);
+    word-break: break-all;
+  }
+
+  .conflict-mods {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    padding-left: var(--space-5);
+  }
+
+  .conflict-mod {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+  }
+
+  .conflict-winner {
+    background: color-mix(in srgb, var(--green) 8%, transparent);
+  }
+
+  .conflict-mod-name {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    color: var(--text-primary);
+    font-weight: 500;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .winner-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 0 5px;
+    border-radius: 3px;
+    background: color-mix(in srgb, var(--green) 15%, transparent);
+    color: var(--green);
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    flex-shrink: 0;
+  }
+
+  .conflict-mod-priority {
+    color: var(--text-tertiary);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+  }
+
+  .make-winner-btn {
+    flex-shrink: 0;
+    color: var(--accent) !important;
+  }
+
+  .make-winner-btn:hover {
+    background: var(--accent-subtle) !important;
   }
 </style>

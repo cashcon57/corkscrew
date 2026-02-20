@@ -29,6 +29,9 @@ export interface InstalledMod {
   enabled: boolean;
   staging_path: string | null;
   install_priority: number;
+  collection_name: string | null;
+  user_notes: string | null;
+  user_tags: string[];
 }
 
 export interface PluginEntry {
@@ -583,6 +586,272 @@ export interface SettingReadOnly {
 export interface SelectOption {
   value: string;
   label: string;
+}
+
+// Collection Management
+
+export interface CollectionSummary {
+  name: string;
+  mod_count: number;
+  enabled_count: number;
+  slug: string | null;
+  author: string | null;
+  image_url: string | null;
+  game_domain: string | null;
+  installed_revision: number | null;
+}
+
+export interface CollectionDiff {
+  collection_name: string;
+  installed_revision: number | null;
+  latest_revision: number;
+  added: DiffEntry[];
+  removed: DiffEntry[];
+  updated: DiffUpdate[];
+  unchanged: number;
+}
+
+export interface DiffEntry {
+  name: string;
+  version: string;
+  source_type: string;
+}
+
+export interface DiffUpdate {
+  name: string;
+  installed_version: string;
+  latest_version: string;
+  source_type: string;
+}
+
+export interface ModTool {
+  id: string;
+  name: string;
+  description: string;
+  exe_names: string[];
+  detected_path: string | null;
+  requires_wine: boolean;
+  category: string;
+}
+
+export interface DeploymentHealth {
+  total_deployed: number;
+  total_enabled: number;
+  total_mods: number;
+  conflict_count: number;
+  deploy_method: string;
+  is_deployed: boolean;
+}
+
+export interface DownloadRecord {
+  id: number;
+  archive_path: string;
+  archive_name: string;
+  nexus_mod_id: number | null;
+  nexus_file_id: number | null;
+  sha256: string | null;
+  file_size: number;
+  downloaded_at: string;
+}
+
+// Download Queue
+
+export type DownloadStatus = "pending" | "downloading" | "completed" | "failed" | "cancelled";
+
+export interface QueueItem {
+  id: number;
+  mod_name: string;
+  file_name: string;
+  status: DownloadStatus;
+  error: string | null;
+  attempt: number;
+  max_attempts: number;
+  downloaded_bytes: number;
+  total_bytes: number;
+  nexus_mod_id: number | null;
+  nexus_file_id: number | null;
+  url: string | null;
+  game_slug: string | null;
+}
+
+export interface QueueCounts {
+  pending: number;
+  downloading: number;
+  completed: number;
+  failed: number;
+  cancelled: number;
+}
+
+// Disk Budget
+
+export interface DiskBudget {
+  staging_bytes: number;
+  staging_count: number;
+  deployment_bytes: number;
+  uses_hardlinks: boolean;
+  available_bytes: number;
+  game_available_bytes: number;
+  total_impact_bytes: number;
+}
+
+export interface InstallImpact {
+  archive_size: number;
+  estimated_staging_bytes: number;
+  deployment_bytes: number;
+  total_bytes: number;
+  uses_hardlinks: boolean;
+  game_available_bytes: number;
+}
+
+// INI Manager
+
+export interface IniFile {
+  file_name: string;
+  path: string;
+  sections: Record<string, Record<string, string>>;
+}
+
+export interface IniSetting {
+  file_name: string;
+  section: string;
+  key: string;
+  value: string;
+}
+
+export interface IniPreset {
+  name: string;
+  description: string;
+  settings: IniSetting[];
+}
+
+// Wine Diagnostics
+
+export type CheckStatus = "pass" | "warning" | "error" | "skipped";
+
+export interface DiagnosticCheck {
+  name: string;
+  category: string;
+  status: CheckStatus;
+  message: string;
+  fix_available: boolean;
+  fix_description: string | null;
+}
+
+export interface DiagnosticResult {
+  checks: DiagnosticCheck[];
+  passed: number;
+  warnings: number;
+  errors: number;
+}
+
+// Pre-flight
+
+export type PreflightStatus = "pass" | "warning" | "fail";
+
+export interface PreflightCheck {
+  name: string;
+  status: PreflightStatus;
+  message: string;
+  detail: string | null;
+}
+
+export interface PreflightResult {
+  checks: PreflightCheck[];
+  passed: number;
+  failed: number;
+  warnings: number;
+  can_proceed: boolean;
+}
+
+// Mod Dependencies
+
+export type DependencyIssueType = "missing_requirement" | "active_conflict" | "orphaned_patch";
+
+export interface ModDependency {
+  id: number;
+  game_id: string;
+  bottle_name: string;
+  mod_id: number;
+  depends_on_id: number | null;
+  nexus_dep_id: number | null;
+  dep_name: string;
+  relationship: string;
+  created_at: string;
+}
+
+export interface DependencyIssue {
+  mod_id: number;
+  mod_name: string;
+  issue_type: DependencyIssueType;
+  message: string;
+  related_mod_name: string;
+}
+
+// Mod Recommendations
+
+export interface ModRecommendation {
+  nexus_mod_id: number;
+  name: string;
+  reason: string;
+  co_occurrence_count: number;
+  is_installed: boolean;
+}
+
+export interface RecommendationResult {
+  mod_id: number;
+  mod_name: string;
+  recommendations: ModRecommendation[];
+}
+
+export interface PopularMod {
+  name: string;
+  nexus_mod_id: number;
+  collection_count: number;
+}
+
+// Session Tracker
+
+export interface GameSession {
+  id: number;
+  game_id: string;
+  bottle_name: string;
+  profile_name: string | null;
+  started_at: string;
+  ended_at: string | null;
+  duration_secs: number | null;
+  clean_exit: boolean | null;
+  crash_log_path: string | null;
+  notes: string | null;
+}
+
+export interface SessionModChange {
+  id: number;
+  session_id: number;
+  mod_id: number | null;
+  mod_name: string;
+  change_type: string;
+  detail: string | null;
+}
+
+export interface StabilitySummary {
+  total_sessions: number;
+  clean_exits: number;
+  crashes: number;
+  unknown_exits: number;
+  avg_duration_secs: number;
+  last_stable_session: string | null;
+  mods_since_last_stable: SessionModChange[];
+}
+
+// FOMOD Recipes
+
+export interface FomodRecipe {
+  id: number;
+  mod_id: number;
+  mod_name: string;
+  installer_hash: string | null;
+  selections: Record<string, string[]>;
+  created_at: string;
 }
 
 // Install Progress Events

@@ -269,7 +269,13 @@ pub fn redeploy_all(
                     .map_err(|e| DeployerError::Other(e.to_string()))?;
 
                 let result = deploy_mod(
-                    db, game_id, bottle_name, m.id, &staging_path, data_dir, &files,
+                    db,
+                    game_id,
+                    bottle_name,
+                    m.id,
+                    &staging_path,
+                    data_dir,
+                    &files,
                 )?;
 
                 total_deployed += result.deployed_count;
@@ -466,10 +472,15 @@ mod tests {
 
         // Create a mod in DB
         let mod_id = db
-            .add_mod("skyrimse", "Gaming", None, "TestMod", "1.0", "test.zip", &[
-                "meshes/test.nif".to_string(),
-                "mod.esp".to_string(),
-            ])
+            .add_mod(
+                "skyrimse",
+                "Gaming",
+                None,
+                "TestMod",
+                "1.0",
+                "test.zip",
+                &["meshes/test.nif".to_string(), "mod.esp".to_string()],
+            )
             .unwrap();
 
         // Create staging files
@@ -477,7 +488,10 @@ mod tests {
         create_staging_file(&staging, "mod.esp", b"esp data");
 
         let files = vec!["meshes/test.nif".to_string(), "mod.esp".to_string()];
-        let result = deploy_mod(&db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &files).unwrap();
+        let result = deploy_mod(
+            &db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &files,
+        )
+        .unwrap();
 
         assert_eq!(result.deployed_count, 2);
         assert_eq!(result.skipped_count, 0);
@@ -491,12 +505,17 @@ mod tests {
 
         let files = vec!["test.esp".to_string()];
         let mod_id = db
-            .add_mod("skyrimse", "Gaming", None, "TestMod", "1.0", "test.zip", &files)
+            .add_mod(
+                "skyrimse", "Gaming", None, "TestMod", "1.0", "test.zip", &files,
+            )
             .unwrap();
 
         create_staging_file(&staging, "test.esp", b"esp");
 
-        deploy_mod(&db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &files).unwrap();
+        deploy_mod(
+            &db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &files,
+        )
+        .unwrap();
         assert!(data_dir.join("test.esp").exists());
 
         let removed = undeploy_mod(&db, "skyrimse", "Gaming", mod_id, &data_dir).unwrap();
@@ -514,23 +533,33 @@ mod tests {
 
         // Low priority mod
         let mod1 = db
-            .add_mod("skyrimse", "Gaming", None, "LowPri", "1.0", "low.zip", &files)
+            .add_mod(
+                "skyrimse", "Gaming", None, "LowPri", "1.0", "low.zip", &files,
+            )
             .unwrap();
         db.set_mod_priority(mod1, 0).unwrap();
         create_staging_file(&staging1, "shared.esp", b"low priority data");
 
         // High priority mod
         let mod2 = db
-            .add_mod("skyrimse", "Gaming", None, "HighPri", "1.0", "high.zip", &files)
+            .add_mod(
+                "skyrimse", "Gaming", None, "HighPri", "1.0", "high.zip", &files,
+            )
             .unwrap();
         db.set_mod_priority(mod2, 10).unwrap();
         create_staging_file(&staging2, "shared.esp", b"high priority data");
 
         // Deploy low priority first
-        deploy_mod(&db, "skyrimse", "Gaming", mod1, &staging1, &data_dir, &files).unwrap();
+        deploy_mod(
+            &db, "skyrimse", "Gaming", mod1, &staging1, &data_dir, &files,
+        )
+        .unwrap();
 
         // Deploy high priority — should overwrite
-        deploy_mod(&db, "skyrimse", "Gaming", mod2, &staging2, &data_dir, &files).unwrap();
+        deploy_mod(
+            &db, "skyrimse", "Gaming", mod2, &staging2, &data_dir, &files,
+        )
+        .unwrap();
 
         // Verify high priority content is in data_dir
         let content = fs::read_to_string(data_dir.join("shared.esp")).unwrap();

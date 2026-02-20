@@ -43,6 +43,23 @@ import type {
   ModlistDiff,
   DisplayFixResult,
   InstallProgressEvent,
+  CollectionSummary,
+  DeploymentHealth,
+  QueueItem,
+  QueueCounts,
+  DiskBudget,
+  InstallImpact,
+  IniFile,
+  IniPreset,
+  DiagnosticResult,
+  PreflightResult,
+  ModDependency,
+  DependencyIssue,
+  RecommendationResult,
+  PopularMod,
+  GameSession,
+  StabilitySummary,
+  FomodRecipe,
 } from "./types";
 
 // Bottles
@@ -611,9 +628,10 @@ export async function installCollection(
   bottleName: string
 ): Promise<{
   installed: number;
+  already_installed: number;
   skipped: number;
   failed: number;
-  details: { name: string; status: string; error: string | null }[];
+  details: { name: string; status: string; error: string | null; url: string | null; instructions: string | null }[];
 }> {
   return invoke("install_collection_cmd", { manifest, gameId, bottleName });
 }
@@ -733,6 +751,114 @@ export async function diffModlists(
   return invoke("diff_modlists_cmd", { filePath, gameId, bottleName });
 }
 
+// Collection Management
+export async function listInstalledCollections(
+  gameId: string,
+  bottleName: string
+): Promise<CollectionSummary[]> {
+  return invoke("list_installed_collections_cmd", { gameId, bottleName });
+}
+
+export async function switchCollection(
+  gameId: string,
+  bottleName: string,
+  collectionName: string
+): Promise<{ deployed_count: number; active_collection: string }> {
+  return invoke("switch_collection_cmd", {
+    gameId,
+    bottleName,
+    collectionName,
+  });
+}
+
+export async function deleteCollection(
+  gameId: string,
+  bottleName: string,
+  collectionName: string,
+  deleteUniqueDownloads: boolean
+): Promise<{ mods_removed: number; downloads_removed: number }> {
+  return invoke("delete_collection_cmd", {
+    gameId,
+    bottleName,
+    collectionName,
+    deleteUniqueDownloads,
+  });
+}
+
+export async function getCollectionDiff(
+  gameId: string,
+  bottleName: string,
+  collectionName: string
+): Promise<import("./types").CollectionDiff> {
+  return invoke("get_collection_diff_cmd", { gameId, bottleName, collectionName });
+}
+
+export async function getDeploymentHealth(
+  gameId: string,
+  bottleName: string
+): Promise<DeploymentHealth> {
+  return invoke("get_deployment_health", { gameId, bottleName });
+}
+
+// Mod Tools
+export async function detectModTools(
+  gameId: string,
+  bottleName: string
+): Promise<import("./types").ModTool[]> {
+  return invoke("detect_mod_tools_cmd", { gameId, bottleName });
+}
+
+// Notes & Tags
+export async function setModNotes(
+  modId: number,
+  notes: string | null
+): Promise<void> {
+  return invoke("set_mod_notes", { modId, notes });
+}
+
+export async function setModTags(
+  modId: number,
+  tags: string[]
+): Promise<void> {
+  return invoke("set_mod_tags", { modId, tags });
+}
+
+export async function getAllTags(
+  gameId: string,
+  bottleName: string
+): Promise<string[]> {
+  return invoke("get_all_tags", { gameId, bottleName });
+}
+
+// Download Queue
+export async function getDownloadQueue(): Promise<QueueItem[]> {
+  return invoke("get_download_queue");
+}
+
+export async function getDownloadQueueCounts(): Promise<QueueCounts> {
+  return invoke("get_download_queue_counts");
+}
+
+export async function retryDownload(id: number): Promise<boolean> {
+  return invoke("retry_download", { id });
+}
+
+export async function cancelDownload(id: number): Promise<void> {
+  return invoke("cancel_download", { id });
+}
+
+export async function clearFinishedDownloads(): Promise<number> {
+  return invoke("clear_finished_downloads");
+}
+
+export function onDownloadQueueUpdate(
+  callback: (items: QueueItem[]) => void
+): Promise<UnlistenFn> {
+  return listen<QueueItem[]>("download-queue-update", (e) =>
+    callback(e.payload)
+  );
+}
+
 // Install Progress Events
 export function onInstallProgress(
   callback: (event: InstallProgressEvent) => void
@@ -740,4 +866,215 @@ export function onInstallProgress(
   return listen<InstallProgressEvent>("install-progress", (e) =>
     callback(e.payload)
   );
+}
+
+// Disk Budget
+export async function getDiskBudget(
+  gameId: string,
+  bottleName: string
+): Promise<DiskBudget> {
+  return invoke("get_disk_budget", { gameId, bottleName });
+}
+
+export async function estimateInstallImpact(
+  archiveSize: number,
+  gameId: string,
+  bottleName: string
+): Promise<InstallImpact> {
+  return invoke("estimate_install_impact_cmd", { archiveSize, gameId, bottleName });
+}
+
+// INI Manager
+export async function getIniSettings(
+  gameId: string,
+  bottleName: string
+): Promise<IniFile[]> {
+  return invoke("get_ini_settings", { gameId, bottleName });
+}
+
+export async function setIniSetting(
+  filePath: string,
+  section: string,
+  key: string,
+  value: string
+): Promise<void> {
+  return invoke("set_ini_setting", { filePath, section, key, value });
+}
+
+export async function getIniPresets(gameId: string): Promise<IniPreset[]> {
+  return invoke("get_ini_presets", { gameId });
+}
+
+export async function applyIniPreset(
+  gameId: string,
+  bottleName: string,
+  presetName: string
+): Promise<number> {
+  return invoke("apply_ini_preset", { gameId, bottleName, presetName });
+}
+
+// Wine Diagnostics
+export async function runWineDiagnostics(
+  gameId: string,
+  bottleName: string
+): Promise<DiagnosticResult> {
+  return invoke("run_wine_diagnostics", { gameId, bottleName });
+}
+
+export async function fixWineAppdata(bottleName: string): Promise<void> {
+  return invoke("fix_wine_appdata", { bottleName });
+}
+
+export async function fixWineDllOverride(
+  bottleName: string,
+  dllName: string,
+  overrideType: string
+): Promise<void> {
+  return invoke("fix_wine_dll_override", { bottleName, dllName, overrideType });
+}
+
+export async function fixWineRetinaMode(bottleName: string): Promise<void> {
+  return invoke("fix_wine_retina_mode", { bottleName });
+}
+
+// Pre-flight
+export async function runPreflightCheck(
+  gameId: string,
+  bottleName: string
+): Promise<PreflightResult> {
+  return invoke("run_preflight_check", { gameId, bottleName });
+}
+
+// Mod Dependencies
+export async function addModDependency(
+  gameId: string,
+  bottleName: string,
+  modId: number,
+  dependsOnId: number | null,
+  nexusDepId: number | null,
+  depName: string,
+  relationship: string
+): Promise<number> {
+  return invoke("add_mod_dependency", {
+    gameId, bottleName, modId, dependsOnId, nexusDepId, depName, relationship,
+  });
+}
+
+export async function removeModDependency(depId: number): Promise<void> {
+  return invoke("remove_mod_dependency", { depId });
+}
+
+export async function getModDependencies(modId: number): Promise<ModDependency[]> {
+  return invoke("get_mod_dependencies", { modId });
+}
+
+export async function checkDependencyIssues(
+  gameId: string,
+  bottleName: string
+): Promise<DependencyIssue[]> {
+  return invoke("check_dependency_issues", { gameId, bottleName });
+}
+
+// Mod Recommendations
+export async function getModRecommendations(
+  gameId: string,
+  bottleName: string,
+  targetModId: number
+): Promise<RecommendationResult> {
+  return invoke("get_mod_recommendations", { gameId, bottleName, targetModId });
+}
+
+export async function getPopularMods(
+  gameId: string,
+  bottleName: string
+): Promise<PopularMod[]> {
+  return invoke<[string, number, number][]>("get_popular_mods", { gameId, bottleName }).then(
+    (items) => items.map(([name, nexus_mod_id, collection_count]) => ({
+      name, nexus_mod_id, collection_count,
+    }))
+  );
+}
+
+// Session Tracker
+export async function startGameSession(
+  gameId: string,
+  bottleName: string,
+  profileName?: string
+): Promise<number> {
+  return invoke("start_game_session", {
+    gameId, bottleName, profileName: profileName ?? null,
+  });
+}
+
+export async function endGameSession(
+  sessionId: number,
+  cleanExit: boolean,
+  crashLogPath?: string
+): Promise<void> {
+  return invoke("end_game_session", {
+    sessionId, cleanExit, crashLogPath: crashLogPath ?? null,
+  });
+}
+
+export async function recordSessionModChange(
+  sessionId: number,
+  modId: number | null,
+  modName: string,
+  changeType: string,
+  detail?: string
+): Promise<number> {
+  return invoke("record_session_mod_change", {
+    sessionId, modId, modName, changeType, detail: detail ?? null,
+  });
+}
+
+export async function getSessionHistory(
+  gameId: string,
+  bottleName: string,
+  limit?: number
+): Promise<GameSession[]> {
+  return invoke("get_session_history", {
+    gameId, bottleName, limit: limit ?? null,
+  });
+}
+
+export async function getStabilitySummary(
+  gameId: string,
+  bottleName: string
+): Promise<StabilitySummary> {
+  return invoke("get_stability_summary", { gameId, bottleName });
+}
+
+// FOMOD Recipes
+export async function saveFomodRecipe(
+  modId: number,
+  modName: string,
+  installerHash: string | null,
+  selections: Record<string, string[]>
+): Promise<number> {
+  return invoke("save_fomod_recipe", { modId, modName, installerHash, selections });
+}
+
+export async function getFomodRecipe(modId: number): Promise<FomodRecipe | null> {
+  return invoke("get_fomod_recipe", { modId });
+}
+
+export async function listFomodRecipes(
+  gameId: string,
+  bottleName: string
+): Promise<FomodRecipe[]> {
+  return invoke("list_fomod_recipes", { gameId, bottleName });
+}
+
+export async function deleteFomodRecipe(modId: number): Promise<void> {
+  return invoke("delete_fomod_recipe", { modId });
+}
+
+export async function hasCompatibleFomodRecipe(
+  modId: number,
+  currentHash?: string
+): Promise<boolean> {
+  return invoke("has_compatible_fomod_recipe", {
+    modId, currentHash: currentHash ?? null,
+  });
 }

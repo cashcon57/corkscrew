@@ -143,7 +143,14 @@ pub fn save_mod_version(
         "INSERT INTO mod_versions
             (mod_id, version, staging_path, archive_name, is_current, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![mod_id, version, staging_path, archive_name, is_current, created_at],
+        params![
+            mod_id,
+            version,
+            staging_path,
+            archive_name,
+            is_current,
+            created_at
+        ],
     )
     .map_err(|e| format!("Failed to save mod version: {}", e))?;
 
@@ -151,10 +158,7 @@ pub fn save_mod_version(
 }
 
 /// List all saved versions for a mod, ordered by creation time (newest first).
-pub fn list_mod_versions(
-    db: &ModDatabase,
-    mod_id: i64,
-) -> Result<Vec<ModVersion>, String> {
+pub fn list_mod_versions(db: &ModDatabase, mod_id: i64) -> Result<Vec<ModVersion>, String> {
     let conn = db.conn().map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare(
@@ -223,12 +227,7 @@ pub fn rollback_to_version(
                 created_at: row.get(6)?,
             })
         })
-        .map_err(|_| {
-            format!(
-                "Version {} not found for mod {}",
-                version_id, mod_id
-            )
-        })?;
+        .map_err(|_| format!("Version {} not found for mod {}", version_id, mod_id))?;
 
     // Clear is_current on all versions for this mod.
     conn.execute(
@@ -549,7 +548,10 @@ mod tests {
 
         // First saved version should be current.
         assert!(versions[1].is_current, "First version should be current");
-        assert!(!versions[0].is_current, "Second version should not be current");
+        assert!(
+            !versions[0].is_current,
+            "Second version should not be current"
+        );
     }
 
     #[test]
@@ -573,7 +575,11 @@ mod tests {
             if v.id == v2_id {
                 assert!(v.is_current, "v2 should be current");
             } else {
-                assert!(!v.is_current, "v{} (id={}) should not be current", v.version, v.id);
+                assert!(
+                    !v.is_current,
+                    "v{} (id={}) should not be current",
+                    v.version, v.id
+                );
             }
         }
 
@@ -700,10 +706,26 @@ mod tests {
     fn test_snapshot_different_games_are_separate() {
         let (db, _tmp) = test_db();
 
-        db.add_mod("skyrimse", "Gaming", None, "Skyrim Mod", "1.0", "a.zip", &[])
-            .unwrap();
-        db.add_mod("fallout4", "Gaming", None, "Fallout Mod", "1.0", "b.zip", &[])
-            .unwrap();
+        db.add_mod(
+            "skyrimse",
+            "Gaming",
+            None,
+            "Skyrim Mod",
+            "1.0",
+            "a.zip",
+            &[],
+        )
+        .unwrap();
+        db.add_mod(
+            "fallout4",
+            "Gaming",
+            None,
+            "Fallout Mod",
+            "1.0",
+            "b.zip",
+            &[],
+        )
+        .unwrap();
 
         create_snapshot(&db, "skyrimse", "Gaming", "Skyrim Snap", None).unwrap();
         create_snapshot(&db, "fallout4", "Gaming", "Fallout Snap", None).unwrap();

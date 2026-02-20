@@ -28,6 +28,12 @@ pub enum InstallerError {
     #[error("7z extraction error: {0}")]
     SevenZ(String),
 
+    #[error("RAR extraction error: {0}")]
+    Rar(String),
+
+    #[error("Tar extraction error: {0}")]
+    Tar(String),
+
     #[error("WalkDir error: {0}")]
     WalkDir(#[from] walkdir::Error),
 
@@ -81,6 +87,23 @@ pub fn extract_archive(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathB
 
     fs::create_dir_all(dest_dir)?;
 
+    // Check compound extensions first (tar.gz, tar.xz, tar.bz2)
+    let name_lower = archive_path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_lowercase();
+
+    if name_lower.ends_with(".tar.gz") || name_lower.ends_with(".tgz") {
+        return extract_tar_gz(archive_path, dest_dir);
+    }
+    if name_lower.ends_with(".tar.xz") || name_lower.ends_with(".txz") {
+        return extract_tar_xz(archive_path, dest_dir);
+    }
+    if name_lower.ends_with(".tar.bz2") || name_lower.ends_with(".tbz2") {
+        return extract_tar_bz2(archive_path, dest_dir);
+    }
+
     let ext = archive_path
         .extension()
         .and_then(|e| e.to_str())
@@ -90,6 +113,7 @@ pub fn extract_archive(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathB
     match ext.as_str() {
         "zip" => extract_zip(archive_path, dest_dir),
         "7z" => extract_7z(archive_path, dest_dir),
+        "rar" => extract_rar(archive_path, dest_dir),
         other => Err(InstallerError::UnsupportedFormat(other.to_string())),
     }
 }
@@ -145,7 +169,9 @@ fn extract_7z(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
     })?;
 
     // Canonicalize dest_dir for path traversal validation.
-    let canonical_dest = dest_dir.canonicalize().unwrap_or_else(|_| dest_dir.to_path_buf());
+    let canonical_dest = dest_dir
+        .canonicalize()
+        .unwrap_or_else(|_| dest_dir.to_path_buf());
 
     // Walk the destination to collect the list of extracted files,
     // rejecting any that escape the destination directory (path traversal).
@@ -173,6 +199,143 @@ fn extract_7z(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
 
     info!(
         "Extracted {} files from 7z: {}",
+        extracted.len(),
+        archive_path.display()
+    );
+    Ok(extracted)
+}
+
+/// Extract a `.rar` archive using the `unrar` crate.
+fn extract_rar(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut extracted = Vec::new();
+    let archive = unrar::Archive::new(archive_path)
+        .open_for_processing()
+        .map_err(|e| InstallerError::Rar(e.to_string()))?;
+
+    let mut cursor = Some(
+        archive
+            .read_header()
+            .map_err(|e| InstallerError::Rar(e.to_string()))?,
+    );
+
+    while let Some(Some(header)) = cursor.take() {
+        let entry = header.entry();
+        let out_path = dest_dir.join(&entry.filename);
+
+        // Path traversal check
+        if !out_path.starts_with(dest_dir) {
+            warn!(
+                "Skipping RAR entry with path traversal: {}",
+                entry.filename.display()
+            );
+            let next = header
+                .skip()
+                .map_err(|e| InstallerError::Rar(e.to_string()))?;
+            cursor = Some(
+                next.read_header()
+                    .map_err(|e| InstallerError::Rar(e.to_string()))?,
+            );
+            continue;
+        }
+
+        if entry.is_file() {
+            if let Some(parent) = out_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let result = header
+                .extract_to(&out_path)
+                .map_err(|e| InstallerError::Rar(e.to_string()))?;
+            extracted.push(out_path);
+            cursor = Some(
+                result
+                    .read_header()
+                    .map_err(|e| InstallerError::Rar(e.to_string()))?,
+            );
+        } else {
+            fs::create_dir_all(&out_path)?;
+            let next = header
+                .skip()
+                .map_err(|e| InstallerError::Rar(e.to_string()))?;
+            cursor = Some(
+                next.read_header()
+                    .map_err(|e| InstallerError::Rar(e.to_string()))?,
+            );
+        }
+    }
+
+    info!(
+        "Extracted {} files from RAR: {}",
+        extracted.len(),
+        archive_path.display()
+    );
+    Ok(extracted)
+}
+
+/// Extract a `.tar.gz` / `.tgz` archive.
+fn extract_tar_gz(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
+    let file = fs::File::open(archive_path)?;
+    let decoder = flate2::read::GzDecoder::new(file);
+    extract_tar(decoder, archive_path, dest_dir)
+}
+
+/// Extract a `.tar.xz` / `.txz` archive.
+fn extract_tar_xz(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
+    let file = fs::File::open(archive_path)?;
+    let decoder = xz2::read::XzDecoder::new(file);
+    extract_tar(decoder, archive_path, dest_dir)
+}
+
+/// Extract a `.tar.bz2` / `.tbz2` archive.
+fn extract_tar_bz2(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
+    let file = fs::File::open(archive_path)?;
+    let decoder = bzip2::read::BzDecoder::new(file);
+    extract_tar(decoder, archive_path, dest_dir)
+}
+
+/// Shared tar extraction logic for any decompressed reader.
+fn extract_tar<R: io::Read>(
+    reader: R,
+    archive_path: &Path,
+    dest_dir: &Path,
+) -> Result<Vec<PathBuf>> {
+    let mut archive = tar::Archive::new(reader);
+    let mut extracted = Vec::new();
+
+    for entry_result in archive
+        .entries()
+        .map_err(|e| InstallerError::Tar(e.to_string()))?
+    {
+        let mut entry = entry_result.map_err(|e| InstallerError::Tar(e.to_string()))?;
+        let rel_path = entry
+            .path()
+            .map_err(|e| InstallerError::Tar(e.to_string()))?
+            .into_owned();
+
+        let out_path = dest_dir.join(&rel_path);
+
+        // Path traversal check
+        if !out_path.starts_with(dest_dir) {
+            warn!(
+                "Skipping tar entry with path traversal: {}",
+                rel_path.display()
+            );
+            continue;
+        }
+
+        if entry.header().entry_type().is_dir() {
+            fs::create_dir_all(&out_path)?;
+        } else if entry.header().entry_type().is_file() {
+            if let Some(parent) = out_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let mut out_file = fs::File::create(&out_path)?;
+            io::copy(&mut entry, &mut out_file)?;
+            extracted.push(out_path);
+        }
+    }
+
+    info!(
+        "Extracted {} files from tar archive: {}",
         extracted.len(),
         archive_path.display()
     );
@@ -222,8 +385,8 @@ fn looks_like_mod_content(directory: &Path) -> bool {
 /// Rules (evaluated in order):
 /// 1. If the extracted root has a single top-level directory:
 ///    a. If that directory is named "data" (case-insensitive) -> use its
-///       *contents* (i.e. return the Data dir itself so the caller copies
-///       children).
+///    *contents* (i.e. return the Data dir itself so the caller copies
+///    children).
 ///    b. If that directory looks like mod content -> use it.
 ///    c. Recurse: treat that directory as the new root and re-evaluate.
 /// 2. If the extracted root contains a child named "Data" -> return that.
@@ -247,11 +410,7 @@ fn _find_data_root_inner(dir: &Path, depth: u32) -> PathBuf {
         .into_iter()
         .flatten()
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            !e.file_name()
-                .to_string_lossy()
-                .starts_with('.')
-        })
+        .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
         .collect();
 
     // --- Rule 1: single top-level directory ---
@@ -263,7 +422,10 @@ fn _find_data_root_inner(dir: &Path, depth: u32) -> PathBuf {
 
             // 1a – named "data"
             if name == "data" {
-                debug!("find_data_root: single dir named 'data' -> {}", entry_path.display());
+                debug!(
+                    "find_data_root: single dir named 'data' -> {}",
+                    entry_path.display()
+                );
                 return entry_path;
             }
 
@@ -337,10 +499,7 @@ pub fn install_mod(
     _nexus_mod_id: Option<i64>,
 ) -> Result<Vec<String>> {
     // 1. Extract into a temp directory.
-    let temp_dir = std::env::temp_dir().join(format!(
-        "corkscrew_install_{}",
-        std::process::id()
-    ));
+    let temp_dir = std::env::temp_dir().join(format!("corkscrew_install_{}", std::process::id()));
     if temp_dir.exists() {
         fs::remove_dir_all(&temp_dir)?;
     }
@@ -365,10 +524,7 @@ pub fn install_mod(
 
     let mut installed_files: Vec<String> = Vec::new();
 
-    for entry in WalkDir::new(&data_root)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in WalkDir::new(&data_root).into_iter().filter_map(|e| e.ok()) {
         if !entry.file_type().is_file() {
             continue;
         }
@@ -387,9 +543,7 @@ pub fn install_mod(
         fs::copy(abs_src, &dest_path)?;
 
         // Store the relative path using forward slashes for consistency.
-        let rel_str = relative
-            .to_string_lossy()
-            .replace('\\', "/");
+        let rel_str = relative.to_string_lossy().replace('\\', "/");
         debug!("Installed: {}", rel_str);
         installed_files.push(rel_str);
     }
@@ -426,9 +580,7 @@ pub fn uninstall_mod_files(data_dir: &Path, installed_files: &[String]) -> Resul
             removed.push(rel_path_str.clone());
 
             // Walk upward and prune empty directories.
-            let mut current = full_path
-                .parent()
-                .map(|p| p.to_path_buf());
+            let mut current = full_path.parent().map(|p| p.to_path_buf());
             while let Some(dir) = current {
                 // Never delete data_dir itself.
                 if dir == data_dir {
@@ -629,8 +781,8 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();
 
-        let fake_file = tmp.join("archive.rar");
-        fs::write(&fake_file, b"not a real rar").unwrap();
+        let fake_file = tmp.join("archive.cab");
+        fs::write(&fake_file, b"not a real cab").unwrap();
 
         let result = extract_archive(&fake_file, &tmp.join("out"));
         assert!(result.is_err());

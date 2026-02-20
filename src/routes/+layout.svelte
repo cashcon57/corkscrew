@@ -1,14 +1,14 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import "../app.css";
-  import { currentPage, errorMessage, successMessage, selectedGame, selectedBottle, showError, showSuccess, appVersion } from "$lib/stores";
+  import { currentPage, errorMessage, successMessage, selectedGame, selectedBottle, showError, showSuccess, appVersion, collectionInstallStatus } from "$lib/stores";
   import { initTheme } from "$lib/theme";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
   import { getVersion } from "@tauri-apps/api/app";
-  import { downloadFromNexus, getAllGames } from "$lib/api";
+  import { downloadFromNexus, getAllGames, getDownloadQueue, retryDownload, cancelDownload, clearFinishedDownloads, onDownloadQueueUpdate } from "$lib/api";
   import { get } from "svelte/store";
-  import type { DetectedGame } from "$lib/types";
+  import type { DetectedGame, QueueItem } from "$lib/types";
   import GameIcon from "$lib/components/GameIcon.svelte";
 
   const navItems = [
@@ -26,10 +26,32 @@
   let detectedGames = $state<DetectedGame[]>([]);
   let gameDropdownOpen = $state(false);
 
+  // Download queue state
+  let queueItems = $state<QueueItem[]>([]);
+  let showQueue = $state(false);
+  let queueUnlisten: (() => void) | null = null;
+
+  let activeDownloads = $derived(queueItems.filter(i => i.status === "downloading" || i.status === "pending").length);
+  let failedDownloads = $derived(queueItems.filter(i => i.status === "failed").length);
+
+  // Queue popover positioning (fixed to escape sidebar overflow:hidden)
+  let queueBtnEl = $state<HTMLElement | null>(null);
+  let popoverStyle = $state('');
+  $effect(() => {
+    if (showQueue && queueBtnEl) {
+      const rect = queueBtnEl.getBoundingClientRect();
+      popoverStyle = `bottom: ${window.innerHeight - rect.top + 8}px; left: ${rect.left}px;`;
+    }
+  });
+
   onMount(() => {
     initTheme();
     loadDetectedGames();
     getVersion().then(v => appVersion.set(v)).catch(() => {});
+
+    // Subscribe to download queue updates
+    getDownloadQueue().then(items => queueItems = items).catch(() => {});
+    onDownloadQueueUpdate((items) => { queueItems = items; }).then(fn => queueUnlisten = fn).catch(() => {});
 
     // Listen for NXM deep-link URLs (e.g. nxm://skyrimspecialedition/mods/123/files/456?key=abc&expires=123)
     onOpenUrl((urls) => {
@@ -46,9 +68,28 @@
       if (!target.closest(".sidebar-game-section")) {
         gameDropdownOpen = false;
       }
+      if (!target.closest(".queue-section")) {
+        showQueue = false;
+      }
     }
+
+    // Global Escape key handler — dismiss toasts and close dropdowns
+    function handleKeydown(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        if (get(errorMessage)) { errorMessage.set(null); return; }
+        if (get(successMessage)) { successMessage.set(null); return; }
+        if (gameDropdownOpen) { gameDropdownOpen = false; return; }
+        if (showQueue) { showQueue = false; return; }
+      }
+    }
+
     document.addEventListener("click", handleClickOutside);
-    return () => document.removeEventListener("click", handleClickOutside);
+    document.addEventListener("keydown", handleKeydown);
+    return () => {
+      document.removeEventListener("click", handleClickOutside);
+      document.removeEventListener("keydown", handleKeydown);
+      if (queueUnlisten) queueUnlisten();
+    };
   });
 
   async function loadDetectedGames() {
@@ -125,6 +166,45 @@
 
   function navigate(page: string) {
     currentPage.set(page);
+  }
+
+  async function handleRetryDownload(id: number) {
+    try {
+      await retryDownload(id);
+      queueItems = await getDownloadQueue();
+    } catch { /* ignore */ }
+  }
+
+  async function handleCancelDownload(id: number) {
+    try {
+      await cancelDownload(id);
+      queueItems = await getDownloadQueue();
+    } catch { /* ignore */ }
+  }
+
+  async function handleClearFinished() {
+    try {
+      await clearFinishedDownloads();
+      queueItems = await getDownloadQueue();
+    } catch { /* ignore */ }
+  }
+
+  // Auto-dismiss success toasts after 4 seconds
+  let successTimer: ReturnType<typeof setTimeout> | null = null;
+  $effect(() => {
+    if ($successMessage) {
+      if (successTimer) clearTimeout(successTimer);
+      successTimer = setTimeout(() => successMessage.set(null), 4000);
+    }
+    return () => { if (successTimer) clearTimeout(successTimer); };
+  });
+
+  function formatBytes(bytes: number): string {
+    if (bytes === 0) return "0 B";
+    const k = 1024;
+    const sizes = ["B", "KB", "MB", "GB"];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
   }
 </script>
 
@@ -275,6 +355,86 @@
         </svg>
         <span>GitHub</span>
       </button>
+
+      <!-- Download Queue Indicator -->
+      <div class="queue-section">
+        <button
+          bind:this={queueBtnEl}
+          class="queue-btn"
+          class:queue-active={activeDownloads > 0}
+          class:queue-error={failedDownloads > 0 && activeDownloads === 0}
+          onclick={(e) => { e.stopPropagation(); showQueue = !showQueue; }}
+          title="Download Queue"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7 10 12 15 17 10" />
+            <line x1="12" y1="15" x2="12" y2="3" />
+          </svg>
+          {#if activeDownloads > 0}
+            <span class="queue-badge queue-badge-active">{activeDownloads}</span>
+          {:else if failedDownloads > 0}
+            <span class="queue-badge queue-badge-error">{failedDownloads}</span>
+          {/if}
+        </button>
+
+        {#if showQueue}
+          <div class="queue-popover" style={popoverStyle}>
+            <div class="queue-popover-header">
+              <span class="queue-popover-title">Downloads</span>
+              {#if queueItems.some(i => i.status === "completed" || i.status === "cancelled")}
+                <button class="queue-clear-btn" onclick={handleClearFinished}>Clear Finished</button>
+              {/if}
+            </div>
+            {#if queueItems.length === 0}
+              <div class="queue-empty">No downloads</div>
+            {:else}
+              <div class="queue-list">
+                {#each queueItems as item (item.id)}
+                  <div class="queue-item" class:queue-item-failed={item.status === "failed"} class:queue-item-done={item.status === "completed"}>
+                    <div class="queue-item-info">
+                      <span class="queue-item-name">{item.mod_name}</span>
+                      <span class="queue-item-status">
+                        {#if item.status === "downloading" && item.total_bytes > 0}
+                          {formatBytes(item.downloaded_bytes)} / {formatBytes(item.total_bytes)}
+                        {:else if item.status === "failed"}
+                          Failed{#if item.error}: {item.error}{/if}
+                        {:else}
+                          {item.status}
+                        {/if}
+                      </span>
+                    </div>
+                    {#if item.status === "downloading" && item.total_bytes > 0}
+                      <div class="queue-progress-bar">
+                        <div class="queue-progress-fill" style="width: {Math.round((item.downloaded_bytes / item.total_bytes) * 100)}%"></div>
+                      </div>
+                    {/if}
+                    <div class="queue-item-actions">
+                      {#if item.status === "failed" && item.attempt < item.max_attempts}
+                        <button class="queue-action-btn" onclick={() => handleRetryDownload(item.id)} title="Retry">
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <polyline points="23 4 23 10 17 10" />
+                            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+                          </svg>
+                        </button>
+                      {/if}
+                      {#if item.status === "pending" || item.status === "downloading"}
+                        <button class="queue-action-btn" onclick={() => handleCancelDownload(item.id)} title="Cancel">
+                          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+                            <line x1="3" y1="3" x2="9" y2="9" />
+                            <line x1="9" y1="3" x2="3" y2="9" />
+                          </svg>
+                        </button>
+                      {/if}
+                    </div>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          </div>
+        {/if}
+      </div>
+
       <span class="sidebar-version">v{$appVersion}</span>
     </div>
   </nav>
@@ -320,6 +480,30 @@
       <slot />
     </main>
   </div>
+
+  {#if $collectionInstallStatus?.active}
+    <div class="global-status-bar">
+      <div class="status-bar-content">
+        <div class="status-spinner"></div>
+        <div class="status-text">
+          <span class="status-collection">{$collectionInstallStatus.collectionName}</span>
+          <span class="status-detail">
+            {$collectionInstallStatus.current}/{$collectionInstallStatus.total}
+            {#if $collectionInstallStatus.currentMod}
+              &mdash; {$collectionInstallStatus.currentMod}
+            {/if}
+          </span>
+        </div>
+      </div>
+      <div class="status-progress-track">
+        <div class="status-progress-fill"
+          style="width: {$collectionInstallStatus.total > 0
+            ? ($collectionInstallStatus.current / $collectionInstallStatus.total) * 100
+            : 0}%">
+        </div>
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -756,7 +940,7 @@
     background: rgba(48, 209, 88, 0.18);
     border: 1px solid rgba(48, 209, 88, 0.25);
     color: var(--green);
-    top: calc(52px + var(--space-2) + 60px);
+    top: calc(52px + var(--space-2) + 52px);
   }
 
   .toast-icon {
@@ -788,5 +972,271 @@
   @keyframes toastIn {
     from { transform: translateY(-8px); opacity: 0; }
     to { transform: translateY(0); opacity: 1; }
+  }
+
+  /* ============================
+     Download Queue
+     ============================ */
+  .queue-section {
+    position: relative;
+  }
+
+  .queue-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: var(--radius-sm);
+    color: var(--text-tertiary);
+    cursor: pointer;
+    transition: all var(--duration-fast) var(--ease);
+    position: relative;
+  }
+
+  .queue-btn:hover {
+    background: var(--surface-hover);
+    color: var(--text-secondary);
+  }
+
+  .queue-btn.queue-active {
+    color: var(--accent);
+  }
+
+  .queue-btn.queue-error {
+    color: var(--red);
+  }
+
+  .queue-badge {
+    position: absolute;
+    top: -2px;
+    right: -2px;
+    min-width: 14px;
+    height: 14px;
+    border-radius: 7px;
+    font-size: 9px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 3px;
+  }
+
+  .queue-badge-active {
+    background: var(--accent);
+    color: #fff;
+  }
+
+  .queue-badge-error {
+    background: var(--red);
+    color: #fff;
+  }
+
+  .queue-popover {
+    position: fixed;
+    width: 300px;
+    max-height: 400px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--separator-opaque);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-lg);
+    z-index: 200;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    animation: dropdownIn var(--duration-fast) var(--ease-out);
+  }
+
+  .queue-popover-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--separator);
+    flex-shrink: 0;
+  }
+
+  .queue-popover-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .queue-clear-btn {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    cursor: pointer;
+    transition: color var(--duration-fast) var(--ease);
+  }
+
+  .queue-clear-btn:hover {
+    color: var(--text-primary);
+  }
+
+  .queue-empty {
+    padding: var(--space-4);
+    text-align: center;
+    font-size: 12px;
+    color: var(--text-tertiary);
+  }
+
+  .queue-list {
+    overflow-y: auto;
+    max-height: 340px;
+  }
+
+  .queue-item {
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--separator);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .queue-item:last-child {
+    border-bottom: none;
+  }
+
+  .queue-item-failed {
+    background: color-mix(in srgb, var(--red) 5%, transparent);
+  }
+
+  .queue-item-done {
+    opacity: 0.6;
+  }
+
+  .queue-item-info {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+  }
+
+  .queue-item-name {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .queue-item-status {
+    font-size: 10px;
+    color: var(--text-tertiary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .queue-progress-bar {
+    height: 3px;
+    background: var(--bg-tertiary);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .queue-progress-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 2px;
+    transition: width 0.2s ease;
+  }
+
+  .queue-item-actions {
+    display: flex;
+    gap: var(--space-1);
+    align-self: flex-end;
+  }
+
+  .queue-action-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    border-radius: var(--radius-sm);
+    color: var(--text-tertiary);
+    cursor: pointer;
+    transition: all var(--duration-fast) var(--ease);
+  }
+
+  .queue-action-btn:hover {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+  }
+
+  /* ---- Global collection install status bar ---- */
+  .global-status-bar {
+    position: fixed;
+    bottom: 16px;
+    left: 16px;
+    width: 220px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 10px 12px;
+    z-index: 300;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  }
+
+  .status-bar-content {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+
+  .status-spinner {
+    width: 14px;
+    height: 14px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    flex-shrink: 0;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  .status-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .status-collection {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .status-detail {
+    font-size: 10px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .status-progress-track {
+    height: 3px;
+    background: var(--bg-tertiary);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .status-progress-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 2px;
+    transition: width 0.3s ease;
   }
 </style>

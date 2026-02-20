@@ -11,8 +11,8 @@ use std::path::Path;
 
 use log::info;
 use rusqlite::{params, Connection};
-use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use walkdir::WalkDir;
 
@@ -93,7 +93,9 @@ pub fn create_game_snapshot(
     bottle_name: &str,
     data_dir: &Path,
 ) -> Result<usize> {
-    let conn = db.conn().map_err(|e| IntegrityError::Other(e.to_string()))?;
+    let conn = db
+        .conn()
+        .map_err(|e| IntegrityError::Other(e.to_string()))?;
 
     // Clear existing snapshot
     conn.execute(
@@ -107,10 +109,7 @@ pub fn create_game_snapshot(
          VALUES (?1, ?2, ?3, ?4, ?5)",
     )?;
 
-    for entry in WalkDir::new(data_dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in WalkDir::new(data_dir).into_iter().filter_map(|e| e.ok()) {
         if !entry.file_type().is_file() {
             continue;
         }
@@ -151,7 +150,9 @@ pub fn check_game_integrity(
     bottle_name: &str,
     data_dir: &Path,
 ) -> Result<IntegrityReport> {
-    let conn = db.conn().map_err(|e| IntegrityError::Other(e.to_string()))?;
+    let conn = db
+        .conn()
+        .map_err(|e| IntegrityError::Other(e.to_string()))?;
 
     // Load snapshot into a map
     let mut stmt = conn.prepare(
@@ -180,10 +181,7 @@ pub fn check_game_integrity(
     let mut seen = std::collections::HashSet::new();
     let mut total_scanned = 0usize;
 
-    for entry in WalkDir::new(data_dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in WalkDir::new(data_dir).into_iter().filter_map(|e| e.ok()) {
         if !entry.file_type().is_file() {
             continue;
         }
@@ -227,14 +225,14 @@ pub fn check_game_integrity(
 }
 
 /// Check if a snapshot exists for a game/bottle.
-pub fn has_snapshot(
-    db: &ModDatabase,
-    game_id: &str,
-    bottle_name: &str,
-) -> Result<bool> {
-    let conn = db.conn().map_err(|e| IntegrityError::Other(e.to_string()))?;
+pub fn has_snapshot(db: &ModDatabase, game_id: &str, bottle_name: &str) -> Result<bool> {
+    let conn = db
+        .conn()
+        .map_err(|e| IntegrityError::Other(e.to_string()))?;
     let count: i64 = conn
-        .prepare("SELECT count(*) FROM game_file_snapshots WHERE game_id = ?1 AND bottle_name = ?2")?
+        .prepare(
+            "SELECT count(*) FROM game_file_snapshots WHERE game_id = ?1 AND bottle_name = ?2",
+        )?
         .query_row(params![game_id, bottle_name], |row| row.get(0))?;
     Ok(count > 0)
 }

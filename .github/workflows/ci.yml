@@ -51,6 +51,10 @@ jobs:
         working-directory: src-tauri
         run: cargo fmt --check
 
+      - name: Clippy lint
+        working-directory: src-tauri
+        run: cargo clippy -- -D warnings
+
       - name: Svelte type check
         run: npx svelte-check --threshold error
 

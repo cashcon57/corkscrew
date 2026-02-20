@@ -217,9 +217,7 @@ pub fn find_crash_logs(game_path: &Path, bottle_path: &Path) -> Vec<CrashLogEntr
         }
 
         let filename = match path.file_name().and_then(|n| n.to_str()) {
-            Some(name) if name.starts_with("crash-") && name.ends_with(".log") => {
-                name.to_string()
-            }
+            Some(name) if name.starts_with("crash-") && name.ends_with(".log") => name.to_string(),
             _ => continue,
         };
 
@@ -290,7 +288,10 @@ pub fn analyze_crash_log(log_path: &Path) -> Result<CrashReport> {
         .collect::<Vec<_>>()
         .into_iter()
         .fold(Vec::new(), |mut acc, item| {
-            if !acc.iter().any(|x: &String| x.to_lowercase() == item.to_lowercase()) {
+            if !acc
+                .iter()
+                .any(|x: &String| x.to_lowercase() == item.to_lowercase())
+            {
                 acc.push(item);
             }
             acc
@@ -303,7 +304,10 @@ pub fn analyze_crash_log(log_path: &Path) -> Result<CrashReport> {
         .collect::<Vec<_>>()
         .into_iter()
         .fold(Vec::new(), |mut acc, item| {
-            if !acc.iter().any(|x: &String| x.to_lowercase() == item.to_lowercase()) {
+            if !acc
+                .iter()
+                .any(|x: &String| x.to_lowercase() == item.to_lowercase())
+            {
                 acc.push(item);
             }
             acc
@@ -350,8 +354,8 @@ fn parse_header(content: &str) -> (String, String) {
         let trimmed = line.trim();
         if trimmed.starts_with("Unhandled exception") {
             // Extract exception type between quotes.
-            let exception_type = extract_between(trimmed, "\"", "\"")
-                .unwrap_or_else(|| "UNKNOWN".to_string());
+            let exception_type =
+                extract_between(trimmed, "\"", "\"").unwrap_or_else(|| "UNKNOWN".to_string());
 
             // Extract address after " at ".
             let crash_address = if let Some(at_idx) = trimmed.find(" at ") {
@@ -427,7 +431,10 @@ fn parse_call_stack(content: &str) -> Vec<(String, String)> {
         // An empty line or a new section header ends the call stack.
         if in_call_stack {
             if trimmed.is_empty()
-                || (trimmed.chars().next().map_or(false, |c| c.is_ascii_uppercase())
+                || (trimmed
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_uppercase())
                     && !trimmed.starts_with('[')
                     && trimmed.contains(':')
                     && !trimmed.contains('+'))
@@ -468,9 +475,7 @@ fn parse_relevant_objects(content: &str) -> Vec<RelevantObject> {
     for line in content.lines() {
         let trimmed = line.trim();
 
-        if trimmed.contains("POSSIBLE RELEVANT OBJECTS")
-            || trimmed.contains("Relevant Objects")
-        {
+        if trimmed.contains("POSSIBLE RELEVANT OBJECTS") || trimmed.contains("Relevant Objects") {
             in_section = true;
             continue;
         }
@@ -485,7 +490,7 @@ fn parse_relevant_objects(content: &str) -> Vec<RelevantObject> {
             // New section headers are typically all-caps or contain colons.
             if !trimmed.starts_with('[')
                 && !trimmed.starts_with('(')
-                && !trimmed.chars().next().map_or(false, |c| c.is_ascii_digit())
+                && !trimmed.chars().next().is_some_and(|c| c.is_ascii_digit())
                 && trimmed.to_uppercase() == trimmed
                 && trimmed.len() > 3
             {
@@ -618,7 +623,10 @@ fn parse_system_info(content: &str) -> Option<SystemInfo> {
             os = Some(after_colon(trimmed).to_string());
         } else if lower.starts_with("cpu:") || lower.starts_with("processor:") {
             cpu = Some(after_colon(trimmed).to_string());
-        } else if lower.starts_with("gpu:") || lower.starts_with("video:") || lower.starts_with("adapter:") {
+        } else if lower.starts_with("gpu:")
+            || lower.starts_with("video:")
+            || lower.starts_with("adapter:")
+        {
             gpu = Some(after_colon(trimmed).to_string());
         } else if lower.contains("physical memory") || lower.contains("ram") {
             // Parse lines like: "Physical Memory: 8192 MB / 16384 MB"
@@ -665,14 +673,15 @@ fn match_crash_patterns(
 
     // Collect all raw text for content-based matching.
     let content_lower = raw_content.to_lowercase();
-    let all_raw_objects: String = objects.iter().map(|o| o.raw.as_str()).collect::<Vec<_>>().join("\n");
+    let all_raw_objects: String = objects
+        .iter()
+        .map(|o| o.raw.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
     let all_raw_lower = all_raw_objects.to_lowercase();
 
     // All call stack modules lowered for easy matching.
-    let stack_modules: Vec<String> = call_stack
-        .iter()
-        .map(|(m, _)| m.to_lowercase())
-        .collect();
+    let stack_modules: Vec<String> = call_stack.iter().map(|(m, _)| m.to_lowercase()).collect();
 
     // -----------------------------------------------------------------------
     // Address-based patterns (SkyrimSE.exe + specific offset)
@@ -817,8 +826,7 @@ fn match_crash_patterns(
                 },
                 SuggestedAction {
                     action_type: ActionType::CheckINI,
-                    description: "Reduce physics object limits in hdtSMP64 configs"
-                        .to_string(),
+                    description: "Reduce physics object limits in hdtSMP64 configs".to_string(),
                     target: Some("hdtSMP64.ini".to_string()),
                 },
             ],
@@ -921,8 +929,7 @@ fn match_crash_patterns(
                 },
                 SuggestedAction {
                     action_type: ActionType::UpdateMod,
-                    description: "Update the performance plugin to the latest version"
-                        .to_string(),
+                    description: "Update the performance plugin to the latest version".to_string(),
                     target: Some("PDPerfPlugin".to_string()),
                 },
             ],
@@ -940,8 +947,7 @@ fn match_crash_patterns(
             suggested_actions: vec![
                 SuggestedAction {
                     action_type: ActionType::UpdateDrivers,
-                    description: "Update NVIDIA graphics drivers to the latest version"
-                        .to_string(),
+                    description: "Update NVIDIA graphics drivers to the latest version".to_string(),
                     target: None,
                 },
                 SuggestedAction {
@@ -1023,15 +1029,13 @@ fn match_crash_patterns(
                     or a plugin's string data, causing a localization lookup crash."
                     .to_string(),
                 confidence: Confidence::Medium,
-                suggested_actions: vec![
-                    SuggestedAction {
-                        action_type: ActionType::CheckINI,
-                        description: "Check Skyrim.ini and SkyrimPrefs.ini for non-ASCII \
+                suggested_actions: vec![SuggestedAction {
+                    action_type: ActionType::CheckINI,
+                    description: "Check Skyrim.ini and SkyrimPrefs.ini for non-ASCII \
                             characters (accented letters, special symbols) and remove them"
-                            .to_string(),
-                        target: Some("Skyrim.ini".to_string()),
-                    },
-                ],
+                        .to_string(),
+                    target: Some("Skyrim.ini".to_string()),
+                }],
             });
         }
     }
@@ -1088,8 +1092,7 @@ fn match_crash_patterns(
                 },
                 SuggestedAction {
                     action_type: ActionType::ManualFix,
-                    description: "Run FNIS or Nemesis after reinstalling the skeleton"
-                        .to_string(),
+                    description: "Run FNIS or Nemesis after reinstalling the skeleton".to_string(),
                     target: None,
                 },
             ],
@@ -1190,17 +1193,15 @@ fn match_crash_patterns(
                 dds_path
             ),
             confidence: Confidence::Low,
-            suggested_actions: vec![
-                SuggestedAction {
-                    action_type: ActionType::ReinstallMod,
-                    description: format!(
-                        "Reinstall the mod that provides \"{}\" or convert it with \
+            suggested_actions: vec![SuggestedAction {
+                action_type: ActionType::ReinstallMod,
+                description: format!(
+                    "Reinstall the mod that provides \"{}\" or convert it with \
                          Cathedral Assets Optimizer",
-                        dds_path
-                    ),
-                    target: Some(dds_path.to_string()),
-                },
-            ],
+                    dds_path
+                ),
+                target: Some(dds_path.to_string()),
+            }],
         });
     }
 
@@ -1214,17 +1215,15 @@ fn match_crash_patterns(
                 nif_path
             ),
             confidence: Confidence::Low,
-            suggested_actions: vec![
-                SuggestedAction {
-                    action_type: ActionType::ReinstallMod,
-                    description: format!(
-                        "Reinstall the mod that provides \"{}\" or run it through \
+            suggested_actions: vec![SuggestedAction {
+                action_type: ActionType::ReinstallMod,
+                description: format!(
+                    "Reinstall the mod that provides \"{}\" or run it through \
                          NIF Optimizer / Cathedral Assets Optimizer",
-                        nif_path
-                    ),
-                    target: Some(nif_path.to_string()),
-                },
-            ],
+                    nif_path
+                ),
+                target: Some(nif_path.to_string()),
+            }],
         });
     }
 
@@ -1295,7 +1294,10 @@ fn quick_summary(content: &str) -> (String, CrashSeverity) {
     let (module, offset) = parse_crash_module(content);
 
     if module == "Unknown" && exception_type == "UNKNOWN" {
-        return ("Unable to parse crash log".to_string(), CrashSeverity::Unknown);
+        return (
+            "Unable to parse crash log".to_string(),
+            CrashSeverity::Unknown,
+        );
     }
 
     let summary = if module.to_lowercase() != "skyrimse.exe" && module != "Unknown" {
@@ -1349,7 +1351,7 @@ fn is_system_dll(name: &str) -> bool {
         "bcrypt.dll",
         "ws2_32.dll",
     ];
-    system_dlls.iter().any(|&s| name == s)
+    system_dlls.contains(&name)
 }
 
 /// Extract text between two delimiter strings.
@@ -1398,15 +1400,12 @@ fn extract_number(s: &str) -> Option<u64> {
 /// `[2]  BSLightingShaderProperty  mymod.esp`
 fn extract_type_name(line: &str) -> String {
     // Skip the leading index (number in brackets or parens).
-    let stripped = line
-        .trim_start_matches(|c: char| c == '[' || c == '(' || c.is_ascii_digit() || c == ']' || c == ')' || c == ' ');
+    let stripped = line.trim_start_matches(|c: char| {
+        c == '[' || c == '(' || c.is_ascii_digit() || c == ']' || c == ')' || c == ' '
+    });
 
     // The type name is the first whitespace-delimited token.
-    stripped
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_string()
+    stripped.split_whitespace().next().unwrap_or("").to_string()
 }
 
 /// Extract a FormID from a relevant object line, if present.
@@ -1435,7 +1434,8 @@ fn extract_form_id(line: &str) -> Option<String> {
 fn extract_source_plugin(line: &str) -> Option<String> {
     // Look for anything ending in .esm, .esp, or .esl.
     for token in line.split_whitespace() {
-        let cleaned = token.trim_matches(|c: char| c == '"' || c == '(' || c == ')' || c == '[' || c == ']');
+        let cleaned =
+            token.trim_matches(|c: char| c == '"' || c == '(' || c == ')' || c == '[' || c == ']');
         let lower = cleaned.to_lowercase();
         if lower.ends_with(".esm") || lower.ends_with(".esp") || lower.ends_with(".esl") {
             return Some(cleaned.to_string());
@@ -1485,7 +1485,9 @@ fn find_file_reference(content: &str, extension: &str) -> Option<String> {
             let cleaned = token.trim_matches(|c: char| {
                 c == '"' || c == '\'' || c == '(' || c == ')' || c == '[' || c == ']'
             });
-            if cleaned.to_lowercase().ends_with(extension) && cleaned.contains('/') || cleaned.contains('\\') {
+            if cleaned.to_lowercase().ends_with(extension) && cleaned.contains('/')
+                || cleaned.contains('\\')
+            {
                 return Some(cleaned.to_string());
             }
         }
@@ -1494,9 +1496,7 @@ fn find_file_reference(content: &str, extension: &str) -> Option<String> {
         if let Some(idx) = lower.find(extension) {
             // Walk backwards from the extension to find the start of the path.
             let before = &line[..idx + extension.len()];
-            let path_start = before.rfind(|c: char| {
-                c == '"' || c == '\'' || c == ' ' || c == '(' || c == '['
-            });
+            let path_start = before.rfind(['"', '\'', ' ', '(', '[']);
             let start = match path_start {
                 Some(i) => i + 1,
                 None => 0,
@@ -1752,8 +1752,13 @@ Nothing to see here.
             SAMPLE_CRASH_LOG,
         );
         assert!(!diagnosis.is_empty());
-        assert!(diagnosis.iter().any(|d| d.title.contains("Memory Exhaustion")));
-        let mem_diag = diagnosis.iter().find(|d| d.title.contains("Memory Exhaustion")).unwrap();
+        assert!(diagnosis
+            .iter()
+            .any(|d| d.title.contains("Memory Exhaustion")));
+        let mem_diag = diagnosis
+            .iter()
+            .find(|d| d.title.contains("Memory Exhaustion"))
+            .unwrap();
         assert_eq!(mem_diag.confidence, Confidence::High);
     }
 
@@ -1763,13 +1768,8 @@ Nothing to see here.
             ("hdtSMP64.dll".to_string(), "ABCDE".to_string()),
             ("SkyrimSE.exe".to_string(), "A01234".to_string()),
         ];
-        let diagnosis = match_crash_patterns(
-            "hdtSMP64.dll",
-            "ABCDE",
-            &call_stack,
-            &[],
-            SAMPLE_HDT_CRASH,
-        );
+        let diagnosis =
+            match_crash_patterns("hdtSMP64.dll", "ABCDE", &call_stack, &[], SAMPLE_HDT_CRASH);
         assert!(diagnosis.iter().any(|d| d.title.contains("HDT-SMP")));
     }
 
@@ -1782,7 +1782,9 @@ Nothing to see here.
             &[],
             SAMPLE_SHADOW_CRASH,
         );
-        assert!(diagnosis.iter().any(|d| d.title.contains("Shadow Scene Node")));
+        assert!(diagnosis
+            .iter()
+            .any(|d| d.title.contains("Shadow Scene Node")));
     }
 
     #[test]
@@ -1791,15 +1793,12 @@ Nothing to see here.
             ("SkyrimSE.exe".to_string(), "AABBCC".to_string()),
             ("tbbmalloc.dll".to_string(), "1111".to_string()),
         ];
-        let diagnosis = match_crash_patterns(
-            "SkyrimSE.exe",
-            "AABBCC",
-            &call_stack,
-            &[],
-            SAMPLE_BAD_ALLOC,
-        );
+        let diagnosis =
+            match_crash_patterns("SkyrimSE.exe", "AABBCC", &call_stack, &[], SAMPLE_BAD_ALLOC);
         assert!(diagnosis.iter().any(|d| d.title.contains("Out of Memory")));
-        assert!(diagnosis.iter().any(|d| d.title.contains("Memory Allocator")));
+        assert!(diagnosis
+            .iter()
+            .any(|d| d.title.contains("Memory Allocator")));
     }
 
     #[test]
@@ -1811,7 +1810,9 @@ Nothing to see here.
             &[],
             SAMPLE_ANIMATION_CRASH,
         );
-        assert!(diagnosis.iter().any(|d| d.title.contains("Animation Limit")));
+        assert!(diagnosis
+            .iter()
+            .any(|d| d.title.contains("Animation Limit")));
     }
 
     #[test]
@@ -1820,7 +1821,8 @@ Nothing to see here.
             type_name: "BSLightingShaderProperty".to_string(),
             form_id: None,
             source_plugin: Some("MyArmor.esp".to_string()),
-            raw: "BSLightingShaderProperty  meshes/actors/character/myarmor.nif  MyArmor.esp".to_string(),
+            raw: "BSLightingShaderProperty  meshes/actors/character/myarmor.nif  MyArmor.esp"
+                .to_string(),
         }];
         let diagnosis = match_crash_patterns(
             "SkyrimSE.exe",
@@ -1830,7 +1832,9 @@ Nothing to see here.
             SAMPLE_NIF_CRASH,
         );
         assert!(diagnosis.iter().any(|d| d.title.contains("Broken NIF")));
-        assert!(diagnosis.iter().any(|d| d.title.contains("Lighting Shader")));
+        assert!(diagnosis
+            .iter()
+            .any(|d| d.title.contains("Lighting Shader")));
     }
 
     #[test]
@@ -1844,7 +1848,9 @@ Nothing to see here.
         );
         // The .STRINGS content is in the registers section, should be caught.
         assert!(
-            diagnosis.iter().any(|d| d.title.contains("String Encoding")),
+            diagnosis
+                .iter()
+                .any(|d| d.title.contains("String Encoding")),
             "Expected a String Encoding diagnosis, got: {:?}",
             diagnosis.iter().map(|d| &d.title).collect::<Vec<_>>()
         );
@@ -1887,8 +1893,12 @@ Nothing to see here.
         let objects = parse_relevant_objects(SAMPLE_CRASH_LOG);
         assert!(objects.len() >= 2);
         assert!(objects.iter().any(|o| o.type_name == "NiNode"));
-        assert!(objects.iter().any(|o| o.source_plugin.as_deref() == Some("Skyrim.esm")));
-        assert!(objects.iter().any(|o| o.source_plugin.as_deref() == Some("MyMod.esp")));
+        assert!(objects
+            .iter()
+            .any(|o| o.source_plugin.as_deref() == Some("Skyrim.esm")));
+        assert!(objects
+            .iter()
+            .any(|o| o.source_plugin.as_deref() == Some("MyMod.esp")));
     }
 
     #[test]
@@ -1927,7 +1937,10 @@ Nothing to see here.
         assert_eq!(report.module_name, "SkyrimSE.exe");
         assert_eq!(report.module_offset, "D6DDDA");
         assert!(!report.diagnosis.is_empty());
-        assert!(report.diagnosis.iter().any(|d| d.title.contains("Memory Exhaustion")));
+        assert!(report
+            .diagnosis
+            .iter()
+            .any(|d| d.title.contains("Memory Exhaustion")));
         assert_eq!(report.severity, CrashSeverity::Critical);
         assert!(report.involved_plugins.contains(&"Skyrim.esm".to_string()));
         assert!(report.involved_plugins.contains(&"MyMod.esp".to_string()));
@@ -1945,7 +1958,10 @@ Nothing to see here.
 
         assert_eq!(report.module_name, "hdtSMP64.dll");
         assert!(report.diagnosis.iter().any(|d| d.title.contains("HDT-SMP")));
-        assert!(report.involved_skse_plugins.iter().any(|p| p.contains("hdtSMP64")));
+        assert!(report
+            .involved_skse_plugins
+            .iter()
+            .any(|p| p.contains("hdtSMP64")));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 [package]
 name = "corkscrew"
-version = "0.5.3"
+version = "0.6.0"
 description = "A mod manager for CrossOver/Wine games on macOS and Linux"
 authors = ["cashconway"]
 edition = "2021"
@@ -35,6 +35,11 @@ tokio = { version = "1", features = ["full"] }
 # Archive extraction
 zip = "2"
 sevenz-rust = "0.6"
+unrar = "0.5"
+tar = "0.4"
+flate2 = "1"
+xz2 = "0.1"
+bzip2 = "0.5"
 
 # XML parsing (FOMOD)
 quick-xml = { version = "0.36", features = ["serialize"] }
@@ -71,6 +76,9 @@ libloot = "0.29"
 
 # WebSocket (Nexus Mods SSO)
 tungstenite = { version = "0.24", features = ["native-tls"] }
+
+# System info (disk space)
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

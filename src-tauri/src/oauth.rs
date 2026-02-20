@@ -100,7 +100,7 @@ const BASE64URL_CHARS: &[u8; 64] =
 
 /// Encode bytes to base64url without padding.
 fn base64url_encode(input: &[u8]) -> String {
-    let mut out = String::with_capacity((input.len() * 4 + 2) / 3);
+    let mut out = String::with_capacity((input.len() * 4).div_ceil(3));
     let mut i = 0;
     while i + 2 < input.len() {
         let b0 = input[i] as u32;
@@ -291,13 +291,9 @@ mod urlencoding {
         let mut out = String::with_capacity(input.len() * 3);
         for byte in input.bytes() {
             match byte {
-                b'A'..=b'Z'
-                | b'a'..=b'z'
-                | b'0'..=b'9'
-                | b'-'
-                | b'_'
-                | b'.'
-                | b'~' => out.push(byte as char),
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    out.push(byte as char)
+                }
                 _ => {
                     out.push('%');
                     out.push_str(&format!("{:02X}", byte));
@@ -326,7 +322,7 @@ fn open_browser(url: &str) -> Result<(), OAuthError> {
     std::process::Command::new(cmd)
         .arg(url)
         .spawn()
-        .map_err(|e| OAuthError::Io(e))?;
+        .map_err(OAuthError::Io)?;
 
     Ok(())
 }
@@ -375,9 +371,7 @@ fn wait_for_callback(
 
     // Set a timeout so we don't block forever.
     let timeout = std::time::Duration::from_secs(CALLBACK_TIMEOUT_SECS);
-    listener
-        .set_nonblocking(false)
-        .ok();
+    listener.set_nonblocking(false).ok();
 
     // Use a blocking accept with a manual timeout via SO_RCVTIMEO equivalent.
     // TcpListener doesn't have set_timeout directly, so we use
@@ -574,11 +568,7 @@ pub async fn start_oauth_flow(client_id: &str) -> Result<TokenPair, OAuthError> 
     params.insert("redirect_uri", &redirect_uri);
     params.insert("code_verifier", &pkce.verifier);
 
-    let response = client
-        .post(NEXUS_TOKEN_URL)
-        .form(&params)
-        .send()
-        .await?;
+    let response = client.post(NEXUS_TOKEN_URL).form(&params).send().await?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -596,9 +586,7 @@ pub async fn start_oauth_flow(client_id: &str) -> Result<TokenPair, OAuthError> 
 
     let tokens = TokenPair {
         access_token: token_response.access_token,
-        refresh_token: token_response
-            .refresh_token
-            .unwrap_or_default(),
+        refresh_token: token_response.refresh_token.unwrap_or_default(),
         expires_at,
     };
 
@@ -609,21 +597,14 @@ pub async fn start_oauth_flow(client_id: &str) -> Result<TokenPair, OAuthError> 
 }
 
 /// Refresh an expired access token using the refresh token.
-pub async fn refresh_tokens(
-    client_id: &str,
-    refresh_token: &str,
-) -> Result<TokenPair, OAuthError> {
+pub async fn refresh_tokens(client_id: &str, refresh_token: &str) -> Result<TokenPair, OAuthError> {
     let client = reqwest::Client::new();
     let mut params = HashMap::new();
     params.insert("grant_type", "refresh_token");
     params.insert("refresh_token", refresh_token);
     params.insert("client_id", client_id);
 
-    let response = client
-        .post(NEXUS_TOKEN_URL)
-        .form(&params)
-        .send()
-        .await?;
+    let response = client.post(NEXUS_TOKEN_URL).form(&params).send().await?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -713,9 +694,8 @@ pub fn parse_user_info(access_token: &str) -> Result<NexusUserInfo, OAuthError> 
     }
 
     let payload_bytes = base64url_decode(parts[1])?;
-    let payload_str = String::from_utf8(payload_bytes).map_err(|e| {
-        OAuthError::InvalidToken(format!("JWT payload is not valid UTF-8: {}", e))
-    })?;
+    let payload_str = String::from_utf8(payload_bytes)
+        .map_err(|e| OAuthError::InvalidToken(format!("JWT payload is not valid UTF-8: {}", e)))?;
 
     let claims: serde_json::Value = serde_json::from_str(&payload_str)?;
 
@@ -1009,11 +989,7 @@ mod tests {
         for input in test_cases {
             let encoded = base64url_encode(input);
             let decoded = base64url_decode(&encoded).expect("decode should succeed");
-            assert_eq!(
-                decoded, input,
-                "roundtrip failed for input {:?}",
-                input
-            );
+            assert_eq!(decoded, input, "roundtrip failed for input {:?}", input);
         }
     }
 

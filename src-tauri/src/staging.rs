@@ -61,24 +61,20 @@ pub struct StagingResult {
 // ---------------------------------------------------------------------------
 
 /// Returns the base staging directory for all mods.
-fn staging_root() -> PathBuf {
+pub fn staging_root() -> PathBuf {
     config::data_dir().join("staging")
 }
 
 /// Returns the staging directory for a specific game/bottle.
 pub fn staging_base_dir(game_id: &str, bottle_name: &str) -> PathBuf {
-    staging_root().join(game_id).join(sanitize_name(bottle_name))
+    staging_root()
+        .join(game_id)
+        .join(sanitize_name(bottle_name))
 }
 
 /// Returns the staging directory for a specific mod.
-pub fn mod_staging_dir(
-    game_id: &str,
-    bottle_name: &str,
-    mod_id: i64,
-    mod_name: &str,
-) -> PathBuf {
-    staging_base_dir(game_id, bottle_name)
-        .join(format!("{}_{}", mod_id, sanitize_name(mod_name)))
+pub fn mod_staging_dir(game_id: &str, bottle_name: &str, mod_id: i64, mod_name: &str) -> PathBuf {
+    staging_base_dir(game_id, bottle_name).join(format!("{}_{}", mod_id, sanitize_name(mod_name)))
 }
 
 /// Sanitize a name for use as a directory component.
@@ -120,10 +116,7 @@ pub fn stage_mod(
     fs::create_dir_all(&staging_dir)?;
 
     // Extract to a temp directory first (reuses existing extraction logic)
-    let temp_dir = std::env::temp_dir().join(format!(
-        "corkscrew_stage_{}",
-        std::process::id()
-    ));
+    let temp_dir = std::env::temp_dir().join(format!("corkscrew_stage_{}", std::process::id()));
     if temp_dir.exists() {
         fs::remove_dir_all(&temp_dir)?;
     }
@@ -150,10 +143,7 @@ pub fn stage_mod(
     let mut files: Vec<String> = Vec::new();
     let mut hashes: Vec<(String, String, u64)> = Vec::new();
 
-    for entry in WalkDir::new(&data_root)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in WalkDir::new(&data_root).into_iter().filter_map(|e| e.ok()) {
         if !entry.file_type().is_file() {
             continue;
         }
@@ -259,7 +249,7 @@ pub fn list_staging_files(staging_path: &Path) -> Result<Vec<String>> {
 // ---------------------------------------------------------------------------
 
 /// Compute the SHA-256 hash of a file, returning the hex string.
-fn compute_sha256(path: &Path) -> Result<String> {
+pub fn compute_sha256(path: &Path) -> Result<String> {
     let mut file = fs::File::open(path)?;
     let mut hasher = Sha256::new();
     io::copy(&mut file, &mut hasher)?;

@@ -51,6 +51,9 @@ pub struct InstalledMod {
     pub enabled: bool,
     pub staging_path: Option<String>,
     pub install_priority: i32,
+    pub collection_name: Option<String>,
+    pub user_notes: Option<String>,
+    pub user_tags: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -69,6 +72,38 @@ pub struct DeploymentEntry {
     pub sha256: Option<String>,
     pub deployed_at: String,
     pub mod_name: String,
+}
+
+// ---------------------------------------------------------------------------
+// DownloadRecord
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DownloadRecord {
+    pub id: i64,
+    pub archive_path: String,
+    pub archive_name: String,
+    pub nexus_mod_id: Option<i64>,
+    pub nexus_file_id: Option<i64>,
+    pub sha256: Option<String>,
+    pub file_size: i64,
+    pub downloaded_at: String,
+}
+
+// ---------------------------------------------------------------------------
+// CollectionSummary
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CollectionSummary {
+    pub name: String,
+    pub mod_count: usize,
+    pub enabled_count: usize,
+    pub slug: Option<String>,
+    pub author: Option<String>,
+    pub image_url: Option<String>,
+    pub game_domain: Option<String>,
+    pub installed_revision: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -120,9 +155,8 @@ impl ModDatabase {
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
         // Run schema migrations
-        crate::migrations::migrate(&conn).map_err(|e| {
-            DatabaseError::Other(format!("Schema migration failed: {}", e))
-        })?;
+        crate::migrations::migrate(&conn)
+            .map_err(|e| DatabaseError::Other(format!("Schema migration failed: {}", e)))?;
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -147,9 +181,13 @@ impl ModDatabase {
     /// Column order must match [`Self::SELECT_COLUMNS`].
     fn row_to_mod(row: &rusqlite::Row<'_>) -> rusqlite::Result<InstalledMod> {
         let files_json: String = row.get(7)?;
-        let installed_files: Vec<String> =
-            serde_json::from_str(&files_json).unwrap_or_default();
+        let installed_files: Vec<String> = serde_json::from_str(&files_json).unwrap_or_default();
         let enabled_int: i64 = row.get(9)?;
+
+        let tags_json: Option<String> = row.get(16)?;
+        let user_tags: Vec<String> = tags_json
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
 
         Ok(InstalledMod {
             id: row.get(0)?,
@@ -166,18 +204,22 @@ impl ModDatabase {
             enabled: enabled_int != 0,
             staging_path: row.get(12)?,
             install_priority: row.get(13)?,
+            collection_name: row.get(14)?,
+            user_notes: row.get(15)?,
+            user_tags,
         })
     }
 
     /// The column list used in every SELECT on `installed_mods`.
-    const SELECT_COLUMNS: &'static str =
-        "id, game_id, bottle_name, nexus_mod_id, name, version, \
+    const SELECT_COLUMNS: &'static str = "id, game_id, bottle_name, nexus_mod_id, name, version, \
          archive_name, installed_files, installed_at, enabled, \
-         nexus_file_id, source_url, staging_path, install_priority";
+         nexus_file_id, source_url, staging_path, install_priority, \
+         collection_name, user_notes, user_tags";
 
     // -- public API ---------------------------------------------------------
 
     /// Insert a new mod record and return its auto-generated row id.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_mod(
         &self,
         game_id: &str,
@@ -218,10 +260,7 @@ impl ModDatabase {
         let existing = self.get_mod(mod_id)?;
         if existing.is_some() {
             let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-            conn.execute(
-                "DELETE FROM installed_mods WHERE id = ?1",
-                params![mod_id],
-            )?;
+            conn.execute("DELETE FROM installed_mods WHERE id = ?1", params![mod_id])?;
         }
         Ok(existing)
     }
@@ -242,11 +281,7 @@ impl ModDatabase {
     }
 
     /// List every mod installed for a given game + bottle combination.
-    pub fn list_mods(
-        &self,
-        game_id: &str,
-        bottle_name: &str,
-    ) -> Result<Vec<InstalledMod>> {
+    pub fn list_mods(&self, game_id: &str, bottle_name: &str) -> Result<Vec<InstalledMod>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(&format!(
             "SELECT {} FROM installed_mods \
@@ -255,10 +290,7 @@ impl ModDatabase {
             Self::SELECT_COLUMNS,
         ))?;
 
-        let rows = stmt.query_map(
-            params![game_id, bottle_name],
-            Self::row_to_mod,
-        )?;
+        let rows = stmt.query_map(params![game_id, bottle_name], Self::row_to_mod)?;
 
         let mut mods = Vec::new();
         for row in rows {
@@ -362,6 +394,16 @@ impl ModDatabase {
         Ok(())
     }
 
+    /// Tag a mod as belonging to a NexusMods collection.
+    pub fn set_collection_name(&self, mod_id: i64, collection_name: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "UPDATE installed_mods SET collection_name = ?1 WHERE id = ?2",
+            params![collection_name, mod_id],
+        )?;
+        Ok(())
+    }
+
     /// Set the install priority for a mod.
     pub fn set_mod_priority(&self, mod_id: i64, priority: i32) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
@@ -408,6 +450,7 @@ impl ModDatabase {
     // -- Deployment manifest ------------------------------------------------
 
     /// Add a deployment manifest entry.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_deployment_entry(
         &self,
         game_id: &str,
@@ -434,9 +477,8 @@ impl ModDatabase {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
         // First collect the relative paths
-        let mut stmt = conn.prepare(
-            "SELECT relative_path FROM deployment_manifest WHERE mod_id = ?1",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT relative_path FROM deployment_manifest WHERE mod_id = ?1")?;
         let paths: Vec<String> = stmt
             .query_map(params![mod_id], |row| row.get(0))?
             .filter_map(|r| r.ok())
@@ -507,23 +549,20 @@ impl ModDatabase {
              WHERE dm.game_id = ?1 AND dm.bottle_name = ?2 AND dm.relative_path = ?3",
         )?;
 
-        let mut rows = stmt.query_map(
-            params![game_id, bottle_name, relative_path],
-            |row| {
-                Ok(DeploymentEntry {
-                    id: row.get(0)?,
-                    game_id: row.get(1)?,
-                    bottle_name: row.get(2)?,
-                    mod_id: row.get(3)?,
-                    relative_path: row.get(4)?,
-                    staging_path: row.get(5)?,
-                    deploy_method: row.get(6)?,
-                    sha256: row.get(7)?,
-                    deployed_at: row.get(8)?,
-                    mod_name: row.get(9)?,
-                })
-            },
-        )?;
+        let mut rows = stmt.query_map(params![game_id, bottle_name, relative_path], |row| {
+            Ok(DeploymentEntry {
+                id: row.get(0)?,
+                game_id: row.get(1)?,
+                bottle_name: row.get(2)?,
+                mod_id: row.get(3)?,
+                relative_path: row.get(4)?,
+                staging_path: row.get(5)?,
+                deploy_method: row.get(6)?,
+                sha256: row.get(7)?,
+                deployed_at: row.get(8)?,
+                mod_name: row.get(9)?,
+            })
+        })?;
 
         match rows.next() {
             Some(row) => Ok(Some(row?)),
@@ -552,10 +591,7 @@ impl ModDatabase {
     }
 
     /// Get file hashes for a mod.
-    pub fn get_file_hashes(
-        &self,
-        mod_id: i64,
-    ) -> Result<Vec<(String, String, u64)>> {
+    pub fn get_file_hashes(&self, mod_id: i64) -> Result<Vec<(String, String, u64)>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT relative_path, sha256, file_size FROM file_hashes WHERE mod_id = ?1",
@@ -647,6 +683,384 @@ impl ModDatabase {
         conflicts.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
         Ok(conflicts)
     }
+
+    // -- Collection queries --------------------------------------------------
+
+    /// List mods belonging to a specific collection.
+    pub fn list_mods_by_collection(
+        &self,
+        game_id: &str,
+        bottle_name: &str,
+        collection_name: &str,
+    ) -> Result<Vec<InstalledMod>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let sql = format!(
+            "SELECT {} FROM installed_mods
+             WHERE game_id = ?1 AND bottle_name = ?2 AND collection_name = ?3
+             ORDER BY install_priority ASC",
+            Self::SELECT_COLUMNS
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            params![game_id, bottle_name, collection_name],
+            Self::row_to_mod,
+        )?;
+        let mut mods = Vec::new();
+        for row in rows {
+            mods.push(row?);
+        }
+        Ok(mods)
+    }
+
+    /// List all installed collections for a game/bottle.
+    /// Returns (collection_name, total_count, enabled_count).
+    pub fn list_installed_collections(
+        &self,
+        game_id: &str,
+        bottle_name: &str,
+    ) -> Result<Vec<(String, usize, usize)>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT collection_name,
+                    COUNT(*) as total,
+                    SUM(CASE WHEN enabled = 1 THEN 1 ELSE 0 END) as enabled
+             FROM installed_mods
+             WHERE game_id = ?1 AND bottle_name = ?2 AND collection_name IS NOT NULL
+             GROUP BY collection_name
+             ORDER BY collection_name",
+        )?;
+        let rows = stmt.query_map(params![game_id, bottle_name], |row| {
+            let name: String = row.get(0)?;
+            let total: i64 = row.get(1)?;
+            let enabled: i64 = row.get(2)?;
+            Ok((name, total as usize, enabled as usize))
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    // -- Download registry ---------------------------------------------------
+
+    /// Register a downloaded archive in the download registry.
+    #[allow(clippy::too_many_arguments)]
+    pub fn register_download(
+        &self,
+        archive_path: &str,
+        archive_name: &str,
+        nexus_mod_id: Option<i64>,
+        nexus_file_id: Option<i64>,
+        sha256: Option<&str>,
+        file_size: i64,
+    ) -> Result<i64> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let downloaded_at = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT OR REPLACE INTO download_registry
+                (archive_path, archive_name, nexus_mod_id, nexus_file_id, sha256, file_size, downloaded_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![archive_path, archive_name, nexus_mod_id, nexus_file_id, sha256, file_size, downloaded_at],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Find a download by Nexus mod and file IDs.
+    pub fn find_download_by_nexus_ids(
+        &self,
+        nexus_mod_id: i64,
+        nexus_file_id: i64,
+    ) -> Result<Option<DownloadRecord>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT id, archive_path, archive_name, nexus_mod_id, nexus_file_id,
+                    sha256, file_size, downloaded_at
+             FROM download_registry
+             WHERE nexus_mod_id = ?1 AND nexus_file_id = ?2",
+        )?;
+        let mut rows = stmt.query_map(params![nexus_mod_id, nexus_file_id], |row| {
+            Ok(DownloadRecord {
+                id: row.get(0)?,
+                archive_path: row.get(1)?,
+                archive_name: row.get(2)?,
+                nexus_mod_id: row.get(3)?,
+                nexus_file_id: row.get(4)?,
+                sha256: row.get(5)?,
+                file_size: row.get(6)?,
+                downloaded_at: row.get(7)?,
+            })
+        })?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Find a download by archive name.
+    pub fn find_download_by_name(&self, archive_name: &str) -> Result<Option<DownloadRecord>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT id, archive_path, archive_name, nexus_mod_id, nexus_file_id,
+                    sha256, file_size, downloaded_at
+             FROM download_registry
+             WHERE archive_name = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![archive_name], |row| {
+            Ok(DownloadRecord {
+                id: row.get(0)?,
+                archive_path: row.get(1)?,
+                archive_name: row.get(2)?,
+                nexus_mod_id: row.get(3)?,
+                nexus_file_id: row.get(4)?,
+                sha256: row.get(5)?,
+                file_size: row.get(6)?,
+                downloaded_at: row.get(7)?,
+            })
+        })?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Add a reference linking a download to a collection.
+    pub fn add_download_collection_ref(
+        &self,
+        download_id: i64,
+        collection_name: &str,
+        game_id: &str,
+        bottle_name: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "INSERT OR IGNORE INTO download_collection_refs
+                (download_id, collection_name, game_id, bottle_name)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![download_id, collection_name, game_id, bottle_name],
+        )?;
+        Ok(())
+    }
+
+    /// Check if a download is only referenced by one collection.
+    pub fn is_download_unique_to_collection(
+        &self,
+        download_id: i64,
+        collection_name: &str,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let count: i64 = conn
+            .prepare(
+                "SELECT COUNT(DISTINCT collection_name) FROM download_collection_refs
+                 WHERE download_id = ?1 AND collection_name != ?2",
+            )?
+            .query_row(params![download_id, collection_name], |row| row.get(0))?;
+        Ok(count == 0)
+    }
+
+    /// Remove a collection's reference to a download.
+    pub fn remove_download_collection_ref(
+        &self,
+        download_id: i64,
+        collection_name: &str,
+        game_id: &str,
+        bottle_name: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "DELETE FROM download_collection_refs
+             WHERE download_id = ?1 AND collection_name = ?2 AND game_id = ?3 AND bottle_name = ?4",
+            params![download_id, collection_name, game_id, bottle_name],
+        )?;
+        Ok(())
+    }
+
+    // -- Notes & tags --------------------------------------------------------
+
+    /// Set user notes for a mod.
+    pub fn set_user_notes(&self, mod_id: i64, notes: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "UPDATE installed_mods SET user_notes = ?1 WHERE id = ?2",
+            params![notes, mod_id],
+        )?;
+        Ok(())
+    }
+
+    /// Set user tags for a mod (stored as JSON array).
+    pub fn set_user_tags(&self, mod_id: i64, tags: &[String]) -> Result<()> {
+        let tags_json = serde_json::to_string(tags)?;
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "UPDATE installed_mods SET user_tags = ?1 WHERE id = ?2",
+            params![tags_json, mod_id],
+        )?;
+        Ok(())
+    }
+
+    /// Get all unique user tags for a game/bottle.
+    pub fn get_all_user_tags(&self, game_id: &str, bottle_name: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT user_tags FROM installed_mods
+             WHERE game_id = ?1 AND bottle_name = ?2 AND user_tags IS NOT NULL",
+        )?;
+        let rows = stmt.query_map(params![game_id, bottle_name], |row| row.get::<_, String>(0))?;
+
+        let mut all_tags = std::collections::HashSet::new();
+        for row in rows {
+            let tags_json = row?;
+            if let Ok(tags) = serde_json::from_str::<Vec<String>>(&tags_json) {
+                for tag in tags {
+                    all_tags.insert(tag);
+                }
+            }
+        }
+        let mut sorted: Vec<String> = all_tags.into_iter().collect();
+        sorted.sort();
+        Ok(sorted)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Collection metadata
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CollectionMetadata {
+    pub id: i64,
+    pub collection_name: String,
+    pub game_id: String,
+    pub bottle_name: String,
+    pub slug: Option<String>,
+    pub author: Option<String>,
+    pub description: Option<String>,
+    pub game_domain: Option<String>,
+    pub image_url: Option<String>,
+    pub installed_revision: Option<u32>,
+    pub total_mods: Option<usize>,
+    pub installed_at: String,
+    pub manifest_json: Option<String>,
+}
+
+impl ModDatabase {
+    /// Save or update collection metadata (upsert by collection_name + game_id + bottle_name).
+    pub fn save_collection_metadata(&self, meta: &CollectionMetadata) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "INSERT OR REPLACE INTO collection_metadata
+                (collection_name, game_id, bottle_name, slug, author, description,
+                 game_domain, image_url, installed_revision, total_mods, installed_at, manifest_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                meta.collection_name,
+                meta.game_id,
+                meta.bottle_name,
+                meta.slug,
+                meta.author,
+                meta.description,
+                meta.game_domain,
+                meta.image_url,
+                meta.installed_revision.map(|v| v as i64),
+                meta.total_mods.map(|v| v as i64),
+                meta.installed_at,
+                meta.manifest_json,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Get metadata for a specific installed collection.
+    pub fn get_collection_metadata(
+        &self,
+        game_id: &str,
+        bottle_name: &str,
+        collection_name: &str,
+    ) -> Result<Option<CollectionMetadata>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT id, collection_name, game_id, bottle_name, slug, author, description,
+                    game_domain, image_url, installed_revision, total_mods, installed_at, manifest_json
+             FROM collection_metadata
+             WHERE game_id = ?1 AND bottle_name = ?2 AND collection_name = ?3",
+        )?;
+        let result = stmt.query_row(params![game_id, bottle_name, collection_name], |row| {
+            Ok(CollectionMetadata {
+                id: row.get(0)?,
+                collection_name: row.get(1)?,
+                game_id: row.get(2)?,
+                bottle_name: row.get(3)?,
+                slug: row.get(4)?,
+                author: row.get(5)?,
+                description: row.get(6)?,
+                game_domain: row.get(7)?,
+                image_url: row.get(8)?,
+                installed_revision: row.get::<_, Option<i64>>(9)?.map(|v| v as u32),
+                total_mods: row.get::<_, Option<i64>>(10)?.map(|v| v as usize),
+                installed_at: row.get(11)?,
+                manifest_json: row.get(12)?,
+            })
+        });
+        match result {
+            Ok(meta) => Ok(Some(meta)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// List all collection metadata for a game/bottle.
+    pub fn list_collection_metadata(
+        &self,
+        game_id: &str,
+        bottle_name: &str,
+    ) -> Result<Vec<CollectionMetadata>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT id, collection_name, game_id, bottle_name, slug, author, description,
+                    game_domain, image_url, installed_revision, total_mods, installed_at, manifest_json
+             FROM collection_metadata
+             WHERE game_id = ?1 AND bottle_name = ?2
+             ORDER BY installed_at DESC",
+        )?;
+        let rows = stmt.query_map(params![game_id, bottle_name], |row| {
+            Ok(CollectionMetadata {
+                id: row.get(0)?,
+                collection_name: row.get(1)?,
+                game_id: row.get(2)?,
+                bottle_name: row.get(3)?,
+                slug: row.get(4)?,
+                author: row.get(5)?,
+                description: row.get(6)?,
+                game_domain: row.get(7)?,
+                image_url: row.get(8)?,
+                installed_revision: row.get::<_, Option<i64>>(9)?.map(|v| v as u32),
+                total_mods: row.get::<_, Option<i64>>(10)?.map(|v| v as usize),
+                installed_at: row.get(11)?,
+                manifest_json: row.get(12)?,
+            })
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    /// Remove collection metadata.
+    pub fn remove_collection_metadata(
+        &self,
+        game_id: &str,
+        bottle_name: &str,
+        collection_name: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "DELETE FROM collection_metadata
+             WHERE game_id = ?1 AND bottle_name = ?2 AND collection_name = ?3",
+            params![game_id, bottle_name, collection_name],
+        )?;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -676,7 +1090,15 @@ mod tests {
         ];
 
         let id = db
-            .add_mod("skyrim", "default", Some(1234), "Cool Armor", "1.0", "cool_armor.zip", &files)
+            .add_mod(
+                "skyrim",
+                "default",
+                Some(1234),
+                "Cool Armor",
+                "1.0",
+                "cool_armor.zip",
+                &files,
+            )
             .unwrap();
 
         let m = db.get_mod(id).unwrap().expect("mod should exist");
@@ -712,9 +1134,12 @@ mod tests {
     fn test_list_mods() {
         let (db, _tmp) = test_db();
 
-        db.add_mod("skyrim", "default", None, "Mod A", "1.0", "a.zip", &[]).unwrap();
-        db.add_mod("skyrim", "default", None, "Mod B", "1.0", "b.zip", &[]).unwrap();
-        db.add_mod("fallout4", "default", None, "Mod C", "1.0", "c.zip", &[]).unwrap();
+        db.add_mod("skyrim", "default", None, "Mod A", "1.0", "a.zip", &[])
+            .unwrap();
+        db.add_mod("skyrim", "default", None, "Mod B", "1.0", "b.zip", &[])
+            .unwrap();
+        db.add_mod("fallout4", "default", None, "Mod C", "1.0", "c.zip", &[])
+            .unwrap();
 
         let skyrim_mods = db.list_mods("skyrim", "default").unwrap();
         assert_eq!(skyrim_mods.len(), 2);
@@ -731,8 +1156,12 @@ mod tests {
         let files_a = vec!["a.txt".to_string(), "b.txt".to_string()];
         let files_b = vec!["c.txt".to_string()];
 
-        let id_a = db.add_mod("skyrim", "default", None, "A", "1.0", "a.zip", &files_a).unwrap();
-        let id_b = db.add_mod("skyrim", "default", None, "B", "1.0", "b.zip", &files_b).unwrap();
+        let id_a = db
+            .add_mod("skyrim", "default", None, "A", "1.0", "a.zip", &files_a)
+            .unwrap();
+        let id_b = db
+            .add_mod("skyrim", "default", None, "B", "1.0", "b.zip", &files_b)
+            .unwrap();
 
         let all = db.get_all_installed_files("skyrim", "default").unwrap();
         assert_eq!(all.len(), 3);
@@ -746,7 +1175,16 @@ mod tests {
         let (db, _tmp) = test_db();
 
         let files = vec!["shared.txt".to_string(), "unique_a.txt".to_string()];
-        db.add_mod("skyrim", "default", None, "Existing Mod", "1.0", "e.zip", &files).unwrap();
+        db.add_mod(
+            "skyrim",
+            "default",
+            None,
+            "Existing Mod",
+            "1.0",
+            "e.zip",
+            &files,
+        )
+        .unwrap();
 
         let new_files = vec!["shared.txt".to_string(), "brand_new.txt".to_string()];
         let conflicts = db.find_conflicts("skyrim", "default", &new_files).unwrap();
@@ -759,7 +1197,9 @@ mod tests {
     fn test_set_enabled() {
         let (db, _tmp) = test_db();
 
-        let id = db.add_mod("skyrim", "default", None, "Toggle Me", "1.0", "t.zip", &[]).unwrap();
+        let id = db
+            .add_mod("skyrim", "default", None, "Toggle Me", "1.0", "t.zip", &[])
+            .unwrap();
         assert!(db.get_mod(id).unwrap().unwrap().enabled);
 
         db.set_enabled(id, false).unwrap();

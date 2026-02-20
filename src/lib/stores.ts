@@ -36,6 +36,17 @@ export const activeMods = derived(
   }
 );
 
+// Collection install progress (global — visible from any page)
+export interface CollectionInstallStatus {
+  active: boolean;
+  collectionName: string;
+  currentMod: string;
+  step: string;
+  current: number;
+  total: number;
+}
+export const collectionInstallStatus = writable<CollectionInstallStatus | null>(null);
+
 // SKSE state
 export const skseStatus = writable<SkseStatus | null>(null);
 

@@ -142,13 +142,15 @@ pub async fn update_masterlist(game_id: &str) -> Result<PathBuf> {
         .with_context(|| format!("No LOOT masterlist available for game '{}'", game_id))?;
 
     let ml_path = masterlist_path(game_id);
-    download_file(&url, &ml_path).await
+    download_file(&url, &ml_path)
+        .await
         .with_context(|| format!("Failed to download masterlist for '{}'", game_id))?;
 
     // Also ensure prelude is cached
     let pl_path = prelude_path();
     if !pl_path.exists() {
-        download_file(prelude_url(), &pl_path).await
+        download_file(prelude_url(), &pl_path)
+            .await
             .context("Failed to download LOOT prelude")?;
     }
 
@@ -162,18 +164,17 @@ async fn download_file(url: &str, dest: &Path) -> Result<()> {
             .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
     }
 
-    let response = reqwest::get(url).await
+    let response = reqwest::get(url)
+        .await
         .with_context(|| format!("HTTP request failed for {}", url))?;
 
     if !response.status().is_success() {
-        anyhow::bail!(
-            "Failed to download {}: HTTP {}",
-            url,
-            response.status()
-        );
+        anyhow::bail!("Failed to download {}: HTTP {}", url, response.status());
     }
 
-    let bytes = response.bytes().await
+    let bytes = response
+        .bytes()
+        .await
         .context("Failed to read response body")?;
 
     std::fs::write(dest, &bytes)
@@ -214,7 +215,9 @@ pub fn sort_plugins(
     let pl_path = prelude_path();
     {
         let db_arc = game.database();
-        let mut db = db_arc.write().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+        let mut db = db_arc
+            .write()
+            .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
         if ml_path.exists() {
             if pl_path.exists() {
                 db.load_masterlist_with_prelude(&ml_path, &pl_path)
@@ -225,7 +228,10 @@ pub fn sort_plugins(
             }
             log::info!("Loaded LOOT masterlist from {}", ml_path.display());
         } else {
-            log::warn!("No masterlist cached for '{}' — sorting without metadata", game_id);
+            log::warn!(
+                "No masterlist cached for '{}' — sorting without metadata",
+                game_id
+            );
         }
     }
 
@@ -246,7 +252,8 @@ pub fn sort_plugins(
     let plugin_names: Vec<&str> = current_order.iter().map(|s| s.as_str()).collect();
 
     // Sort
-    let sorted = game.sort_plugins(&plugin_names)
+    let sorted = game
+        .sort_plugins(&plugin_names)
         .map_err(|e| anyhow::anyhow!("LOOT sort failed: {:?}", e))?;
 
     // Count how many plugins moved
@@ -285,7 +292,9 @@ pub fn get_plugin_messages(
     let pl_path = prelude_path();
     {
         let db_arc = game.database();
-        let mut db = db_arc.write().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+        let mut db = db_arc
+            .write()
+            .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
         if ml_path.exists() {
             if pl_path.exists() {
                 let _ = db.load_masterlist_with_prelude(&ml_path, &pl_path);
@@ -338,11 +347,9 @@ fn collect_plugin_warnings(game: &libloot::Game, plugin_names: &[String]) -> Vec
     let mut warnings = Vec::new();
 
     for name in plugin_names {
-        if let Ok(Some(metadata)) = db.plugin_metadata(
-            name,
-            MergeMode::WithUserMetadata,
-            EvalMode::DoNotEvaluate,
-        ) {
+        if let Ok(Some(metadata)) =
+            db.plugin_metadata(name, MergeMode::WithUserMetadata, EvalMode::DoNotEvaluate)
+        {
             for msg in metadata.messages() {
                 let level = match msg.message_type() {
                     libloot::metadata::MessageType::Say => "info",
@@ -440,9 +447,18 @@ mod tests {
 
     #[test]
     fn game_type_mapping_covers_known_games() {
-        assert!(matches!(game_type_for("skyrimse"), Some(GameType::SkyrimSE)));
-        assert!(matches!(game_type_for("fallout4"), Some(GameType::Fallout4)));
-        assert!(matches!(game_type_for("oblivion"), Some(GameType::Oblivion)));
+        assert!(matches!(
+            game_type_for("skyrimse"),
+            Some(GameType::SkyrimSE)
+        ));
+        assert!(matches!(
+            game_type_for("fallout4"),
+            Some(GameType::Fallout4)
+        ));
+        assert!(matches!(
+            game_type_for("oblivion"),
+            Some(GameType::Oblivion)
+        ));
         assert!(game_type_for("unknown_game").is_none());
     }
 

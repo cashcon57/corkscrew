@@ -9,6 +9,8 @@
 //!
 //! The result is a personal API key that can be used with the Nexus Mods API.
 
+#![allow(clippy::result_large_err)]
+
 use std::time::{Duration, Instant};
 
 use thiserror::Error;
@@ -118,9 +120,7 @@ fn set_read_timeout(
 ) -> Result<(), SsoError> {
     match socket.get_ref() {
         MaybeTlsStream::NativeTls(tls_stream) => {
-            tls_stream
-                .get_ref()
-                .set_read_timeout(Some(timeout))?;
+            tls_stream.get_ref().set_read_timeout(Some(timeout))?;
         }
         MaybeTlsStream::Plain(tcp_stream) => {
             tcp_stream.set_read_timeout(Some(timeout))?;
@@ -201,9 +201,7 @@ pub fn run_sso_flow() -> Result<String, SsoError> {
                 let _ = socket.send(Message::Pong(data));
             }
             Ok(Message::Close(_)) => {
-                return Err(SsoError::Failed(
-                    "SSO server closed connection".to_string(),
-                ));
+                return Err(SsoError::Failed("SSO server closed connection".to_string()));
             }
             Ok(_) => {
                 // Ignore binary, pong, etc.
@@ -216,9 +214,7 @@ pub fn run_sso_flow() -> Result<String, SsoError> {
                 continue;
             }
             Err(tungstenite::Error::ConnectionClosed) => {
-                return Err(SsoError::Failed(
-                    "WebSocket connection closed".to_string(),
-                ));
+                return Err(SsoError::Failed("WebSocket connection closed".to_string()));
             }
             Err(e) => return Err(SsoError::WebSocket(e)),
         }

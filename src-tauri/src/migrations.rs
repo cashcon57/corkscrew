@@ -19,7 +19,7 @@ pub enum MigrationError {
 pub type Result<T> = std::result::Result<T, MigrationError>;
 
 /// The current target schema version. Bump this when adding a new migration.
-const TARGET_VERSION: u32 = 2;
+const TARGET_VERSION: u32 = 6;
 
 /// Get the current schema version (0 if no version table exists).
 pub fn current_version(conn: &Connection) -> Result<u32> {
@@ -54,6 +54,26 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     if version == 1 {
         migrate_v1_to_v2(conn)?;
         version = 2;
+    }
+
+    if version == 2 {
+        migrate_v2_to_v3(conn)?;
+        version = 3;
+    }
+
+    if version == 3 {
+        migrate_v3_to_v4(conn)?;
+        version = 4;
+    }
+
+    if version == 4 {
+        migrate_v4_to_v5(conn)?;
+        version = 5;
+    }
+
+    if version == 5 {
+        migrate_v5_to_v6(conn)?;
+        version = 6;
     }
 
     let _ = version; // suppress unused warning when TARGET_VERSION == current
@@ -232,6 +252,219 @@ fn migrate_v1_to_v2(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Migration 2 → 3: Collection tracking.
+///
+/// Adds a collection_name column to installed_mods so mods can be associated
+/// with the NexusMods collection they were installed from.
+fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+
+    match tx.execute_batch("ALTER TABLE installed_mods ADD COLUMN collection_name TEXT") {
+        Ok(_) => {}
+        Err(e) => {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column") {
+                return Err(MigrationError::Sqlite(e));
+            }
+        }
+    }
+
+    tx.execute("UPDATE schema_version SET version = 3", [])?;
+    tx.commit()?;
+    log::info!("Migration 2 → 3 complete (collection_name column)");
+    Ok(())
+}
+
+/// Migration 3 → 4: Download registry, notes & tags.
+///
+/// Creates the download_registry and download_collection_refs tables for
+/// shared download deduplication across collections. Also adds user_notes
+/// and user_tags columns to installed_mods.
+fn migrate_v3_to_v4(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+
+    // Download registry for deduplication
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS download_registry (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            archive_path    TEXT    NOT NULL,
+            archive_name    TEXT    NOT NULL,
+            nexus_mod_id    INTEGER,
+            nexus_file_id   INTEGER,
+            sha256          TEXT,
+            file_size       INTEGER NOT NULL DEFAULT 0,
+            downloaded_at   TEXT    NOT NULL,
+            UNIQUE(archive_path)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_download_registry_nexus
+            ON download_registry (nexus_mod_id, nexus_file_id);",
+    )?;
+
+    // Tracks which collections reference which downloads
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS download_collection_refs (
+            download_id     INTEGER NOT NULL REFERENCES download_registry(id) ON DELETE CASCADE,
+            collection_name TEXT    NOT NULL,
+            game_id         TEXT    NOT NULL,
+            bottle_name     TEXT    NOT NULL,
+            UNIQUE(download_id, collection_name, game_id, bottle_name)
+        );",
+    )?;
+
+    // Mod notes and tags
+    let new_columns = [
+        "ALTER TABLE installed_mods ADD COLUMN user_notes TEXT",
+        "ALTER TABLE installed_mods ADD COLUMN user_tags TEXT", // JSON array
+    ];
+
+    for sql in &new_columns {
+        match tx.execute_batch(sql) {
+            Ok(_) => {}
+            Err(e) => {
+                let msg = e.to_string();
+                if !msg.contains("duplicate column") {
+                    return Err(MigrationError::Sqlite(e));
+                }
+            }
+        }
+    }
+
+    tx.execute("UPDATE schema_version SET version = 4", [])?;
+    tx.commit()?;
+    log::info!("Migration 3 → 4 complete (download registry, notes & tags)");
+    Ok(())
+}
+
+/// Migration 4 → 5: Dependencies, FOMOD recipes, game sessions.
+///
+/// Adds tables for mod dependency tracking, FOMOD choice replay,
+/// game session stability tracking, and INI tweak presets.
+fn migrate_v4_to_v5(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+
+    // Mod dependency graph
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS mod_dependencies (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            game_id         TEXT    NOT NULL,
+            bottle_name     TEXT    NOT NULL,
+            mod_id          INTEGER NOT NULL REFERENCES installed_mods(id) ON DELETE CASCADE,
+            depends_on_id   INTEGER REFERENCES installed_mods(id) ON DELETE CASCADE,
+            nexus_dep_id    INTEGER,
+            dep_name        TEXT    NOT NULL,
+            relationship    TEXT    NOT NULL DEFAULT 'requires',
+            created_at      TEXT    NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_mod_deps_mod
+            ON mod_dependencies (mod_id);
+        CREATE INDEX IF NOT EXISTS idx_mod_deps_target
+            ON mod_dependencies (depends_on_id);",
+    )?;
+
+    // FOMOD recipes (saved installer selections)
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS fomod_recipes (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            mod_id          INTEGER NOT NULL REFERENCES installed_mods(id) ON DELETE CASCADE,
+            mod_name        TEXT    NOT NULL,
+            installer_hash  TEXT,
+            selections_json TEXT    NOT NULL,
+            created_at      TEXT    NOT NULL,
+            UNIQUE(mod_id)
+        );",
+    )?;
+
+    // Game sessions for stability tracking
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS game_sessions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            game_id         TEXT    NOT NULL,
+            bottle_name     TEXT    NOT NULL,
+            profile_name    TEXT,
+            started_at      TEXT    NOT NULL,
+            ended_at        TEXT,
+            duration_secs   INTEGER,
+            clean_exit      INTEGER,
+            crash_log_path  TEXT,
+            notes           TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_sessions_game
+            ON game_sessions (game_id, bottle_name);",
+    )?;
+
+    // Mod changes per session
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS session_mod_changes (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id      INTEGER NOT NULL REFERENCES game_sessions(id) ON DELETE CASCADE,
+            mod_id          INTEGER,
+            mod_name        TEXT    NOT NULL,
+            change_type     TEXT    NOT NULL,
+            detail          TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_session_changes
+            ON session_mod_changes (session_id);",
+    )?;
+
+    // INI presets
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS ini_presets (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            name            TEXT    NOT NULL,
+            game_id         TEXT    NOT NULL,
+            description     TEXT,
+            settings_json   TEXT    NOT NULL,
+            is_builtin      INTEGER NOT NULL DEFAULT 0,
+            created_at      TEXT    NOT NULL,
+            UNIQUE(name, game_id)
+        );",
+    )?;
+
+    tx.execute("UPDATE schema_version SET version = 5", [])?;
+    tx.commit()?;
+    log::info!("Migration 4 → 5 complete (dependencies, FOMOD recipes, sessions, INI presets)");
+    Ok(())
+}
+
+/// Migration 5 → 6: Collection metadata.
+///
+/// Stores rich metadata about installed collections (slug, author, image_url,
+/// manifest JSON snapshot) for the My Collections redesign and diff system.
+fn migrate_v5_to_v6(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS collection_metadata (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            collection_name     TEXT NOT NULL,
+            game_id             TEXT NOT NULL,
+            bottle_name         TEXT NOT NULL,
+            slug                TEXT,
+            author              TEXT,
+            description         TEXT,
+            game_domain         TEXT,
+            image_url           TEXT,
+            installed_revision  INTEGER,
+            total_mods          INTEGER,
+            installed_at        TEXT NOT NULL,
+            manifest_json       TEXT,
+            UNIQUE(collection_name, game_id, bottle_name)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_collection_meta_game
+            ON collection_metadata (game_id, bottle_name);",
+    )?;
+
+    tx.execute("UPDATE schema_version SET version = 6", [])?;
+    tx.commit()?;
+    log::info!("Migration 5 → 6 complete (collection metadata)");
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -267,6 +500,9 @@ mod tests {
         assert!(tables.contains(&"file_hashes".to_string()));
         assert!(tables.contains(&"conflict_rules".to_string()));
         assert!(tables.contains(&"schema_version".to_string()));
+        assert!(tables.contains(&"download_registry".to_string()));
+        assert!(tables.contains(&"download_collection_refs".to_string()));
+        assert!(tables.contains(&"collection_metadata".to_string()));
     }
 
     #[test]
@@ -332,7 +568,9 @@ mod tests {
 
         // Verify the backfilled entry
         let (method, path): (String, String) = conn
-            .prepare("SELECT deploy_method, relative_path FROM deployment_manifest WHERE mod_id = 1")
+            .prepare(
+                "SELECT deploy_method, relative_path FROM deployment_manifest WHERE mod_id = 1",
+            )
             .unwrap()
             .query_row([], |row| Ok((row.get(0)?, row.get(1)?)))
             .unwrap();

@@ -90,9 +90,16 @@ pub struct BottleSettingDef {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum SettingType {
-    Toggle { current: bool },
-    Select { current: String, options: Vec<SelectOption> },
-    ReadOnly { value: String },
+    Toggle {
+        current: bool,
+    },
+    Select {
+        current: String,
+        options: Vec<SelectOption>,
+    },
+    ReadOnly {
+        value: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -131,7 +138,8 @@ fn parse_cxbottle_conf(path: &Path) -> Result<CxBottleConf> {
         if trimmed.starts_with('[') && trimmed.ends_with(']') {
             // Save previous unknown section
             if !known_section && !current_section.is_empty() {
-                conf.raw_sections.push((current_section.clone(), current_lines.clone()));
+                conf.raw_sections
+                    .push((current_section.clone(), current_lines.clone()));
             }
             current_section = trimmed[1..trimmed.len() - 1].to_string();
             current_lines = Vec::new();
@@ -145,9 +153,15 @@ fn parse_cxbottle_conf(path: &Path) -> Result<CxBottleConf> {
             let value = trimmed[eq_pos + 1..].trim().to_string();
 
             match current_section.as_str() {
-                "Bottle" => { conf.bottle.insert(key, value); }
-                "EnvironmentVariables" => { conf.env_vars.insert(key, value); }
-                _ => { current_lines.push(line.to_string()); }
+                "Bottle" => {
+                    conf.bottle.insert(key, value);
+                }
+                "EnvironmentVariables" => {
+                    conf.env_vars.insert(key, value);
+                }
+                _ => {
+                    current_lines.push(line.to_string());
+                }
             }
         } else if !known_section {
             current_lines.push(line.to_string());
@@ -168,15 +182,27 @@ fn write_cxbottle_conf(path: &Path, conf: &CxBottleConf) -> Result<()> {
     // Write [Bottle] section
     output.push_str("[Bottle]\n");
     // Write in a stable order: known keys first, then alphabetical
-    let known_keys = ["WineArch", "BottleID", "Version", "Timestamp", "Encoding",
-                      "Template", "MenuRoot", "MenuStrip", "MenuMode", "AssocMode"];
+    let known_keys = [
+        "WineArch",
+        "BottleID",
+        "Version",
+        "Timestamp",
+        "Encoding",
+        "Template",
+        "MenuRoot",
+        "MenuStrip",
+        "MenuMode",
+        "AssocMode",
+    ];
     for key in &known_keys {
         if let Some(val) = conf.bottle.get(*key) {
             output.push_str(&format!("{} = {}\n", key, val));
         }
     }
     // Remaining keys alphabetically
-    let mut remaining: Vec<_> = conf.bottle.iter()
+    let mut remaining: Vec<_> = conf
+        .bottle
+        .iter()
         .filter(|(k, _)| !known_keys.contains(&k.as_str()))
         .collect();
     remaining.sort_by_key(|(k, _)| (*k).clone());
@@ -231,12 +257,32 @@ pub fn get_bottle_settings(bottle: &Bottle) -> Result<BottleSettings> {
             name: bottle.name.clone(),
             source: bottle.source.clone(),
             path: bottle.path.to_string_lossy().into_owned(),
-            arch: conf.bottle.get("WineArch").cloned().unwrap_or_else(|| "win64".to_string()),
-            windows_version: conf.bottle.get("Template").cloned().unwrap_or_else(|| "win10_64".to_string()),
+            arch: conf
+                .bottle
+                .get("WineArch")
+                .cloned()
+                .unwrap_or_else(|| "win64".to_string()),
+            windows_version: conf
+                .bottle
+                .get("Template")
+                .cloned()
+                .unwrap_or_else(|| "win10_64".to_string()),
             crossover_version: conf.bottle.get("Version").cloned().unwrap_or_default(),
-            msync_enabled: conf.env_vars.get("WINEMSYNC").map(|v| v == "1").unwrap_or(false),
-            metalfx_enabled: conf.env_vars.get("D3DM_ENABLE_METALFX").map(|v| v == "1").unwrap_or(false),
-            dxmt_nvext_enabled: conf.env_vars.get("DXMT_ENABLE_NVEXT").map(|v| v == "1").unwrap_or(false),
+            msync_enabled: conf
+                .env_vars
+                .get("WINEMSYNC")
+                .map(|v| v == "1")
+                .unwrap_or(false),
+            metalfx_enabled: conf
+                .env_vars
+                .get("D3DM_ENABLE_METALFX")
+                .map(|v| v == "1")
+                .unwrap_or(false),
+            dxmt_nvext_enabled: conf
+                .env_vars
+                .get("DXMT_ENABLE_NVEXT")
+                .map(|v| v == "1")
+                .unwrap_or(false),
             env_vars: conf.env_vars,
             has_native_config: true,
         })
@@ -246,7 +292,13 @@ pub fn get_bottle_settings(bottle: &Bottle) -> Result<BottleSettings> {
             name: bottle.name.clone(),
             source: bottle.source.clone(),
             path: bottle.path.to_string_lossy().into_owned(),
-            arch: if bottle.path.join("drive_c").join("windows").join("syswow64").exists() {
+            arch: if bottle
+                .path
+                .join("drive_c")
+                .join("windows")
+                .join("syswow64")
+                .exists()
+            {
                 "win64".to_string()
             } else {
                 "win32".to_string()
@@ -273,25 +325,29 @@ pub fn set_bottle_setting(bottle: &Bottle, key: &str, value: &str) -> Result<()>
 
     match key {
         "windows_version" => {
-            conf.bottle.insert("Template".to_string(), value.to_string());
+            conf.bottle
+                .insert("Template".to_string(), value.to_string());
         }
         "msync_enabled" => {
             if value == "true" || value == "1" {
-                conf.env_vars.insert("WINEMSYNC".to_string(), "1".to_string());
+                conf.env_vars
+                    .insert("WINEMSYNC".to_string(), "1".to_string());
             } else {
                 conf.env_vars.remove("WINEMSYNC");
             }
         }
         "metalfx_enabled" => {
             if value == "true" || value == "1" {
-                conf.env_vars.insert("D3DM_ENABLE_METALFX".to_string(), "1".to_string());
+                conf.env_vars
+                    .insert("D3DM_ENABLE_METALFX".to_string(), "1".to_string());
             } else {
                 conf.env_vars.remove("D3DM_ENABLE_METALFX");
             }
         }
         "dxmt_nvext_enabled" => {
             if value == "true" || value == "1" {
-                conf.env_vars.insert("DXMT_ENABLE_NVEXT".to_string(), "1".to_string());
+                conf.env_vars
+                    .insert("DXMT_ENABLE_NVEXT".to_string(), "1".to_string());
             } else {
                 conf.env_vars.remove("DXMT_ENABLE_NVEXT");
             }
@@ -302,13 +358,15 @@ pub fn set_bottle_setting(bottle: &Bottle, key: &str, value: &str) -> Result<()>
             if value.is_empty() {
                 conf.env_vars.remove(var_name);
             } else {
-                conf.env_vars.insert(var_name.to_string(), value.to_string());
+                conf.env_vars
+                    .insert(var_name.to_string(), value.to_string());
             }
         }
         _ => {
-            return Err(BottleConfigError::UnsupportedSource(
-                format!("unknown setting key: {}", key),
-            ));
+            return Err(BottleConfigError::UnsupportedSource(format!(
+                "unknown setting key: {}",
+                key
+            )));
         }
     }
 
@@ -329,7 +387,11 @@ pub fn get_setting_definitions(settings: &BottleSettings) -> Vec<BottleSettingDe
         label: "Architecture".to_string(),
         description: "Windows architecture for this bottle".to_string(),
         setting_type: SettingType::ReadOnly {
-            value: if settings.arch == "win64" { "64-bit".to_string() } else { "32-bit".to_string() },
+            value: if settings.arch == "win64" {
+                "64-bit".to_string()
+            } else {
+                "32-bit".to_string()
+            },
         },
         recommended: None,
     });
@@ -352,13 +414,18 @@ pub fn get_setting_definitions(settings: &BottleSettings) -> Vec<BottleSettingDe
         defs.push(BottleSettingDef {
             key: "windows_version".to_string(),
             label: "Windows Version".to_string(),
-            description: "Which version of Windows to emulate. Most games work best with Windows 10.".to_string(),
+            description:
+                "Which version of Windows to emulate. Most games work best with Windows 10."
+                    .to_string(),
             setting_type: SettingType::Select {
                 current: settings.windows_version.clone(),
-                options: WINDOWS_VERSIONS.iter().map(|(val, label)| SelectOption {
-                    value: val.to_string(),
-                    label: label.to_string(),
-                }).collect(),
+                options: WINDOWS_VERSIONS
+                    .iter()
+                    .map(|(val, label)| SelectOption {
+                        value: val.to_string(),
+                        label: label.to_string(),
+                    })
+                    .collect(),
             },
             recommended: Some("win10_64".to_string()),
         });
