@@ -34,7 +34,7 @@ Corkscrew installs, manages, and organizes mods for Windows games running throug
 
 It works by reading and writing directly to your Wine bottle's filesystem, the same way the game itself sees it. Your bottles, your mods, no middleman.
 
-> **Status:** Alpha (v0.5.0). Skyrim Special Edition is the first fully supported game. More games coming soon.
+> **Status:** v0.5.0 — First functional release. Skyrim Special Edition is the first fully supported game. More games coming soon.
 
 ---
 
@@ -103,13 +103,15 @@ Everything listed above is implemented and functional. The app has been tested p
 
 - Bottle discovery and game detection across all supported Wine sources
 - Full mod lifecycle: install from archive → stage → deploy → enable/disable → uninstall
+- Drag-and-drop mod installation with real-time progress events
 - NXM protocol link handling (click on Nexus website → mod downloads in Corkscrew)
 - FOMOD installer wizard for mods with complex install options
+- NexusMods Collection installation (premium: automated download + deploy; free: guided manual download)
 - LOOT-powered plugin sorting with masterlist fetching
 - Profile save/load/switch with full deployment cycling
 - Crash log analysis with actionable diagnosis
 - SKSE detection, download, install, and launch-through-SKSE
-- Collection browsing and metadata viewing
+- Collection browsing, filtering by game, and metadata viewing
 
 ### Known Limitations
 
