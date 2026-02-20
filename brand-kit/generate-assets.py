@@ -145,14 +145,21 @@ def add_shadow(img: Image.Image, mask: Image.Image) -> Image.Image:
     return result.resize((size, size), Image.Resampling.LANCZOS)
 
 
-def build_macos_icon(transparent_artwork: Image.Image, size: int) -> Image.Image:
-    """Compose the final macOS-style icon at the given size.
+def build_macos_icon(transparent_artwork: Image.Image, size: int, full_bleed: bool = False) -> Image.Image:
+    """Compose a macOS-style icon at the given size.
+
+    Args:
+        transparent_artwork: The corkscrew artwork with transparent background.
+        size: Output icon size in pixels.
+        full_bleed: If True, gradient fills entire square (for Tauri/OS icons where
+                    macOS applies its own squircle mask). If False, bakes in the
+                    squircle (for brand-kit/web/marketing use).
 
     Layers (bottom to top):
-    1. Dark gradient background (squircle shaped)
+    1. Dark gradient background
     2. Specular highlight overlay
-    3. Inner edge glow
-    4. Corkscrew artwork (centered, ~70% of canvas)
+    3. Inner edge glow (squircle mode only)
+    4. Corkscrew artwork (centered, ~80% of canvas)
     """
     # 1. Gradient background
     bg = make_gradient_background(size)
@@ -160,27 +167,32 @@ def build_macos_icon(transparent_artwork: Image.Image, size: int) -> Image.Image
     # 2. Apply specular highlight to background
     bg = add_specular_highlight(bg)
 
-    # 3. Squircle mask
-    mask = make_squircle_mask(size)
+    # Artwork fill: 62% of canvas — matches native macOS icon proportions
+    # (e.g., Finder, Safari, Settings all have ~60-65% artwork fill)
+    art_fill = 0.62
 
-    # 4. Apply mask to background
-    bg.putalpha(mask)
+    if full_bleed:
+        # Full square — macOS will apply its own squircle mask
+        art_size = int(size * art_fill)
+        art_pad = (size - art_size) // 2
+        artwork = transparent_artwork.resize((art_size, art_size), Image.Resampling.LANCZOS)
+        bg.paste(artwork, (art_pad, art_pad), artwork)
+        return bg
+    else:
+        # Baked squircle for brand-kit / web use
+        mask = make_squircle_mask(size)
+        bg.putalpha(mask)
+        bg = add_edge_highlight(bg, mask)
 
-    # 5. Add edge highlight
-    bg = add_edge_highlight(bg, mask)
+        art_size = int(size * art_fill)
+        art_pad = (size - art_size) // 2
+        artwork = transparent_artwork.resize((art_size, art_size), Image.Resampling.LANCZOS)
+        bg.paste(artwork, (art_pad, art_pad), artwork)
 
-    # 6. Composite artwork on top (70% of canvas, centered)
-    art_size = int(size * 0.70)
-    art_pad = (size - art_size) // 2
-    artwork = transparent_artwork.resize((art_size, art_size), Image.Resampling.LANCZOS)
+        # Re-apply squircle mask to clip everything cleanly
+        bg.putalpha(mask)
 
-    # Paste artwork centered on the background
-    bg.paste(artwork, (art_pad, art_pad), artwork)
-
-    # 7. Re-apply squircle mask to clip everything cleanly
-    bg.putalpha(mask)
-
-    return bg
+        return bg
 
 
 def main():
@@ -234,32 +246,33 @@ def main():
     print(f"  -> static/corkscrew-icon-sm.png (64x64)")
 
     # --- Generate Tauri app icons ---
-    # macOS: The system applies the squircle mask automatically on Big Sur+
-    # So icon.png should be the full square with background (system clips it)
-    # We bake in our own squircle so it looks perfect on all platforms
+    # macOS Big Sur+: The system applies its own squircle mask automatically.
+    # So Tauri icons must be full-bleed squares (gradient fills entire canvas).
+    # If we bake in rounded corners, the OS mask clips them and the icon
+    # appears smaller than other dock icons.
     icons_dir = project_dir / "src-tauri" / "icons"
-    print("\nGenerating Tauri app icons...")
+    print("\nGenerating Tauri app icons (full-bleed for OS masking)...")
 
-    # icon.png — 512x512 main icon
-    icon_512 = build_macos_icon(artwork, 512)
+    # icon.png — 512x512 main icon (full-bleed)
+    icon_512 = build_macos_icon(artwork, 512, full_bleed=True)
     icon_512.save(icons_dir / "icon.png", "PNG", optimize=True)
-    print(f"  icon.png (512x512)")
+    print(f"  icon.png (512x512, full-bleed)")
 
-    # 128x128 and 128x128@2x (256x256)
-    icon_128_tauri = build_macos_icon(artwork, 128)
+    # 128x128 and 128x128@2x (256x256) — full-bleed
+    icon_128_tauri = build_macos_icon(artwork, 128, full_bleed=True)
     icon_128_tauri.save(icons_dir / "128x128.png", "PNG", optimize=True)
-    print(f"  128x128.png")
+    print(f"  128x128.png (full-bleed)")
 
-    icon_256 = build_macos_icon(artwork, 256)
+    icon_256 = build_macos_icon(artwork, 256, full_bleed=True)
     icon_256.save(icons_dir / "128x128@2x.png", "PNG", optimize=True)
-    print(f"  128x128@2x.png (256x256)")
+    print(f"  128x128@2x.png (256x256, full-bleed)")
 
-    # 32x32
-    icon_32 = build_macos_icon(artwork, 32)
+    # 32x32 — full-bleed
+    icon_32 = build_macos_icon(artwork, 32, full_bleed=True)
     icon_32.save(icons_dir / "32x32.png", "PNG", optimize=True)
-    print(f"  32x32.png")
+    print(f"  32x32.png (full-bleed)")
 
-    # Windows Square logos — use same styled icon
+    # Windows Square logos — full-bleed (Windows tiles are edge-to-edge)
     win_sizes = [
         ("Square30x30Logo.png", 30),
         ("Square44x44Logo.png", 44),
@@ -272,19 +285,20 @@ def main():
         ("Square310x310Logo.png", 310),
         ("StoreLogo.png", 50),
     ]
-    print("  Windows logos...")
+    print("  Windows logos (full-bleed)...")
     for name, size in win_sizes:
         if size >= 64:
-            icon = build_macos_icon(artwork, size)
+            icon = build_macos_icon(artwork, size, full_bleed=True)
         else:
-            icon = build_macos_icon(artwork, 256).resize((size, size), Image.Resampling.LANCZOS)
+            icon = build_macos_icon(artwork, 256, full_bleed=True).resize(
+                (size, size), Image.Resampling.LANCZOS)
         icon.save(icons_dir / name, "PNG", optimize=True)
     print(f"  {len(win_sizes)} Windows icons generated")
 
-    # icon.ico — 256x256
-    icon_ico = build_macos_icon(artwork, 256)
+    # icon.ico — 256x256 (full-bleed)
+    icon_ico = build_macos_icon(artwork, 256, full_bleed=True)
     icon_ico.save(icons_dir / "icon.ico", format="ICO", sizes=[(256, 256)])
-    print(f"  icon.ico (256x256)")
+    print(f"  icon.ico (256x256, full-bleed)")
 
     # icon.icns — macOS native format
     # Tauri generates this from icon.png during build, but we can also
@@ -309,8 +323,9 @@ def main():
         ]
 
         for name, size in icns_sizes:
-            icon = build_macos_icon(artwork, size) if size >= 64 else \
-                   build_macos_icon(artwork, 256).resize((size, size), Image.Resampling.LANCZOS)
+            icon = build_macos_icon(artwork, size, full_bleed=True) if size >= 64 else \
+                   build_macos_icon(artwork, 256, full_bleed=True).resize(
+                       (size, size), Image.Resampling.LANCZOS)
             icon.save(iconset_dir / name, "PNG", optimize=True)
 
         result = subprocess.run(
