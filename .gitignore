@@ -35,14 +35,6 @@ Thumbs.db
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 
-# Brand kit source (9.5MB, too large for git)
+# Brand kit source (too large for git)
 brand-kit/source-highres.png
-
-# Legacy Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-*.egg
-*.whl
-.venv/
-venv/
+brand-kit/*.xcf

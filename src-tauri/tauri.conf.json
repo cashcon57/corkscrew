@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Corkscrew",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "identifier": "com.cashconway.corkscrew",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -38,10 +38,17 @@
       "desktop": {
         "schemes": ["nxm"]
       }
+    },
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE0MEMzMzM1MUM3N0JFRUUKUldUdXZuY2NOVE1NRktPQXBKWDdSaXdTeHREdXpEOU5nTVVyTC85YVJ4dlR3QzFwcFlyUWdPVzMK",
+      "endpoints": [
+        "https://github.com/cashconway/Corkscrew/releases/latest/download/latest.json"
+      ]
     }
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": false,
     "targets": ["dmg", "app", "appimage", "deb", "rpm"],
     "icon": [
       "icons/32x32.png",

@@ -420,8 +420,8 @@
   {:catch}
     <div class="page-loading"><p style="color: var(--text-tertiary)">Failed to load page. Try restarting the app.</p></div>
   {/await}
-{:else if $currentPage === "modlists"}
-  {#await import("./modlists/+page.svelte")}
+{:else if $currentPage === "discover" || $currentPage === "collections" || $currentPage === "modlists"}
+  {#await import("./collections/+page.svelte")}
     <div class="page-loading"><div class="spinner"><div class="spinner-ring"></div></div></div>
   {:then mod}
     <mod.default />
@@ -446,22 +446,6 @@
   {/await}
 {:else if $currentPage === "logs"}
   {#await import("./logs/+page.svelte")}
-    <div class="page-loading"><div class="spinner"><div class="spinner-ring"></div></div></div>
-  {:then mod}
-    <mod.default />
-  {:catch}
-    <div class="page-loading"><p style="color: var(--text-tertiary)">Failed to load page. Try restarting the app.</p></div>
-  {/await}
-{:else if $currentPage === "collections"}
-  {#await import("./collections/+page.svelte")}
-    <div class="page-loading"><div class="spinner"><div class="spinner-ring"></div></div></div>
-  {:then mod}
-    <mod.default />
-  {:catch}
-    <div class="page-loading"><p style="color: var(--text-tertiary)">Failed to load page. Try restarting the app.</p></div>
-  {/await}
-{:else if $currentPage === "about"}
-  {#await import("./about/+page.svelte")}
     <div class="page-loading"><div class="spinner"><div class="spinner-ring"></div></div></div>
   {:then mod}
     <mod.default />

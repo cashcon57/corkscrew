@@ -2100,22 +2100,65 @@ async fn check_mod_updates(
 
 // --- Mod Tools ---
 
-#[tauri::command]
-fn detect_mod_tools_cmd(
-    game_id: String,
-    bottle_name: String,
-    _state: State<AppState>,
-) -> Result<Vec<mod_tools::ModTool>, String> {
-    let bottle = bottles::find_bottle_by_name(&bottle_name)
+/// Helper to resolve game data dir from game_id + bottle_name.
+fn resolve_game_data_dir(game_id: &str, bottle_name: &str) -> std::result::Result<PathBuf, String> {
+    let bottle = bottles::find_bottle_by_name(bottle_name)
         .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
     let detected_games = games::detect_games(&bottle);
     let game = detected_games
         .iter()
         .find(|g| g.game_id == game_id)
         .ok_or_else(|| format!("Game '{}' not found", game_id))?;
+    Ok(PathBuf::from(&game.data_dir))
+}
 
-    let data_dir = PathBuf::from(&game.data_dir);
+#[tauri::command]
+fn detect_mod_tools_cmd(
+    game_id: String,
+    bottle_name: String,
+    _state: State<AppState>,
+) -> Result<Vec<mod_tools::ModTool>, String> {
+    let data_dir = resolve_game_data_dir(&game_id, &bottle_name)?;
     Ok(mod_tools::detect_tools(&data_dir))
+}
+
+#[tauri::command]
+async fn install_mod_tool(
+    tool_id: String,
+    game_id: String,
+    bottle_name: String,
+) -> Result<String, String> {
+    let data_dir = resolve_game_data_dir(&game_id, &bottle_name)?;
+    mod_tools::install_tool(&tool_id, &data_dir)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn uninstall_mod_tool(tool_id: String, game_id: String, bottle_name: String) -> Result<(), String> {
+    let data_dir = resolve_game_data_dir(&game_id, &bottle_name)?;
+    mod_tools::uninstall_tool(&tool_id, &data_dir).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn launch_mod_tool(
+    tool_id: String,
+    game_id: String,
+    bottle_name: String,
+) -> Result<LaunchResult, String> {
+    let bottle = bottles::find_bottle_by_name(&bottle_name)
+        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
+    let data_dir = resolve_game_data_dir(&game_id, &bottle_name)?;
+    let tools = mod_tools::detect_tools(&data_dir);
+    let tool = tools
+        .iter()
+        .find(|t| t.id == tool_id)
+        .ok_or_else(|| format!("Tool '{}' not found", tool_id))?;
+    let exe_path = tool
+        .detected_path
+        .as_ref()
+        .ok_or_else(|| format!("Tool '{}' is not installed", tool_id))?;
+    mod_tools::launch_tool(Path::new(exe_path), &bottle)
 }
 
 // --- FOMOD ---
@@ -3044,6 +3087,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState {
             db: Arc::new(db),
             download_queue: Arc::new(download_queue::DownloadQueue::new()),
@@ -3100,6 +3145,9 @@ pub fn run() {
             activate_profile,
             check_mod_updates,
             detect_mod_tools_cmd,
+            install_mod_tool,
+            uninstall_mod_tool,
+            launch_mod_tool,
             detect_fomod,
             get_fomod_defaults,
             get_fomod_files,

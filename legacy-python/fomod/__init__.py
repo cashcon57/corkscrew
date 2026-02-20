@@ -1,1 +1,0 @@
-"""FOMOD installer support."""

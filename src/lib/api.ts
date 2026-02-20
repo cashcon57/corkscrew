@@ -808,6 +808,30 @@ export async function detectModTools(
   return invoke("detect_mod_tools_cmd", { gameId, bottleName });
 }
 
+export async function installModTool(
+  toolId: string,
+  gameId: string,
+  bottleName: string
+): Promise<string> {
+  return invoke("install_mod_tool", { toolId, gameId, bottleName });
+}
+
+export async function uninstallModTool(
+  toolId: string,
+  gameId: string,
+  bottleName: string
+): Promise<void> {
+  return invoke("uninstall_mod_tool", { toolId, gameId, bottleName });
+}
+
+export async function launchModTool(
+  toolId: string,
+  gameId: string,
+  bottleName: string
+): Promise<LaunchResult> {
+  return invoke("launch_mod_tool", { toolId, gameId, bottleName });
+}
+
 // Notes & Tags
 export async function setModNotes(
   modId: number,

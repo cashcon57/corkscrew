@@ -1,6 +1,6 @@
 {
   "name": "corkscrew-app",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "",
   "type": "module",
   "scripts": {
@@ -17,6 +17,8 @@
     "@tauri-apps/plugin-deep-link": "^2.4.7",
     "@tauri-apps/plugin-dialog": "^2.6.0",
     "@tauri-apps/plugin-opener": "^2",
+    "@tauri-apps/plugin-process": "^2.3.1",
+    "@tauri-apps/plugin-updater": "^2.10.0",
     "@types/dompurify": "^3.0.5",
     "dompurify": "^3.3.1",
     "marked": "^17.0.3"

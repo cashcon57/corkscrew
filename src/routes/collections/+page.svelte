@@ -28,7 +28,7 @@
   const NEXUS_API_KEY_URL = "https://www.nexusmods.com/users/myaccount?tab=api+access";
 
   // ---- Tab State ----
-  let activeTab = $state<"browse" | "my">("browse");
+  let activeTab = $state<"browse" | "my" | "wabbajack">("browse");
   let myCollections = $state<CollectionSummary[]>([]);
   let loadingMyCollections = $state(false);
   let switchingCollection = $state<string | null>(null);
@@ -483,6 +483,9 @@
       {#if myCollections.length > 0}
         <span class="tab-count">{myCollections.length}</span>
       {/if}
+    </button>
+    <button class="tab-btn" class:tab-active={activeTab === "wabbajack"} onclick={() => activeTab = "wabbajack"}>
+      Wabbajack Lists
     </button>
   </div>
 
@@ -1028,6 +1031,18 @@
         </div>
       </div>
     </div>
+
+  {:else if activeTab === "wabbajack"}
+    <!-- Wabbajack Tab (embedded) -->
+    {#await import("../modlists/+page.svelte")}
+      <div style="display:flex;align-items:center;justify-content:center;min-height:200px;">
+        <div class="spinner"><div class="spinner-ring"></div></div>
+      </div>
+    {:then mod}
+      <mod.default />
+    {:catch}
+      <p style="color: var(--text-tertiary); text-align: center; padding: 48px;">Failed to load Wabbajack Lists.</p>
+    {/await}
 
   {:else}
     <!-- Browse View -->

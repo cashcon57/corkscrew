@@ -163,9 +163,7 @@ fn check_dxvk(bottle: &Bottle) -> DiagnosticCheck {
             .ok()
             .map(|content| {
                 let overrides = parse_dll_overrides(&content);
-                overrides
-                    .get("dxgi")
-                    .is_some_and(|v| v.contains("native"))
+                overrides.get("dxgi").is_some_and(|v| v.contains("native"))
             })
             .unwrap_or(false);
 

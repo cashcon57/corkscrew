@@ -81,8 +81,13 @@
 
   // Search/filter state
   let searchQuery = $state("");
-  let filterStatus = $state<"all" | "enabled" | "disabled" | "conflicts">("all");
+  let filterStatus = $state<"all" | "enabled" | "disabled" | "conflicts" | "has-updates">("all");
   let filterCollection = $state<string | null>(null);
+  let sortBy = $state<"priority" | "name" | "date" | "version" | "files">("priority");
+  let sortDir = $state<"asc" | "desc">("asc");
+
+  // Detail panel
+  let detailMod = $state<InstalledMod | null>(null);
 
   // Notes/tags editing
   let editingNotesId = $state<number | null>(null);
@@ -144,18 +149,34 @@
 
   onDestroy(() => { if (installUnlisten) { installUnlisten(); installUnlisten = null; } });
 
-  // Sorted mods by install_priority ascending
-  let sortedMods = $derived(
-    [...$installedMods].sort((a, b) => a.install_priority - b.install_priority)
-  );
+  // Sorted mods
+  let sortedMods = $derived((() => {
+    const mods = [...$installedMods];
+    const dir = sortDir === "asc" ? 1 : -1;
+    mods.sort((a, b) => {
+      switch (sortBy) {
+        case "name": return dir * a.name.localeCompare(b.name);
+        case "date": return dir * (new Date(a.installed_at).getTime() - new Date(b.installed_at).getTime());
+        case "version": return dir * (a.version || "").localeCompare(b.version || "");
+        case "files": return dir * (a.installed_files.length - b.installed_files.length);
+        default: return dir * (a.install_priority - b.install_priority);
+      }
+    });
+    return mods;
+  })());
 
   // Filtered mods based on search and filters
   let filteredMods = $derived((() => {
     let mods = sortedMods;
-    // Text search
+    // Text search (name, tags, notes, collection)
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
-      mods = mods.filter(m => m.name.toLowerCase().includes(q));
+      mods = mods.filter(m =>
+        m.name.toLowerCase().includes(q) ||
+        m.user_tags.some(t => t.toLowerCase().includes(q)) ||
+        (m.user_notes && m.user_notes.toLowerCase().includes(q)) ||
+        (m.collection_name && m.collection_name.toLowerCase().includes(q))
+      );
     }
     // Status filter
     if (filterStatus === "enabled") {
@@ -164,6 +185,8 @@
       mods = mods.filter(m => !m.enabled);
     } else if (filterStatus === "conflicts") {
       mods = mods.filter(m => conflictModIds.has(m.id));
+    } else if (filterStatus === "has-updates") {
+      mods = mods.filter(m => updateMap.has(m.id));
     }
     // Collection filter
     if (filterCollection !== null) {
@@ -1181,6 +1204,7 @@
           <option value="enabled">Enabled</option>
           <option value="disabled">Disabled</option>
           <option value="conflicts">Has Conflicts</option>
+          <option value="has-updates">Has Updates</option>
         </select>
         {#if collectionNames.length > 0}
           <select class="filter-select" bind:value={filterCollection}>
@@ -1191,6 +1215,17 @@
             {/each}
           </select>
         {/if}
+        <select class="filter-select" bind:value={sortBy}>
+          <option value="priority">Sort: Priority</option>
+          <option value="name">Sort: Name</option>
+          <option value="date">Sort: Date</option>
+          <option value="files">Sort: File Count</option>
+        </select>
+        <button class="sort-dir-btn" onclick={() => sortDir = sortDir === "asc" ? "desc" : "asc"} title={sortDir === "asc" ? "Ascending" : "Descending"}>
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="transform: {sortDir === 'desc' ? 'rotate(180deg)' : 'none'}">
+            <path d="M6 2v8M3 7l3 3 3-3" />
+          </svg>
+        </button>
         {#if searchQuery || filterStatus !== "all" || filterCollection !== null}
           <span class="filter-count">{filteredMods.length} of {$installedMods.length}</span>
         {/if}
@@ -1227,6 +1262,7 @@
         </button>
       </div>
     {:else}
+      <div class="mod-layout" class:has-detail={detailMod !== null}>
       <div class="mod-table-container" class:reordering-active={reordering}>
         <div class="mod-table">
           <!-- Sticky Header -->
@@ -1252,7 +1288,7 @@
                 class:row-drag-above={dragOverIndex === i && dragRowIndex !== null && dragRowIndex > i}
                 class:row-drag-below={dragOverIndex === i && dragRowIndex !== null && dragRowIndex < i}
                 draggable="true"
-                onclick={() => selectedModId = selectedModId === mod.id ? undefined : mod.id}
+                onclick={() => { selectedModId = selectedModId === mod.id ? undefined : mod.id; detailMod = detailMod?.id === mod.id ? null : mod; }}
                 ondragstart={(e) => handleRowDragStart(e, i)}
                 ondragover={(e) => handleRowDragOver(e, i)}
                 ondragend={handleRowDragEnd}
@@ -1368,6 +1404,122 @@
             {/each}
           </div>
         </div>
+      </div>
+
+      <!-- Detail Sidebar -->
+      {#if detailMod}
+        <div class="mod-detail-panel">
+          <div class="detail-header">
+            <h3 class="detail-name">{detailMod.name}</h3>
+            <button class="detail-close" onclick={() => { detailMod = null; selectedModId = undefined; }}>
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+                <line x1="3" y1="3" x2="11" y2="11" /><line x1="11" y1="3" x2="3" y2="11" />
+              </svg>
+            </button>
+          </div>
+
+          <div class="detail-body">
+            <div class="detail-meta">
+              <div class="detail-row">
+                <span class="detail-label">Version</span>
+                <span class="detail-value">{detailMod.version || "\u2014"}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">Installed</span>
+                <span class="detail-value">{formatDate(detailMod.installed_at)}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">Files</span>
+                <span class="detail-value">{detailMod.installed_files.length}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">Priority</span>
+                <span class="detail-value">{detailMod.install_priority}</span>
+              </div>
+              {#if detailMod.archive_name}
+                <div class="detail-row">
+                  <span class="detail-label">Archive</span>
+                  <span class="detail-value detail-archive">{detailMod.archive_name}</span>
+                </div>
+              {/if}
+              {#if detailMod.collection_name}
+                <div class="detail-row">
+                  <span class="detail-label">Collection</span>
+                  <span class="detail-value collection-badge">{detailMod.collection_name}</span>
+                </div>
+              {/if}
+              {#if detailMod.nexus_mod_id}
+                <div class="detail-row">
+                  <span class="detail-label">Nexus</span>
+                  <a class="detail-value detail-link" href="https://www.nexusmods.com/{activeGame?.nexus_slug}/mods/{detailMod.nexus_mod_id}" target="_blank" rel="noopener noreferrer">
+                    Mod #{detailMod.nexus_mod_id}
+                  </a>
+                </div>
+              {/if}
+            </div>
+
+            {#if updateMap.has(detailMod.id)}
+              {@const update = updateMap.get(detailMod.id)!}
+              <div class="detail-update-banner">
+                <span class="detail-update-text">Update: v{update.current_version} &rarr; v{update.latest_version}</span>
+              </div>
+            {/if}
+
+            {#if conflictModIds.has(detailMod.id)}
+              <div class="detail-section">
+                <h4 class="detail-section-title">Conflicts</h4>
+                <div class="detail-conflict-list">
+                  {#each [...(conflictDetails.get(detailMod.id) ?? [])] as conflictName}
+                    <span class="detail-conflict-badge">{conflictName}</span>
+                  {/each}
+                </div>
+              </div>
+            {/if}
+
+            <!-- Tags -->
+            <div class="detail-section">
+              <h4 class="detail-section-title">Tags</h4>
+              <div class="detail-tags">
+                {#each detailMod.user_tags as tag}
+                  <span class="detail-tag">{tag}</span>
+                {/each}
+                {#if detailMod.user_tags.length === 0}
+                  <span class="detail-empty">No tags</span>
+                {/if}
+              </div>
+            </div>
+
+            <!-- Notes -->
+            <div class="detail-section">
+              <h4 class="detail-section-title">Notes</h4>
+              {#if editingNotesId === detailMod.id}
+                <textarea class="detail-notes-input" bind:value={editingNotesValue} rows="3" placeholder="Add notes about this mod..."></textarea>
+                <div class="detail-notes-actions">
+                  <button class="btn btn-primary btn-sm" onclick={() => handleSaveNotes(detailMod!.id)}>Save</button>
+                  <button class="btn btn-ghost btn-sm" onclick={() => editingNotesId = null}>Cancel</button>
+                </div>
+              {:else}
+                <button class="detail-notes-display" onclick={() => { editingNotesId = detailMod!.id; editingNotesValue = detailMod!.user_notes ?? ""; }}>
+                  {detailMod.user_notes || "Click to add notes..."}
+                </button>
+              {/if}
+            </div>
+
+            <!-- Actions -->
+            <div class="detail-actions">
+              <button class="btn btn-secondary btn-sm" onclick={() => handleToggle(detailMod!)}>
+                {detailMod.enabled ? "Disable" : "Enable"}
+              </button>
+              {#if confirmUninstall === detailMod.id}
+                <button class="btn btn-danger btn-sm" onclick={() => handleUninstall(detailMod!.id)}>Confirm</button>
+                <button class="btn btn-ghost btn-sm" onclick={() => confirmUninstall = null}>Cancel</button>
+              {:else}
+                <button class="btn btn-ghost-danger btn-sm" onclick={() => confirmUninstall = detailMod!.id}>Uninstall</button>
+              {/if}
+            </div>
+          </div>
+        </div>
+      {/if}
       </div>
 
       <!-- Dependency Panel (collapsible) -->
@@ -1779,6 +1931,21 @@
     max-width: 320px;
     line-height: 1.5;
     margin-bottom: var(--space-2);
+  }
+
+  /* ============================
+     Mod Layout (list + detail)
+     ============================ */
+  .mod-layout {
+    display: flex;
+    gap: var(--space-4);
+    flex: 1;
+    min-height: 0;
+  }
+
+  .mod-layout.has-detail .mod-table-container {
+    flex: 1;
+    min-width: 0;
   }
 
   /* ============================
@@ -2704,5 +2871,241 @@
 
   .make-winner-btn:hover {
     background: var(--accent-subtle) !important;
+  }
+
+  /* ============================
+     Sort Direction Button
+     ============================ */
+  .sort-dir-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: var(--radius-sm);
+    color: var(--text-tertiary);
+    transition: all var(--duration-fast) var(--ease);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  .sort-dir-btn:hover {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+  }
+
+  /* ============================
+     Detail Panel
+     ============================ */
+  .mod-detail-panel {
+    width: 300px;
+    min-width: 300px;
+    border-radius: var(--radius-lg);
+    background: var(--bg-primary);
+    box-shadow: var(--glass-edge-shadow);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    animation: detailSlideIn 0.15s var(--ease-out);
+  }
+
+  @keyframes detailSlideIn {
+    from { opacity: 0; transform: translateX(8px); }
+    to { opacity: 1; transform: translateX(0); }
+  }
+
+  .detail-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--space-2);
+    padding: var(--space-4);
+    border-bottom: 1px solid var(--separator);
+  }
+
+  .detail-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+    line-height: 1.35;
+    word-break: break-word;
+  }
+
+  .detail-close {
+    flex-shrink: 0;
+    padding: 4px;
+    border-radius: var(--radius-sm);
+    color: var(--text-tertiary);
+    cursor: pointer;
+    transition: all var(--duration-fast) var(--ease);
+  }
+
+  .detail-close:hover {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+  }
+
+  .detail-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: var(--space-4);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+
+  .detail-meta {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .detail-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    padding: 3px 0;
+  }
+
+  .detail-label {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    font-weight: 500;
+  }
+
+  .detail-value {
+    font-size: 12px;
+    color: var(--text-primary);
+    font-weight: 500;
+    text-align: right;
+    max-width: 60%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .detail-archive {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-secondary);
+  }
+
+  .detail-link {
+    color: var(--accent);
+    text-decoration: none;
+  }
+
+  .detail-link:hover {
+    text-decoration: underline;
+  }
+
+  .detail-update-banner {
+    padding: var(--space-2) var(--space-3);
+    background: rgba(48, 209, 88, 0.1);
+    border: 1px solid rgba(48, 209, 88, 0.2);
+    border-radius: var(--radius-sm);
+  }
+
+  .detail-update-text {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--green);
+  }
+
+  .detail-section {
+    border-top: 1px solid var(--separator);
+    padding-top: var(--space-3);
+  }
+
+  .detail-section-title {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-tertiary);
+    margin-bottom: var(--space-2);
+  }
+
+  .detail-conflict-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  .detail-conflict-badge {
+    font-size: 11px;
+    padding: 2px 6px;
+    background: rgba(255, 69, 58, 0.1);
+    color: var(--red);
+    border-radius: var(--radius-sm);
+    font-weight: 500;
+  }
+
+  .detail-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  .detail-tag {
+    font-size: 11px;
+    padding: 2px 8px;
+    background: var(--accent-subtle);
+    color: var(--accent);
+    border-radius: var(--radius-sm);
+    font-weight: 500;
+  }
+
+  .detail-empty {
+    font-size: 12px;
+    color: var(--text-quaternary);
+  }
+
+  .detail-notes-input {
+    width: 100%;
+    padding: var(--space-2);
+    background: var(--bg-base);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-size: 12px;
+    font-family: inherit;
+    resize: vertical;
+  }
+
+  .detail-notes-input:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+
+  .detail-notes-actions {
+    display: flex;
+    gap: var(--space-2);
+    margin-top: var(--space-2);
+  }
+
+  .detail-notes-display {
+    width: 100%;
+    text-align: left;
+    padding: var(--space-2);
+    font-size: 12px;
+    color: var(--text-secondary);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: background var(--duration-fast) var(--ease);
+    white-space: pre-wrap;
+    word-break: break-word;
+    line-height: 1.5;
+  }
+
+  .detail-notes-display:hover {
+    background: var(--surface-hover);
+  }
+
+  .detail-actions {
+    display: flex;
+    gap: var(--space-2);
+    border-top: 1px solid var(--separator);
+    padding-top: var(--space-3);
   }
 </style>

@@ -6,6 +6,8 @@
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
   import { getVersion } from "@tauri-apps/api/app";
+  import { check } from "@tauri-apps/plugin-updater";
+  import { relaunch } from "@tauri-apps/plugin-process";
   import { downloadFromNexus, getAllGames, getDownloadQueue, retryDownload, cancelDownload, clearFinishedDownloads, onDownloadQueueUpdate } from "$lib/api";
   import { get } from "svelte/store";
   import type { DetectedGame, QueueItem } from "$lib/types";
@@ -15,12 +17,10 @@
     { id: "dashboard", label: "Dashboard" },
     { id: "mods", label: "Mods" },
     { id: "plugins", label: "Load Order" },
-    { id: "collections", label: "Collections" },
-    { id: "modlists", label: "Wabbajack Lists" },
+    { id: "discover", label: "Discover" },
     { id: "profiles", label: "Profiles" },
     { id: "logs", label: "Crash Logs" },
     { id: "settings", label: "Settings" },
-    { id: "about", label: "About" },
   ];
 
   let detectedGames = $state<DetectedGame[]>([]);
@@ -33,6 +33,13 @@
 
   let activeDownloads = $derived(queueItems.filter(i => i.status === "downloading" || i.status === "pending").length);
   let failedDownloads = $derived(queueItems.filter(i => i.status === "failed").length);
+
+  // Auto-update state
+  let updateAvailable = $state(false);
+  let updateVersion = $state("");
+  let updateDownloading = $state(false);
+  let updateProgress = $state(0);
+  let updateReady = $state(false);
 
   // Queue popover positioning (fixed to escape sidebar overflow:hidden)
   let queueBtnEl = $state<HTMLElement | null>(null);
@@ -48,6 +55,9 @@
     initTheme();
     loadDetectedGames();
     getVersion().then(v => appVersion.set(v)).catch(() => {});
+
+    // Check for app updates on startup
+    checkForUpdates();
 
     // Subscribe to download queue updates
     getDownloadQueue().then(items => queueItems = items).catch(() => {});
@@ -162,6 +172,38 @@
     } catch (err: unknown) {
       showError(`NXM download failed: ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
+
+  async function checkForUpdates() {
+    try {
+      const update = await check();
+      if (update) {
+        updateAvailable = true;
+        updateVersion = update.version;
+        // Auto-download the update in the background
+        update.downloadAndInstall((progress) => {
+          if (progress.event === "Started" && progress.data.contentLength) {
+            updateDownloading = true;
+          } else if (progress.event === "Progress") {
+            updateProgress += progress.data.chunkLength;
+          } else if (progress.event === "Finished") {
+            updateReady = true;
+            updateDownloading = false;
+          }
+        }).then(() => {
+          updateReady = true;
+          updateDownloading = false;
+        }).catch(() => {
+          updateDownloading = false;
+        });
+      }
+    } catch {
+      // Update check failed silently — network error or no endpoint yet
+    }
+  }
+
+  async function handleRelaunch() {
+    await relaunch();
   }
 
   function navigate(page: string) {
@@ -300,17 +342,10 @@
                   <rect x="2.5" y="6.5" width="11" height="3" rx="1" />
                   <rect x="2.5" y="11" width="11" height="3" rx="1" />
                 </svg>
-              {:else if item.id === "collections"}
+              {:else if item.id === "discover"}
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                  <rect x="2" y="3" width="12" height="10" rx="2" />
-                  <path d="M5 3V2M11 3V2" />
-                  <path d="M5 7h6M5 10h4" />
-                </svg>
-              {:else if item.id === "modlists"}
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M2 3h12M2 6.5h12M2 10h12M2 13.5h12" />
-                  <circle cx="13" cy="3" r="1" fill="currentColor" stroke="none" />
-                  <circle cx="13" cy="6.5" r="1" fill="currentColor" stroke="none" />
+                  <circle cx="8" cy="8" r="6.5" />
+                  <path d="M5.5 5.5l2 4.5 4.5 2-2-4.5z" />
                 </svg>
               {:else if item.id === "logs"}
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -435,7 +470,22 @@
         {/if}
       </div>
 
-      <span class="sidebar-version">v{$appVersion}</span>
+      {#if updateReady}
+        <button class="update-btn update-ready" onclick={handleRelaunch} title="Restart to apply update">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="23 4 23 10 17 10" />
+            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+          </svg>
+          Restart for v{updateVersion}
+        </button>
+      {:else if updateAvailable && updateDownloading}
+        <span class="update-btn update-downloading">
+          <span class="spinner spinner-sm"></span>
+          Updating...
+        </span>
+      {:else}
+        <span class="sidebar-version">v{$appVersion}</span>
+      {/if}
     </div>
   </nav>
 
@@ -863,6 +913,33 @@
     color: var(--text-quaternary);
     font-weight: 500;
     letter-spacing: 0.02em;
+  }
+
+  .update-btn {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 3px 8px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+  }
+
+  .update-ready {
+    background: var(--accent-subtle);
+    color: var(--accent);
+    transition: background var(--duration-fast) var(--ease);
+  }
+
+  .update-ready:hover {
+    background: var(--accent);
+    color: white;
+  }
+
+  .update-downloading {
+    color: var(--text-tertiary);
+    cursor: default;
   }
 
   /* --- Content column --- */

@@ -632,6 +632,11 @@ export interface ModTool {
   detected_path: string | null;
   requires_wine: boolean;
   category: string;
+  can_auto_install: boolean;
+  github_repo: string | null;
+  download_url: string | null;
+  license: string;
+  wine_notes: string | null;
 }
 
 export interface DeploymentHealth {
