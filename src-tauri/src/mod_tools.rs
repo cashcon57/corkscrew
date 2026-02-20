@@ -3,6 +3,7 @@
 //! Provides a registry of known modding tools (SSEEdit, BethINI, DynDOLOD, etc.)
 //! with automatic detection, GitHub-based auto-installation, and Wine-based launching.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -11,6 +12,9 @@ use log::{debug, info};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use walkdir::WalkDir;
+
+use crate::collections::CollectionManifest;
+use crate::wabbajack::ParsedModlist;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -77,6 +81,8 @@ pub struct ModTool {
     pub recommended_alternative: Option<String>,
     /// INI edits to apply when this tool is installed/run.
     pub recommended_ini_edits: Vec<IniEdit>,
+    /// Ko-fi, Patreon, or other support/donation URL for the tool author.
+    pub support_url: Option<String>,
 }
 
 /// A recommended INI edit for a tool.
@@ -92,6 +98,213 @@ pub struct IniEdit {
     pub value: String,
     /// Description of what this edit does.
     pub description: String,
+}
+
+// ---------------------------------------------------------------------------
+// Tool Requirement Signatures
+// ---------------------------------------------------------------------------
+
+/// Maps known Nexus mod IDs and archive name patterns to a Corkscrew tool ID.
+pub struct ToolSignature {
+    pub tool_id: &'static str,
+    pub tool_name: &'static str,
+    pub nexus_mod_ids: &'static [i64],
+    pub name_patterns: &'static [&'static str],
+}
+
+/// Known tool signatures for detecting required tools in collections/wabbajack lists.
+pub const TOOL_SIGNATURES: &[ToolSignature] = &[
+    ToolSignature {
+        tool_id: "skse",
+        tool_name: "SKSE64",
+        nexus_mod_ids: &[30379],
+        name_patterns: &["skse64", "skse_"],
+    },
+    ToolSignature {
+        tool_id: "sseedit",
+        tool_name: "SSEEdit (xEdit)",
+        nexus_mod_ids: &[164],
+        name_patterns: &["sseedit", "xedit", "tes5edit"],
+    },
+    ToolSignature {
+        tool_id: "bodyslide",
+        tool_name: "BodySlide & Outfit Studio",
+        nexus_mod_ids: &[201],
+        name_patterns: &["bodyslide", "outfit studio"],
+    },
+    ToolSignature {
+        tool_id: "nemesis",
+        tool_name: "Nemesis",
+        nexus_mod_ids: &[60033],
+        name_patterns: &["nemesis unlimited behavior"],
+    },
+    ToolSignature {
+        tool_id: "fnis",
+        tool_name: "FNIS",
+        nexus_mod_ids: &[3038],
+        name_patterns: &["fnis", "generatefnis"],
+    },
+    ToolSignature {
+        tool_id: "pandora",
+        tool_name: "Pandora Behaviour Engine+",
+        nexus_mod_ids: &[],
+        name_patterns: &["pandora behaviour", "pandora behavior"],
+    },
+    ToolSignature {
+        tool_id: "dyndolod",
+        tool_name: "DynDOLOD",
+        nexus_mod_ids: &[68518, 32382],
+        name_patterns: &["dyndolod"],
+    },
+    ToolSignature {
+        tool_id: "wryebash",
+        tool_name: "Wrye Bash",
+        nexus_mod_ids: &[],
+        name_patterns: &["wrye bash", "wryebash"],
+    },
+    ToolSignature {
+        tool_id: "cao",
+        tool_name: "Cathedral Assets Optimizer",
+        nexus_mod_ids: &[],
+        name_patterns: &["cathedral assets optimizer"],
+    },
+    ToolSignature {
+        tool_id: "bethini",
+        tool_name: "BethINI Pie",
+        nexus_mod_ids: &[631],
+        name_patterns: &["bethini"],
+    },
+    ToolSignature {
+        tool_id: "nifoptimizer",
+        tool_name: "SSE NIF Optimizer",
+        nexus_mod_ids: &[],
+        name_patterns: &["nif optimizer", "nifoptimizer"],
+    },
+    ToolSignature {
+        tool_id: "loot",
+        tool_name: "LOOT",
+        nexus_mod_ids: &[],
+        name_patterns: &["loot"],
+    },
+];
+
+/// A tool detected as required by a collection or wabbajack modlist.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RequiredTool {
+    pub tool_id: String,
+    pub tool_name: String,
+    pub can_auto_install: bool,
+    pub is_detected: bool,
+    pub wine_compat: String,
+    pub recommended_alternative: Option<String>,
+    pub download_url: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Tool Requirement Detection
+// ---------------------------------------------------------------------------
+
+/// Detect tool requirements from a NexusMods collection manifest.
+pub fn detect_required_tools_collection(
+    manifest: &CollectionManifest,
+    game_data_dir: &Path,
+) -> Vec<RequiredTool> {
+    let mut matched_ids: HashSet<String> = HashSet::new();
+    let mut results: Vec<RequiredTool> = Vec::new();
+    let detected = detect_tools(game_data_dir);
+
+    for mod_entry in &manifest.mods {
+        let name_lower = mod_entry.name.to_lowercase();
+
+        for sig in TOOL_SIGNATURES {
+            if matched_ids.contains(sig.tool_id) {
+                continue;
+            }
+
+            let id_match = mod_entry
+                .source
+                .mod_id
+                .map(|id| sig.nexus_mod_ids.contains(&id))
+                .unwrap_or(false);
+
+            let name_match = sig.name_patterns.iter().any(|p| name_lower.contains(p));
+
+            if id_match || name_match {
+                matched_ids.insert(sig.tool_id.to_string());
+                results.push(build_required_tool(sig, &detected));
+            }
+        }
+    }
+
+    results
+}
+
+/// Detect tool requirements from a parsed Wabbajack modlist.
+pub fn detect_required_tools_wabbajack(
+    modlist: &ParsedModlist,
+    game_data_dir: &Path,
+) -> Vec<RequiredTool> {
+    let mut matched_ids: HashSet<String> = HashSet::new();
+    let mut results: Vec<RequiredTool> = Vec::new();
+    let detected = detect_tools(game_data_dir);
+
+    for archive in &modlist.archives {
+        let name_lower = archive.name.to_lowercase();
+
+        for sig in TOOL_SIGNATURES {
+            if matched_ids.contains(sig.tool_id) {
+                continue;
+            }
+
+            let id_match = archive
+                .nexus_mod_id
+                .map(|id| sig.nexus_mod_ids.contains(&id))
+                .unwrap_or(false);
+
+            let name_match = sig.name_patterns.iter().any(|p| name_lower.contains(p));
+
+            if id_match || name_match {
+                matched_ids.insert(sig.tool_id.to_string());
+                results.push(build_required_tool(sig, &detected));
+            }
+        }
+    }
+
+    results
+}
+
+/// Build a RequiredTool from a signature, enriching with builtin tool metadata.
+fn build_required_tool(sig: &ToolSignature, detected_tools: &[ModTool]) -> RequiredTool {
+    let builtin = builtin_tools()
+        .into_iter()
+        .find(|t| t.id == sig.tool_id);
+
+    let is_detected = detected_tools
+        .iter()
+        .any(|t| t.id == sig.tool_id && t.detected_path.is_some());
+
+    if let Some(tool) = builtin {
+        RequiredTool {
+            tool_id: sig.tool_id.to_string(),
+            tool_name: tool.name,
+            can_auto_install: tool.can_auto_install,
+            is_detected,
+            wine_compat: tool.wine_compat,
+            recommended_alternative: tool.recommended_alternative,
+            download_url: tool.download_url,
+        }
+    } else {
+        // Tool in signatures but not in builtin registry (e.g. SKSE)
+        RequiredTool {
+            tool_id: sig.tool_id.to_string(),
+            tool_name: sig.tool_name.to_string(),
+            can_auto_install: false,
+            is_detected,
+            wine_compat: "good".to_string(),
+            recommended_alternative: None,
+            download_url: None,
+        }
+    }
 }
 
 /// Minimal GitHub release JSON shape.
@@ -136,6 +349,7 @@ fn builtin_tools() -> Vec<ModTool> {
             wine_compat: "good".into(),
             recommended_alternative: None,
             recommended_ini_edits: vec![],
+            support_url: Some("https://ko-fi.com/elminsterau".into()),
         },
         ModTool {
             id: "pandora".into(),
@@ -157,6 +371,7 @@ fn builtin_tools() -> Vec<ModTool> {
             wine_compat: "good".into(),
             recommended_alternative: None,
             recommended_ini_edits: vec![],
+            support_url: Some("https://www.patreon.com/monitorhz".into()),
         },
         ModTool {
             id: "bodyslide".into(),
@@ -174,6 +389,7 @@ fn builtin_tools() -> Vec<ModTool> {
             wine_compat: "good".into(),
             recommended_alternative: None,
             recommended_ini_edits: vec![],
+            support_url: None,
         },
         ModTool {
             id: "cao".into(),
@@ -191,6 +407,7 @@ fn builtin_tools() -> Vec<ModTool> {
             wine_compat: "good".into(),
             recommended_alternative: None,
             recommended_ini_edits: vec![],
+            support_url: Some("https://github.com/sponsors/Guekka".into()),
         },
         ModTool {
             id: "nifoptimizer".into(),
@@ -208,6 +425,7 @@ fn builtin_tools() -> Vec<ModTool> {
             wine_compat: "good".into(),
             recommended_alternative: None,
             recommended_ini_edits: vec![],
+            support_url: None,
         },
         ModTool {
             id: "wryebash".into(),
@@ -225,6 +443,7 @@ fn builtin_tools() -> Vec<ModTool> {
             wine_compat: "good".into(),
             recommended_alternative: None,
             recommended_ini_edits: vec![],
+            support_url: None,
         },
         // ---- Tools with limited Wine compatibility ----
         ModTool {
@@ -243,6 +462,7 @@ fn builtin_tools() -> Vec<ModTool> {
             wine_compat: "limited".into(),
             recommended_alternative: None,
             recommended_ini_edits: vec![],
+            support_url: None,
         },
         ModTool {
             id: "dyndolod".into(),
@@ -260,6 +480,7 @@ fn builtin_tools() -> Vec<ModTool> {
             wine_compat: "limited".into(),
             recommended_alternative: None,
             recommended_ini_edits: vec![],
+            support_url: Some("https://ko-fi.com/sheson".into()),
         },
         // ---- Not recommended via Wine — use Pandora instead ----
         ModTool {
@@ -278,6 +499,7 @@ fn builtin_tools() -> Vec<ModTool> {
             wine_compat: "not_recommended".into(),
             recommended_alternative: Some("pandora".into()),
             recommended_ini_edits: vec![],
+            support_url: Some("https://www.patreon.com/shikyokira".into()),
         },
         ModTool {
             id: "fnis".into(),
@@ -297,6 +519,7 @@ fn builtin_tools() -> Vec<ModTool> {
             wine_compat: "not_recommended".into(),
             recommended_alternative: Some("pandora".into()),
             recommended_ini_edits: vec![],
+            support_url: None,
         },
     ]
 }
@@ -1010,5 +1233,174 @@ mod tests {
 
         let content = fs::read_to_string(target.join("test.txt")).unwrap();
         assert_eq!(content, "hello world");
+    }
+
+    // --- Tool Requirement Detection Tests ---
+
+    fn mock_collection_manifest(mods: Vec<(&str, Option<i64>)>) -> CollectionManifest {
+        use crate::collections::{CollectionModEntry, CollectionSource};
+        CollectionManifest {
+            name: "Test Collection".to_string(),
+            slug: Some("test-collection".to_string()),
+            author: "Test".to_string(),
+            description: "Test".to_string(),
+            game_domain: "skyrimspecialedition".to_string(),
+            image_url: None,
+            mod_rules: vec![],
+            install_instructions: None,
+            mods: mods
+                .into_iter()
+                .map(|(name, mod_id)| CollectionModEntry {
+                    name: name.to_string(),
+                    version: "1.0".to_string(),
+                    optional: false,
+                    source: CollectionSource {
+                        source_type: "nexus".to_string(),
+                        url: None,
+                        instructions: None,
+                        mod_id,
+                        file_id: Some(1),
+                        update_policy: None,
+                        md5: None,
+                        file_size: None,
+                    },
+                    choices: None,
+                    patches: None,
+                    instructions: None,
+                    phase: None,
+                    file_overrides: vec![],
+                })
+                .collect(),
+            plugins: vec![],
+        }
+    }
+
+    fn mock_parsed_modlist(archives: Vec<(&str, Option<i64>)>) -> ParsedModlist {
+        use crate::wabbajack::ArchiveSummary;
+        ParsedModlist {
+            name: "Test Modlist".to_string(),
+            author: "Test".to_string(),
+            description: "Test".to_string(),
+            version: "1.0".to_string(),
+            game_type: 1,
+            game_name: "Skyrim Special Edition".to_string(),
+            is_nsfw: false,
+            archive_count: archives.len(),
+            total_download_size: 0,
+            directive_count: 0,
+            directive_breakdown: std::collections::HashMap::new(),
+            archives: archives
+                .into_iter()
+                .map(|(name, nexus_mod_id)| ArchiveSummary {
+                    name: name.to_string(),
+                    size: 1000,
+                    source_type: if nexus_mod_id.is_some() {
+                        "Nexus".to_string()
+                    } else {
+                        "HTTP".to_string()
+                    },
+                    nexus_mod_id,
+                    nexus_file_id: Some(1),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn test_detect_collection_tools_by_mod_id() {
+        let manifest = mock_collection_manifest(vec![
+            ("SKSE64", Some(30379)),
+            ("SkyUI", Some(12604)),
+        ]);
+        let tools =
+            detect_required_tools_collection(&manifest, Path::new("/nonexistent"));
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].tool_id, "skse");
+    }
+
+    #[test]
+    fn test_detect_collection_tools_by_name() {
+        let manifest = mock_collection_manifest(vec![
+            ("Nemesis Unlimited Behavior Engine", None),
+            ("SkyUI", None),
+        ]);
+        let tools =
+            detect_required_tools_collection(&manifest, Path::new("/nonexistent"));
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].tool_id, "nemesis");
+        assert_eq!(tools[0].recommended_alternative.as_deref(), Some("pandora"));
+    }
+
+    #[test]
+    fn test_detect_collection_tools_dedup() {
+        // Same tool matched by both mod_id and name
+        let manifest = mock_collection_manifest(vec![
+            ("SSEEdit xEdit", Some(164)),
+        ]);
+        let tools =
+            detect_required_tools_collection(&manifest, Path::new("/nonexistent"));
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].tool_id, "sseedit");
+    }
+
+    #[test]
+    fn test_detect_wabbajack_tools_by_mod_id() {
+        let modlist = mock_parsed_modlist(vec![
+            ("skse64_2_02_06.7z", Some(30379)),
+            ("SkyUI_5_2_SE.7z", Some(12604)),
+        ]);
+        let tools =
+            detect_required_tools_wabbajack(&modlist, Path::new("/nonexistent"));
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].tool_id, "skse");
+    }
+
+    #[test]
+    fn test_detect_wabbajack_tools_by_name() {
+        let modlist = mock_parsed_modlist(vec![
+            ("skse64_2_02_06.7z", None),
+            ("random_mod.zip", None),
+        ]);
+        let tools =
+            detect_required_tools_wabbajack(&modlist, Path::new("/nonexistent"));
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].tool_id, "skse");
+    }
+
+    #[test]
+    fn test_detect_no_tools() {
+        let manifest = mock_collection_manifest(vec![
+            ("SkyUI", Some(12604)),
+            ("USSEP", Some(266)),
+        ]);
+        let tools =
+            detect_required_tools_collection(&manifest, Path::new("/nonexistent"));
+        assert!(tools.is_empty());
+    }
+
+    #[test]
+    fn test_tool_signatures_cover_all_builtins() {
+        // Every builtin tool should have a matching signature
+        let tools = builtin_tools();
+        for tool in &tools {
+            assert!(
+                TOOL_SIGNATURES.iter().any(|s| s.tool_id == tool.id),
+                "Builtin tool '{}' has no entry in TOOL_SIGNATURES",
+                tool.id
+            );
+        }
+    }
+
+    #[test]
+    fn test_required_tool_enriches_from_builtin() {
+        let manifest = mock_collection_manifest(vec![
+            ("SSEEdit", Some(164)),
+        ]);
+        let tools =
+            detect_required_tools_collection(&manifest, Path::new("/nonexistent"));
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].tool_name, "SSEEdit (xEdit)");
+        assert!(tools[0].can_auto_install);
+        assert_eq!(tools[0].wine_compat, "good");
     }
 }

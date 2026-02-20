@@ -1,11 +1,19 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { getWabbajackModlists, fetchUrlText } from "$lib/api";
-  import { showError, selectedGame } from "$lib/stores";
-  import type { ModlistSummary } from "$lib/types";
+  import { open } from "@tauri-apps/plugin-dialog";
+  import { openUrl } from "@tauri-apps/plugin-opener";
+  import {
+    getWabbajackModlists,
+    fetchUrlText,
+    parseWabbajackFile,
+    detectWabbajackTools,
+  } from "$lib/api";
+  import { showError, showSuccess, selectedGame } from "$lib/stores";
+  import type { ModlistSummary, ParsedModlist, RequiredTool } from "$lib/types";
   import { marked } from "marked";
   import DOMPurify from "dompurify";
   import CompatibilityPanel from "$lib/components/CompatibilityPanel.svelte";
+  import RequiredToolsPrompt from "$lib/components/RequiredToolsPrompt.svelte";
 
   let modlists = $state<ModlistSummary[]>([]);
   let filtered = $state<ModlistSummary[]>([]);
@@ -20,6 +28,19 @@
   let selectedModlist = $state<ModlistSummary | null>(null);
   let readmeContent = $state("");
   let loadingDetail = $state(false);
+
+  // Parsed file state (after loading .wabbajack)
+  let parsedModlist = $state<ParsedModlist | null>(null);
+  let wabbajackFilePath = $state<string | null>(null);
+  let parsingFile = $state(false);
+
+  // Tool detection state
+  let pendingTools = $state<RequiredTool[]>([]);
+  let showToolsPrompt = $state(false);
+
+  // Install state
+  let installing = $state(false);
+  let installStep = $state("");
 
   // Derived unique games from the modlists
   const gameOptions = $derived.by(() => {
@@ -135,6 +156,130 @@
   function backToBrowse() {
     selectedModlist = null;
     readmeContent = "";
+    parsedModlist = null;
+    wabbajackFilePath = null;
+  }
+
+  /** Open a file picker to select a local .wabbajack file. */
+  async function openLocalFile() {
+    try {
+      const selected = await open({
+        multiple: false,
+        filters: [{ name: "Wabbajack Modlist", extensions: ["wabbajack"] }],
+      });
+      if (!selected) return;
+
+      const filePath = typeof selected === "string" ? selected : selected;
+      await parseAndShowFile(filePath);
+    } catch (e: unknown) {
+      showError(`Failed to open file: ${e}`);
+    }
+  }
+
+  /** Parse a .wabbajack file and show the summary view. */
+  async function parseAndShowFile(filePath: string) {
+    parsingFile = true;
+    parsedModlist = null;
+    wabbajackFilePath = filePath;
+    // Clear gallery detail view
+    selectedModlist = null;
+    readmeContent = "";
+
+    try {
+      parsedModlist = await parseWabbajackFile(filePath);
+    } catch (e: unknown) {
+      showError(`Failed to parse .wabbajack file: ${e}`);
+      parsedModlist = null;
+      wabbajackFilePath = null;
+    } finally {
+      parsingFile = false;
+    }
+  }
+
+  /** Group archives by source type for display. */
+  function archiveBreakdown(modlist: ParsedModlist): { source: string; count: number; size: number }[] {
+    const map = new Map<string, { count: number; size: number }>();
+    for (const archive of modlist.archives) {
+      const entry = map.get(archive.source_type) ?? { count: 0, size: 0 };
+      entry.count += 1;
+      entry.size += archive.size;
+      map.set(archive.source_type, entry);
+    }
+    return Array.from(map.entries())
+      .map(([source, data]) => ({ source, ...data }))
+      .sort((a, b) => b.count - a.count);
+  }
+
+  /** Check for required tools and begin install. */
+  async function handleBeginInstall() {
+    const game = $selectedGame;
+    if (!game || !wabbajackFilePath) return;
+
+    try {
+      const tools = await detectWabbajackTools(wabbajackFilePath, game.game_id, game.bottle_name);
+      const uninstalled = tools.filter((t) => !t.is_detected);
+      if (uninstalled.length > 0) {
+        pendingTools = tools;
+        showToolsPrompt = true;
+        return;
+      }
+      proceedWithInstall();
+    } catch (e: unknown) {
+      showError(`Tool detection failed: ${e}`);
+      proceedWithInstall();
+    }
+  }
+
+  function proceedWithInstall() {
+    showToolsPrompt = false;
+    pendingTools = [];
+    // The actual archive download + deploy pipeline would go here.
+    // For now, show info about what the install would do.
+    installing = true;
+    installStep = "Modlist installation pipeline is in development. Archive download and deployment will be available in a future update.";
+    showSuccess("Tool check complete. Full installation pipeline coming soon.");
+    installing = false;
+  }
+
+  function sourceLabel(source: string): string {
+    const labels: Record<string, string> = {
+      Nexus: "Nexus Mods",
+      HTTP: "Direct Download",
+      GoogleDrive: "Google Drive",
+      Mega: "Mega.nz",
+      MediaFire: "MediaFire",
+      ModDB: "ModDB",
+      WabbajackCDN: "Wabbajack CDN",
+      GameFile: "Game Files",
+      Manual: "Manual Download",
+    };
+    return labels[source] ?? source;
+  }
+
+  function sourceColor(source: string): string {
+    const colors: Record<string, string> = {
+      Nexus: "var(--system-accent)",
+      HTTP: "#22c55e",
+      WabbajackCDN: "#a78bfa",
+      GoogleDrive: "#f59e0b",
+      Mega: "#ef4444",
+      GameFile: "var(--text-tertiary)",
+      Manual: "#f97316",
+    };
+    return colors[source] ?? "var(--text-secondary)";
+  }
+
+  /** Validate that a URL is a safe HTTP(S) URL before opening in browser. */
+  function safeOpenUrl(url: string | null | undefined) {
+    if (!url) return;
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+        openUrl(url);
+      }
+    } catch {
+      // ignore invalid URLs
+    }
   }
 </script>
 
@@ -247,20 +392,179 @@
           </div>
         {/if}
 
-        <!-- Install -->
+        <!-- Install Actions -->
         <div class="detail-install-bar">
-          <button
-            class="btn btn-primary btn-lg"
-            disabled
-            title="Modlist installation coming soon"
-          >
+          {#if selectedModlist.download_url}
+            <button
+              class="btn btn-primary btn-lg"
+              onclick={() => safeOpenUrl(selectedModlist?.download_url)}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="7 10 12 15 17 10" />
+                <line x1="12" y1="15" x2="12" y2="3" />
+              </svg>
+              Download .wabbajack
+            </button>
+          {/if}
+          <button class="btn btn-accent btn-lg" onclick={openLocalFile}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+            </svg>
+            Open Local File
+          </button>
+        </div>
+      </div>
+    </div>
+
+  {:else if parsedModlist}
+    <!-- Parsed File View -->
+    <div class="detail-view">
+      <div class="detail-header">
+        <button class="btn btn-ghost" onclick={backToBrowse}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M19 12H5" />
+            <polyline points="12 19 5 12 12 5" />
+          </svg>
+          Back to Browse
+        </button>
+      </div>
+
+      <div class="detail-content">
+        <div class="detail-title-section">
+          <div class="detail-title-row">
+            <h2 class="detail-name">{parsedModlist.name || "Untitled Modlist"}</h2>
+            <span class="game-badge">{parsedModlist.game_name}</span>
+            {#if parsedModlist.is_nsfw}
+              <span class="nsfw-badge">NSFW</span>
+            {/if}
+          </div>
+          {#if parsedModlist.author}
+            <p class="detail-author">by {parsedModlist.author}</p>
+          {/if}
+          {#if parsedModlist.version}
+            <span class="detail-version">v{parsedModlist.version}</span>
+          {/if}
+        </div>
+
+        {#if parsedModlist.description}
+          <div class="detail-section">
+            <h3 class="detail-section-title">Description</h3>
+            <div class="detail-description"><p>{parsedModlist.description}</p></div>
+          </div>
+        {/if}
+
+        <!-- Stats -->
+        <div class="detail-stats-bar">
+          <div class="detail-stat">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
               <polyline points="7 10 12 15 17 10" />
               <line x1="12" y1="15" x2="12" y2="3" />
             </svg>
-            Install (Coming Soon)
-          </button>
+            <span class="detail-stat-value">{formatSize(parsedModlist.total_download_size)}</span>
+            <span class="detail-stat-label">Download</span>
+          </div>
+          <div class="detail-stat">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+            </svg>
+            <span class="detail-stat-value">{parsedModlist.archive_count.toLocaleString()}</span>
+            <span class="detail-stat-label">Archives</span>
+          </div>
+          <div class="detail-stat">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
+              <polyline points="13 2 13 9 20 9" />
+            </svg>
+            <span class="detail-stat-value">{parsedModlist.directive_count.toLocaleString()}</span>
+            <span class="detail-stat-label">Directives</span>
+          </div>
+        </div>
+
+        <!-- Archive Sources Breakdown -->
+        <div class="detail-section">
+          <h3 class="detail-section-title">Archive Sources</h3>
+          <div class="source-breakdown">
+            {#each archiveBreakdown(parsedModlist) as item}
+              <div class="source-row">
+                <div class="source-info">
+                  <span class="source-dot" style="background: {sourceColor(item.source)}"></span>
+                  <span class="source-name">{sourceLabel(item.source)}</span>
+                </div>
+                <div class="source-stats">
+                  <span class="source-count">{item.count}</span>
+                  <span class="source-size">{formatSize(item.size)}</span>
+                </div>
+              </div>
+            {/each}
+          </div>
+        </div>
+
+        <!-- Directive Breakdown -->
+        {#if Object.keys(parsedModlist.directive_breakdown).length > 0}
+          <div class="detail-section">
+            <h3 class="detail-section-title">Directive Breakdown</h3>
+            <div class="directive-breakdown">
+              {#each Object.entries(parsedModlist.directive_breakdown).sort((a, b) => b[1] - a[1]) as [kind, count]}
+                <div class="directive-row">
+                  <span class="directive-kind">{kind}</span>
+                  <span class="directive-count">{count.toLocaleString()}</span>
+                </div>
+              {/each}
+            </div>
+          </div>
+        {/if}
+
+        <!-- Compatibility Check -->
+        {#if parsedModlist.game_name.includes("Skyrim") && $selectedGame}
+          <div class="detail-section">
+            <CompatibilityPanel gameId={$selectedGame.game_id} bottleName={$selectedGame.bottle_name} />
+          </div>
+        {/if}
+
+        <!-- Install -->
+        <div class="detail-install-bar">
+          {#if !$selectedGame}
+            <p class="install-note">Select a game in the sidebar to begin installation.</p>
+          {:else}
+            <button
+              class="btn btn-primary btn-lg"
+              onclick={handleBeginInstall}
+              disabled={installing}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="7 10 12 15 17 10" />
+                <line x1="12" y1="15" x2="12" y2="3" />
+              </svg>
+              {installing ? "Installing..." : "Begin Install"}
+            </button>
+          {/if}
+          {#if installStep}
+            <p class="install-note">{installStep}</p>
+          {/if}
+        </div>
+      </div>
+    </div>
+
+    {#if showToolsPrompt && $selectedGame}
+      <RequiredToolsPrompt
+        tools={pendingTools}
+        gameId={$selectedGame.game_id}
+        bottleName={$selectedGame.bottle_name}
+        oncontinue={proceedWithInstall}
+        oncancel={() => { showToolsPrompt = false; }}
+      />
+    {/if}
+
+  {:else if parsingFile}
+    <div class="loading-container">
+      <div class="loading-card">
+        <div class="spinner"><div class="spinner-ring"></div></div>
+        <div class="loading-text">
+          <p class="loading-title">Parsing modlist</p>
+          <p class="loading-detail">Reading .wabbajack file...</p>
         </div>
       </div>
     </div>
@@ -274,14 +578,20 @@
           Browse Wabbajack modlists — curated, pre-configured mod setups
         </p>
       </div>
-      {#if !loading}
-        <div class="header-stats">
+      <div class="header-right">
+        <button class="btn btn-accent btn-sm" onclick={openLocalFile}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+          </svg>
+          Open .wabbajack
+        </button>
+        {#if !loading}
           <div class="stat-pill">
             <span class="stat-value">{filtered.length}</span>
             <span class="stat-label">{filtered.length === 1 ? "List" : "Lists"}</span>
           </div>
-        </div>
-      {/if}
+        {/if}
+      </div>
     </header>
 
     {#if loading}
@@ -996,5 +1306,105 @@
     padding: var(--space-6) 0;
     border-top: 1px solid var(--separator);
     margin-top: var(--space-4);
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+    align-items: center;
+  }
+
+  .install-note {
+    font-size: 13px;
+    color: var(--text-tertiary);
+    flex-basis: 100%;
+    margin-top: var(--space-1);
+  }
+
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+  }
+
+  /* Source breakdown */
+  .source-breakdown {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .source-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-2) var(--space-3);
+    background: var(--surface);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius);
+  }
+
+  .source-info {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .source-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .source-name {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-primary);
+  }
+
+  .source-stats {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+  }
+
+  .source-count {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .source-size {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    font-variant-numeric: tabular-nums;
+    min-width: 60px;
+    text-align: right;
+  }
+
+  /* Directive breakdown */
+  .directive-breakdown {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .directive-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-1) var(--space-3);
+  }
+
+  .directive-kind {
+    font-size: 13px;
+    color: var(--text-secondary);
+  }
+
+  .directive-count {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
   }
 </style>

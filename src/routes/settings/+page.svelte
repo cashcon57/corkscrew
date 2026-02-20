@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, applyToolIniEdits } from "$lib/api";
+  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, applyToolIniEdits, getPlatformDetail } from "$lib/api";
   import { config, showError, showSuccess, selectedGame, skseStatus, currentPage, appVersion, updateReady, updateVersion, updateChecking, updateError, triggerUpdateCheck } from "$lib/stores";
-  import type { AppConfig, ModTool } from "$lib/types";
+  import type { AppConfig, ModTool, PlatformInfo } from "$lib/types";
   import ThemeToggle from "$lib/components/ThemeToggle.svelte";
   import SettingsAuthSection from "./settings-auth-section.svelte";
   import IniManagerPanel from "$lib/components/IniManagerPanel.svelte";
@@ -57,8 +57,11 @@
   const limitedTools = $derived(modTools.filter(t => t.wine_compat === "limited"));
   const notRecommendedTools = $derived(modTools.filter(t => t.wine_compat === "not_recommended"));
 
-  // Detect platform for comparison dialog
-  const isMac = typeof navigator !== "undefined" && navigator.platform?.startsWith("Mac");
+  // Platform detection via Tauri command
+  let platformInfo = $state<PlatformInfo>({ os: "macos", is_steam_os: false });
+  const isMac = $derived(platformInfo.os === "macos");
+  const isLinux = $derived(platformInfo.os === "linux");
+  const isSteamOS = $derived(platformInfo.is_steam_os);
 
   interface LayerInfo {
     name: string;
@@ -83,12 +86,18 @@
     { name: "Wine", url: "https://www.winehq.org/", description: "The original compatibility layer. Manual setup, maximum flexibility.", platforms: ["macOS", "Linux"], cost: "Free", color: "#722F37", bg: "rgba(114, 47, 55, 0.14)", icon: "wine" },
   ];
 
-  // Group layers into sections
-  const recommended = $derived(
-    isMac
+  // Group layers into sections (SteamOS puts Proton/Steam first)
+  const recommended = $derived.by(() => {
+    const list = isMac
       ? layers.filter(l => l.recommendation && l.platforms.includes("macOS"))
-      : layers.filter(l => l.recommendation && l.platforms.includes("Linux"))
-  );
+      : layers.filter(l => l.recommendation && l.platforms.includes("Linux"));
+    if (isSteamOS) {
+      return list.sort((a, b) =>
+        a.name.startsWith("Proton") ? -1 : b.name.startsWith("Proton") ? 1 : 0
+      );
+    }
+    return list;
+  });
 
   const otherOptions = $derived(
     isMac
@@ -118,6 +127,9 @@
   }
 
   onMount(async () => {
+    // Load platform info
+    try { platformInfo = await getPlatformDetail(); } catch { /* fallback defaults */ }
+
     try {
       const cfg = await getConfig();
       config.set(cfg);
@@ -484,6 +496,13 @@
   {#if game}
     <div class="section">
       <h2 class="section-title">Modding Tools</h2>
+      {#if isSteamOS}
+        <p class="platform-note">These tools run via Proton/Steam on SteamOS.</p>
+      {:else if isLinux}
+        <p class="platform-note">These tools run via your Wine/Proton compatibility layer.</p>
+      {:else if isMac}
+        <p class="platform-note">These tools run via your Wine compatibility layer (CrossOver, Moonshine, etc.).</p>
+      {/if}
 
       {#if loadingTools}
         <div class="section-card">
@@ -503,7 +522,14 @@
                 {#if i > 0}<div class="card-divider"></div>{/if}
                 <div class="card-row tool-row">
                   <div class="tool-info">
-                    <span class="row-label">{tool.name}</span>
+                    <div class="tool-name-row">
+                      <span class="row-label">{tool.name}</span>
+                      {#if tool.support_url}
+                        <button class="tool-support-link" onclick={() => openUrl(tool.support_url!)} type="button" title="Support {tool.name} author">
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
+                        </button>
+                      {/if}
+                    </div>
                     <span class="tool-description">
                       {tool.description}
                       <span class="tool-license">{tool.license}</span>
@@ -587,7 +613,14 @@
                 {#if i > 0}<div class="card-divider"></div>{/if}
                 <div class="card-row tool-row">
                   <div class="tool-info">
-                    <span class="row-label">{tool.name}</span>
+                    <div class="tool-name-row">
+                      <span class="row-label">{tool.name}</span>
+                      {#if tool.support_url}
+                        <button class="tool-support-link" onclick={() => openUrl(tool.support_url!)} type="button" title="Support {tool.name} author">
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
+                        </button>
+                      {/if}
+                    </div>
                     <span class="tool-description">
                       {tool.description}
                       <span class="tool-license">{tool.license}</span>
@@ -647,7 +680,14 @@
                 {#if i > 0}<div class="card-divider"></div>{/if}
                 <div class="card-row tool-row">
                   <div class="tool-info">
-                    <span class="row-label tool-warn-name">{tool.name}</span>
+                    <div class="tool-name-row">
+                      <span class="row-label tool-warn-name">{tool.name}</span>
+                      {#if tool.support_url}
+                        <button class="tool-support-link" onclick={() => openUrl(tool.support_url!)} type="button" title="Support {tool.name} author">
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
+                        </button>
+                      {/if}
+                    </div>
                     <span class="tool-description">
                       {tool.description}
                       <span class="tool-license">{tool.license}</span>
@@ -1061,6 +1101,13 @@
 
   .section {
     margin-bottom: var(--space-6);
+  }
+
+  .platform-note {
+    font-size: 0.8rem;
+    color: var(--text-tertiary);
+    margin: -4px 0 8px;
+    padding: 0;
   }
 
   .section-title {
@@ -1904,6 +1951,31 @@
 
   .tool-alt-link:hover {
     color: var(--text-primary);
+  }
+
+  .tool-name-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .tool-support-link {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    background: transparent;
+    border: none;
+    color: var(--text-tertiary);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: color var(--duration-fast) var(--ease);
+  }
+
+  .tool-support-link:hover {
+    color: #ff5e5b;
   }
 
   .badge-amber {

@@ -38,7 +38,7 @@ Corkscrew installs, manages, and organizes mods for Windows games running throug
 
 It works by reading and writing directly to your Wine bottle's filesystem, the same way the game itself sees it. Your bottles, your mods, no middleman.
 
-> **Status:** v0.8.0 — Skyrim Special Edition is the first fully supported game. More games coming soon.
+> **Status:** v0.9.0 — Skyrim Special Edition is the first fully supported game. More games coming soon.
 
 ---
 
@@ -427,9 +427,22 @@ Corkscrew stands on the shoulders of many open source projects. We are deeply gr
 - **[FOMOD](https://fomod-docs.readthedocs.io/)** standard — The XML-based mod installer format used by many mod authors.
 - **[reqwest](https://github.com/seanmonstar/reqwest)** — HTTP client for Nexus Mods API and NexusMods Collections GraphQL.
 
+### Modding Tool Authors
+
+Corkscrew integrates with many community-built modding tools. If you use these tools, please consider supporting their authors:
+
+- **[SSEEdit / xEdit](https://github.com/TES5Edit/TES5Edit)** by ElminsterAU — The essential plugin editor for Bethesda games. [Support on Ko-fi](https://ko-fi.com/elminsterau)
+- **[DynDOLOD](https://dyndolod.info/)** by Sheson — Dynamic distant object LOD generation. [Support on Ko-fi](https://ko-fi.com/sheson)
+- **[Pandora Behaviour Engine](https://github.com/Monitor221hz/Pandora-Behaviour-Engine)** by Monitor221hz — Modern animation engine, Wine-compatible alternative to FNIS/Nemesis. [Support on Patreon](https://www.patreon.com/monitorhz)
+- **[Nemesis Unlimited Behavior Engine](https://github.com/ShikyoKira/Project-New-Reign---Nemesis-Main)** by ShikyoKira — Animation engine for Skyrim. [Support on Patreon](https://www.patreon.com/shikyokira)
+- **[Cathedral Assets Optimizer](https://github.com/Guekka/Cathedral-Assets-Optimizer)** by Guekka — Texture and mesh optimization. [Support on GitHub Sponsors](https://github.com/sponsors/Guekka)
+- **[BodySlide and Outfit Studio](https://github.com/ousnius/BodySlide-and-Outfit-Studio)** by ousnius — Body and outfit customization tool.
+- **[BethINI](https://www.nexusmods.com/skyrimspecialedition/mods/631)** by DoubleYou — INI configuration tool for Bethesda games.
+- **[Wrye Bash](https://github.com/wrye-bash/wrye-bash)** — Bashed Patch creation and mod management.
+- **[SKSE Team](https://skse.silverlock.org/)** — The Skyrim Script Extender, essential for most Skyrim mods.
+
 ### Communities & Services
 
-- **[SKSE Team](https://skse.silverlock.org/)** — For the Skyrim Script Extender, essential for most Skyrim mods.
 - **[Wine Project](https://www.winehq.org/)** — The foundation that makes running Windows games on macOS and Linux possible.
 - **[CrossOver](https://www.codeweavers.com/crossover)** by CodeWeavers — A polished Wine implementation and major Wine contributor.
 - **[Nexus Mods](https://www.nexusmods.com/)** — For the modding community, mod hosting, and the API and GraphQL endpoints that mod managers depend on.

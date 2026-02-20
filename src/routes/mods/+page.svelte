@@ -11,6 +11,7 @@
     checkSkse,
     getSkseDownloadUrl,
     installSkseFromArchive,
+    installSkseAuto,
     setSksePreference,
     checkSkyrimVersion,
     downgradeSkyrim,
@@ -523,6 +524,22 @@
       showSuccess("SKSE installed successfully");
     } catch (e: unknown) {
       showError(`SKSE installation failed: ${e}`);
+    } finally {
+      installingSkse = false;
+    }
+  }
+
+  async function handleAutoInstallSkse() {
+    const game = pickedGame ?? $selectedGame;
+    if (!game) return;
+    try {
+      installingSkse = true;
+      skse = await installSkseAuto(game.game_id, game.bottle_name);
+      skseStatus.set(skse);
+      showSksePrompt = false;
+      showSuccess("SKSE auto-installed successfully");
+    } catch (e: unknown) {
+      showError(`SKSE auto-install failed: ${e}`);
     } finally {
       installingSkse = false;
     }
@@ -1303,9 +1320,11 @@
           </p>
         </div>
         <div class="skse-banner-actions">
-          <button class="btn btn-secondary btn-sm" onclick={handleOpenSkseDownload}>Download</button>
-          <button class="btn btn-primary btn-sm" onclick={handleInstallSkse} disabled={installingSkse}>
-            {installingSkse ? "Installing..." : "Install from Archive"}
+          <button class="btn btn-primary btn-sm" onclick={handleAutoInstallSkse} disabled={installingSkse}>
+            {installingSkse ? "Installing..." : "Auto Install"}
+          </button>
+          <button class="btn btn-secondary btn-sm" onclick={handleInstallSkse} disabled={installingSkse}>
+            From Archive
           </button>
           <button class="btn btn-ghost btn-sm" onclick={dismissSksePrompt}>Dismiss</button>
         </div>

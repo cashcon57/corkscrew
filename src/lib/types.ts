@@ -89,6 +89,22 @@ export interface SkseCompatibility {
   severity: "ok" | "warning" | "error";
 }
 
+export interface SkseBuild {
+  tag: string;
+  version: string;
+  target_game_version: string;
+  download_url: string;
+  filename: string;
+  is_recommended: boolean;
+}
+
+export interface SkseAvailableBuilds {
+  game_version: string;
+  edition: string;
+  recommended: SkseBuild | null;
+  all_builds: SkseBuild[];
+}
+
 export interface DisplaySettings {
   width: number;
   height: number;
@@ -690,6 +706,7 @@ export interface ModTool {
   wine_compat: "good" | "limited" | "not_recommended";
   recommended_alternative: string | null;
   recommended_ini_edits: IniEdit[];
+  support_url: string | null;
 }
 
 export interface DeploymentHealth {
@@ -910,6 +927,25 @@ export interface FomodRecipe {
   installer_hash: string | null;
   selections: Record<string, string[]>;
   created_at: string;
+}
+
+// Tool Requirement Detection
+
+export interface RequiredTool {
+  tool_id: string;
+  tool_name: string;
+  can_auto_install: boolean;
+  is_detected: boolean;
+  wine_compat: string;
+  recommended_alternative: string | null;
+  download_url: string | null;
+}
+
+// Platform Detection
+
+export interface PlatformInfo {
+  os: string;
+  is_steam_os: boolean;
 }
 
 // Install Progress Events

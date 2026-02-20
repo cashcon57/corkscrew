@@ -64,6 +64,9 @@ import type {
   ResolutionResult,
   NotificationEntry,
   DeployProgress,
+  RequiredTool,
+  PlatformInfo,
+  SkseAvailableBuilds,
 } from "./types";
 
 // Bottles
@@ -219,6 +222,21 @@ export async function checkSkseCompatibility(
   bottleName: string
 ): Promise<SkseCompatibility> {
   return invoke("check_skse_compatibility_cmd", { gameId, bottleName });
+}
+
+// SKSE Auto-Download
+export async function getSkseBuilds(
+  gameId: string,
+  bottleName: string
+): Promise<SkseAvailableBuilds> {
+  return invoke("get_skse_builds", { gameId, bottleName });
+}
+
+export async function installSkseAuto(
+  gameId: string,
+  bottleName: string
+): Promise<SkseStatus> {
+  return invoke("install_skse_auto_cmd", { gameId, bottleName });
 }
 
 // Display Fix
@@ -1173,4 +1191,26 @@ export function onDeployProgress(
   return listen<DeployProgress>("deploy-progress", (e) =>
     callback(e.payload)
   );
+}
+
+// Tool Requirement Detection
+export async function detectCollectionTools(
+  manifestJson: string,
+  gameId: string,
+  bottleName: string
+): Promise<RequiredTool[]> {
+  return invoke("detect_collection_tools", { manifestJson, gameId, bottleName });
+}
+
+export async function detectWabbajackTools(
+  wjPath: string,
+  gameId: string,
+  bottleName: string
+): Promise<RequiredTool[]> {
+  return invoke("detect_wabbajack_tools", { wjPath, gameId, bottleName });
+}
+
+// Platform Detection
+export async function getPlatformDetail(): Promise<PlatformInfo> {
+  return invoke("get_platform_detail");
 }

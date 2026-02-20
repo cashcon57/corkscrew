@@ -1038,6 +1038,49 @@ fn check_skse_compatibility_cmd(
 }
 
 #[tauri::command]
+fn get_skse_builds(
+    game_id: String,
+    bottle_name: String,
+) -> Result<skse::SkseAvailableBuilds, String> {
+    if game_id != "skyrimse" {
+        return Err("SKSE is only available for Skyrim Special Edition".into());
+    }
+
+    let (_, game, _) = resolve_game(&game_id, &bottle_name)?;
+    let game_path = PathBuf::from(&game.game_path);
+    let downgrade_status =
+        downgrader::detect_skyrim_version(&game_path).map_err(|e| e.to_string())?;
+
+    Ok(skse::get_available_skse_builds(&downgrade_status.current_version))
+}
+
+#[tauri::command]
+async fn install_skse_auto_cmd(
+    game_id: String,
+    bottle_name: String,
+) -> Result<SkseStatus, String> {
+    if game_id != "skyrimse" {
+        return Err("SKSE is only available for Skyrim Special Edition".into());
+    }
+
+    let (_, game, _) = resolve_game(&game_id, &bottle_name)?;
+    let game_path = PathBuf::from(&game.game_path);
+    let downgrade_status =
+        downgrader::detect_skyrim_version(&game_path).map_err(|e| e.to_string())?;
+
+    let mut status = skse::install_skse_auto(&game_path, &downgrade_status.current_version)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if status.installed {
+        let _ = skse::set_skse_preference(&game_id, &bottle_name, true);
+        status.use_skse = true;
+    }
+
+    Ok(status)
+}
+
+#[tauri::command]
 fn fix_skyrim_display(bottle_name: String) -> Result<display_fix::DisplayFixResult, String> {
     let bottle = resolve_bottle(&bottle_name)?;
     display_fix::auto_fix_display(&bottle)
@@ -2145,6 +2188,52 @@ fn apply_tool_ini_edits_cmd(
     mod_tools::apply_tool_ini_edits(&tool_id, &data_dir).map_err(|e| e.to_string())
 }
 
+// --- Tool Requirement Detection ---
+
+#[tauri::command]
+fn detect_collection_tools(
+    manifest_json: String,
+    game_id: String,
+    bottle_name: String,
+) -> Result<Vec<mod_tools::RequiredTool>, String> {
+    let manifest: collections::CollectionManifest =
+        serde_json::from_str(&manifest_json).map_err(|e| format!("Invalid manifest JSON: {}", e))?;
+    let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
+    Ok(mod_tools::detect_required_tools_collection(&manifest, &data_dir))
+}
+
+#[tauri::command]
+fn detect_wabbajack_tools(
+    wj_path: String,
+    game_id: String,
+    bottle_name: String,
+) -> Result<Vec<mod_tools::RequiredTool>, String> {
+    let parsed = wabbajack::parse_wabbajack_file(std::path::Path::new(&wj_path))
+        .map_err(|e| format!("Failed to parse .wabbajack: {}", e))?;
+    let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
+    Ok(mod_tools::detect_required_tools_wabbajack(&parsed, &data_dir))
+}
+
+// --- Platform Detection ---
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct PlatformInfo {
+    os: String,
+    is_steam_os: bool,
+}
+
+#[tauri::command]
+fn get_platform_detail() -> PlatformInfo {
+    let os = std::env::consts::OS.to_string();
+    let is_steam_os = if cfg!(target_os = "linux") {
+        std::path::Path::new("/etc/steamos-release").exists()
+            || std::env::var("SteamOS").is_ok()
+    } else {
+        false
+    };
+    PlatformInfo { os, is_steam_os }
+}
+
 // --- FOMOD ---
 
 #[tauri::command]
@@ -3043,6 +3132,8 @@ pub fn run() {
             launch_game_cmd,
             check_skse,
             get_skse_download_url,
+            get_skse_builds,
+            install_skse_auto_cmd,
             install_skse_from_archive_cmd,
             set_skse_preference_cmd,
             check_skyrim_version,
@@ -3082,6 +3173,9 @@ pub fn run() {
             launch_mod_tool,
             reinstall_mod_tool,
             apply_tool_ini_edits_cmd,
+            detect_collection_tools,
+            detect_wabbajack_tools,
+            get_platform_detail,
             detect_fomod,
             get_fomod_defaults,
             get_fomod_files,

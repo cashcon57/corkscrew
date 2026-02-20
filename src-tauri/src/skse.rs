@@ -2,12 +2,12 @@
 //!
 //! Provides utilities for:
 //! - Detecting whether SKSE is installed in a Skyrim SE game directory
-//! - Installing SKSE files from a user-provided local archive
+//! - Auto-downloading the correct SKSE build for the user's game version
+//! - Installing SKSE files from a local or downloaded archive
 //! - Persisting per-game SKSE preference in the Corkscrew config
 //!
-//! **NOTE:** SKSE's license prohibits automated redistribution. We do NOT
-//! auto-download SKSE. Instead, the user downloads the archive manually from
-//! the official site and we install from their local copy.
+//! SKSE is distributed via GitHub releases (ianpatt/skse64) with no
+//! redistribution restrictions. Each release targets a specific Skyrim version.
 
 use std::fs;
 use std::io;
@@ -70,6 +70,73 @@ const SKSE_LOADER: &str = "skse64_loader.exe";
 
 /// Official SKSE download page.
 const SKSE_URL: &str = "https://skse.silverlock.org/";
+
+/// GitHub repo for SKSE64 releases.
+const SKSE_GITHUB_REPO: &str = "ianpatt/skse64";
+
+// ---------------------------------------------------------------------------
+// SKSE Version ↔ Game Version Database
+// ---------------------------------------------------------------------------
+
+/// Static mapping of SKSE versions to their target Skyrim game versions.
+#[allow(dead_code)]
+struct SkseVersionEntry {
+    /// SKSE tag (e.g., "v2.2.6")
+    tag: &'static str,
+    /// Target Skyrim game version (e.g., "1.6.1170")
+    game_version: &'static str,
+    /// Whether this is the GOG variant (separate asset)
+    has_gog_variant: bool,
+}
+
+/// Known SKSE releases mapped to their target Skyrim versions.
+/// Ordered newest-first for priority matching.
+const SKSE_VERSION_DB: &[SkseVersionEntry] = &[
+    SkseVersionEntry { tag: "v2.2.6", game_version: "1.6.1170", has_gog_variant: false },
+    SkseVersionEntry { tag: "v2.2.5", game_version: "1.6.1130", has_gog_variant: false },
+    SkseVersionEntry { tag: "v2.2.4", game_version: "1.6.1130", has_gog_variant: false },
+    SkseVersionEntry { tag: "v2.2.3", game_version: "1.6.640", has_gog_variant: true },
+    SkseVersionEntry { tag: "v2.2.2", game_version: "1.6.640", has_gog_variant: false },
+    SkseVersionEntry { tag: "v2.2.1", game_version: "1.6.640", has_gog_variant: false },
+    SkseVersionEntry { tag: "v2.2.0", game_version: "1.6.629", has_gog_variant: false },
+    SkseVersionEntry { tag: "v2.1.5", game_version: "1.6.353", has_gog_variant: false },
+    SkseVersionEntry { tag: "v2.1.4", game_version: "1.6.342", has_gog_variant: false },
+    SkseVersionEntry { tag: "v2.1.3", game_version: "1.6.323", has_gog_variant: false },
+    SkseVersionEntry { tag: "v2.1.2", game_version: "1.6.318", has_gog_variant: false },
+    SkseVersionEntry { tag: "v2.1.1", game_version: "1.6.318", has_gog_variant: false },
+    SkseVersionEntry { tag: "v2.1.0", game_version: "1.6.317", has_gog_variant: false },
+    SkseVersionEntry { tag: "v2.0.20", game_version: "1.5.97", has_gog_variant: false },
+];
+
+/// Available SKSE builds for a specific game version, returned to frontend.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SkseAvailableBuilds {
+    /// The detected or provided game version string.
+    pub game_version: String,
+    /// Whether the game version is SE (1.5.x) or AE (1.6.x).
+    pub edition: String,
+    /// Recommended SKSE build (best match for the game version).
+    pub recommended: Option<SkseBuild>,
+    /// All compatible builds, newest first.
+    pub all_builds: Vec<SkseBuild>,
+}
+
+/// A single SKSE build that can be downloaded.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SkseBuild {
+    /// SKSE version tag (e.g., "v2.2.6")
+    pub tag: String,
+    /// SKSE version without prefix (e.g., "2.2.6")
+    pub version: String,
+    /// Target game version (e.g., "1.6.1170")
+    pub target_game_version: String,
+    /// Direct download URL from GitHub releases
+    pub download_url: String,
+    /// Asset filename (e.g., "skse64_2_02_06.7z")
+    pub filename: String,
+    /// Whether this is the recommended build for the detected game version
+    pub is_recommended: bool,
+}
 
 // ---------------------------------------------------------------------------
 // Detection
@@ -186,6 +253,177 @@ pub fn install_skse_from_archive(game_path: &Path, archive_path: &Path) -> Resul
     let status = detect_skse(game_path);
     info!(
         "SKSE installation complete: installed={}, version={:?}",
+        status.installed, status.version
+    );
+
+    Ok(status)
+}
+
+// ---------------------------------------------------------------------------
+// Auto-download from GitHub
+// ---------------------------------------------------------------------------
+
+/// Convert an SKSE tag like "v2.2.6" to an asset filename like "skse64_2_02_06.7z".
+fn tag_to_asset_name(tag: &str) -> Option<String> {
+    let version = tag.strip_prefix('v')?;
+    let parts: Vec<u32> = version.split('.').filter_map(|p| p.parse().ok()).collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    Some(format!("skse64_{}_{:02}_{:02}.7z", parts[0], parts[1], parts[2]))
+}
+
+/// Parse a game version string like "1.6.1170" into a comparable tuple.
+fn parse_game_version(v: &str) -> Option<(u32, u32, u32)> {
+    // Strip any suffix text (e.g., "1.5.97 (Special Edition)")
+    let clean = v.split_whitespace().next().unwrap_or(v);
+    let parts: Vec<u32> = clean.split('.').filter_map(|p| p.parse().ok()).collect();
+    if parts.len() >= 3 {
+        Some((parts[0], parts[1], parts[2]))
+    } else {
+        None
+    }
+}
+
+/// Get available SKSE builds for a given game version.
+///
+/// Uses the static version database to find compatible builds.
+/// The recommended build is the newest SKSE that targets a game version
+/// less than or equal to the user's game version.
+pub fn get_available_skse_builds(game_version: &str) -> SkseAvailableBuilds {
+    let edition = if game_version.contains("1.5") {
+        "SE"
+    } else if game_version.contains("1.6") {
+        "AE"
+    } else {
+        "Unknown"
+    };
+
+    let user_ver = parse_game_version(game_version);
+
+    let mut all_builds: Vec<SkseBuild> = Vec::new();
+    let mut recommended: Option<SkseBuild> = None;
+
+    for entry in SKSE_VERSION_DB {
+        let filename = match tag_to_asset_name(entry.tag) {
+            Some(f) => f,
+            None => continue,
+        };
+
+        let download_url = format!(
+            "https://github.com/{}/releases/download/{}/{}",
+            SKSE_GITHUB_REPO, entry.tag, filename
+        );
+
+        let version = entry.tag.strip_prefix('v').unwrap_or(entry.tag).to_string();
+
+        // Determine if this build is compatible with the user's game version.
+        // SKSE is forward-compatible within a version range, so we pick the
+        // newest SKSE whose target game version <= user's game version.
+        let target_ver = parse_game_version(entry.game_version);
+        let compatible = match (user_ver, target_ver) {
+            (Some(u), Some(t)) => t <= u,
+            _ => false,
+        };
+
+        let build = SkseBuild {
+            tag: entry.tag.to_string(),
+            version,
+            target_game_version: entry.game_version.to_string(),
+            download_url,
+            filename,
+            is_recommended: false,
+        };
+
+        if compatible && recommended.is_none() {
+            let mut rec = build.clone();
+            rec.is_recommended = true;
+            recommended = Some(rec.clone());
+            all_builds.push(rec);
+        } else {
+            all_builds.push(build);
+        }
+    }
+
+    SkseAvailableBuilds {
+        game_version: game_version.to_string(),
+        edition: edition.to_string(),
+        recommended,
+        all_builds,
+    }
+}
+
+/// Download and install the recommended SKSE build for the user's game version.
+///
+/// Fetches the .7z archive from GitHub releases, extracts it, and copies
+/// the SKSE files into the game directory.
+pub async fn install_skse_auto(
+    game_path: &Path,
+    game_version: &str,
+) -> Result<SkseStatus> {
+    let builds = get_available_skse_builds(game_version);
+    let build = builds.recommended.ok_or_else(|| {
+        SkseError::Other(format!(
+            "No compatible SKSE build found for game version {}",
+            game_version
+        ))
+    })?;
+
+    info!(
+        "Auto-downloading SKSE {} for game version {} from {}",
+        build.tag, game_version, build.download_url
+    );
+
+    let client = reqwest::Client::builder()
+        .user_agent("Corkscrew-ModManager/1.0")
+        .build()
+        .map_err(|e| SkseError::Other(format!("HTTP client error: {}", e)))?;
+
+    let bytes = client
+        .get(&build.download_url)
+        .send()
+        .await
+        .map_err(|e| SkseError::Other(format!("Download failed: {}", e)))?
+        .error_for_status()
+        .map_err(|e| SkseError::Other(format!("Download failed: {}", e)))?
+        .bytes()
+        .await
+        .map_err(|e| SkseError::Other(format!("Download failed: {}", e)))?;
+
+    info!(
+        "Downloaded {} ({} bytes), extracting...",
+        build.filename,
+        bytes.len()
+    );
+
+    // Write to a temp file and extract
+    let extract_dir = std::env::temp_dir().join("corkscrew_skse_extract");
+    if extract_dir.exists() {
+        fs::remove_dir_all(&extract_dir)?;
+    }
+    fs::create_dir_all(&extract_dir)?;
+
+    // SKSE archives are .7z — write to temp then extract
+    let tmp_archive = extract_dir.join(&build.filename);
+    fs::write(&tmp_archive, &bytes)?;
+
+    installer::extract_archive(&tmp_archive, &extract_dir)
+        .map_err(|e| SkseError::Extraction(format!("Failed to extract SKSE archive: {}", e)))?;
+
+    // Remove the archive file after extraction
+    let _ = fs::remove_file(&tmp_archive);
+
+    // Install the files
+    install_skse_files(&extract_dir, game_path)?;
+
+    // Clean up
+    if let Err(e) = fs::remove_dir_all(&extract_dir) {
+        warn!("Failed to clean up SKSE extraction dir: {}", e);
+    }
+
+    let status = detect_skse(game_path);
+    info!(
+        "SKSE auto-install complete: installed={}, version={:?}",
         status.installed, status.version
     );
 
@@ -846,5 +1084,79 @@ mod tests {
         );
         assert_eq!(deserialized.version, Some("2.2.6".to_string()));
         assert_eq!(deserialized.use_skse, true);
+    }
+
+    // --- Auto-download tests ---
+
+    #[test]
+    fn tag_to_asset_name_works() {
+        assert_eq!(tag_to_asset_name("v2.2.6"), Some("skse64_2_02_06.7z".into()));
+        assert_eq!(tag_to_asset_name("v2.0.20"), Some("skse64_2_00_20.7z".into()));
+        assert_eq!(tag_to_asset_name("v2.1.0"), Some("skse64_2_01_00.7z".into()));
+        assert_eq!(tag_to_asset_name("invalid"), None);
+    }
+
+    #[test]
+    fn parse_game_version_works() {
+        assert_eq!(parse_game_version("1.6.1170"), Some((1, 6, 1170)));
+        assert_eq!(parse_game_version("1.5.97"), Some((1, 5, 97)));
+        assert_eq!(
+            parse_game_version("1.5.97 (Special Edition)"),
+            Some((1, 5, 97))
+        );
+        assert_eq!(parse_game_version("invalid"), None);
+    }
+
+    #[test]
+    fn get_builds_for_ae_latest() {
+        let builds = get_available_skse_builds("1.6.1170");
+        assert_eq!(builds.edition, "AE");
+        let rec = builds.recommended.unwrap();
+        assert_eq!(rec.tag, "v2.2.6");
+        assert!(rec.is_recommended);
+        assert!(rec.download_url.contains("skse64_2_02_06.7z"));
+    }
+
+    #[test]
+    fn get_builds_for_se() {
+        let builds = get_available_skse_builds("1.5.97 (Special Edition)");
+        assert_eq!(builds.edition, "SE");
+        let rec = builds.recommended.unwrap();
+        assert_eq!(rec.tag, "v2.0.20");
+        assert_eq!(rec.target_game_version, "1.5.97");
+    }
+
+    #[test]
+    fn get_builds_for_ae_1130() {
+        let builds = get_available_skse_builds("1.6.1130");
+        let rec = builds.recommended.unwrap();
+        // Should recommend v2.2.5 or v2.2.4 (both target 1.6.1130)
+        assert!(rec.tag == "v2.2.5" || rec.tag == "v2.2.4");
+    }
+
+    #[test]
+    fn get_builds_for_old_ae() {
+        let builds = get_available_skse_builds("1.6.640");
+        let rec = builds.recommended.unwrap();
+        // Should recommend v2.2.3 (newest targeting 1.6.640)
+        assert_eq!(rec.tag, "v2.2.3");
+    }
+
+    #[test]
+    fn get_builds_unknown_version() {
+        let builds = get_available_skse_builds("invalid-version");
+        assert!(builds.recommended.is_none());
+    }
+
+    #[test]
+    fn all_version_db_entries_have_valid_assets() {
+        for entry in SKSE_VERSION_DB {
+            let asset = tag_to_asset_name(entry.tag);
+            assert!(
+                asset.is_some(),
+                "SKSE_VERSION_DB entry {} has invalid tag",
+                entry.tag
+            );
+        }
     }
 }

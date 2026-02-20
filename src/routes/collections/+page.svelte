@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from "svelte";
   import { goto } from "$app/navigation";
   import { selectedGame, showError, showSuccess, collectionInstallStatus } from "$lib/stores";
-  import type { CollectionInfo, CollectionMod, CollectionSearchResult, InstalledMod } from "$lib/types";
+  import type { CollectionInfo, CollectionManifest, CollectionMod, CollectionSearchResult, InstalledMod } from "$lib/types";
   import {
     browseCollections,
     getCollection,
@@ -17,14 +17,16 @@
     deleteCollection,
     getCollectionDiff,
     getInstalledMods,
+    detectCollectionTools,
   } from "$lib/api";
-  import type { CollectionSummary, CollectionDiff } from "$lib/types";
+  import type { CollectionSummary, CollectionDiff, RequiredTool } from "$lib/types";
   import type { InstallProgressEvent } from "$lib/types";
   import { config } from "$lib/stores";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { marked } from "marked";
   import DOMPurify from "dompurify";
   import CompatibilityPanel from "$lib/components/CompatibilityPanel.svelte";
+  import RequiredToolsPrompt from "$lib/components/RequiredToolsPrompt.svelte";
 
   const NEXUS_API_KEY_URL = "https://www.nexusmods.com/users/myaccount?tab=api+access";
 
@@ -193,6 +195,12 @@
   let userActions = $state<Array<{mod_name: string, action: string, url: string | null, instructions: string | null}>>([]);
   let installUnlisten: (() => void) | null = null;
 
+  // Tool requirement detection
+  let pendingTools = $state<RequiredTool[]>([]);
+  let showToolsPrompt = $state(false);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let pendingManifest = $state<(CollectionManifest & Record<string, unknown>) | null>(null);
+
   const gameOptions = $derived.by(() => {
     const gamesSet = new Set(collections.map(c => c.game_domain));
     return Array.from(gamesSet).sort();
@@ -336,8 +344,60 @@
   async function handleInstallCollection() {
     if (!selectedCollection || !$selectedGame) return;
 
-    // We need a manifest to install. For now, fetch the latest revision mods
-    // and construct a simplified manifest from the collection info.
+    // Build manifest first so we can check for required tools
+    const manifest = {
+      name: selectedCollection.name,
+      author: selectedCollection.author,
+      description: selectedCollection.summary,
+      game_domain: selectedCollection.game_domain,
+      mods: selectedMods.map((m) => ({
+        name: m.name,
+        version: m.version,
+        optional: m.optional,
+        source: {
+          type: m.source_type,
+          url: m.download_url ?? null,
+          instructions: m.instructions ?? null,
+          modId: m.nexus_mod_id ?? null,
+          fileId: m.nexus_file_id ?? null,
+          updatePolicy: null,
+          md5: null,
+          fileSize: m.file_size ?? null,
+        },
+        choices: null,
+        patches: null,
+        instructions: m.instructions ?? null,
+        phase: null,
+        fileOverrides: [],
+      })),
+      modRules: [],
+      plugins: [],
+      installInstructions: null,
+      slug: selectedCollection.slug ?? null,
+      image_url: selectedCollection.image_url ?? null,
+    };
+
+    // Check for required tools before installing
+    try {
+      const manifestJson = JSON.stringify(manifest);
+      const tools = await detectCollectionTools(manifestJson, $selectedGame.game_id, $selectedGame.bottle_name);
+      const uninstalled = tools.filter((t) => !t.is_detected);
+      if (uninstalled.length > 0) {
+        pendingTools = tools;
+        pendingManifest = manifest;
+        showToolsPrompt = true;
+        return;
+      }
+    } catch {
+      // Tool detection is best-effort; proceed with install if it fails
+    }
+
+    await proceedWithInstall(manifest);
+  }
+
+  async function proceedWithInstall(manifest: CollectionManifest & Record<string, unknown>) {
+    if (!selectedCollection || !$selectedGame) return;
+
     installing = true;
     installStep = "preparing";
     installModName = "";
@@ -392,39 +452,6 @@
           collectionInstallStatus.set(null);
         }
       });
-
-      // Build a minimal manifest from the collection metadata + mods
-      const manifest = {
-        name: selectedCollection.name,
-        author: selectedCollection.author,
-        description: selectedCollection.summary,
-        game_domain: selectedCollection.game_domain,
-        mods: selectedMods.map((m) => ({
-          name: m.name,
-          version: m.version,
-          optional: m.optional,
-          source: {
-            type: m.source_type,
-            url: m.download_url ?? null,
-            instructions: m.instructions ?? null,
-            modId: m.nexus_mod_id ?? null,
-            fileId: m.nexus_file_id ?? null,
-            updatePolicy: null,
-            md5: null,
-            fileSize: m.file_size ?? null,
-          },
-          choices: null,
-          patches: null,
-          instructions: m.instructions ?? null,
-          phase: null,
-          fileOverrides: [],
-        })),
-        modRules: [],
-        plugins: [],
-        installInstructions: null,
-        slug: selectedCollection.slug ?? null,
-        image_url: selectedCollection.image_url ?? null,
-      };
 
       const result = await installCollection(
         manifest,
@@ -1428,6 +1455,23 @@
     {/if}
   {/if}
 </div>
+
+{#if showToolsPrompt && $selectedGame}
+  <RequiredToolsPrompt
+    tools={pendingTools}
+    gameId={$selectedGame.game_id}
+    bottleName={$selectedGame.bottle_name}
+    oncontinue={() => {
+      showToolsPrompt = false;
+      if (pendingManifest) proceedWithInstall(pendingManifest);
+    }}
+    oncancel={() => {
+      showToolsPrompt = false;
+      pendingManifest = null;
+      pendingTools = [];
+    }}
+  />
+{/if}
 
 <style>
   /* ---- Page Layout ---- */

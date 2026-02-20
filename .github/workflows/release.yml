@@ -58,9 +58,12 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libgtk-3-dev
 
       - name: Install Tauri CLI
-        run: cargo install tauri-cli
+        run: cargo install tauri-cli --version 2.10.0 --locked
 
       - name: Build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: cargo tauri build --target ${{ matrix.config.target }}
 
       - name: Upload macOS artifacts
@@ -71,6 +74,8 @@ jobs:
           path: |
             src-tauri/target/${{ matrix.config.target }}/release/bundle/dmg/*.dmg
             src-tauri/target/${{ matrix.config.target }}/release/bundle/macos/*.app
+            src-tauri/target/${{ matrix.config.target }}/release/bundle/macos/*.tar.gz
+            src-tauri/target/${{ matrix.config.target }}/release/bundle/macos/*.sig
 
       - name: Upload Linux artifacts
         if: runner.os == 'Linux'
@@ -79,6 +84,8 @@ jobs:
           name: linux-${{ matrix.config.target }}
           path: |
             src-tauri/target/${{ matrix.config.target }}/release/bundle/appimage/*.AppImage
+            src-tauri/target/${{ matrix.config.target }}/release/bundle/appimage/*.tar.gz
+            src-tauri/target/${{ matrix.config.target }}/release/bundle/appimage/*.sig
             src-tauri/target/${{ matrix.config.target }}/release/bundle/deb/*.deb
             src-tauri/target/${{ matrix.config.target }}/release/bundle/rpm/*.rpm
 
@@ -94,6 +101,9 @@ jobs:
         with:
           path: artifacts
 
+      - name: Build latest.json for updater
+        run: python3 scripts/build-latest-json.py artifacts/ > latest.json
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -104,3 +114,6 @@ jobs:
             artifacts/**/*.AppImage
             artifacts/**/*.deb
             artifacts/**/*.rpm
+            artifacts/**/*.tar.gz
+            artifacts/**/*.sig
+            latest.json
