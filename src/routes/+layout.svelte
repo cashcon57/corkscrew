@@ -5,7 +5,7 @@
   import { initTheme } from "$lib/theme";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
-  import { downloadFromNexus } from "$lib/api";
+  import { downloadFromNexus, getAllGames } from "$lib/api";
   import { get } from "svelte/store";
 
   const navItems = [
@@ -34,8 +34,37 @@
   });
 
   async function handleNxmLink(nxmUrl: string) {
-    const game = get(selectedGame);
-    const bottle = get(selectedBottle);
+    // Extract game slug from nxm://skyrimspecialedition/mods/...
+    const slugMatch = nxmUrl.match(/^nxm:\/\/([^/]+)\//);
+    if (!slugMatch) {
+      showError("Invalid NXM link format.");
+      return;
+    }
+    const nxmSlug = slugMatch[1].toLowerCase();
+
+    // Find a detected game matching this NXM slug
+    let game = get(selectedGame);
+    let bottle = get(selectedBottle);
+
+    if (!game || game.nexus_slug !== nxmSlug) {
+      // Auto-detect: scan all games across all bottles for one matching this slug
+      try {
+        const allGames = await getAllGames();
+        const match = allGames.find((g) => g.nexus_slug === nxmSlug);
+        if (match) {
+          game = match;
+          bottle = match.bottle_name;
+          selectedGame.set(match);
+          selectedBottle.set(match.bottle_name);
+        } else {
+          showError(`No installed game found for NexusMods domain "${nxmSlug}". Make sure the game is detected on the Dashboard.`);
+          return;
+        }
+      } catch {
+        showError("Failed to scan games for NXM link. Select a game manually on the Dashboard.");
+        return;
+      }
+    }
 
     if (!game || !bottle) {
       showError("Select a game first before installing from NexusMods links.");

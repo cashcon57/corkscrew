@@ -317,6 +317,41 @@ Corkscrew stands on the shoulders of many open source projects. We are deeply gr
 
 ---
 
+## Third-Party Licenses
+
+Corkscrew is licensed under GPL-3.0-or-later. The following third-party components are incorporated and require copyright notice:
+
+### GPL-3.0 — LOOT Stack
+
+Corkscrew links against the LOOT plugin sorting libraries. These are licensed under the GNU General Public License v3.0 and are Copyright (C) Oliver Shercliff (WrinklyNinja).
+
+- **[libloot](https://github.com/loot/libloot)** (GPL-3.0-or-later) — Load order sorting engine
+- **[esplugin](https://github.com/Ortham/esplugin)** (GPL-3.0) — Bethesda plugin file parser
+- **[libloadorder](https://github.com/Ortham/libloadorder)** (GPL-3.0) — Load order management library
+- **[loot-condition-interpreter](https://github.com/loot/loot-condition-interpreter)** (MIT) — Metadata condition evaluator
+
+Full license text: https://www.gnu.org/licenses/gpl-3.0.html
+
+### Apache-2.0 / MPL-2.0 — DOMPurify
+
+Copyright 2025 Dr.-Ing. Mario Heiderich, Cure53. Licensed under Apache License 2.0 or Mozilla Public License 2.0.
+
+- **[DOMPurify](https://github.com/cure53/DOMPurify)** — HTML sanitization for collection and modlist descriptions
+
+### Apache-2.0 / MIT — Tauri
+
+Copyright (c) Tauri Programme within The Commons Conservancy. Licensed under Apache License 2.0 or MIT.
+
+- **[Tauri](https://github.com/tauri-apps/tauri)** and official plugins (opener, dialog, deep-link, fs)
+
+### MPL-2.0 — Servo Components
+
+Copyright (c) Mozilla Foundation and contributors. Licensed under Mozilla Public License 2.0.
+
+- **[cssparser](https://github.com/servo/rust-cssparser)** / **[selectors](https://github.com/servo/servo)** — CSS parsing (transitive dependency via Tauri/wry)
+
+---
+
 ## Contributing
 
 This is a young project and there's plenty to do. If you're a Mac or Linux gamer who's tired of manually dragging files into Wine prefixes, you're the target audience — and probably the ideal contributor.
