@@ -385,9 +385,9 @@ export interface CollectionManifest {
   description: string;
   game_domain: string;
   mods: CollectionModEntry[];
-  mod_rules: CollectionModRule[];
+  modRules: CollectionModRule[];
   plugins: CollectionPlugin[];
-  install_instructions: string | null;
+  installInstructions: string | null;
 }
 
 export interface CollectionModEntry {
@@ -399,31 +399,31 @@ export interface CollectionModEntry {
   patches: Record<string, string> | null;
   instructions: string | null;
   phase: number | null;
-  file_overrides: string[];
+  fileOverrides: string[];
 }
 
 export interface CollectionSource {
-  source_type: string;
+  type: string;
   url: string | null;
   instructions: string | null;
-  mod_id: number | null;
-  file_id: number | null;
-  update_policy: string | null;
+  modId: number | null;
+  fileId: number | null;
+  updatePolicy: string | null;
   md5: string | null;
-  file_size: number | null;
+  fileSize: number | null;
 }
 
 export interface CollectionModRule {
   source: ModReference;
-  rule_type: string;
+  type: string;
   reference: ModReference;
 }
 
 export interface ModReference {
-  file_md5: string | null;
-  logical_file_name: string | null;
+  fileMD5: string | null;
+  logicalFileName: string | null;
   tag: string | null;
-  id_hint: string | null;
+  idHint: string | null;
 }
 
 export interface CollectionPlugin {
