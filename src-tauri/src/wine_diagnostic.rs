@@ -895,8 +895,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let bottle = setup_bottle(&tmp);
         let sys32 = tmp.path().join("drive_c").join("windows").join("system32");
-        // Create fake DXVK DLLs (large enough to pass size check)
-        let big_data = vec![0u8; 600_000];
+        // Create fake DXVK DLLs with signature so multi-signal detection works
+        let mut big_data = vec![0u8; 600_000];
+        big_data[100..104].copy_from_slice(b"dxvk");
         fs::write(sys32.join("d3d11.dll"), &big_data).unwrap();
         fs::write(sys32.join("d3d10core.dll"), &big_data).unwrap();
         fs::write(sys32.join("dxgi.dll"), &big_data).unwrap();
@@ -965,8 +966,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let bottle = setup_bottle(&tmp);
         let sys32 = tmp.path().join("drive_c").join("windows").join("system32");
-        // Create all 3 DXVK DLLs with large enough size
-        let big_data = vec![0u8; 700_000];
+        // Create all 3 DXVK DLLs with DXVK signature for multi-signal detection
+        let mut big_data = vec![0u8; 700_000];
+        big_data[100..104].copy_from_slice(b"dxvk");
         fs::write(sys32.join("d3d11.dll"), &big_data).unwrap();
         fs::write(sys32.join("d3d10core.dll"), &big_data).unwrap();
         fs::write(sys32.join("dxgi.dll"), &big_data).unwrap();
