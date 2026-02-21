@@ -1,18 +1,22 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import "../app.css";
-  import { currentPage, errorMessage, successMessage, selectedGame, selectedBottle, showError, showSuccess, appVersion, collectionInstallStatus, updateReady as updateReadyStore, updateVersion as updateVersionStore, updateChecking as updateCheckingStore, updateError as updateErrorStore, setUpdateCheckFn, notificationCount, showNotificationLog } from "$lib/stores";
+  import { currentPage, errorMessage, successMessage, selectedGame, selectedBottle, showError, showSuccess, appVersion, collectionInstallStatus, updateReady as updateReadyStore, updateVersion as updateVersionStore, updateChecking as updateCheckingStore, updateError as updateErrorStore, setUpdateCheckFn, notificationCount, showNotificationLog, activeProfile, profileList, sidebarCollapsed, controllerMode } from "$lib/stores";
   import { initTheme } from "$lib/theme";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
   import { getVersion } from "@tauri-apps/api/app";
   import { check } from "@tauri-apps/plugin-updater";
   import { relaunch } from "@tauri-apps/plugin-process";
-  import { downloadFromNexus, getAllGames, getDownloadQueue, retryDownload, cancelDownload, clearFinishedDownloads, onDownloadQueueUpdate } from "$lib/api";
+  import { downloadFromNexus, getAllGames, getDownloadQueue, retryDownload, cancelDownload, clearFinishedDownloads, onDownloadQueueUpdate, listProfiles, activateProfile, getConfig, launchGame } from "$lib/api";
   import { get } from "svelte/store";
-  import type { DetectedGame, QueueItem } from "$lib/types";
+  import type { DetectedGame, QueueItem, Profile } from "$lib/types";
   import GameIcon from "$lib/components/GameIcon.svelte";
   import NotificationLog from "$lib/components/mods/NotificationLog.svelte";
+  import FirstRunWizard from "$lib/components/FirstRunWizard.svelte";
+  import SpotlightSearch from "$lib/components/SpotlightSearch.svelte";
+  import { GamepadManager } from "$lib/gamepad";
+  import type { GamepadAction } from "$lib/gamepad";
   import { getNotificationCount, logNotification } from "$lib/api";
 
   const navItems = [
@@ -28,6 +32,10 @@
   let detectedGames = $state<DetectedGame[]>([]);
   let gameDropdownOpen = $state(false);
 
+  // Profile selector state
+  let profileDropdownOpen = $state(false);
+  let switchingProfile = $state(false);
+
   // Download queue state
   let queueItems = $state<QueueItem[]>([]);
   let showQueue = $state(false);
@@ -35,6 +43,24 @@
 
   let activeDownloads = $derived(queueItems.filter(i => i.status === "downloading" || i.status === "pending").length);
   let failedDownloads = $derived(queueItems.filter(i => i.status === "failed").length);
+
+  // Total download progress (0-100) for the mini bar
+  let downloadProgress = $derived.by(() => {
+    const active = queueItems.filter(i => i.status === "downloading");
+    if (active.length === 0) return 0;
+    const totalBytes = active.reduce((sum, i) => sum + i.total_bytes, 0);
+    const downloadedBytes = active.reduce((sum, i) => sum + i.downloaded_bytes, 0);
+    return totalBytes > 0 ? Math.round((downloadedBytes / totalBytes) * 100) : 0;
+  });
+
+  // First-run wizard state
+  let showFirstRunWizard = $state(false);
+
+  // Spotlight search
+  let showSpotlight = $state(false);
+
+  // Game launch state
+  let launching = $state(false);
 
   // Auto-update state
   let updateAvailable = $state(false);
@@ -75,6 +101,13 @@
     initTheme();
     loadDetectedGames();
     getVersion().then(v => appVersion.set(v)).catch(() => {});
+
+    // Check if first-run wizard should show
+    getConfig().then(config => {
+      if (!config.has_completed_setup) {
+        showFirstRunWizard = true;
+      }
+    }).catch(() => {});
     getNotificationCount().then(c => notificationCount.set(c)).catch(() => {});
 
     // Check for app updates on startup
@@ -99,26 +132,109 @@
       if (!target.closest(".sidebar-game-section")) {
         gameDropdownOpen = false;
       }
+      if (!target.closest(".sidebar-profile-section")) {
+        profileDropdownOpen = false;
+      }
       if (!target.closest(".queue-section") && !target.closest(".queue-popover")) {
         showQueue = false;
       }
     }
 
-    // Global Escape key handler — dismiss toasts and close dropdowns
+    // Global keyboard shortcuts
+    const navPageIds = ["dashboard", "mods", "plugins", "discover", "profiles", "logs", "settings"];
+
     function handleKeydown(e: KeyboardEvent) {
+      // Cmd+K / Ctrl+K: spotlight search
+      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+        e.preventDefault();
+        showSpotlight = !showSpotlight;
+        return;
+      }
+      // Cmd+B / Ctrl+B: toggle sidebar
+      if ((e.metaKey || e.ctrlKey) && e.key === "b") {
+        e.preventDefault();
+        sidebarCollapsed.update(v => !v);
+        return;
+      }
+      // Cmd+, / Ctrl+,: settings
+      if ((e.metaKey || e.ctrlKey) && e.key === ",") {
+        e.preventDefault();
+        navigate("settings");
+        return;
+      }
+      // Cmd+1-7 / Ctrl+1-7: navigate to page
+      if ((e.metaKey || e.ctrlKey) && e.key >= "1" && e.key <= "7") {
+        e.preventDefault();
+        const idx = parseInt(e.key) - 1;
+        if (idx < navPageIds.length) navigate(navPageIds[idx]);
+        return;
+      }
       if (e.key === "Escape") {
+        if (showSpotlight) { showSpotlight = false; return; }
         if (get(errorMessage)) { errorMessage.set(null); return; }
         if (get(successMessage)) { successMessage.set(null); return; }
         if (gameDropdownOpen) { gameDropdownOpen = false; return; }
+        if (profileDropdownOpen) { profileDropdownOpen = false; return; }
         if (showQueue) { showQueue = false; return; }
       }
     }
 
     document.addEventListener("click", handleClickOutside);
     document.addEventListener("keydown", handleKeydown);
+
+    // Gamepad / controller support
+    const gamepad = new GamepadManager((action: GamepadAction) => {
+      if (!get(controllerMode)) return;
+      switch (action) {
+        case "shoulder_left": {
+          const idx = navPageIds.indexOf(get(currentPage));
+          if (idx > 0) navigate(navPageIds[idx - 1]);
+          break;
+        }
+        case "shoulder_right": {
+          const idx = navPageIds.indexOf(get(currentPage));
+          if (idx < navPageIds.length - 1) navigate(navPageIds[idx + 1]);
+          break;
+        }
+        case "back":
+          if (showSpotlight) showSpotlight = false;
+          break;
+        case "menu":
+          showSpotlight = !showSpotlight;
+          break;
+        case "confirm": {
+          const focused = document.activeElement as HTMLElement | null;
+          focused?.click();
+          break;
+        }
+        case "up":
+        case "down":
+        case "left":
+        case "right": {
+          // Focus navigation: move between focusable elements
+          const focusables = Array.from(
+            document.querySelectorAll<HTMLElement>(
+              'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
+            )
+          ).filter(el => el.offsetParent !== null);
+          const idx = focusables.indexOf(document.activeElement as HTMLElement);
+          if (action === "down" || action === "right") {
+            const next = idx < focusables.length - 1 ? idx + 1 : 0;
+            focusables[next]?.focus();
+          } else {
+            const prev = idx > 0 ? idx - 1 : focusables.length - 1;
+            focusables[prev]?.focus();
+          }
+          break;
+        }
+      }
+    });
+    gamepad.start();
+
     return () => {
       document.removeEventListener("click", handleClickOutside);
       document.removeEventListener("keydown", handleKeydown);
+      gamepad.stop();
       if (queueUnlisten) queueUnlisten();
     };
   });
@@ -129,6 +245,12 @@
       // Auto-select the first game if none is selected
       if (!get(selectedGame) && detectedGames.length > 0) {
         pickGame(detectedGames[0]);
+      } else {
+        // If a game was already selected (restored from store), load its profiles
+        const currentGame = get(selectedGame);
+        if (currentGame) {
+          loadProfilesForGame(currentGame);
+        }
       }
     } catch {
       // Games will load when user navigates to Dashboard
@@ -139,10 +261,61 @@
     selectedGame.set(game);
     selectedBottle.set(game.bottle_name);
     gameDropdownOpen = false;
+    loadProfilesForGame(game);
+  }
+
+  async function loadProfilesForGame(game: DetectedGame) {
+    try {
+      const profiles = await listProfiles(game.game_id, game.bottle_name);
+      profileList.set(profiles);
+      const active = profiles.find(p => p.is_active) ?? null;
+      activeProfile.set(active);
+    } catch {
+      profileList.set([]);
+      activeProfile.set(null);
+    }
+  }
+
+  async function handleProfileSwitch(profile: Profile) {
+    const game = get(selectedGame);
+    if (!game || switchingProfile) return;
+    profileDropdownOpen = false;
+    switchingProfile = true;
+    try {
+      await activateProfile(profile.id, game.game_id, game.bottle_name);
+      // Reload profiles to get updated is_active flags
+      await loadProfilesForGame(game);
+      wrappedShowSuccess(`Switched to profile "${profile.name}"`);
+    } catch (e: unknown) {
+      wrappedShowError(`Profile switch failed: ${e}`);
+    } finally {
+      switchingProfile = false;
+    }
+  }
+
+  function toggleProfileDropdown() {
+    profileDropdownOpen = !profileDropdownOpen;
   }
 
   function toggleGameDropdown() {
     gameDropdownOpen = !gameDropdownOpen;
+  }
+
+  async function handleLaunchGame(useSkse: boolean = false) {
+    if (!$selectedGame || launching) return;
+    launching = true;
+    try {
+      const result = await launchGame($selectedGame.game_id, $selectedGame.bottle_name, useSkse);
+      if (result.success) {
+        showSuccess(`Launched ${$selectedGame.display_name}`);
+      } else {
+        showError(`Failed to launch ${$selectedGame.display_name}`);
+      }
+    } catch (e: unknown) {
+      showError(`Launch error: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      launching = false;
+    }
   }
 
   async function handleNxmLink(nxmUrl: string) {
@@ -282,44 +455,71 @@
   }
 </script>
 
-<div class="app-shell">
-  <nav class="sidebar">
+<div class="app-shell" class:controller-mode={$controllerMode}>
+  <nav class="sidebar" class:collapsed={$sidebarCollapsed}>
     <!-- Traffic light zone (macOS window controls sit here) -->
     <div class="sidebar-traffic-zone" data-tauri-drag-region></div>
 
     <!-- Brand lockup: sits below traffic lights, above nav -->
     <div class="sidebar-brand-section">
-      <button class="sidebar-brand-btn" onclick={() => navigate("dashboard")}>
+      <button class="sidebar-brand-btn" onclick={() => navigate("dashboard")} title="Dashboard">
         <img class="brand-icon" src="/corkscrew-icon.png" alt="" width="28" height="28" draggable="false" />
-        <div class="brand-text">
-          <span class="brand-name">Corkscrew</span>
-          <span class="brand-tagline">Mod Manager</span>
-        </div>
+        {#if !$sidebarCollapsed}
+          <div class="brand-text">
+            <span class="brand-name">Corkscrew</span>
+            <span class="brand-tagline">Mod Manager</span>
+          </div>
+        {/if}
       </button>
     </div>
 
     <!-- Game selector -->
     <div class="sidebar-game-section">
       {#if detectedGames.length > 0}
-        <button class="game-selector-btn" onclick={toggleGameDropdown}>
-          {#if $selectedGame}
-            <GameIcon gameId={$selectedGame.game_id} size={22} />
-            <div class="game-selector-text">
-              <span class="game-selector-name">{$selectedGame.display_name}</span>
-              <span class="game-selector-bottle">{$selectedGame.bottle_name}</span>
-            </div>
-          {:else}
-            <svg class="game-selector-placeholder-icon" width="22" height="22" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-              <rect x="2" y="4" width="12" height="8" rx="2" opacity="0.4" />
-              <circle cx="6" cy="8" r="1.5" opacity="0.4" />
-              <circle cx="10" cy="8" r="1.5" opacity="0.4" />
-            </svg>
-            <span class="game-selector-placeholder">Select a game</span>
+        <div class="game-selector-row">
+          <button class="game-selector-btn" onclick={toggleGameDropdown} title={$selectedGame?.display_name ?? "Select a game"}>
+            {#if $selectedGame}
+              <GameIcon gameId={$selectedGame.game_id} size={22} />
+              {#if !$sidebarCollapsed}
+                <div class="game-selector-text">
+                  <span class="game-selector-name">{$selectedGame.display_name}</span>
+                  <span class="game-selector-bottle">{$selectedGame.bottle_name}</span>
+                </div>
+              {/if}
+            {:else}
+              <svg class="game-selector-placeholder-icon" width="22" height="22" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="2" y="4" width="12" height="8" rx="2" opacity="0.4" />
+                <circle cx="6" cy="8" r="1.5" opacity="0.4" />
+                <circle cx="10" cy="8" r="1.5" opacity="0.4" />
+              </svg>
+              {#if !$sidebarCollapsed}
+                <span class="game-selector-placeholder">Select a game</span>
+              {/if}
+            {/if}
+            {#if !$sidebarCollapsed}
+              <svg class="game-selector-chevron" class:open={gameDropdownOpen} width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 4l2 2 2-2" />
+              </svg>
+            {/if}
+          </button>
+
+          {#if $selectedGame && !$sidebarCollapsed}
+            <button
+              class="game-launch-btn"
+              onclick={() => handleLaunchGame(false)}
+              disabled={launching}
+              title="Launch {$selectedGame.display_name}"
+            >
+              {#if launching}
+                <span class="spinner spinner-sm"></span>
+              {:else}
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+                  <path d="M4 2.5v11l9-5.5z" />
+                </svg>
+              {/if}
+            </button>
           {/if}
-          <svg class="game-selector-chevron" class:open={gameDropdownOpen} width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M3 4l2 2 2-2" />
-          </svg>
-        </button>
+        </div>
 
         {#if gameDropdownOpen}
           <div class="game-dropdown">
@@ -345,6 +545,48 @@
       {/if}
     </div>
 
+    <!-- Profile selector -->
+    {#if $profileList.length > 0}
+      <div class="sidebar-profile-section">
+        <button class="profile-selector-btn" onclick={toggleProfileDropdown} disabled={switchingProfile} title={$activeProfile?.name ?? "No profile"}>
+          {#if switchingProfile}
+            <span class="spinner spinner-sm"></span>
+            {#if !$sidebarCollapsed}<span class="profile-selector-name">Switching...</span>{/if}
+          {:else}
+            <svg class="profile-selector-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="2" y="2" width="12" height="4" rx="1" />
+              <rect x="2" y="10" width="12" height="4" rx="1" />
+            </svg>
+            {#if !$sidebarCollapsed}<span class="profile-selector-name">{$activeProfile?.name ?? "No profile"}</span>{/if}
+          {/if}
+          {#if !$sidebarCollapsed}
+            <svg class="profile-selector-chevron" class:open={profileDropdownOpen} width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 4l2 2 2-2" />
+            </svg>
+          {/if}
+        </button>
+
+        {#if profileDropdownOpen}
+          <div class="profile-dropdown">
+            {#each $profileList as profile}
+              <button
+                class="profile-dropdown-item"
+                class:active={profile.is_active}
+                onclick={() => handleProfileSwitch(profile)}
+              >
+                <span class="profile-dropdown-name">{profile.name}</span>
+                {#if profile.is_active}
+                  <svg class="profile-active-check" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="20 6 9 17 4 12" />
+                  </svg>
+                {/if}
+              </button>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    {/if}
+
     <ul class="nav-list">
       {#each navItems as item}
         <li>
@@ -352,6 +594,7 @@
             class="nav-item"
             class:active={$currentPage === item.id}
             onclick={() => navigate(item.id)}
+            title={item.label}
           >
             <span class="nav-icon">
               {#if item.id === "dashboard"}
@@ -405,23 +648,45 @@
                 </svg>
               {/if}
             </span>
-            <span class="nav-label">{item.label}</span>
+            {#if !$sidebarCollapsed}<span class="nav-label">{item.label}</span>{/if}
           </button>
         </li>
       {/each}
     </ul>
 
+    <!-- Download progress mini-bar -->
+    {#if activeDownloads > 0}
+      <div class="download-mini-bar">
+        <div class="download-mini-fill" style="width: {downloadProgress}%"></div>
+      </div>
+    {/if}
+
     <div class="sidebar-footer">
+      <!-- Collapse toggle -->
       <button
-        class="sidebar-gh-btn"
-        onclick={() => openUrl("https://github.com/cashcon57/corkscrew")}
-        title="View on GitHub"
+        class="sidebar-collapse-btn"
+        onclick={() => sidebarCollapsed.update(v => !v)}
+        title={$sidebarCollapsed ? "Expand sidebar (Cmd+B)" : "Collapse sidebar (Cmd+B)"}
       >
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-          <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z" />
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="transform: {$sidebarCollapsed ? 'rotate(180deg)' : 'none'}">
+          <rect x="3" y="3" width="18" height="18" rx="2" />
+          <line x1="9" y1="3" x2="9" y2="21" />
+          <polyline points="14 9 11 12 14 15" />
         </svg>
-        <span>GitHub</span>
       </button>
+
+      {#if !$sidebarCollapsed}
+        <button
+          class="sidebar-gh-btn"
+          onclick={() => openUrl("https://github.com/cashcon57/corkscrew")}
+          title="View on GitHub"
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z" />
+          </svg>
+          <span>GitHub</span>
+        </button>
+      {/if}
 
       <!-- Download Queue Indicator -->
       <div class="queue-section">
@@ -462,21 +727,23 @@
         {/if}
       </button>
 
-      {#if updateReady}
-        <button class="update-btn update-ready" onclick={handleRelaunch} title="Restart to apply update">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="23 4 23 10 17 10" />
-            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
-          </svg>
-          Restart for v{updateVersion}
-        </button>
-      {:else if updateAvailable && updateDownloading}
-        <span class="update-btn update-downloading">
-          <span class="spinner spinner-sm"></span>
-          Updating...
-        </span>
-      {:else}
-        <span class="sidebar-version">v{$appVersion}</span>
+      {#if !$sidebarCollapsed}
+        {#if updateReady}
+          <button class="update-btn update-ready" onclick={handleRelaunch} title="Restart to apply update">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="23 4 23 10 17 10" />
+              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+            </svg>
+            Restart for v{updateVersion}
+          </button>
+        {:else if updateAvailable && updateDownloading}
+          <span class="update-btn update-downloading">
+            <span class="spinner spinner-sm"></span>
+            Updating...
+          </span>
+        {:else}
+          <span class="sidebar-version">v{$appVersion}</span>
+        {/if}
       {/if}
     </div>
   </nav>
@@ -603,6 +870,14 @@
   <NotificationLog />
 </div>
 
+{#if showFirstRunWizard}
+  <FirstRunWizard onComplete={() => showFirstRunWizard = false} />
+{/if}
+
+{#if showSpotlight}
+  <SpotlightSearch onClose={() => showSpotlight = false} />
+{/if}
+
 <style>
   .app-shell {
     display: flex;
@@ -632,6 +907,12 @@
     flex-direction: column;
     overflow: hidden;
     position: relative;
+    transition: width 0.2s var(--ease), min-width 0.2s var(--ease);
+  }
+
+  .sidebar.collapsed {
+    width: 56px;
+    min-width: 56px;
     z-index: 10;
     border: 1px solid rgba(255, 255, 255, 0.08);
     box-shadow:
@@ -723,11 +1004,18 @@
     position: relative;
   }
 
+  .game-selector-row {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
+
   .game-selector-btn {
     display: flex;
     align-items: center;
     gap: 10px;
-    width: 100%;
+    flex: 1;
+    min-width: 0;
     padding: 8px 10px;
     border-radius: var(--radius);
     color: var(--text-primary);
@@ -739,6 +1027,29 @@
 
   .game-selector-btn:hover {
     background: var(--surface-hover);
+  }
+
+  .game-launch-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border-radius: var(--radius);
+    color: var(--green);
+    cursor: pointer;
+    transition: background var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease);
+    flex-shrink: 0;
+  }
+
+  .game-launch-btn:hover {
+    background: var(--surface-hover);
+    color: var(--green-bright, #5eeb8a);
+  }
+
+  .game-launch-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .game-selector-text {
@@ -883,6 +1194,129 @@
     opacity: 0.7;
   }
 
+  /* --- Profile selector --- */
+
+  .sidebar-profile-section {
+    padding: 0 var(--space-2) var(--space-2);
+    border-bottom: 1px solid var(--separator);
+    margin-bottom: var(--space-2);
+    position: relative;
+  }
+
+  .profile-selector-btn {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 6px 10px;
+    border-radius: var(--radius);
+    color: var(--text-secondary);
+    font-size: 12px;
+    transition: background var(--duration-fast) var(--ease);
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .profile-selector-btn:hover {
+    background: var(--surface-hover);
+  }
+
+  .profile-selector-btn:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+
+  .profile-selector-icon {
+    flex-shrink: 0;
+    color: var(--text-tertiary);
+  }
+
+  .profile-selector-name {
+    flex: 1;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .profile-selector-chevron {
+    flex-shrink: 0;
+    color: var(--text-quaternary);
+    transition: transform var(--duration-fast) var(--ease);
+    margin-left: auto;
+  }
+
+  .profile-selector-chevron.open {
+    transform: rotate(180deg);
+  }
+
+  .profile-dropdown {
+    position: absolute;
+    top: 100%;
+    left: var(--space-2);
+    right: var(--space-2);
+    background: var(--bg-grouped);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: var(--radius);
+    padding: 4px;
+    z-index: 100;
+    box-shadow:
+      0 4px 24px rgba(0, 0, 0, 0.3),
+      0 1px 4px rgba(0, 0, 0, 0.15),
+      inset 0 1px 0 0 rgba(255, 255, 255, 0.06);
+    backdrop-filter: blur(24px) saturate(1.3);
+    -webkit-backdrop-filter: blur(24px) saturate(1.3);
+    animation: dropdownIn var(--duration-fast) var(--ease-out);
+    max-height: 200px;
+    overflow-y: auto;
+  }
+
+  :global([data-theme="light"]) .profile-dropdown {
+    border-color: rgba(0, 0, 0, 0.12);
+    box-shadow:
+      0 4px 24px rgba(0, 0, 0, 0.12),
+      0 1px 4px rgba(0, 0, 0, 0.06);
+  }
+
+  .profile-dropdown-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding: 7px 8px;
+    border-radius: calc(var(--radius) - 2px);
+    color: var(--text-secondary);
+    font-size: 12px;
+    transition: all var(--duration-fast) var(--ease);
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .profile-dropdown-item:hover {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+  }
+
+  .profile-dropdown-item.active {
+    background: var(--accent-subtle);
+    color: var(--accent);
+  }
+
+  .profile-dropdown-name {
+    font-size: 12px;
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .profile-active-check {
+    flex-shrink: 0;
+    color: var(--accent);
+  }
+
   /* --- Nav list --- */
 
   .nav-list {
@@ -927,6 +1361,22 @@
     flex-shrink: 0;
   }
 
+  /* --- Download mini-bar --- */
+
+  .download-mini-bar {
+    height: 2px;
+    background: var(--separator);
+    flex-shrink: 0;
+    overflow: hidden;
+  }
+
+  .download-mini-fill {
+    height: 100%;
+    background: var(--system-accent);
+    transition: width 0.3s var(--ease);
+    min-width: 2%;
+  }
+
   /* --- Sidebar footer --- */
 
   .sidebar-footer {
@@ -935,6 +1385,62 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+  }
+
+  .sidebar-collapse-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: var(--radius-sm);
+    color: var(--text-tertiary);
+    cursor: pointer;
+    transition: all var(--duration-fast) var(--ease);
+    flex-shrink: 0;
+  }
+
+  .sidebar-collapse-btn:hover {
+    background: var(--surface-hover);
+    color: var(--text-secondary);
+  }
+
+  /* Collapsed sidebar adjustments */
+  .sidebar.collapsed .sidebar-brand-section {
+    padding: 0 var(--space-1) var(--space-3);
+  }
+
+  .sidebar.collapsed .sidebar-brand-btn {
+    justify-content: center;
+    padding: var(--space-2);
+  }
+
+  .sidebar.collapsed .sidebar-game-section,
+  .sidebar.collapsed .sidebar-profile-section {
+    padding-left: var(--space-1);
+    padding-right: var(--space-1);
+  }
+
+  .sidebar.collapsed .game-selector-btn,
+  .sidebar.collapsed .profile-selector-btn {
+    justify-content: center;
+    padding: var(--space-2);
+  }
+
+
+  .sidebar.collapsed .nav-list {
+    padding: 0 var(--space-1);
+  }
+
+  .sidebar.collapsed .nav-item {
+    justify-content: center;
+    padding: var(--space-2);
+  }
+
+  .sidebar.collapsed .sidebar-footer {
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: var(--space-1);
   }
 
   .sidebar-gh-btn {
@@ -1362,5 +1868,28 @@
     background: var(--accent);
     border-radius: 2px;
     transition: width 0.3s ease;
+  }
+
+  /* Controller mode: larger touch targets for Steam Deck */
+  :global(.controller-mode) button,
+  :global(.controller-mode) .btn,
+  :global(.controller-mode) .nav-item {
+    min-height: 44px;
+    font-size: 15px;
+  }
+
+  :global(.controller-mode) input,
+  :global(.controller-mode) select {
+    min-height: 44px;
+    font-size: 15px;
+  }
+
+  :global(.controller-mode) .nav-item {
+    padding: var(--space-3) var(--space-4);
+  }
+
+  :global(.controller-mode) :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
 </style>

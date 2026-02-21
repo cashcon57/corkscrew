@@ -19,7 +19,7 @@ pub enum MigrationError {
 pub type Result<T> = std::result::Result<T, MigrationError>;
 
 /// The current target schema version. Bump this when adding a new migration.
-const TARGET_VERSION: u32 = 7;
+const TARGET_VERSION: u32 = 9;
 
 /// Get the current schema version (0 if no version table exists).
 pub fn current_version(conn: &Connection) -> Result<u32> {
@@ -79,6 +79,16 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     if version == 6 {
         migrate_v6_to_v7(conn)?;
         version = 7;
+    }
+
+    if version == 7 {
+        migrate_v7_to_v8(conn)?;
+        version = 8;
+    }
+
+    if version == 8 {
+        migrate_v8_to_v9(conn)?;
+        version = 9;
     }
 
     let _ = version; // suppress unused warning when TARGET_VERSION == current
@@ -506,6 +516,70 @@ fn migrate_v6_to_v7(conn: &Connection) -> Result<()> {
     tx.execute("UPDATE schema_version SET version = 7", [])?;
     tx.commit()?;
     log::info!("Migration 6 → 7 complete (auto_category, notification_log)");
+    Ok(())
+}
+
+/// Migration 7 → 8: Add source_type column for multi-source mod support.
+///
+/// Tracks where each mod came from: "nexus", "direct", "loverslab", "moddb",
+/// "curseforge", or "manual". Backfills existing mods: those with a nexus_mod_id
+/// get "nexus", all others get "manual".
+fn migrate_v7_to_v8(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+
+    match tx.execute_batch("ALTER TABLE installed_mods ADD COLUMN source_type TEXT NOT NULL DEFAULT 'manual'") {
+        Ok(_) => {}
+        Err(e) => {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column") {
+                return Err(MigrationError::Sqlite(e));
+            }
+        }
+    }
+
+    // Backfill: mods with nexus_mod_id get "nexus"
+    tx.execute(
+        "UPDATE installed_mods SET source_type = 'nexus' WHERE nexus_mod_id IS NOT NULL",
+        [],
+    )?;
+
+    tx.execute("UPDATE schema_version SET version = 8", [])?;
+    tx.commit()?;
+    log::info!("Migration 7 → 8 complete (source_type column)");
+    Ok(())
+}
+
+/// Migration 8 → 9: Persistent download queue table.
+///
+/// Stores download queue items so they survive app restarts. Items with status
+/// "downloading" are reset to "pending" on load (since the download was
+/// interrupted).
+fn migrate_v8_to_v9(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS download_queue (
+            id INTEGER PRIMARY KEY,
+            mod_name TEXT NOT NULL,
+            file_name TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            error TEXT,
+            attempt INTEGER NOT NULL DEFAULT 0,
+            max_attempts INTEGER NOT NULL DEFAULT 3,
+            downloaded_bytes INTEGER NOT NULL DEFAULT 0,
+            total_bytes INTEGER NOT NULL DEFAULT 0,
+            nexus_mod_id INTEGER,
+            nexus_file_id INTEGER,
+            url TEXT,
+            game_slug TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )",
+    )?;
+
+    tx.execute("UPDATE schema_version SET version = 9", [])?;
+    tx.commit()?;
+    log::info!("Migration 8 → 9 complete (download_queue table)");
     Ok(())
 }
 

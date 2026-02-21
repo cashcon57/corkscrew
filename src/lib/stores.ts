@@ -1,11 +1,11 @@
 import { writable, derived } from "svelte/store";
-import type { Bottle, DetectedGame, InstalledMod, AppConfig, SkseStatus } from "./types";
+import type { Bottle, DetectedGame, InstalledMod, AppConfig, SkseStatus, Profile } from "./types";
 
 // App state
 export const bottles = writable<Bottle[]>([]);
 export const games = writable<DetectedGame[]>([]);
 export const installedMods = writable<InstalledMod[]>([]);
-export const config = writable<AppConfig>({ nexus_api_key: null, download_dir: null });
+export const config = writable<AppConfig>({ nexus_api_key: null, download_dir: null, staging_dir: null, has_completed_setup: false, controller_mode: false });
 
 // UI state
 export const selectedBottle = writable<string | null>(null);
@@ -36,6 +36,10 @@ export const activeMods = derived(
   }
 );
 
+// Profile state (global — sidebar selector + profile page)
+export const activeProfile = writable<Profile | null>(null);
+export const profileList = writable<Profile[]>([]);
+
 // Collection install progress (global — visible from any page)
 export interface CollectionInstallStatus {
   active: boolean;
@@ -63,6 +67,19 @@ export let triggerUpdateCheck: (() => Promise<void>) | null = null;
 export function setUpdateCheckFn(fn: () => Promise<void>) {
   triggerUpdateCheck = fn;
 }
+
+// Sidebar collapse state (persisted to localStorage)
+function createPersistedBool(key: string, fallback: boolean) {
+  const stored = typeof localStorage !== "undefined" ? localStorage.getItem(key) : null;
+  const initial = stored !== null ? stored === "true" : fallback;
+  const store = writable(initial);
+  store.subscribe((v) => {
+    if (typeof localStorage !== "undefined") localStorage.setItem(key, String(v));
+  });
+  return store;
+}
+export const sidebarCollapsed = createPersistedBool("corkscrew:sidebar-collapsed", false);
+export const controllerMode = createPersistedBool("corkscrew:controller-mode", false);
 
 // Notification log (persistent — backed by SQLite)
 export const notificationCount = writable<number>(0);

@@ -67,6 +67,8 @@ import type {
   RequiredTool,
   PlatformInfo,
   SkseAvailableBuilds,
+  ImportResult,
+  NexusModInfo,
 } from "./types";
 
 // Bottles
@@ -617,6 +619,14 @@ export async function analyzeCrashLog(
   return invoke("analyze_crash_log_cmd", { logPath });
 }
 
+// NexusMods Browse
+export async function browseNexusMods(
+  gameSlug: string,
+  category: string,
+): Promise<NexusModInfo[]> {
+  return invoke("browse_nexus_mods_cmd", { gameSlug, category });
+}
+
 // Collections
 export async function browseCollections(
   gameDomain: string,
@@ -787,6 +797,14 @@ export async function diffModlists(
   return invoke("diff_modlists_cmd", { filePath, gameId, bottleName });
 }
 
+export async function executeModlistImport(
+  filePath: string,
+  gameId: string,
+  bottleName: string
+): Promise<ImportResult> {
+  return invoke("execute_modlist_import", { filePath, gameId, bottleName });
+}
+
 // Collection Management
 export async function listInstalledCollections(
   gameId: string,
@@ -890,6 +908,14 @@ export async function setModNotes(
   notes: string | null
 ): Promise<void> {
   return invoke("set_mod_notes", { modId, notes });
+}
+
+export async function setModSource(
+  modId: number,
+  sourceType: string,
+  sourceUrl: string | null
+): Promise<void> {
+  return invoke("set_mod_source", { modId, sourceType, sourceUrl });
 }
 
 export async function setModTags(

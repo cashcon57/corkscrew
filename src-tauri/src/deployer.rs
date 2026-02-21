@@ -20,6 +20,26 @@ use thiserror::Error;
 use crate::database::ModDatabase;
 
 // ---------------------------------------------------------------------------
+// Filesystem helpers
+// ---------------------------------------------------------------------------
+
+/// Check whether two paths reside on the same filesystem (device).
+/// Returns `false` if either path doesn't exist or metadata can't be read.
+#[cfg(unix)]
+pub fn same_filesystem(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (fs::metadata(a), fs::metadata(b)) {
+        (Ok(ma), Ok(mb)) => ma.dev() == mb.dev(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+pub fn same_filesystem(_a: &Path, _b: &Path) -> bool {
+    false // assume different on non-Unix; always copy
+}
+
+// ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
 
@@ -90,8 +110,15 @@ pub fn deploy_mod(
         return Err(DeployerError::StagingNotFound(staging_path.to_path_buf()));
     }
 
-    // Hardlinks are free; only check space for copy-based deployment.
-    if !test_hardlink_support(staging_path, data_dir) {
+    // Check if staging and data_dir are on the same filesystem.
+    // Hardlinks only work within a single filesystem (same device).
+    let can_hardlink = same_filesystem(staging_path, data_dir);
+    if !can_hardlink {
+        debug!(
+            "Staging ({}) and data_dir ({}) are on different filesystems — will use copy",
+            staging_path.display(),
+            data_dir.display()
+        );
         let deploy_size = crate::disk_budget::dir_size(staging_path);
         crate::disk_budget::check_space_guard(data_dir, deploy_size)
             .map_err(DeployerError::Other)?;
@@ -156,13 +183,25 @@ pub fn deploy_mod(
             continue;
         }
 
-        let method = match fs::hard_link(&src, &dst) {
-            Ok(_) => "hardlink",
-            Err(_) => {
-                fs::copy(&src, &dst)?;
-                fallback_used = true;
-                "copy"
+        let method = if can_hardlink {
+            match fs::hard_link(&src, &dst) {
+                Ok(_) => "hardlink",
+                Err(e) => {
+                    warn!(
+                        "Hardlink failed for {} → {}: {} (falling back to copy)",
+                        src.display(),
+                        dst.display(),
+                        e
+                    );
+                    fs::copy(&src, &dst)?;
+                    fallback_used = true;
+                    "copy"
+                }
             }
+        } else {
+            fs::copy(&src, &dst)?;
+            fallback_used = true;
+            "copy"
         };
 
         db.add_deployment_entry(
@@ -244,14 +283,14 @@ pub fn redeploy_all(
         game_id,
         bottle_name,
         data_dir,
-        None::<fn(usize, usize, &str)>,
+        None::<fn(usize, usize, &str, usize, usize)>,
     )
 }
 
 /// Full redeploy with optional progress callback.
 ///
-/// The callback receives `(current_index, total_mods, mod_name)` after each
-/// mod is deployed, allowing the frontend to display a progress indicator.
+/// The callback receives `(current_index, total_mods, mod_name, files_deployed, total_files)`
+/// during deployment, allowing the frontend to display a smooth progress indicator.
 pub fn redeploy_all_with_progress<F>(
     db: &ModDatabase,
     game_id: &str,
@@ -260,9 +299,12 @@ pub fn redeploy_all_with_progress<F>(
     on_progress: Option<F>,
 ) -> Result<DeployResult>
 where
-    F: Fn(usize, usize, &str),
+    F: Fn(usize, usize, &str, usize, usize),
 {
-    if !test_hardlink_support(data_dir, data_dir) {
+    // Check disk space if any staging dir is on a different filesystem than data_dir
+    // (hardlinks won't work cross-filesystem, so copies will consume space).
+    let staging_root = crate::staging::staging_base_dir(game_id, bottle_name);
+    if !same_filesystem(&staging_root, data_dir) {
         let total_staging: u64 = db
             .list_mods(game_id, bottle_name)
             .unwrap_or_default()
@@ -289,9 +331,18 @@ where
     let mut total_skipped = 0;
     let mut any_fallback = false;
 
+    // Pre-count total files for accurate progress reporting
+    let total_files: usize = enabled_mods
+        .iter()
+        .filter_map(|m| m.staging_path.as_ref())
+        .filter_map(|p| crate::staging::list_staging_files(Path::new(p)).ok())
+        .map(|f| f.len())
+        .sum();
+    let mut files_so_far: usize = 0;
+
     for (i, m) in enabled_mods.iter().enumerate() {
         if let Some(ref on_progress) = on_progress {
-            on_progress(i, total, &m.name);
+            on_progress(i, total, &m.name, files_so_far, total_files);
         }
 
         if let Some(ref staging_path_str) = m.staging_path {
@@ -300,6 +351,7 @@ where
                 let files = crate::staging::list_staging_files(&staging_path)
                     .map_err(|e| DeployerError::Other(e.to_string()))?;
 
+                let file_count = files.len();
                 let result = deploy_mod(
                     db,
                     game_id,
@@ -310,6 +362,7 @@ where
                     &files,
                 )?;
 
+                files_so_far += file_count;
                 total_deployed += result.deployed_count;
                 total_skipped += result.skipped_count;
                 any_fallback = any_fallback || result.fallback_used;
@@ -432,12 +485,19 @@ fn restore_next_winner(
                 fs::create_dir_all(parent)?;
             }
 
-            let method = match fs::hard_link(&src, &dst) {
-                Ok(_) => "hardlink",
-                Err(_) => {
-                    fs::copy(&src, &dst)?;
-                    "copy"
+            let can_hardlink = same_filesystem(&staging_path, data_dir);
+            let method = if can_hardlink {
+                match fs::hard_link(&src, &dst) {
+                    Ok(_) => "hardlink",
+                    Err(e) => {
+                        warn!("Hardlink failed in restore_next_winner: {}", e);
+                        fs::copy(&src, &dst)?;
+                        "copy"
+                    }
                 }
+            } else {
+                fs::copy(&src, &dst)?;
+                "copy"
             };
 
             db.add_deployment_entry(
@@ -599,5 +659,26 @@ mod tests {
         fs::create_dir_all(&dir_b).unwrap();
 
         assert!(test_hardlink_support(&dir_a, &dir_b));
+    }
+
+    #[test]
+    fn same_filesystem_same_tmpdir() {
+        let tmp = TempDir::new().unwrap();
+        let dir_a = tmp.path().join("a");
+        let dir_b = tmp.path().join("b");
+        fs::create_dir_all(&dir_a).unwrap();
+        fs::create_dir_all(&dir_b).unwrap();
+
+        assert!(same_filesystem(&dir_a, &dir_b));
+    }
+
+    #[test]
+    fn same_filesystem_nonexistent_returns_false() {
+        let tmp = TempDir::new().unwrap();
+        let real = tmp.path().join("real");
+        fs::create_dir_all(&real).unwrap();
+        let fake = PathBuf::from("/nonexistent/corkscrew_test_xyz");
+
+        assert!(!same_filesystem(&real, &fake));
     }
 }

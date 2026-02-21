@@ -144,8 +144,13 @@
           readmeContent = DOMPurify.sanitize(html);
         }
       } catch (e: unknown) {
+        const errMsg = String(e);
+        const is404 = errMsg.includes("404");
         readmeContent = DOMPurify.sanitize(
-          `<p style="color: var(--text-tertiary)">Could not load readme: ${e}</p>`,
+          `<div style="color: var(--text-tertiary); text-align: center; padding: 24px 0;">` +
+          `<p style="margin-bottom: 8px;">${is404 ? "Readme page is no longer available." : "Could not load readme."}</p>` +
+          `<p style="font-size: 12px; opacity: 0.7;">${is404 ? "The author's readme link may have moved or been removed." : errMsg}</p>` +
+          `</div>`,
         );
       }
     }

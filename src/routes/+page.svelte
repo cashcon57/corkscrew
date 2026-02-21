@@ -10,6 +10,7 @@
   } from "$lib/stores";
   import type { Bottle, DetectedGame, BottleSettingDef } from "$lib/types";
   import { openUrl } from "@tauri-apps/plugin-opener";
+  import ModHealthDashboard from "$lib/components/ModHealthDashboard.svelte";
 
   let loadingState = $state<"idle" | "loading" | "done">("idle");
   const isMac = typeof navigator !== "undefined" && navigator.platform?.startsWith("Mac");
@@ -402,6 +403,18 @@
           </div>
         {/if}
       </section>
+
+      <!-- Mod Health Section (when a game is selected) -->
+      {#if $selectedGame}
+        <section class="section">
+          <div class="section-header">
+            <h3 class="section-title">Mod Health</h3>
+          </div>
+          <div class="health-wrapper">
+            <ModHealthDashboard />
+          </div>
+        </section>
+      {/if}
     {/if}
   </div>
 {:else if $currentPage === "mods"}
@@ -1111,6 +1124,15 @@
     outline: none;
     border-color: var(--accent);
     box-shadow: 0 0 0 2px var(--accent-subtle);
+  }
+
+  /* Mod Health Wrapper */
+  .health-wrapper {
+    background: var(--bg-grouped);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius-lg);
+    padding: var(--space-5);
+    box-shadow: var(--glass-edge-shadow);
   }
 
   /* Read-only value */

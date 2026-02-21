@@ -1,42 +1,8 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
   import { selectedGame, showError, showSuccess } from "$lib/stores";
-  import type { DetectedGame } from "$lib/types";
-  // TODO: Import from $lib/api when backend commands are ready
-  // import { invoke } from "@tauri-apps/api/core";
-
-  // ---- Types ----
-
-  type ImportModStatus = "installed" | "auto_download" | "manual" | "version_mismatch";
-
-  interface ModlistMetadata {
-    name: string;
-    game: string;
-    gameId: string;
-    modCount: number;
-    exportDate: string;
-    exporterName: string;
-    exporterVersion: string;
-  }
-
-  interface ImportMod {
-    name: string;
-    version: string;
-    nexusModId: number | null;
-    nexusFileId: number | null;
-    status: ImportModStatus;
-    currentVersion?: string; // if version_mismatch
-    message?: string;
-  }
-
-  interface ImportPlan {
-    metadata: ModlistMetadata;
-    mods: ImportMod[];
-    readyCount: number;
-    downloadCount: number;
-    manualCount: number;
-    mismatchCount: number;
-  }
+  import { importModlistPlan, executeModlistImport } from "$lib/api";
+  import type { ImportPlan, ImportResult, ImportStatus } from "$lib/types";
 
   // ---- Props ----
 
@@ -53,8 +19,7 @@
   let filePath = $state<string | null>(null);
   let validating = $state(false);
   let validationError = $state<string | null>(null);
-  let metadata = $state<ModlistMetadata | null>(null);
-  let gameCompatible = $state(true);
+  let fileValid = $state(false);
 
   // Step 2
   let importPlan = $state<ImportPlan | null>(null);
@@ -62,8 +27,7 @@
 
   // Step 3
   let importing = $state(false);
-  let importProgress = $state(0);
-  let importTotal = $state(0);
+  let importResult = $state<ImportResult | null>(null);
   let importComplete = $state(false);
   let importErrors = $state<string[]>([]);
 
@@ -72,10 +36,10 @@
   const statusCounts = $derived.by(() => {
     if (!importPlan) return { installed: 0, autoDownload: 0, manual: 0, mismatch: 0 };
     return {
-      installed: importPlan.readyCount,
-      autoDownload: importPlan.downloadCount,
-      manual: importPlan.manualCount,
-      mismatch: importPlan.mismatchCount,
+      installed: importPlan.already_installed,
+      autoDownload: importPlan.nexus_mods,
+      manual: importPlan.manual_mods,
+      mismatch: importPlan.mods.filter(m => m.status === "VersionMismatch").length,
     };
   });
 
@@ -101,30 +65,15 @@
     if (!filePath) return;
     validating = true;
     validationError = null;
-    metadata = null;
+    fileValid = false;
     try {
-      // TODO: Wire up when backend is ready
-      // const result = await invoke("validate_modlist_file", { filePath });
-      // metadata = result as ModlistMetadata;
-
-      // Placeholder metadata
-      const fileName = filePath.split("/").pop() ?? filePath;
-      metadata = {
-        name: fileName.replace(/\.[^/.]+$/, ""),
-        game: game?.display_name ?? "Unknown Game",
-        gameId: game?.game_id ?? "",
-        modCount: 0,
-        exportDate: new Date().toISOString(),
-        exporterName: "Corkscrew",
-        exporterVersion: "0.1.0",
-      };
-
-      // Check game compatibility
-      if (game && metadata.gameId && metadata.gameId !== game.game_id) {
-        gameCompatible = false;
-      } else {
-        gameCompatible = true;
+      // Basic validation — the real analysis happens in step 2 (importModlistPlan)
+      const ext = filePath.split(".").pop()?.toLowerCase();
+      if (!ext || !["json", "txt", "modlist"].includes(ext)) {
+        validationError = "Unsupported file format. Please select a .json, .txt, or .modlist file.";
+        return;
       }
+      fileValid = true;
     } catch (e: unknown) {
       validationError = `Failed to validate file: ${e}`;
     } finally {
@@ -133,27 +82,11 @@
   }
 
   async function proceedToStep2() {
-    if (!filePath || !metadata || !game) return;
+    if (!filePath || !fileValid || !game) return;
     currentStep = 2;
     planLoading = true;
     try {
-      // TODO: Wire up when backend is ready
-      // const plan = await invoke("plan_modlist_import", {
-      //   filePath,
-      //   gameId: game.game_id,
-      //   bottleName: game.bottle_name,
-      // });
-      // importPlan = plan as ImportPlan;
-
-      // Placeholder plan
-      importPlan = {
-        metadata: metadata,
-        mods: [],
-        readyCount: 0,
-        downloadCount: 0,
-        manualCount: 0,
-        mismatchCount: 0,
-      };
+      importPlan = await importModlistPlan(filePath, game.game_id, game.bottle_name);
     } catch (e: unknown) {
       showError(`Failed to generate import plan: ${e}`);
       currentStep = 1;
@@ -165,27 +98,21 @@
   // ---- Step 3: Import ----
 
   async function proceedToStep3() {
-    if (!importPlan || !game) return;
+    if (!importPlan || !filePath || !game) return;
     currentStep = 3;
     importing = true;
-    importProgress = 0;
-    importTotal = importPlan.mods.length;
     importErrors = [];
     importComplete = false;
+    importResult = null;
 
     try {
-      // TODO: Wire up when backend is ready
-      // Use an event listener for progress updates
-      // await invoke("execute_modlist_import", {
-      //   filePath,
-      //   gameId: game.game_id,
-      //   bottleName: game.bottle_name,
-      // });
-
-      // Simulate completion
-      importProgress = importTotal;
+      importResult = await executeModlistImport(filePath, game.game_id, game.bottle_name);
+      importErrors = importResult.errors;
       importComplete = true;
-      showSuccess("Mod list import complete");
+
+      if (importResult.errors.length === 0) {
+        showSuccess("Mod list import complete");
+      }
 
       if (oncomplete) {
         oncomplete();
@@ -216,30 +143,30 @@
     });
   }
 
-  function statusLabel(status: ImportModStatus): string {
+  function statusLabel(status: ImportStatus): string {
     switch (status) {
-      case "installed": return "Installed";
-      case "auto_download": return "Auto Download";
-      case "manual": return "Manual";
-      case "version_mismatch": return "Version Mismatch";
+      case "AlreadyInstalled": return "Installed";
+      case "CanAutoDownload": return "Auto Download";
+      case "NeedsManualDownload": return "Manual";
+      case "VersionMismatch": return "Version Mismatch";
     }
   }
 
-  function statusColor(status: ImportModStatus): string {
+  function statusColor(status: ImportStatus): string {
     switch (status) {
-      case "installed": return "var(--green)";
-      case "auto_download": return "var(--system-accent)";
-      case "manual": return "var(--yellow)";
-      case "version_mismatch": return "#ff9f0a";
+      case "AlreadyInstalled": return "var(--green)";
+      case "CanAutoDownload": return "var(--system-accent)";
+      case "NeedsManualDownload": return "var(--yellow)";
+      case "VersionMismatch": return "#ff9f0a";
     }
   }
 
-  function statusBg(status: ImportModStatus): string {
+  function statusBg(status: ImportStatus): string {
     switch (status) {
-      case "installed": return "var(--green-subtle)";
-      case "auto_download": return "var(--system-accent-subtle)";
-      case "manual": return "var(--yellow-subtle)";
-      case "version_mismatch": return "rgba(255, 159, 10, 0.15)";
+      case "AlreadyInstalled": return "var(--green-subtle)";
+      case "CanAutoDownload": return "var(--system-accent-subtle)";
+      case "NeedsManualDownload": return "var(--yellow-subtle)";
+      case "VersionMismatch": return "rgba(255, 159, 10, 0.15)";
     }
   }
 
@@ -359,41 +286,19 @@
                   </svg>
                   <span>{validationError}</span>
                 </div>
-              {:else if metadata}
+              {:else if fileValid}
                 <div class="metadata-card">
-                  <h4 class="metadata-title">{metadata.name}</h4>
+                  <h4 class="metadata-title">{filePath?.split("/").pop()?.replace(/\.[^/.]+$/, "") ?? "Mod List"}</h4>
                   <div class="metadata-grid">
                     <div class="metadata-item">
-                      <span class="metadata-label">Game</span>
-                      <span class="metadata-value">{metadata.game}</span>
+                      <span class="metadata-label">Target Game</span>
+                      <span class="metadata-value">{game?.display_name ?? "No game selected"}</span>
                     </div>
                     <div class="metadata-item">
-                      <span class="metadata-label">Mods</span>
-                      <span class="metadata-value">{metadata.modCount}</span>
-                    </div>
-                    <div class="metadata-item">
-                      <span class="metadata-label">Exported</span>
-                      <span class="metadata-value">{formatDate(metadata.exportDate)}</span>
-                    </div>
-                    <div class="metadata-item">
-                      <span class="metadata-label">Source</span>
-                      <span class="metadata-value">{metadata.exporterName} {metadata.exporterVersion}</span>
+                      <span class="metadata-label">Status</span>
+                      <span class="metadata-value" style="color: var(--green)">Ready to analyze</span>
                     </div>
                   </div>
-
-                  {#if !gameCompatible}
-                    <div class="compat-warning">
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-                        <line x1="12" y1="9" x2="12" y2="13" />
-                        <line x1="12" y1="17" x2="12.01" y2="17" />
-                      </svg>
-                      <span>
-                        This mod list is for <strong>{metadata.game}</strong> but the selected game is
-                        <strong>{game?.display_name ?? "none"}</strong>. The import may not work correctly.
-                      </span>
-                    </div>
-                  {/if}
                 </div>
               {/if}
             </div>
@@ -448,8 +353,8 @@
                         </span>
                         <span class="col-plan-version">
                           <span class="version-text">{mod.version}</span>
-                          {#if mod.status === "version_mismatch" && mod.currentVersion}
-                            <span class="version-current">current: {mod.currentVersion}</span>
+                          {#if mod.status === "VersionMismatch"}
+                            <span class="version-current">version differs</span>
                           {/if}
                         </span>
                         <span class="col-plan-status">
@@ -483,16 +388,13 @@
               </div>
               <h4 class="progress-title">Importing mod list...</h4>
               <p class="progress-detail">
-                {importProgress} of {importTotal} mods processed
+                Applying changes and preparing download list
               </p>
               <div class="progress-bar-track">
-                <div
-                  class="progress-bar-fill"
-                  style="width: {importTotal > 0 ? (importProgress / importTotal * 100) : 0}%"
-                ></div>
+                <div class="progress-bar-fill progress-bar-indeterminate"></div>
               </div>
             </div>
-          {:else if importComplete}
+          {:else if importComplete && importResult}
             <div class="import-complete-section">
               <div class="complete-icon">
                 <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--green)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -502,8 +404,24 @@
               </div>
               <h4 class="complete-title">Import Complete</h4>
               <p class="complete-detail">
-                {importTotal} mod{importTotal !== 1 ? "s" : ""} processed successfully.
+                {importResult.mods_updated} mod{importResult.mods_updated !== 1 ? "s" : ""} updated,
+                {importResult.mods_skipped} skipped.
+                {#if importResult.mods_to_download.length > 0}
+                  {importResult.mods_to_download.length} mod{importResult.mods_to_download.length !== 1 ? "s" : ""} need downloading.
+                {/if}
               </p>
+              {#if importResult.mods_to_download.length > 0}
+                <div class="downloads-section">
+                  <h4 class="downloads-title">Mods to Download ({importResult.mods_to_download.length})</h4>
+                  {#each importResult.mods_to_download as dl}
+                    <div class="download-item">
+                      <span class="download-name">{dl.name}</span>
+                      <span class="download-version">{dl.version}</span>
+                      <span class="download-source">{dl.source_type}</span>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
               {#if importErrors.length > 0}
                 <div class="import-errors">
                   <h4 class="errors-title">Errors ({importErrors.length})</h4>
@@ -531,7 +449,7 @@
         <button
           class="btn btn-accent"
           onclick={proceedToStep2}
-          disabled={!metadata || !gameCompatible || validating}
+          disabled={!fileValid || !game || validating}
           type="button"
         >
           Continue
@@ -1075,6 +993,16 @@
     transition: width var(--duration) var(--ease);
   }
 
+  .progress-bar-indeterminate {
+    width: 40% !important;
+    animation: indeterminate 1.5s ease-in-out infinite;
+  }
+
+  @keyframes indeterminate {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(350%); }
+  }
+
   /* ---- Import Complete ---- */
 
   .import-complete-section {
@@ -1099,6 +1027,61 @@
   .complete-detail {
     font-size: 13px;
     color: var(--text-tertiary);
+  }
+
+  .downloads-section {
+    width: 100%;
+    background: var(--surface);
+    border-radius: var(--radius);
+    padding: var(--space-3);
+    margin-top: var(--space-2);
+    text-align: left;
+    max-height: 180px;
+    overflow-y: auto;
+  }
+
+  .downloads-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--system-accent);
+    margin-bottom: var(--space-2);
+  }
+
+  .download-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) 0;
+    font-size: 12px;
+    border-bottom: 1px solid var(--separator);
+  }
+
+  .download-item:last-child {
+    border-bottom: none;
+  }
+
+  .download-name {
+    flex: 1;
+    font-weight: 500;
+    color: var(--text-primary);
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .download-version {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-tertiary);
+  }
+
+  .download-source {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: var(--text-quaternary);
+    letter-spacing: 0.04em;
   }
 
   .import-errors {

@@ -61,7 +61,16 @@ pub struct StagingResult {
 // ---------------------------------------------------------------------------
 
 /// Returns the base staging directory for all mods.
+/// Uses the configured override if set, otherwise falls back to the default
+/// location under the platform data directory.
 pub fn staging_root() -> PathBuf {
+    if let Ok(cfg) = config::get_config() {
+        if let Some(ref dir) = cfg.staging_dir {
+            if !dir.is_empty() {
+                return PathBuf::from(dir);
+            }
+        }
+    }
     config::data_dir().join("staging")
 }
 

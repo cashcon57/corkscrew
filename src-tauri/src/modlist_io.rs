@@ -76,8 +76,14 @@ pub struct ExportedMod {
     pub nexus_file_id: Option<i64>,
     pub archive_name: String,
     pub source_url: Option<String>,
+    #[serde(default = "default_source_type")]
+    pub source_type: String,
     pub installed_files: Vec<String>,
     pub fomod_selections: Option<serde_json::Value>,
+}
+
+fn default_source_type() -> String {
+    "manual".to_string()
 }
 
 /// A single plugin entry in an exported modlist.
@@ -112,6 +118,7 @@ pub struct ImportModStatus {
     pub status: ImportStatus,
     pub nexus_mod_id: Option<i64>,
     pub nexus_file_id: Option<i64>,
+    pub source_type: String,
     pub existing_mod_id: Option<i64>,
 }
 
@@ -178,6 +185,7 @@ pub fn export_modlist(
             nexus_file_id: m.nexus_file_id,
             archive_name: m.archive_name.clone(),
             source_url: m.source_url.clone(),
+            source_type: m.source_type.clone(),
             installed_files: m.installed_files.clone(),
             fomod_selections: None,
         })
@@ -270,6 +278,7 @@ pub fn plan_import(
             status,
             nexus_mod_id: em.nexus_mod_id,
             nexus_file_id: em.nexus_file_id,
+            source_type: em.source_type.clone(),
             existing_mod_id,
         });
     }
@@ -401,6 +410,103 @@ fn game_display_name(game_id: &str) -> &str {
     }
 }
 
+/// Result of executing a modlist import.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ImportResult {
+    /// How many already-installed mods had their priority/enabled state updated.
+    pub mods_updated: usize,
+    /// How many mods were already installed and needed no changes.
+    pub mods_skipped: usize,
+    /// Mods that need to be downloaded (not yet installed).
+    pub mods_to_download: Vec<ImportDownloadAction>,
+    /// Errors encountered while applying changes.
+    pub errors: Vec<String>,
+}
+
+/// A mod that the user needs to download to complete the import.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ImportDownloadAction {
+    pub name: String,
+    pub version: String,
+    pub nexus_mod_id: Option<i64>,
+    pub nexus_file_id: Option<i64>,
+    pub source_type: String,
+    pub source_url: Option<String>,
+}
+
+/// Execute a modlist import: apply priority/enabled changes for already-installed
+/// mods and return a list of download actions for missing mods.
+///
+/// This does NOT trigger any downloads — the frontend is responsible for that
+/// (respecting NexusMods free-user restrictions).
+pub fn execute_import(
+    db: &ModDatabase,
+    modlist: &ExportedModlist,
+    game_id: &str,
+    bottle_name: &str,
+) -> Result<ImportResult, ModlistError> {
+    let installed = db
+        .list_mods(game_id, bottle_name)
+        .map_err(|e| ModlistError::Database(e.to_string()))?;
+
+    let mut mods_updated = 0usize;
+    let mut mods_skipped = 0usize;
+    let mut mods_to_download = Vec::new();
+    let mut errors = Vec::new();
+
+    for (i, em) in modlist.mods.iter().enumerate() {
+        let target_priority = em.priority.max(i as i32);
+
+        match find_existing_mod(&installed, em) {
+            Some((mod_id, _version_matches)) => {
+                // Mod is installed — update priority and enabled state
+                let mut changed = false;
+
+                if let Err(e) = db.set_mod_priority(mod_id, target_priority) {
+                    errors.push(format!("{}: failed to set priority: {}", em.name, e));
+                } else {
+                    changed = true;
+                }
+
+                // Get current state to check if enabled needs toggling
+                if let Ok(Some(current)) = db.get_mod(mod_id) {
+                    if current.enabled != em.enabled {
+                        if let Err(e) = db.set_enabled(mod_id, em.enabled) {
+                            errors.push(format!("{}: failed to toggle: {}", em.name, e));
+                        } else {
+                            changed = true;
+                        }
+                    }
+                }
+
+                if changed {
+                    mods_updated += 1;
+                } else {
+                    mods_skipped += 1;
+                }
+            }
+            None => {
+                // Mod not installed — add to download list
+                mods_to_download.push(ImportDownloadAction {
+                    name: em.name.clone(),
+                    version: em.version.clone(),
+                    nexus_mod_id: em.nexus_mod_id,
+                    nexus_file_id: em.nexus_file_id,
+                    source_type: em.source_type.clone(),
+                    source_url: em.source_url.clone(),
+                });
+            }
+        }
+    }
+
+    Ok(ImportResult {
+        mods_updated,
+        mods_skipped,
+        mods_to_download,
+        errors,
+    })
+}
+
 /// Try to find an existing installed mod that matches an exported mod entry.
 ///
 /// Returns `Some((mod_id, version_matches))` if a match is found, where
@@ -484,6 +590,7 @@ mod tests {
             nexus_file_id: None,
             archive_name: format!("{}.zip", name.to_lowercase().replace(' ', "_")),
             source_url: None,
+            source_type: if nexus_mod_id.is_some() { "nexus".to_string() } else { "manual".to_string() },
             installed_files: vec![format!(
                 "data/meshes/{}.nif",
                 name.to_lowercase().replace(' ', "_")

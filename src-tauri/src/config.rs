@@ -54,6 +54,21 @@ pub struct AppConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download_dir: Option<String>,
 
+    /// Override for the staging directory (optional; falls back to the
+    /// platform data directory when `None`). Setting this to a directory on
+    /// the same filesystem as the game's Wine bottle enables hardlink
+    /// deployment (zero disk overhead).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staging_dir: Option<String>,
+
+    /// Whether the first-run setup wizard has been completed.
+    #[serde(default)]
+    pub has_completed_setup: bool,
+
+    /// Whether controller/gamepad mode is enabled (larger UI targets for Steam Deck).
+    #[serde(default)]
+    pub controller_mode: bool,
+
     /// Catch-all for any additional settings that may be added in the future.
     /// Flattened so extra keys sit at the top level of the JSON object.
     #[serde(flatten)]
@@ -207,6 +222,15 @@ pub fn set_config_value(key: &str, value: &str) -> Result<()> {
         "download_dir" => {
             config.download_dir = Some(value.to_owned());
         }
+        "staging_dir" => {
+            config.staging_dir = Some(value.to_owned());
+        }
+        "has_completed_setup" => {
+            config.has_completed_setup = value == "true";
+        }
+        "controller_mode" => {
+            config.controller_mode = value == "true";
+        }
         _ => {
             config
                 .extra
@@ -230,6 +254,9 @@ pub fn get_config_value(key: &str) -> Result<Option<String>> {
     let value = match key {
         "nexus_api_key" => config.nexus_api_key,
         "download_dir" => config.download_dir,
+        "staging_dir" => config.staging_dir,
+        "has_completed_setup" => Some(config.has_completed_setup.to_string()),
+        "controller_mode" => Some(config.controller_mode.to_string()),
         _ => config.extra.get(key).map(|v| match v {
             serde_json::Value::String(s) => s.clone(),
             other => other.to_string(),
@@ -265,6 +292,9 @@ mod tests {
         let mut config = AppConfig {
             nexus_api_key: Some("abc123".into()),
             download_dir: Some("/tmp/mods".into()),
+            staging_dir: None,
+            has_completed_setup: false,
+            controller_mode: false,
             extra: HashMap::new(),
         };
         config

@@ -1,19 +1,7 @@
 <script lang="ts">
   import { selectedGame, showError, showSuccess } from "$lib/stores";
-  import type { InstalledMod } from "$lib/types";
-  // TODO: Import from $lib/api when backend commands are ready
-  // import { invoke } from "@tauri-apps/api/core";
-
-  // ---- Types ----
-
-  interface ModVersion {
-    id: string;
-    version: string;
-    installedAt: string;
-    archiveName: string;
-    stagingPath: string | null;
-    isCurrent: boolean;
-  }
+  import { listModVersions, rollbackModVersion } from "$lib/api";
+  import type { InstalledMod, ModVersion } from "$lib/types";
 
   // ---- Props ----
 
@@ -44,25 +32,7 @@
     if (!game) return;
     loading = true;
     try {
-      // TODO: Wire up when backend is ready
-      // const history = await invoke("get_mod_version_history", {
-      //   modId: mod.id,
-      //   gameId: game.game_id,
-      //   bottleName: game.bottle_name,
-      // });
-      // versions = history as ModVersion[];
-
-      // Placeholder: show current version only
-      versions = [
-        {
-          id: `${mod.id}-current`,
-          version: mod.version || "Unknown",
-          installedAt: mod.installed_at,
-          archiveName: mod.archive_name,
-          stagingPath: mod.staging_path,
-          isCurrent: true,
-        },
-      ];
+      versions = await listModVersions(mod.id);
     } catch (e: unknown) {
       showError(`Failed to load version history: ${e}`);
     } finally {
@@ -84,13 +54,7 @@
     if (!confirmRollback || !game) return;
     rollingBack = true;
     try {
-      // TODO: Wire up when backend is ready
-      // await invoke("rollback_mod_version", {
-      //   modId: mod.id,
-      //   versionId: confirmRollback.id,
-      //   gameId: game.game_id,
-      //   bottleName: game.bottle_name,
-      // });
+      await rollbackModVersion(mod.id, confirmRollback.id);
 
       showSuccess(`Rolled back "${mod.name}" to version ${confirmRollback.version}`);
 
@@ -155,11 +119,11 @@
       {#each versions as version (version.id)}
         <div
           class="vh-entry"
-          class:vh-entry-current={version.isCurrent}
+          class:vh-entry-current={version.is_current}
           role="listitem"
         >
           <div class="vh-entry-marker">
-            <div class="marker-dot" class:marker-current={version.isCurrent}></div>
+            <div class="marker-dot" class:marker-current={version.is_current}></div>
             {#if versions.indexOf(version) < versions.length - 1}
               <div class="marker-line"></div>
             {/if}
@@ -167,15 +131,15 @@
           <div class="vh-entry-content">
             <div class="vh-entry-header">
               <span class="vh-version">{version.version}</span>
-              {#if version.isCurrent}
+              {#if version.is_current}
                 <span class="current-badge">Current</span>
               {/if}
-              <span class="vh-date">{formatDate(version.installedAt)}</span>
+              <span class="vh-date">{formatDate(version.created_at)}</span>
             </div>
-            {#if version.archiveName}
-              <span class="vh-archive">{version.archiveName}</span>
+            {#if version.archive_name}
+              <span class="vh-archive">{version.archive_name}</span>
             {/if}
-            {#if !version.isCurrent}
+            {#if !version.is_current}
               <button
                 class="btn btn-rollback"
                 onclick={() => requestRollback(version)}
@@ -226,12 +190,12 @@
         </div>
         <div class="meta-row">
           <span class="meta-label">Installed</span>
-          <span class="meta-value">{formatDateTime(confirmRollback.installedAt)}</span>
+          <span class="meta-value">{formatDateTime(confirmRollback.created_at)}</span>
         </div>
-        {#if confirmRollback.archiveName}
+        {#if confirmRollback.archive_name}
           <div class="meta-row">
             <span class="meta-label">Archive</span>
-            <span class="meta-value meta-mono">{confirmRollback.archiveName}</span>
+            <span class="meta-value meta-mono">{confirmRollback.archive_name}</span>
           </div>
         {/if}
       </div>

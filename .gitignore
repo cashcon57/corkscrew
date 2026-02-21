@@ -37,6 +37,7 @@ vite.config.ts.timestamp-*
 
 # Release artifacts
 latest.json
+*.sig
 
 # Brand kit source (too large for git)
 brand-kit/source-highres.png

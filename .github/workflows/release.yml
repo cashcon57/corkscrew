@@ -12,26 +12,9 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    name: Build (${{ matrix.config.name }})
-    runs-on: ${{ matrix.config.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        config:
-          - name: macOS (Apple Silicon)
-            os: macos-latest
-            target: aarch64-apple-darwin
-            arch: aarch64
-          - name: macOS (Intel)
-            os: macos-latest
-            target: x86_64-apple-darwin
-            arch: x86_64
-          - name: Linux (x86_64)
-            os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            arch: x86_64
-
+  build-linux:
+    name: Build Linux (x86_64)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -43,8 +26,6 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.config.target }}
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
@@ -55,7 +36,6 @@ jobs:
         run: npm ci
 
       - name: Install Linux system dependencies
-        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libgtk-3-dev
@@ -67,69 +47,84 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: cargo tauri build --target ${{ matrix.config.target }}
-
-      - name: Rename macOS updater artifacts with arch suffix
-        if: runner.os == 'macOS'
-        run: |
-          DIR=src-tauri/target/${{ matrix.config.target }}/release/bundle/macos
-          ARCH=${{ matrix.config.arch }}
-          # Corkscrew.app.tar.gz → Corkscrew_ARCH.app.tar.gz
-          if [ -f "$DIR/Corkscrew.app.tar.gz" ]; then
-            mv "$DIR/Corkscrew.app.tar.gz" "$DIR/Corkscrew_${ARCH}.app.tar.gz"
-          fi
-          if [ -f "$DIR/Corkscrew.app.tar.gz.sig" ]; then
-            mv "$DIR/Corkscrew.app.tar.gz.sig" "$DIR/Corkscrew_${ARCH}.app.tar.gz.sig"
-          fi
-
-      - name: Upload macOS artifacts
-        if: runner.os == 'macOS'
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-${{ matrix.config.target }}
-          path: |
-            src-tauri/target/${{ matrix.config.target }}/release/bundle/dmg/*.dmg
-            src-tauri/target/${{ matrix.config.target }}/release/bundle/macos/*.app
-            src-tauri/target/${{ matrix.config.target }}/release/bundle/macos/*.tar.gz
-            src-tauri/target/${{ matrix.config.target }}/release/bundle/macos/*.sig
+        run: cargo tauri build --target x86_64-unknown-linux-gnu
 
       - name: Upload Linux artifacts
-        if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4
         with:
-          name: linux-${{ matrix.config.target }}
+          name: linux-x86_64-unknown-linux-gnu
           path: |
-            src-tauri/target/${{ matrix.config.target }}/release/bundle/appimage/*.AppImage
-            src-tauri/target/${{ matrix.config.target }}/release/bundle/appimage/*.tar.gz
-            src-tauri/target/${{ matrix.config.target }}/release/bundle/appimage/*.sig
-            src-tauri/target/${{ matrix.config.target }}/release/bundle/deb/*.deb
-            src-tauri/target/${{ matrix.config.target }}/release/bundle/rpm/*.rpm
+            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
+            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.tar.gz
+            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.sig
+            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb
+            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/rpm/*.rpm
 
   release:
-    name: Create Release
-    needs: build
+    name: Publish Release
+    needs: build-linux
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download all artifacts
+      - name: Download Linux CI artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
 
+      - name: Download macOS artifacts from draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          mkdir -p artifacts/macos-aarch64-apple-darwin artifacts/macos-x86_64-apple-darwin
+
+          echo "Downloading macOS updater artifacts from release $TAG..."
+
+          gh release download "$TAG" \
+            -p "Corkscrew_aarch64.app.tar.gz" \
+            -p "Corkscrew_aarch64.app.tar.gz.sig" \
+            -D artifacts/macos-aarch64-apple-darwin 2>/dev/null \
+            && echo "  ✓ macOS aarch64 updater artifacts downloaded" \
+            || echo "  ⚠ macOS aarch64 updater artifacts not found (release will be Linux-only)"
+
+          gh release download "$TAG" \
+            -p "Corkscrew_x86_64.app.tar.gz" \
+            -p "Corkscrew_x86_64.app.tar.gz.sig" \
+            -D artifacts/macos-x86_64-apple-darwin 2>/dev/null \
+            && echo "  ✓ macOS x86_64 updater artifacts downloaded" \
+            || echo "  ⚠ macOS x86_64 updater artifacts not found (release will be Linux-only)"
+
+          echo ""
+          echo "Artifact directories:"
+          ls -lhR artifacts/ 2>/dev/null || true
+
+      - name: Rename Linux artifacts to friendly names
+        run: |
+          VERSION=$(jq -r .version src-tauri/tauri.conf.json)
+          DIR=artifacts/linux-x86_64-unknown-linux-gnu
+
+          cd "$DIR"
+          for f in *; do
+            case "$f" in
+              *.AppImage.tar.gz.sig) mv "$f" "Corkscrew-${VERSION}-Linux.AppImage.tar.gz.sig" ;;
+              *.AppImage.tar.gz)     mv "$f" "Corkscrew-${VERSION}-Linux.AppImage.tar.gz" ;;
+              *.AppImage.sig)        mv "$f" "Corkscrew-${VERSION}-Linux.AppImage.sig" ;;
+              *.AppImage)            mv "$f" "Corkscrew-${VERSION}-Linux.AppImage" ;;
+              *.deb)                 mv "$f" "Corkscrew-${VERSION}-Linux.deb" ;;
+              *.rpm)                 mv "$f" "Corkscrew-${VERSION}-Linux.rpm" ;;
+            esac
+          done
+          cd -
+
       - name: Build latest.json for updater
         run: python3 scripts/build-latest-json.py artifacts/ > latest.json
 
-      - name: Create GitHub Release
+      - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           draft: false
           generate_release_notes: true
           files: |
-            artifacts/**/*.dmg
-            artifacts/**/*.AppImage
-            artifacts/**/*.deb
-            artifacts/**/*.rpm
-            artifacts/**/*.tar.gz
-            artifacts/**/*.sig
+            artifacts/linux-x86_64-unknown-linux-gnu/*
             latest.json

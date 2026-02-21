@@ -14,6 +14,8 @@ export interface DetectedGame {
   bottle_path: string;
 }
 
+export type ModSourceType = "nexus" | "direct" | "loverslab" | "moddb" | "curseforge" | "manual";
+
 export interface InstalledMod {
   id: number;
   game_id: string;
@@ -21,6 +23,7 @@ export interface InstalledMod {
   nexus_mod_id: number | null;
   nexus_file_id: number | null;
   source_url: string | null;
+  source_type: ModSourceType;
   name: string;
   version: string;
   archive_name: string;
@@ -47,6 +50,8 @@ export interface DeployProgress {
   current: number;
   total: number;
   mod_name: string;
+  files_deployed: number;
+  total_files: number;
 }
 
 export interface PluginEntry {
@@ -57,6 +62,9 @@ export interface PluginEntry {
 export interface AppConfig {
   nexus_api_key: string | null;
   download_dir: string | null;
+  staging_dir: string | null;
+  has_completed_setup: boolean;
+  controller_mode: boolean;
   [key: string]: unknown;
 }
 
@@ -391,6 +399,23 @@ export interface SystemInfo {
   vram_total_mb: number | null;
 }
 
+// NexusMods Browse
+
+export interface NexusModInfo {
+  mod_id: number;
+  name: string;
+  summary: string;
+  author: string;
+  category_id: number;
+  version: string;
+  endorsement_count: number;
+  unique_downloads: number;
+  picture_url: string | null;
+  updated_at: string | null;
+  available: boolean;
+  adult_content: boolean;
+}
+
 // Collections
 
 export interface CollectionInfo {
@@ -559,6 +584,7 @@ export interface ExportedMod {
   nexus_file_id: number | null;
   archive_name: string;
   source_url: string | null;
+  source_type: string;
   installed_files: string[];
   fomod_selections: unknown | null;
 }
@@ -584,6 +610,7 @@ export interface ImportModStatus {
   status: ImportStatus;
   nexus_mod_id: number | null;
   nexus_file_id: number | null;
+  source_type: string;
   existing_mod_id: number | null;
 }
 
@@ -599,6 +626,22 @@ export interface ModlistDiff {
   version_changed: [string, string, string][];
   priority_changed: [string, number, number][];
   enabled_changed: [string, boolean, boolean][];
+}
+
+export interface ImportResult {
+  mods_updated: number;
+  mods_skipped: number;
+  mods_to_download: ImportDownloadAction[];
+  errors: string[];
+}
+
+export interface ImportDownloadAction {
+  name: string;
+  version: string;
+  nexus_mod_id: number | null;
+  nexus_file_id: number | null;
+  source_type: string;
+  source_url: string | null;
 }
 
 // Bottle Settings

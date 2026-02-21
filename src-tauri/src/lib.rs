@@ -159,6 +159,8 @@ fn install_mod_cmd(
     bottle_name: String,
     mod_name: Option<String>,
     mod_version: Option<String>,
+    source_type: Option<String>,
+    source_url: Option<String>,
     state: State<AppState>,
 ) -> Result<InstalledMod, String> {
     use progress::{InstallProgress, INSTALL_PROGRESS_EVENT};
@@ -315,6 +317,11 @@ fn install_mod_cmd(
             },
         );
         let _ = sync_skyrim_plugins_for_game(&game, &bottle);
+    }
+
+    // Set source type if provided
+    if let Some(ref st) = source_type {
+        let _ = db.set_mod_source(mod_id, st, source_url.as_deref());
     }
 
     // Emit: mod completed
@@ -1336,16 +1343,24 @@ fn redeploy_all_mods(
         &game_id,
         &bottle_name,
         &data_dir,
-        Some(move |current: usize, total: usize, mod_name: &str| {
-            let _ = app_clone.emit(
-                "deploy-progress",
-                serde_json::json!({
-                    "current": current,
-                    "total": total,
-                    "mod_name": mod_name,
-                }),
-            );
-        }),
+        Some(
+            move |current: usize,
+                  total: usize,
+                  mod_name: &str,
+                  files_deployed: usize,
+                  total_files: usize| {
+                let _ = app_clone.emit(
+                    "deploy-progress",
+                    serde_json::json!({
+                        "current": current,
+                        "total": total,
+                        "mod_name": mod_name,
+                        "files_deployed": files_deployed,
+                        "total_files": total_files,
+                    }),
+                );
+            },
+        ),
     )
     .map_err(|e| e.to_string())?;
 
@@ -1426,7 +1441,9 @@ fn get_deployment_health(
     let deploy_method = if is_deployed {
         match resolve_game(&game_id, &bottle_name) {
             Ok((_, _, data_dir)) => {
-                if deployer::test_hardlink_support(&data_dir, &data_dir) {
+                // Test actual staging→data_dir filesystem match (not same-dir)
+                let staging_root = staging::staging_base_dir(&game_id, &bottle_name);
+                if deployer::same_filesystem(&staging_root, &data_dir) {
                     "hardlink"
                 } else {
                     "copy"
@@ -1658,6 +1675,18 @@ async fn get_collection_diff_cmd(
 fn set_mod_notes(mod_id: i64, notes: Option<String>, state: State<AppState>) -> Result<(), String> {
     let db = &state.db;
     db.set_user_notes(mod_id, notes.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_mod_source(
+    mod_id: i64,
+    source_type: String,
+    source_url: Option<String>,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let db = &state.db;
+    db.set_mod_source(mod_id, &source_type, source_url.as_deref())
         .map_err(|e| e.to_string())
 }
 
@@ -2509,11 +2538,13 @@ async fn fetch_url_text(url: String) -> Result<String, String> {
 
     let client = reqwest::Client::builder()
         .user_agent("Corkscrew/0.3")
+        .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| e.to_string())?;
 
     let resp = client
         .get(&resolved_url)
+        .header("Accept", "text/html, text/markdown, text/plain, */*")
         .send()
         .await
         .map_err(|e| format!("Failed to fetch URL: {e}"))?;
@@ -2525,6 +2556,22 @@ async fn fetch_url_text(url: String) -> Result<String, String> {
     resp.text()
         .await
         .map_err(|e| format!("Failed to read response: {e}"))
+}
+
+#[tauri::command]
+async fn browse_nexus_mods_cmd(
+    game_slug: String,
+    category: String,
+) -> Result<Vec<nexus::NexusModInfo>, String> {
+    let api_key = config::get_config()
+        .ok()
+        .and_then(|c| c.nexus_api_key)
+        .ok_or_else(|| "No NexusMods API key configured".to_string())?;
+    let client = nexus::NexusClient::new(api_key);
+    client
+        .browse_mods(&game_slug, &category)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -2784,6 +2831,20 @@ fn diff_modlists_cmd(
     Ok(modlist_io::diff_modlists(&current, &imported))
 }
 
+#[tauri::command]
+fn execute_modlist_import(
+    file_path: String,
+    game_id: String,
+    bottle_name: String,
+    state: State<AppState>,
+) -> Result<modlist_io::ImportResult, String> {
+    let imported =
+        modlist_io::read_modlist_file(Path::new(&file_path)).map_err(|e| e.to_string())?;
+    let db = &state.db;
+    modlist_io::execute_import(db, &imported, &game_id, &bottle_name)
+        .map_err(|e| e.to_string())
+}
+
 // --- Disk Budget Commands ---
 
 #[tauri::command]
@@ -2810,6 +2871,58 @@ fn estimate_install_impact_cmd(
         archive_size,
         &data_dir,
     ))
+}
+
+// --- Staging Info Commands ---
+
+#[tauri::command]
+fn get_staging_info(
+    game_id: String,
+    bottle_name: String,
+) -> Result<serde_json::Value, String> {
+    let staging_root = staging::staging_root();
+    let staging_dir = staging::staging_base_dir(&game_id, &bottle_name);
+
+    let (hardlinks_supported, data_dir_str) = match resolve_game(&game_id, &bottle_name) {
+        Ok((_, _, data_dir)) => (
+            deployer::same_filesystem(&staging_dir, &data_dir),
+            data_dir.to_string_lossy().to_string(),
+        ),
+        Err(_) => (false, String::new()),
+    };
+
+    let config = config::get_config().map_err(|e| e.to_string())?;
+    let is_custom = config.staging_dir.is_some();
+
+    Ok(serde_json::json!({
+        "staging_root": staging_root.to_string_lossy(),
+        "staging_dir": staging_dir.to_string_lossy(),
+        "data_dir": data_dir_str,
+        "hardlinks_supported": hardlinks_supported,
+        "is_custom_path": is_custom,
+    }))
+}
+
+#[tauri::command]
+fn set_staging_directory(path: Option<String>) -> Result<(), String> {
+    match path {
+        Some(ref p) if !p.is_empty() => {
+            // Validate path exists or can be created
+            let path_buf = std::path::PathBuf::from(p);
+            if !path_buf.exists() {
+                std::fs::create_dir_all(&path_buf).map_err(|e| {
+                    format!("Cannot create staging directory '{}': {}", p, e)
+                })?;
+            }
+            config::set_config_value("staging_dir", p).map_err(|e| e.to_string())
+        }
+        _ => {
+            // Clear override — revert to default
+            let mut cfg = config::get_config().map_err(|e| e.to_string())?;
+            cfg.staging_dir = None;
+            config::save_config(&cfg).map_err(|e| e.to_string())
+        }
+    }
 }
 
 // --- INI Manager Commands ---
@@ -3091,6 +3204,7 @@ fn has_compatible_fomod_recipe(
 pub fn run() {
     // Register game plugins
     plugins::skyrim_se::register();
+    plugins::fallout4::register();
 
     // Initialize database
     let db_path = config::db_path();
@@ -3109,9 +3223,22 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .manage(AppState {
-            db: Arc::new(db),
-            download_queue: Arc::new(download_queue::DownloadQueue::new()),
+        .manage({
+            let queue = download_queue::DownloadQueue::new();
+            // Restore persisted queue items from database
+            match db.load_queue_items() {
+                Ok(items) => {
+                    if !items.is_empty() {
+                        log::info!("Restored {} download queue items from database", items.len());
+                        queue.load_from(items);
+                    }
+                }
+                Err(e) => log::warn!("Failed to load download queue from database: {}", e),
+            }
+            AppState {
+                db: Arc::new(db),
+                download_queue: Arc::new(queue),
+            }
         })
         .invoke_handler(tauri::generate_handler![
             get_bottles,
@@ -3201,7 +3328,8 @@ pub fn run() {
             analyze_crash_log_cmd,
             // Utility
             fetch_url_text,
-            // Collections
+            // Collections & Nexus Browse
+            browse_nexus_mods_cmd,
             browse_collections_cmd,
             get_collection_cmd,
             get_collection_revisions,
@@ -3225,6 +3353,7 @@ pub fn run() {
             export_modlist_cmd,
             import_modlist_plan,
             diff_modlists_cmd,
+            execute_modlist_import,
             // Download Archive Management
             list_download_archives,
             delete_download_archive,
@@ -3238,6 +3367,7 @@ pub fn run() {
             get_deployment_health,
             // Notes & Tags
             set_mod_notes,
+            set_mod_source,
             set_mod_tags,
             get_all_tags,
             // Auto-category
@@ -3256,6 +3386,9 @@ pub fn run() {
             // Disk Budget
             get_disk_budget,
             estimate_install_impact_cmd,
+            // Staging Info
+            get_staging_info,
+            set_staging_directory,
             // INI Manager
             get_ini_settings,
             set_ini_setting,

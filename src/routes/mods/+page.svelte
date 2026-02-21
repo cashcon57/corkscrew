@@ -2,6 +2,9 @@
   import { onMount, onDestroy } from "svelte";
   import { open } from "@tauri-apps/plugin-dialog";
   import { openUrl } from "@tauri-apps/plugin-opener";
+  import ModVersionHistory from "$lib/components/ModVersionHistory.svelte";
+  import ModlistImportWizard from "$lib/components/ModlistImportWizard.svelte";
+  import FomodWizard from "$lib/components/FomodWizard.svelte";
   import {
     getInstalledMods,
     installMod,
@@ -30,6 +33,11 @@
     resolveAllConflicts,
     onDeployProgress,
     backfillCategories,
+    exportModlist,
+    detectFomod,
+    getFomodRecipe,
+    getFomodFiles,
+    saveFomodRecipe,
   } from "$lib/api";
   import type { InstallProgressEvent, DeploymentHealth, ConflictSuggestion, ResolutionResult, DeployProgress } from "$lib/types";
   import {
@@ -41,13 +49,14 @@
     showSuccess,
     skseStatus,
   } from "$lib/stores";
-  import type { InstalledMod, DetectedGame, SkseStatus, DowngradeStatus, FileConflict, ModUpdateInfo } from "$lib/types";
+  import type { InstalledMod, DetectedGame, SkseStatus, DowngradeStatus, FileConflict, ModUpdateInfo, FomodInstaller } from "$lib/types";
   import GameIcon from "$lib/components/GameIcon.svelte";
   import DiskBudgetPanel from "$lib/components/DiskBudgetPanel.svelte";
   import PreflightPanel from "$lib/components/PreflightPanel.svelte";
   import DependencyPanel from "$lib/components/DependencyPanel.svelte";
   import SessionHistoryPanel from "$lib/components/SessionHistoryPanel.svelte";
   import ModCategoryView from "$lib/components/mods/ModCategoryView.svelte";
+  import ModBisect from "$lib/components/ModBisect.svelte";
 
   let installing = $state(false);
   let installStep = $state("");
@@ -72,6 +81,15 @@
   let dragOverIndex = $state<number | null>(null);
   let reordering = $state(false);
 
+  // Import/export state
+  let showImportWizard = $state(false);
+  let exporting = $state(false);
+
+  // FOMOD wizard state
+  let showFomodWizard = $state(false);
+  let fomodInstaller = $state<FomodInstaller | null>(null);
+  let fomodTargetMod = $state<InstalledMod | null>(null);
+
   // Conflict state
   let conflicts = $state<FileConflict[]>([]);
 
@@ -88,6 +106,7 @@
   // Search/filter state
   let searchQuery = $state("");
   let filterStatus = $state<"all" | "enabled" | "disabled" | "conflicts" | "has-updates">("all");
+  let filterSource = $state<"all" | "nexus" | "loverslab" | "moddb" | "curseforge" | "direct" | "manual">("all");
   let filterCollection = $state<string | null>(null);
   let sortBy = $state<"priority" | "name" | "date" | "version" | "files">("priority");
   let sortDir = $state<"asc" | "desc">("asc");
@@ -130,6 +149,7 @@
   let showPreflightPanel = $state(false);
   let showSessionPanel = $state(false);
   let showDependencyPanel = $state(false);
+  let showBisect = $state(false);
 
   // Derived: set of mod IDs that have conflicts
   let conflictModIds = $derived((() => {
@@ -262,6 +282,10 @@
     } else if (filterStatus === "has-updates") {
       mods = mods.filter(m => updateMap.has(m.id));
     }
+    // Source filter
+    if (filterSource !== "all") {
+      mods = mods.filter(m => (m.source_type || "manual") === filterSource);
+    }
     // Collection filter
     if (filterCollection !== null) {
       if (filterCollection === "__standalone__") {
@@ -385,8 +409,23 @@
         game.game_id,
         game.bottle_name
       );
-      showSuccess(`Installed "${(mod as InstalledMod).name}" successfully`);
+      const installed = mod as InstalledMod;
+      showSuccess(`Installed "${installed.name}" successfully`);
       await loadMods(game);
+
+      // Auto-detect FOMOD after install
+      if (installed.staging_path) {
+        try {
+          const installer = await detectFomod(installed.staging_path);
+          if (installer) {
+            fomodInstaller = installer;
+            fomodTargetMod = installed;
+            showFomodWizard = true;
+          }
+        } catch {
+          // FOMOD detection is optional, don't show errors
+        }
+      }
     } catch (e: unknown) {
       showError(`Install failed: ${e}`);
     } finally {
@@ -639,8 +678,23 @@
       });
 
       const mod = await installMod(filePath, game.game_id, game.bottle_name);
-      showSuccess(`Installed "${(mod as InstalledMod).name}" successfully`);
+      const installed = mod as InstalledMod;
+      showSuccess(`Installed "${installed.name}" successfully`);
       await loadMods(game);
+
+      // Auto-detect FOMOD after drag-and-drop install
+      if (installed.staging_path) {
+        try {
+          const installer = await detectFomod(installed.staging_path);
+          if (installer) {
+            fomodInstaller = installer;
+            fomodTargetMod = installed;
+            showFomodWizard = true;
+          }
+        } catch {
+          // FOMOD detection is optional
+        }
+      }
     } catch (e: unknown) {
       showError(`Install failed: ${e}`);
     } finally {
@@ -766,6 +820,92 @@
     }
   }
 
+  // --- Batch Update All ---
+  async function handleUpdateAll() {
+    const game = pickedGame ?? $selectedGame;
+    if (!game || modUpdates.length === 0) return;
+    // NexusMods compliance: open browser pages for each update
+    // Free users must manually download from the Nexus website
+    const gameSlug = game.nexus_slug || game.game_id;
+    let opened = 0;
+    for (const update of modUpdates) {
+      try {
+        await openUrl(`https://www.nexusmods.com/${gameSlug}/mods/${update.nexus_mod_id}?tab=files`);
+        opened++;
+      } catch {
+        // Skip mods that fail to open
+      }
+    }
+    if (opened > 0) {
+      showSuccess(`Opened ${opened} Nexus mod page${opened !== 1 ? "s" : ""} for updating`);
+    }
+  }
+
+  // --- FOMOD Reconfigure ---
+  async function handleReconfigureFomod(mod: InstalledMod) {
+    if (!mod.staging_path) return;
+    try {
+      const installer = await detectFomod(mod.staging_path);
+      if (!installer) {
+        showError("No FOMOD installer found in this mod's staging folder.");
+        return;
+      }
+      // Load previous recipe to pre-populate selections
+      const recipe = await getFomodRecipe(mod.id);
+      if (recipe) {
+        // Pre-apply saved selections into the installer (the wizard's loadDefaults will handle this)
+      }
+      fomodInstaller = installer;
+      fomodTargetMod = mod;
+      showFomodWizard = true;
+    } catch (e: unknown) {
+      showError(`Failed to detect FOMOD: ${e}`);
+    }
+  }
+
+  async function handleFomodComplete(selections: Record<string, string[]>) {
+    const game = pickedGame ?? $selectedGame;
+    if (!game || !fomodTargetMod || !fomodInstaller) return;
+    showFomodWizard = false;
+    try {
+      // Get the files for the new selections
+      const files = await getFomodFiles(fomodInstaller, selections);
+      // Save the recipe
+      await saveFomodRecipe(fomodTargetMod.id, fomodTargetMod.name, "", selections);
+      // Redeploy to apply changes
+      await redeployAllMods(game.game_id, game.bottle_name);
+      await loadMods(game);
+      await refreshHealth(game);
+      showSuccess(`Reconfigured FOMOD for "${fomodTargetMod.name}"`);
+    } catch (e: unknown) {
+      showError(`Failed to apply FOMOD configuration: ${e}`);
+    } finally {
+      fomodInstaller = null;
+      fomodTargetMod = null;
+    }
+  }
+
+  // --- Import / Export ---
+  async function handleExport() {
+    const game = pickedGame ?? $selectedGame;
+    if (!game) return;
+    exporting = true;
+    try {
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const outputPath = await save({
+        filters: [{ name: "Mod List", extensions: ["json"] }],
+        defaultPath: `${game.display_name.replace(/[^a-zA-Z0-9]/g, "_")}_modlist.json`,
+      });
+      if (!outputPath) return;
+      await exportModlist(game.game_id, game.bottle_name, outputPath);
+      showSuccess("Mod list exported successfully");
+    } catch (e: unknown) {
+      showError(`Export failed: ${e}`);
+    } finally {
+      exporting = false;
+    }
+  }
+
   // --- Deploy / Purge / Health ---
   async function handleDeploy() {
     const game = pickedGame ?? $selectedGame;
@@ -775,8 +915,14 @@
     deployProgressText = "Starting...";
     try {
       deployUnlisten = await onDeployProgress((p: DeployProgress) => {
-        deployProgress = p.total > 0 ? Math.round((p.current / p.total) * 100) : 0;
-        deployProgressText = `${p.current}/${p.total} ${p.mod_name}`;
+        // Use file-level progress for smoother bar (falls back to mod-level if unavailable)
+        if (p.total_files > 0) {
+          deployProgress = Math.round((p.files_deployed / p.total_files) * 100);
+          deployProgressText = `${p.mod_name} (${p.files_deployed}/${p.total_files} files)`;
+        } else {
+          deployProgress = p.total > 0 ? Math.round((p.current / p.total) * 100) : 0;
+          deployProgressText = `${p.current}/${p.total} ${p.mod_name}`;
+        }
       });
       const result = await redeployAllMods(game.game_id, game.bottle_name);
       showSuccess(`Deployed ${result.deployed_count} files${result.fallback_used ? " (copy fallback used)" : ""}`);
@@ -1160,8 +1306,25 @@
               <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
             </svg>
             Updates
+            {#if modUpdates.length > 0}
+              <span class="update-count-badge">{modUpdates.length}</span>
+            {/if}
           {/if}
         </button>
+        {#if modUpdates.length > 0}
+          <button
+            class="btn btn-accent btn-sm"
+            onclick={handleUpdateAll}
+            title="Open Nexus download pages for all outdated mods"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="7 10 12 15 17 10" />
+              <line x1="12" y1="15" x2="12" y2="3" />
+            </svg>
+            Update All ({modUpdates.length})
+          </button>
+        {/if}
         <a
           href="https://www.nexusmods.com/{activeGame.nexus_slug}"
           target="_blank"
@@ -1259,6 +1422,53 @@
           </span>
         {/if}
       {/if}
+      <!-- Import / Export -->
+      <button
+        class="btn btn-ghost"
+        onclick={() => showImportWizard = true}
+        title="Import a mod list"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+          <polyline points="7 10 12 15 17 10" />
+          <line x1="12" y1="15" x2="12" y2="3" />
+        </svg>
+        Import
+      </button>
+      <button
+        class="btn btn-ghost"
+        onclick={handleExport}
+        disabled={exporting || $installedMods.length === 0}
+        title="Export current mod list"
+      >
+        {#if exporting}
+          <span class="spinner spinner-sm"></span>
+          Exporting...
+        {:else}
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="17 8 12 3 7 8" />
+            <line x1="12" y1="3" x2="12" y2="15" />
+          </svg>
+          Export
+        {/if}
+      </button>
+
+      {#if $installedMods.filter(m => m.enabled).length >= 10}
+        <button
+          class="btn btn-ghost"
+          onclick={() => showBisect = true}
+          title="Binary search to find which mod causes crashes"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="8" />
+            <line x1="21" y1="21" x2="16.65" y2="16.65" />
+            <line x1="8" y1="11" x2="14" y2="11" />
+          </svg>
+          Bisect
+        </button>
+      {/if}
+
       <div class="play-button-group">
         <button class="btn btn-play" onclick={handlePlay} disabled={launching}>
           {#if launching}
@@ -1534,6 +1744,15 @@
           <option value="conflicts">Has Conflicts</option>
           <option value="has-updates">Has Updates</option>
         </select>
+        <select class="filter-select" bind:value={filterSource}>
+          <option value="all">All Sources</option>
+          <option value="nexus">Nexus</option>
+          <option value="loverslab">LoversLab</option>
+          <option value="moddb">ModDB</option>
+          <option value="curseforge">CurseForge</option>
+          <option value="direct">Direct</option>
+          <option value="manual">Manual</option>
+        </select>
         <!-- View mode toggle -->
         <div class="view-mode-toggle">
           <button
@@ -1569,7 +1788,7 @@
             </svg>
           </button>
         </div>
-        {#if searchQuery || filterStatus !== "all" || filterCollection !== null}
+        {#if searchQuery || filterStatus !== "all" || filterSource !== "all" || filterCollection !== null}
           <span class="filter-count">{filteredMods.length} of {$installedMods.length}</span>
         {/if}
       </div>
@@ -1673,7 +1892,7 @@
             {#if filteredMods.length === 0 && $installedMods.length > 0}
               <div class="empty-filter-state">
                 <p>No mods match your filters.</p>
-                <button class="btn btn-ghost btn-sm" onclick={() => { searchQuery = ""; filterStatus = "all"; filterCollection = null; }}>
+                <button class="btn btn-ghost btn-sm" onclick={() => { searchQuery = ""; filterStatus = "all"; filterSource = "all"; filterCollection = null; }}>
                   Clear Filters
                 </button>
               </div>
@@ -1700,6 +1919,7 @@
                       class="table-row"
                       class:row-disabled={!mod.enabled}
                       class:row-selected={selectedModId === mod.id}
+                      class:row-has-conflict={conflictModIds.has(mod.id)}
                       class:row-dragging={dragRowIndex === globalIndex}
                       class:row-drag-over={dragOverIndex === globalIndex && dragRowIndex !== null && dragRowIndex !== globalIndex}
                       class:row-drag-above={dragOverIndex === globalIndex && dragRowIndex !== null && dragRowIndex > globalIndex}
@@ -1715,7 +1935,7 @@
                       <span class="col-toggle"><button class="toggle-switch" class:toggle-on={mod.enabled} class:toggle-busy={togglingMod === mod.id} onclick={() => handleToggle(mod)} title={mod.enabled ? "Disable mod" : "Enable mod"}><span class="toggle-track"><span class="toggle-thumb"></span></span></button></span>
                       <span class="col-name"><span class="mod-name">{mod.name}</span>{#if conflictModIds.has(mod.id)}<span class="conflict-icon" title={getConflictTooltip(mod.id)}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg></span>{/if}{#if mod.user_notes}<span class="notes-icon" title={mod.user_notes}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /></svg></span>{/if}</span>
                       <span class="col-category">{#if mod.auto_category}<span class="category-cell" style="color: {categoryColors[mod.auto_category] ?? '#6b7280'};" title={mod.auto_category}>{#if categoryIcons[mod.auto_category]}<svg class="category-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{@html categoryIcons[mod.auto_category]}</svg>{/if}<span class="category-label">{mod.auto_category}</span></span>{:else}<span class="text-muted">&mdash;</span>{/if}</span>
-                      <span class="col-origin">{#if mod.nexus_mod_id}<span class="origin-label origin-nexus">Nexus</span>{:else}<span class="origin-label origin-manual">Manual</span>{/if}</span>
+                      <span class="col-origin">{#if mod.source_type === "nexus"}<span class="origin-label origin-nexus">Nexus</span>{:else if mod.source_type === "loverslab"}<span class="origin-label origin-loverslab">LoversLab</span>{:else if mod.source_type === "moddb"}<span class="origin-label origin-moddb">ModDB</span>{:else if mod.source_type === "curseforge"}<span class="origin-label origin-curseforge">CurseForge</span>{:else if mod.source_type === "direct"}<span class="origin-label origin-direct">Direct</span>{:else}<span class="origin-label origin-manual">Manual</span>{/if}</span>
                       <span class="col-source">{#if mod.collection_name}<span class="source-label source-collection" title={mod.collection_name}>{mod.collection_name}</span>{:else}<span class="source-label source-user">User</span>{/if}</span>
                       <span class="col-version"><span class="version-text">{mod.version || "\u2014"}</span>{#if updateMap.has(mod.id)}{@const update = updateMap.get(mod.id)!}<span class="update-badge" title={`Update available: v${update.latest_version}`}>Update</span>{/if}</span>
                       <span class="col-files">{mod.installed_files.length}</span>
@@ -1743,6 +1963,7 @@
                 class:row-disabled={!mod.enabled}
                 class:row-selected={selectedModId === mod.id}
                 class:row-focused={focusedIndex === i}
+                class:row-has-conflict={conflictModIds.has(mod.id)}
                 class:row-dragging={dragRowIndex === i}
                 class:row-drag-over={dragOverIndex === i && dragRowIndex !== null && dragRowIndex !== i}
                 class:row-drag-above={dragOverIndex === i && dragRowIndex !== null && dragRowIndex > i}
@@ -1827,8 +2048,16 @@
 
                 <!-- DL Origin -->
                 <span class="col-origin">
-                  {#if mod.nexus_mod_id}
+                  {#if mod.source_type === "nexus"}
                     <span class="origin-label origin-nexus">Nexus</span>
+                  {:else if mod.source_type === "loverslab"}
+                    <span class="origin-label origin-loverslab">LoversLab</span>
+                  {:else if mod.source_type === "moddb"}
+                    <span class="origin-label origin-moddb">ModDB</span>
+                  {:else if mod.source_type === "curseforge"}
+                    <span class="origin-label origin-curseforge">CurseForge</span>
+                  {:else if mod.source_type === "direct"}
+                    <span class="origin-label origin-direct">Direct</span>
                   {:else}
                     <span class="origin-label origin-manual">Manual</span>
                   {/if}
@@ -1918,7 +2147,7 @@
                               </button>
                             {/if}
                             {#if mod.staging_path}
-                              <button class="overflow-item" onclick={(e) => { e.stopPropagation(); overflowMenuModId = null; /* TODO: reconfigure FOMOD */ }}>
+                              <button class="overflow-item" onclick={(e) => { e.stopPropagation(); overflowMenuModId = null; handleReconfigureFomod(mod); }}>
                                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                   <circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
                                 </svg>
@@ -1980,6 +2209,32 @@
                   <span class="detail-value collection-badge">{detailMod.collection_name}</span>
                 </div>
               {/if}
+              <div class="detail-row">
+                <span class="detail-label">Source</span>
+                <span class="detail-value">
+                  {#if detailMod.source_type === "nexus"}
+                    <span class="origin-label origin-nexus">Nexus</span>
+                  {:else if detailMod.source_type === "loverslab"}
+                    <span class="origin-label origin-loverslab">LoversLab</span>
+                  {:else if detailMod.source_type === "moddb"}
+                    <span class="origin-label origin-moddb">ModDB</span>
+                  {:else if detailMod.source_type === "curseforge"}
+                    <span class="origin-label origin-curseforge">CurseForge</span>
+                  {:else if detailMod.source_type === "direct"}
+                    <span class="origin-label origin-direct">Direct</span>
+                  {:else}
+                    <span class="origin-label origin-manual">Manual</span>
+                  {/if}
+                </span>
+              </div>
+              {#if detailMod.source_url}
+                <div class="detail-row">
+                  <span class="detail-label">Source URL</span>
+                  <a class="detail-value detail-link" href={detailMod.source_url} target="_blank" rel="noopener noreferrer">
+                    {detailMod.source_url.length > 40 ? detailMod.source_url.slice(0, 40) + '...' : detailMod.source_url}
+                  </a>
+                </div>
+              {/if}
               {#if detailMod.nexus_mod_id}
                 <div class="detail-row">
                   <span class="detail-label">Nexus</span>
@@ -2035,6 +2290,11 @@
                   {detailMod.user_notes || "Click to add notes..."}
                 </button>
               {/if}
+            </div>
+
+            <!-- Version History -->
+            <div class="detail-section">
+              <ModVersionHistory mod={detailMod} onrollback={() => { const g = pickedGame ?? $selectedGame; if (g) loadMods(g); }} />
             </div>
 
             <!-- Actions -->
@@ -2188,7 +2448,56 @@
   {/if}
 </div>
 
+{#if showFomodWizard && fomodInstaller}
+  <div class="fomod-wizard-overlay">
+    <FomodWizard
+      installer={fomodInstaller}
+      onComplete={handleFomodComplete}
+      onCancel={() => { showFomodWizard = false; fomodInstaller = null; fomodTargetMod = null; }}
+    />
+  </div>
+{/if}
+
+{#if showImportWizard}
+  <ModlistImportWizard
+    onclose={() => showImportWizard = false}
+    oncomplete={() => { showImportWizard = false; const g = pickedGame ?? $selectedGame; if (g) loadMods(g); }}
+  />
+{/if}
+
+{#if showBisect}
+  <ModBisect
+    mods={$installedMods}
+    onClose={() => showBisect = false}
+    onComplete={async (culprit) => {
+      showBisect = false;
+      const g = pickedGame ?? $selectedGame;
+      if (g) {
+        await toggleMod(culprit.id, g.game_id, g.bottle_name, false);
+        await redeployAllMods(g.game_id, g.bottle_name);
+        loadMods(g);
+        showSuccess(`Disabled "${culprit.name}" — the likely culprit.`);
+      }
+    }}
+  />
+{/if}
+
 <style>
+  /* ============================
+     FOMOD Wizard Overlay
+     ============================ */
+  .fomod-wizard-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2000;
+  }
+
   /* ============================
      Page Layout
      ============================ */
@@ -2986,6 +3295,10 @@
   /* ============================
      Conflict Indicator
      ============================ */
+  .table-row.row-has-conflict {
+    border-left: 2px solid var(--yellow);
+  }
+
   .conflict-icon {
     flex-shrink: 0;
     display: inline-flex;
@@ -3043,6 +3356,27 @@
 
   .update-badge:hover {
     background: rgba(10, 132, 255, 0.25);
+  }
+
+  .update-count-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 100px;
+    background: var(--system-accent);
+    color: white;
+    font-size: 10px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    margin-left: 2px;
+  }
+
+  .btn-sm {
+    padding: var(--space-1) var(--space-3);
+    font-size: 12px;
   }
 
   /* ============================
@@ -4353,6 +4687,22 @@
 
   .origin-nexus {
     color: var(--accent, #d98f40);
+  }
+
+  .origin-loverslab {
+    color: #e06090;
+  }
+
+  .origin-moddb {
+    color: #6cb4ee;
+  }
+
+  .origin-curseforge {
+    color: #f16436;
+  }
+
+  .origin-direct {
+    color: #8bc34a;
   }
 
   .origin-manual {

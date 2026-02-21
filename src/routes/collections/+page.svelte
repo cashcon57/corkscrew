@@ -2,9 +2,10 @@
   import { onMount, onDestroy } from "svelte";
   import { goto } from "$app/navigation";
   import { selectedGame, showError, showSuccess, collectionInstallStatus } from "$lib/stores";
-  import type { CollectionInfo, CollectionManifest, CollectionMod, CollectionSearchResult, InstalledMod } from "$lib/types";
+  import type { CollectionInfo, CollectionManifest, CollectionMod, CollectionSearchResult, InstalledMod, NexusModInfo } from "$lib/types";
   import {
     browseCollections,
+    browseNexusMods,
     getCollection,
     getCollectionMods,
     getNexusAccountStatus,
@@ -46,7 +47,7 @@
   }
 
   // ---- Tab State ----
-  let activeTab = $state<"browse" | "my" | "wabbajack">("browse");
+  let activeTab = $state<"browse" | "my" | "wabbajack" | "mods">("browse");
   let myCollections = $state<CollectionSummary[]>([]);
   let loadingMyCollections = $state(false);
   let switchingCollection = $state<string | null>(null);
@@ -154,6 +155,12 @@
     }
   });
 
+  $effect(() => {
+    if (activeTab === "mods" && $selectedGame) {
+      loadBrowseMods(browseModsCategory);
+    }
+  });
+
   // ---- Account State ----
 
   interface AccountStatus {
@@ -200,6 +207,80 @@
   let showToolsPrompt = $state(false);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let pendingManifest = $state<(CollectionManifest & Record<string, unknown>) | null>(null);
+
+  // ---- Mod Browse State ----
+  let browseMods = $state<NexusModInfo[]>([]);
+  let browseModsLoading = $state(false);
+  let browseModsCategory = $state<"trending" | "latest" | "updated">("trending");
+  let browseModsSearch = $state("");
+  let browseModsShowNsfw = $state(false);
+
+  const filteredBrowseMods = $derived.by(() => {
+    let result = browseMods;
+    if (!browseModsShowNsfw) {
+      result = result.filter(m => !m.adult_content);
+    }
+    if (browseModsSearch.trim()) {
+      const q = browseModsSearch.toLowerCase();
+      result = result.filter(m =>
+        m.name.toLowerCase().includes(q) ||
+        m.author.toLowerCase().includes(q) ||
+        m.summary.toLowerCase().includes(q)
+      );
+    }
+    return result;
+  });
+
+  async function loadBrowseMods(category: string) {
+    const game = $selectedGame;
+    if (!game) return;
+    browseModsLoading = true;
+    try {
+      // Map game_id to NexusMods domain slug
+      const slugMap: Record<string, string> = {
+        skyrimse: "skyrimspecialedition",
+        skyrim: "skyrim",
+        fallout4: "fallout4",
+        fallout3: "fallout3",
+        falloutnv: "newvegas",
+        oblivion: "oblivion",
+        morrowind: "morrowind",
+        starfield: "starfield",
+        enderal: "enderal",
+        enderalse: "enderalspecialedition",
+      };
+      const slug = slugMap[game.game_id] ?? game.game_id;
+      browseMods = await browseNexusMods(slug, category);
+    } catch (e: unknown) {
+      showError(`Failed to browse mods: ${e instanceof Error ? e.message : String(e)}`);
+      browseMods = [];
+    } finally {
+      browseModsLoading = false;
+    }
+  }
+
+  function formatDownloads(n: number): string {
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+    return n.toString();
+  }
+
+  function openModPage(mod: NexusModInfo) {
+    const game = $selectedGame;
+    if (!game) return;
+    const slugMap: Record<string, string> = {
+      skyrimse: "skyrimspecialedition",
+      skyrim: "skyrim",
+      fallout4: "fallout4",
+      fallout3: "fallout3",
+      falloutnv: "newvegas",
+      oblivion: "oblivion",
+      morrowind: "morrowind",
+      starfield: "starfield",
+    };
+    const slug = slugMap[game.game_id] ?? game.game_id;
+    safeOpenUrl(`https://www.nexusmods.com/${slug}/mods/${mod.mod_id}`);
+  }
 
   const gameOptions = $derived.by(() => {
     const gamesSet = new Set(collections.map(c => c.game_domain));
@@ -566,6 +647,9 @@
     </button>
     <button class="tab-btn" class:tab-active={activeTab === "wabbajack"} onclick={() => activeTab = "wabbajack"}>
       Wabbajack Lists
+    </button>
+    <button class="tab-btn" class:tab-active={activeTab === "mods"} onclick={() => activeTab = "mods"}>
+      Browse Mods
     </button>
   </div>
 
@@ -1253,6 +1337,112 @@
     {:catch}
       <p style="color: var(--text-tertiary); text-align: center; padding: 48px;">Failed to load Wabbajack Lists.</p>
     {/await}
+
+  {:else if activeTab === "mods"}
+    <!-- Browse Mods Tab -->
+    <header class="page-header">
+      <div class="header-text">
+        <h2 class="page-title">Browse Mods</h2>
+        <p class="page-subtitle">Discover mods on NexusMods for {$selectedGame?.display_name ?? "your game"}</p>
+      </div>
+      <div class="header-right">
+        {#if !browseModsLoading}
+          <div class="stat-pill">
+            <span class="stat-value">{filteredBrowseMods.length}</span>
+            <span class="stat-label">{filteredBrowseMods.length === 1 ? "mod" : "mods"}</span>
+          </div>
+        {/if}
+      </div>
+    </header>
+
+    {#if !$selectedGame}
+      <div class="empty-state">
+        <p class="empty-title">No game selected</p>
+        <p class="empty-detail">Select a game from the sidebar to browse mods.</p>
+      </div>
+    {:else}
+      <div class="filters-bar">
+        <div class="search-wrapper">
+          <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="8" />
+            <line x1="21" y1="21" x2="16.65" y2="16.65" />
+          </svg>
+          <input type="text" class="search-input" placeholder="Filter results..." bind:value={browseModsSearch} />
+        </div>
+        <div class="filter-group">
+          <select class="filter-select" bind:value={browseModsCategory} onchange={() => loadBrowseMods(browseModsCategory)}>
+            <option value="trending">Trending</option>
+            <option value="latest">Latest</option>
+            <option value="updated">Updated</option>
+          </select>
+        </div>
+        <label class="nsfw-toggle">
+          <input type="checkbox" bind:checked={browseModsShowNsfw} />
+          <span>NSFW</span>
+        </label>
+      </div>
+
+      {#if browseModsLoading}
+        <div class="loading-container">
+          <div class="loading-card">
+            <div class="spinner"><div class="spinner-ring"></div></div>
+            <div class="loading-text">
+              <p class="loading-title">Fetching mods</p>
+              <p class="loading-detail">Loading {browseModsCategory} mods from NexusMods...</p>
+            </div>
+          </div>
+        </div>
+      {:else if filteredBrowseMods.length === 0}
+        <div class="empty-state">
+          <p class="empty-title">No mods found</p>
+          <p class="empty-detail">{browseModsSearch ? "Try a different search term." : "No mods available for this category."}</p>
+        </div>
+      {:else}
+        <div class="mod-browse-grid">
+          {#each filteredBrowseMods as mod}
+            <button class="mod-browse-card" onclick={() => openModPage(mod)}>
+              {#if mod.picture_url}
+                <div class="mod-browse-img" style="background-image: url({mod.picture_url})"></div>
+              {:else}
+                <div class="mod-browse-img mod-browse-img-placeholder">
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.3">
+                    <rect x="3" y="3" width="18" height="18" rx="2" />
+                    <circle cx="8.5" cy="8.5" r="1.5" />
+                    <polyline points="21 15 16 10 5 21" />
+                  </svg>
+                </div>
+              {/if}
+              <div class="mod-browse-body">
+                <h4 class="mod-browse-name">{mod.name}</h4>
+                <p class="mod-browse-author">by {mod.author}</p>
+                <p class="mod-browse-summary">{mod.summary}</p>
+                <div class="mod-browse-stats">
+                  <span class="mod-browse-stat" title="Endorsements">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3H14z" />
+                      <path d="M7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3" />
+                    </svg>
+                    {formatDownloads(mod.endorsement_count)}
+                  </span>
+                  <span class="mod-browse-stat" title="Downloads">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                      <polyline points="7 10 12 15 17 10" />
+                      <line x1="12" y1="15" x2="12" y2="3" />
+                    </svg>
+                    {formatDownloads(mod.unique_downloads)}
+                  </span>
+                  {#if mod.version}
+                    <span class="mod-browse-stat mod-browse-version">v{mod.version}</span>
+                  {/if}
+                </div>
+              </div>
+            </button>
+          {/each}
+        </div>
+        <p class="browse-mods-hint">Click a mod to view it on NexusMods. Free users download via the website; premium users can use NXM links.</p>
+      {/if}
+    {/if}
 
   {:else}
     <!-- Browse View -->
@@ -2999,5 +3189,110 @@
   .diff-unchanged {
     color: var(--text-tertiary);
     font-size: 11px;
+  }
+
+  /* ---- Browse Mods Grid ---- */
+
+  .mod-browse-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: var(--space-3);
+    padding: 0 0 var(--space-4);
+  }
+
+  .mod-browse-card {
+    display: flex;
+    flex-direction: column;
+    background: var(--surface);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    cursor: pointer;
+    transition: border-color var(--duration-fast) var(--ease), box-shadow var(--duration-fast) var(--ease);
+    text-align: left;
+  }
+
+  .mod-browse-card:hover {
+    border-color: var(--accent);
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.2);
+  }
+
+  .mod-browse-img {
+    width: 100%;
+    height: 120px;
+    background-size: cover;
+    background-position: center;
+    background-color: var(--bg-base);
+  }
+
+  .mod-browse-img-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .mod-browse-body {
+    padding: var(--space-3);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    flex: 1;
+  }
+
+  .mod-browse-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .mod-browse-author {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin: 0;
+  }
+
+  .mod-browse-summary {
+    font-size: 11px;
+    color: var(--text-secondary);
+    line-height: 1.4;
+    margin: 2px 0 0;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .mod-browse-stats {
+    display: flex;
+    gap: var(--space-3);
+    margin-top: auto;
+    padding-top: var(--space-2);
+  }
+
+  .mod-browse-stat {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: var(--text-tertiary);
+  }
+
+  .mod-browse-version {
+    margin-left: auto;
+    color: var(--text-quaternary);
+    font-family: var(--font-mono);
+    font-size: 10px;
+  }
+
+  .browse-mods-hint {
+    font-size: 11px;
+    color: var(--text-quaternary);
+    text-align: center;
+    padding: var(--space-2) 0 var(--space-4);
   }
 </style>

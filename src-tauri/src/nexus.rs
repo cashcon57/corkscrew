@@ -158,6 +158,49 @@ pub struct DownloadLink {
     pub short_name: String,
 }
 
+/// Mod info returned from NexusMods browse/search endpoints.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NexusModInfo {
+    pub mod_id: i64,
+    pub name: String,
+    pub summary: String,
+    pub author: String,
+    pub category_id: i64,
+    pub version: String,
+    pub endorsement_count: i64,
+    pub unique_downloads: i64,
+    pub picture_url: Option<String>,
+    pub updated_at: Option<String>,
+    pub available: bool,
+    pub adult_content: bool,
+}
+
+fn parse_nexus_mod(v: &serde_json::Value) -> Option<NexusModInfo> {
+    Some(NexusModInfo {
+        mod_id: v.get("mod_id").and_then(|x| x.as_i64())?,
+        name: v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        summary: v.get("summary").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        author: v.get("author").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        category_id: v.get("category_id").and_then(|x| x.as_i64()).unwrap_or(0),
+        version: v.get("version").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        endorsement_count: v.get("endorsement_count").and_then(|x| x.as_i64()).unwrap_or(0),
+        unique_downloads: v.get("mod_unique_downloads").and_then(|x| x.as_i64())
+            .or_else(|| v.get("unique_downloads").and_then(|x| x.as_i64()))
+            .unwrap_or(0),
+        picture_url: v.get("picture_url").and_then(|x| x.as_str()).map(|s| s.to_string()),
+        updated_at: v.get("updated_timestamp")
+            .and_then(|x| x.as_i64())
+            .map(|ts| {
+                chrono::DateTime::from_timestamp(ts, 0)
+                    .map(|dt| dt.format("%Y-%m-%d").to_string())
+                    .unwrap_or_default()
+            })
+            .or_else(|| v.get("updated_time").and_then(|x| x.as_str()).map(|s| s.to_string())),
+        available: v.get("available").and_then(|x| x.as_bool()).unwrap_or(true),
+        adult_content: v.get("contains_adult_content").and_then(|x| x.as_bool()).unwrap_or(false),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
@@ -472,6 +515,46 @@ impl NexusClient {
         }
 
         Ok(updates)
+    }
+
+    /// Browse mods on NexusMods by category (trending, latest, updated).
+    ///
+    /// Returns up to 20 mods from the specified browse category.
+    pub async fn browse_mods(
+        &self,
+        game_slug: &str,
+        category: &str,
+    ) -> Result<Vec<NexusModInfo>> {
+        let endpoint = match category {
+            "latest" => "latest_added",
+            "updated" => "updated",
+            _ => "trending",
+        };
+        let url = format!("{NEXUS_API_BASE}/games/{game_slug}/mods/{endpoint}.json");
+        let json = self.get_json(&url).await?;
+
+        let mods = json
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|v| parse_nexus_mod(&v))
+            .collect();
+
+        Ok(mods)
+    }
+
+    /// Get detailed information for a single mod, returned as NexusModInfo.
+    pub async fn get_mod_info(
+        &self,
+        game_slug: &str,
+        mod_id: i64,
+    ) -> Result<NexusModInfo> {
+        let json = self.get_mod(game_slug, mod_id).await?;
+        parse_nexus_mod(&json).ok_or_else(|| NexusError::Api {
+            status: 0,
+            message: "Failed to parse mod info".into(),
+        })
     }
 
     /// Convenience wrapper: resolve an NXM link, fetch CDN URLs, then

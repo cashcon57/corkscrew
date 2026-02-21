@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, applyToolIniEdits, getPlatformDetail } from "$lib/api";
-  import { config, showError, showSuccess, selectedGame, skseStatus, currentPage, appVersion, updateReady, updateVersion, updateChecking, updateError, triggerUpdateCheck } from "$lib/stores";
+  import { config, showError, showSuccess, selectedGame, skseStatus, currentPage, appVersion, updateReady, updateVersion, updateChecking, updateError, triggerUpdateCheck, controllerMode } from "$lib/stores";
   import type { AppConfig, ModTool, PlatformInfo } from "$lib/types";
   import ThemeToggle from "$lib/components/ThemeToggle.svelte";
   import SettingsAuthSection from "./settings-auth-section.svelte";
@@ -444,6 +444,26 @@
       <div class="card-row appearance-row">
         <span class="row-label">Theme</span>
         <ThemeToggle />
+      </div>
+      <div class="card-row appearance-row">
+        <div class="toggle-info">
+          <span class="row-label">Controller Mode</span>
+          <span class="toggle-description">Larger buttons and gamepad navigation for Steam Deck</span>
+        </div>
+        <button
+          class="toggle-switch"
+          class:toggle-on={$controllerMode}
+          onclick={() => {
+            const next = !$controllerMode;
+            controllerMode.set(next);
+            setConfigValue("controller_mode", String(next)).catch(() => {});
+          }}
+          type="button"
+          role="switch"
+          aria-checked={$controllerMode}
+        >
+          <span class="toggle-thumb"></span>
+        </button>
       </div>
     </div>
   </div>

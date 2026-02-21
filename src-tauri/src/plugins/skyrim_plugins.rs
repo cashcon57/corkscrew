@@ -294,17 +294,18 @@ pub fn sync_plugins(data_dir: &Path, plugins_file: &Path, loadorder_file: &Path)
             continue;
         }
 
-        let entry = if let Some(existing_entry) = existing_map.remove(&key) {
-            PluginEntry {
-                filename: plugin_name.clone(),
-                enabled: existing_entry.enabled,
-            }
+        let base_enabled = if let Some(existing_entry) = existing_map.remove(&key) {
+            existing_entry.enabled
         } else {
             // Newly discovered plugin, default to enabled (matches Vortex/MO2 behavior).
-            PluginEntry {
-                filename: plugin_name.clone(),
-                enabled: true,
-            }
+            true
+        };
+
+        // ESM and ESL files are always loaded by the engine — force them enabled.
+        let is_master = key.ends_with(".esm") || key.ends_with(".esl");
+        let entry = PluginEntry {
+            filename: plugin_name.clone(),
+            enabled: if is_master { true } else { base_enabled },
         };
 
         result.push(entry);
@@ -406,21 +407,25 @@ pub fn toggle_plugin(
     };
 
     let target_lower = plugin_name.to_lowercase();
+
+    // ESM and ESL files are always loaded by the engine — refuse to disable them.
+    let is_master = target_lower.ends_with(".esm") || target_lower.ends_with(".esl");
+    let effective_enabled = if is_master { true } else { enabled };
+
     let mut found = false;
 
     for entry in &mut entries {
         if entry.filename.to_lowercase() == target_lower {
-            entry.enabled = enabled;
+            entry.enabled = effective_enabled;
             found = true;
             break;
         }
     }
 
     if !found {
-        // Plugin not in list — add it
         entries.push(PluginEntry {
             filename: plugin_name.to_string(),
-            enabled,
+            enabled: effective_enabled,
         });
     }
 
@@ -817,5 +822,163 @@ mod tests {
         assert!(result[1].enabled);
         assert_eq!(result[2].filename, "B.esp");
         assert!(!result[2].enabled); // preserves disabled state
+    }
+
+    #[test]
+    fn sync_plugins_forces_esm_enabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("Data");
+        fs::create_dir_all(&data_dir).unwrap();
+
+        fs::write(data_dir.join("Skyrim.esm"), b"fake").unwrap();
+        fs::write(data_dir.join("ModMaster.esm"), b"fake").unwrap();
+        fs::write(data_dir.join("UserMod.esp"), b"fake").unwrap();
+
+        let pf = tmp.path().join("plugins.txt");
+        let lo = tmp.path().join("loadorder.txt");
+
+        // Pre-populate with the mod ESM disabled (as if from an old plugins.txt).
+        write_plugins_txt(
+            &pf,
+            &[
+                PluginEntry {
+                    filename: "Skyrim.esm".into(),
+                    enabled: true,
+                },
+                PluginEntry {
+                    filename: "ModMaster.esm".into(),
+                    enabled: false,
+                },
+                PluginEntry {
+                    filename: "UserMod.esp".into(),
+                    enabled: false,
+                },
+            ],
+        )
+        .unwrap();
+
+        sync_plugins(&data_dir, &pf, &lo).unwrap();
+        let entries = read_plugins_txt(&pf).unwrap();
+
+        let master = entries
+            .iter()
+            .find(|e| e.filename == "ModMaster.esm")
+            .unwrap();
+        assert!(master.enabled, "ESM files must be forced enabled by sync");
+
+        // ESP should preserve its disabled state.
+        let esp = entries
+            .iter()
+            .find(|e| e.filename == "UserMod.esp")
+            .unwrap();
+        assert!(!esp.enabled, "ESP disabled state should be preserved");
+    }
+
+    #[test]
+    fn sync_plugins_forces_esl_enabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("Data");
+        fs::create_dir_all(&data_dir).unwrap();
+
+        fs::write(data_dir.join("Skyrim.esm"), b"fake").unwrap();
+        fs::write(data_dir.join("LightPatch.esl"), b"fake").unwrap();
+
+        let pf = tmp.path().join("plugins.txt");
+        let lo = tmp.path().join("loadorder.txt");
+
+        // Pre-populate with the ESL disabled.
+        write_plugins_txt(
+            &pf,
+            &[
+                PluginEntry {
+                    filename: "Skyrim.esm".into(),
+                    enabled: true,
+                },
+                PluginEntry {
+                    filename: "LightPatch.esl".into(),
+                    enabled: false,
+                },
+            ],
+        )
+        .unwrap();
+
+        sync_plugins(&data_dir, &pf, &lo).unwrap();
+        let entries = read_plugins_txt(&pf).unwrap();
+
+        let esl = entries
+            .iter()
+            .find(|e| e.filename == "LightPatch.esl")
+            .unwrap();
+        assert!(esl.enabled, "ESL files must be forced enabled by sync");
+    }
+
+    #[test]
+    fn toggle_plugin_refuses_to_disable_esm() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pf = tmp.path().join("plugins.txt");
+        let lo = tmp.path().join("loadorder.txt");
+
+        write_plugins_txt(
+            &pf,
+            &[PluginEntry {
+                filename: "ModMaster.esm".into(),
+                enabled: true,
+            }],
+        )
+        .unwrap();
+
+        // Try to disable an ESM — should remain enabled.
+        let result = toggle_plugin(&pf, &lo, "ModMaster.esm", false).unwrap();
+        let entry = result
+            .iter()
+            .find(|e| e.filename == "ModMaster.esm")
+            .unwrap();
+        assert!(entry.enabled, "ESM must stay enabled even when toggled off");
+    }
+
+    #[test]
+    fn toggle_plugin_refuses_to_disable_esl() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pf = tmp.path().join("plugins.txt");
+        let lo = tmp.path().join("loadorder.txt");
+
+        write_plugins_txt(
+            &pf,
+            &[PluginEntry {
+                filename: "Light.esl".into(),
+                enabled: true,
+            }],
+        )
+        .unwrap();
+
+        let result = toggle_plugin(&pf, &lo, "Light.esl", false).unwrap();
+        let entry = result
+            .iter()
+            .find(|e| e.filename == "Light.esl")
+            .unwrap();
+        assert!(entry.enabled, "ESL must stay enabled even when toggled off");
+    }
+
+    #[test]
+    fn toggle_plugin_allows_disabling_esp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pf = tmp.path().join("plugins.txt");
+        let lo = tmp.path().join("loadorder.txt");
+
+        write_plugins_txt(
+            &pf,
+            &[PluginEntry {
+                filename: "UserMod.esp".into(),
+                enabled: true,
+            }],
+        )
+        .unwrap();
+
+        let result = toggle_plugin(&pf, &lo, "UserMod.esp", false).unwrap();
+        let entry = result
+            .iter()
+            .find(|e| e.filename == "UserMod.esp")
+            .unwrap();
+        assert!(!entry.enabled, "ESP files can be disabled normally");
     }
 }

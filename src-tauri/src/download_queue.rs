@@ -70,6 +70,20 @@ impl DownloadQueue {
         }
     }
 
+    /// Load persisted items from the database into the queue.
+    /// Call this once at app startup to restore the queue state.
+    pub fn load_from(&self, items: Vec<QueueItem>) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut max_id = inner.next_id;
+        for item in items {
+            if item.id >= max_id {
+                max_id = item.id + 1;
+            }
+            inner.items.push_back(item);
+        }
+        inner.next_id = max_id;
+    }
+
     /// Add a new item to the queue and return its ID.
     pub fn enqueue(
         &self,

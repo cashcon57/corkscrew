@@ -116,7 +116,9 @@ pub fn available_space(path: &Path) -> u64 {
 pub fn estimate_install_impact(archive_size: u64, game_data_dir: &Path) -> InstallImpact {
     // Rough estimate: extracted size is ~2-3x archive size for typical mods
     let estimated_extracted = archive_size * 3;
-    let uses_hardlinks = deployer::test_hardlink_support(game_data_dir, game_data_dir);
+    // Check if staging and game dir are on the same filesystem
+    let staging_root = staging::staging_root();
+    let uses_hardlinks = deployer::same_filesystem(&staging_root, game_data_dir);
     let deployment_cost = if uses_hardlinks {
         0
     } else {
@@ -163,7 +165,8 @@ pub fn compute_budget(game_id: &str, bottle_name: &str, game_data_dir: &Path) ->
         }
     }
 
-    let uses_hardlinks = deployer::test_hardlink_support(game_data_dir, game_data_dir);
+    // Check if staging and game dir are on the same filesystem (hardlinks need same device)
+    let uses_hardlinks = deployer::same_filesystem(&staging_root, game_data_dir);
     let deployment_bytes = if uses_hardlinks { 0 } else { staging_bytes };
     let total_impact = staging_bytes + deployment_bytes;
 

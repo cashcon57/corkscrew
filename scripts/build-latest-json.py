@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-"""Build latest.json for Tauri updater from CI build artifacts.
+"""Build latest.json for Tauri updater from build artifacts.
 
 Usage: python3 scripts/build-latest-json.py artifacts/ > latest.json
 
-Expects artifact directories laid out by actions/download-artifact:
+Hybrid release: macOS built locally (release.sh), Linux built in CI.
+Expects artifact directories with this layout:
   artifacts/
-    macos-aarch64-apple-darwin/
+    macos-aarch64-apple-darwin/       (downloaded from draft GH release)
       Corkscrew_aarch64.app.tar.gz
       Corkscrew_aarch64.app.tar.gz.sig
-    macos-x86_64-apple-darwin/
+    macos-x86_64-apple-darwin/        (downloaded from draft GH release)
       Corkscrew_x86_64.app.tar.gz
       Corkscrew_x86_64.app.tar.gz.sig
-    linux-x86_64-unknown-linux-gnu/
-      *.AppImage.tar.gz       (or *.AppImage with *.AppImage.sig)
-      *.AppImage.tar.gz.sig
+    linux-x86_64-unknown-linux-gnu/   (from CI build artifacts)
+      Corkscrew-VERSION-Linux.AppImage.tar.gz + .sig  (or .AppImage + .sig)
 """
 
 import json

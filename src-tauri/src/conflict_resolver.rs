@@ -388,6 +388,7 @@ mod tests {
             user_notes: None,
             user_tags: vec![],
             auto_category: None,
+            source_type: "manual".into(),
         }
     }
 

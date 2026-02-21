@@ -1,33 +1,20 @@
 <script lang="ts">
-  import { getPluginOrder } from "$lib/api";
+  import { getPluginOrder, addPluginRule, removePluginRule, listPluginRules } from "$lib/api";
   import { selectedGame, showError, showSuccess } from "$lib/stores";
-  import type { PluginEntry } from "$lib/types";
-  // TODO: Import from $lib/api when backend commands are ready
-  // import { invoke } from "@tauri-apps/api/core";
-
-  // ---- Types ----
-
-  type RuleType = "load_after" | "load_before";
-
-  interface CustomRule {
-    id: string;
-    plugin: string;
-    ruleType: RuleType;
-    reference: string;
-  }
+  import type { PluginEntry, PluginRule, PluginRuleType } from "$lib/types";
 
   // ---- State ----
 
   let plugins = $state<PluginEntry[]>([]);
-  let rules = $state<CustomRule[]>([]);
+  let rules = $state<PluginRule[]>([]);
   let loading = $state(false);
   let savingRule = $state(false);
-  let deletingRuleId = $state<string | null>(null);
+  let deletingRuleId = $state<number | null>(null);
 
   // Add rule form state
   let showAddForm = $state(false);
   let formPlugin = $state("");
-  let formRuleType = $state<RuleType>("load_after");
+  let formRuleType = $state<PluginRuleType>("LoadAfter");
   let formReference = $state("");
 
   // Cycle detection
@@ -53,14 +40,7 @@
     loading = true;
     try {
       plugins = await getPluginOrder(game.game_id, game.bottle_name);
-
-      // TODO: Wire up when backend is ready
-      // const savedRules = await invoke("get_custom_plugin_rules", {
-      //   gameId: game.game_id,
-      //   bottleName: game.bottle_name
-      // });
-      // rules = savedRules as CustomRule[];
-      rules = []; // placeholder
+      rules = await listPluginRules(game.game_id, game.bottle_name);
     } catch (e: unknown) {
       showError(`Failed to load plugins: ${e}`);
     } finally {
@@ -71,7 +51,7 @@
   function openAddForm() {
     showAddForm = true;
     formPlugin = availablePlugins[0] ?? "";
-    formRuleType = "load_after";
+    formRuleType = "LoadAfter";
     formReference = "";
     cycleWarning = null;
   }
@@ -83,27 +63,27 @@
     cycleWarning = null;
   }
 
-  function detectCycle(newRule: Omit<CustomRule, "id">): boolean {
+  function detectCycle(pluginName: string, ruleType: PluginRuleType, referencePlugin: string): boolean {
     // Build adjacency: plugin -> [plugins it must load after]
     const edges = new Map<string, Set<string>>();
 
     for (const rule of rules) {
-      if (rule.ruleType === "load_after") {
-        if (!edges.has(rule.plugin)) edges.set(rule.plugin, new Set());
-        edges.get(rule.plugin)!.add(rule.reference);
-      } else {
-        if (!edges.has(rule.reference)) edges.set(rule.reference, new Set());
-        edges.get(rule.reference)!.add(rule.plugin);
+      if (rule.rule_type === "LoadAfter") {
+        if (!edges.has(rule.plugin_name)) edges.set(rule.plugin_name, new Set());
+        edges.get(rule.plugin_name)!.add(rule.reference_plugin);
+      } else if (rule.rule_type === "LoadBefore") {
+        if (!edges.has(rule.reference_plugin)) edges.set(rule.reference_plugin, new Set());
+        edges.get(rule.reference_plugin)!.add(rule.plugin_name);
       }
     }
 
     // Add the proposed rule
-    if (newRule.ruleType === "load_after") {
-      if (!edges.has(newRule.plugin)) edges.set(newRule.plugin, new Set());
-      edges.get(newRule.plugin)!.add(newRule.reference);
+    if (ruleType === "LoadAfter") {
+      if (!edges.has(pluginName)) edges.set(pluginName, new Set());
+      edges.get(pluginName)!.add(referencePlugin);
     } else {
-      if (!edges.has(newRule.reference)) edges.set(newRule.reference, new Set());
-      edges.get(newRule.reference)!.add(newRule.plugin);
+      if (!edges.has(referencePlugin)) edges.set(referencePlugin, new Set());
+      edges.get(referencePlugin)!.add(pluginName);
     }
 
     // DFS cycle detection
@@ -147,7 +127,7 @@
 
     // Check for duplicate
     const duplicate = rules.find(
-      r => r.plugin === formPlugin && r.ruleType === formRuleType && r.reference === formReference
+      r => r.plugin_name === formPlugin && r.rule_type === formRuleType && r.reference_plugin === formReference
     );
     if (duplicate) {
       showError("This rule already exists");
@@ -155,8 +135,7 @@
     }
 
     // Check for cycles
-    const newRule = { plugin: formPlugin, ruleType: formRuleType, reference: formReference };
-    if (detectCycle(newRule)) {
+    if (detectCycle(formPlugin, formRuleType, formReference)) {
       cycleWarning = `Adding this rule would create a circular dependency between ${formPlugin} and ${formReference}`;
       return;
     }
@@ -164,17 +143,9 @@
     savingRule = true;
     cycleWarning = null;
     try {
-      // TODO: Wire up when backend is ready
-      // const ruleId = await invoke("add_custom_plugin_rule", {
-      //   gameId: game.game_id,
-      //   bottleName: game.bottle_name,
-      //   plugin: formPlugin,
-      //   ruleType: formRuleType,
-      //   reference: formReference,
-      // });
-
-      const ruleId = crypto.randomUUID();
-      rules = [...rules, { id: ruleId, ...newRule }];
+      await addPluginRule(game.game_id, game.bottle_name, formPlugin, formRuleType, formReference);
+      // Reload rules from backend to get the real IDs
+      rules = await listPluginRules(game.game_id, game.bottle_name);
       showSuccess("Rule added");
       cancelAddForm();
     } catch (e: unknown) {
@@ -184,12 +155,11 @@
     }
   }
 
-  async function handleDeleteRule(ruleId: string) {
+  async function handleDeleteRule(ruleId: number) {
     if (!game) return;
     deletingRuleId = ruleId;
     try {
-      // TODO: Wire up when backend is ready
-      // await invoke("remove_custom_plugin_rule", { ruleId });
+      await removePluginRule(ruleId);
       rules = rules.filter(r => r.id !== ruleId);
       showSuccess("Rule removed");
     } catch (e: unknown) {
@@ -199,12 +169,12 @@
     }
   }
 
-  function ruleTypeLabel(type: RuleType): string {
-    return type === "load_after" ? "loads after" : "loads before";
+  function ruleTypeLabel(type: PluginRuleType): string {
+    return type === "LoadAfter" ? "loads after" : type === "LoadBefore" ? "loads before" : "group";
   }
 
-  function ruleTypeArrow(type: RuleType): string {
-    return type === "load_after" ? "\u2192" : "\u2190";
+  function ruleTypeArrow(type: PluginRuleType): string {
+    return type === "LoadAfter" ? "\u2192" : "\u2190";
   }
 </script>
 
@@ -276,20 +246,20 @@
         <div class="segmented-control" role="radiogroup" aria-label="Rule type">
           <button
             class="segment"
-            class:segment-active={formRuleType === "load_after"}
-            onclick={() => formRuleType = "load_after"}
+            class:segment-active={formRuleType === "LoadAfter"}
+            onclick={() => formRuleType = "LoadAfter"}
             role="radio"
-            aria-checked={formRuleType === "load_after"}
+            aria-checked={formRuleType === "LoadAfter"}
             type="button"
           >
             Load After
           </button>
           <button
             class="segment"
-            class:segment-active={formRuleType === "load_before"}
-            onclick={() => formRuleType = "load_before"}
+            class:segment-active={formRuleType === "LoadBefore"}
+            onclick={() => formRuleType = "LoadBefore"}
             role="radio"
-            aria-checked={formRuleType === "load_before"}
+            aria-checked={formRuleType === "LoadBefore"}
             type="button"
           >
             Load Before
@@ -361,11 +331,11 @@
       {#each rules as rule (rule.id)}
         <div class="rule-row" role="listitem">
           <div class="rule-content">
-            <span class="rule-plugin">{rule.plugin}</span>
-            <span class="rule-arrow">{ruleTypeArrow(rule.ruleType)}</span>
-            <span class="rule-type-label">{ruleTypeLabel(rule.ruleType)}</span>
-            <span class="rule-arrow">{ruleTypeArrow(rule.ruleType)}</span>
-            <span class="rule-plugin">{rule.reference}</span>
+            <span class="rule-plugin">{rule.plugin_name}</span>
+            <span class="rule-arrow">{ruleTypeArrow(rule.rule_type)}</span>
+            <span class="rule-type-label">{ruleTypeLabel(rule.rule_type)}</span>
+            <span class="rule-arrow">{ruleTypeArrow(rule.rule_type)}</span>
+            <span class="rule-plugin">{rule.reference_plugin}</span>
           </div>
           <button
             class="rule-delete"

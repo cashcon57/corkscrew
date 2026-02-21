@@ -43,6 +43,7 @@ pub struct InstalledMod {
     pub nexus_mod_id: Option<i64>,
     pub nexus_file_id: Option<i64>,
     pub source_url: Option<String>,
+    pub source_type: String,
     pub name: String,
     pub version: String,
     pub archive_name: String,
@@ -217,6 +218,7 @@ impl ModDatabase {
             nexus_mod_id: row.get(3)?,
             nexus_file_id: row.get(10)?,
             source_url: row.get(11)?,
+            source_type: row.get::<_, Option<String>>(18)?.unwrap_or_else(|| "manual".to_string()),
             name: row.get(4)?,
             version: row.get(5)?,
             archive_name: row.get(6)?,
@@ -236,7 +238,7 @@ impl ModDatabase {
     const SELECT_COLUMNS: &'static str = "id, game_id, bottle_name, nexus_mod_id, name, version, \
          archive_name, installed_files, installed_at, enabled, \
          nexus_file_id, source_url, staging_path, install_priority, \
-         collection_name, user_notes, user_tags, auto_category";
+         collection_name, user_notes, user_tags, auto_category, source_type";
 
     // -- public API ---------------------------------------------------------
 
@@ -412,6 +414,21 @@ impl ModDatabase {
         conn.execute(
             "UPDATE installed_mods SET source_url = ?1 WHERE id = ?2",
             params![url, mod_id],
+        )?;
+        Ok(())
+    }
+
+    /// Set the source type and optionally the source URL for a mod.
+    pub fn set_mod_source(
+        &self,
+        mod_id: i64,
+        source_type: &str,
+        source_url: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "UPDATE installed_mods SET source_type = ?1, source_url = ?2 WHERE id = ?3",
+            params![source_type, source_url, mod_id],
         )?;
         Ok(())
     }
@@ -1237,6 +1254,105 @@ impl ModDatabase {
             .prepare("SELECT COUNT(*) FROM notification_log")?
             .query_row([], |row| row.get(0))?;
         Ok(count as usize)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Download Queue Persistence
+// ---------------------------------------------------------------------------
+
+impl ModDatabase {
+    /// Save a queue item to the database.
+    pub fn save_queue_item(&self, item: &crate::download_queue::QueueItem) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let status_str = match item.status {
+            crate::download_queue::DownloadStatus::Pending => "pending",
+            crate::download_queue::DownloadStatus::Downloading => "downloading",
+            crate::download_queue::DownloadStatus::Completed => "completed",
+            crate::download_queue::DownloadStatus::Failed => "failed",
+            crate::download_queue::DownloadStatus::Cancelled => "cancelled",
+        };
+        conn.execute(
+            "INSERT OR REPLACE INTO download_queue
+                (id, mod_name, file_name, status, error, attempt, max_attempts,
+                 downloaded_bytes, total_bytes, nexus_mod_id, nexus_file_id,
+                 url, game_slug, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, datetime('now'))",
+            params![
+                item.id as i64,
+                item.mod_name,
+                item.file_name,
+                status_str,
+                item.error,
+                item.attempt,
+                item.max_attempts,
+                item.downloaded_bytes as i64,
+                item.total_bytes as i64,
+                item.nexus_mod_id,
+                item.nexus_file_id,
+                item.url,
+                item.game_slug,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Load all non-completed/non-cancelled queue items from the database.
+    /// Items that were "downloading" are reset to "pending" since the download
+    /// was interrupted by the app closing.
+    pub fn load_queue_items(&self) -> Result<Vec<crate::download_queue::QueueItem>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT id, mod_name, file_name, status, error, attempt, max_attempts,
+                    downloaded_bytes, total_bytes, nexus_mod_id, nexus_file_id, url, game_slug
+             FROM download_queue
+             WHERE status NOT IN ('completed', 'cancelled')
+             ORDER BY id",
+        )?;
+
+        let items = stmt
+            .query_map([], |row| {
+                let status_str: String = row.get(3)?;
+                let status = match status_str.as_str() {
+                    "downloading" | "pending" => crate::download_queue::DownloadStatus::Pending,
+                    "failed" => crate::download_queue::DownloadStatus::Failed,
+                    _ => crate::download_queue::DownloadStatus::Pending,
+                };
+                Ok(crate::download_queue::QueueItem {
+                    id: row.get::<_, i64>(0)? as u64,
+                    mod_name: row.get(1)?,
+                    file_name: row.get(2)?,
+                    status,
+                    error: row.get(4)?,
+                    attempt: row.get(5)?,
+                    max_attempts: row.get(6)?,
+                    downloaded_bytes: 0, // Reset on restart
+                    total_bytes: row.get::<_, i64>(8)? as u64,
+                    nexus_mod_id: row.get(9)?,
+                    nexus_file_id: row.get(10)?,
+                    url: row.get(11)?,
+                    game_slug: row.get(12)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        // Reset any "downloading" items back to "pending" in the DB
+        conn.execute(
+            "UPDATE download_queue SET status = 'pending', downloaded_bytes = 0 WHERE status = 'downloading'",
+            [],
+        )?;
+
+        Ok(items)
+    }
+
+    /// Remove completed and cancelled queue items from the database.
+    pub fn clear_finished_queue_items(&self) -> Result<usize> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let count = conn.execute(
+            "DELETE FROM download_queue WHERE status IN ('completed', 'cancelled')",
+            [],
+        )?;
+        Ok(count)
     }
 }
 
