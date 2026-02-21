@@ -2337,6 +2337,54 @@ fn parse_wabbajack_file(file_path: String) -> Result<ParsedModlist, String> {
     wabbajack::parse_wabbajack_file(std::path::Path::new(&file_path))
 }
 
+#[tauri::command]
+async fn download_wabbajack_file(url: String, filename: String) -> Result<String, String> {
+    let download_dir = config::get_config()
+        .ok()
+        .and_then(|c| c.download_dir)
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::data_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join("corkscrew")
+                .join("downloads")
+        });
+
+    std::fs::create_dir_all(&download_dir)
+        .map_err(|e| format!("Failed to create download directory: {e}"))?;
+
+    let dest = download_dir.join(&filename);
+
+    let client = reqwest::Client::builder()
+        .user_agent("Corkscrew/1.0")
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .map_err(|e| format!("HTTP client error: {e}"))?;
+
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Download failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!(
+            "Download failed: HTTP {} — the file may have been removed from the Wabbajack CDN.",
+            resp.status()
+        ));
+    }
+
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read download: {e}"))?;
+
+    std::fs::write(&dest, &bytes)
+        .map_err(|e| format!("Failed to save file: {e}"))?;
+
+    Ok(dest.to_string_lossy().to_string())
+}
+
 // --- Helpers ---
 
 fn get_current_plugins(game_id: &str, bottle_name: &str) -> Vec<PluginEntry> {
@@ -3312,6 +3360,7 @@ pub fn run() {
             has_game_snapshot,
             get_wabbajack_modlists,
             parse_wabbajack_file,
+            download_wabbajack_file,
             // Nexus SSO
             start_nexus_sso,
             // OAuth (legacy)

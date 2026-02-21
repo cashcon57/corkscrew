@@ -526,6 +526,13 @@ export async function parseWabbajackFile(
   return invoke("parse_wabbajack_file", { filePath });
 }
 
+export async function downloadWabbajackFile(
+  url: string,
+  filename: string
+): Promise<string> {
+  return invoke("download_wabbajack_file", { url, filename });
+}
+
 // Download Archive Management
 export async function listDownloadArchives(): Promise<{
   filename: string;

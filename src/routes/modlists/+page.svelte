@@ -6,6 +6,7 @@
     getWabbajackModlists,
     fetchUrlText,
     parseWabbajackFile,
+    downloadWabbajackFile,
     detectWabbajackTools,
   } from "$lib/api";
   import { showError, showSuccess, selectedGame } from "$lib/stores";
@@ -33,6 +34,10 @@
   let parsedModlist = $state<ParsedModlist | null>(null);
   let wabbajackFilePath = $state<string | null>(null);
   let parsingFile = $state(false);
+
+  // Download state
+  let downloading = $state(false);
+  let downloadError = $state<string | null>(null);
 
   // Tool detection state
   let pendingTools = $state<RequiredTool[]>([]);
@@ -274,6 +279,30 @@
     return colors[source] ?? "var(--text-secondary)";
   }
 
+  async function handleDownloadWabbajack(modlist: ModlistSummary) {
+    if (!modlist.download_url || downloading) return;
+    downloading = true;
+    downloadError = null;
+    try {
+      // Sanitize filename from title
+      const safeName = modlist.title.replace(/[^a-zA-Z0-9_\- ]/g, "").trim();
+      const filename = `${safeName}.wabbajack`;
+      const filePath = await downloadWabbajackFile(modlist.download_url, filename);
+      showSuccess(`Downloaded "${modlist.title}" — parsing...`);
+
+      // Auto-parse the downloaded file
+      parsedModlist = await parseWabbajackFile(filePath);
+      wabbajackFilePath = filePath;
+      selectedModlist = null;
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      downloadError = msg;
+      showError(`Download failed: ${msg}`);
+    } finally {
+      downloading = false;
+    }
+  }
+
   /** Validate that a URL is a safe HTTP(S) URL before opening in browser. */
   function safeOpenUrl(url: string | null | undefined) {
     if (!url) return;
@@ -402,15 +431,24 @@
           {#if selectedModlist.download_url}
             <button
               class="btn btn-primary btn-lg"
-              onclick={() => safeOpenUrl(selectedModlist?.download_url)}
+              onclick={() => selectedModlist && handleDownloadWabbajack(selectedModlist)}
+              disabled={downloading}
             >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                <polyline points="7 10 12 15 17 10" />
-                <line x1="12" y1="15" x2="12" y2="3" />
-              </svg>
-              Download .wabbajack
+              {#if downloading}
+                <span class="spinner spinner-sm"></span>
+                Downloading...
+              {:else}
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="7 10 12 15 17 10" />
+                  <line x1="12" y1="15" x2="12" y2="3" />
+                </svg>
+                Download .wabbajack
+              {/if}
             </button>
+            {#if downloadError}
+              <p class="download-error">{downloadError}</p>
+            {/if}
           {/if}
           <button class="btn btn-accent btn-lg" onclick={openLocalFile}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1411,5 +1449,15 @@
     font-weight: 600;
     color: var(--text-primary);
     font-variant-numeric: tabular-nums;
+  }
+
+  .download-error {
+    color: #ef4444;
+    font-size: 13px;
+    margin-top: 8px;
+    padding: 8px 12px;
+    background: rgba(239, 68, 68, 0.1);
+    border-radius: 6px;
+    border: 1px solid rgba(239, 68, 68, 0.2);
   }
 </style>
