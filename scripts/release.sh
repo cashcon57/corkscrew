@@ -79,7 +79,8 @@ echo "  package.json     → $VERSION"
 echo "  Cargo.toml       → $VERSION"
 
 # --- Build macOS ---
-export TAURI_SIGNING_PRIVATE_KEY="$KEY_FILE"
+export TAURI_SIGNING_PRIVATE_KEY
+TAURI_SIGNING_PRIVATE_KEY="$(cat "$KEY_FILE")"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$KEY_PASSWORD"
 
 echo ""

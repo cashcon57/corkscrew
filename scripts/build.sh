@@ -11,7 +11,8 @@ if [[ ! -f "$KEY_FILE" ]]; then
   exit 1
 fi
 
-export TAURI_SIGNING_PRIVATE_KEY="$KEY_FILE"
+export TAURI_SIGNING_PRIVATE_KEY
+TAURI_SIGNING_PRIVATE_KEY="$(cat "$KEY_FILE")"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="corkscrew-updater-2024"
 
 echo "Signing key loaded from $KEY_FILE"
