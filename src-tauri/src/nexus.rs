@@ -738,7 +738,7 @@ pub async fn graphql_search_mods(
                     modCategory { id }
                     version
                     endorsements
-                    uniqueDownloads
+                    downloads
                     pictureUrl
                     updatedAt
                     adultContent
@@ -833,7 +833,7 @@ pub async fn graphql_search_mods(
                     .unwrap_or(0),
                 version: v.get("version").and_then(|x| x.as_str()).unwrap_or("").to_string(),
                 endorsement_count: v.get("endorsements").and_then(|x| x.as_i64()).unwrap_or(0),
-                unique_downloads: v.get("uniqueDownloads").and_then(|x| x.as_i64()).unwrap_or(0),
+                unique_downloads: v.get("downloads").and_then(|x| x.as_i64()).unwrap_or(0),
                 picture_url: v.get("pictureUrl").and_then(|x| x.as_str()).map(String::from),
                 updated_at: v.get("updatedAt").and_then(|x| x.as_str()).map(String::from),
                 available: v.get("status").and_then(|x| x.as_str()).map(|s| s == "published").unwrap_or(true),

@@ -279,7 +279,7 @@
       if (browseUseGraphQL) {
         const sortMap: Record<string, string> = {
           endorsements: "endorsements",
-          downloads: "unique_downloads",
+          downloads: "downloads",
           name: "name",
           updated: "updated",
         };
