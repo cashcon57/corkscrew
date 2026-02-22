@@ -214,6 +214,11 @@
   let userActions = $state<Array<{mod_name: string, action: string, url: string | null, instructions: string | null}>>([]);
   let installUnlisten: (() => void) | null = null;
 
+  // Floating install button
+  let statsBarEl = $state<HTMLElement | null>(null);
+  let showFloatingInstall = $state(false);
+  let statsBarObserver: IntersectionObserver | null = null;
+
   // Tool requirement detection
   let pendingTools = $state<RequiredTool[]>([]);
   let showToolsPrompt = $state(false);
@@ -398,9 +403,26 @@
     await checkAccount();
   });
 
+  // Track when stats bar scrolls out of view for floating install button
+  $effect(() => {
+    if (statsBarEl) {
+      statsBarObserver = new IntersectionObserver(
+        ([entry]) => { showFloatingInstall = !entry.isIntersecting; },
+        { threshold: 0 }
+      );
+      statsBarObserver.observe(statsBarEl);
+      return () => {
+        statsBarObserver?.disconnect();
+        statsBarObserver = null;
+        showFloatingInstall = false;
+      };
+    }
+  });
+
   onDestroy(() => {
     if (installUnlisten) { installUnlisten(); installUnlisten = null; }
     if (elapsedInterval) { clearInterval(elapsedInterval); elapsedInterval = null; }
+    statsBarObserver?.disconnect();
   });
 
   async function checkAccount() {
@@ -1139,30 +1161,63 @@
         </div>
 
         <!-- Stats Bar -->
-        <div class="detail-stats-bar">
-          <div class="detail-stat">
-            <span class="detail-stat-value">{selectedCollection.total_mods}</span>
-            <span class="detail-stat-label">Mods</span>
-          </div>
-          <div class="detail-stat">
-            <span class="detail-stat-value">{formatNumber(selectedCollection.total_downloads)}</span>
-            <span class="detail-stat-label">Downloads</span>
-          </div>
-          <div class="detail-stat">
-            <span class="detail-stat-value">{formatNumber(selectedCollection.endorsements)}</span>
-            <span class="detail-stat-label">Endorsements</span>
-          </div>
-          {#if selectedCollection.download_size}
+        <div class="detail-stats-bar" bind:this={statsBarEl}>
+          <div class="detail-stats-left">
             <div class="detail-stat">
-              <span class="detail-stat-value">{formatSize(selectedCollection.download_size)}</span>
-              <span class="detail-stat-label">Download Size</span>
+              <span class="detail-stat-value">{selectedCollection.total_mods}</span>
+              <span class="detail-stat-label">Mods</span>
             </div>
-          {/if}
-          <div class="detail-stat">
-            <span class="detail-stat-value">Rev. {selectedCollection.latest_revision}</span>
-            <span class="detail-stat-label">Latest</span>
+            <div class="detail-stat">
+              <span class="detail-stat-value">{formatNumber(selectedCollection.total_downloads)}</span>
+              <span class="detail-stat-label">Downloads</span>
+            </div>
+            <div class="detail-stat">
+              <span class="detail-stat-value">{formatNumber(selectedCollection.endorsements)}</span>
+              <span class="detail-stat-label">Endorsements</span>
+            </div>
+            {#if selectedCollection.download_size}
+              <div class="detail-stat">
+                <span class="detail-stat-value">{formatSize(selectedCollection.download_size)}</span>
+                <span class="detail-stat-label">Download Size</span>
+              </div>
+            {/if}
+            <div class="detail-stat">
+              <span class="detail-stat-value">Rev. {selectedCollection.latest_revision}</span>
+              <span class="detail-stat-label">Latest</span>
+            </div>
           </div>
+          {#if !installing && !installResult}
+            <button
+              class="btn btn-primary stats-install-btn"
+              onclick={handleInstallCollection}
+              disabled={!$selectedGame}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="7 10 12 15 17 10" />
+                <line x1="12" y1="15" x2="12" y2="3" />
+              </svg>
+              Install
+            </button>
+          {/if}
         </div>
+
+        <!-- Floating Install Button (appears on scroll) -->
+        {#if showFloatingInstall && !installing && !installResult}
+          <button
+            class="floating-install-btn"
+            onclick={handleInstallCollection}
+            disabled={!$selectedGame}
+            title="Install Collection"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="7 10 12 15 17 10" />
+              <line x1="12" y1="15" x2="12" y2="3" />
+            </svg>
+            Install Collection
+          </button>
+        {/if}
 
         <!-- Description -->
         {#if renderedDescription}
@@ -2517,11 +2572,65 @@
 
   .detail-stats-bar {
     display: flex;
-    gap: var(--space-6);
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-4);
     padding: var(--space-4) var(--space-5);
     background: var(--surface);
     border: 1px solid var(--separator);
     border-radius: var(--radius-lg);
+  }
+
+  .detail-stats-left {
+    display: flex;
+    gap: var(--space-6);
+  }
+
+  .stats-install-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 18px;
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .floating-install-btn {
+    position: fixed;
+    bottom: 28px;
+    right: 28px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 20px;
+    background: var(--system-accent);
+    color: var(--system-accent-on);
+    font-size: 13px;
+    font-weight: 600;
+    border: none;
+    border-radius: var(--radius-lg);
+    cursor: pointer;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3), 0 1px 4px rgba(0, 0, 0, 0.15);
+    z-index: 50;
+    animation: floatIn 0.2s ease-out;
+    transition: background 0.15s ease, transform 0.15s ease;
+  }
+
+  .floating-install-btn:hover:not(:disabled) {
+    background: var(--system-accent-hover);
+    transform: translateY(-1px);
+  }
+
+  .floating-install-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  @keyframes floatIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
   }
 
   .detail-stat {
