@@ -134,6 +134,38 @@ EOF
 git tag "$TAG"
 git push origin main "$TAG"
 
+# --- Generate changelog ---
+echo ""
+echo "=== Generating changelog ==="
+
+# Find previous tag for diff
+PREV_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]' | head -n 2 | tail -n 1)
+if [[ -z "$PREV_TAG" ]]; then
+  PREV_TAG=$(git rev-list --max-parents=0 HEAD)
+  echo "  No previous tag found, using initial commit"
+else
+  echo "  Changes since $PREV_TAG"
+fi
+
+# Build changelog from commit messages (skip version bump commits)
+CHANGELOG=$(git log "${PREV_TAG}..HEAD~1" --pretty=format:"- %s" --no-merges \
+  | grep -v "^- v[0-9]" \
+  | grep -v "^- Co-Authored-By" \
+  || true)
+
+if [[ -z "$CHANGELOG" ]]; then
+  CHANGELOG="- Bug fixes and improvements"
+fi
+
+RELEASE_NOTES="## What's Changed
+
+${CHANGELOG}
+
+**Full Changelog**: https://github.com/${REPO}/compare/${PREV_TAG}...${TAG}"
+
+echo "$RELEASE_NOTES"
+echo ""
+
 # --- Create draft release ---
 echo ""
 echo "=== Creating draft release $TAG ==="
@@ -141,7 +173,7 @@ gh release create "$TAG" \
   --repo "$REPO" \
   --draft \
   --title "$TAG" \
-  --notes "Release $TAG — macOS artifacts uploaded. Linux builds incoming via CI." \
+  --notes "$RELEASE_NOTES" \
   "$STAGE"/*
 
 echo ""
