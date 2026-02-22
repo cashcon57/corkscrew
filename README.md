@@ -20,17 +20,6 @@
   <a href="https://ko-fi.com/cash508287"><img src="https://img.shields.io/badge/Ko--fi-Support%20Corkscrew-FF5E5B?logo=ko-fi&logoColor=white" alt="Ko-fi"></a>
 </p>
 
-<p align="center">
-  <a href="#features">Features</a>&nbsp;&nbsp;&bull;&nbsp;&nbsp;
-  <a href="#installation">Installation</a>&nbsp;&nbsp;&bull;&nbsp;&nbsp;
-  <a href="#supported-platforms">Platforms</a>&nbsp;&nbsp;&bull;&nbsp;&nbsp;
-  <a href="#current-status">Status</a>&nbsp;&nbsp;&bull;&nbsp;&nbsp;
-  <a href="#architecture">Architecture</a>&nbsp;&nbsp;&bull;&nbsp;&nbsp;
-  <a href="#contributing">Contributing</a>&nbsp;&nbsp;&bull;&nbsp;&nbsp;
-  <a href="#acknowledgments">Acknowledgments</a>&nbsp;&nbsp;&bull;&nbsp;&nbsp;
-  <a href="#support">Support</a>
-</p>
-
 <br>
 
 Corkscrew installs, manages, and organizes mods for Windows games running through [CrossOver](https://www.codeweavers.com/crossover), [Moonshine](https://github.com/ybmeng/moonshine), [Lutris](https://lutris.net/), [Proton](https://github.com/ValveSoftware/Proton), and other Wine-based compatibility layers — no Windows VM required.
@@ -38,6 +27,49 @@ Corkscrew installs, manages, and organizes mods for Windows games running throug
 It works by reading and writing directly to your Wine bottle's filesystem, the same way the game itself sees it. Your bottles, your mods, no middleman.
 
 > **v1.4** — Now with 80+ supported games, NexusMods-style advanced filtering, Wabbajack modlist installation, and comprehensive light/dark mode support.
+
+---
+
+## Table of Contents
+
+- [Installation](#installation)
+  - [Requirements](#requirements)
+  - [From Release](#from-release) — [macOS](#macos) · [Linux](#linux)
+  - [From Source](#from-source)
+  - [Auto-Updates](#auto-updates)
+- [Features](#features)
+  - [Mod Management](#mod-management)
+  - [Mods Page UX](#mods-page-ux)
+  - [Nexus Mods Integration](#nexus-mods-integration)
+  - [Plugin Load Order](#plugin-load-order)
+  - [Profiles](#profiles)
+  - [Wabbajack Modlists](#wabbajack-modlists)
+  - [Crash Log Analysis](#crash-log-analysis)
+  - [Game Launching & Tools](#game-launching--tools)
+  - [Platform & UI](#platform--ui)
+- [Supported Platforms](#supported-platforms)
+  - [Bottle Sources](#bottle-sources)
+  - [Games](#games)
+  - [Keyboard Shortcuts](#keyboard-shortcuts)
+- [Current Status](#current-status)
+  - [What Works](#what-works)
+  - [Known Limitations](#known-limitations)
+  - [Roadmap](#roadmap)
+- [Architecture](#architecture)
+  - [Why These Technologies](#why-these-technologies)
+  - [Project Structure](#project-structure)
+  - [How Mods Are Installed](#how-mods-are-installed)
+- [Contributing](#contributing)
+  - [Development Quick Start](#development-quick-start)
+  - [Areas Where Help Is Wanted](#areas-where-help-is-wanted)
+- [Acknowledgments](#acknowledgments)
+  - [Projects We Build Upon](#projects-we-build-upon)
+  - [Libraries & Tools](#libraries--tools)
+  - [Modding Tool Authors](#modding-tool-authors)
+  - [Communities & Services](#communities--services)
+- [Third-Party Licenses](#third-party-licenses)
+- [Support](#support)
+- [License](#license)
 
 ---
 
@@ -350,7 +382,7 @@ Key workflows tested end-to-end:
 
 ## Architecture
 
-### Why these technologies
+### Why These Technologies
 
 **[Tauri v2](https://v2.tauri.app/)** was chosen over Electron because mod managers are filesystem-heavy tools. Tauri gives us a Rust backend that can walk Wine prefix directories, compute SHA-256 hashes, extract archives, and manage SQLite databases at native speed — all without shipping a bundled Chromium. The result is a ~15 MB app bundle instead of 150+ MB.
 
@@ -360,7 +392,7 @@ Key workflows tested end-to-end:
 
 **SQLite** (via `rusqlite`) with a versioned migration system (v1→v9) tracks installed mods, deployment manifests, file hashes, profiles, plugin rules, conflict rules, mod version history, game file snapshots, mod dependencies, FOMOD recipes, game sessions, collection metadata, auto-categories, download registry, and notification logs.
 
-### Project structure
+### Project Structure
 
 ```
 src/                          Svelte frontend
@@ -425,6 +457,10 @@ src-tauri/src/                Rust backend (~48 modules, 561 tests)
 ├── collections.rs      NexusMods Collections GraphQL API client
 ├── collection_installer.rs  Collection install orchestrator + auto-profile creation
 ├── wabbajack.rs        Wabbajack gallery fetching + .wabbajack file parsing
+├── wabbajack_types.rs  Wabbajack type definitions + BSA/BA2 archive handling
+├── wabbajack_directives.rs  Directive execution (copy, patch, create, inline)
+├── wabbajack_downloader.rs  Multi-source download engine (Nexus, HTTP, Mega, GDrive)
+├── wabbajack_installer.rs   Full modlist install pipeline + cancellation support
 ├── launcher.rs         Game launching through Wine/CrossOver/Whisky/Proton
 ├── skse.rs             SKSE detection, auto-download, installation + version-aware builds
 ├── downgrader.rs       Skyrim version detection + Stock Game creation
@@ -458,7 +494,7 @@ src-tauri/src/                Rust backend (~48 modules, 561 tests)
     └── vortex_game_registry.json  80+ game definitions (auto-updated daily)
 ```
 
-### How mods are installed
+### How Mods Are Installed
 
 1. User drops an archive or clicks Install — the frontend calls `install_mod_cmd` via Tauri IPC
 2. Progress events are emitted at each step via the Tauri event system, providing real-time UI feedback
