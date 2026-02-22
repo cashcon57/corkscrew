@@ -117,10 +117,19 @@ jobs:
           done
           cd -
 
-      - name: Build latest.json for updater
+      - name: Build latest.json for updater (all platforms)
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/build-latest-json.py artifacts/ > latest.json
+
+      - name: Remove macOS-only latest.json from draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          gh release delete-asset "$TAG" latest.json --repo "${{ github.repository }}" -y 2>/dev/null \
+            && echo "Removed macOS-only latest.json" \
+            || echo "No existing latest.json to remove"
 
       - name: Publish release
         uses: softprops/action-gh-release@v2

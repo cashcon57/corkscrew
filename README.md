@@ -37,7 +37,7 @@ Corkscrew installs, manages, and organizes mods for Windows games running throug
 
 It works by reading and writing directly to your Wine bottle's filesystem, the same way the game itself sees it. Your bottles, your mods, no middleman.
 
-> **v1.2** — Skyrim Special Edition is the first fully supported game. More games coming soon.
+> **v1.4** — Now with 80+ supported games, NexusMods-style advanced filtering, Wabbajack modlist installation, and comprehensive light/dark mode support.
 
 ---
 
@@ -153,7 +153,8 @@ Corkscrew includes an in-app auto-updater. When a new version is published on Gi
 - **API key authentication** — Connect your Nexus Mods account via API key to access premium features. SSO/OAuth module is implemented and ready for use once NexusMods approves the application.
 - **NXM protocol handling** — Registered as an `nxm://` protocol handler. Users click "Download with Mod Manager" on the Nexus Mods website, and Corkscrew receives and processes the NXM link.
 - **Strict download compliance** — Corkscrew **never automates downloads for free NexusMods users**. Free users are always directed to the Nexus Mods website to click "Slow Download" manually. Only premium users get API-initiated downloads. This is enforced at the API layer in `nexus.rs::get_download_links()`.
-- **Collections browser** — Browse NexusMods Collections via the GraphQL v2 API with search, sorting, filtering, and detailed mod/revision views.
+- **Browse Nexus Mods** — Search and filter NexusMods mods with advanced filters (category, author, update period, min downloads/endorsements), multiple sort options, and NexusMods-style filter pills.
+- **Collections browser** — Browse NexusMods Collections via the GraphQL v2 API with search, sorting, advanced filtering, and detailed mod/revision views.
 - **Collection installation** — Premium users can install entire NexusMods Collections with one click. The orchestrator resolves install order, downloads mods via the NexusMods API, handles FOMOD selections from the collection manifest, deploys files, and applies the collection's plugin load order. Free users see a list of mods with links to download manually from the Nexus website.
 - **Update checking** — Check installed mods against Nexus for available updates.
 - **Collection diff** — Compare your locally installed collection against the author's latest revision to see added, removed, and updated mods.
@@ -173,9 +174,10 @@ Corkscrew includes an in-app auto-updater. When a new version is published on Gi
 - **Auto-profile on collection install** — A named profile snapshot is automatically created after each collection installation.
 
 ### Wabbajack Modlists
-- **Gallery browser** — Browse the full Wabbajack modlist gallery with search, game filtering, and NSFW toggle.
+- **Gallery browser** — Browse the full Wabbajack modlist gallery with search, game filtering, NSFW toggle, and advanced filters (install size, tags).
 - **Modlist metadata** — View archive counts, download/install sizes, tags, and version info.
 - **Local .wabbajack parsing** — Open and analyze downloaded `.wabbajack` files to see directive breakdowns, archive source breakdown (Nexus, HTTP, Mega, Google Drive, etc.), and compatibility info.
+- **Modlist installation** — Full install pipeline: pre-flight checks, NexusMods archive downloads (premium), HTTP direct downloads, directive execution (copy, patch, create, inline), staging and deployment with progress tracking and cancellation support.
 - **Tool detection** — Scans the modlist for required tools and prompts for installation before proceeding.
 
 ### Crash Log Analysis
@@ -199,7 +201,7 @@ Corkscrew includes an in-app auto-updater. When a new version is published on Gi
 
 ### Platform & UI
 - **Automatic bottle detection** — Finds CrossOver, Whisky, Moonshine, Heroic, Mythic, Lutris, Proton, Bottles, and native Wine prefixes.
-- **Game scanning** — Discovers supported titles across all bottles (Skyrim SE via Steam or GOG to start).
+- **Game scanning** — Discovers 80+ supported titles across all bottles via Steam and GOG path scanning.
 - **Platform-aware settings** — Detects macOS, Linux, and SteamOS, showing platform-relevant compatibility layers and recommendations.
 - **macOS vibrancy** — Native translucent materials that follow the active window state.
 - **Light and dark themes** — System-following by default with manual toggle.
@@ -226,12 +228,53 @@ Corkscrew includes an in-app auto-updater. When a new version is published on Gi
 
 ### Games
 
-| Game | ID | Status |
-|------|----|--------|
-| Skyrim Special Edition | `skyrimse` | Full support |
-| *More to come* | | Planned |
+Corkscrew supports **80+ games** via an auto-generated game registry extracted from [Vortex's game extensions](https://github.com/Nexus-Mods/vortex-games). Games are auto-detected inside Wine bottles by scanning Steam and GOG installation paths.
 
-Adding a new game is a matter of writing a small plugin — see [`plugins/skyrim_se.rs`](src-tauri/src/plugins/skyrim_se.rs) for the pattern.
+<details>
+<summary><strong>View full supported games list</strong> (click to expand)</summary>
+
+<!-- GAME_SUPPORT_TABLE_START -->
+**80+ games supported** — auto-updated daily from NexusMods API
+
+| # | Game | NexusMods Domain | Mods | Tools | Stores |
+|---|------|-----------------|------|-------|--------|
+| 1 | Skyrim Special Edition | [skyrimspecialedition](https://www.nexusmods.com/skyrimspecialedition) | 126,900 | Yes | Steam, GOG, Epic |
+| 2 | Skyrim | [skyrim](https://www.nexusmods.com/skyrim) | 72,800 | Yes | Steam |
+| 3 | Fallout 4 | [fallout4](https://www.nexusmods.com/fallout4) | 71,200 | Yes | Steam, GOG, Epic |
+| 4 | Fallout: New Vegas | [newvegas](https://www.nexusmods.com/newvegas) | 39,900 | Yes | Steam, GOG, Epic |
+| 5 | The Elder Scrolls IV: Oblivion | [oblivion](https://www.nexusmods.com/oblivion) | 33,000 | Yes | Steam, GOG |
+| 6 | Stardew Valley | [stardewvalley](https://www.nexusmods.com/stardewvalley) | 28,600 | Yes | Steam, GOG |
+| 7 | Cyberpunk 2077 | [cyberpunk2077](https://www.nexusmods.com/cyberpunk2077) | 20,000 | | Steam, GOG |
+| 8 | Fallout 3 | [fallout3](https://www.nexusmods.com/fallout3) | 16,900 | Yes | Steam, GOG, Epic |
+| 9 | Baldur's Gate 3 | [baldursgate3](https://www.nexusmods.com/baldursgate3) | 16,800 | Yes | Steam, GOG |
+| 10 | Morrowind | [morrowind](https://www.nexusmods.com/morrowind) | 14,600 | Yes | Steam, GOG |
+| 11 | Starfield | [starfield](https://www.nexusmods.com/starfield) | 12,200 | | Steam |
+| 12 | Blade & Sorcery | [bladeandsorcery](https://www.nexusmods.com/bladeandsorcery) | 8,400 | | Steam |
+| 13 | The Witcher 3 | [witcher3](https://www.nexusmods.com/witcher3) | 8,400 | Yes | Steam, GOG, Epic |
+| 14 | 7 Days to Die | [7daystodie](https://www.nexusmods.com/7daystodie) | 6,900 | | Steam |
+| 15 | Monster Hunter: World | [monsterhunterworld](https://www.nexusmods.com/monsterhunterworld) | 6,300 | Yes | Steam |
+| 16 | The Sims 4 | [thesims4](https://www.nexusmods.com/thesims4) | 4,200 | | Steam |
+| 17 | Dragon Age: Origins | [dragonage](https://www.nexusmods.com/dragonage) | 3,900 | | Steam |
+| 18 | No Man's Sky | [nomanssky](https://www.nexusmods.com/nomanssky) | 2,600 | | Steam |
+| 19 | Enderal | [enderal](https://www.nexusmods.com/enderal) | 877 | Yes | Steam |
+| 20 | Skyrim VR | [skyrimspecialedition](https://www.nexusmods.com/skyrimspecialedition) | - | Yes | Steam |
+| 21 | Fallout 4 VR | [fallout4](https://www.nexusmods.com/fallout4) | - | Yes | Steam |
+| 22 | Sekiro | [sekiro](https://www.nexusmods.com/sekiro) | 1,700 | | Steam |
+| 23 | Darkest Dungeon | [darkestdungeon](https://www.nexusmods.com/darkestdungeon) | 1,600 | | Steam, GOG, Epic |
+| 24 | Dragon Age 2 | [dragonage2](https://www.nexusmods.com/dragonage2) | 1,500 | | Steam |
+| 25 | Kingdom Come: Deliverance | [kingdomcomedeliverance](https://www.nexusmods.com/kingdomcomedeliverance) | 1,500 | | Steam, Epic |
+| 26 | Dark Souls | [darksouls](https://www.nexusmods.com/darksouls) | 1,400 | | Steam |
+| 27 | Kenshi | [kenshi](https://www.nexusmods.com/kenshi) | 1,400 | | Steam |
+| 28 | Mount & Blade: Warband | [mbwarband](https://www.nexusmods.com/mbwarband) | 1,400 | | Steam |
+| 29 | X4: Foundations | [x4foundations](https://www.nexusmods.com/x4foundations) | 1,400 | | Steam, GOG |
+| 30+ | ...and 50+ more games | | | | |
+<!-- GAME_SUPPORT_TABLE_END -->
+
+</details>
+
+Games with **dedicated plugins** (Skyrim SE, Fallout 4) have full support including plugin load order management, LOOT sorting, SKSE integration, and plugins.txt handling. All other registry games get automatic detection and basic mod deployment.
+
+Adding a new game with enhanced support is a matter of writing a small plugin — see [`plugins/skyrim_se.rs`](src-tauri/src/plugins/skyrim_se.rs) for the pattern. The game support table is auto-updated daily via the [NexusMods API](https://www.nexusmods.com/) (requires `NEXUS_API_KEY` secret).
 
 ### Keyboard Shortcuts
 
@@ -255,7 +298,7 @@ These shortcuts are available on the Mods page:
 
 ### What Works
 
-Everything listed in [Features](#features) is implemented and functional. The app has been tested primarily on macOS (Apple Silicon) with CrossOver and Whisky bottles running Skyrim SE via Steam.
+Everything listed in [Features](#features) is implemented and functional. The app has been tested primarily on macOS (Apple Silicon) with CrossOver and Whisky bottles. 80+ games are auto-detected; Skyrim SE and Fallout 4 have full-featured support including load order management.
 
 Key workflows tested end-to-end:
 
@@ -277,26 +320,26 @@ Key workflows tested end-to-end:
 ### Known Limitations
 
 - **Linux testing is limited** — The app builds for Linux and handles Linux paths throughout, but primary testing has been on macOS. Community feedback on SteamOS/Proton setups is especially welcome.
-- **Single game support** — Only Skyrim SE is supported currently. The plugin architecture is ready for more games, but each needs a detection plugin.
-- **Wabbajack installation** — You can browse the gallery and parse `.wabbajack` files, but full automated Wabbajack modlist installation (downloading archives from all sources, executing all directive types) is actively being built.
+- **Enhanced game support** — 80+ games are detected and support basic mod deployment. Full-featured support (plugin load order, LOOT sorting, SKSE, plugins.txt) currently exists for Skyrim SE and Fallout 4. Other Bethesda games are next in line.
+- **Wabbajack installation** — The full Wabbajack install pipeline is implemented (NexusMods downloads, HTTP direct downloads, directive execution), but some edge cases with non-Nexus sources (Mega, Google Drive, LoversLab) may need manual intervention.
 - **NexusMods SSO** — The SSO/OAuth2 module (with PKCE) is fully implemented and ready to use. Currently awaiting NexusMods approval of the "Corkscrew" application slug. In the meantime, API key authentication works.
 - **macOS code signing** — The app is not signed with an Apple Developer certificate. Users need to bypass Gatekeeper on first launch (see [Installation](#installation)).
 
 ### Roadmap
 
 **In progress:**
-- Full Wabbajack modlist installation (all directive types, multi-source downloads, resumable installs)
-- SKSE version management and auto-switching
+- Enhanced game plugins for more Bethesda titles (Oblivion, Fallout 3, Fallout NV, Starfield, Morrowind) with full load order support
+- Wabbajack modlist installation improvements (more download sources, better error recovery)
 
 **Near-term:**
 - NexusMods SSO/OAuth authentication (pending NM app approval)
 - Collection update installation from diff view
-- Resizable table columns with persistent widths
+- Per-game tool configuration for non-Bethesda games
 
 **Medium-term:**
-- More game plugins (Fallout 4, Oblivion, Starfield, etc.)
 - Same-volume staging for reliable hardlink deployment
 - Enhanced dependency visualization with tree view
+- Resizable table columns with persistent widths
 
 **Long-term:**
 - Apple Developer code signing
@@ -364,11 +407,12 @@ src/                          Svelte frontend
 │   └── settings/+page.svelte Config, game tools, auth, INI, diagnostics
 └── app.css                   Design system (tokens, themes, vibrancy, animations)
 
-src-tauri/src/                Rust backend (~46 modules, 514 tests)
-├── lib.rs              Tauri command handlers (~163 IPC commands)
+src-tauri/src/                Rust backend (~48 modules, 561 tests)
+├── lib.rs              Tauri command handlers (~165 IPC commands)
 ├── bottles.rs          Bottle detection (9 sources, macOS + Linux)
 ├── bottle_config.rs    Wine bottle settings (MSync, MetalFX, env vars)
 ├── games.rs            Game detection framework + plugin registry
+├── game_registry.rs    Auto-generated game plugins from Vortex data (80+ games)
 ├── installer.rs        Archive extraction (.zip, .7z, .rar, .tar.gz/xz/bz2) + data root detection
 ├── staging.rs          Staging folder management + SHA-256 hashing
 ├── deployer.rs         Hardlink/copy deployment engine + manifest tracking + progress events
@@ -406,9 +450,12 @@ src-tauri/src/                Rust backend (~46 modules, 514 tests)
 ├── mod_tools.rs        Mod tool detection, auto-install, launch + tool signatures
 ├── session_tracker.rs  Game session logging + stability analysis
 ├── download_queue.rs   Download queue with retry + progress events
-└── plugins/
-    ├── skyrim_se.rs          Skyrim SE detection (Steam + GOG paths)
-    └── skyrim_plugins.rs     Plugin load order management
+├── plugins/
+│   ├── skyrim_se.rs          Skyrim SE detection (Steam + GOG paths)
+│   ├── fallout4.rs           Fallout 4 detection (Steam + GOG paths)
+│   └── skyrim_plugins.rs     Plugin load order management
+└── data/
+    └── vortex_game_registry.json  80+ game definitions (auto-updated daily)
 ```
 
 ### How mods are installed
@@ -444,15 +491,15 @@ cargo tauri dev    # Development mode with hot-reload
 
 ```bash
 # Run tests
-cd src-tauri && cargo test           # 514 Rust tests
+cd src-tauri && cargo test           # 561 Rust tests
 npx svelte-check --threshold error   # Frontend type checking
 ```
 
 ### Areas Where Help Is Wanted
 
 - **Linux testing** — Especially SteamOS/Steam Deck, Fedora, and Ubuntu with Proton/Lutris bottles
-- **Game plugins** — Adding support for Fallout 4, Oblivion, Starfield, and other Bethesda titles
-- **Wabbajack installation** — Implementing the archive download and directive execution pipeline
+- **Enhanced game plugins** — Adding full load order support for Oblivion, Fallout 3, Fallout NV, Starfield, and Morrowind
+- **Non-Bethesda game testing** — Testing mod deployment for the 70+ newly supported games
 - **Accessibility** — Improving screen reader support and keyboard navigation
 
 ---

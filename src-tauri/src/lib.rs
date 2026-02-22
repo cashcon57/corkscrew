@@ -14,6 +14,7 @@ pub mod download_queue;
 pub mod executables;
 pub mod fomod;
 pub mod fomod_recipes;
+pub mod game_registry;
 pub mod games;
 pub mod ini_manager;
 pub mod installer;
@@ -122,6 +123,11 @@ fn get_games(bottle_name: Option<String>) -> Result<Vec<DetectedGame>, String> {
 #[tauri::command]
 fn get_all_games() -> Result<Vec<DetectedGame>, String> {
     Ok(games::detect_all_games())
+}
+
+#[tauri::command]
+fn list_supported_games() -> Result<Vec<game_registry::SupportedGame>, String> {
+    Ok(game_registry::list_supported_games())
 }
 
 #[tauri::command]
@@ -3466,9 +3472,10 @@ fn has_compatible_fomod_recipe(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Register game plugins
+    // Register game plugins (dedicated plugins first, then registry)
     plugins::skyrim_se::register();
     plugins::fallout4::register();
+    game_registry::register_all();
 
     // Initialize database
     let db_path = config::db_path();
@@ -3509,6 +3516,7 @@ pub fn run() {
             get_bottles,
             get_games,
             get_all_games,
+            list_supported_games,
             get_bottle_settings,
             get_bottle_setting_defs,
             set_bottle_setting,

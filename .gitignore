@@ -39,6 +39,23 @@ vite.config.ts.timestamp-*
 latest.json
 *.sig
 
+# Screenshots (dev/testing)
+crashlogs-page.png
+dashboard-initial.png
+discover-page.png
+mods-no-game.png
+phase1-*.png
+phase2-*.png
+settings-dark-mode.png
+settings-page.png
+avatar.jpg
+
+# Raw icon sources (processed into static/icons/)
+tools:sites icons/
+
+# Playwright MCP
+.playwright-mcp/
+
 # Brand kit source (too large for git)
 brand-kit/source-highres.png
 brand-kit/*.xcf

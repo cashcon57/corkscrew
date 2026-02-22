@@ -114,6 +114,25 @@ echo ""
 echo "=== Staged artifacts ==="
 ls -lh "$STAGE/"
 
+# --- Generate latest.json (macOS-only, CI will merge Linux later) ---
+echo ""
+echo "=== Generating latest.json (macOS platforms) ==="
+
+LATEST_TMP="$ROOT/target/latest-stage"
+rm -rf "$LATEST_TMP" && mkdir -p \
+  "$LATEST_TMP/macos-aarch64-apple-darwin" \
+  "$LATEST_TMP/macos-x86_64-apple-darwin"
+
+cp "$STAGE/Corkscrew_aarch64.app.tar.gz"     "$LATEST_TMP/macos-aarch64-apple-darwin/"
+cp "$STAGE/Corkscrew_aarch64.app.tar.gz.sig" "$LATEST_TMP/macos-aarch64-apple-darwin/"
+cp "$STAGE/Corkscrew_x86_64.app.tar.gz"      "$LATEST_TMP/macos-x86_64-apple-darwin/"
+cp "$STAGE/Corkscrew_x86_64.app.tar.gz.sig"  "$LATEST_TMP/macos-x86_64-apple-darwin/"
+
+python3 "$ROOT/scripts/build-latest-json.py" "$LATEST_TMP" > "$STAGE/latest.json"
+echo "  latest.json generated with macOS platforms"
+cat "$STAGE/latest.json" | python3 -m json.tool 2>/dev/null || cat "$STAGE/latest.json"
+rm -rf "$LATEST_TMP"
+
 # --- Commit, tag, push ---
 echo ""
 echo "=== Committing version bump ==="
@@ -181,9 +200,11 @@ echo "========================================="
 echo "  Release $TAG draft created"
 echo "========================================="
 echo ""
-echo "  macOS artifacts uploaded to draft release."
-echo "  CI is now building Linux — it will add Linux artifacts,"
-echo "  generate latest.json, and publish the release."
+echo "  macOS artifacts + latest.json uploaded to draft release."
+echo "  macOS users can update immediately."
+echo ""
+echo "  CI is now building Linux — it will add Linux artifacts"
+echo "  and merge Linux platforms into latest.json."
 echo ""
 echo "  Draft:   https://github.com/$REPO/releases/tag/$TAG"
 echo "  CI:      https://github.com/$REPO/actions"
