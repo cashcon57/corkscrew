@@ -339,7 +339,7 @@
     width: 100%;
     height: 6px;
     border-radius: 3px;
-    background: var(--separator-opaque, rgba(255, 255, 255, 0.08));
+    background: var(--separator-opaque);
     overflow: hidden;
   }
 

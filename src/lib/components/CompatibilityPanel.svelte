@@ -255,7 +255,7 @@
     font-size: 13px;
     font-weight: 600;
     color: var(--text-primary);
-    background: rgba(255, 255, 255, 0.03);
+    background: var(--surface-subtle);
     border-bottom: 1px solid var(--separator);
   }
 
@@ -297,7 +297,7 @@
     align-items: flex-start;
     gap: var(--space-3);
     padding: var(--space-3) var(--space-4);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+    border-bottom: 1px solid var(--separator);
   }
 
   .compat-row:last-of-type {
@@ -399,7 +399,7 @@
   .compat-footer {
     padding: var(--space-2) var(--space-4);
     border-top: 1px solid var(--separator);
-    background: rgba(255, 255, 255, 0.02);
+    background: var(--surface-subtle);
     font-size: 12px;
     font-weight: 500;
   }

@@ -26,6 +26,11 @@
   let sortField = $state<"title" | "author" | "download_size" | "install_size">("title");
   let sortDirection = $state<"asc" | "desc">("asc");
 
+  // Advanced filter state
+  let maxInstallSize = $state<number | null>(null);
+  let tagFilter = $state<string[]>([]);
+  let showAdvancedFilters = $state(false);
+
   // Detail view state
   let selectedModlist = $state<ModlistSummary | null>(null);
   let readmeContent = $state("");
@@ -54,6 +59,18 @@
     return Array.from(games).sort();
   });
 
+  // Derived available tags from all modlists
+  const availableTags = $derived.by(() => {
+    const tags = new Set<string>();
+    modlists.forEach((m) => m.tags?.forEach((t: string) => tags.add(t)));
+    return Array.from(tags).sort();
+  });
+
+  // Count of active advanced filters
+  const activeFilterCount = $derived(
+    (maxInstallSize !== null ? 1 : 0) + tagFilter.length
+  );
+
   $effect(() => {
     let result = modlists;
 
@@ -76,6 +93,19 @@
           m.author.toLowerCase().includes(q) ||
           m.description.toLowerCase().includes(q) ||
           m.tags.some((t) => t.toLowerCase().includes(q))
+      );
+    }
+
+    // Filter by max install size
+    if (maxInstallSize !== null) {
+      const limit = maxInstallSize;
+      result = result.filter((m) => m.install_size <= limit);
+    }
+
+    // Filter by tags
+    if (tagFilter.length > 0) {
+      result = result.filter((m) =>
+        tagFilter.every((t) => m.tags?.includes(t))
       );
     }
 
@@ -667,6 +697,15 @@
           <input type="checkbox" bind:checked={showNsfw} />
           <span>NSFW</span>
         </label>
+        <button class="filter-toggle" onclick={() => showAdvancedFilters = !showAdvancedFilters}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="4" y1="6" x2="20" y2="6" />
+            <line x1="8" y1="12" x2="20" y2="12" />
+            <line x1="12" y1="18" x2="20" y2="18" />
+          </svg>
+          Filters {showAdvancedFilters ? '\u25B2' : '\u25BC'}
+          {#if activeFilterCount > 0}<span class="filter-badge">{activeFilterCount}</span>{/if}
+        </button>
         <div class="sort-group">
           <select class="filter-select" bind:value={sortField}>
             <option value="title">Sort: Name</option>
@@ -690,11 +729,63 @@
         </div>
       </div>
 
+      {#if showAdvancedFilters}
+        <div class="advanced-filters">
+          <!-- Install Size -->
+          <div class="filter-section">
+            <span class="filter-label">Install Size</span>
+            <div class="filter-pills">
+              <button class="filter-pill" class:active={maxInstallSize === null} onclick={() => maxInstallSize = null}>Any</button>
+              <button class="filter-pill" class:active={maxInstallSize === 50_000_000_000} onclick={() => maxInstallSize = 50_000_000_000}>&lt; 50 GB</button>
+              <button class="filter-pill" class:active={maxInstallSize === 100_000_000_000} onclick={() => maxInstallSize = 100_000_000_000}>&lt; 100 GB</button>
+              <button class="filter-pill" class:active={maxInstallSize === 200_000_000_000} onclick={() => maxInstallSize = 200_000_000_000}>&lt; 200 GB</button>
+            </div>
+          </div>
+
+          <!-- Tags -->
+          {#if availableTags.length > 0}
+            <div class="filter-section">
+              <span class="filter-label">Tags</span>
+              <div class="filter-pills">
+                {#each availableTags as tag}
+                  <button
+                    class="filter-pill"
+                    class:active={tagFilter.includes(tag)}
+                    onclick={() => {
+                      if (tagFilter.includes(tag)) tagFilter = tagFilter.filter(t => t !== tag);
+                      else tagFilter = [...tagFilter, tag];
+                    }}
+                  >{tag}</button>
+                {/each}
+              </div>
+            </div>
+          {/if}
+        </div>
+      {/if}
+
+      <!-- Active filter chips -->
+      {#if activeFilterCount > 0}
+        <div class="active-filters">
+          {#if maxInstallSize !== null}
+            <span class="filter-chip">
+              Install &lt; {maxInstallSize / 1_000_000_000} GB
+              <button onclick={() => maxInstallSize = null} title="Remove filter">&times;</button>
+            </span>
+          {/if}
+          {#each tagFilter as tag}
+            <span class="filter-chip">
+              {tag}
+              <button onclick={() => tagFilter = tagFilter.filter(t => t !== tag)} title="Remove filter">&times;</button>
+            </span>
+          {/each}
+        </div>
+      {/if}
+
       {#if filtered.length === 0}
         <div class="empty-state">
           <p class="empty-title">No modlists found</p>
           <p class="empty-detail">
-            {#if searchQuery || gameFilter !== "all"}
+            {#if searchQuery || gameFilter !== "all" || activeFilterCount > 0}
               Try adjusting your search or filters.
             {:else}
               No modlists are currently available.
@@ -898,7 +989,7 @@
 
   .filter-select {
     padding: var(--space-2) var(--space-3);
-    background: var(--surface);
+    background: var(--bg-tertiary);
     border: 1px solid var(--separator);
     border-radius: var(--radius);
     color: var(--text-primary);
@@ -952,6 +1043,127 @@
     color: var(--text-primary);
   }
 
+  /* Advanced Filters */
+  .filter-toggle {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--surface);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius);
+    color: var(--text-secondary);
+    font-size: 12px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+
+  .filter-toggle:hover {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+  }
+
+  .filter-badge {
+    background: var(--accent, var(--system-accent));
+    color: var(--accent-on, #fff);
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 10px;
+    font-weight: 600;
+  }
+
+  .advanced-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-4);
+    padding: var(--space-3) var(--space-4);
+    background: var(--surface-subtle, var(--bg-secondary));
+    border: 1px solid var(--separator);
+    border-radius: var(--radius);
+    margin-bottom: var(--space-4);
+  }
+
+  .filter-section {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    min-width: 140px;
+  }
+
+  .filter-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .filter-pills {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+
+  .filter-pill {
+    padding: 3px 10px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--separator);
+    border-radius: 12px;
+    color: var(--text-secondary);
+    font-size: 11px;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+
+  .filter-pill:hover {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+  }
+
+  .filter-pill.active {
+    background: var(--system-accent-subtle);
+    border-color: var(--system-accent);
+    color: var(--system-accent);
+    font-weight: 500;
+  }
+
+  .active-filters {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-bottom: var(--space-4);
+  }
+
+  .filter-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    background: var(--system-accent-subtle);
+    border: 1px solid var(--system-accent-muted, rgba(0, 122, 255, 0.25));
+    border-radius: 10px;
+    color: var(--system-accent);
+    font-size: 11px;
+    font-weight: 500;
+  }
+
+  .filter-chip button {
+    display: flex;
+    background: none;
+    border: none;
+    color: inherit;
+    cursor: pointer;
+    padding: 0;
+    opacity: 0.7;
+    font-size: 13px;
+    line-height: 1;
+  }
+
+  .filter-chip button:hover {
+    opacity: 1;
+  }
+
   /* Grid */
   .modlist-grid {
     display: grid;
@@ -974,7 +1186,7 @@
   }
 
   .modlist-card:hover {
-    border-color: rgba(255, 255, 255, 0.12);
+    border-color: var(--separator);
   }
 
   @keyframes cardFadeIn {
@@ -1032,7 +1244,7 @@
     font-size: 10px;
     font-weight: 500;
     color: var(--text-tertiary);
-    background: rgba(255, 255, 255, 0.05);
+    background: var(--surface);
     padding: 1px var(--space-2);
     border-radius: var(--radius-sm);
   }
@@ -1074,7 +1286,7 @@
     font-size: 10px;
     font-weight: 500;
     color: var(--text-secondary);
-    background: rgba(255, 255, 255, 0.06);
+    background: var(--surface);
     padding: 1px 6px;
     border-radius: var(--radius-sm);
   }
@@ -1180,9 +1392,9 @@
   .empty-state {
     text-align: center;
     padding: var(--space-12) var(--space-8);
-    border: 1px dashed rgba(255, 255, 255, 0.1);
+    border: 1px dashed var(--separator);
     border-radius: var(--radius-lg);
-    background: rgba(255, 255, 255, 0.015);
+    background: var(--surface-subtle);
     box-shadow: var(--glass-edge-shadow);
   }
 
@@ -1250,7 +1462,7 @@
   .detail-version {
     font-size: 12px;
     color: var(--text-tertiary);
-    background: rgba(255, 255, 255, 0.05);
+    background: var(--surface);
     padding: 2px var(--space-2);
     border-radius: var(--radius-sm);
   }

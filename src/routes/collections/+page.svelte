@@ -199,6 +199,32 @@
   let collectionsSearchTimer: ReturnType<typeof setTimeout> | null = null;
   const collectionsTotalPages = $derived(Math.max(1, Math.ceil(collectionsTotalCount / COLLECTIONS_PAGE_SIZE)));
   const collectionsCurrentPage = $derived(Math.floor(collectionsOffset / COLLECTIONS_PAGE_SIZE) + 1);
+
+  // Advanced collections filters
+  let collectionsAuthorFilter = $state("");
+  let collectionsMinDownloads = $state<number | null>(null);
+  let collectionsMinEndorsements = $state<number | null>(null);
+  let showCollectionsAdvancedFilters = $state(false);
+  let collectionsAuthorTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const collectionsActiveFilterCount = $derived(
+    (collectionsAuthorFilter.trim() ? 1 : 0) +
+    (collectionsMinDownloads !== null ? 1 : 0) +
+    (collectionsMinEndorsements !== null ? 1 : 0)
+  );
+
+  function clearAllCollectionsFilters() {
+    collectionsAuthorFilter = "";
+    collectionsMinDownloads = null;
+    collectionsMinEndorsements = null;
+    reloadWithSort();
+  }
+
+  function collectionsAuthorDebounced() {
+    if (collectionsAuthorTimer) clearTimeout(collectionsAuthorTimer);
+    collectionsAuthorTimer = setTimeout(() => reloadWithSort(), 400);
+  }
+
   let selectedCollection = $state<CollectionInfo | null>(null);
   let selectedMods = $state<CollectionMod[]>([]);
   let loadingDetail = $state(false);
@@ -230,7 +256,7 @@
   let browseModsLoading = $state(false);
   let browseModsSearch = $state("");
   let browseModsShowNsfw = $state(false);
-  let browseModsSort = $state<"endorsements" | "downloads" | "name" | "updated">("endorsements");
+  let browseModsSort = $state<"endorsements" | "downloads" | "name" | "updated" | "createdAt">("endorsements");
   let browseModsTotalCount = $state(0);
   let browseModsOffset = $state(0);
   let browseModsHasMore = $state(false);
@@ -240,6 +266,46 @@
   let browseInstalledNexusIds = $state<Set<number>>(new Set());
   let browseSearchTimer: ReturnType<typeof setTimeout> | null = null;
   let browseUseGraphQL = $state(true);
+
+  // Advanced browse filters
+  let browseAuthorFilter = $state("");
+  let browseUpdatePeriod = $state<"all" | "24h" | "1w" | "1m">("all");
+  let browseMinDownloads = $state<number | null>(null);
+  let browseMinEndorsements = $state<number | null>(null);
+  let showBrowseAdvancedFilters = $state(false);
+  let browseAuthorTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const browseActiveFilterCount = $derived(
+    (browseAuthorFilter.trim() ? 1 : 0) +
+    (browseUpdatePeriod !== "all" ? 1 : 0) +
+    (browseMinDownloads !== null ? 1 : 0) +
+    (browseMinEndorsements !== null ? 1 : 0) +
+    (browseCategoryId !== null ? 1 : 0)
+  );
+
+  function computeUpdatedSince(period: "all" | "24h" | "1w" | "1m"): string | null {
+    if (period === "all") return null;
+    const msMap: Record<string, number> = {
+      "24h": 24 * 60 * 60 * 1000,
+      "1w": 7 * 24 * 60 * 60 * 1000,
+      "1m": 30 * 24 * 60 * 60 * 1000,
+    };
+    return new Date(Date.now() - msMap[period]).toISOString();
+  }
+
+  function clearAllBrowseFilters() {
+    browseAuthorFilter = "";
+    browseUpdatePeriod = "all";
+    browseMinDownloads = null;
+    browseMinEndorsements = null;
+    browseCategoryId = null;
+    loadBrowseMods();
+  }
+
+  function browseAuthorDebounced() {
+    if (browseAuthorTimer) clearTimeout(browseAuthorTimer);
+    browseAuthorTimer = setTimeout(() => loadBrowseMods(), 400);
+  }
 
   const gameSlugMap: Record<string, string> = {
     skyrimse: "skyrimspecialedition",
@@ -293,6 +359,7 @@
           downloads: "downloads",
           name: "name",
           updated: "updated",
+          createdAt: "createdAt",
         };
         const result = await searchNexusMods(
           slug,
@@ -302,6 +369,11 @@
           BROWSE_PAGE_SIZE,
           browseModsOffset,
           browseModsShowNsfw,
+          browseCategoryId || null,
+          browseAuthorFilter.trim() || null,
+          computeUpdatedSince(browseUpdatePeriod),
+          browseMinDownloads,
+          browseMinEndorsements,
         );
         browseMods = result.mods;
         browseModsTotalCount = result.total_count;
@@ -486,6 +558,9 @@
       const result: CollectionSearchResult = await browseCollections(
         gameDomain, COLLECTIONS_PAGE_SIZE, collectionsOffset,
         sortField, sortDirection, searchText,
+        collectionsAuthorFilter.trim() || undefined,
+        collectionsMinDownloads || undefined,
+        collectionsMinEndorsements || undefined,
       );
       collections = result.collections;
       collectionsTotalCount = result.total_count;
@@ -1540,13 +1615,95 @@
             <option value="downloads">Sort: Downloads</option>
             <option value="name">Sort: Name</option>
             <option value="updated">Sort: Updated</option>
+            <option value="createdAt">Sort: Recently Added</option>
           </select>
         </div>
         <label class="nsfw-toggle">
           <input type="checkbox" bind:checked={browseModsShowNsfw} onchange={() => loadBrowseMods()} />
           <span>NSFW</span>
         </label>
+        <button class="filter-toggle" onclick={() => showBrowseAdvancedFilters = !showBrowseAdvancedFilters}>
+          Filters {showBrowseAdvancedFilters ? '\u25B2' : '\u25BC'}
+          {#if browseActiveFilterCount > 0}<span class="filter-badge">{browseActiveFilterCount}</span>{/if}
+        </button>
       </div>
+
+      {#if showBrowseAdvancedFilters}
+        <div class="advanced-filters">
+          <div class="filter-section">
+            <label class="filter-label">Author</label>
+            <input type="text" class="filter-input" placeholder="Filter by author..." bind:value={browseAuthorFilter} oninput={browseAuthorDebounced} />
+          </div>
+
+          <div class="filter-section">
+            <label class="filter-label">Updated</label>
+            <div class="filter-pills">
+              <button class="filter-pill" class:active={browseUpdatePeriod === "all"} onclick={() => { browseUpdatePeriod = "all"; loadBrowseMods(); }}>All Time</button>
+              <button class="filter-pill" class:active={browseUpdatePeriod === "24h"} onclick={() => { browseUpdatePeriod = "24h"; loadBrowseMods(); }}>Last 24h</button>
+              <button class="filter-pill" class:active={browseUpdatePeriod === "1w"} onclick={() => { browseUpdatePeriod = "1w"; loadBrowseMods(); }}>Last Week</button>
+              <button class="filter-pill" class:active={browseUpdatePeriod === "1m"} onclick={() => { browseUpdatePeriod = "1m"; loadBrowseMods(); }}>Last Month</button>
+            </div>
+          </div>
+
+          <div class="filter-section">
+            <label class="filter-label">Min Downloads</label>
+            <div class="filter-pills">
+              <button class="filter-pill" class:active={browseMinDownloads === null} onclick={() => { browseMinDownloads = null; loadBrowseMods(); }}>Any</button>
+              <button class="filter-pill" class:active={browseMinDownloads === 1000} onclick={() => { browseMinDownloads = 1000; loadBrowseMods(); }}>1K+</button>
+              <button class="filter-pill" class:active={browseMinDownloads === 10000} onclick={() => { browseMinDownloads = 10000; loadBrowseMods(); }}>10K+</button>
+              <button class="filter-pill" class:active={browseMinDownloads === 100000} onclick={() => { browseMinDownloads = 100000; loadBrowseMods(); }}>100K+</button>
+            </div>
+          </div>
+
+          <div class="filter-section">
+            <label class="filter-label">Min Endorsements</label>
+            <div class="filter-pills">
+              <button class="filter-pill" class:active={browseMinEndorsements === null} onclick={() => { browseMinEndorsements = null; loadBrowseMods(); }}>Any</button>
+              <button class="filter-pill" class:active={browseMinEndorsements === 100} onclick={() => { browseMinEndorsements = 100; loadBrowseMods(); }}>100+</button>
+              <button class="filter-pill" class:active={browseMinEndorsements === 1000} onclick={() => { browseMinEndorsements = 1000; loadBrowseMods(); }}>1K+</button>
+              <button class="filter-pill" class:active={browseMinEndorsements === 10000} onclick={() => { browseMinEndorsements = 10000; loadBrowseMods(); }}>10K+</button>
+            </div>
+          </div>
+        </div>
+      {/if}
+
+      {#if browseActiveFilterCount > 0}
+        <div class="active-filters">
+          {#if browseCategoryId !== null}
+            <span class="filter-chip">
+              Category: {browseCategoryOptions.find(c => c.id === browseCategoryId)?.name ?? browseCategoryId}
+              <button onclick={() => { browseCategoryId = null; loadBrowseMods(); }}>&times;</button>
+            </span>
+          {/if}
+          {#if browseAuthorFilter.trim()}
+            <span class="filter-chip">
+              Author: {browseAuthorFilter}
+              <button onclick={() => { browseAuthorFilter = ""; loadBrowseMods(); }}>&times;</button>
+            </span>
+          {/if}
+          {#if browseUpdatePeriod !== "all"}
+            <span class="filter-chip">
+              Updated: {browseUpdatePeriod === "24h" ? "Last 24h" : browseUpdatePeriod === "1w" ? "Last Week" : "Last Month"}
+              <button onclick={() => { browseUpdatePeriod = "all"; loadBrowseMods(); }}>&times;</button>
+            </span>
+          {/if}
+          {#if browseMinDownloads !== null}
+            <span class="filter-chip">
+              Downloads: {formatDownloads(browseMinDownloads)}+
+              <button onclick={() => { browseMinDownloads = null; loadBrowseMods(); }}>&times;</button>
+            </span>
+          {/if}
+          {#if browseMinEndorsements !== null}
+            <span class="filter-chip">
+              Endorsements: {formatDownloads(browseMinEndorsements)}+
+              <button onclick={() => { browseMinEndorsements = null; loadBrowseMods(); }}>&times;</button>
+            </span>
+          {/if}
+          <button class="filter-chip filter-chip-clear" onclick={clearAllBrowseFilters}>
+            Clear All &times;
+          </button>
+        </div>
+      {/if}
 
       {#if browseModsLoading}
         <div class="loading-container">
@@ -1741,7 +1898,66 @@
             </svg>
           </button>
         </div>
+        <button class="filter-toggle" onclick={() => showCollectionsAdvancedFilters = !showCollectionsAdvancedFilters}>
+          Filters {showCollectionsAdvancedFilters ? '\u25B2' : '\u25BC'}
+          {#if collectionsActiveFilterCount > 0}<span class="filter-badge">{collectionsActiveFilterCount}</span>{/if}
+        </button>
       </div>
+
+      {#if showCollectionsAdvancedFilters}
+        <div class="advanced-filters">
+          <div class="filter-section">
+            <label class="filter-label">Author</label>
+            <input type="text" class="filter-input" placeholder="Filter by author..." bind:value={collectionsAuthorFilter} oninput={collectionsAuthorDebounced} />
+          </div>
+
+          <div class="filter-section">
+            <label class="filter-label">Min Downloads</label>
+            <div class="filter-pills">
+              <button class="filter-pill" class:active={collectionsMinDownloads === null} onclick={() => { collectionsMinDownloads = null; reloadWithSort(); }}>Any</button>
+              <button class="filter-pill" class:active={collectionsMinDownloads === 1000} onclick={() => { collectionsMinDownloads = 1000; reloadWithSort(); }}>1K+</button>
+              <button class="filter-pill" class:active={collectionsMinDownloads === 10000} onclick={() => { collectionsMinDownloads = 10000; reloadWithSort(); }}>10K+</button>
+              <button class="filter-pill" class:active={collectionsMinDownloads === 100000} onclick={() => { collectionsMinDownloads = 100000; reloadWithSort(); }}>100K+</button>
+            </div>
+          </div>
+
+          <div class="filter-section">
+            <label class="filter-label">Min Endorsements</label>
+            <div class="filter-pills">
+              <button class="filter-pill" class:active={collectionsMinEndorsements === null} onclick={() => { collectionsMinEndorsements = null; reloadWithSort(); }}>Any</button>
+              <button class="filter-pill" class:active={collectionsMinEndorsements === 100} onclick={() => { collectionsMinEndorsements = 100; reloadWithSort(); }}>100+</button>
+              <button class="filter-pill" class:active={collectionsMinEndorsements === 1000} onclick={() => { collectionsMinEndorsements = 1000; reloadWithSort(); }}>1K+</button>
+              <button class="filter-pill" class:active={collectionsMinEndorsements === 10000} onclick={() => { collectionsMinEndorsements = 10000; reloadWithSort(); }}>10K+</button>
+            </div>
+          </div>
+        </div>
+      {/if}
+
+      {#if collectionsActiveFilterCount > 0}
+        <div class="active-filters">
+          {#if collectionsAuthorFilter.trim()}
+            <span class="filter-chip">
+              Author: {collectionsAuthorFilter}
+              <button onclick={() => { collectionsAuthorFilter = ""; reloadWithSort(); }}>&times;</button>
+            </span>
+          {/if}
+          {#if collectionsMinDownloads !== null}
+            <span class="filter-chip">
+              Downloads: {formatNumber(collectionsMinDownloads)}+
+              <button onclick={() => { collectionsMinDownloads = null; reloadWithSort(); }}>&times;</button>
+            </span>
+          {/if}
+          {#if collectionsMinEndorsements !== null}
+            <span class="filter-chip">
+              Endorsements: {formatNumber(collectionsMinEndorsements)}+
+              <button onclick={() => { collectionsMinEndorsements = null; reloadWithSort(); }}>&times;</button>
+            </span>
+          {/if}
+          <button class="filter-chip filter-chip-clear" onclick={clearAllCollectionsFilters}>
+            Clear All &times;
+          </button>
+        </div>
+      {/if}
 
       {#if filtered.length === 0}
         <div class="empty-state">
@@ -2126,8 +2342,8 @@
     display: inline-block;
     width: 14px;
     height: 14px;
-    border: 2px solid rgba(255, 255, 255, 0.3);
-    border-top-color: #fff;
+    border: 2px solid var(--text-tertiary);
+    border-top-color: var(--text-primary);
     border-radius: 50%;
     animation: spin 0.75s linear infinite;
     flex-shrink: 0;
@@ -2194,7 +2410,7 @@
 
   .filter-select {
     padding: var(--space-2) var(--space-3);
-    background: var(--surface);
+    background: var(--bg-tertiary);
     border: 1px solid var(--separator);
     border-radius: var(--radius);
     color: var(--text-primary);
@@ -2272,7 +2488,7 @@
   }
 
   .collection-card:hover {
-    border-color: rgba(255, 255, 255, 0.12);
+    border-color: var(--separator);
     box-shadow: var(--glass-edge-shadow), var(--shadow-sm);
   }
 
@@ -2371,7 +2587,7 @@
     font-size: 10px;
     font-weight: 500;
     color: var(--text-secondary);
-    background: rgba(255, 255, 255, 0.06);
+    background: var(--surface);
     padding: 1px 6px;
     border-radius: var(--radius-sm);
   }
@@ -2497,9 +2713,9 @@
     gap: var(--space-3);
     text-align: center;
     padding: var(--space-12) var(--space-8);
-    border: 1px dashed rgba(255, 255, 255, 0.1);
+    border: 1px dashed var(--separator);
     border-radius: var(--radius-lg);
-    background: rgba(255, 255, 255, 0.015);
+    background: var(--surface-subtle);
     box-shadow: var(--glass-edge-shadow);
   }
 
@@ -2721,11 +2937,7 @@
   }
 
   .mods-table-row:nth-child(even) {
-    background: rgba(255, 255, 255, 0.025);
-  }
-
-  :global([data-theme="light"]) .mods-table-row:nth-child(even) {
-    background: rgba(0, 0, 0, 0.025);
+    background: var(--surface-subtle);
   }
 
   .mods-table-row:hover {
@@ -3157,7 +3369,7 @@
     border-radius: 100px;
     font-size: 10px;
     font-weight: 700;
-    background: rgba(255, 255, 255, 0.2);
+    background: var(--surface-active);
   }
 
   /* ============================
@@ -3661,5 +3873,162 @@
     font-size: var(--font-xs);
     color: var(--text-muted);
     margin-left: var(--space-2);
+  }
+
+  /* ---- Advanced Filters ---- */
+
+  .filter-toggle {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--surface);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius);
+    color: var(--text-secondary);
+    font-size: 12px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+    white-space: nowrap;
+  }
+
+  .filter-toggle:hover {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+  }
+
+  .filter-badge {
+    background: var(--system-accent);
+    color: var(--system-accent-on);
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 10px;
+    font-weight: 600;
+  }
+
+  .advanced-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-4);
+    padding: var(--space-3) var(--space-4);
+    background: var(--surface);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius);
+    margin-bottom: var(--space-3);
+  }
+
+  .filter-section {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    min-width: 140px;
+  }
+
+  .filter-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .filter-input {
+    padding: var(--space-1) var(--space-2);
+    background: var(--bg-tertiary);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-size: 12px;
+    outline: none;
+    min-width: 160px;
+    font-family: var(--font-sans);
+  }
+
+  .filter-input:focus {
+    border-color: var(--system-accent);
+  }
+
+  .filter-input::placeholder {
+    color: var(--text-tertiary);
+  }
+
+  .filter-pills {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+
+  .filter-pill {
+    padding: 3px 10px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--separator);
+    border-radius: 12px;
+    color: var(--text-secondary);
+    font-size: 11px;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+
+  .filter-pill:hover {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+  }
+
+  .filter-pill.active {
+    background: var(--system-accent-subtle);
+    border-color: var(--system-accent);
+    color: var(--system-accent);
+    font-weight: 500;
+  }
+
+  .active-filters {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-bottom: var(--space-3);
+  }
+
+  .filter-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    background: var(--system-accent-subtle);
+    border: 1px solid color-mix(in srgb, var(--system-accent) 30%, transparent);
+    border-radius: 10px;
+    color: var(--system-accent);
+    font-size: 11px;
+    font-weight: 500;
+  }
+
+  .filter-chip button {
+    display: flex;
+    align-items: center;
+    background: none;
+    border: none;
+    color: inherit;
+    cursor: pointer;
+    padding: 0;
+    opacity: 0.7;
+    font-size: 13px;
+    line-height: 1;
+  }
+
+  .filter-chip button:hover {
+    opacity: 1;
+  }
+
+  .filter-chip-clear {
+    background: var(--surface-hover);
+    border-color: var(--separator);
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-weight: 500;
+  }
+
+  .filter-chip-clear:hover {
+    background: var(--surface-active);
+    color: var(--text-primary);
   }
 </style>

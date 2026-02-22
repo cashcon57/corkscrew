@@ -412,6 +412,7 @@ export interface NexusModInfo {
   unique_downloads: number;
   picture_url: string | null;
   updated_at: string | null;
+  created_at: string | null;
   available: boolean;
   adult_content: boolean;
 }

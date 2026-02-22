@@ -219,7 +219,7 @@
   .preflight-header {
     padding: var(--space-3) var(--space-4);
     border-bottom: 1px solid var(--separator);
-    background: rgba(255, 255, 255, 0.03);
+    background: var(--surface-subtle);
   }
 
   .preflight-title-row {

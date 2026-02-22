@@ -661,6 +661,11 @@ export async function searchNexusMods(
   count: number,
   offset: number,
   includeAdult: boolean,
+  categoryId: number | null = null,
+  author: string | null = null,
+  updatedSince: string | null = null,
+  minDownloads: number | null = null,
+  minEndorsements: number | null = null,
 ): Promise<import("./types").NexusSearchResult> {
   return invoke("search_nexus_mods_cmd", {
     gameSlug,
@@ -670,6 +675,11 @@ export async function searchNexusMods(
     count,
     offset,
     includeAdult,
+    categoryId,
+    author,
+    updatedSince,
+    minDownloads,
+    minEndorsements,
   });
 }
 
@@ -687,12 +697,18 @@ export async function browseCollections(
   sortField?: string,
   sortDirection?: string,
   searchText?: string,
+  author?: string,
+  minDownloads?: number,
+  minEndorsements?: number,
 ): Promise<CollectionSearchResult> {
   return invoke("browse_collections_cmd", {
     gameDomain, count, offset,
     sortField: sortField ?? null,
     sortDirection: sortDirection ?? null,
     searchText: searchText ?? null,
+    author: author ?? null,
+    minDownloads: minDownloads ?? null,
+    minEndorsements: minEndorsements ?? null,
   });
 }
 

@@ -885,11 +885,7 @@
     overflow: hidden;
     padding: 8px;
     gap: 8px;
-    background: #18181b;
-  }
-
-  :global([data-theme="light"]) .app-shell {
-    background: #e0e0e5;
+    background: var(--bg-base);
   }
 
   :global(html.vibrancy-active) .app-shell {
@@ -914,10 +910,10 @@
     width: 56px;
     min-width: 56px;
     z-index: 10;
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    border: 1px solid var(--separator);
     box-shadow:
-      inset 0 1px 0 0 rgba(255, 255, 255, 0.08),
-      0 0 0 0.5px rgba(255, 255, 255, 0.04),
+      inset 0 1px 0 0 var(--surface-hover),
+      0 0 0 0.5px var(--surface-subtle),
       0 1px 4px rgba(0, 0, 0, 0.12),
       0 4px 16px rgba(0, 0, 0, 0.08);
     backdrop-filter: blur(20px) saturate(1.2);
@@ -932,10 +928,18 @@
       0 4px 16px rgba(0, 0, 0, 0.04);
   }
 
+  :global([data-theme="light"]) .sidebar.collapsed {
+    border-color: rgba(0, 0, 0, 0.08);
+    box-shadow:
+      0 0 0 0.5px rgba(0, 0, 0, 0.04),
+      0 1px 4px rgba(0, 0, 0, 0.06),
+      0 4px 16px rgba(0, 0, 0, 0.04);
+  }
+
   :global(html.vibrancy-active) .sidebar {
     backdrop-filter: blur(24px);
     -webkit-backdrop-filter: blur(24px);
-    border-color: rgba(255, 255, 255, 0.10);
+    border-color: var(--separator);
   }
 
   /* Traffic light spacer — clears macOS window controls.
@@ -1263,14 +1267,9 @@
     border-radius: 14px;
     overflow: hidden;
     background: var(--bg-base);
-    border: 1px solid rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--separator);
     position: relative;
-    box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.06);
-  }
-
-  :global([data-theme="light"]) .content-column {
-    border-color: rgba(0, 0, 0, 0.06);
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.04);
+    box-shadow: inset 0 1px 0 0 var(--surface);
   }
 
   :global(html.vibrancy-active) .content-column {

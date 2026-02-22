@@ -184,14 +184,14 @@
     min-width: 240px;
     max-width: 320px;
     background: var(--bg-elevated);
-    border: 1px solid rgba(255, 255, 255, 0.12);
+    border: 1px solid var(--separator);
     border-radius: var(--radius);
     padding: 4px;
     z-index: 100;
     box-shadow:
       0 4px 24px rgba(0, 0, 0, 0.3),
       0 1px 4px rgba(0, 0, 0, 0.15),
-      inset 0 1px 0 0 rgba(255, 255, 255, 0.06);
+      inset 0 1px 0 0 var(--surface);
     animation: dropdownIn 0.15s ease-out;
     max-height: 320px;
     overflow-y: auto;

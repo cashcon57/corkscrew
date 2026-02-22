@@ -2779,6 +2779,11 @@ async fn search_nexus_mods_cmd(
     count: u32,
     offset: u32,
     include_adult: bool,
+    category_id: Option<i64>,
+    author: Option<String>,
+    updated_since: Option<String>,
+    min_downloads: Option<i64>,
+    min_endorsements: Option<i64>,
 ) -> Result<NexusSearchResult, String> {
     let api_key = config::get_config()
         .ok()
@@ -2793,6 +2798,11 @@ async fn search_nexus_mods_cmd(
         count,
         offset,
         include_adult,
+        category_id,
+        author.as_deref(),
+        updated_since.as_deref(),
+        min_downloads,
+        min_endorsements,
     )
     .await
     .map_err(|e| e.to_string())
@@ -2821,6 +2831,9 @@ async fn browse_collections_cmd(
     sort_field: Option<String>,
     sort_direction: Option<String>,
     search_text: Option<String>,
+    author: Option<String>,
+    min_downloads: Option<i64>,
+    min_endorsements: Option<i64>,
 ) -> Result<CollectionSearchResult, String> {
     let api_key = config::get_config().ok().and_then(|c| c.nexus_api_key);
 
@@ -2828,9 +2841,14 @@ async fn browse_collections_cmd(
     let sd = sort_direction.as_deref().unwrap_or("desc");
     let st = search_text.as_deref().filter(|s| !s.is_empty());
 
-    collections::browse_collections(api_key.as_deref(), &game_domain, count, offset, sf, sd, st)
-        .await
-        .map_err(|e| e.to_string())
+    collections::browse_collections(
+        api_key.as_deref(), &game_domain, count, offset, sf, sd, st,
+        author.as_deref(),
+        min_downloads,
+        min_endorsements,
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

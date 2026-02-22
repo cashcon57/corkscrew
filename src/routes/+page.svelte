@@ -903,10 +903,10 @@
     align-items: center;
     justify-content: center;
     padding: var(--space-12) var(--space-8);
-    border: 1px dashed rgba(255, 255, 255, 0.1);
+    border: 1px dashed var(--separator);
     border-radius: var(--radius-lg);
     text-align: center;
-    background: rgba(255, 255, 255, 0.015);
+    background: var(--surface-subtle);
   }
 
   .empty-icon {

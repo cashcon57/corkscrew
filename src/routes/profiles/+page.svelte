@@ -475,9 +475,9 @@
   .empty-state {
     text-align: center;
     padding: var(--space-12) var(--space-8);
-    border: 1px dashed rgba(255, 255, 255, 0.1);
+    border: 1px dashed var(--separator);
     border-radius: var(--radius-lg);
-    background: rgba(255, 255, 255, 0.015);
+    background: var(--surface-subtle);
     box-shadow: var(--glass-edge-shadow);
   }
 

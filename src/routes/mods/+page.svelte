@@ -3437,8 +3437,8 @@
     display: inline-block;
     width: 14px;
     height: 14px;
-    border: 2px solid rgba(255, 255, 255, 0.3);
-    border-top-color: #fff;
+    border: 2px solid var(--text-tertiary);
+    border-top-color: var(--text-primary);
     border-radius: 50%;
     animation: spin 0.6s linear infinite;
   }
@@ -3576,11 +3576,7 @@
 
   .sortable-header:hover {
     color: var(--text-primary);
-    background: rgba(255, 255, 255, 0.05);
-  }
-
-  :global([data-theme="light"]) .sortable-header:hover {
-    background: rgba(0, 0, 0, 0.05);
+    background: var(--surface);
   }
 
   .sort-arrow {
@@ -3622,11 +3618,7 @@
   }
 
   .table-row:nth-child(even) {
-    background: rgba(255, 255, 255, 0.025);
-  }
-
-  :global([data-theme="light"]) .table-row:nth-child(even) {
-    background: rgba(0, 0, 0, 0.025);
+    background: var(--surface-subtle);
   }
 
   .table-row:hover {
@@ -4488,7 +4480,7 @@
 
   .filter-select {
     padding: var(--space-2) var(--space-3);
-    background: var(--surface);
+    background: var(--bg-tertiary);
     border: 1px solid var(--separator);
     border-radius: var(--radius-sm);
     color: var(--text-secondary);
@@ -5394,7 +5386,7 @@
 
   .banner-dismiss:hover {
     opacity: 1;
-    background: rgba(255, 255, 255, 0.1);
+    background: var(--surface-hover);
   }
 
   /* Bulk Action Bar */

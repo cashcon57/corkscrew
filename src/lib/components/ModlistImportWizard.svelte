@@ -890,11 +890,7 @@
   }
 
   .plan-table-row:nth-child(even) {
-    background: rgba(255, 255, 255, 0.025);
-  }
-
-  :global([data-theme="light"]) .plan-table-row:nth-child(even) {
-    background: rgba(0, 0, 0, 0.025);
+    background: var(--surface-subtle);
   }
 
   .plan-table-row:hover {

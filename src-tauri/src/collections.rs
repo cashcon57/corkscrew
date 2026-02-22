@@ -449,6 +449,9 @@ pub async fn browse_collections(
     sort_field: &str,
     sort_direction: &str,
     search_text: Option<&str>,
+    author: Option<&str>,
+    min_downloads: Option<i64>,
+    min_endorsements: Option<i64>,
 ) -> Result<CollectionSearchResult, CollectionsError> {
     // Map friendly sort names to GraphQL field names
     let gql_sort_key = match sort_field {
@@ -489,6 +492,26 @@ pub async fn browse_collections(
         filter.insert(
             "name".to_string(),
             serde_json::json!([{ "op": "WILDCARD", "value": format!("*{}*", text) }]),
+        );
+    }
+    if let Some(auth) = author {
+        if !auth.is_empty() {
+            filter.insert(
+                "authorName".to_string(),
+                serde_json::json!([{ "op": "WILDCARD", "value": format!("*{}*", auth) }]),
+            );
+        }
+    }
+    if let Some(min_dl) = min_downloads {
+        filter.insert(
+            "totalDownloads".to_string(),
+            serde_json::json!([{ "op": "GREATER_THAN", "value": min_dl }]),
+        );
+    }
+    if let Some(min_end) = min_endorsements {
+        filter.insert(
+            "endorsements".to_string(),
+            serde_json::json!([{ "op": "GREATER_THAN", "value": min_end }]),
         );
     }
 

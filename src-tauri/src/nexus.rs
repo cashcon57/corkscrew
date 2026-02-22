@@ -177,6 +177,7 @@ pub struct NexusModInfo {
     pub unique_downloads: i64,
     pub picture_url: Option<String>,
     pub updated_at: Option<String>,
+    pub created_at: Option<String>,
     pub available: bool,
     pub adult_content: bool,
 }
@@ -202,6 +203,14 @@ fn parse_nexus_mod(v: &serde_json::Value) -> Option<NexusModInfo> {
                     .unwrap_or_default()
             })
             .or_else(|| v.get("updated_time").and_then(|x| x.as_str()).map(|s| s.to_string())),
+        created_at: v.get("created_timestamp")
+            .and_then(|x| x.as_i64())
+            .map(|ts| {
+                chrono::DateTime::from_timestamp(ts, 0)
+                    .map(|dt| dt.format("%Y-%m-%d").to_string())
+                    .unwrap_or_default()
+            })
+            .or_else(|| v.get("created_time").and_then(|x| x.as_str()).map(|s| s.to_string())),
         available: v.get("available").and_then(|x| x.as_bool()).unwrap_or(true),
         adult_content: v.get("contains_adult_content").and_then(|x| x.as_bool()).unwrap_or(false),
     })
@@ -925,6 +934,11 @@ pub async fn graphql_search_mods(
     count: u32,
     offset: u32,
     include_adult: bool,
+    category_id: Option<i64>,
+    author: Option<&str>,
+    updated_since: Option<&str>,
+    min_downloads: Option<i64>,
+    min_endorsements: Option<i64>,
 ) -> Result<NexusSearchResult> {
     let headers = nexus_graphql_headers(api_key);
     let client = reqwest::Client::builder()
@@ -956,6 +970,40 @@ pub async fn graphql_search_mods(
             serde_json::json!([{ "value": false, "op": "EQUALS" }]),
         );
     }
+    if let Some(cat_id) = category_id {
+        filter.insert(
+            "categoryId".into(),
+            serde_json::json!([{ "value": cat_id, "op": "EQUALS" }]),
+        );
+    }
+    if let Some(auth) = author {
+        if !auth.is_empty() {
+            filter.insert(
+                "author".into(),
+                serde_json::json!([{ "value": format!("*{}*", auth), "op": "WILDCARD" }]),
+            );
+        }
+    }
+    if let Some(since) = updated_since {
+        if !since.is_empty() {
+            filter.insert(
+                "updatedAt".into(),
+                serde_json::json!([{ "value": since, "op": "GREATER_THAN" }]),
+            );
+        }
+    }
+    if let Some(min_dl) = min_downloads {
+        filter.insert(
+            "downloads".into(),
+            serde_json::json!([{ "value": min_dl, "op": "GREATER_THAN" }]),
+        );
+    }
+    if let Some(min_end) = min_endorsements {
+        filter.insert(
+            "endorsements".into(),
+            serde_json::json!([{ "value": min_end, "op": "GREATER_THAN" }]),
+        );
+    }
     filter.insert("op".into(), serde_json::json!("AND"));
 
     let sort_field = sort_by.unwrap_or("endorsements");
@@ -975,6 +1023,7 @@ pub async fn graphql_search_mods(
                     downloads
                     pictureUrl
                     updatedAt
+                    createdAt
                     adultContent
                     status
                 }
@@ -1075,6 +1124,7 @@ pub async fn graphql_search_mods(
                 unique_downloads: v.get("downloads").and_then(|x| x.as_i64()).unwrap_or(0),
                 picture_url: v.get("pictureUrl").and_then(|x| x.as_str()).map(String::from),
                 updated_at: v.get("updatedAt").and_then(|x| x.as_str()).map(String::from),
+                created_at: v.get("createdAt").and_then(|x| x.as_str()).map(String::from),
                 available: v.get("status").and_then(|x| x.as_str()).map(|s| s == "published").unwrap_or(true),
                 adult_content: v.get("adultContent").and_then(|x| x.as_bool()).unwrap_or(false),
             })
