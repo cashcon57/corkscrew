@@ -1562,6 +1562,15 @@ fn list_installed_collections_cmd(
 }
 
 #[tauri::command]
+fn set_mod_collection_name_cmd(
+    mod_id: i64,
+    collection_name: String,
+    state: State<AppState>,
+) -> Result<(), String> {
+    state.db.set_collection_name(mod_id, &collection_name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn switch_collection_cmd(
     game_id: String,
     bottle_name: String,
@@ -3595,6 +3604,7 @@ pub fn run() {
             clear_all_download_archives,
             // Collection Management
             list_installed_collections_cmd,
+            set_mod_collection_name_cmd,
             switch_collection_cmd,
             delete_collection_cmd,
             get_collection_diff_cmd,

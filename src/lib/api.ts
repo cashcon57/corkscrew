@@ -865,6 +865,13 @@ export async function listInstalledCollections(
   return invoke("list_installed_collections_cmd", { gameId, bottleName });
 }
 
+export async function setModCollectionName(
+  modId: number,
+  collectionName: string
+): Promise<void> {
+  return invoke("set_mod_collection_name_cmd", { modId, collectionName });
+}
+
 export async function switchCollection(
   gameId: string,
   bottleName: string,

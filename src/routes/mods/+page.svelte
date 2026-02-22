@@ -42,6 +42,8 @@
     detectModTools,
     launchModTool,
     getAvailableDiskSpace,
+    setModCollectionName,
+    listInstalledCollections,
   } from "$lib/api";
   import type { InstallProgressEvent, DeploymentHealth, ConflictSuggestion, ResolutionResult, DeployProgress, ModTool } from "$lib/types";
   import {
@@ -52,6 +54,8 @@
     showError,
     showSuccess,
     skseStatus,
+    activeCollection,
+    collectionList,
   } from "$lib/stores";
   import type { InstalledMod, DetectedGame, SkseStatus, DowngradeStatus, FileConflict, ModUpdateInfo, FomodInstaller } from "$lib/types";
   import GameIcon from "$lib/components/GameIcon.svelte";
@@ -68,6 +72,9 @@
   let installing = $state(false);
   let installStep = $state("");
   let installDetail = $state("");
+  let showModlistNamePrompt = $state(false);
+  let modlistNameInput = $state("User");
+  let pendingInstallFilePath = $state<string | null>(null);
   let loadingMods = $state(false);
   let confirmUninstall = $state<number | null>(null);
   let togglingMod = $state<number | null>(null);
@@ -592,6 +599,39 @@
 
     if (!filePath) return;
 
+    // If no modlist is active, prompt the user to name their current modlist
+    if (!$activeCollection) {
+      pendingInstallFilePath = filePath as string;
+      modlistNameInput = "User";
+      showModlistNamePrompt = true;
+      return;
+    }
+
+    await doInstallMod(filePath as string);
+  }
+
+  async function confirmModlistName() {
+    const name = modlistNameInput.trim();
+    if (!name) return;
+    showModlistNamePrompt = false;
+    const game = pickedGame ?? $selectedGame;
+    if (!game) return;
+    activeCollection.set({ name, mod_count: 0, enabled_count: 0, slug: null, author: null, image_url: null, game_domain: null, installed_revision: null });
+    if (pendingInstallFilePath) {
+      await doInstallMod(pendingInstallFilePath);
+      pendingInstallFilePath = null;
+      // Reload collections for the top bar
+      try {
+        const collections = await listInstalledCollections(game.game_id, game.bottle_name);
+        collectionList.set(collections);
+      } catch { /* non-critical */ }
+    }
+  }
+
+  async function doInstallMod(filePath: string) {
+    const game = pickedGame ?? $selectedGame;
+    if (!game) return;
+
     // Check available disk space before installing
     try {
       const homeDir = filePath as string;
@@ -629,11 +669,19 @@
       });
 
       const mod = await installMod(
-        filePath as string,
+        filePath,
         game.game_id,
         game.bottle_name
       );
       const installed = mod as InstalledMod;
+
+      // Associate mod with the active modlist
+      if ($activeCollection) {
+        try {
+          await setModCollectionName(installed.id, $activeCollection.name);
+        } catch { /* non-critical */ }
+      }
+
       showSuccess(`Installed "${installed.name}" successfully`);
       await loadMods(game);
 
@@ -2850,6 +2898,31 @@
   }}
   onCancel={() => duplicateDialog = null}
 />
+
+{#if showModlistNamePrompt}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="modlist-prompt-overlay" onclick={() => { showModlistNamePrompt = false; pendingInstallFilePath = null; }}>
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="modlist-prompt-card" onclick={(e) => e.stopPropagation()}>
+      <h3 class="modlist-prompt-title">Name Your Modlist</h3>
+      <p class="modlist-prompt-desc">You don't have an active modlist. Name your current mod setup so new mods are grouped together.</p>
+      <form onsubmit={(e) => { e.preventDefault(); confirmModlistName(); }}>
+        <input
+          class="modlist-prompt-input"
+          type="text"
+          bind:value={modlistNameInput}
+          placeholder="Modlist name..."
+          autofocus
+          onkeydown={(e) => { if (e.key === "Escape") { showModlistNamePrompt = false; pendingInstallFilePath = null; } }}
+        />
+        <div class="modlist-prompt-actions">
+          <button type="button" class="btn btn-ghost" onclick={() => { showModlistNamePrompt = false; pendingInstallFilePath = null; }}>Cancel</button>
+          <button type="submit" class="btn btn-primary" disabled={!modlistNameInput.trim()}>Continue</button>
+        </div>
+      </form>
+    </div>
+  </div>
+{/if}
 
 {#if showImportWizard}
   <ModlistImportWizard
@@ -5341,5 +5414,62 @@
     font-weight: 600;
     color: var(--system-accent);
     margin-right: var(--space-2);
+  }
+
+  .modlist-prompt-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 200;
+    backdrop-filter: blur(4px);
+    animation: fadeIn 0.15s ease-out;
+  }
+
+  .modlist-prompt-card {
+    background: var(--bg-grouped);
+    border: 1px solid var(--separator-opaque);
+    border-radius: var(--radius-lg, 12px);
+    padding: 24px;
+    max-width: 400px;
+    width: 90%;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  }
+
+  .modlist-prompt-title {
+    font-size: 16px;
+    font-weight: 600;
+    margin: 0 0 8px;
+  }
+
+  .modlist-prompt-desc {
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin: 0 0 16px;
+    line-height: 1.5;
+  }
+
+  .modlist-prompt-input {
+    width: 100%;
+    padding: 8px 12px;
+    font-size: 14px;
+    background: var(--surface);
+    border: 1px solid var(--separator-opaque);
+    border-radius: var(--radius);
+    color: var(--text-primary);
+    outline: none;
+    margin-bottom: 16px;
+  }
+
+  .modlist-prompt-input:focus {
+    border-color: var(--accent);
+  }
+
+  .modlist-prompt-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
   }
 </style>
