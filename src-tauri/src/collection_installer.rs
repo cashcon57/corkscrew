@@ -36,6 +36,20 @@ pub struct ModInstallDetail {
     pub instructions: Option<String>,
 }
 
+/// Map internal game IDs to NexusMods domain slugs.
+fn game_id_to_nexus_slug(game_id: &str) -> &str {
+    match game_id {
+        "skyrimse" => "skyrimspecialedition",
+        "falloutnv" => "newvegas",
+        "enderalse" => "enderalspecialedition",
+        // These map 1:1
+        "skyrim" | "fallout4" | "fallout3" | "oblivion" | "morrowind" | "starfield" | "enderal" => {
+            game_id
+        }
+        other => other,
+    }
+}
+
 /// Install a NexusMods collection into the given game/bottle.
 ///
 /// This orchestrates the full pipeline: resolve order, download (premium only),
@@ -91,10 +105,7 @@ pub async fn install_collection(
     let mut details: Vec<ModInstallDetail> = Vec::new();
 
     // Determine game slug for Nexus API
-    let game_slug = match game_id {
-        "skyrimse" => "skyrimspecialedition",
-        other => other,
-    };
+    let game_slug = game_id_to_nexus_slug(game_id);
 
     // Load existing mods for already-installed detection
     let existing_mods = db.list_mods(game_id, bottle_name).unwrap_or_default();
@@ -266,7 +277,7 @@ pub async fn install_collection(
         description: Some(manifest.description.clone()),
         game_domain: Some(manifest.game_domain.clone()),
         image_url: manifest.image_url.clone(),
-        installed_revision: None,
+        installed_revision: manifest.revision,
         total_mods: Some(manifest.mods.len()),
         installed_at: chrono::Utc::now().to_rfc3339(),
         manifest_json,

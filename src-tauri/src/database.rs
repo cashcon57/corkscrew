@@ -285,6 +285,8 @@ impl ModDatabase {
         if existing.is_some() {
             let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
             conn.execute("DELETE FROM installed_mods WHERE id = ?1", params![mod_id])?;
+            // Clean up profile_mods references (no FK constraint on mod_id)
+            let _ = conn.execute("DELETE FROM profile_mods WHERE mod_id = ?1", params![mod_id]);
             drop(conn);
             let _ = self.clear_conflict_rules_for_mod(mod_id);
         }
@@ -977,6 +979,17 @@ impl ModDatabase {
             params![download_id, collection_name, game_id, bottle_name],
         )?;
         Ok(())
+    }
+
+    /// Delete orphaned download_registry rows that have no collection references.
+    pub fn cleanup_orphaned_downloads(&self) -> Result<usize> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let deleted = conn.execute(
+            "DELETE FROM download_registry WHERE id NOT IN
+             (SELECT DISTINCT download_id FROM download_collection_refs)",
+            [],
+        )?;
+        Ok(deleted)
     }
 
     // -- Notes & tags --------------------------------------------------------

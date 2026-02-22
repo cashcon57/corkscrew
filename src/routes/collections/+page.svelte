@@ -547,6 +547,7 @@
       installInstructions: null,
       slug: selectedCollection.slug ?? null,
       image_url: selectedCollection.image_url ?? null,
+      revision: selectedCollection.latest_revision ?? null,
     };
 
     // Check for required tools before installing

@@ -211,7 +211,9 @@
     if (!game) return;
     uninstallingTool = toolId;
     try {
-      await uninstallModTool(toolId, game.game_id, game.bottle_name);
+      // Find the tool's detected_path so the backend can locate exes outside Tools/
+      const tool = modTools.find((t) => t.id === toolId);
+      await uninstallModTool(toolId, game.game_id, game.bottle_name, tool?.detected_path);
       modTools = await detectModTools(game.game_id, game.bottle_name);
       showSuccess("Tool removed");
     } catch (e: unknown) {

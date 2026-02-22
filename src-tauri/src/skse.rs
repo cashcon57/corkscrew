@@ -431,7 +431,7 @@ pub async fn install_skse_auto(game_path: &Path, game_version: &str) -> Result<S
     );
 
     let client = reqwest::Client::builder()
-        .user_agent("Corkscrew-ModManager/1.0")
+        .user_agent(format!("Corkscrew/{}", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| SkseError::Other(format!("HTTP client error: {}", e)))?;
 

@@ -1,26 +1,25 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import "../app.css";
-  import { currentPage, errorMessage, successMessage, selectedGame, selectedBottle, showError, showSuccess, appVersion, collectionInstallStatus, updateReady as updateReadyStore, updateVersion as updateVersionStore, updateNotes as updateNotesStore, updateChecking as updateCheckingStore, updateError as updateErrorStore, setUpdateCheckFn, notificationCount, showNotificationLog, activeProfile, profileList, sidebarCollapsed, controllerMode } from "$lib/stores";
+  import { currentPage, errorMessage, successMessage, selectedGame, selectedBottle, showError, showSuccess, appVersion, collectionInstallStatus, updateReady as updateReadyStore, updateVersion as updateVersionStore, updateNotes as updateNotesStore, updateChecking as updateCheckingStore, updateError as updateErrorStore, setUpdateCheckFn, notificationCount, showNotificationLog, activeProfile, profileList, activeCollection, collectionList, sidebarCollapsed, controllerMode } from "$lib/stores";
   import { initTheme } from "$lib/theme";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
   import { getVersion } from "@tauri-apps/api/app";
   import { check } from "@tauri-apps/plugin-updater";
   import { relaunch } from "@tauri-apps/plugin-process";
-  import { downloadFromNexus, getAllGames, getDownloadQueue, retryDownload, cancelDownload, clearFinishedDownloads, onDownloadQueueUpdate, listProfiles, activateProfile, getConfig, launchGame } from "$lib/api";
+  import { downloadFromNexus, getAllGames, getDownloadQueue, retryDownload, cancelDownload, clearFinishedDownloads, onDownloadQueueUpdate, listProfiles, listInstalledCollections, getConfig, launchGame } from "$lib/api";
   import { get } from "svelte/store";
-  import type { DetectedGame, QueueItem, Profile } from "$lib/types";
-  import GameIcon from "$lib/components/GameIcon.svelte";
+  import type { DetectedGame, QueueItem } from "$lib/types";
   import NotificationLog from "$lib/components/mods/NotificationLog.svelte";
   import FirstRunWizard from "$lib/components/FirstRunWizard.svelte";
   import SpotlightSearch from "$lib/components/SpotlightSearch.svelte";
+  import TopBar from "$lib/components/topbar/TopBar.svelte";
   import { GamepadManager } from "$lib/gamepad";
   import type { GamepadAction } from "$lib/gamepad";
   import { getNotificationCount, logNotification } from "$lib/api";
 
   const navItems = [
-    { id: "dashboard", label: "Dashboard" },
     { id: "mods", label: "Mods" },
     { id: "plugins", label: "Load Order" },
     { id: "discover", label: "Discover" },
@@ -30,11 +29,6 @@
   ];
 
   let detectedGames = $state<DetectedGame[]>([]);
-  let gameDropdownOpen = $state(false);
-
-  // Profile selector state
-  let profileDropdownOpen = $state(false);
-  let switchingProfile = $state(false);
 
   // Download queue state
   let queueItems = $state<QueueItem[]>([]);
@@ -183,19 +177,13 @@
     // Close dropdown on click outside
     function handleClickOutside(e: MouseEvent) {
       const target = e.target as HTMLElement;
-      if (!target.closest(".sidebar-game-section")) {
-        gameDropdownOpen = false;
-      }
-      if (!target.closest(".sidebar-profile-section")) {
-        profileDropdownOpen = false;
-      }
       if (!target.closest(".queue-section") && !target.closest(".queue-popover")) {
         showQueue = false;
       }
     }
 
     // Global keyboard shortcuts
-    const navPageIds = ["dashboard", "mods", "plugins", "discover", "profiles", "logs", "settings"];
+    const navPageIds = ["mods", "plugins", "discover", "profiles", "logs", "settings"];
 
     function handleKeydown(e: KeyboardEvent) {
       // Cmd+K / Ctrl+K: spotlight search
@@ -216,8 +204,8 @@
         navigate("settings");
         return;
       }
-      // Cmd+1-7 / Ctrl+1-7: navigate to page
-      if ((e.metaKey || e.ctrlKey) && e.key >= "1" && e.key <= "7") {
+      // Cmd+1-6 / Ctrl+1-6: navigate to page
+      if ((e.metaKey || e.ctrlKey) && e.key >= "1" && e.key <= "6") {
         e.preventDefault();
         const idx = parseInt(e.key) - 1;
         if (idx < navPageIds.length) navigate(navPageIds[idx]);
@@ -234,8 +222,6 @@
         if (showSpotlight) { showSpotlight = false; return; }
         if (get(errorMessage)) { errorMessage.set(null); return; }
         if (get(successMessage)) { successMessage.set(null); return; }
-        if (gameDropdownOpen) { gameDropdownOpen = false; return; }
-        if (profileDropdownOpen) { profileDropdownOpen = false; return; }
         if (showQueue) { showQueue = false; return; }
       }
     }
@@ -307,10 +293,11 @@
       if (!get(selectedGame) && detectedGames.length > 0) {
         pickGame(detectedGames[0]);
       } else {
-        // If a game was already selected (restored from store), load its profiles
+        // If a game was already selected (restored from store), load its profiles + collections
         const currentGame = get(selectedGame);
         if (currentGame) {
           loadProfilesForGame(currentGame);
+          loadCollectionsForGame(currentGame);
         }
       }
     } catch {
@@ -321,8 +308,8 @@
   function pickGame(game: DetectedGame) {
     selectedGame.set(game);
     selectedBottle.set(game.bottle_name);
-    gameDropdownOpen = false;
     loadProfilesForGame(game);
+    loadCollectionsForGame(game);
   }
 
   async function loadProfilesForGame(game: DetectedGame) {
@@ -337,29 +324,20 @@
     }
   }
 
-  async function handleProfileSwitch(profile: Profile) {
-    const game = get(selectedGame);
-    if (!game || switchingProfile) return;
-    profileDropdownOpen = false;
-    switchingProfile = true;
+  async function loadCollectionsForGame(game: DetectedGame) {
     try {
-      await activateProfile(profile.id, game.game_id, game.bottle_name);
-      // Reload profiles to get updated is_active flags
-      await loadProfilesForGame(game);
-      wrappedShowSuccess(`Switched to profile "${profile.name}"`);
-    } catch (e: unknown) {
-      wrappedShowError(`Profile switch failed: ${e}`);
-    } finally {
-      switchingProfile = false;
+      const collections = await listInstalledCollections(game.game_id, game.bottle_name);
+      collectionList.set(collections);
+      // Keep current active collection if it still exists in the new list,
+      // otherwise clear it (no persistent is_active flag for collections)
+      const current = get(activeCollection);
+      if (current && !collections.find(c => c.name === current.name)) {
+        activeCollection.set(null);
+      }
+    } catch {
+      collectionList.set([]);
+      activeCollection.set(null);
     }
-  }
-
-  function toggleProfileDropdown() {
-    profileDropdownOpen = !profileDropdownOpen;
-  }
-
-  function toggleGameDropdown() {
-    gameDropdownOpen = !gameDropdownOpen;
   }
 
   async function handleLaunchGame(useSkse: boolean = false) {
@@ -531,125 +509,11 @@
         {#if !$sidebarCollapsed}
           <div class="brand-text">
             <span class="brand-name">Corkscrew</span>
-            <span class="brand-tagline">Mod Manager</span>
+            <span class="brand-tagline">Wine Dashboard</span>
           </div>
         {/if}
       </button>
     </div>
-
-    <!-- Game selector -->
-    <div class="sidebar-game-section">
-      {#if detectedGames.length > 0}
-        <div class="game-selector-row">
-          <button class="game-selector-btn" onclick={toggleGameDropdown} title={$selectedGame?.display_name ?? "Select a game"}>
-            {#if $selectedGame}
-              <GameIcon gameId={$selectedGame.game_id} size={22} />
-              {#if !$sidebarCollapsed}
-                <div class="game-selector-text">
-                  <span class="game-selector-name">{$selectedGame.display_name}</span>
-                  <span class="game-selector-bottle">{$selectedGame.bottle_name}</span>
-                </div>
-              {/if}
-            {:else}
-              <svg class="game-selector-placeholder-icon" width="22" height="22" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                <rect x="2" y="4" width="12" height="8" rx="2" opacity="0.4" />
-                <circle cx="6" cy="8" r="1.5" opacity="0.4" />
-                <circle cx="10" cy="8" r="1.5" opacity="0.4" />
-              </svg>
-              {#if !$sidebarCollapsed}
-                <span class="game-selector-placeholder">Select a game</span>
-              {/if}
-            {/if}
-            {#if !$sidebarCollapsed}
-              <svg class="game-selector-chevron" class:open={gameDropdownOpen} width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M3 4l2 2 2-2" />
-              </svg>
-            {/if}
-          </button>
-
-          {#if $selectedGame && !$sidebarCollapsed}
-            <button
-              class="game-launch-btn"
-              onclick={() => handleLaunchGame(false)}
-              disabled={launching}
-              title="Launch {$selectedGame.display_name}"
-            >
-              {#if launching}
-                <span class="spinner spinner-sm"></span>
-              {:else}
-                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-                  <path d="M4 2.5v11l9-5.5z" />
-                </svg>
-              {/if}
-            </button>
-          {/if}
-        </div>
-
-        {#if gameDropdownOpen}
-          <div class="game-dropdown">
-            {#each detectedGames as game}
-              <button
-                class="game-dropdown-item"
-                class:active={$selectedGame?.game_id === game.game_id && $selectedGame?.bottle_name === game.bottle_name}
-                onclick={() => pickGame(game)}
-              >
-                <GameIcon gameId={game.game_id} size={18} />
-                <div class="game-dropdown-text">
-                  <span class="game-dropdown-name">{game.display_name}</span>
-                  <span class="game-dropdown-bottle">{game.bottle_name}</span>
-                </div>
-              </button>
-            {/each}
-          </div>
-        {/if}
-      {:else}
-        <div class="game-selector-empty">
-          <span class="game-selector-placeholder">No games detected</span>
-        </div>
-      {/if}
-    </div>
-
-    <!-- Profile selector -->
-    {#if $profileList.length > 0}
-      <div class="sidebar-profile-section">
-        <button class="profile-selector-btn" onclick={toggleProfileDropdown} disabled={switchingProfile} title={$activeProfile?.name ?? "No profile"}>
-          {#if switchingProfile}
-            <span class="spinner spinner-sm"></span>
-            {#if !$sidebarCollapsed}<span class="profile-selector-name">Switching...</span>{/if}
-          {:else}
-            <svg class="profile-selector-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-              <rect x="2" y="2" width="12" height="4" rx="1" />
-              <rect x="2" y="10" width="12" height="4" rx="1" />
-            </svg>
-            {#if !$sidebarCollapsed}<span class="profile-selector-name">{$activeProfile?.name ?? "No profile"}</span>{/if}
-          {/if}
-          {#if !$sidebarCollapsed}
-            <svg class="profile-selector-chevron" class:open={profileDropdownOpen} width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M3 4l2 2 2-2" />
-            </svg>
-          {/if}
-        </button>
-
-        {#if profileDropdownOpen}
-          <div class="profile-dropdown">
-            {#each $profileList as profile}
-              <button
-                class="profile-dropdown-item"
-                class:active={profile.is_active}
-                onclick={() => handleProfileSwitch(profile)}
-              >
-                <span class="profile-dropdown-name">{profile.name}</span>
-                {#if profile.is_active}
-                  <svg class="profile-active-check" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                    <polyline points="20 6 9 17 4 12" />
-                  </svg>
-                {/if}
-              </button>
-            {/each}
-          </div>
-        {/if}
-      </div>
-    {/if}
 
     <ul class="nav-list">
       {#each navItems as item}
@@ -661,14 +525,7 @@
             title={item.label}
           >
             <span class="nav-icon">
-              {#if item.id === "dashboard"}
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                  <rect x="1.5" y="1.5" width="5" height="5" rx="1" />
-                  <rect x="9.5" y="1.5" width="5" height="5" rx="1" />
-                  <rect x="1.5" y="9.5" width="5" height="5" rx="1" />
-                  <rect x="9.5" y="9.5" width="5" height="5" rx="1" />
-                </svg>
-              {:else if item.id === "mods"}
+              {#if item.id === "mods"}
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
                   <rect x="3" y="1.5" width="10" height="13" rx="1.5" />
                   <line x1="5.5" y1="4.5" x2="10.5" y2="4.5" />
@@ -823,8 +680,13 @@
   </nav>
 
   <div class="content-column">
-    <!-- Drag region for window titlebar (no content, just draggable) -->
-    <div class="content-drag-region" data-tauri-drag-region></div>
+    <TopBar
+      {detectedGames}
+      onPickGame={pickGame}
+      onLaunchGame={() => handleLaunchGame(false)}
+      onNavigate={navigate}
+      {launching}
+    />
 
     <main class="content">
       {#if $errorMessage}
@@ -1008,7 +870,7 @@
         <div class="shortcut-row"><kbd>Cmd</kbd><kbd>K</kbd><span>Spotlight Search</span></div>
         <div class="shortcut-row"><kbd>Cmd</kbd><kbd>B</kbd><span>Toggle Sidebar</span></div>
         <div class="shortcut-row"><kbd>Cmd</kbd><kbd>,</kbd><span>Settings</span></div>
-        <div class="shortcut-row"><kbd>Cmd</kbd><kbd>1</kbd>-<kbd>7</kbd><span>Navigate Pages</span></div>
+        <div class="shortcut-row"><kbd>Cmd</kbd><kbd>1</kbd>-<kbd>6</kbd><span>Navigate Pages</span></div>
         <div class="shortcut-row"><kbd>Cmd</kbd><kbd>/</kbd><span>This Modal</span></div>
         <div class="shortcut-row"><kbd>Esc</kbd><span>Close Panel / Dismiss</span></div>
       </div>
@@ -1133,328 +995,6 @@
     line-height: 1.2;
   }
 
-  /* --- Game selector --- */
-
-  .sidebar-game-section {
-    padding: 0 var(--space-2) var(--space-2);
-    border-bottom: 1px solid var(--separator);
-    margin-bottom: var(--space-2);
-    position: relative;
-  }
-
-  .game-selector-row {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-  }
-
-  .game-selector-btn {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    flex: 1;
-    min-width: 0;
-    padding: 8px 10px;
-    border-radius: var(--radius);
-    color: var(--text-primary);
-    font-size: 13px;
-    transition: background var(--duration-fast) var(--ease);
-    cursor: pointer;
-    text-align: left;
-  }
-
-  .game-selector-btn:hover {
-    background: var(--surface-hover);
-  }
-
-  .game-launch-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 32px;
-    height: 32px;
-    border-radius: var(--radius);
-    color: var(--green);
-    cursor: pointer;
-    transition: background var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease);
-    flex-shrink: 0;
-  }
-
-  .game-launch-btn:hover {
-    background: var(--surface-hover);
-    color: var(--green-bright, #5eeb8a);
-  }
-
-  .game-launch-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .game-selector-text {
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-    flex: 1;
-  }
-
-  .game-selector-name {
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--text-primary);
-    line-height: 1.3;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .game-selector-bottle {
-    font-size: 10px;
-    font-weight: 400;
-    color: var(--text-tertiary);
-    line-height: 1.3;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .game-selector-chevron {
-    flex-shrink: 0;
-    color: var(--text-quaternary);
-    transition: transform var(--duration-fast) var(--ease);
-    margin-left: auto;
-  }
-
-  .game-selector-chevron.open {
-    transform: rotate(180deg);
-  }
-
-  .game-selector-placeholder {
-    font-size: 12px;
-    font-weight: 500;
-    color: var(--text-tertiary);
-  }
-
-  .game-selector-placeholder-icon {
-    color: var(--text-quaternary);
-    flex-shrink: 0;
-  }
-
-  .game-selector-empty {
-    padding: 8px 10px;
-  }
-
-  /* Dropdown */
-
-  .game-dropdown {
-    position: absolute;
-    top: 100%;
-    left: var(--space-2);
-    right: var(--space-2);
-    background: var(--bg-grouped);
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    border-radius: var(--radius);
-    padding: 4px;
-    z-index: 100;
-    box-shadow:
-      0 4px 24px rgba(0, 0, 0, 0.3),
-      0 1px 4px rgba(0, 0, 0, 0.15),
-      inset 0 1px 0 0 rgba(255, 255, 255, 0.06);
-    backdrop-filter: blur(24px) saturate(1.3);
-    -webkit-backdrop-filter: blur(24px) saturate(1.3);
-    animation: dropdownIn var(--duration-fast) var(--ease-out);
-    max-height: 240px;
-    overflow-y: auto;
-  }
-
-  :global([data-theme="light"]) .game-dropdown {
-    border-color: rgba(0, 0, 0, 0.12);
-    box-shadow:
-      0 4px 24px rgba(0, 0, 0, 0.12),
-      0 1px 4px rgba(0, 0, 0, 0.06);
-  }
-
-  @keyframes dropdownIn {
-    from { transform: translateY(-4px); opacity: 0; }
-    to { transform: translateY(0); opacity: 1; }
-  }
-
-  .game-dropdown-item {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    padding: 7px 8px;
-    border-radius: calc(var(--radius) - 2px);
-    color: var(--text-secondary);
-    font-size: 12px;
-    transition: all var(--duration-fast) var(--ease);
-    cursor: pointer;
-    text-align: left;
-  }
-
-  .game-dropdown-item:hover {
-    background: var(--surface-hover);
-    color: var(--text-primary);
-  }
-
-  .game-dropdown-item.active {
-    background: var(--accent-subtle);
-    color: var(--accent);
-  }
-
-  .game-dropdown-text {
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-  }
-
-  .game-dropdown-name {
-    font-size: 12px;
-    font-weight: 500;
-    line-height: 1.3;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .game-dropdown-bottle {
-    font-size: 10px;
-    font-weight: 400;
-    color: var(--text-tertiary);
-    line-height: 1.3;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .game-dropdown-item.active .game-dropdown-bottle {
-    color: var(--accent);
-    opacity: 0.7;
-  }
-
-  /* --- Profile selector --- */
-
-  .sidebar-profile-section {
-    padding: 0 var(--space-2) var(--space-2);
-    border-bottom: 1px solid var(--separator);
-    margin-bottom: var(--space-2);
-    position: relative;
-  }
-
-  .profile-selector-btn {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    padding: 6px 10px;
-    border-radius: var(--radius);
-    color: var(--text-secondary);
-    font-size: 12px;
-    transition: background var(--duration-fast) var(--ease);
-    cursor: pointer;
-    text-align: left;
-  }
-
-  .profile-selector-btn:hover {
-    background: var(--surface-hover);
-  }
-
-  .profile-selector-btn:disabled {
-    opacity: 0.6;
-    cursor: default;
-  }
-
-  .profile-selector-icon {
-    flex-shrink: 0;
-    color: var(--text-tertiary);
-  }
-
-  .profile-selector-name {
-    flex: 1;
-    font-size: 12px;
-    font-weight: 500;
-    color: var(--text-secondary);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .profile-selector-chevron {
-    flex-shrink: 0;
-    color: var(--text-quaternary);
-    transition: transform var(--duration-fast) var(--ease);
-    margin-left: auto;
-  }
-
-  .profile-selector-chevron.open {
-    transform: rotate(180deg);
-  }
-
-  .profile-dropdown {
-    position: absolute;
-    top: 100%;
-    left: var(--space-2);
-    right: var(--space-2);
-    background: var(--bg-grouped);
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    border-radius: var(--radius);
-    padding: 4px;
-    z-index: 100;
-    box-shadow:
-      0 4px 24px rgba(0, 0, 0, 0.3),
-      0 1px 4px rgba(0, 0, 0, 0.15),
-      inset 0 1px 0 0 rgba(255, 255, 255, 0.06);
-    backdrop-filter: blur(24px) saturate(1.3);
-    -webkit-backdrop-filter: blur(24px) saturate(1.3);
-    animation: dropdownIn var(--duration-fast) var(--ease-out);
-    max-height: 200px;
-    overflow-y: auto;
-  }
-
-  :global([data-theme="light"]) .profile-dropdown {
-    border-color: rgba(0, 0, 0, 0.12);
-    box-shadow:
-      0 4px 24px rgba(0, 0, 0, 0.12),
-      0 1px 4px rgba(0, 0, 0, 0.06);
-  }
-
-  .profile-dropdown-item {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    width: 100%;
-    padding: 7px 8px;
-    border-radius: calc(var(--radius) - 2px);
-    color: var(--text-secondary);
-    font-size: 12px;
-    transition: all var(--duration-fast) var(--ease);
-    cursor: pointer;
-    text-align: left;
-  }
-
-  .profile-dropdown-item:hover {
-    background: var(--surface-hover);
-    color: var(--text-primary);
-  }
-
-  .profile-dropdown-item.active {
-    background: var(--accent-subtle);
-    color: var(--accent);
-  }
-
-  .profile-dropdown-name {
-    font-size: 12px;
-    font-weight: 500;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .profile-active-check {
-    flex-shrink: 0;
-    color: var(--accent);
-  }
-
   /* --- Nav list --- */
 
   .nav-list {
@@ -1552,19 +1092,6 @@
     justify-content: center;
     padding: var(--space-2);
   }
-
-  .sidebar.collapsed .sidebar-game-section,
-  .sidebar.collapsed .sidebar-profile-section {
-    padding-left: var(--space-1);
-    padding-right: var(--space-1);
-  }
-
-  .sidebar.collapsed .game-selector-btn,
-  .sidebar.collapsed .profile-selector-btn {
-    justify-content: center;
-    padding: var(--space-2);
-  }
-
 
   .sidebar.collapsed .nav-list {
     padding: 0 var(--space-1);
@@ -1748,18 +1275,6 @@
   :global(html.vibrancy-active) .content-column {
     backdrop-filter: blur(16px) saturate(1.1);
     -webkit-backdrop-filter: blur(16px) saturate(1.1);
-  }
-
-  /* Drag region overlays the top of the content area — doesn't take up flow space */
-  .content-drag-region {
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    height: 28px;
-    -webkit-app-region: drag;
-    z-index: 5;
-    pointer-events: auto;
   }
 
   /* --- Content area --- */

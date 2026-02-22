@@ -925,9 +925,10 @@ export async function installModTool(
 export async function uninstallModTool(
   toolId: string,
   gameId: string,
-  bottleName: string
+  bottleName: string,
+  detectedPath?: string | null,
 ): Promise<void> {
-  return invoke("uninstall_mod_tool", { toolId, gameId, bottleName });
+  return invoke("uninstall_mod_tool", { toolId, gameId, bottleName, detectedPath: detectedPath ?? null });
 }
 
 export async function launchModTool(

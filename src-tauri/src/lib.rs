@@ -366,12 +366,15 @@ fn uninstall_mod(
             .map_err(|e| e.to_string())?
     };
 
+    // Clean orphaned rollback staging directories before DB removal
+    let _ = rollback::cleanup_mod_version_staging(db, mod_id);
+
     // Remove staging directory if it exists
     if let Some(ref staging_path) = installed_mod.staging_path {
         let _ = staging::remove_staging(Path::new(staging_path));
     }
 
-    // Remove from database (cascades to deployment_manifest, file_hashes)
+    // Remove from database (cascades to deployment_manifest, file_hashes; cleans profile_mods)
     db.remove_mod(mod_id).map_err(|e| e.to_string())?;
 
     // Sync Skyrim plugins if applicable
@@ -812,7 +815,7 @@ async fn get_game_logo(game_id: String) -> Result<Option<String>, String> {
     let url = format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{app_id}/logo.png");
 
     let client = reqwest::Client::builder()
-        .user_agent("Corkscrew/0.1.0")
+        .user_agent(format!("Corkscrew/{}", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| e.to_string())?;
@@ -1625,44 +1628,108 @@ fn delete_collection_cmd(
 
     let mut mods_removed = 0usize;
     let mut downloads_removed = 0usize;
+    let mut errors: Vec<String> = Vec::new();
+
+    // Collect plugin filenames for rule cleanup
+    let mut plugin_names: Vec<String> = Vec::new();
 
     for m in &collection_mods {
-        // Undeploy
-        let _ = deployer::undeploy_mod(db, &game_id, &bottle_name, m.id, &data_dir);
-
-        // Remove staging
-        if let Some(sp) = &m.staging_path {
-            let _ = std::fs::remove_dir_all(sp);
-        }
-
-        // Optionally delete unique downloads
-        if delete_unique_downloads {
-            if let (Some(mod_id), Some(file_id)) = (m.nexus_mod_id, m.nexus_file_id) {
-                if let Ok(Some(dl)) = db.find_download_by_nexus_ids(mod_id, file_id) {
-                    if let Ok(true) = db.is_download_unique_to_collection(dl.id, &collection_name) {
-                        let _ = std::fs::remove_file(&dl.archive_path);
-                        downloads_removed += 1;
-                    }
-                    let _ = db.remove_download_collection_ref(
-                        dl.id,
-                        &collection_name,
-                        &game_id,
-                        &bottle_name,
-                    );
+        // Gather plugin filenames before removal
+        for file in &m.installed_files {
+            let lower = file.to_lowercase();
+            if lower.ends_with(".esp") || lower.ends_with(".esm") || lower.ends_with(".esl") {
+                if let Some(fname) = Path::new(file).file_name().and_then(|f| f.to_str()) {
+                    plugin_names.push(fname.to_string());
                 }
             }
         }
 
-        // Remove from DB
-        let _ = db.remove_mod(m.id);
-        mods_removed += 1;
+        // Undeploy
+        if let Err(e) = deployer::undeploy_mod(db, &game_id, &bottle_name, m.id, &data_dir) {
+            errors.push(format!("Failed to undeploy '{}': {}", m.name, e));
+        }
+
+        // Clean orphaned rollback staging directories
+        if let Err(e) = rollback::cleanup_mod_version_staging(db, m.id) {
+            errors.push(format!("Failed to clean rollback staging for '{}': {}", m.name, e));
+        }
+
+        // Remove staging
+        if let Some(sp) = &m.staging_path {
+            if let Err(e) = std::fs::remove_dir_all(sp) {
+                if Path::new(sp).exists() {
+                    errors.push(format!("Failed to remove staging for '{}': {}", m.name, e));
+                }
+            }
+        }
+
+        // Find download record — try nexus IDs first, fall back to archive name
+        let download = if let (Some(nmod_id), Some(nfile_id)) = (m.nexus_mod_id, m.nexus_file_id) {
+            db.find_download_by_nexus_ids(nmod_id, nfile_id).ok().flatten()
+        } else {
+            None
+        }
+        .or_else(|| db.find_download_by_name(&m.archive_name).ok().flatten());
+
+        if let Some(dl) = download {
+            // Check uniqueness before removing the ref
+            let is_unique = db
+                .is_download_unique_to_collection(dl.id, &collection_name)
+                .unwrap_or(false);
+
+            // Optionally delete the actual archive file if unique to this collection
+            if delete_unique_downloads && is_unique {
+                if let Err(e) = std::fs::remove_file(&dl.archive_path) {
+                    if Path::new(&dl.archive_path).exists() {
+                        errors.push(format!("Failed to delete download for '{}': {}", m.name, e));
+                    }
+                } else {
+                    downloads_removed += 1;
+                }
+            }
+
+            // Always clean up the collection ref
+            if let Err(e) = db.remove_download_collection_ref(
+                dl.id,
+                &collection_name,
+                &game_id,
+                &bottle_name,
+            ) {
+                errors.push(format!("Failed to remove download ref for '{}': {}", m.name, e));
+            }
+        }
+
+        // Remove from DB (cascades deployment_manifest, file_hashes; also cleans profile_mods)
+        if let Err(e) = db.remove_mod(m.id) {
+            errors.push(format!("Failed to remove mod '{}' from DB: {}", m.name, e));
+        } else {
+            mods_removed += 1;
+        }
+    }
+
+    // Clean orphaned download_registry rows
+    if let Err(e) = db.cleanup_orphaned_downloads() {
+        errors.push(format!("Failed to clean orphaned downloads: {}", e));
+    }
+
+    // Clean plugin rules for removed mods' plugins
+    if !plugin_names.is_empty() {
+        if let Err(e) =
+            loot_rules::remove_rules_for_plugins(db, &game_id, &bottle_name, &plugin_names)
+        {
+            errors.push(format!("Failed to clean plugin rules: {}", e));
+        }
     }
 
     // Clean up collection metadata
-    let _ = db.remove_collection_metadata(&game_id, &bottle_name, &collection_name);
+    if let Err(e) = db.remove_collection_metadata(&game_id, &bottle_name, &collection_name) {
+        errors.push(format!("Failed to remove collection metadata: {}", e));
+    }
 
     // Redeploy remaining mods to restore any files that were shadowed
-    let _ = deployer::redeploy_all(db, &game_id, &bottle_name, &data_dir);
+    if let Err(e) = deployer::redeploy_all(db, &game_id, &bottle_name, &data_dir) {
+        errors.push(format!("Failed to redeploy remaining mods: {}", e));
+    }
 
     if game_id == "skyrimse" {
         let _ = sync_skyrim_plugins_for_game(&game, &bottle);
@@ -1671,6 +1738,7 @@ fn delete_collection_cmd(
     Ok(serde_json::json!({
         "mods_removed": mods_removed,
         "downloads_removed": downloads_removed,
+        "errors": errors,
     }))
 }
 
@@ -2222,9 +2290,15 @@ async fn install_mod_tool(
 }
 
 #[tauri::command]
-fn uninstall_mod_tool(tool_id: String, game_id: String, bottle_name: String) -> Result<(), String> {
+fn uninstall_mod_tool(
+    tool_id: String,
+    game_id: String,
+    bottle_name: String,
+    detected_path: Option<String>,
+) -> Result<(), String> {
     let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
-    mod_tools::uninstall_tool(&tool_id, &data_dir).map_err(|e| e.to_string())
+    mod_tools::uninstall_tool(&tool_id, &data_dir, detected_path.as_deref())
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -2416,7 +2490,7 @@ async fn download_wabbajack_file(url: String, filename: String) -> Result<String
     let dest = download_dir.join(&filename);
 
     let client = reqwest::Client::builder()
-        .user_agent("Corkscrew/1.0")
+        .user_agent(format!("Corkscrew/{}", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(300))
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;
@@ -2645,7 +2719,7 @@ async fn fetch_url_text(url: String) -> Result<String, String> {
     };
 
     let client = reqwest::Client::builder()
-        .user_agent("Corkscrew/0.3")
+        .user_agent(format!("Corkscrew/{}", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| e.to_string())?;

@@ -201,6 +201,33 @@ pub fn clear_rules(db: &ModDatabase, game_id: &str, bottle_name: &str) -> Result
     Ok(())
 }
 
+/// Remove all rules that reference any of the given plugin names
+/// (as either the subject or the reference plugin).
+pub fn remove_rules_for_plugins(
+    db: &ModDatabase,
+    game_id: &str,
+    bottle_name: &str,
+    plugin_names: &[String],
+) -> Result<usize, String> {
+    if plugin_names.is_empty() {
+        return Ok(0);
+    }
+    let conn = db.conn().map_err(|e| e.to_string())?;
+    let mut total = 0usize;
+    for name in plugin_names {
+        let deleted = conn
+            .execute(
+                "DELETE FROM plugin_rules
+                 WHERE game_id = ?1 AND bottle_name = ?2
+                 AND (plugin_name = ?3 OR reference_plugin = ?3)",
+                params![game_id, bottle_name, name],
+            )
+            .map_err(|e| format!("Failed to remove rules for plugin '{}': {}", name, e))?;
+        total += deleted;
+    }
+    Ok(total)
+}
+
 // ---------------------------------------------------------------------------
 // Validation
 // ---------------------------------------------------------------------------

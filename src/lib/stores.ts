@@ -1,5 +1,5 @@
 import { writable, derived } from "svelte/store";
-import type { Bottle, DetectedGame, InstalledMod, AppConfig, SkseStatus, Profile } from "./types";
+import type { Bottle, DetectedGame, InstalledMod, AppConfig, SkseStatus, Profile, CollectionSummary } from "./types";
 
 // App state
 export const bottles = writable<Bottle[]>([]);
@@ -39,6 +39,10 @@ export const activeMods = derived(
 // Profile state (global — sidebar selector + profile page)
 export const activeProfile = writable<Profile | null>(null);
 export const profileList = writable<Profile[]>([]);
+
+// Collection/modlist state (global — top bar selector + collection pages)
+export const activeCollection = writable<CollectionSummary | null>(null);
+export const collectionList = writable<CollectionSummary[]>([]);
 
 // Collection install progress (global — visible from any page)
 export interface CollectionInstallStatus {

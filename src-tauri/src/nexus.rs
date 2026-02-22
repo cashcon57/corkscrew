@@ -222,7 +222,8 @@ impl NexusClient {
             .expect("API key contains non-ASCII bytes");
         headers.insert("apikey", header_val);
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
-        headers.insert(USER_AGENT, HeaderValue::from_static("Corkscrew/0.1.0"));
+        let ua = format!("Corkscrew/{}", env!("CARGO_PKG_VERSION"));
+        headers.insert(USER_AGENT, HeaderValue::from_str(&ua).unwrap());
 
         let client = reqwest::Client::builder()
             .default_headers(headers)
@@ -671,7 +672,7 @@ pub struct NexusSearchResult {
 /// Returns the raw JSON schema string for development/debugging.
 pub async fn graphql_introspect(api_key: &str) -> Result<String> {
     let client = reqwest::Client::builder()
-        .user_agent("Corkscrew/1.0.0")
+        .user_agent(format!("Corkscrew/{}", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(NexusError::Http)?;
@@ -706,7 +707,7 @@ pub async fn graphql_search_mods(
     include_adult: bool,
 ) -> Result<NexusSearchResult> {
     let client = reqwest::Client::builder()
-        .user_agent("Corkscrew/1.0.0")
+        .user_agent(format!("Corkscrew/{}", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(NexusError::Http)?;
@@ -736,12 +737,12 @@ pub async fn graphql_search_mods(
                     author
                     modCategory { id }
                     version
-                    endorsementCount
-                    uniqueDownloadsCount
+                    endorsements
+                    uniqueDownloads
                     pictureUrl
                     updatedAt
-                    available
                     adultContent
+                    status
                 }
                 totalCount
             }
@@ -831,11 +832,11 @@ pub async fn graphql_search_mods(
                     .and_then(|x| x.as_i64())
                     .unwrap_or(0),
                 version: v.get("version").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                endorsement_count: v.get("endorsementCount").and_then(|x| x.as_i64()).unwrap_or(0),
-                unique_downloads: v.get("uniqueDownloadsCount").and_then(|x| x.as_i64()).unwrap_or(0),
+                endorsement_count: v.get("endorsements").and_then(|x| x.as_i64()).unwrap_or(0),
+                unique_downloads: v.get("uniqueDownloads").and_then(|x| x.as_i64()).unwrap_or(0),
                 picture_url: v.get("pictureUrl").and_then(|x| x.as_str()).map(String::from),
                 updated_at: v.get("updatedAt").and_then(|x| x.as_str()).map(String::from),
-                available: v.get("available").and_then(|x| x.as_bool()).unwrap_or(true),
+                available: v.get("status").and_then(|x| x.as_str()).map(|s| s == "published").unwrap_or(true),
                 adult_content: v.get("adultContent").and_then(|x| x.as_bool()).unwrap_or(false),
             })
         })

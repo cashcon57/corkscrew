@@ -681,7 +681,7 @@ pub async fn install_tool(tool_id: &str, game_data_dir: &Path) -> Result<String>
     );
 
     let client = reqwest::Client::builder()
-        .user_agent("Corkscrew-ModManager/1.0")
+        .user_agent(format!("Corkscrew/{}", env!("CARGO_PKG_VERSION")))
         .build()?;
 
     let release: GitHubRelease = client
@@ -849,11 +849,17 @@ fn find_tool_exe(tool: &ModTool, tool_dir: &Path) -> Option<PathBuf> {
 // Uninstallation
 // ---------------------------------------------------------------------------
 
-/// Remove an installed tool from the game's Tools directory.
-pub fn uninstall_tool(tool_id: &str, game_data_dir: &Path) -> Result<()> {
+/// Remove an installed tool. First tries the canonical Tools directory, then
+/// falls back to the `detected_path` (the exe found by `detect_tools`).
+pub fn uninstall_tool(
+    tool_id: &str,
+    game_data_dir: &Path,
+    detected_path: Option<&str>,
+) -> Result<()> {
     let game_dir = game_data_dir.parent().unwrap_or(game_data_dir);
     let tool_dir = game_dir.join(TOOLS_DIR).join(tool_id);
 
+    // Try canonical Tools/<id>/ directory first
     if tool_dir.exists() {
         info!(
             "Uninstalling tool '{}' from: {}",
@@ -861,11 +867,34 @@ pub fn uninstall_tool(tool_id: &str, game_data_dir: &Path) -> Result<()> {
             tool_dir.display()
         );
         fs::remove_dir_all(&tool_dir)?;
-    } else {
-        debug!("Tool directory does not exist: {}", tool_dir.display());
+        return Ok(());
     }
 
-    Ok(())
+    // Fallback: remove via detected exe path
+    if let Some(path_str) = detected_path {
+        let exe_path = Path::new(path_str);
+        if exe_path.exists() {
+            info!(
+                "Uninstalling tool '{}' via detected path: {}",
+                tool_id,
+                exe_path.display()
+            );
+            fs::remove_file(exe_path)?;
+
+            // If the parent is a tool-specific folder (not game root), remove if empty
+            if let Some(parent) = exe_path.parent() {
+                if parent != game_dir && parent != game_data_dir {
+                    let _ = fs::remove_dir(parent); // only removes empty dirs
+                }
+            }
+            return Ok(());
+        }
+    }
+
+    Err(ToolError::Other(format!(
+        "Tool '{}' not found — neither in Tools directory nor at detected path",
+        tool_id
+    )))
 }
 
 // ---------------------------------------------------------------------------
@@ -877,7 +906,7 @@ pub fn uninstall_tool(tool_id: &str, game_data_dir: &Path) -> Result<()> {
 /// Returns the path to the newly installed tool's executable.
 pub async fn reinstall_tool(tool_id: &str, game_data_dir: &Path) -> Result<String> {
     info!("Reinstalling mod tool '{}'", tool_id);
-    uninstall_tool(tool_id, game_data_dir)?;
+    uninstall_tool(tool_id, game_data_dir, None)?;
     install_tool(tool_id, game_data_dir).await
 }
 
@@ -1212,8 +1241,8 @@ mod tests {
         let data_dir = tmp.path().join("Data");
         fs::create_dir_all(&data_dir).unwrap();
 
-        // Should not error even if tool dir doesn't exist
-        assert!(uninstall_tool("sseedit", &data_dir).is_ok());
+        // Should error when tool dir doesn't exist and no detected path
+        assert!(uninstall_tool("sseedit", &data_dir, None).is_err());
     }
 
     #[test]
@@ -1252,6 +1281,7 @@ mod tests {
             description: "Test".to_string(),
             game_domain: "skyrimspecialedition".to_string(),
             image_url: None,
+            revision: None,
             mod_rules: vec![],
             install_instructions: None,
             mods: mods

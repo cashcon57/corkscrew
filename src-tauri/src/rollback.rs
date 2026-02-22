@@ -110,6 +110,34 @@ fn init_schema_with_conn(conn: &Connection) -> Result<(), rusqlite::Error> {
 }
 
 // ---------------------------------------------------------------------------
+// Cleanup
+// ---------------------------------------------------------------------------
+
+/// Remove on-disk staging directories for all saved versions of a mod.
+/// Call this *before* `remove_mod()` so the mod_versions rows still exist.
+pub fn cleanup_mod_version_staging(db: &ModDatabase, mod_id: i64) -> Result<(), String> {
+    let conn = db.conn().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare("SELECT staging_path FROM mod_versions WHERE mod_id = ?1")
+        .map_err(|e| format!("Failed to query mod versions: {}", e))?;
+    let paths: Vec<String> = stmt
+        .query_map(params![mod_id], |row| row.get(0))
+        .map_err(|e| format!("Failed to read mod version rows: {}", e))?
+        .filter_map(|r| r.ok())
+        .collect();
+    drop(stmt);
+    drop(conn);
+
+    for path in &paths {
+        let p = std::path::Path::new(path);
+        if p.exists() {
+            let _ = std::fs::remove_dir_all(p);
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Mod version management
 // ---------------------------------------------------------------------------
 

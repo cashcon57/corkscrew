@@ -206,6 +206,8 @@ pub struct CollectionManifest {
     pub slug: Option<String>,
     #[serde(default)]
     pub image_url: Option<String>,
+    #[serde(default)]
+    pub revision: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -295,7 +297,7 @@ async fn graphql_query<T: serde::de::DeserializeOwned>(
     variables: serde_json::Value,
 ) -> Result<T, CollectionsError> {
     let client = reqwest::Client::builder()
-        .user_agent("Corkscrew/0.1.0")
+        .user_agent(format!("Corkscrew/{}", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
@@ -359,12 +361,11 @@ query CollectionsV2($count: Int, $offset: Int, $filter: CollectionsSearchFilter,
             user { name }
             tileImage { thumbnailUrl(size: small) }
             endorsements totalDownloads
-            latestPublishedRevision { revisionNumber totalSize }
+            latestPublishedRevision { revisionNumber totalSize modFiles { fileId } }
             updatedAt adultContent
             tags { name }
             category { name }
             game { domainName }
-            revisions { revisionNumber }
         }
         totalCount
     }
@@ -378,12 +379,11 @@ query Collection($slug: String!, $viewAdultContent: Boolean) {
         user { name }
         tileImage { thumbnailUrl(size: small) }
         endorsements totalDownloads
-        latestPublishedRevision { revisionNumber totalSize }
+        latestPublishedRevision { revisionNumber totalSize modFiles { fileId } }
         updatedAt adultContent
         tags { name }
         category { name }
         game { domainName }
-        revisions { revisionNumber }
     }
 }
 "#;
@@ -462,12 +462,7 @@ pub async fn browse_collections(
         "count": count,
         "offset": offset,
         "filter": {
-            "op": "AND",
-            "gameDomain": [{ "op": "EQUALS", "value": game_domain }],
-            "collectionStatus": [
-                { "op": "EQUALS", "value": "listed" },
-                { "op": "EQUALS", "value": "published" }
-            ]
+            "gameDomain": [{ "op": "EQUALS", "value": game_domain }]
         },
         "sort": sort_array,
     });
@@ -1031,9 +1026,9 @@ fn parse_collection_node(node: &serde_json::Value) -> CollectionInfo {
         })
         .unwrap_or_default();
 
-    // Count total mods from revision info
-    let total_mods = node
-        .get("revisions")
+    // Count total mods from latest published revision's modFiles
+    let total_mods = latest_pub_rev
+        .and_then(|r| r.get("modFiles"))
         .and_then(|v| v.as_array())
         .map(|a| a.len())
         .unwrap_or(0);

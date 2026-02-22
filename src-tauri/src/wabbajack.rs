@@ -221,7 +221,7 @@ pub struct ArchiveSummary {
 /// Fetch the master repository index and all modlists from all repositories.
 pub async fn fetch_modlist_gallery() -> Result<Vec<ModlistSummary>, String> {
     let client = reqwest::Client::builder()
-        .user_agent("Corkscrew/0.3.0")
+        .user_agent(format!("Corkscrew/{}", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
