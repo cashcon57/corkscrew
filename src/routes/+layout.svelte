@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import "../app.css";
-  import { currentPage, errorMessage, successMessage, selectedGame, selectedBottle, showError, showSuccess, appVersion, collectionInstallStatus, updateReady as updateReadyStore, updateVersion as updateVersionStore, updateChecking as updateCheckingStore, updateError as updateErrorStore, setUpdateCheckFn, notificationCount, showNotificationLog, activeProfile, profileList, sidebarCollapsed, controllerMode } from "$lib/stores";
+  import { currentPage, errorMessage, successMessage, selectedGame, selectedBottle, showError, showSuccess, appVersion, collectionInstallStatus, updateReady as updateReadyStore, updateVersion as updateVersionStore, updateNotes as updateNotesStore, updateChecking as updateCheckingStore, updateError as updateErrorStore, setUpdateCheckFn, notificationCount, showNotificationLog, activeProfile, profileList, sidebarCollapsed, controllerMode } from "$lib/stores";
   import { initTheme } from "$lib/theme";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
@@ -65,9 +65,12 @@
   // Auto-update state
   let updateAvailable = $state(false);
   let updateVersion = $state("");
+  let updateBody = $state<string | null>(null);
   let updateDownloading = $state(false);
   let updateProgress = $state(0);
   let updateReady = $state(false);
+  let showUpdateBanner = $state(false);
+  let updateNotesExpanded = $state(false);
 
   // Queue popover positioning (fixed to escape sidebar overflow:hidden)
   let queueBtnEl = $state<HTMLElement | null>(null);
@@ -376,7 +379,10 @@
       if (update) {
         updateAvailable = true;
         updateVersion = update.version;
+        updateBody = update.body ?? null;
         updateVersionStore.set(update.version);
+        updateNotesStore.set(update.body ?? null);
+        showUpdateBanner = true;
         update.downloadAndInstall((progress) => {
           if (progress.event === "Started" && progress.data.contentLength) {
             updateDownloading = true;
@@ -783,6 +789,45 @@
               <line x1="8" y1="2" x2="2" y2="8" />
             </svg>
           </button>
+        </div>
+      {/if}
+
+      {#if showUpdateBanner && updateAvailable}
+        <div class="update-banner" role="status">
+          <div class="update-banner-header">
+            <div class="update-banner-title">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="23 4 23 10 17 10" />
+                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+              </svg>
+              <span>Update available: <strong>v{updateVersion}</strong></span>
+            </div>
+            <div class="update-banner-actions">
+              {#if updateReady}
+                <button class="btn btn-accent btn-sm" onclick={handleRelaunch}>Restart to Update</button>
+              {:else if updateDownloading}
+                <span class="update-banner-downloading"><span class="spinner spinner-sm"></span> Downloading...</span>
+              {/if}
+              <button class="update-banner-dismiss" onclick={() => showUpdateBanner = false} aria-label="Dismiss">
+                <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+                  <line x1="2" y1="2" x2="8" y2="8" />
+                  <line x1="8" y1="2" x2="2" y2="8" />
+                </svg>
+              </button>
+            </div>
+          </div>
+          {#if updateBody}
+            <div class="update-banner-notes" class:expanded={updateNotesExpanded}>
+              <div class="update-notes-content">
+                {updateBody}
+              </div>
+            </div>
+            {#if updateBody.length > 150}
+              <button class="update-notes-toggle" onclick={() => updateNotesExpanded = !updateNotesExpanded}>
+                {updateNotesExpanded ? "Show less" : "Read more..."}
+              </button>
+            {/if}
+          {/if}
         </div>
       {/if}
 
@@ -1493,6 +1538,99 @@
   .update-downloading {
     color: var(--text-tertiary);
     cursor: default;
+  }
+
+  /* --- Update banner --- */
+
+  .update-banner {
+    background: var(--bg-elevated, rgba(255, 255, 255, 0.04));
+    border: 1px solid var(--accent-subtle, rgba(217, 143, 64, 0.2));
+    border-radius: var(--radius-md, 8px);
+    margin: var(--space-3, 12px) var(--space-4, 16px) 0;
+    padding: var(--space-3, 12px) var(--space-4, 16px);
+  }
+
+  .update-banner-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3, 12px);
+  }
+
+  .update-banner-title {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2, 8px);
+    font-size: 13px;
+    color: var(--text-primary);
+  }
+
+  .update-banner-title svg {
+    color: var(--accent, #d98f40);
+    flex-shrink: 0;
+  }
+
+  .update-banner-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2, 8px);
+    flex-shrink: 0;
+  }
+
+  .update-banner-downloading {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-tertiary);
+  }
+
+  .update-banner-dismiss {
+    background: none;
+    border: none;
+    color: var(--text-tertiary);
+    cursor: pointer;
+    padding: 4px;
+    border-radius: var(--radius-sm, 4px);
+    opacity: 0.6;
+    transition: opacity 0.15s;
+  }
+
+  .update-banner-dismiss:hover {
+    opacity: 1;
+  }
+
+  .update-banner-notes {
+    margin-top: var(--space-2, 8px);
+    max-height: 60px;
+    overflow: hidden;
+    transition: max-height 0.3s ease;
+  }
+
+  .update-banner-notes.expanded {
+    max-height: 400px;
+  }
+
+  .update-notes-content {
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .update-notes-toggle {
+    background: none;
+    border: none;
+    color: var(--accent, #d98f40);
+    cursor: pointer;
+    font-size: 11px;
+    padding: 2px 0;
+    margin-top: 2px;
+  }
+
+  .update-notes-toggle:hover {
+    text-decoration: underline;
   }
 
   /* --- Content column --- */

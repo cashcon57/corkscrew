@@ -735,6 +735,14 @@
     });
   }
 
+  function getModSourceUrl(mod: InstalledMod): string | null {
+    if (mod.source_url) return mod.source_url;
+    if (mod.nexus_mod_id && activeGame) {
+      return `https://www.nexusmods.com/${activeGame.nexus_slug}/mods/${mod.nexus_mod_id}`;
+    }
+    return null;
+  }
+
   // --- Drag reorder handlers ---
   function handleRowDragStart(e: DragEvent, index: number) {
     dragRowIndex = index;
@@ -1936,7 +1944,7 @@
                       <span class="col-toggle"><button class="toggle-switch" class:toggle-on={mod.enabled} class:toggle-busy={togglingMod === mod.id} onclick={() => handleToggle(mod)} title={mod.enabled ? "Disable mod" : "Enable mod"}><span class="toggle-track"><span class="toggle-thumb"></span></span></button></span>
                       <span class="col-name"><span class="mod-name">{mod.name}</span>{#if conflictModIds.has(mod.id)}<span class="conflict-icon" title={getConflictTooltip(mod.id)}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg></span>{/if}{#if mod.user_notes}<span class="notes-icon" title={mod.user_notes}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /></svg></span>{/if}</span>
                       <span class="col-category">{#if mod.auto_category}<span class="category-cell" style="color: {categoryColors[mod.auto_category] ?? '#6b7280'};" title={mod.auto_category}>{#if categoryIcons[mod.auto_category]}<svg class="category-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{@html categoryIcons[mod.auto_category]}</svg>{/if}<span class="category-label">{mod.auto_category}</span></span>{:else}<span class="text-muted">&mdash;</span>{/if}</span>
-                      <span class="col-origin">{#if mod.source_type === "nexus"}<span class="origin-label origin-nexus">Nexus</span>{:else if mod.source_type === "loverslab"}<span class="origin-label origin-loverslab">LoversLab</span>{:else if mod.source_type === "moddb"}<span class="origin-label origin-moddb">ModDB</span>{:else if mod.source_type === "curseforge"}<span class="origin-label origin-curseforge">CurseForge</span>{:else if mod.source_type === "direct"}<span class="origin-label origin-direct">Direct</span>{:else}<span class="origin-label origin-manual">Manual</span>{/if}</span>
+                      <span class="col-origin">{#if mod.source_type === "nexus"}<span class="origin-label origin-nexus">Nexus</span>{:else if mod.source_type === "loverslab"}<span class="origin-label origin-loverslab">LoversLab</span>{:else if mod.source_type === "moddb"}<span class="origin-label origin-moddb">ModDB</span>{:else if mod.source_type === "curseforge"}<span class="origin-label origin-curseforge">CurseForge</span>{:else if mod.source_type === "direct"}<span class="origin-label origin-direct">Direct</span>{:else}<span class="origin-label origin-manual">Manual</span>{/if}{#if getModSourceUrl(mod)}<button class="origin-link-btn" title="Open mod page" onclick={(e) => { e.stopPropagation(); openUrl(getModSourceUrl(mod)!); }}><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></svg></button>{/if}</span>
                       <span class="col-source">{#if mod.collection_name}<span class="source-label source-collection" title={mod.collection_name}>{mod.collection_name}</span>{:else}<span class="source-label source-user">User</span>{/if}</span>
                       <span class="col-version"><span class="version-text">{mod.version || "\u2014"}</span>{#if updateMap.has(mod.id)}{@const update = updateMap.get(mod.id)!}<span class="update-badge" title={`Update available: v${update.latest_version}`}>Update</span>{/if}</span>
                       <span class="col-files">{mod.installed_files.length}</span>
@@ -2061,6 +2069,11 @@
                     <span class="origin-label origin-direct">Direct</span>
                   {:else}
                     <span class="origin-label origin-manual">Manual</span>
+                  {/if}
+                  {#if getModSourceUrl(mod)}
+                    <button class="origin-link-btn" title="Open mod page" onclick={(e) => { e.stopPropagation(); openUrl(getModSourceUrl(mod)!); }}>
+                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></svg>
+                    </button>
                   {/if}
                 </span>
 
@@ -2226,16 +2239,13 @@
                   {:else}
                     <span class="origin-label origin-manual">Manual</span>
                   {/if}
+                  {#if getModSourceUrl(detailMod)}
+                    <button class="origin-link-btn" title="Open mod page" onclick={() => openUrl(getModSourceUrl(detailMod!)!)}>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></svg>
+                    </button>
+                  {/if}
                 </span>
               </div>
-              {#if detailMod.source_url}
-                <div class="detail-row">
-                  <span class="detail-label">Source URL</span>
-                  <a class="detail-value detail-link" href={detailMod.source_url} target="_blank" rel="noopener noreferrer">
-                    {detailMod.source_url.length > 40 ? detailMod.source_url.slice(0, 40) + '...' : detailMod.source_url}
-                  </a>
-                </div>
-              {/if}
               {#if detailMod.nexus_mod_id}
                 <div class="detail-row">
                   <span class="detail-label">Nexus</span>
@@ -4721,6 +4731,25 @@
 
   .origin-manual {
     color: var(--text-tertiary);
+  }
+
+  .origin-link-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 1px 3px;
+    margin-left: 2px;
+    color: var(--text-tertiary);
+    opacity: 0.6;
+    transition: opacity 0.15s, color 0.15s;
+    vertical-align: middle;
+    display: inline-flex;
+    align-items: center;
+  }
+
+  .origin-link-btn:hover {
+    opacity: 1;
+    color: var(--accent, #d98f40);
   }
 
   /* ============================

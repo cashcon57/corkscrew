@@ -60,6 +60,7 @@ export const appVersion = writable<string>("0.0.0");
 // Auto-update state (shared between layout and settings)
 export const updateReady = writable(false);
 export const updateVersion = writable("");
+export const updateNotes = writable<string | null>(null);
 export const updateChecking = writable(false);
 export const updateError = writable<string | null>(null);
 // Set by layout to allow settings page to trigger a manual check

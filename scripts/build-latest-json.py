@@ -17,6 +17,7 @@ Expects artifact directories with this layout:
 """
 
 import json
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -107,9 +108,22 @@ def main():
     for key in platforms:
         platforms[key]["url"] = platforms[key]["url"].replace("{{version}}", tag)
 
+    # Try to fetch release notes from GitHub
+    notes = f"v{version}"
+    try:
+        gh_result = subprocess.run(
+            ["gh", "release", "view", tag, "--repo", REPO, "--json", "body", "-q", ".body"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if gh_result.returncode == 0 and gh_result.stdout.strip():
+            notes = gh_result.stdout.strip()
+            print(f"Fetched release notes ({len(notes)} chars)", file=sys.stderr)
+    except Exception as e:
+        print(f"Warning: Could not fetch release notes: {e}", file=sys.stderr)
+
     result = {
         "version": version,
-        "notes": f"v{version}",
+        "notes": notes,
         "pub_date": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "platforms": platforms,
     }

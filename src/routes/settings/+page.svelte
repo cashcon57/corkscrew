@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, applyToolIniEdits, getPlatformDetail } from "$lib/api";
-  import { config, showError, showSuccess, selectedGame, skseStatus, currentPage, appVersion, updateReady, updateVersion, updateChecking, updateError, triggerUpdateCheck, controllerMode } from "$lib/stores";
+  import { config, showError, showSuccess, selectedGame, skseStatus, currentPage, appVersion, updateReady, updateVersion, updateNotes, updateChecking, updateError, triggerUpdateCheck, controllerMode } from "$lib/stores";
   import type { AppConfig, ModTool, PlatformInfo } from "$lib/types";
   import ThemeToggle from "$lib/components/ThemeToggle.svelte";
   import SettingsAuthSection from "./settings-auth-section.svelte";
@@ -12,6 +12,7 @@
   import { relaunch } from "@tauri-apps/plugin-process";
 
   let manualCheckDone = $state(false);
+  let settingsNotesExpanded = $state(false);
 
   async function handleCheckForUpdates() {
     manualCheckDone = false;
@@ -1075,6 +1076,22 @@
           {/if}
         </div>
       </div>
+      {#if $updateNotes && $updateReady}
+        <div class="card-divider"></div>
+        <div class="card-row about-row">
+          <span class="row-label">Patch Notes</span>
+          <div class="row-value patch-notes-container">
+            <div class="patch-notes-text" class:expanded={settingsNotesExpanded}>
+              {$updateNotes}
+            </div>
+            {#if $updateNotes.length > 150}
+              <button class="patch-notes-toggle" onclick={() => settingsNotesExpanded = !settingsNotesExpanded}>
+                {settingsNotesExpanded ? "Show less" : "Read more..."}
+              </button>
+            {/if}
+          </div>
+        </div>
+      {/if}
       <div class="card-divider"></div>
       <div class="card-row about-row">
         <span class="row-label">Author</span>
@@ -1905,6 +1922,41 @@
 
   .btn-update-ready:hover {
     opacity: 0.85;
+  }
+
+  .patch-notes-container {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .patch-notes-text {
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 60px;
+    overflow: hidden;
+    transition: max-height 0.3s ease;
+  }
+
+  .patch-notes-text.expanded {
+    max-height: 400px;
+  }
+
+  .patch-notes-toggle {
+    background: none;
+    border: none;
+    color: var(--accent, #d98f40);
+    cursor: pointer;
+    font-size: 11px;
+    padding: 0;
+    text-align: left;
+  }
+
+  .patch-notes-toggle:hover {
+    text-decoration: underline;
   }
 
   /* --- Mod Tools --- */

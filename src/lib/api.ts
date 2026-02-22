@@ -110,7 +110,9 @@ export async function installMod(
   gameId: string,
   bottleName: string,
   modName?: string,
-  modVersion?: string
+  modVersion?: string,
+  sourceType?: string,
+  sourceUrl?: string
 ): Promise<InstalledMod> {
   return invoke("install_mod_cmd", {
     archivePath,
@@ -118,6 +120,8 @@ export async function installMod(
     bottleName,
     modName: modName ?? null,
     modVersion: modVersion ?? "",
+    sourceType: sourceType ?? null,
+    sourceUrl: sourceUrl ?? null,
   });
 }
 

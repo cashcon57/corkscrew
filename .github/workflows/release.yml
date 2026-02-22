@@ -117,7 +117,22 @@ jobs:
           done
           cd -
 
+      - name: Generate release notes on draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          NOTES=$(gh api repos/${{ github.repository }}/releases/generate-notes \
+            -f tag_name="$TAG" --jq .body 2>/dev/null || echo "")
+          if [ -n "$NOTES" ]; then
+            echo "$NOTES" > /tmp/release-notes.txt
+            gh release edit "$TAG" --notes-file /tmp/release-notes.txt
+            echo "Updated draft release with generated notes"
+          fi
+
       - name: Build latest.json for updater
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: python3 scripts/build-latest-json.py artifacts/ > latest.json
 
       - name: Publish release
