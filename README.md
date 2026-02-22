@@ -37,7 +37,7 @@ Corkscrew installs, manages, and organizes mods for Windows games running throug
 
 It works by reading and writing directly to your Wine bottle's filesystem, the same way the game itself sees it. Your bottles, your mods, no middleman.
 
-> **v0.9.0** — Skyrim Special Edition is the first fully supported game. More games coming soon.
+> **v1.2** — Skyrim Special Edition is the first fully supported game. More games coming soon.
 
 ---
 
@@ -150,14 +150,15 @@ Corkscrew includes an in-app auto-updater. When a new version is published on Gi
 - **Persistent notification log** — All success/error/warning notifications are logged to a persistent database. Click the bell icon in the sidebar to review past notifications with timestamps.
 
 ### Nexus Mods Integration
-- **API key authentication** — Connect your Nexus Mods account to access premium features.
-- **NXM link handling** — Download mods directly from NXM links on the Nexus Mods website.
+- **API key authentication** — Connect your Nexus Mods account via API key to access premium features. SSO/OAuth module is implemented and ready for use once NexusMods approves the application.
+- **NXM protocol handling** — Registered as an `nxm://` protocol handler. Users click "Download with Mod Manager" on the Nexus Mods website, and Corkscrew receives and processes the NXM link.
+- **Strict download compliance** — Corkscrew **never automates downloads for free NexusMods users**. Free users are always directed to the Nexus Mods website to click "Slow Download" manually. Only premium users get API-initiated downloads. This is enforced at the API layer in `nexus.rs::get_download_links()`.
+- **Collections browser** — Browse NexusMods Collections via the GraphQL v2 API with search, sorting, filtering, and detailed mod/revision views.
+- **Collection installation** — Premium users can install entire NexusMods Collections with one click. The orchestrator resolves install order, downloads mods via the NexusMods API, handles FOMOD selections from the collection manifest, deploys files, and applies the collection's plugin load order. Free users see a list of mods with links to download manually from the Nexus website.
 - **Update checking** — Check installed mods against Nexus for available updates.
-- **Collections browser** — Browse NexusMods Collections with search, sorting, filtering, and detailed mod/revision views.
-- **Collection installation** — Premium users can install entire NexusMods Collections with one click. The orchestrator resolves install order, downloads mods, handles FOMOD selections from the collection manifest, deploys files, and applies the collection's plugin load order. Free users see a list of mods to download manually from the Nexus website.
 - **Collection diff** — Compare your locally installed collection against the author's latest revision to see added, removed, and updated mods.
 - **Tool requirement detection** — Before installing a Collection or Wabbajack modlist, Corkscrew scans for required modding tools (SKSE, Nemesis, BodySlide, etc.) and prompts you to install missing tools before proceeding.
-- **Premium enforcement** — Free users are directed to the Nexus Mods website for downloads; only premium users get API-initiated downloads, in full compliance with NexusMods policies.
+- **Rate limit compliance** — All API calls respect NexusMods rate limits with graceful error handling (skip on failure, no aggressive retries).
 
 ### Plugin Load Order
 - **LOOT-powered sorting** — Automatic plugin sorting using [libloot](https://github.com/loot/libloot) (the same engine behind LOOT), with masterlist fetching from GitHub.
@@ -277,22 +278,25 @@ Key workflows tested end-to-end:
 
 - **Linux testing is limited** — The app builds for Linux and handles Linux paths throughout, but primary testing has been on macOS. Community feedback on SteamOS/Proton setups is especially welcome.
 - **Single game support** — Only Skyrim SE is supported currently. The plugin architecture is ready for more games, but each needs a detection plugin.
-- **Wabbajack installation** — You can browse the gallery and parse `.wabbajack` files, but automated Wabbajack modlist installation (downloading archives, executing directives) is not yet implemented.
-- **NexusMods SSO** — The SSO module is built but requires NexusMods to approve the "Corkscrew" application slug. Currently uses API key authentication.
+- **Wabbajack installation** — You can browse the gallery and parse `.wabbajack` files, but full automated Wabbajack modlist installation (downloading archives from all sources, executing all directive types) is actively being built.
+- **NexusMods SSO** — The SSO/OAuth2 module (with PKCE) is fully implemented and ready to use. Currently awaiting NexusMods approval of the "Corkscrew" application slug. In the meantime, API key authentication works.
 - **macOS code signing** — The app is not signed with an Apple Developer certificate. Users need to bypass Gatekeeper on first launch (see [Installation](#installation)).
 
 ### Roadmap
 
+**In progress:**
+- Full Wabbajack modlist installation (all directive types, multi-source downloads, resumable installs)
+- SKSE version management and auto-switching
+
 **Near-term:**
-- Wabbajack modlist installation (FromArchive directives, download orchestration)
+- NexusMods SSO/OAuth authentication (pending NM app approval)
+- Collection update installation from diff view
 - Resizable table columns with persistent widths
-- Enhanced dependency visualization with tree view
 
 **Medium-term:**
 - More game plugins (Fallout 4, Oblivion, Starfield, etc.)
-- NexusMods SSO/OAuth authentication (pending NM app approval)
-- Collection update installation from diff view
 - Same-volume staging for reliable hardlink deployment
+- Enhanced dependency visualization with tree view
 
 **Long-term:**
 - Apple Developer code signing
@@ -311,15 +315,15 @@ Key workflows tested end-to-end:
 
 **Rust** handles everything that touches the filesystem or network: bottle discovery across nine different Wine sources, archive extraction, staging-based mod deployment via hardlinks, LOOT plugin sorting, Nexus Mods API calls, NexusMods Collections GraphQL queries, SKSE auto-download from GitHub, Skyrim SE version detection, crash log analysis, mod tool management, and Wabbajack modlist gallery fetching. The plugin-based game detection system (`GamePlugin` trait) makes adding new game support straightforward.
 
-**SQLite** (via `rusqlite`) with a versioned migration system (v1→v7) tracks installed mods, deployment manifests, file hashes, profiles, plugin rules, conflict rules, mod version history, game file snapshots, mod dependencies, FOMOD recipes, game sessions, collection metadata, auto-categories, and notification logs.
+**SQLite** (via `rusqlite`) with a versioned migration system (v1→v9) tracks installed mods, deployment manifests, file hashes, profiles, plugin rules, conflict rules, mod version history, game file snapshots, mod dependencies, FOMOD recipes, game sessions, collection metadata, auto-categories, download registry, and notification logs.
 
 ### Project structure
 
 ```
 src/                          Svelte frontend
 ├── lib/
-│   ├── api.ts                Tauri IPC bindings (~115 typed invoke wrappers)
-│   ├── types.ts              Shared TypeScript interfaces (~115 types)
+│   ├── api.ts                Tauri IPC bindings (~164 typed invoke wrappers)
+│   ├── types.ts              Shared TypeScript interfaces (~118 types)
 │   ├── stores.ts             Svelte stores (game selection, mods, toasts, notifications)
 │   ├── theme.ts              Theme detection, persistence, and vibrancy
 │   └── components/
@@ -360,8 +364,8 @@ src/                          Svelte frontend
 │   └── settings/+page.svelte Config, game tools, auth, INI, diagnostics
 └── app.css                   Design system (tokens, themes, vibrancy, animations)
 
-src-tauri/src/                Rust backend (~48 modules, 502 tests)
-├── lib.rs              Tauri command handlers (~105 IPC commands)
+src-tauri/src/                Rust backend (~46 modules, 514 tests)
+├── lib.rs              Tauri command handlers (~163 IPC commands)
 ├── bottles.rs          Bottle detection (9 sources, macOS + Linux)
 ├── bottle_config.rs    Wine bottle settings (MSync, MetalFX, env vars)
 ├── games.rs            Game detection framework + plugin registry
@@ -369,7 +373,7 @@ src-tauri/src/                Rust backend (~48 modules, 502 tests)
 ├── staging.rs          Staging folder management + SHA-256 hashing
 ├── deployer.rs         Hardlink/copy deployment engine + manifest tracking + progress events
 ├── database.rs         SQLite mod tracking with versioned migrations + notification log
-├── migrations.rs       Schema versioning + migration runner (v1→v7)
+├── migrations.rs       Schema versioning + migration runner (v1→v9)
 ├── loot.rs             libloot wrapper + masterlist management
 ├── loot_rules.rs       Custom plugin load order rules
 ├── profiles.rs         Mod profile CRUD + activation flow
@@ -440,7 +444,7 @@ cargo tauri dev    # Development mode with hot-reload
 
 ```bash
 # Run tests
-cd src-tauri && cargo test           # 502 Rust tests
+cd src-tauri && cargo test           # 514 Rust tests
 npx svelte-check --threshold error   # Frontend type checking
 ```
 

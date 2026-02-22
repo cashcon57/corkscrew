@@ -889,7 +889,7 @@
   }
 
   :global([data-theme="light"]) .app-shell {
-    background: #d2d2d7;
+    background: #e0e0e5;
   }
 
   :global(html.vibrancy-active) .app-shell {
@@ -1270,6 +1270,7 @@
 
   :global([data-theme="light"]) .content-column {
     border-color: rgba(0, 0, 0, 0.06);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.04);
   }
 
   :global(html.vibrancy-active) .content-column {
