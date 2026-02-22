@@ -62,7 +62,7 @@ use launcher::LaunchResult;
 use loot::{PluginWarning, SortResult};
 use loot_rules::PluginRule;
 use modlist_io::{ImportPlan, ModlistDiff};
-use nexus::ModUpdateInfo;
+use nexus::{ModUpdateInfo, NexusCategory, NexusSearchResult};
 use oauth::{NexusUserInfo, TokenPair};
 use plugins::skyrim_plugins::PluginEntry;
 use profiles::Profile;
@@ -2683,6 +2683,49 @@ async fn browse_nexus_mods_cmd(
 }
 
 #[tauri::command]
+async fn search_nexus_mods_cmd(
+    game_slug: String,
+    search_text: Option<String>,
+    sort_by: Option<String>,
+    sort_dir: Option<String>,
+    count: u32,
+    offset: u32,
+    include_adult: bool,
+) -> Result<NexusSearchResult, String> {
+    let api_key = config::get_config()
+        .ok()
+        .and_then(|c| c.nexus_api_key)
+        .ok_or_else(|| "No NexusMods API key configured".to_string())?;
+    nexus::graphql_search_mods(
+        &api_key,
+        &game_slug,
+        search_text.as_deref(),
+        sort_by.as_deref(),
+        sort_dir.as_deref(),
+        count,
+        offset,
+        include_adult,
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_game_categories_cmd(
+    game_slug: String,
+) -> Result<Vec<NexusCategory>, String> {
+    let api_key = config::get_config()
+        .ok()
+        .and_then(|c| c.nexus_api_key)
+        .ok_or_else(|| "No NexusMods API key configured".to_string())?;
+    let client = nexus::NexusClient::new(api_key);
+    client
+        .get_game_categories(&game_slug)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn browse_collections_cmd(
     game_domain: String,
     count: u32,
@@ -2979,6 +3022,11 @@ fn estimate_install_impact_cmd(
         archive_size,
         &data_dir,
     ))
+}
+
+#[tauri::command]
+fn get_available_disk_space_cmd(path: String) -> Result<u64, String> {
+    Ok(disk_budget::available_space(std::path::Path::new(&path)))
 }
 
 // --- Staging Info Commands ---
@@ -3440,6 +3488,8 @@ pub fn run() {
             fetch_url_text,
             // Collections & Nexus Browse
             browse_nexus_mods_cmd,
+            search_nexus_mods_cmd,
+            get_game_categories_cmd,
             browse_collections_cmd,
             get_collection_cmd,
             get_collection_revisions,
@@ -3496,6 +3546,7 @@ pub fn run() {
             // Disk Budget
             get_disk_budget,
             estimate_install_impact_cmd,
+            get_available_disk_space_cmd,
             // Staging Info
             get_staging_info,
             set_staging_directory,

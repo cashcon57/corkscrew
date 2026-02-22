@@ -9,6 +9,8 @@
   } from "$lib/api";
   import { selectedGame, showError, showSuccess } from "$lib/stores";
   import type { Profile } from "$lib/types";
+  import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
+  import SkeletonRows from "$lib/components/SkeletonRows.svelte";
 
   let profiles = $state<Profile[]>([]);
   let loading = $state(true);
@@ -17,6 +19,7 @@
   let newProfileName = $state("");
   let editingId = $state<number | null>(null);
   let editingName = $state("");
+  let confirmDeleteId = $state<number | null>(null);
 
   const game = $derived($selectedGame);
 
@@ -55,7 +58,13 @@
 
   async function handleDelete(id: number) {
     if (!game) return;
-    if (!confirm("Are you sure you want to delete this profile?")) return;
+    confirmDeleteId = id;
+  }
+
+  async function confirmDelete() {
+    if (confirmDeleteId === null) return;
+    const id = confirmDeleteId;
+    confirmDeleteId = null;
     try {
       await deleteProfile(id);
       showSuccess("Profile deleted");
@@ -135,9 +144,7 @@
       <p class="empty-detail">Select a game from the Dashboard to manage profiles.</p>
     </div>
   {:else if loading}
-    <div class="loading-container">
-      <div class="spinner"><div class="spinner-ring"></div></div>
-    </div>
+    <SkeletonRows rows={4} columns={3} />
   {:else}
     <!-- Create New Profile -->
     <div class="create-section">
@@ -246,6 +253,17 @@
     {/if}
   {/if}
 </div>
+
+<ConfirmDialog
+  open={confirmDeleteId !== null}
+  title="Delete Profile"
+  message="Are you sure you want to delete this profile? This action cannot be undone."
+  details={confirmDeleteId ? [profiles.find(p => p.id === confirmDeleteId)?.name ?? ""].filter(Boolean) : []}
+  confirmLabel="Delete"
+  confirmDanger={true}
+  onConfirm={confirmDelete}
+  onCancel={() => confirmDeleteId = null}
+/>
 
 <style>
   .profiles-page {

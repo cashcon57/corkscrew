@@ -31,6 +31,18 @@
     return "ok";
   });
 
+  // Stacked bar segments
+  const stackedBar = $derived.by(() => {
+    if (!budget) return { staging: 0, deployed: 0, free: 100 };
+    const total = budget.staging_bytes + budget.available_bytes;
+    if (total === 0) return { staging: 0, deployed: 0, free: 100 };
+    const staging = (budget.staging_bytes / total) * 100;
+    // Only show deployed segment for copies (hardlinks have zero extra cost)
+    const deployed = budget.uses_hardlinks ? 0 : (budget.deployment_bytes / total) * 100;
+    const free = Math.max(0, 100 - staging - deployed);
+    return { staging, deployed, free };
+  });
+
   const methodLabel = $derived(
     budget?.uses_hardlinks ? "Hardlinks" : "Copies"
   );
@@ -97,20 +109,34 @@
           <span>Calculating disk usage...</span>
         </div>
       {:else if budget}
-        <!-- Usage Bar -->
+        <!-- Stacked Usage Bar -->
         <div class="usage-bar-container">
           <div class="usage-bar-labels">
-            <span class="usage-bar-label">Staging usage</span>
-            <span class="usage-bar-value">{usageRatio.toFixed(1)}%</span>
+            <span class="usage-bar-label">Disk breakdown</span>
+            <span class="usage-bar-value">{usageRatio.toFixed(1)}% used</span>
           </div>
           <div class="usage-bar-track">
-            <div
-              class="usage-bar-fill"
-              class:fill-ok={barStatus === "ok"}
-              class:fill-warning={barStatus === "warning"}
-              class:fill-critical={barStatus === "critical"}
-              style="width: {usageRatio}%"
-            ></div>
+            {#if stackedBar.staging > 0}
+              <div
+                class="usage-bar-fill fill-staging"
+                style="width: {stackedBar.staging}%"
+                title="Staging: {budget ? formatBytes(budget.staging_bytes) : ''}"
+              ></div>
+            {/if}
+            {#if stackedBar.deployed > 0}
+              <div
+                class="usage-bar-fill fill-deployed"
+                style="width: {stackedBar.deployed}%"
+                title="Deployed: {budget ? formatBytes(budget.deployment_bytes) : ''}"
+              ></div>
+            {/if}
+          </div>
+          <div class="usage-bar-legend">
+            <span class="legend-item"><span class="legend-dot dot-staging"></span>Staging</span>
+            {#if !budget?.uses_hardlinks}
+              <span class="legend-item"><span class="legend-dot dot-deployed"></span>Deployed</span>
+            {/if}
+            <span class="legend-item"><span class="legend-dot dot-free"></span>Free</span>
           </div>
         </div>
 
@@ -309,6 +335,7 @@
   }
 
   .usage-bar-track {
+    display: flex;
     width: 100%;
     height: 6px;
     border-radius: 3px;
@@ -318,9 +345,28 @@
 
   .usage-bar-fill {
     height: 100%;
-    border-radius: 3px;
     transition: width 0.4s var(--ease);
     min-width: 2px;
+  }
+
+  .usage-bar-fill:first-child {
+    border-radius: 3px 0 0 3px;
+  }
+
+  .usage-bar-fill:last-child {
+    border-radius: 0 3px 3px 0;
+  }
+
+  .usage-bar-fill:only-child {
+    border-radius: 3px;
+  }
+
+  .fill-staging {
+    background: var(--system-accent);
+  }
+
+  .fill-deployed {
+    background: var(--green);
   }
 
   .fill-ok {
@@ -334,6 +380,30 @@
   .fill-critical {
     background: var(--red);
   }
+
+  .usage-bar-legend {
+    display: flex;
+    gap: var(--space-3);
+    margin-top: var(--space-2);
+  }
+
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 10px;
+    color: var(--text-tertiary);
+  }
+
+  .legend-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+  }
+
+  .dot-staging { background: var(--system-accent); }
+  .dot-deployed { background: var(--green); }
+  .dot-free { background: var(--separator-opaque); }
 
   /* ---- Stats Grid ---- */
 

@@ -53,6 +53,44 @@
     return totalBytes > 0 ? Math.round((downloadedBytes / totalBytes) * 100) : 0;
   });
 
+  // Download ETA tracking
+  let lastDownloadSnapshot = $state<{ time: number; bytes: number } | null>(null);
+  let downloadSpeed = $state(0); // bytes per second
+
+  $effect(() => {
+    const active = queueItems.filter(i => i.status === "downloading");
+    if (active.length === 0) {
+      lastDownloadSnapshot = null;
+      downloadSpeed = 0;
+      return;
+    }
+    const currentBytes = active.reduce((sum, i) => sum + i.downloaded_bytes, 0);
+    const now = Date.now();
+    if (lastDownloadSnapshot) {
+      const elapsed = (now - lastDownloadSnapshot.time) / 1000;
+      if (elapsed > 0.5) {
+        const bytesDelta = currentBytes - lastDownloadSnapshot.bytes;
+        downloadSpeed = Math.max(0, bytesDelta / elapsed);
+        lastDownloadSnapshot = { time: now, bytes: currentBytes };
+      }
+    } else {
+      lastDownloadSnapshot = { time: now, bytes: currentBytes };
+    }
+  });
+
+  const downloadEta = $derived.by(() => {
+    if (downloadSpeed <= 0) return "";
+    const active = queueItems.filter(i => i.status === "downloading");
+    const remaining = active.reduce((sum, i) => sum + (i.total_bytes - i.downloaded_bytes), 0);
+    if (remaining <= 0) return "";
+    const seconds = remaining / downloadSpeed;
+    if (seconds < 60) return "< 1 min";
+    if (seconds < 3600) return `~${Math.ceil(seconds / 60)} min`;
+    const hrs = Math.floor(seconds / 3600);
+    const mins = Math.ceil((seconds % 3600) / 60);
+    return `~${hrs}h ${mins}m`;
+  });
+
   // First-run wizard state
   let showFirstRunWizard = $state(false);
 
@@ -61,6 +99,19 @@
 
   // Game launch state
   let launching = $state(false);
+
+  // Keyboard shortcuts modal
+  let showShortcuts = $state(false);
+
+  // Friendly error message mapping for download errors
+  function friendlyError(raw: string): string {
+    const lower = raw.toLowerCase();
+    if (lower.includes("403") || lower.includes("premium")) return "Premium membership required for API downloads";
+    if (lower.includes("404")) return "File was removed from NexusMods";
+    if (lower.includes("timeout") || lower.includes("etimedout")) return "Network timeout \u2014 check your connection";
+    if (lower.includes("429") || lower.includes("rate limit")) return "API rate limit reached \u2014 wait a moment";
+    return raw;
+  }
 
   // Auto-update state
   let updateAvailable = $state(false);
@@ -172,7 +223,14 @@
         if (idx < navPageIds.length) navigate(navPageIds[idx]);
         return;
       }
+      // Cmd+/ or Cmd+?: keyboard shortcuts modal
+      if ((e.metaKey || e.ctrlKey) && (e.key === "/" || e.key === "?")) {
+        e.preventDefault();
+        showShortcuts = !showShortcuts;
+        return;
+      }
       if (e.key === "Escape") {
+        if (showShortcuts) { showShortcuts = false; return; }
         if (showSpotlight) { showSpotlight = false; return; }
         if (get(errorMessage)) { errorMessage.set(null); return; }
         if (get(successMessage)) { successMessage.set(null); return; }
@@ -692,6 +750,16 @@
           </svg>
           <span>GitHub</span>
         </button>
+        <button
+          class="sidebar-gh-btn"
+          onclick={() => showShortcuts = true}
+          title="Keyboard Shortcuts (Cmd+/)"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="4" width="20" height="16" rx="2" /><line x1="6" y1="8" x2="6" y2="8" /><line x1="10" y1="8" x2="10" y2="8" /><line x1="14" y1="8" x2="14" y2="8" /><line x1="18" y1="8" x2="18" y2="8" /><line x1="8" y1="12" x2="16" y2="12" /><line x1="6" y1="16" x2="6" y2="16" /><line x1="18" y1="16" x2="18" y2="16" />
+          </svg>
+          <span>Shortcuts</span>
+        </button>
       {/if}
 
       <!-- Download Queue Indicator -->
@@ -863,7 +931,7 @@
   {#if showQueue}
     <div class="queue-popover" style={popoverStyle}>
       <div class="queue-popover-header">
-        <span class="queue-popover-title">Downloads</span>
+        <span class="queue-popover-title">Downloads{#if downloadEta}<span class="queue-eta"> &mdash; {downloadEta} remaining</span>{/if}</span>
         {#if queueItems.some(i => i.status === "completed" || i.status === "failed")}
           <button class="queue-clear-btn" onclick={handleClearFinished}>Clear finished</button>
         {/if}
@@ -884,7 +952,7 @@
                   {:else if item.status === "completed"}
                     Done
                   {:else if item.status === "failed"}
-                    Failed{item.error ? `: ${item.error}` : ""}
+                    Failed{item.error ? `: ${friendlyError(item.error)}` : ""}
                   {/if}
                 </span>
               </div>
@@ -921,6 +989,31 @@
 
 {#if showSpotlight}
   <SpotlightSearch onClose={() => showSpotlight = false} />
+{/if}
+
+{#if showShortcuts}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="shortcuts-overlay" onclick={() => showShortcuts = false} role="dialog" aria-label="Keyboard Shortcuts">
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="shortcuts-card" onclick={(e) => e.stopPropagation()}>
+      <div class="shortcuts-header">
+        <h3>Keyboard Shortcuts</h3>
+        <button class="shortcuts-close" onclick={() => showShortcuts = false}>
+          <svg width="14" height="14" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+            <line x1="3" y1="3" x2="9" y2="9" /><line x1="9" y1="3" x2="3" y2="9" />
+          </svg>
+        </button>
+      </div>
+      <div class="shortcuts-grid">
+        <div class="shortcut-row"><kbd>Cmd</kbd><kbd>K</kbd><span>Spotlight Search</span></div>
+        <div class="shortcut-row"><kbd>Cmd</kbd><kbd>B</kbd><span>Toggle Sidebar</span></div>
+        <div class="shortcut-row"><kbd>Cmd</kbd><kbd>,</kbd><span>Settings</span></div>
+        <div class="shortcut-row"><kbd>Cmd</kbd><kbd>1</kbd>-<kbd>7</kbd><span>Navigate Pages</span></div>
+        <div class="shortcut-row"><kbd>Cmd</kbd><kbd>/</kbd><span>This Modal</span></div>
+        <div class="shortcut-row"><kbd>Esc</kbd><span>Close Panel / Dismiss</span></div>
+      </div>
+    </div>
+  </div>
 {/if}
 
 <style>
@@ -1836,6 +1929,12 @@
     color: var(--text-primary);
   }
 
+  .queue-eta {
+    font-weight: 400;
+    color: var(--text-tertiary);
+    font-size: 11px;
+  }
+
   .queue-clear-btn {
     font-size: 11px;
     color: var(--text-tertiary);
@@ -2035,5 +2134,102 @@
   :global(.controller-mode) :focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
+  }
+
+  /* Keyboard Shortcuts Modal */
+  .shortcuts-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    backdrop-filter: blur(4px);
+    animation: shortcutsFadeIn 150ms ease-out;
+  }
+
+  .shortcuts-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--separator-opaque);
+    border-radius: var(--radius);
+    padding: var(--space-6);
+    max-width: 380px;
+    width: 90vw;
+    box-shadow: var(--shadow-lg);
+    animation: shortcutsSlideUp 200ms var(--ease-out);
+  }
+
+  .shortcuts-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: var(--space-5);
+  }
+
+  .shortcuts-header h3 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .shortcuts-close {
+    background: none;
+    border: none;
+    color: var(--text-tertiary);
+    cursor: pointer;
+    padding: var(--space-1);
+    border-radius: var(--radius-sm);
+  }
+
+  .shortcuts-close:hover {
+    color: var(--text-primary);
+    background: var(--surface-hover);
+  }
+
+  .shortcuts-grid {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .shortcut-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: 13px;
+    color: var(--text-secondary);
+  }
+
+  .shortcut-row span {
+    margin-left: auto;
+  }
+
+  .shortcut-row kbd {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 24px;
+    height: 22px;
+    padding: 0 6px;
+    background: var(--surface);
+    border: 1px solid var(--separator-opaque);
+    border-radius: 4px;
+    font-family: var(--font-mono, monospace);
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-primary);
+    box-shadow: 0 1px 0 var(--separator-opaque);
+  }
+
+  @keyframes shortcutsFadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  @keyframes shortcutsSlideUp {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
   }
 </style>

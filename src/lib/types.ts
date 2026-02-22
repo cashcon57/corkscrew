@@ -416,6 +416,19 @@ export interface NexusModInfo {
   adult_content: boolean;
 }
 
+export interface NexusSearchResult {
+  mods: NexusModInfo[];
+  total_count: number;
+  offset: number;
+  has_more: boolean;
+}
+
+export interface NexusCategory {
+  category_id: number;
+  name: string;
+  parent_category: number | null;
+}
+
 // Collections
 
 export interface CollectionInfo {

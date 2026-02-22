@@ -41,6 +41,7 @@
     saveFomodRecipe,
     detectModTools,
     launchModTool,
+    getAvailableDiskSpace,
   } from "$lib/api";
   import type { InstallProgressEvent, DeploymentHealth, ConflictSuggestion, ResolutionResult, DeployProgress, ModTool } from "$lib/types";
   import {
@@ -60,6 +61,9 @@
   import SessionHistoryPanel from "$lib/components/SessionHistoryPanel.svelte";
   import ModCategoryView from "$lib/components/mods/ModCategoryView.svelte";
   import ModBisect from "$lib/components/ModBisect.svelte";
+  import HelpTooltip from "$lib/components/HelpTooltip.svelte";
+  import SkeletonRows from "$lib/components/SkeletonRows.svelte";
+  import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
 
   let installing = $state(false);
   let installStep = $state("");
@@ -114,6 +118,12 @@
   let sortBy = $state<"priority" | "name" | "date" | "version" | "files">("priority");
   let sortDir = $state<"asc" | "desc">("asc");
 
+  // Persistent search: restore from sessionStorage on mount
+  function searchStorageKey(game: DetectedGame) {
+    return `corkscrew-search-${game.game_id}-${game.bottle_name}`;
+  }
+  let searchRestored = false;
+
   // Detail panel
   let detailMod = $state<InstalledMod | null>(null);
 
@@ -127,6 +137,24 @@
 
   // Mod overflow menu state
   let overflowMenuModId = $state<number | null>(null);
+
+  // Duplicate mod detection
+  let duplicateDialog = $state<{ newMod: InstalledMod; oldMod: InstalledMod } | null>(null);
+
+  // Proactive issue banner dismissals (per session per game)
+  let dismissedBanners = $state<Set<string>>(new Set());
+  function dismissBanner(key: string) {
+    const next = new Set(dismissedBanners);
+    next.add(key);
+    dismissedBanners = next;
+    if (activeGame) {
+      const storeKey = `corkscrew-banners-${activeGame.game_id}-${activeGame.bottle_name}`;
+      sessionStorage.setItem(storeKey, JSON.stringify([...next]));
+    }
+  }
+
+  // Bulk selection state (functions defined after filteredMods)
+  let selectedModIds = $state<Set<number>>(new Set());
   let suggestions = $state<ConflictSuggestion[]>([]);
   let analyzingConflicts = $state(false);
   let resolvingAll = $state(false);
@@ -268,20 +296,117 @@
     return mods;
   })());
 
-  // Filtered mods based on search and filters
+  // Faceted search parser
+  const FACET_PREFIXES = ["tag", "source", "enabled", "conflict", "update", "category", "collection", "priority", "files"] as const;
+  type FacetKey = typeof FACET_PREFIXES[number];
+
+  interface ParsedSearch {
+    facets: Map<FacetKey, string>;
+    freeText: string;
+  }
+
+  function parseFacets(query: string): ParsedSearch {
+    const facets = new Map<FacetKey, string>();
+    const freeWords: string[] = [];
+    const tokens = query.match(/(?:[^\s"]+|"[^"]*")+/g) ?? [];
+
+    for (const token of tokens) {
+      const colonIdx = token.indexOf(":");
+      if (colonIdx > 0) {
+        const prefix = token.slice(0, colonIdx).toLowerCase();
+        if (FACET_PREFIXES.includes(prefix as FacetKey)) {
+          facets.set(prefix as FacetKey, token.slice(colonIdx + 1).replace(/^"|"$/g, ""));
+          continue;
+        }
+      }
+      freeWords.push(token);
+    }
+
+    return { facets, freeText: freeWords.join(" ") };
+  }
+
+  // Derived parsed search for use in UI (facet pills)
+  let parsedSearch = $derived(parseFacets(searchQuery));
+
+  // Filtered mods based on faceted search and dropdown filters
   let filteredMods = $derived((() => {
     let mods = sortedMods;
-    // Text search (name, tags, notes, collection)
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase();
+    const { facets, freeText } = parsedSearch;
+
+    // Apply facet filters
+    const tagFacet = facets.get("tag");
+    if (tagFacet) {
+      const t = tagFacet.toLowerCase();
+      mods = mods.filter(m => m.user_tags.some(tag => tag.toLowerCase().includes(t)));
+    }
+
+    const sourceFacet = facets.get("source");
+    if (sourceFacet) {
+      const s = sourceFacet.toLowerCase();
+      mods = mods.filter(m => (m.source_type || "manual").toLowerCase() === s);
+    }
+
+    const enabledFacet = facets.get("enabled");
+    if (enabledFacet) {
+      const val = enabledFacet.toLowerCase() === "true";
+      mods = mods.filter(m => m.enabled === val);
+    }
+
+    const conflictFacet = facets.get("conflict");
+    if (conflictFacet && conflictFacet.toLowerCase() === "true") {
+      mods = mods.filter(m => conflictModIds.has(m.id));
+    }
+
+    const updateFacet = facets.get("update");
+    if (updateFacet && updateFacet.toLowerCase() === "true") {
+      mods = mods.filter(m => updateMap.has(m.id));
+    }
+
+    const categoryFacet = facets.get("category");
+    if (categoryFacet) {
+      const c = categoryFacet.toLowerCase();
+      mods = mods.filter(m => m.auto_category?.toLowerCase().includes(c));
+    }
+
+    const collectionFacet = facets.get("collection");
+    if (collectionFacet) {
+      const c = collectionFacet.toLowerCase();
+      mods = mods.filter(m => m.collection_name?.toLowerCase().includes(c));
+    }
+
+    const priorityFacet = facets.get("priority");
+    if (priorityFacet) {
+      const match = priorityFacet.match(/^([><])(\d+)$/);
+      if (match) {
+        const n = parseInt(match[2]);
+        if (match[1] === ">") mods = mods.filter(m => m.install_priority > n);
+        else mods = mods.filter(m => m.install_priority < n);
+      }
+    }
+
+    const filesFacet = facets.get("files");
+    if (filesFacet) {
+      const match = filesFacet.match(/^([><])(\d+)$/);
+      if (match) {
+        const n = parseInt(match[2]);
+        if (match[1] === ">") mods = mods.filter(m => m.installed_files.length > n);
+        else mods = mods.filter(m => m.installed_files.length < n);
+      }
+    }
+
+    // Free text search across name, tags, notes, collection, category
+    if (freeText.trim()) {
+      const q = freeText.toLowerCase();
       mods = mods.filter(m =>
         m.name.toLowerCase().includes(q) ||
         m.user_tags.some(t => t.toLowerCase().includes(q)) ||
         (m.user_notes && m.user_notes.toLowerCase().includes(q)) ||
-        (m.collection_name && m.collection_name.toLowerCase().includes(q))
+        (m.collection_name && m.collection_name.toLowerCase().includes(q)) ||
+        (m.auto_category && m.auto_category.toLowerCase().includes(q))
       );
     }
-    // Status filter
+
+    // Dropdown filters (independent AND layer — always applied on top of facets)
     if (filterStatus === "enabled") {
       mods = mods.filter(m => m.enabled);
     } else if (filterStatus === "disabled") {
@@ -291,11 +416,11 @@
     } else if (filterStatus === "has-updates") {
       mods = mods.filter(m => updateMap.has(m.id));
     }
-    // Source filter
+
     if (filterSource !== "all") {
       mods = mods.filter(m => (m.source_type || "manual") === filterSource);
     }
-    // Collection filter
+
     if (filterCollection !== null) {
       if (filterCollection === "__standalone__") {
         mods = mods.filter(m => !m.collection_name);
@@ -303,8 +428,59 @@
         mods = mods.filter(m => m.collection_name === filterCollection);
       }
     }
+
     return mods;
   })());
+
+  // Bulk selection derived and functions (after filteredMods is defined)
+  let selectAll = $derived(filteredMods.length > 0 && filteredMods.every(m => selectedModIds.has(m.id)));
+
+  function toggleSelectAll() {
+    if (selectAll) {
+      selectedModIds = new Set();
+    } else {
+      selectedModIds = new Set(filteredMods.map(m => m.id));
+    }
+  }
+
+  function toggleSelectMod(id: number) {
+    const next = new Set(selectedModIds);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    selectedModIds = next;
+  }
+
+  async function batchEnable() {
+    for (const id of selectedModIds) {
+      const mod = $installedMods.find(m => m.id === id);
+      if (mod && !mod.enabled && activeGame) {
+        await toggleMod(id, activeGame.game_id, activeGame.bottle_name, true);
+      }
+    }
+    selectedModIds = new Set();
+    if (activeGame) await loadMods(activeGame);
+  }
+
+  async function batchDisable() {
+    for (const id of selectedModIds) {
+      const mod = $installedMods.find(m => m.id === id);
+      if (mod && mod.enabled && activeGame) {
+        await toggleMod(id, activeGame.game_id, activeGame.bottle_name, false);
+      }
+    }
+    selectedModIds = new Set();
+    if (activeGame) await loadMods(activeGame);
+  }
+
+  async function batchUninstall() {
+    for (const id of selectedModIds) {
+      if (activeGame) {
+        await uninstallMod(id, activeGame.game_id, activeGame.bottle_name);
+      }
+    }
+    selectedModIds = new Set();
+    if (activeGame) await loadMods(activeGame);
+  }
 
   // Unique collection names for filter dropdown
   let collectionNames = $derived((() => {
@@ -340,9 +516,26 @@
   // Track the current load to avoid stale race conditions
   let loadGeneration = 0;
 
+  // Restore search + banners from sessionStorage when game changes
   $effect(() => {
     if (activeGame) {
+      const saved = sessionStorage.getItem(searchStorageKey(activeGame));
+      searchQuery = saved ?? "";
+      searchRestored = true;
+      // Restore dismissed banners
+      const bannerKey = `corkscrew-banners-${activeGame.game_id}-${activeGame.bottle_name}`;
+      const savedBanners = sessionStorage.getItem(bannerKey);
+      dismissedBanners = savedBanners ? new Set(JSON.parse(savedBanners)) : new Set();
+      // Clear selection
+      selectedModIds = new Set();
       loadMods(activeGame);
+    }
+  });
+
+  // Persist search to sessionStorage
+  $effect(() => {
+    if (searchRestored && activeGame) {
+      sessionStorage.setItem(searchStorageKey(activeGame), searchQuery);
     }
   });
 
@@ -399,6 +592,23 @@
 
     if (!filePath) return;
 
+    // Check available disk space before installing
+    try {
+      const homeDir = filePath as string;
+      const parentDir = homeDir.substring(0, homeDir.lastIndexOf("/")) || "/";
+      const freeBytes = await getAvailableDiskSpace(parentDir);
+      const GB = 1024 * 1024 * 1024;
+      if (freeBytes < 0.5 * GB) {
+        showError("Not enough disk space (< 500 MB free). Free up space before installing.");
+        return;
+      }
+      if (freeBytes < 2 * GB) {
+        showError("Low disk space warning: less than 2 GB free. Install will proceed, but consider freeing space.");
+      }
+    } catch {
+      // Non-critical — proceed even if space check fails
+    }
+
     installing = true;
     installStep = "preparing";
     installDetail = "";
@@ -426,6 +636,16 @@
       const installed = mod as InstalledMod;
       showSuccess(`Installed "${installed.name}" successfully`);
       await loadMods(game);
+
+      // Check for duplicate mod (same nexus_mod_id)
+      if (installed.nexus_mod_id) {
+        const existing = $installedMods.find(
+          m => m.nexus_mod_id === installed.nexus_mod_id && m.id !== installed.id
+        );
+        if (existing) {
+          duplicateDialog = { newMod: installed, oldMod: existing };
+        }
+      }
 
       // Auto-detect FOMOD after install
       if (installed.staging_path) {
@@ -934,7 +1154,7 @@
       });
       if (!outputPath) return;
       await exportModlist(game.game_id, game.bottle_name, outputPath);
-      showSuccess("Mod list exported successfully");
+      showSuccess(`Mod list exported to ${outputPath}`);
     } catch (e: unknown) {
       showError(`Export failed: ${e}`);
     } finally {
@@ -1441,6 +1661,7 @@
             Deploy
           {/if}
         </button>
+        <HelpTooltip text="Copies mod files into the game directory so the game can load them" />
         <button
           class="btn btn-ghost-danger"
           onclick={handlePurge}
@@ -1458,6 +1679,7 @@
             Purge
           {/if}
         </button>
+        <HelpTooltip text="Removes all deployed mod files from the game directory" />
         {#if deployHealth}
           <span class="deploy-status" class:status-deployed={deployHealth.is_deployed} class:status-purged={!deployHealth.is_deployed}>
             {deployHealth.is_deployed ? "Deployed" : "Purged"}
@@ -1795,6 +2017,48 @@
           </div>
         {/if}
 
+        <!-- Proactive Issue Banners -->
+        {#if conflictModIds.size > 0 && !dismissedBanners.has("conflicts")}
+          <div class="issue-banner issue-banner-yellow">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+              <line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
+            </svg>
+            <span>You have {conflictModIds.size} mod{conflictModIds.size === 1 ? "" : "s"} with unresolved file conflicts</span>
+            <button class="banner-action" onclick={() => { showConflictPanel = true; }}>View Conflicts</button>
+            <button class="banner-dismiss" onclick={() => dismissBanner("conflicts")}>
+              <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+                <line x1="3" y1="3" x2="9" y2="9" /><line x1="9" y1="3" x2="3" y2="9" />
+              </svg>
+            </button>
+          </div>
+        {/if}
+        {#if $skseStatus && !$skseStatus.installed && activeGame?.game_id === "skyrimse" && !dismissedBanners.has("skse")}
+          <div class="issue-banner issue-banner-blue">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" />
+            </svg>
+            <span>SKSE not detected — many mods require it</span>
+            <button class="banner-action" onclick={() => { showSksePrompt = true; }}>Install SKSE</button>
+            <button class="banner-dismiss" onclick={() => dismissBanner("skse")}>
+              <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+                <line x1="3" y1="3" x2="9" y2="9" /><line x1="9" y1="3" x2="3" y2="9" />
+              </svg>
+            </button>
+          </div>
+        {/if}
+
+        <!-- Bulk Action Bar -->
+        {#if selectedModIds.size > 0}
+          <div class="bulk-action-bar">
+            <span class="bulk-count">{selectedModIds.size} selected</span>
+            <button class="btn btn-sm btn-secondary" onclick={batchEnable}>Enable All</button>
+            <button class="btn btn-sm btn-secondary" onclick={batchDisable}>Disable All</button>
+            <button class="btn btn-sm btn-ghost-danger" onclick={batchUninstall}>Uninstall</button>
+            <button class="btn btn-sm btn-ghost" onclick={() => selectedModIds = new Set()}>Clear</button>
+          </div>
+        {/if}
+
         <!-- Search & Filter Bar -->
         {#if $installedMods.length > 0}
           <div class="filter-bar">
@@ -1803,9 +2067,24 @@
             <circle cx="11" cy="11" r="8" />
             <line x1="21" y1="21" x2="16.65" y2="16.65" />
           </svg>
+          {#each [...parsedSearch.facets] as [key, value]}
+            <button
+              class="facet-pill"
+              onclick={() => {
+                const regex = new RegExp(`${key}:(?:"[^"]*"|\\S+)\\s*`, "i");
+                searchQuery = searchQuery.replace(regex, "").trim();
+              }}
+              title="Click to remove"
+            >
+              {key}:{value}
+              <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                <line x1="3" y1="3" x2="9" y2="9" /><line x1="9" y1="3" x2="3" y2="9" />
+              </svg>
+            </button>
+          {/each}
           <input
             type="text"
-            placeholder="Search mods..."
+            placeholder={parsedSearch.facets.size > 0 ? "Add more filters..." : "Search mods... (try tag: source: enabled:)"}
             bind:value={searchQuery}
             class="search-input"
           />
@@ -1931,6 +2210,9 @@
         <div class="mod-table">
           <!-- Sticky Header — click to sort -->
           <div class="table-header">
+            <label class="col-check">
+              <input type="checkbox" checked={selectAll} onchange={toggleSelectAll} />
+            </label>
             <span class="col-grip" title="Drag to reorder"></span>
             <span class="col-toggle header-sep-right">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity: 0.5" aria-hidden="true">
@@ -2012,6 +2294,7 @@
                       ondragend={handleRowDragEnd}
                       ondrop={(e) => handleRowDrop(e, globalIndex)}
                     >
+                      <label class="col-check" onclick={(e) => e.stopPropagation()}><input type="checkbox" checked={selectedModIds.has(mod.id)} onchange={() => toggleSelectMod(mod.id)} /></label>
                       <span class="col-grip"><span class="drag-handle" title="Drag to reorder"><svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><circle cx="4" cy="2.5" r="1" /><circle cx="8" cy="2.5" r="1" /><circle cx="4" cy="6" r="1" /><circle cx="8" cy="6" r="1" /><circle cx="4" cy="9.5" r="1" /><circle cx="8" cy="9.5" r="1" /></svg></span></span>
                       <span class="col-toggle"><button class="toggle-switch" class:toggle-on={mod.enabled} class:toggle-busy={togglingMod === mod.id} onclick={() => handleToggle(mod)} title={mod.enabled ? "Disable mod" : "Enable mod"}><span class="toggle-track"><span class="toggle-thumb"></span></span></button></span>
                       <span class="col-name"><span class="mod-name">{mod.name}</span>{#if conflictModIds.has(mod.id)}<span class="conflict-icon" title={getConflictTooltip(mod.id)}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg></span>{/if}{#if mod.user_notes}<span class="notes-icon" title={mod.user_notes}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /></svg></span>{/if}</span>
@@ -2057,6 +2340,11 @@
                 ondragend={handleRowDragEnd}
                 ondrop={(e) => handleRowDrop(e, i)}
               >
+                <!-- Bulk Select Checkbox -->
+                <label class="col-check" onclick={(e) => e.stopPropagation()}>
+                  <input type="checkbox" checked={selectedModIds.has(mod.id)} onchange={() => toggleSelectMod(mod.id)} />
+                </label>
+
                 <!-- Drag Handle -->
                 <span class="col-grip">
                   <span class="drag-handle" title="Drag to reorder">
@@ -2540,6 +2828,28 @@
     />
   </div>
 {/if}
+
+<ConfirmDialog
+  open={duplicateDialog !== null}
+  title="Duplicate Mod Detected"
+  message={duplicateDialog ? `"${duplicateDialog.oldMod.name}" (v${duplicateDialog.oldMod.version || "?"}) is already installed. Would you like to uninstall the old version?` : ""}
+  details={duplicateDialog ? [`New: v${duplicateDialog.newMod.version || "?"}`, `Old: v${duplicateDialog.oldMod.version || "?"}`] : []}
+  confirmLabel="Uninstall Old Version"
+  confirmDanger={true}
+  onConfirm={async () => {
+    if (duplicateDialog && activeGame) {
+      try {
+        await uninstallMod(duplicateDialog.oldMod.id, activeGame.game_id, activeGame.bottle_name);
+        showSuccess(`Removed old version of "${duplicateDialog.oldMod.name}"`);
+        await loadMods(activeGame);
+      } catch (e) {
+        showError(`Failed to uninstall old version: ${e}`);
+      }
+    }
+    duplicateDialog = null;
+  }}
+  onCancel={() => duplicateDialog = null}
+/>
 
 {#if showImportWizard}
   <ModlistImportWizard
@@ -3151,7 +3461,7 @@
 
   .table-header {
     display: grid;
-    grid-template-columns: 28px 48px minmax(0, 1fr) 100px 68px 110px 72px 48px 90px 64px;
+    grid-template-columns: 24px 28px 48px minmax(0, 1fr) 100px 68px 110px 72px 48px 90px 64px;
     padding: var(--space-2) var(--space-3);
     background: var(--bg-secondary);
     border-bottom: 1px solid var(--separator);
@@ -3213,7 +3523,7 @@
 
   .table-row {
     display: grid;
-    grid-template-columns: 28px 48px minmax(0, 1fr) 100px 68px 110px 72px 48px 90px 64px;
+    grid-template-columns: 24px 28px 48px minmax(0, 1fr) 100px 68px 110px 72px 48px 90px 64px;
     padding: var(--space-2) var(--space-3);
     align-items: center;
     font-size: 13px;
@@ -3227,7 +3537,7 @@
   @media (max-width: 1200px) {
     .table-header,
     .table-row {
-      grid-template-columns: 28px 48px minmax(0, 1fr) 0px 0px 0px 64px 0px 0px 60px;
+      grid-template-columns: 24px 28px 48px minmax(0, 1fr) 0px 0px 0px 64px 0px 0px 60px;
     }
     .col-category,
     .col-origin,
@@ -4036,19 +4346,41 @@
   .search-box {
     display: flex;
     align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
+    gap: var(--space-1);
+    padding: var(--space-1) var(--space-3);
     background: var(--surface);
     border: 1px solid var(--separator);
     border-radius: var(--radius-sm);
     flex: 1;
-    max-width: 280px;
+    max-width: 480px;
     color: var(--text-tertiary);
     transition: border-color var(--duration-fast) var(--ease);
+    flex-wrap: wrap;
+    min-height: 32px;
   }
 
   .search-box:focus-within {
     border-color: var(--accent-muted);
+  }
+
+  .facet-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 2px 8px;
+    background: var(--system-accent-subtle);
+    color: var(--system-accent);
+    border: none;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 500;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background var(--duration-fast) var(--ease);
+  }
+
+  .facet-pill:hover {
+    background: color-mix(in srgb, var(--system-accent) 25%, transparent);
   }
 
   .search-input {
@@ -4921,5 +5253,93 @@
     gap: var(--space-2);
     flex-wrap: wrap;
     justify-content: center;
+  }
+
+  /* Bulk Select Checkbox Column */
+  .col-check {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+  }
+
+  .col-check input[type="checkbox"] {
+    width: 14px;
+    height: 14px;
+    accent-color: var(--system-accent);
+    cursor: pointer;
+  }
+
+  /* Proactive Issue Banners */
+  .issue-banner {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    margin-bottom: var(--space-2);
+  }
+
+  .issue-banner span {
+    flex: 1;
+  }
+
+  .issue-banner-yellow {
+    background: var(--yellow-subtle);
+    color: var(--yellow);
+    border: 1px solid rgba(255, 214, 10, 0.2);
+  }
+
+  .issue-banner-blue {
+    background: var(--blue-subtle);
+    color: var(--blue);
+    border: 1px solid rgba(10, 132, 255, 0.2);
+  }
+
+  .banner-action {
+    background: none;
+    border: none;
+    color: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    text-decoration: underline;
+    padding: 0;
+    white-space: nowrap;
+  }
+
+  .banner-dismiss {
+    background: none;
+    border: none;
+    color: inherit;
+    opacity: 0.6;
+    cursor: pointer;
+    padding: 2px;
+    border-radius: 3px;
+  }
+
+  .banner-dismiss:hover {
+    opacity: 1;
+    background: rgba(255, 255, 255, 0.1);
+  }
+
+  /* Bulk Action Bar */
+  .bulk-action-bar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--system-accent-subtle);
+    border: 1px solid rgba(10, 132, 255, 0.2);
+    border-radius: var(--radius-sm);
+    margin-bottom: var(--space-2);
+  }
+
+  .bulk-count {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--system-accent);
+    margin-right: var(--space-2);
   }
 </style>

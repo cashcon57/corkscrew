@@ -615,6 +615,243 @@ impl NexusClient {
 }
 
 // ---------------------------------------------------------------------------
+// Game categories (v1 REST API)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NexusCategory {
+    pub category_id: i64,
+    pub name: String,
+    pub parent_category: Option<i64>,
+}
+
+impl NexusClient {
+    /// Fetch the full category tree for a game from v1 REST API.
+    pub async fn get_game_categories(
+        &self,
+        game_slug: &str,
+    ) -> Result<Vec<NexusCategory>> {
+        let url = format!("{NEXUS_API_BASE}/games/{game_slug}/categories.json");
+        let json = self.get_json(&url).await?;
+        let categories = json
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|v| {
+                Some(NexusCategory {
+                    category_id: v.get("category_id").and_then(|x| x.as_i64())?,
+                    name: v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    parent_category: v.get("parent_category").and_then(|x| {
+                        let id = x.as_i64().unwrap_or(0);
+                        if id == 0 { None } else { Some(id) }
+                    }),
+                })
+            })
+            .collect();
+        Ok(categories)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NexusMods v2 GraphQL mod search
+// ---------------------------------------------------------------------------
+
+const GRAPHQL_ENDPOINT: &str = "https://api.nexusmods.com/v2/graphql";
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NexusSearchResult {
+    pub mods: Vec<NexusModInfo>,
+    pub total_count: u64,
+    pub offset: u32,
+    pub has_more: bool,
+}
+
+/// Run an introspection query against the NexusMods v2 GraphQL API.
+/// Returns the raw JSON schema string for development/debugging.
+pub async fn graphql_introspect(api_key: &str) -> Result<String> {
+    let client = reqwest::Client::builder()
+        .user_agent("Corkscrew/1.0.0")
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(NexusError::Http)?;
+
+    let body = serde_json::json!({
+        "query": "{ __schema { queryType { name } types { name kind fields { name type { name kind ofType { name kind } } args { name type { name kind } } } } } }"
+    });
+
+    let response = client
+        .post(GRAPHQL_ENDPOINT)
+        .header("apikey", api_key)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(NexusError::Http)?;
+
+    let text = response.text().await.map_err(NexusError::Http)?;
+    Ok(text)
+}
+
+/// Search mods via NexusMods v2 GraphQL API.
+/// Falls back gracefully if the query doesn't exist.
+pub async fn graphql_search_mods(
+    api_key: &str,
+    game_domain: &str,
+    search_text: Option<&str>,
+    sort_by: Option<&str>,
+    sort_dir: Option<&str>,
+    count: u32,
+    offset: u32,
+    include_adult: bool,
+) -> Result<NexusSearchResult> {
+    let client = reqwest::Client::builder()
+        .user_agent("Corkscrew/1.0.0")
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(NexusError::Http)?;
+
+    // Build GraphQL variables
+    let mut filter = serde_json::Map::new();
+    filter.insert("gameDomainName".into(), serde_json::json!(game_domain));
+    if let Some(text) = search_text {
+        if !text.is_empty() {
+            filter.insert("searchQuery".into(), serde_json::json!(text));
+        }
+    }
+    if !include_adult {
+        filter.insert("adultContent".into(), serde_json::json!(false));
+    }
+
+    let sort_field = sort_by.unwrap_or("endorsements");
+    let sort_direction = sort_dir.unwrap_or("DESC");
+
+    let query = r#"
+        query SearchMods($filter: ModsFilter, $sort: [ModsSort!], $count: Int, $offset: Int) {
+            mods(filter: $filter, sort: $sort, count: $count, offset: $offset) {
+                nodes {
+                    modId
+                    name
+                    summary
+                    author
+                    modCategory { id }
+                    version
+                    endorsementCount
+                    uniqueDownloadsCount
+                    pictureUrl
+                    updatedAt
+                    available
+                    adultContent
+                }
+                totalCount
+            }
+        }
+    "#;
+
+    let variables = serde_json::json!({
+        "filter": filter,
+        "sort": [{ "field": sort_field, "direction": sort_direction }],
+        "count": count,
+        "offset": offset,
+    });
+
+    let body = serde_json::json!({
+        "query": query,
+        "variables": variables,
+    });
+
+    let response = client
+        .post(GRAPHQL_ENDPOINT)
+        .header("apikey", api_key)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(NexusError::Http)?;
+
+    let status = response.status();
+    let json: serde_json::Value = response.json().await.map_err(NexusError::Http)?;
+
+    if !status.is_success() {
+        return Err(NexusError::Api {
+            status: status.as_u16(),
+            message: format!("GraphQL error: {}", json),
+        });
+    }
+
+    // Check for GraphQL errors
+    if let Some(errors) = json.get("errors") {
+        if let Some(arr) = errors.as_array() {
+            if !arr.is_empty() {
+                let messages: Vec<String> = arr
+                    .iter()
+                    .filter_map(|e| e.get("message").and_then(|m| m.as_str()))
+                    .map(String::from)
+                    .collect();
+                return Err(NexusError::Api {
+                    status: 0,
+                    message: format!("GraphQL errors: {}", messages.join("; ")),
+                });
+            }
+        }
+    }
+
+    // Parse response data
+    let data = json.get("data").ok_or(NexusError::Api {
+        status: 0,
+        message: "No 'data' field in GraphQL response".into(),
+    })?;
+
+    let mods_data = data.get("mods").ok_or(NexusError::Api {
+        status: 0,
+        message: "No 'mods' field in GraphQL response — mod search may not be available".into(),
+    })?;
+
+    let nodes = mods_data
+        .get("nodes")
+        .and_then(|n| n.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let total_count = mods_data
+        .get("totalCount")
+        .and_then(|n| n.as_u64())
+        .unwrap_or(0);
+
+    let mods: Vec<NexusModInfo> = nodes
+        .into_iter()
+        .filter_map(|v| {
+            Some(NexusModInfo {
+                mod_id: v.get("modId").and_then(|x| x.as_i64())?,
+                name: v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                summary: v.get("summary").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                author: v.get("author").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                category_id: v.get("modCategory")
+                    .and_then(|c| c.get("id"))
+                    .and_then(|x| x.as_i64())
+                    .unwrap_or(0),
+                version: v.get("version").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                endorsement_count: v.get("endorsementCount").and_then(|x| x.as_i64()).unwrap_or(0),
+                unique_downloads: v.get("uniqueDownloadsCount").and_then(|x| x.as_i64()).unwrap_or(0),
+                picture_url: v.get("pictureUrl").and_then(|x| x.as_str()).map(String::from),
+                updated_at: v.get("updatedAt").and_then(|x| x.as_str()).map(String::from),
+                available: v.get("available").and_then(|x| x.as_bool()).unwrap_or(true),
+                adult_content: v.get("adultContent").and_then(|x| x.as_bool()).unwrap_or(false),
+            })
+        })
+        .collect();
+
+    let has_more = (offset as u64 + mods.len() as u64) < total_count;
+
+    Ok(NexusSearchResult {
+        mods,
+        total_count,
+        offset,
+        has_more,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

@@ -652,6 +652,33 @@ export async function browseNexusMods(
   return invoke("browse_nexus_mods_cmd", { gameSlug, category });
 }
 
+// NexusMods Search (GraphQL v2)
+export async function searchNexusMods(
+  gameSlug: string,
+  searchText: string | null,
+  sortBy: string | null,
+  sortDir: string | null,
+  count: number,
+  offset: number,
+  includeAdult: boolean,
+): Promise<import("./types").NexusSearchResult> {
+  return invoke("search_nexus_mods_cmd", {
+    gameSlug,
+    searchText,
+    sortBy,
+    sortDir,
+    count,
+    offset,
+    includeAdult,
+  });
+}
+
+export async function getGameCategories(
+  gameSlug: string,
+): Promise<import("./types").NexusCategory[]> {
+  return invoke("get_game_categories_cmd", { gameSlug });
+}
+
 // Collections
 export async function browseCollections(
   gameDomain: string,
@@ -1001,6 +1028,10 @@ export async function getDiskBudget(
   bottleName: string
 ): Promise<DiskBudget> {
   return invoke("get_disk_budget", { gameId, bottleName });
+}
+
+export async function getAvailableDiskSpace(path: string): Promise<number> {
+  return invoke("get_available_disk_space_cmd", { path });
 }
 
 export async function estimateInstallImpact(

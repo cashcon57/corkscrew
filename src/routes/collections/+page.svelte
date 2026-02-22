@@ -2,10 +2,12 @@
   import { onMount, onDestroy } from "svelte";
   import { goto } from "$app/navigation";
   import { selectedGame, showError, showSuccess, collectionInstallStatus } from "$lib/stores";
-  import type { CollectionInfo, CollectionManifest, CollectionMod, CollectionSearchResult, InstalledMod, NexusModInfo } from "$lib/types";
+  import type { CollectionInfo, CollectionManifest, CollectionMod, CollectionSearchResult, InstalledMod, NexusModInfo, NexusCategory, NexusSearchResult } from "$lib/types";
   import {
     browseCollections,
     browseNexusMods,
+    searchNexusMods,
+    getGameCategories,
     getCollection,
     getCollectionMods,
     getNexusAccountStatus,
@@ -159,7 +161,9 @@
 
   $effect(() => {
     if (activeTab === "browse_mods" && $selectedGame) {
-      loadBrowseMods(browseModsCategory);
+      loadBrowseMods();
+      loadBrowseCategories();
+      loadBrowseInstalledIds();
     }
   });
 
@@ -213,63 +217,137 @@
   // ---- Mod Browse State ----
   let browseMods = $state<NexusModInfo[]>([]);
   let browseModsLoading = $state(false);
-  let browseModsCategory = $state<"all" | "trending" | "latest" | "updated">("all");
   let browseModsSearch = $state("");
   let browseModsShowNsfw = $state(false);
   let browseModsSort = $state<"endorsements" | "downloads" | "name" | "updated">("endorsements");
+  let browseModsTotalCount = $state(0);
+  let browseModsOffset = $state(0);
+  let browseModsHasMore = $state(false);
+  const BROWSE_PAGE_SIZE = 20;
+  let browseCategories = $state<NexusCategory[]>([]);
+  let browseCategoryId = $state<number | null>(null);
+  let browseInstalledNexusIds = $state<Set<number>>(new Set());
+  let browseSearchTimer: ReturnType<typeof setTimeout> | null = null;
+  let browseUseGraphQL = $state(true);
 
-  const filteredBrowseMods = $derived.by(() => {
-    let result = browseMods;
-    if (!browseModsShowNsfw) {
-      result = result.filter(m => !m.adult_content);
-    }
-    if (browseModsSearch.trim()) {
-      const q = browseModsSearch.toLowerCase();
-      result = result.filter(m =>
-        m.name.toLowerCase().includes(q) ||
-        m.author.toLowerCase().includes(q) ||
-        m.summary.toLowerCase().includes(q)
-      );
-    }
-    // Sort
-    result = [...result].sort((a, b) => {
-      switch (browseModsSort) {
-        case "endorsements": return b.endorsement_count - a.endorsement_count;
-        case "downloads": return b.unique_downloads - a.unique_downloads;
-        case "name": return a.name.localeCompare(b.name);
-        case "updated": return (b.updated_at ?? "").localeCompare(a.updated_at ?? "");
-        default: return 0;
+  const gameSlugMap: Record<string, string> = {
+    skyrimse: "skyrimspecialedition",
+    skyrim: "skyrim",
+    fallout4: "fallout4",
+    fallout3: "fallout3",
+    falloutnv: "newvegas",
+    oblivion: "oblivion",
+    morrowind: "morrowind",
+    starfield: "starfield",
+    enderal: "enderal",
+    enderalse: "enderalspecialedition",
+  };
+
+  function getGameSlug(): string {
+    const game = $selectedGame;
+    if (!game) return "";
+    return gameSlugMap[game.game_id] ?? game.game_id;
+  }
+
+  const browseTotalPages = $derived(Math.max(1, Math.ceil(browseModsTotalCount / BROWSE_PAGE_SIZE)));
+  const browseCurrentPage = $derived(Math.floor(browseModsOffset / BROWSE_PAGE_SIZE) + 1);
+
+  // Build hierarchical category display list
+  const browseCategoryOptions = $derived.by(() => {
+    if (browseCategories.length === 0) return [];
+    const topLevel = browseCategories.filter(c => !c.parent_category);
+    const result: { id: number; name: string; depth: number }[] = [];
+    for (const cat of topLevel.sort((a, b) => a.name.localeCompare(b.name))) {
+      result.push({ id: cat.category_id, name: cat.name, depth: 0 });
+      const children = browseCategories
+        .filter(c => c.parent_category === cat.category_id)
+        .sort((a, b) => a.name.localeCompare(b.name));
+      for (const child of children) {
+        result.push({ id: child.category_id, name: child.name, depth: 1 });
       }
-    });
+    }
     return result;
   });
 
-  async function loadBrowseMods(category: string) {
-    const game = $selectedGame;
-    if (!game) return;
+  async function loadBrowseMods(resetOffset = true) {
+    const slug = getGameSlug();
+    if (!slug) return;
+    if (resetOffset) browseModsOffset = 0;
     browseModsLoading = true;
+
     try {
-      // Map game_id to NexusMods domain slug
-      const slugMap: Record<string, string> = {
-        skyrimse: "skyrimspecialedition",
-        skyrim: "skyrim",
-        fallout4: "fallout4",
-        fallout3: "fallout3",
-        falloutnv: "newvegas",
-        oblivion: "oblivion",
-        morrowind: "morrowind",
-        starfield: "starfield",
-        enderal: "enderal",
-        enderalse: "enderalspecialedition",
-      };
-      const slug = slugMap[game.game_id] ?? game.game_id;
-      browseMods = await browseNexusMods(slug, category);
+      if (browseUseGraphQL) {
+        const sortMap: Record<string, string> = {
+          endorsements: "endorsements",
+          downloads: "unique_downloads",
+          name: "name",
+          updated: "updated",
+        };
+        const result = await searchNexusMods(
+          slug,
+          browseModsSearch.trim() || null,
+          sortMap[browseModsSort] ?? "endorsements",
+          browseModsSort === "name" ? "ASC" : "DESC",
+          BROWSE_PAGE_SIZE,
+          browseModsOffset,
+          browseModsShowNsfw,
+        );
+        browseMods = result.mods;
+        browseModsTotalCount = result.total_count;
+        browseModsHasMore = result.has_more;
+      } else {
+        // Fallback to v1 REST browse
+        browseMods = await browseNexusMods(slug, "all");
+        browseModsTotalCount = browseMods.length;
+        browseModsHasMore = false;
+      }
     } catch (e: unknown) {
-      showError(`Failed to browse mods: ${e instanceof Error ? e.message : String(e)}`);
+      const msg = e instanceof Error ? e.message : String(e);
+      if (browseUseGraphQL && msg.includes("mod search may not be available")) {
+        browseUseGraphQL = false;
+        await loadBrowseMods(resetOffset);
+        return;
+      }
+      showError(`Failed to browse mods: ${msg}`);
       browseMods = [];
+      browseModsTotalCount = 0;
+      browseModsHasMore = false;
     } finally {
       browseModsLoading = false;
     }
+  }
+
+  async function loadBrowseCategories() {
+    const slug = getGameSlug();
+    if (!slug) return;
+    try {
+      browseCategories = await getGameCategories(slug);
+    } catch {
+      browseCategories = [];
+    }
+  }
+
+  async function loadBrowseInstalledIds() {
+    const game = $selectedGame;
+    if (!game) return;
+    try {
+      const mods = await getInstalledMods(game.game_id, game.bottle_name);
+      browseInstalledNexusIds = new Set(
+        mods.filter(m => m.nexus_mod_id != null).map(m => m.nexus_mod_id as number)
+      );
+    } catch {
+      browseInstalledNexusIds = new Set();
+    }
+  }
+
+  function browseGoToPage(page: number) {
+    browseModsOffset = (page - 1) * BROWSE_PAGE_SIZE;
+    loadBrowseMods(false);
+  }
+
+  function browseSearchDebounced() {
+    if (browseSearchTimer) clearTimeout(browseSearchTimer);
+    browseSearchTimer = setTimeout(() => loadBrowseMods(), 400);
   }
 
   function formatDownloads(n: number): string {
@@ -1363,10 +1441,10 @@
         <p class="page-subtitle">Discover mods on NexusMods for {$selectedGame?.display_name ?? "your game"}</p>
       </div>
       <div class="header-right">
-        {#if !browseModsLoading}
+        {#if !browseModsLoading && browseModsTotalCount > 0}
           <div class="stat-pill">
-            <span class="stat-value">{filteredBrowseMods.length}</span>
-            <span class="stat-label">{filteredBrowseMods.length === 1 ? "mod" : "mods"}</span>
+            <span class="stat-value">{browseModsTotalCount.toLocaleString()}</span>
+            <span class="stat-label">{browseModsTotalCount === 1 ? "mod" : "mods"}</span>
           </div>
         {/if}
       </div>
@@ -1384,18 +1462,20 @@
             <circle cx="11" cy="11" r="8" />
             <line x1="21" y1="21" x2="16.65" y2="16.65" />
           </svg>
-          <input type="text" class="search-input" placeholder="Search mods..." bind:value={browseModsSearch} />
+          <input type="text" class="search-input" placeholder="Search NexusMods..." bind:value={browseModsSearch} oninput={browseSearchDebounced} />
         </div>
+        {#if browseCategoryOptions.length > 0}
+          <div class="filter-group">
+            <select class="filter-select" bind:value={browseCategoryId} onchange={() => loadBrowseMods()}>
+              <option value={null}>All Categories</option>
+              {#each browseCategoryOptions as cat}
+                <option value={cat.id}>{cat.depth > 0 ? "\u00A0\u00A0" : ""}{cat.name}</option>
+              {/each}
+            </select>
+          </div>
+        {/if}
         <div class="filter-group">
-          <select class="filter-select" bind:value={browseModsCategory} onchange={() => loadBrowseMods(browseModsCategory)}>
-            <option value="all">All Mods</option>
-            <option value="trending">Trending</option>
-            <option value="latest">Latest Added</option>
-            <option value="updated">Recently Updated</option>
-          </select>
-        </div>
-        <div class="filter-group">
-          <select class="filter-select" bind:value={browseModsSort}>
+          <select class="filter-select" bind:value={browseModsSort} onchange={() => loadBrowseMods()}>
             <option value="endorsements">Sort: Endorsements</option>
             <option value="downloads">Sort: Downloads</option>
             <option value="name">Sort: Name</option>
@@ -1403,7 +1483,7 @@
           </select>
         </div>
         <label class="nsfw-toggle">
-          <input type="checkbox" bind:checked={browseModsShowNsfw} />
+          <input type="checkbox" bind:checked={browseModsShowNsfw} onchange={() => loadBrowseMods()} />
           <span>NSFW</span>
         </label>
       </div>
@@ -1413,20 +1493,23 @@
           <div class="loading-card">
             <div class="spinner"><div class="spinner-ring"></div></div>
             <div class="loading-text">
-              <p class="loading-title">Fetching mods</p>
-              <p class="loading-detail">Loading {browseModsCategory} mods from NexusMods...</p>
+              <p class="loading-title">Searching NexusMods</p>
+              <p class="loading-detail">{browseModsSearch ? `Searching for "${browseModsSearch}"...` : "Loading popular mods..."}</p>
             </div>
           </div>
         </div>
-      {:else if filteredBrowseMods.length === 0}
+      {:else if browseMods.length === 0}
         <div class="empty-state">
           <p class="empty-title">No mods found</p>
-          <p class="empty-detail">{browseModsSearch ? "Try a different search term." : "No mods available for this category."}</p>
+          <p class="empty-detail">{browseModsSearch ? "Try a different search term." : "No mods available for this selection."}</p>
         </div>
       {:else}
         <div class="mod-browse-grid">
-          {#each filteredBrowseMods as mod}
+          {#each browseMods as mod}
             <button class="mod-browse-card" onclick={() => openModPage(mod)}>
+              {#if browseInstalledNexusIds.has(mod.mod_id)}
+                <div class="browse-installed-badge">Installed</div>
+              {/if}
               {#if mod.picture_url}
                 <div class="mod-browse-img" style="background-image: url({mod.picture_url})"></div>
               {:else}
@@ -1466,6 +1549,40 @@
             </button>
           {/each}
         </div>
+
+        <!-- Pagination -->
+        {#if browseTotalPages > 1}
+          <div class="browse-pagination">
+            <button
+              class="btn btn-ghost btn-sm"
+              disabled={browseCurrentPage <= 1}
+              onclick={() => browseGoToPage(browseCurrentPage - 1)}
+            >Previous</button>
+            {#each Array.from({ length: Math.min(browseTotalPages, 7) }, (_, i) => {
+              const total = browseTotalPages;
+              const current = browseCurrentPage;
+              if (total <= 7) return i + 1;
+              if (i === 0) return 1;
+              if (i === 6) return total;
+              if (current <= 4) return i + 1;
+              if (current >= total - 3) return total - 6 + i;
+              return current - 3 + i;
+            }) as page}
+              <button
+                class="btn btn-sm"
+                class:btn-primary={page === browseCurrentPage}
+                class:btn-ghost={page !== browseCurrentPage}
+                onclick={() => browseGoToPage(page)}
+              >{page}</button>
+            {/each}
+            <button
+              class="btn btn-ghost btn-sm"
+              disabled={!browseModsHasMore}
+              onclick={() => browseGoToPage(browseCurrentPage + 1)}
+            >Next</button>
+          </div>
+        {/if}
+
         <p class="browse-mods-hint">Click a mod to view it on NexusMods. Free users download via the website; premium users can use NXM links.</p>
       {/if}
     {/if}
@@ -3227,6 +3344,7 @@
   }
 
   .mod-browse-card {
+    position: relative;
     display: flex;
     flex-direction: column;
     background: var(--surface);
@@ -3320,5 +3438,29 @@
     color: var(--text-quaternary);
     text-align: center;
     padding: var(--space-2) 0 var(--space-4);
+  }
+
+  .browse-installed-badge {
+    position: absolute;
+    top: var(--space-2);
+    right: var(--space-2);
+    padding: 2px 8px;
+    border-radius: 100px;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    background: color-mix(in srgb, var(--green) 20%, transparent);
+    color: var(--green);
+    backdrop-filter: blur(4px);
+    z-index: 1;
+  }
+
+  .browse-pagination {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-1);
+    padding: var(--space-4) 0 var(--space-2);
   }
 </style>
