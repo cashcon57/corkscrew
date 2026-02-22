@@ -333,6 +333,20 @@ export async function resolveAllConflicts(
   return invoke("resolve_all_conflicts_cmd", { gameId, bottleName });
 }
 
+export async function recordConflictWinner(
+  gameId: string,
+  bottleName: string,
+  winnerModId: number,
+  loserModIds: number[]
+): Promise<void> {
+  return invoke("record_conflict_winner", {
+    gameId,
+    bottleName,
+    winnerModId,
+    loserModIds,
+  });
+}
+
 export async function getDeploymentManifest(
   gameId: string,
   bottleName: string

@@ -31,6 +31,7 @@
     setModPriority,
     analyzeConflicts,
     resolveAllConflicts,
+    recordConflictWinner,
     onDeployProgress,
     backfillCategories,
     exportModlist,
@@ -38,8 +39,10 @@
     getFomodRecipe,
     getFomodFiles,
     saveFomodRecipe,
+    detectModTools,
+    launchModTool,
   } from "$lib/api";
-  import type { InstallProgressEvent, DeploymentHealth, ConflictSuggestion, ResolutionResult, DeployProgress } from "$lib/types";
+  import type { InstallProgressEvent, DeploymentHealth, ConflictSuggestion, ResolutionResult, DeployProgress, ModTool } from "$lib/types";
   import {
     selectedGame,
     installedMods,
@@ -150,6 +153,12 @@
   let showSessionPanel = $state(false);
   let showDependencyPanel = $state(false);
   let showBisect = $state(false);
+
+  // Tools quick-launch
+  let modTools = $state<ModTool[]>([]);
+  let showToolsMenu = $state(false);
+  let launchingToolId = $state<string | null>(null);
+  let installedTools = $derived(modTools.filter(t => t.detected_path));
 
   // Derived: set of mod IDs that have conflicts
   let conflictModIds = $derived((() => {
@@ -345,11 +354,16 @@
       // Only update state if this is still the latest load request
       if (thisLoad !== loadGeneration) return;
       installedMods.set(mods);
-      // Also load conflicts
+      // Also load conflicts and tools
       try {
         conflicts = await getConflicts(game.game_id, game.bottle_name);
       } catch {
         conflicts = [];
+      }
+      try {
+        modTools = await detectModTools(game.game_id, game.bottle_name);
+      } catch {
+        modTools = [];
       }
     } catch (e: unknown) {
       if (thisLoad !== loadGeneration) return;
@@ -743,6 +757,20 @@
     return null;
   }
 
+  async function handleLaunchTool(toolId: string) {
+    const game = pickedGame ?? $selectedGame;
+    if (!game) return;
+    launchingToolId = toolId;
+    showToolsMenu = false;
+    try {
+      await launchModTool(toolId, game.game_id, game.bottle_name);
+    } catch (e: unknown) {
+      showError(`Failed to launch tool: ${e}`);
+    } finally {
+      launchingToolId = null;
+    }
+  }
+
   // --- Drag reorder handlers ---
   function handleRowDragStart(e: DragEvent, index: number) {
     dragRowIndex = index;
@@ -1018,6 +1046,11 @@
       const winner = conflict.mods.find(m => m.mod_id === conflict.winner_mod_id);
       const newPriority = winner ? winner.priority + 1 : 999;
       await setModPriority(modId, newPriority);
+      // Record this resolution so the conflict disappears from the list
+      const loserIds = conflict.mods
+        .filter(m => m.mod_id !== modId)
+        .map(m => m.mod_id);
+      await recordConflictWinner(game.game_id, game.bottle_name, modId, loserIds);
       await redeployAllMods(game.game_id, game.bottle_name);
       await loadMods(game);
       await refreshHealth(game);
@@ -1200,7 +1233,7 @@
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<svelte:window onkeydown={handleKeydown} />
+<svelte:window onkeydown={handleKeydown} onclick={() => { showToolsMenu = false; showSkseMenu = false; }} />
 <div
   class="mods-page"
   class:drag-active={draggingOver}
@@ -1478,6 +1511,45 @@
         </button>
       {/if}
 
+      {#if installedTools.length > 0}
+        <div class="tools-dropdown-wrap">
+          <button
+            class="btn btn-ghost"
+            onclick={(e) => { e.stopPropagation(); showToolsMenu = !showToolsMenu; showSkseMenu = false; }}
+            disabled={launchingToolId !== null}
+            title="Launch modding tools"
+          >
+            {#if launchingToolId}
+              <span class="spinner spinner-sm"></span>
+            {:else}
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
+              </svg>
+            {/if}
+            Tools
+            <svg width="8" height="8" viewBox="0 0 10 10" fill="currentColor"><path d="M2 3.5L5 7L8 3.5H2z" /></svg>
+          </button>
+          {#if showToolsMenu}
+            <div class="tools-dropdown">
+              {#each installedTools as tool (tool.id)}
+                <button
+                  class="dropdown-item"
+                  onclick={() => handleLaunchTool(tool.id)}
+                  disabled={launchingToolId === tool.id}
+                >
+                  <span class="tool-launch-name">{tool.name}</span>
+                  <span class="tool-launch-cat">{tool.category}</span>
+                </button>
+              {/each}
+              <div class="dropdown-divider"></div>
+              <button class="dropdown-item dropdown-item-muted" onclick={() => { showToolsMenu = false; currentPage.set("settings"); }}>
+                Manage Tools...
+              </button>
+            </div>
+          {/if}
+        </div>
+      {/if}
+
       <div class="play-button-group">
         <button class="btn btn-play" onclick={handlePlay} disabled={launching}>
           {#if launching}
@@ -1493,7 +1565,7 @@
         {#if activeGame?.game_id === "skyrimse" && skse?.installed}
           <button
             class="btn btn-play-dropdown"
-            onclick={() => showSkseMenu = !showSkseMenu}
+            onclick={(e) => { e.stopPropagation(); showSkseMenu = !showSkseMenu; showToolsMenu = false; }}
             aria-label="SKSE options"
           >
             <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
@@ -3642,6 +3714,42 @@
     color: var(--text-tertiary);
   }
 
+  .dropdown-item-muted {
+    color: var(--text-tertiary);
+    font-size: 12px;
+  }
+
+  /* --- Tools dropdown --- */
+
+  .tools-dropdown-wrap {
+    position: relative;
+  }
+
+  .tools-dropdown {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    margin-top: var(--space-1);
+    background: var(--bg-elevated);
+    border: 1px solid var(--separator-opaque);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-lg);
+    min-width: 220px;
+    z-index: 100;
+    overflow: hidden;
+  }
+
+  .tool-launch-name {
+    flex: 1;
+  }
+
+  .tool-launch-cat {
+    font-size: 10px;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
   /* --- SKSE Banner --- */
 
   .skse-banner {
@@ -4051,6 +4159,7 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    margin-bottom: var(--space-3);
   }
 
   .conflict-panel-header {

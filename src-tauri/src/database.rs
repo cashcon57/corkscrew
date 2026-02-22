@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -285,6 +285,8 @@ impl ModDatabase {
         if existing.is_some() {
             let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
             conn.execute("DELETE FROM installed_mods WHERE id = ?1", params![mod_id])?;
+            drop(conn);
+            let _ = self.clear_conflict_rules_for_mod(mod_id);
         }
         Ok(existing)
     }
@@ -719,8 +721,71 @@ impl ModDatabase {
             }
         }
 
+        // Filter out resolved conflicts (covered by conflict_rules).
+        let resolved = self.get_resolved_pairs(game_id, bottle_name)?;
+        if !resolved.is_empty() {
+            conflicts.retain(|c| {
+                // A conflict is resolved if every loser has a rule with the winner
+                !c.mods
+                    .iter()
+                    .filter(|m| m.mod_id != c.winner_mod_id)
+                    .all(|loser| resolved.contains(&(c.winner_mod_id, loser.mod_id)))
+            });
+        }
+
         conflicts.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
         Ok(conflicts)
+    }
+
+    // -- Conflict rules ------------------------------------------------------
+
+    /// Record that a conflict between two mods has been resolved.
+    pub fn add_conflict_rule(
+        &self,
+        game_id: &str,
+        bottle_name: &str,
+        winner_mod_id: i64,
+        loser_mod_id: i64,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "INSERT OR REPLACE INTO conflict_rules
+             (game_id, bottle_name, winner_mod_id, loser_mod_id, file_pattern)
+             VALUES (?1, ?2, ?3, ?4, NULL)",
+            params![game_id, bottle_name, winner_mod_id, loser_mod_id],
+        )?;
+        Ok(())
+    }
+
+    /// Get all resolved (winner, loser) pairs for a game/bottle.
+    pub fn get_resolved_pairs(
+        &self,
+        game_id: &str,
+        bottle_name: &str,
+    ) -> Result<HashSet<(i64, i64)>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT winner_mod_id, loser_mod_id FROM conflict_rules
+             WHERE game_id = ?1 AND bottle_name = ?2",
+        )?;
+        let rows = stmt.query_map(params![game_id, bottle_name], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        let mut pairs = HashSet::new();
+        for row in rows {
+            pairs.insert(row?);
+        }
+        Ok(pairs)
+    }
+
+    /// Remove all conflict rules involving a specific mod (e.g. on uninstall).
+    pub fn clear_conflict_rules_for_mod(&self, mod_id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "DELETE FROM conflict_rules WHERE winner_mod_id = ?1 OR loser_mod_id = ?1",
+            params![mod_id],
+        )?;
+        Ok(())
     }
 
     // -- Collection queries --------------------------------------------------

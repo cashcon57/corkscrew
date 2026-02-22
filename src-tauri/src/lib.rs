@@ -1293,6 +1293,29 @@ fn resolve_all_conflicts_cmd(
     let suggestions = conflict_resolver::analyze_conflicts(&conflicts, &mods, loot_ref);
     let result = conflict_resolver::apply_suggestions(db, &game_id, &bottle_name, &suggestions)?;
 
+    // Record conflict rules for resolved conflicts so they disappear from the list.
+    for suggestion in &suggestions {
+        match suggestion.status {
+            conflict_resolver::ConflictStatus::AuthorResolved => {
+                let winner = suggestion.current_winner_id;
+                for m in &suggestion.mods {
+                    if m.mod_id != winner {
+                        let _ = db.add_conflict_rule(&game_id, &bottle_name, winner, m.mod_id);
+                    }
+                }
+            }
+            conflict_resolver::ConflictStatus::Suggested => {
+                let winner = suggestion.suggested_winner_id;
+                for m in &suggestion.mods {
+                    if m.mod_id != winner {
+                        let _ = db.add_conflict_rule(&game_id, &bottle_name, winner, m.mod_id);
+                    }
+                }
+            }
+            conflict_resolver::ConflictStatus::Manual => {}
+        }
+    }
+
     // Redeploy to apply new priorities if any changed.
     if result.priorities_changed > 0 {
         let (_bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
@@ -1304,6 +1327,22 @@ fn resolve_all_conflicts_cmd(
     }
 
     Ok(result)
+}
+
+#[tauri::command]
+fn record_conflict_winner(
+    game_id: String,
+    bottle_name: String,
+    winner_mod_id: i64,
+    loser_mod_ids: Vec<i64>,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let db = &state.db;
+    for loser_id in loser_mod_ids {
+        db.add_conflict_rule(&game_id, &bottle_name, winner_mod_id, loser_id)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -3345,6 +3384,7 @@ pub fn run() {
             get_conflicts,
             analyze_conflicts_cmd,
             resolve_all_conflicts_cmd,
+            record_conflict_winner,
             get_deployment_manifest_cmd,
             set_mod_priority,
             reorder_mods,
