@@ -19,7 +19,7 @@ pub enum MigrationError {
 pub type Result<T> = std::result::Result<T, MigrationError>;
 
 /// The current target schema version. Bump this when adding a new migration.
-const TARGET_VERSION: u32 = 9;
+const TARGET_VERSION: u32 = 10;
 
 /// Get the current schema version (0 if no version table exists).
 pub fn current_version(conn: &Connection) -> Result<u32> {
@@ -89,6 +89,11 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     if version == 8 {
         migrate_v8_to_v9(conn)?;
         version = 9;
+    }
+
+    if version == 9 {
+        migrate_v9_to_v10(conn)?;
+        version = 10;
     }
 
     let _ = version; // suppress unused warning when TARGET_VERSION == current
@@ -580,6 +585,68 @@ fn migrate_v8_to_v9(conn: &Connection) -> Result<()> {
     tx.execute("UPDATE schema_version SET version = 9", [])?;
     tx.commit()?;
     log::info!("Migration 8 → 9 complete (download_queue table)");
+    Ok(())
+}
+
+/// Migration 9 → 10: Wabbajack install pipeline tables.
+///
+/// Creates tables for tracking Wabbajack modlist installations and per-archive
+/// download status. Also adds xxhash64 and file_path columns to the download
+/// registry for shared download cache lookups.
+fn migrate_v9_to_v10(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+
+    // Wabbajack install tracking
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS wabbajack_installs (
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            modlist_name          TEXT    NOT NULL,
+            modlist_version       TEXT    NOT NULL DEFAULT '',
+            game_type             INTEGER NOT NULL DEFAULT 0,
+            install_dir           TEXT    NOT NULL,
+            status                TEXT    NOT NULL DEFAULT 'pending',
+            total_archives        INTEGER NOT NULL DEFAULT 0,
+            completed_archives    INTEGER NOT NULL DEFAULT 0,
+            total_directives      INTEGER NOT NULL DEFAULT 0,
+            completed_directives  INTEGER NOT NULL DEFAULT 0,
+            error_message         TEXT,
+            created_at            TEXT    NOT NULL DEFAULT (datetime('now')),
+            updated_at            TEXT    NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS wabbajack_archive_status (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            install_id    INTEGER NOT NULL REFERENCES wabbajack_installs(id) ON DELETE CASCADE,
+            archive_hash  TEXT    NOT NULL,
+            archive_name  TEXT    NOT NULL,
+            source_type   TEXT    NOT NULL DEFAULT '',
+            status        TEXT    NOT NULL DEFAULT 'pending',
+            download_path TEXT,
+            error_message TEXT,
+            UNIQUE(install_id, archive_hash)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_wj_archive_status_install
+            ON wabbajack_archive_status (install_id);",
+    )?;
+
+    // Add xxhash64 and file_path columns to download_registry for shared cache
+    let has_xxhash: bool = tx
+        .prepare("SELECT 1 FROM pragma_table_info('download_registry') WHERE name = 'xxhash64'")?
+        .exists([])?;
+
+    if !has_xxhash {
+        tx.execute_batch(
+            "ALTER TABLE download_registry ADD COLUMN xxhash64 TEXT;
+             ALTER TABLE download_registry ADD COLUMN file_path TEXT;
+             CREATE INDEX IF NOT EXISTS idx_download_registry_xxhash
+                ON download_registry (xxhash64);",
+        )?;
+    }
+
+    tx.execute("UPDATE schema_version SET version = 10", [])?;
+    tx.commit()?;
+    log::info!("Migration 9 → 10 complete (wabbajack install pipeline tables)");
     Ok(())
 }
 

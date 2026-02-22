@@ -54,6 +54,27 @@
   const game = $derived($selectedGame);
   const skse = $derived($skseStatus);
   const isSkyrim = $derived(game?.game_id === "skyrimse");
+
+  // Tool icon mapping (tool ID → icon path)
+  const toolIcons: Record<string, string> = {
+    sseedit: "/icons/xedit.png",
+    pandora: "/icons/pandora.png",
+    bodyslide: "/icons/bodyslide.png",
+    cao: "/icons/cao.png",
+    nifoptimizer: "/icons/nifoptimizer.png",
+    wryebash: "/icons/wryebash.png",
+    bethini: "/icons/bethini.png",
+    dyndolod: "/icons/dyndolod.png",
+    skse: "/icons/skse.png",
+  };
+
+  // Layer icon mapping (layer icon key → image path, only for layers with real icons)
+  const layerIconImages: Record<string, string> = {
+    crossover: "/icons/crossover.png",
+    heroic: "/icons/heroic.png",
+    mythic: "/icons/mythic.png",
+    wine: "/icons/wine.png",
+  };
   const recommendedTools = $derived(modTools.filter(t => t.wine_compat === "good"));
   const limitedTools = $derived(modTools.filter(t => t.wine_compat === "limited"));
   const notRecommendedTools = $derived(modTools.filter(t => t.wine_compat === "not_recommended"));
@@ -348,32 +369,18 @@
   }
 </script>
 
+{#snippet toolIcon(toolId: string)}
+  {#if toolIcons[toolId]}
+    <img src={toolIcons[toolId]} alt="" width="20" height="20" class="tool-icon-img" />
+  {/if}
+{/snippet}
+
 {#snippet layerIcon(icon: string)}
-  {#if icon === "crossover"}
-    <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-      <rect x="4" y="4" width="8" height="8" rx="1" transform="rotate(45 8 8)" />
-      <rect x="8" y="8" width="8" height="8" rx="1" transform="rotate(45 12 12)" />
-    </svg>
+  {#if layerIconImages[icon]}
+    <img src={layerIconImages[icon]} alt="" width="18" height="18" style="object-fit: contain; border-radius: 3px;" />
   {:else if icon === "moonshine"}
     <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
       <path d="M15 4a7 7 0 1 0-1 12A5 5 0 0 1 15 4z" />
-    </svg>
-  {:else if icon === "heroic"}
-    <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M10 2L3 5v5c0 4.4 3 7.5 7 9 4-1.5 7-4.6 7-9V5l-7-3z" />
-      <line x1="10" y1="7" x2="10" y2="14" />
-      <line x1="8" y1="9" x2="12" y2="9" />
-    </svg>
-  {:else if icon === "mythic"}
-    <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-      <rect x="3" y="11" width="5" height="5" rx="0.5" transform="rotate(45 5.5 13.5)" />
-      <rect x="6" y="8" width="5" height="5" rx="0.5" transform="rotate(45 8.5 10.5)" />
-      <rect x="9" y="5" width="5" height="5" rx="0.5" transform="rotate(45 11.5 7.5)" />
-    </svg>
-  {:else if icon === "wine"}
-    <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M7 2h6l.5 5a3.5 3.5 0 0 1-7 0L7 2z" /><line x1="10" y1="12" x2="10" y2="17" />
-      <line x1="7" y1="17" x2="13" y2="17" />
     </svg>
   {:else if icon === "lutris"}
     <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -477,6 +484,7 @@
       <h2 class="section-title">Game Tools</h2>
       <div class="section-card">
         <div class="card-row tool-row">
+          {@render toolIcon("skse")}
           <div class="tool-info">
             <span class="row-label">SKSE (Script Extender)</span>
             <span class="tool-description">
@@ -544,6 +552,7 @@
               {#each recommendedTools as tool, i (tool.id)}
                 {#if i > 0}<div class="card-divider"></div>{/if}
                 <div class="card-row tool-row">
+                  {@render toolIcon(tool.id)}
                   <div class="tool-info">
                     <div class="tool-name-row">
                       <span class="row-label">{tool.name}</span>
@@ -635,6 +644,7 @@
               {#each limitedTools as tool, i (tool.id)}
                 {#if i > 0}<div class="card-divider"></div>{/if}
                 <div class="card-row tool-row">
+                  {@render toolIcon(tool.id)}
                   <div class="tool-info">
                     <div class="tool-name-row">
                       <span class="row-label">{tool.name}</span>
@@ -702,6 +712,7 @@
               {#each notRecommendedTools as tool, i (tool.id)}
                 {#if i > 0}<div class="card-divider"></div>{/if}
                 <div class="card-row tool-row">
+                  {@render toolIcon(tool.id)}
                   <div class="tool-info">
                     <div class="tool-name-row">
                       <span class="row-label tool-warn-name">{tool.name}</span>
@@ -1314,13 +1325,23 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: var(--space-4);
+    gap: var(--space-3);
+  }
+
+  :global(.tool-icon-img) {
+    width: 20px;
+    height: 20px;
+    object-fit: contain;
+    border-radius: 3px;
+    flex-shrink: 0;
   }
 
   .tool-info {
     display: flex;
     flex-direction: column;
     gap: 2px;
+    flex: 1;
+    min-width: 0;
   }
 
   .tool-description {

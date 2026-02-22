@@ -3,7 +3,7 @@
 </script>
 
 <img
-  src="/nexus-logo.png"
+  src="/icons/nexusmods.png"
   alt="Nexus Mods"
   width={size}
   height={size}

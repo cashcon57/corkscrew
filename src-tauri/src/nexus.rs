@@ -1,4 +1,7 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Mutex;
+use std::time::Instant;
 
 use futures::StreamExt;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, USER_AGENT};
@@ -31,6 +34,9 @@ pub enum NexusError {
 
     #[error("Missing download links in API response")]
     NoDownloadLinks,
+
+    #[error("Rate limited by NexusMods API (retry after {retry_after}s)")]
+    RateLimited { retry_after: u64 },
 }
 
 pub type Result<T> = std::result::Result<T, NexusError>;
@@ -202,16 +208,98 @@ fn parse_nexus_mod(v: &serde_json::Value) -> Option<NexusModInfo> {
 }
 
 // ---------------------------------------------------------------------------
+// Rate limit tracking
+// ---------------------------------------------------------------------------
+
+/// Tracks NexusMods API rate limit state from response headers.
+struct RateLimitState {
+    hourly_remaining: AtomicI64,
+    daily_remaining: AtomicI64,
+    last_request: Mutex<Option<Instant>>,
+}
+
+impl RateLimitState {
+    fn new() -> Self {
+        Self {
+            hourly_remaining: AtomicI64::new(-1), // -1 = unknown
+            daily_remaining: AtomicI64::new(-1),
+            last_request: Mutex::new(None),
+        }
+    }
+
+    /// Record the time of a request and enforce minimum spacing (1 second).
+    async fn throttle(&self) {
+        let wait = {
+            let last = self.last_request.lock().unwrap();
+            if let Some(prev) = *last {
+                let elapsed = prev.elapsed();
+                let min_interval = std::time::Duration::from_secs(1);
+                if elapsed < min_interval {
+                    Some(min_interval - elapsed)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
+        if let Some(duration) = wait {
+            tokio::time::sleep(duration).await;
+        }
+
+        // Update last request time after any wait
+        let mut last_guard = self.last_request.lock().unwrap();
+        *last_guard = Some(Instant::now());
+    }
+
+    /// Parse rate limit headers from a response and update internal state.
+    fn update_from_response(&self, response: &reqwest::Response) {
+        if let Some(val) = response.headers().get("x-rl-hourly-remaining") {
+            if let Ok(s) = val.to_str() {
+                if let Ok(n) = s.parse::<i64>() {
+                    self.hourly_remaining.store(n, Ordering::Relaxed);
+                }
+            }
+        }
+        if let Some(val) = response.headers().get("x-rl-daily-remaining") {
+            if let Ok(s) = val.to_str() {
+                if let Ok(n) = s.parse::<i64>() {
+                    self.daily_remaining.store(n, Ordering::Relaxed);
+                }
+            }
+        }
+    }
+
+    /// Get current rate limit info for logging/diagnostics.
+    fn _hourly_remaining(&self) -> i64 {
+        self.hourly_remaining.load(Ordering::Relaxed)
+    }
+
+    fn _daily_remaining(&self) -> i64 {
+        self.daily_remaining.load(Ordering::Relaxed)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
 
 /// Async client for the Nexus Mods v1 REST API.
 pub struct NexusClient {
     client: reqwest::Client,
+    rate_limit: RateLimitState,
 }
 
 impl NexusClient {
     /// Create a new client using the supplied personal API key.
+    ///
+    /// Sets all NexusMods-required headers:
+    /// - `apikey` - personal API key for authentication
+    /// - `User-Agent` - identifies the application
+    /// - `Application-Name` - required by NexusMods API TOS
+    /// - `Application-Version` - required by NexusMods API TOS
+    /// - `Protocol-Version` - NexusMods API protocol version
     pub fn new(api_key: String) -> Self {
         let mut headers = HeaderMap::new();
         // HeaderValue::from_str accepts visible ASCII (0x20..=0x7E) + tab.
@@ -225,21 +313,85 @@ impl NexusClient {
         let ua = format!("Corkscrew/{}", env!("CARGO_PKG_VERSION"));
         headers.insert(USER_AGENT, HeaderValue::from_str(&ua).unwrap());
 
+        // NexusMods API compliance headers
+        headers.insert(
+            "Application-Name",
+            HeaderValue::from_static("Corkscrew"),
+        );
+        let app_version = HeaderValue::from_str(env!("CARGO_PKG_VERSION"))
+            .unwrap_or_else(|_| HeaderValue::from_static("0.0.0"));
+        headers.insert("Application-Version", app_version);
+        headers.insert(
+            "Protocol-Version",
+            HeaderValue::from_static("0.15.5"),
+        );
+
         let client = reqwest::Client::builder()
             .default_headers(headers)
             .build()
             .expect("failed to build reqwest client");
 
-        Self { client }
+        Self {
+            client,
+            rate_limit: RateLimitState::new(),
+        }
     }
 
     // -- helpers -----------------------------------------------------------
 
     /// Send a GET request, returning a `serde_json::Value` on success or a
     /// `NexusError::Api` on a non-2xx status.
+    ///
+    /// Includes client-side rate limit throttling (minimum 1s between requests),
+    /// response header tracking, and automatic HTTP 429 retry with backoff.
     async fn get_json(&self, url: &str) -> Result<serde_json::Value> {
+        // Enforce minimum spacing between requests
+        self.rate_limit.throttle().await;
+
         let response = self.client.get(url).send().await?;
+        self.rate_limit.update_from_response(&response);
         let status = response.status();
+
+        // Handle HTTP 429 (Too Many Requests) with retry
+        if status.as_u16() == 429 {
+            let retry_after = response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(5);
+
+            log::warn!(
+                "NexusMods API rate limited (429). Retrying after {}s. URL: {}",
+                retry_after,
+                url
+            );
+
+            tokio::time::sleep(std::time::Duration::from_secs(retry_after)).await;
+
+            // Retry once
+            self.rate_limit.throttle().await;
+            let retry_response = self.client.get(url).send().await?;
+            self.rate_limit.update_from_response(&retry_response);
+            let retry_status = retry_response.status();
+
+            if retry_status.as_u16() == 429 {
+                return Err(NexusError::RateLimited { retry_after });
+            }
+
+            if !retry_status.is_success() {
+                let message = retry_response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "no response body".into());
+                return Err(NexusError::Api {
+                    status: retry_status.as_u16(),
+                    message,
+                });
+            }
+
+            return Ok(retry_response.json().await?);
+        }
 
         if !status.is_success() {
             let message = response
@@ -363,8 +515,55 @@ impl NexusClient {
             url.push_str(&format!("?key={encoded_key}&expires={encoded_expires}"));
         }
 
+        // Enforce minimum spacing between requests
+        self.rate_limit.throttle().await;
+
         let response = self.client.get(&url).send().await?;
+        self.rate_limit.update_from_response(&response);
         let status = response.status();
+
+        // Handle HTTP 429 with retry
+        if status.as_u16() == 429 {
+            let retry_after = response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(5);
+
+            log::warn!(
+                "NexusMods API rate limited (429) on download links. Retrying after {}s.",
+                retry_after
+            );
+
+            tokio::time::sleep(std::time::Duration::from_secs(retry_after)).await;
+
+            self.rate_limit.throttle().await;
+            let retry_response = self.client.get(&url).send().await?;
+            self.rate_limit.update_from_response(&retry_response);
+            let retry_status = retry_response.status();
+
+            if retry_status.as_u16() == 429 {
+                return Err(NexusError::RateLimited { retry_after });
+            }
+
+            if !retry_status.is_success() {
+                let message = retry_response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "no response body".into());
+                return Err(NexusError::Api {
+                    status: retry_status.as_u16(),
+                    message,
+                });
+            }
+
+            let links: Vec<DownloadLink> = retry_response.json().await?;
+            if links.is_empty() {
+                return Err(NexusError::NoDownloadLinks);
+            }
+            return Ok(links);
+        }
 
         if !status.is_success() {
             let message = response
@@ -668,11 +867,34 @@ pub struct NexusSearchResult {
     pub has_more: bool,
 }
 
+/// Build default headers for standalone GraphQL requests (outside NexusClient).
+fn nexus_graphql_headers(api_key: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    if let Ok(val) = HeaderValue::from_str(api_key) {
+        headers.insert("apikey", val);
+    }
+    headers.insert("Content-Type", HeaderValue::from_static("application/json"));
+    headers.insert(
+        "Application-Name",
+        HeaderValue::from_static("Corkscrew"),
+    );
+    let app_version = HeaderValue::from_str(env!("CARGO_PKG_VERSION"))
+        .unwrap_or_else(|_| HeaderValue::from_static("0.0.0"));
+    headers.insert("Application-Version", app_version);
+    headers.insert(
+        "Protocol-Version",
+        HeaderValue::from_static("0.15.5"),
+    );
+    headers
+}
+
 /// Run an introspection query against the NexusMods v2 GraphQL API.
 /// Returns the raw JSON schema string for development/debugging.
 pub async fn graphql_introspect(api_key: &str) -> Result<String> {
+    let headers = nexus_graphql_headers(api_key);
     let client = reqwest::Client::builder()
         .user_agent(format!("Corkscrew/{}", env!("CARGO_PKG_VERSION")))
+        .default_headers(headers)
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(NexusError::Http)?;
@@ -683,8 +905,6 @@ pub async fn graphql_introspect(api_key: &str) -> Result<String> {
 
     let response = client
         .post(GRAPHQL_ENDPOINT)
-        .header("apikey", api_key)
-        .header("Content-Type", "application/json")
         .json(&body)
         .send()
         .await
@@ -706,23 +926,37 @@ pub async fn graphql_search_mods(
     offset: u32,
     include_adult: bool,
 ) -> Result<NexusSearchResult> {
+    let headers = nexus_graphql_headers(api_key);
     let client = reqwest::Client::builder()
         .user_agent(format!("Corkscrew/{}", env!("CARGO_PKG_VERSION")))
+        .default_headers(headers)
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(NexusError::Http)?;
 
-    // Build GraphQL variables
+    // Build GraphQL variables using NexusMods v2 filter/sort schema.
+    // Filters use array-of-objects format: [{ "value": ..., "op": "EQUALS" }]
+    // Sorts use named-field format: [{ "endorsements": { "direction": "DESC" } }]
     let mut filter = serde_json::Map::new();
-    filter.insert("gameDomainName".into(), serde_json::json!(game_domain));
+    filter.insert(
+        "gameDomainName".into(),
+        serde_json::json!([{ "value": game_domain, "op": "EQUALS" }]),
+    );
     if let Some(text) = search_text {
         if !text.is_empty() {
-            filter.insert("searchQuery".into(), serde_json::json!(text));
+            filter.insert(
+                "name".into(),
+                serde_json::json!([{ "value": text, "op": "WILDCARD" }]),
+            );
         }
     }
     if !include_adult {
-        filter.insert("adultContent".into(), serde_json::json!(false));
+        filter.insert(
+            "adultContent".into(),
+            serde_json::json!([{ "value": false, "op": "EQUALS" }]),
+        );
     }
+    filter.insert("op".into(), serde_json::json!("AND"));
 
     let sort_field = sort_by.unwrap_or("endorsements");
     let sort_direction = sort_dir.unwrap_or("DESC");
@@ -749,9 +983,16 @@ pub async fn graphql_search_mods(
         }
     "#;
 
+    // Build sort object: { "<field_name>": { "direction": "DESC" } }
+    let mut sort_obj = serde_json::Map::new();
+    sort_obj.insert(
+        sort_field.to_string(),
+        serde_json::json!({ "direction": sort_direction }),
+    );
+
     let variables = serde_json::json!({
         "filter": filter,
-        "sort": [{ "field": sort_field, "direction": sort_direction }],
+        "sort": [sort_obj],
         "count": count,
         "offset": offset,
     });
@@ -763,8 +1004,6 @@ pub async fn graphql_search_mods(
 
     let response = client
         .post(GRAPHQL_ENDPOINT)
-        .header("apikey", api_key)
-        .header("Content-Type", "application/json")
         .json(&body)
         .send()
         .await

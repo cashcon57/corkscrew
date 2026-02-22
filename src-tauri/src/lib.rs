@@ -38,6 +38,10 @@ pub mod session_tracker;
 pub mod skse;
 pub mod staging;
 pub mod wabbajack;
+pub mod wabbajack_directives;
+pub mod wabbajack_downloader;
+pub mod wabbajack_installer;
+pub mod wabbajack_types;
 pub mod wine_diagnostic;
 
 use std::path::{Path, PathBuf};
@@ -73,6 +77,7 @@ use wabbajack::{ModlistSummary, ParsedModlist};
 struct AppState {
     db: Arc<ModDatabase>,
     download_queue: Arc<download_queue::DownloadQueue>,
+    wj_cancel_tokens: std::sync::Mutex<std::collections::HashMap<i64, Arc<std::sync::atomic::AtomicBool>>>,
 }
 
 /// Resolve a bottle by name, returning a useful error if not found.
@@ -2815,13 +2820,15 @@ async fn browse_collections_cmd(
     offset: u32,
     sort_field: Option<String>,
     sort_direction: Option<String>,
+    search_text: Option<String>,
 ) -> Result<CollectionSearchResult, String> {
     let api_key = config::get_config().ok().and_then(|c| c.nexus_api_key);
 
     let sf = sort_field.as_deref().unwrap_or("endorsements");
     let sd = sort_direction.as_deref().unwrap_or("desc");
+    let st = search_text.as_deref().filter(|s| !s.is_empty());
 
-    collections::browse_collections(api_key.as_deref(), &game_domain, count, offset, sf, sd)
+    collections::browse_collections(api_key.as_deref(), &game_domain, count, offset, sf, sd, st)
         .await
         .map_err(|e| e.to_string())
 }
@@ -3477,6 +3484,7 @@ pub fn run() {
             AppState {
                 db: Arc::new(db),
                 download_queue: Arc::new(queue),
+                wj_cancel_tokens: std::sync::Mutex::new(std::collections::HashMap::new()),
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -3553,6 +3561,12 @@ pub fn run() {
             get_wabbajack_modlists,
             parse_wabbajack_file,
             download_wabbajack_file,
+            // Wabbajack Install Pipeline
+            wabbajack_installer::install_wabbajack_modlist_cmd,
+            wabbajack_installer::cancel_wabbajack_install,
+            wabbajack_installer::resume_wabbajack_install,
+            wabbajack_installer::get_wabbajack_install_status,
+            wabbajack_installer::wabbajack_preflight_cmd,
             // Nexus SSO
             start_nexus_sso,
             // OAuth (legacy)

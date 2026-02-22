@@ -1432,6 +1432,185 @@ impl ModDatabase {
         )?;
         Ok(count)
     }
+
+    // -----------------------------------------------------------------------
+    // Wabbajack install pipeline
+    // -----------------------------------------------------------------------
+
+    /// Create a new Wabbajack install record.
+    pub fn create_wj_install(
+        &self,
+        modlist_name: &str,
+        modlist_version: &str,
+        game_type: u32,
+        install_dir: &str,
+        total_archives: usize,
+        total_directives: usize,
+    ) -> Result<i64> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "INSERT INTO wabbajack_installs
+                (modlist_name, modlist_version, game_type, install_dir, status,
+                 total_archives, total_directives)
+             VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6)",
+            params![
+                modlist_name,
+                modlist_version,
+                game_type,
+                install_dir,
+                total_archives as i64,
+                total_directives as i64,
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Update the status of a Wabbajack install.
+    pub fn update_wj_install_status(
+        &self,
+        install_id: i64,
+        status: &str,
+        error_message: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "UPDATE wabbajack_installs SET status = ?1, error_message = ?2,
+                    updated_at = datetime('now') WHERE id = ?3",
+            params![status, error_message, install_id],
+        )?;
+        Ok(())
+    }
+
+    /// Update the completed archive count for a Wabbajack install.
+    pub fn update_wj_install_archive_progress(
+        &self,
+        install_id: i64,
+        completed: i64,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "UPDATE wabbajack_installs SET completed_archives = ?1,
+                    updated_at = datetime('now') WHERE id = ?2",
+            params![completed, install_id],
+        )?;
+        Ok(())
+    }
+
+    /// Update the completed directive count for a Wabbajack install.
+    pub fn update_wj_install_directive_progress(
+        &self,
+        install_id: i64,
+        completed: i64,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "UPDATE wabbajack_installs SET completed_directives = ?1,
+                    updated_at = datetime('now') WHERE id = ?2",
+            params![completed, install_id],
+        )?;
+        Ok(())
+    }
+
+    /// Insert or update archive download status for a Wabbajack install.
+    pub fn upsert_wj_archive_status(
+        &self,
+        install_id: i64,
+        archive_hash: &str,
+        archive_name: &str,
+        source_type: &str,
+        status: &str,
+        download_path: Option<&str>,
+        error_message: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "INSERT INTO wabbajack_archive_status
+                (install_id, archive_hash, archive_name, source_type, status, download_path, error_message)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(install_id, archive_hash)
+             DO UPDATE SET status = ?5, download_path = ?6, error_message = ?7",
+            params![
+                install_id,
+                archive_hash,
+                archive_name,
+                source_type,
+                status,
+                download_path,
+                error_message,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// List all archive statuses for a Wabbajack install.
+    pub fn list_wj_archive_status(
+        &self,
+        install_id: i64,
+    ) -> Result<Vec<(String, String, String, Option<String>)>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT archive_hash, archive_name, status, download_path
+             FROM wabbajack_archive_status WHERE install_id = ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![install_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Look up a file in the download registry by xxhash64.
+    pub fn find_download_by_xxhash(&self, xxhash64: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let result = conn
+            .prepare("SELECT file_path FROM download_registry WHERE xxhash64 = ?1 LIMIT 1")?
+            .query_row(params![xxhash64], |row| row.get::<_, String>(0))
+            .ok();
+        Ok(result)
+    }
+
+    /// Set the xxhash64 for a download registry entry.
+    pub fn set_download_xxhash(&self, file_path: &str, xxhash64: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "UPDATE download_registry SET xxhash64 = ?1 WHERE file_path = ?2",
+            params![xxhash64, file_path],
+        )?;
+        Ok(())
+    }
+
+    /// Get the install status for a Wabbajack install.
+    pub fn get_wj_install_status(
+        &self,
+        install_id: i64,
+    ) -> Result<Option<(String, i64, i64, i64, i64, Option<String>)>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let result = conn
+            .prepare(
+                "SELECT status, total_archives, completed_archives,
+                        total_directives, completed_directives, error_message
+                 FROM wabbajack_installs WHERE id = ?1",
+            )?
+            .query_row(params![install_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            })
+            .ok();
+        Ok(result)
+    }
 }
 
 // ---------------------------------------------------------------------------

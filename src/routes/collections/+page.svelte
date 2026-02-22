@@ -191,8 +191,14 @@
   let searchQuery = $state("");
   let gameFilter = $state("all");
   let showNsfw = $state(false);
-  let sortField = $state<"endorsements" | "downloads" | "name" | "rating" | "created">("endorsements");
+  let sortField = $state<"endorsements" | "downloads" | "name" | "rating" | "created" | "updated" | "mods">("endorsements");
   let sortDirection = $state<"asc" | "desc">("desc");
+  let collectionsTotalCount = $state(0);
+  let collectionsOffset = $state(0);
+  const COLLECTIONS_PAGE_SIZE = 20;
+  let collectionsSearchTimer: ReturnType<typeof setTimeout> | null = null;
+  const collectionsTotalPages = $derived(Math.max(1, Math.ceil(collectionsTotalCount / COLLECTIONS_PAGE_SIZE)));
+  const collectionsCurrentPage = $derived(Math.floor(collectionsOffset / COLLECTIONS_PAGE_SIZE) + 1);
   let selectedCollection = $state<CollectionInfo | null>(null);
   let selectedMods = $state<CollectionMod[]>([]);
   let loadingDetail = $state(false);
@@ -381,22 +387,8 @@
   $effect(() => {
     let result = collections;
 
-    if (gameFilter !== "all") {
-      result = result.filter(c => c.game_domain === gameFilter);
-    }
-
     if (!showNsfw) {
       result = result.filter(c => !c.adult_content);
-    }
-
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase();
-      result = result.filter(c =>
-        c.name.toLowerCase().includes(q) ||
-        c.author.toLowerCase().includes(q) ||
-        c.summary.toLowerCase().includes(q) ||
-        c.tags.some(t => t.toLowerCase().includes(q))
-      );
     }
 
     filtered = result;
@@ -464,11 +456,17 @@
     }
   }
 
-  async function loadCollections(gameDomain: string = "skyrimspecialedition") {
+  async function loadCollections(gameDomain: string = "skyrimspecialedition", resetOffset = true) {
     loading = true;
+    if (resetOffset) collectionsOffset = 0;
     try {
-      const result: CollectionSearchResult = await browseCollections(gameDomain, 50, 0, sortField, sortDirection);
+      const searchText = searchQuery.trim() || undefined;
+      const result: CollectionSearchResult = await browseCollections(
+        gameDomain, COLLECTIONS_PAGE_SIZE, collectionsOffset,
+        sortField, sortDirection, searchText,
+      );
       collections = result.collections;
+      collectionsTotalCount = result.total_count;
     } catch (e: unknown) {
       showError(`Failed to load collections: ${e}`);
     } finally {
@@ -479,6 +477,12 @@
   function reloadWithSort() {
     const gd = gameFilter !== "all" ? gameFilter : "skyrimspecialedition";
     loadCollections(gd);
+  }
+
+  function collectionsGoToPage(page: number) {
+    collectionsOffset = (page - 1) * COLLECTIONS_PAGE_SIZE;
+    const gd = gameFilter !== "all" ? gameFilter : "skyrimspecialedition";
+    loadCollections(gd, false);
   }
 
   async function viewCollectionDetail(collection: CollectionInfo) {
@@ -1642,6 +1646,10 @@
             class="search-input"
             placeholder="Search collections..."
             bind:value={searchQuery}
+            oninput={() => {
+              if (collectionsSearchTimer) clearTimeout(collectionsSearchTimer);
+              collectionsSearchTimer = setTimeout(() => reloadWithSort(), 400);
+            }}
           />
         </div>
         <select class="filter-select" bind:value={gameFilter} onchange={() => { if (gameFilter !== "all") loadCollections(gameFilter); }}>
@@ -1661,6 +1669,8 @@
             <option value="name">Sort: Name</option>
             <option value="rating">Sort: Rating</option>
             <option value="created">Sort: Newest</option>
+            <option value="updated">Sort: Updated</option>
+            <option value="mods">Sort: Mod Count</option>
           </select>
           <button
             class="sort-direction-btn"
@@ -1785,6 +1795,38 @@
             </div>
           {/each}
         </div>
+
+        <!-- Pagination -->
+        {#if collectionsTotalPages > 1}
+          <div class="pagination-bar">
+            <button
+              class="btn btn-sm"
+              disabled={collectionsCurrentPage <= 1 || loading}
+              onclick={() => collectionsGoToPage(collectionsCurrentPage - 1)}
+            >Previous</button>
+            <div class="page-numbers">
+              {#each Array.from({ length: Math.min(collectionsTotalPages, 7) }, (_, i) => {
+                if (collectionsTotalPages <= 7) return i + 1;
+                if (collectionsCurrentPage <= 4) return i + 1;
+                if (collectionsCurrentPage >= collectionsTotalPages - 3) return collectionsTotalPages - 6 + i;
+                return collectionsCurrentPage - 3 + i;
+              }) as page}
+                <button
+                  class="page-btn"
+                  class:active={page === collectionsCurrentPage}
+                  disabled={loading}
+                  onclick={() => collectionsGoToPage(page)}
+                >{page}</button>
+              {/each}
+            </div>
+            <button
+              class="btn btn-sm"
+              disabled={collectionsCurrentPage >= collectionsTotalPages || loading}
+              onclick={() => collectionsGoToPage(collectionsCurrentPage + 1)}
+            >Next</button>
+            <span class="page-info">{collectionsTotalCount} collections</span>
+          </div>
+        {/if}
       {/if}
     {/if}
   {/if}
@@ -3463,5 +3505,52 @@
     justify-content: center;
     gap: var(--space-1);
     padding: var(--space-4) 0 var(--space-2);
+  }
+
+  .pagination-bar {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    padding: var(--space-4) 0 var(--space-2);
+  }
+
+  .page-numbers {
+    display: flex;
+    gap: 2px;
+  }
+
+  .page-btn {
+    min-width: 32px;
+    height: 32px;
+    border: 1px solid var(--border);
+    background: var(--surface-1);
+    color: var(--text-secondary);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-size: var(--font-xs);
+    transition: all 0.15s ease;
+  }
+
+  .page-btn:hover:not(:disabled) {
+    background: var(--surface-2);
+    color: var(--text-primary);
+  }
+
+  .page-btn.active {
+    background: var(--accent);
+    color: var(--text-on-accent, #fff);
+    border-color: var(--accent);
+  }
+
+  .page-btn:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+
+  .page-info {
+    font-size: var(--font-xs);
+    color: var(--text-muted);
+    margin-left: var(--space-2);
   }
 </style>

@@ -16,6 +16,18 @@
   let installed = $state<Set<string>>(new Set());
   let errors = $state<Record<string, string>>({});
 
+  const toolIcons: Record<string, string> = {
+    sseedit: "/icons/xedit.png",
+    pandora: "/icons/pandora.png",
+    bodyslide: "/icons/bodyslide.png",
+    cao: "/icons/cao.png",
+    nifoptimizer: "/icons/nifoptimizer.png",
+    wryebash: "/icons/wryebash.png",
+    bethini: "/icons/bethini.png",
+    dyndolod: "/icons/dyndolod.png",
+    skse: "/icons/skse.png",
+  };
+
   const uninstalledTools = $derived(
     tools.filter((t) => !t.is_detected && !installed.has(t.tool_id))
   );
@@ -62,6 +74,9 @@
     <div class="tools-list">
       {#each tools as tool (tool.tool_id)}
         <div class="tool-row" class:detected={tool.is_detected || installed.has(tool.tool_id)}>
+          {#if toolIcons[tool.tool_id]}
+            <img src={toolIcons[tool.tool_id]} alt="" width="22" height="22" class="tool-icon" />
+          {/if}
           <div class="tool-info">
             <span class="tool-name">{tool.tool_name}</span>
             {#if tool.wine_compat === "not_recommended" && tool.recommended_alternative}
@@ -171,6 +186,12 @@
     border-radius: 8px;
     background: var(--bg-tertiary, #252535);
     border: 1px solid var(--border, #333);
+  }
+
+  .tool-icon {
+    object-fit: contain;
+    border-radius: 4px;
+    flex-shrink: 0;
   }
 
   .tool-row.detected {

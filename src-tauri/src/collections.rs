@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -296,8 +297,27 @@ async fn graphql_query<T: serde::de::DeserializeOwned>(
     query: &str,
     variables: serde_json::Value,
 ) -> Result<T, CollectionsError> {
+    // Build default headers with NexusMods API compliance fields
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "Content-Type",
+        HeaderValue::from_static("application/json"),
+    );
+    headers.insert(
+        "Application-Name",
+        HeaderValue::from_static("Corkscrew"),
+    );
+    let app_version = HeaderValue::from_str(env!("CARGO_PKG_VERSION"))
+        .unwrap_or_else(|_| HeaderValue::from_static("0.0.0"));
+    headers.insert("Application-Version", app_version);
+    headers.insert(
+        "Protocol-Version",
+        HeaderValue::from_static("0.15.5"),
+    );
+
     let client = reqwest::Client::builder()
         .user_agent(format!("Corkscrew/{}", env!("CARGO_PKG_VERSION")))
+        .default_headers(headers)
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
@@ -311,8 +331,6 @@ async fn graphql_query<T: serde::de::DeserializeOwned>(
     if let Some(key) = api_key {
         request = request.header("apikey", key);
     }
-
-    request = request.header("Content-Type", "application/json");
 
     let response = request.json(&body).send().await?;
     let status = response.status();
@@ -361,13 +379,13 @@ query CollectionsV2($count: Int, $offset: Int, $filter: CollectionsSearchFilter,
             user { name }
             tileImage { thumbnailUrl(size: small) }
             endorsements totalDownloads
-            latestPublishedRevision { revisionNumber totalSize modFiles { fileId } }
+            latestPublishedRevision { revisionNumber totalSize modCount }
             updatedAt adultContent
             tags { name }
             category { name }
             game { domainName }
         }
-        totalCount
+        nodesCount totalCount
     }
 }
 "#;
@@ -379,7 +397,7 @@ query Collection($slug: String!, $viewAdultContent: Boolean) {
         user { name }
         tileImage { thumbnailUrl(size: small) }
         endorsements totalDownloads
-        latestPublishedRevision { revisionNumber totalSize modFiles { fileId } }
+        latestPublishedRevision { revisionNumber totalSize modCount }
         updatedAt adultContent
         tags { name }
         category { name }
@@ -394,7 +412,7 @@ query CollectionRevisions($slug: String!, $viewAdultContent: Boolean) {
         revisions {
             revisionNumber createdAt updatedAt
             revisionStatus totalSize
-            modFiles { fileId }
+            modCount
         }
     }
 }
@@ -430,6 +448,7 @@ pub async fn browse_collections(
     offset: u32,
     sort_field: &str,
     sort_direction: &str,
+    search_text: Option<&str>,
 ) -> Result<CollectionSearchResult, CollectionsError> {
     // Map friendly sort names to GraphQL field names
     let gql_sort_key = match sort_field {
@@ -437,6 +456,8 @@ pub async fn browse_collections(
         "downloads" => "totalDownloads",
         "rating" => "recentRating",
         "created" => "createdAt",
+        "updated" => "updatedAt",
+        "mods" => "latestPublishedRevision.modCount",
         _ => "endorsements",
     };
     let gql_direction = if sort_direction == "asc" {
@@ -458,12 +479,23 @@ pub async fn browse_collections(
     );
     let sort_array = serde_json::Value::Array(vec![serde_json::Value::Object(sort_obj)]);
 
+    // Build filter with required gameDomain + optional name search
+    let mut filter = serde_json::Map::new();
+    filter.insert(
+        "gameDomain".to_string(),
+        serde_json::json!([{ "op": "EQUALS", "value": game_domain }]),
+    );
+    if let Some(text) = search_text {
+        filter.insert(
+            "name".to_string(),
+            serde_json::json!([{ "op": "WILDCARD", "value": format!("*{}*", text) }]),
+        );
+    }
+
     let variables = serde_json::json!({
         "count": count,
         "offset": offset,
-        "filter": {
-            "gameDomain": [{ "op": "EQUALS", "value": game_domain }]
-        },
+        "filter": filter,
         "sort": sort_array,
     });
 
@@ -547,10 +579,9 @@ pub async fn get_revisions(
         .iter()
         .map(|rev| {
             let mod_files = rev
-                .get("modFiles")
-                .and_then(|v| v.as_array())
-                .map(|a| a.len())
-                .unwrap_or(0);
+                .get("modCount")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
 
             CollectionRevision {
                 revision_number: rev
@@ -1026,12 +1057,11 @@ fn parse_collection_node(node: &serde_json::Value) -> CollectionInfo {
         })
         .unwrap_or_default();
 
-    // Count total mods from latest published revision's modFiles
+    // Count total mods from latest published revision's modCount scalar
     let total_mods = latest_pub_rev
-        .and_then(|r| r.get("modFiles"))
-        .and_then(|v| v.as_array())
-        .map(|a| a.len())
-        .unwrap_or(0);
+        .and_then(|r| r.get("modCount"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
 
     CollectionInfo {
         slug,

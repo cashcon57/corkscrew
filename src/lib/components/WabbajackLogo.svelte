@@ -3,7 +3,7 @@
 </script>
 
 <img
-  src="/wabbajack-logo.png"
+  src="/icons/wabbajack.png"
   alt="Wabbajack"
   width={size}
   height={size}

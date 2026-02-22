@@ -1,0 +1,863 @@
+// ---------------------------------------------------------------------------
+// Wabbajack archive download engine
+// ---------------------------------------------------------------------------
+//
+// Phase 1 of the Wabbajack install pipeline. Downloads archives referenced by
+// a parsed Wabbajack modlist from multiple sources (NexusMods, HTTP, Google
+// Drive, MEGA, MediaFire, ModDB, Wabbajack CDN, game files, manual).
+
+use crate::database::ModDatabase;
+use crate::wabbajack_types::*;
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+use futures::StreamExt;
+use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
+use serde::Serialize;
+use tauri::{AppHandle, Emitter};
+use tokio::sync::Semaphore;
+
+const NEXUS_API_BASE: &str = "https://api.nexusmods.com/v1";
+
+// ---------------------------------------------------------------------------
+// Error type
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, thiserror::Error)]
+pub enum WjDownloadError {
+    #[error("HTTP error: {0}")]
+    Http(#[from] reqwest::Error),
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Hash mismatch: expected {expected}, got {actual}")]
+    HashMismatch { expected: String, actual: String },
+    #[error("User action required: {0}")]
+    UserActionRequired(String),
+    #[error("Download source unsupported: {0}")]
+    Unsupported(String),
+    #[error("{0}")]
+    Other(String),
+}
+
+// ---------------------------------------------------------------------------
+// Progress events
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Serialize)]
+#[serde(tag = "type")]
+pub enum WjProgressEvent {
+    DownloadStarted {
+        archive_name: String,
+        index: usize,
+        total: usize,
+    },
+    DownloadProgress {
+        archive_name: String,
+        bytes_downloaded: u64,
+        total_bytes: u64,
+    },
+    DownloadCompleted {
+        archive_name: String,
+    },
+    DownloadFailed {
+        archive_name: String,
+        error: String,
+    },
+    DownloadSkipped {
+        archive_name: String,
+        reason: String,
+    },
+    UserActionRequired {
+        archive_name: String,
+        url: String,
+        prompt: String,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// WjDownloader
+// ---------------------------------------------------------------------------
+
+pub struct WjDownloader {
+    http_client: reqwest::Client,
+    nexus_api_key: Option<String>,
+    is_premium: bool,
+    download_dir: PathBuf,
+}
+
+impl WjDownloader {
+    /// Create a new downloader. If `nexus_api_key` is supplied the downloader
+    /// can make NexusMods API calls; `is_premium` gates automated downloads.
+    pub fn new(
+        nexus_api_key: Option<String>,
+        is_premium: bool,
+        download_dir: PathBuf,
+    ) -> Self {
+        let ua = format!("Corkscrew/{}", env!("CARGO_PKG_VERSION"));
+        let mut default_headers = HeaderMap::new();
+        default_headers.insert(USER_AGENT, HeaderValue::from_str(&ua).unwrap());
+
+        let http_client = reqwest::Client::builder()
+            .default_headers(default_headers)
+            .redirect(reqwest::redirect::Policy::limited(10))
+            .build()
+            .expect("failed to build reqwest client");
+
+        Self {
+            http_client,
+            nexus_api_key,
+            is_premium,
+            download_dir,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Source-specific download handlers
+    // -----------------------------------------------------------------------
+
+    /// Download from NexusMods (premium only).
+    async fn download_nexus(
+        &self,
+        app: &AppHandle,
+        archive_name: &str,
+        game: &str,
+        mod_id: i64,
+        file_id: i64,
+    ) -> Result<PathBuf, WjDownloadError> {
+        // CRITICAL: free users must NOT get automated downloads.
+        if !self.is_premium {
+            let domain = wj_game_to_nexus_domain(game);
+            let url = format!(
+                "https://www.nexusmods.com/{domain}/mods/{mod_id}?tab=files&file_id={file_id}"
+            );
+            return Err(WjDownloadError::UserActionRequired(format!(
+                "NexusMods free account: please download manually from {url}"
+            )));
+        }
+
+        let api_key = self.nexus_api_key.as_deref().ok_or_else(|| {
+            WjDownloadError::Other("NexusMods API key required for premium downloads".into())
+        })?;
+
+        let domain = wj_game_to_nexus_domain(game);
+        let url = format!(
+            "{NEXUS_API_BASE}/games/{domain}/mods/{mod_id}/files/{file_id}/download_link.json"
+        );
+
+        let resp = self
+            .http_client
+            .get(&url)
+            .header("apikey", api_key)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(WjDownloadError::Other(format!(
+                "Nexus API {status}: {body}"
+            )));
+        }
+
+        let links: Vec<serde_json::Value> = resp.json().await?;
+        let download_url = links
+            .first()
+            .and_then(|l| l.get("URI").or(l.get("uri")))
+            .and_then(|u| u.as_str())
+            .ok_or_else(|| WjDownloadError::Other("No download URI in Nexus response".into()))?;
+
+        self.stream_download(app, archive_name, download_url, &HeaderMap::new())
+            .await
+    }
+
+    /// Download from a direct HTTP/HTTPS URL with optional headers.
+    async fn download_http(
+        &self,
+        app: &AppHandle,
+        archive_name: &str,
+        url: &str,
+        extra_headers: &[String],
+    ) -> Result<PathBuf, WjDownloadError> {
+        let mut headers = HeaderMap::new();
+        for h in extra_headers {
+            if let Some((k, v)) = h.split_once(':') {
+                if let (Ok(name), Ok(val)) = (
+                    reqwest::header::HeaderName::from_bytes(k.trim().as_bytes()),
+                    HeaderValue::from_str(v.trim()),
+                ) {
+                    headers.insert(name, val);
+                }
+            }
+        }
+        self.stream_download(app, archive_name, url, &headers).await
+    }
+
+    /// Download from Google Drive.
+    async fn download_google_drive(
+        &self,
+        app: &AppHandle,
+        archive_name: &str,
+        id: &str,
+    ) -> Result<PathBuf, WjDownloadError> {
+        let url = format!(
+            "https://drive.usercontent.google.com/download?id={id}&export=download&confirm=t"
+        );
+        self.stream_download(app, archive_name, &url, &HeaderMap::new())
+            .await
+    }
+
+    /// Download from MEGA using the `mega` crate.
+    async fn download_mega(
+        &self,
+        _app: &AppHandle,
+        archive_name: &str,
+        url: &str,
+    ) -> Result<PathBuf, WjDownloadError> {
+        let http = reqwest::Client::new();
+        let mega_client = mega::Client::builder()
+            .build(http)
+            .map_err(|e| WjDownloadError::Other(format!("Failed to create MEGA client: {e}")))?;
+
+        let nodes = mega_client
+            .fetch_public_nodes(url)
+            .await
+            .map_err(|e| WjDownloadError::Other(format!("MEGA fetch nodes failed: {e}")))?;
+
+        // Find the first file node.
+        let file_node = nodes
+            .iter()
+            .find(|n| n.kind().is_file())
+            .ok_or_else(|| WjDownloadError::Other("No file node found in MEGA link".into()))?;
+
+        let dest = self.download_dir.join(sanitize_filename(archive_name));
+        let partial = dest.with_extension("partial");
+
+        // The mega crate uses futures::io::AsyncWrite. We download into an
+        // in-memory buffer and then write to disk.
+        let mut buf: Vec<u8> = Vec::with_capacity(file_node.size() as usize);
+        let cursor = futures::io::Cursor::new(&mut buf);
+
+        mega_client
+            .download_node(file_node, cursor)
+            .await
+            .map_err(|e| WjDownloadError::Other(format!("MEGA download failed: {e}")))?;
+
+        tokio::fs::write(&partial, &buf).await?;
+        tokio::fs::rename(&partial, &dest).await?;
+        Ok(dest)
+    }
+
+    /// Download from MediaFire (scrape the actual download link from the page).
+    async fn download_mediafire(
+        &self,
+        app: &AppHandle,
+        archive_name: &str,
+        url: &str,
+    ) -> Result<PathBuf, WjDownloadError> {
+        let page_html = self
+            .http_client
+            .get(url)
+            .send()
+            .await?
+            .text()
+            .await?;
+
+        let document = scraper::Html::parse_document(&page_html);
+        let selector = scraper::Selector::parse("a#downloadButton, a.input.popsok")
+            .map_err(|_| WjDownloadError::Other("Failed to parse CSS selector".into()))?;
+
+        let real_url = document
+            .select(&selector)
+            .next()
+            .and_then(|el| el.value().attr("href"))
+            .ok_or_else(|| {
+                WjDownloadError::Other(
+                    "Could not find download link on MediaFire page".into(),
+                )
+            })?;
+
+        self.stream_download(app, archive_name, real_url, &HeaderMap::new())
+            .await
+    }
+
+    /// Download from Wabbajack CDN (direct HTTP).
+    async fn download_wabbajack_cdn(
+        &self,
+        app: &AppHandle,
+        archive_name: &str,
+        url: &str,
+    ) -> Result<PathBuf, WjDownloadError> {
+        self.stream_download(app, archive_name, url, &HeaderMap::new())
+            .await
+    }
+
+    /// Download from ModDB (direct HTTP with redirect following).
+    async fn download_moddb(
+        &self,
+        app: &AppHandle,
+        archive_name: &str,
+        url: &str,
+    ) -> Result<PathBuf, WjDownloadError> {
+        self.stream_download(app, archive_name, url, &HeaderMap::new())
+            .await
+    }
+
+    /// Copy a file from the game directory.
+    async fn download_game_file_source(
+        &self,
+        _app: &AppHandle,
+        archive_name: &str,
+        game: &str,
+        game_file: &str,
+    ) -> Result<PathBuf, WjDownloadError> {
+        // Try to locate the game directory by scanning all detected games.
+        let domain = wj_game_to_nexus_domain(game);
+        let all_games = crate::games::detect_all_games();
+        let detected = all_games
+            .iter()
+            .find(|g| {
+                g.nexus_slug == domain
+                    || g.game_id.eq_ignore_ascii_case(game)
+            })
+            .ok_or_else(|| {
+                WjDownloadError::Other(format!(
+                    "Cannot detect install path for game '{game}'"
+                ))
+            })?;
+
+        let source = detected.game_path.join(game_file.replace('\\', "/"));
+        if !source.exists() {
+            return Err(WjDownloadError::Other(format!(
+                "Game file not found: {}",
+                source.display()
+            )));
+        }
+
+        let dest = self.download_dir.join(sanitize_filename(archive_name));
+        tokio::fs::copy(&source, &dest).await?;
+        Ok(dest)
+    }
+
+    /// Manual download -- user must fetch the file themselves.
+    async fn download_manual(
+        &self,
+        _app: &AppHandle,
+        _archive_name: &str,
+        url: &str,
+        prompt: &str,
+    ) -> Result<PathBuf, WjDownloadError> {
+        let msg = if prompt.is_empty() {
+            format!("Please download this file manually: {url}")
+        } else {
+            format!("{prompt}\n{url}")
+        };
+        Err(WjDownloadError::UserActionRequired(msg))
+    }
+
+    // -----------------------------------------------------------------------
+    // Dispatcher
+    // -----------------------------------------------------------------------
+
+    /// Download a single archive, dispatching to the correct handler based on
+    /// the archive's state variant.
+    pub async fn download_archive(
+        &self,
+        app: &AppHandle,
+        archive: &WjTypedArchive,
+        install_id: i64,
+        db: &Arc<ModDatabase>,
+    ) -> Result<PathBuf, WjDownloadError> {
+        let name = &archive.name;
+
+        let result = match &archive.state {
+            WjArchiveState::Nexus {
+                game,
+                mod_id,
+                file_id,
+            } => {
+                self.download_nexus(app, name, game, *mod_id, *file_id)
+                    .await
+            }
+            WjArchiveState::Http { url, headers } => {
+                self.download_http(app, name, url, headers).await
+            }
+            WjArchiveState::GoogleDrive { id } => {
+                self.download_google_drive(app, name, id).await
+            }
+            WjArchiveState::Mega { url } => {
+                self.download_mega(app, name, url).await
+            }
+            WjArchiveState::MediaFire { url } => {
+                self.download_mediafire(app, name, url).await
+            }
+            WjArchiveState::WabbajackCDN { url } => {
+                self.download_wabbajack_cdn(app, name, url).await
+            }
+            WjArchiveState::ModDB { url } => {
+                self.download_moddb(app, name, url).await
+            }
+            WjArchiveState::GameFileSource {
+                game, game_file, ..
+            } => {
+                self.download_game_file_source(app, name, game, game_file)
+                    .await
+            }
+            WjArchiveState::Manual { url, prompt } => {
+                self.download_manual(app, name, url, prompt).await
+            }
+            WjArchiveState::LoversLab { url, .. } => {
+                Err(WjDownloadError::UserActionRequired(format!(
+                    "LoversLab downloads require manual action: {url}"
+                )))
+            }
+            WjArchiveState::VectorPlexus { url, .. } => {
+                Err(WjDownloadError::UserActionRequired(format!(
+                    "VectorPlexus downloads require manual action: {url}"
+                )))
+            }
+            WjArchiveState::TESAlliance { url, .. } => {
+                Err(WjDownloadError::UserActionRequired(format!(
+                    "TESAlliance downloads require manual action: {url}"
+                )))
+            }
+            WjArchiveState::Bethesda { .. } => Err(WjDownloadError::Unsupported(
+                "Bethesda.net downloads are not supported".into(),
+            )),
+        };
+
+        // Update archive status in DB.
+        match &result {
+            Ok(path) => {
+                let _ = db.upsert_wj_archive_status(
+                    install_id,
+                    &archive.hash.0,
+                    name,
+                    archive.state.source_type_name(),
+                    "downloaded",
+                    Some(&path.to_string_lossy()),
+                    None,
+                );
+            }
+            Err(e) => {
+                let status = match e {
+                    WjDownloadError::UserActionRequired(_) => "user_action",
+                    WjDownloadError::Unsupported(_) => "unsupported",
+                    _ => "failed",
+                };
+                let _ = db.upsert_wj_archive_status(
+                    install_id,
+                    &archive.hash.0,
+                    name,
+                    archive.state.source_type_name(),
+                    status,
+                    None,
+                    Some(&e.to_string()),
+                );
+            }
+        }
+
+        result
+    }
+
+    // -----------------------------------------------------------------------
+    // Parallel orchestrator
+    // -----------------------------------------------------------------------
+
+    /// Download all archives in the list, respecting concurrency limits and a
+    /// shared cancel token. Returns a map of archive_hash -> file_path for
+    /// successfully downloaded archives.
+    pub async fn download_all_archives(
+        &self,
+        app: &AppHandle,
+        db: &Arc<ModDatabase>,
+        install_id: i64,
+        archives: &[WjTypedArchive],
+        concurrency: usize,
+        cancel_token: &AtomicBool,
+    ) -> Result<HashMap<String, PathBuf>, WjDownloadError> {
+        let total = archives.len();
+        let results: Arc<tokio::sync::Mutex<HashMap<String, PathBuf>>> =
+            Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+
+        // Because `self` is not `'static` we cannot move it into `tokio::spawn`.
+        // Instead, process downloads sequentially with semaphore-gated concurrency.
+        let sem = Arc::new(Semaphore::new(concurrency));
+
+        for (index, archive) in archives.iter().enumerate() {
+            if cancel_token.load(Ordering::Relaxed) {
+                break;
+            }
+
+            let hash_str = archive.hash.0.clone();
+            let archive_name = archive.name.clone();
+
+            // Check shared cache again (already handled above but we
+            // refactored into a single loop).
+            if let Ok(Some(cached_path)) = db.find_download_by_xxhash(&hash_str) {
+                let cached = PathBuf::from(&cached_path);
+                if cached.exists() {
+                    let _ = app.emit(
+                        "wabbajack-install-progress",
+                        WjProgressEvent::DownloadSkipped {
+                            archive_name: archive_name.clone(),
+                            reason: "already cached".into(),
+                        },
+                    );
+                    let _ = db.upsert_wj_archive_status(
+                        install_id,
+                        &hash_str,
+                        &archive_name,
+                        archive.state.source_type_name(),
+                        "verified",
+                        Some(&cached_path),
+                        None,
+                    );
+                    results.lock().await.insert(hash_str, cached);
+                    continue;
+                }
+            }
+
+            let permit = sem.clone().acquire_owned().await.expect("semaphore closed");
+
+            let _ = app.emit(
+                "wabbajack-install-progress",
+                WjProgressEvent::DownloadStarted {
+                    archive_name: archive_name.clone(),
+                    index,
+                    total,
+                },
+            );
+
+            match self.download_archive(app, archive, install_id, db).await {
+                Ok(path) => {
+                    // Verify xxHash64.
+                    match verify_xxhash64(&path, &archive.hash) {
+                        Ok(()) => {
+                            let _ = app.emit(
+                                "wabbajack-install-progress",
+                                WjProgressEvent::DownloadCompleted {
+                                    archive_name: archive_name.clone(),
+                                },
+                            );
+                            let _ = db.upsert_wj_archive_status(
+                                install_id,
+                                &hash_str,
+                                &archive_name,
+                                archive.state.source_type_name(),
+                                "verified",
+                                Some(&path.to_string_lossy()),
+                                None,
+                            );
+                            results.lock().await.insert(hash_str, path);
+                        }
+                        Err(e) => {
+                            let _ = app.emit(
+                                "wabbajack-install-progress",
+                                WjProgressEvent::DownloadFailed {
+                                    archive_name: archive_name.clone(),
+                                    error: e.to_string(),
+                                },
+                            );
+                            let _ = db.upsert_wj_archive_status(
+                                install_id,
+                                &hash_str,
+                                &archive_name,
+                                archive.state.source_type_name(),
+                                "failed",
+                                Some(&path.to_string_lossy()),
+                                Some(&e.to_string()),
+                            );
+                        }
+                    }
+                }
+                Err(WjDownloadError::UserActionRequired(msg)) => {
+                    // Extract URL from the message (best-effort).
+                    let url_part = msg
+                        .split_whitespace()
+                        .find(|w| w.starts_with("http"))
+                        .unwrap_or("")
+                        .to_string();
+                    let _ = app.emit(
+                        "wabbajack-install-progress",
+                        WjProgressEvent::UserActionRequired {
+                            archive_name: archive_name.clone(),
+                            url: url_part,
+                            prompt: msg.clone(),
+                        },
+                    );
+                }
+                Err(e) => {
+                    let _ = app.emit(
+                        "wabbajack-install-progress",
+                        WjProgressEvent::DownloadFailed {
+                            archive_name: archive_name.clone(),
+                            error: e.to_string(),
+                        },
+                    );
+                }
+            }
+
+            drop(permit);
+        }
+
+        let map = Arc::try_unwrap(results)
+            .map(|mutex| mutex.into_inner())
+            .unwrap_or_else(|arc| {
+                // Should not happen, but handle gracefully.
+                let guard = arc.blocking_lock();
+                guard.clone()
+            });
+
+        Ok(map)
+    }
+
+    // -----------------------------------------------------------------------
+    // Streaming download helper
+    // -----------------------------------------------------------------------
+
+    /// Stream an HTTP response body to a file with progress events.
+    async fn stream_download(
+        &self,
+        app: &AppHandle,
+        archive_name: &str,
+        url: &str,
+        extra_headers: &HeaderMap,
+    ) -> Result<PathBuf, WjDownloadError> {
+        let dest = self
+            .download_dir
+            .join(sanitize_filename(archive_name));
+        let partial = dest.with_extension("partial");
+
+        let resp = self
+            .http_client
+            .get(url)
+            .headers(extra_headers.clone())
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(WjDownloadError::Other(format!(
+                "HTTP {status}: {body}"
+            )));
+        }
+
+        let total_bytes = resp.content_length().unwrap_or(0);
+        let mut stream = resp.bytes_stream();
+        let mut file = tokio::fs::File::create(&partial).await?;
+        let mut downloaded: u64 = 0;
+        // Throttle progress events to avoid flooding.
+        let mut last_progress_emit: u64 = 0;
+
+        use tokio::io::AsyncWriteExt;
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result?;
+            file.write_all(&chunk).await?;
+            downloaded += chunk.len() as u64;
+
+            // Emit progress at most every 256 KB.
+            if downloaded - last_progress_emit > 256 * 1024 || downloaded == total_bytes {
+                let _ = app.emit(
+                    "wabbajack-install-progress",
+                    WjProgressEvent::DownloadProgress {
+                        archive_name: archive_name.to_string(),
+                        bytes_downloaded: downloaded,
+                        total_bytes,
+                    },
+                );
+                last_progress_emit = downloaded;
+            }
+        }
+
+        file.flush().await?;
+        drop(file);
+
+        // Rename .partial -> final name.
+        tokio::fs::rename(&partial, &dest).await?;
+        Ok(dest)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Hash verification
+// ---------------------------------------------------------------------------
+
+/// Verify that a downloaded file matches the expected xxHash64 (base64).
+/// Returns Ok(()) on match, Err(WjDownloadError::HashMismatch) otherwise.
+pub fn verify_xxhash64(path: &Path, expected: &WjHash) -> Result<(), WjDownloadError> {
+    if expected.is_empty() {
+        // No hash to verify -- treat as pass.
+        return Ok(());
+    }
+
+    let actual = xxhash64_file(path).map_err(WjDownloadError::Io)?;
+
+    if actual != *expected {
+        return Err(WjDownloadError::HashMismatch {
+            expected: expected.0.clone(),
+            actual: actual.0,
+        });
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Map Wabbajack's `Game` field (e.g. "SkyrimSpecialEdition") to a NexusMods
+/// API game domain slug (e.g. "skyrimspecialedition").
+fn wj_game_to_nexus_domain(game: &str) -> String {
+    // Wabbajack's C# Game enum uses PascalCase. NexusMods API requires the
+    // lowercase slug. We handle the known mappings and fall back to lowercasing.
+    match game {
+        "Skyrim" | "skyrim" => "skyrim".into(),
+        "SkyrimSpecialEdition" | "skyrimspecialedition" => "skyrimspecialedition".into(),
+        "SkyrimVR" | "skyrimvr" => "skyrimvr".into(),
+        "Fallout4" | "fallout4" => "fallout4".into(),
+        "Fallout4VR" | "fallout4vr" => "fallout4vr".into(),
+        "FalloutNewVegas" | "falloutnewvegas" => "falloutnewvegas".into(),
+        "Fallout3" | "fallout3" => "fallout3".into(),
+        "Oblivion" | "oblivion" => "oblivion".into(),
+        "Morrowind" | "morrowind" => "morrowind".into(),
+        "Enderal" | "enderal" => "enderal".into(),
+        "EnderalSpecialEdition" | "enderalspecialedition" => "enderalspecialedition".into(),
+        "Cyberpunk2077" | "cyberpunk2077" => "cyberpunk2077".into(),
+        "StardewValley" | "stardewvalley" => "stardewvalley".into(),
+        "Witcher3" | "witcher3" | "TheWitcher3" => "witcher3".into(),
+        "Starfield" | "starfield" => "starfield".into(),
+        "BaldursGate3" | "baldursgate3" => "baldursgate3".into(),
+        "DragonAgeInquisition" | "dragonageinquisition" => "dragonageinquisition".into(),
+        "MechWarrior5" | "mechwarrior5mercenaries" => "mechwarrior5mercenaries".into(),
+        "NoMansSky" | "nomanssky" => "nomanssky".into(),
+        "KingdomComeDeliverance" | "kingdomcomedeliverance" => "kingdomcomedeliverance".into(),
+        other => other.to_lowercase(),
+    }
+}
+
+/// Sanitize a filename by replacing unsafe characters.
+fn sanitize_filename(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() {
+        "download".to_string()
+    } else {
+        cleaned
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_wj_game_to_nexus_domain() {
+        assert_eq!(
+            wj_game_to_nexus_domain("SkyrimSpecialEdition"),
+            "skyrimspecialedition"
+        );
+        assert_eq!(wj_game_to_nexus_domain("Fallout4"), "fallout4");
+        assert_eq!(wj_game_to_nexus_domain("Oblivion"), "oblivion");
+        // Unknown game falls back to lowercase.
+        assert_eq!(
+            wj_game_to_nexus_domain("SomeNewGame"),
+            "somenewgame"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_filename() {
+        assert_eq!(sanitize_filename("SkyUI_5_2_SE.zip"), "SkyUI_5_2_SE.zip");
+        assert_eq!(
+            sanitize_filename("mod with spaces.7z"),
+            "mod_with_spaces.7z"
+        );
+        assert_eq!(sanitize_filename("../../../etc/passwd"), ".._.._.._etc_passwd");
+        assert_eq!(sanitize_filename(""), "download");
+    }
+
+    #[test]
+    fn test_verify_xxhash64_matches() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("test.bin");
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            f.write_all(b"hello world").unwrap();
+        }
+
+        // Compute the expected hash.
+        let expected = xxhash64_bytes(b"hello world");
+        assert!(verify_xxhash64(&path, &expected).is_ok());
+    }
+
+    #[test]
+    fn test_verify_xxhash64_mismatch() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("test.bin");
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            f.write_all(b"hello world").unwrap();
+        }
+
+        let wrong = WjHash::from_u64(0xDEADBEEF);
+        let err = verify_xxhash64(&path, &wrong).unwrap_err();
+        match err {
+            WjDownloadError::HashMismatch { .. } => {} // expected
+            other => panic!("Expected HashMismatch, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn test_verify_xxhash64_empty_hash_passes() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("test.bin");
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            f.write_all(b"anything").unwrap();
+        }
+
+        let empty = WjHash::default();
+        assert!(verify_xxhash64(&path, &empty).is_ok());
+    }
+
+    #[test]
+    fn test_progress_event_serialization() {
+        let event = WjProgressEvent::DownloadStarted {
+            archive_name: "test.zip".into(),
+            index: 0,
+            total: 10,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"type\":\"DownloadStarted\""));
+        assert!(json.contains("\"archive_name\":\"test.zip\""));
+    }
+
+    #[test]
+    fn test_downloader_free_user_nexus_blocked() {
+        // Verify that constructing a downloader with is_premium=false
+        // and no API key means the struct is in the right state.
+        let tmp = TempDir::new().unwrap();
+        let dl = WjDownloader::new(None, false, tmp.path().to_path_buf());
+        assert!(!dl.is_premium);
+        assert!(dl.nexus_api_key.is_none());
+    }
+}

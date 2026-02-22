@@ -686,11 +686,13 @@ export async function browseCollections(
   offset: number,
   sortField?: string,
   sortDirection?: string,
+  searchText?: string,
 ): Promise<CollectionSearchResult> {
   return invoke("browse_collections_cmd", {
     gameDomain, count, offset,
     sortField: sortField ?? null,
     sortDirection: sortDirection ?? null,
+    searchText: searchText ?? null,
   });
 }
 
