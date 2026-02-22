@@ -888,7 +888,7 @@
     background: var(--bg-base);
   }
 
-  :global(html.vibrancy-active) .app-shell {
+  :global(html.vibrancy-active:not([data-theme="light"])) .app-shell {
     background: transparent;
   }
 
@@ -936,7 +936,7 @@
       0 4px 16px rgba(0, 0, 0, 0.04);
   }
 
-  :global(html.vibrancy-active) .sidebar {
+  :global(html.vibrancy-active:not([data-theme="light"])) .sidebar {
     backdrop-filter: blur(24px);
     -webkit-backdrop-filter: blur(24px);
     border-color: var(--separator);
@@ -1272,7 +1272,7 @@
     box-shadow: inset 0 1px 0 0 var(--surface);
   }
 
-  :global(html.vibrancy-active) .content-column {
+  :global(html.vibrancy-active:not([data-theme="light"])) .content-column {
     backdrop-filter: blur(16px) saturate(1.1);
     -webkit-backdrop-filter: blur(16px) saturate(1.1);
   }

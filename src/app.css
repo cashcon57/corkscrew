@@ -167,7 +167,7 @@
    Vibrancy Overrides (macOS)
    ============================== */
 
-html.vibrancy-active {
+html.vibrancy-active:not([data-theme="light"]) {
   --bg-base: var(--bg-base-vibrancy);
   --bg-primary: var(--bg-primary-vibrancy);
   --bg-grouped: var(--bg-grouped-vibrancy);
@@ -175,9 +175,15 @@ html.vibrancy-active {
   --surface: var(--surface-vibrancy);
 }
 
-html.vibrancy-active,
-html.vibrancy-active body {
+html.vibrancy-active:not([data-theme="light"]),
+html.vibrancy-active:not([data-theme="light"]) body {
   background: transparent !important;
+}
+
+/* Light mode on macOS: opaque backgrounds, no vibrancy bleed-through */
+html.vibrancy-active[data-theme="light"],
+html.vibrancy-active[data-theme="light"] body {
+  background: var(--bg-base) !important;
 }
 
 /* ==============================
