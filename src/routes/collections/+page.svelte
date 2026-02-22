@@ -28,6 +28,8 @@
   import DOMPurify from "dompurify";
   import CompatibilityPanel from "$lib/components/CompatibilityPanel.svelte";
   import RequiredToolsPrompt from "$lib/components/RequiredToolsPrompt.svelte";
+  import NexusLogo from "$lib/components/NexusLogo.svelte";
+  import WabbajackLogo from "$lib/components/WabbajackLogo.svelte";
 
   const NEXUS_API_KEY_URL = "https://www.nexusmods.com/users/myaccount?tab=api+access";
 
@@ -47,7 +49,7 @@
   }
 
   // ---- Tab State ----
-  let activeTab = $state<"browse" | "my" | "wabbajack" | "mods">("browse");
+  let activeTab = $state<"my" | "nexus" | "wabbajack" | "browse_mods">("my");
   let myCollections = $state<CollectionSummary[]>([]);
   let loadingMyCollections = $state(false);
   let switchingCollection = $state<string | null>(null);
@@ -156,7 +158,7 @@
   });
 
   $effect(() => {
-    if (activeTab === "mods" && $selectedGame) {
+    if (activeTab === "browse_mods" && $selectedGame) {
       loadBrowseMods(browseModsCategory);
     }
   });
@@ -211,9 +213,10 @@
   // ---- Mod Browse State ----
   let browseMods = $state<NexusModInfo[]>([]);
   let browseModsLoading = $state(false);
-  let browseModsCategory = $state<"trending" | "latest" | "updated">("trending");
+  let browseModsCategory = $state<"all" | "trending" | "latest" | "updated">("all");
   let browseModsSearch = $state("");
   let browseModsShowNsfw = $state(false);
+  let browseModsSort = $state<"endorsements" | "downloads" | "name" | "updated">("endorsements");
 
   const filteredBrowseMods = $derived.by(() => {
     let result = browseMods;
@@ -228,6 +231,16 @@
         m.summary.toLowerCase().includes(q)
       );
     }
+    // Sort
+    result = [...result].sort((a, b) => {
+      switch (browseModsSort) {
+        case "endorsements": return b.endorsement_count - a.endorsement_count;
+        case "downloads": return b.unique_downloads - a.unique_downloads;
+        case "name": return a.name.localeCompare(b.name);
+        case "updated": return (b.updated_at ?? "").localeCompare(a.updated_at ?? "");
+        default: return 0;
+      }
+    });
     return result;
   });
 
@@ -636,20 +649,23 @@
 <div class="collections-page">
   <!-- Tab Switcher -->
   <div class="tab-bar">
-    <button class="tab-btn" class:tab-active={activeTab === "browse"} onclick={() => activeTab = "browse"}>
-      Browse
-    </button>
     <button class="tab-btn" class:tab-active={activeTab === "my"} onclick={() => activeTab = "my"}>
       My Collections
       {#if myCollections.length > 0}
         <span class="tab-count">{myCollections.length}</span>
       {/if}
     </button>
+    <button class="tab-btn" class:tab-active={activeTab === "nexus"} onclick={() => activeTab = "nexus"}>
+      <NexusLogo size={14} />
+      Nexus Mods Collections
+    </button>
     <button class="tab-btn" class:tab-active={activeTab === "wabbajack"} onclick={() => activeTab = "wabbajack"}>
+      <WabbajackLogo size={14} />
       Wabbajack Lists
     </button>
-    <button class="tab-btn" class:tab-active={activeTab === "mods"} onclick={() => activeTab = "mods"}>
-      Browse Mods
+    <button class="tab-btn" class:tab-active={activeTab === "browse_mods"} onclick={() => activeTab = "browse_mods"}>
+      <NexusLogo size={14} />
+      Browse Nexus
     </button>
   </div>
 
@@ -879,9 +895,10 @@
     {:else if myCollections.length === 0}
       <div class="my-collections-empty">
         <p>No collections installed yet.</p>
-        <p class="muted">Install a collection from the Browse tab to get started.</p>
-        <button class="btn btn-secondary" onclick={() => activeTab = "browse"}>
-          Browse Collections
+        <p class="muted">Install a collection from Nexus Mods Collections to get started.</p>
+        <button class="btn btn-secondary" onclick={() => activeTab = "nexus"}>
+          <NexusLogo size={14} />
+          Browse Nexus Mods Collections
         </button>
       </div>
     {:else}
@@ -1338,11 +1355,11 @@
       <p style="color: var(--text-tertiary); text-align: center; padding: 48px;">Failed to load Wabbajack Lists.</p>
     {/await}
 
-  {:else if activeTab === "mods"}
-    <!-- Browse Mods Tab -->
+  {:else if activeTab === "browse_mods"}
+    <!-- Browse Nexus Tab -->
     <header class="page-header">
       <div class="header-text">
-        <h2 class="page-title">Browse Mods</h2>
+        <h2 class="page-title"><NexusLogo size={22} /> Browse Nexus</h2>
         <p class="page-subtitle">Discover mods on NexusMods for {$selectedGame?.display_name ?? "your game"}</p>
       </div>
       <div class="header-right">
@@ -1367,13 +1384,22 @@
             <circle cx="11" cy="11" r="8" />
             <line x1="21" y1="21" x2="16.65" y2="16.65" />
           </svg>
-          <input type="text" class="search-input" placeholder="Filter results..." bind:value={browseModsSearch} />
+          <input type="text" class="search-input" placeholder="Search mods..." bind:value={browseModsSearch} />
         </div>
         <div class="filter-group">
           <select class="filter-select" bind:value={browseModsCategory} onchange={() => loadBrowseMods(browseModsCategory)}>
+            <option value="all">All Mods</option>
             <option value="trending">Trending</option>
-            <option value="latest">Latest</option>
-            <option value="updated">Updated</option>
+            <option value="latest">Latest Added</option>
+            <option value="updated">Recently Updated</option>
+          </select>
+        </div>
+        <div class="filter-group">
+          <select class="filter-select" bind:value={browseModsSort}>
+            <option value="endorsements">Sort: Endorsements</option>
+            <option value="downloads">Sort: Downloads</option>
+            <option value="name">Sort: Name</option>
+            <option value="updated">Sort: Updated</option>
           </select>
         </div>
         <label class="nsfw-toggle">
@@ -1444,11 +1470,11 @@
       {/if}
     {/if}
 
-  {:else}
-    <!-- Browse View -->
+  {:else if activeTab === "nexus"}
+    <!-- Nexus Mods Collections -->
     <header class="page-header">
       <div class="header-text">
-        <h2 class="page-title">Collections</h2>
+        <h2 class="page-title"><NexusLogo size={22} /> Nexus Mods Collections</h2>
         <p class="page-subtitle">Browse and install curated mod collections from Nexus Mods</p>
       </div>
       <div class="header-right">

@@ -517,19 +517,48 @@ impl NexusClient {
         Ok(updates)
     }
 
-    /// Browse mods on NexusMods by category (trending, latest, updated).
+    /// Browse mods on NexusMods by category (trending, latest, updated, all).
     ///
-    /// Returns up to 20 mods from the specified browse category.
+    /// When `category` is `"all"`, fetches trending + latest + updated
+    /// concurrently and deduplicates by mod_id, returning the combined set.
     pub async fn browse_mods(
         &self,
         game_slug: &str,
         category: &str,
     ) -> Result<Vec<NexusModInfo>> {
-        let endpoint = match category {
-            "latest" => "latest_added",
-            "updated" => "updated",
-            _ => "trending",
-        };
+        if category == "all" {
+            // Fetch all three endpoints concurrently for maximum coverage
+            let (trending, latest, updated) = tokio::join!(
+                self.browse_mods_single(game_slug, "trending"),
+                self.browse_mods_single(game_slug, "latest_added"),
+                self.browse_mods_single(game_slug, "updated"),
+            );
+
+            let mut seen = std::collections::HashSet::new();
+            let mut combined = Vec::new();
+            for list in [trending, latest, updated] {
+                for m in list.unwrap_or_default() {
+                    if seen.insert(m.mod_id) {
+                        combined.push(m);
+                    }
+                }
+            }
+            Ok(combined)
+        } else {
+            self.browse_mods_single(game_slug, match category {
+                "latest" => "latest_added",
+                "updated" => "updated",
+                _ => "trending",
+            }).await
+        }
+    }
+
+    /// Fetch a single browse endpoint.
+    async fn browse_mods_single(
+        &self,
+        game_slug: &str,
+        endpoint: &str,
+    ) -> Result<Vec<NexusModInfo>> {
         let url = format!("{NEXUS_API_BASE}/games/{game_slug}/mods/{endpoint}.json");
         let json = self.get_json(&url).await?;
 

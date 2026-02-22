@@ -15,6 +15,7 @@
   import DOMPurify from "dompurify";
   import CompatibilityPanel from "$lib/components/CompatibilityPanel.svelte";
   import RequiredToolsPrompt from "$lib/components/RequiredToolsPrompt.svelte";
+  import WabbajackLogo from "$lib/components/WabbajackLogo.svelte";
 
   let modlists = $state<ModlistSummary[]>([]);
   let filtered = $state<ModlistSummary[]>([]);
@@ -616,7 +617,7 @@
     <!-- Browse View -->
     <header class="page-header">
       <div class="header-text">
-        <h2 class="page-title">Wabbajack Lists</h2>
+        <h2 class="page-title"><WabbajackLogo size={22} /> Wabbajack Lists</h2>
         <p class="page-subtitle">
           Browse Wabbajack modlists — curated, pre-configured mod setups
         </p>

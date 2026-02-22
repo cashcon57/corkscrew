@@ -950,6 +950,27 @@ fn launch_game_cmd(
         use_skse
     );
 
+    // Auto-apply display fix for Skyrim SE before launching to ensure fullscreen
+    if game_id == "skyrimse" {
+        match display_fix::auto_fix_display(&bottle) {
+            Ok(result) => {
+                if result.fixed {
+                    log::info!(
+                        "Auto-applied display fix: {}x{} fullscreen (was {}x{} fs={} borderless={})",
+                        result.applied.width, result.applied.height,
+                        result.previous.width, result.previous.height,
+                        result.previous.fullscreen, result.previous.borderless
+                    );
+                } else {
+                    log::debug!("Display settings already correct, no fix needed");
+                }
+            }
+            Err(e) => {
+                log::warn!("Could not auto-fix display settings: {}", e);
+            }
+        }
+    }
+
     launcher::launch_game(&bottle, &exe_path, Some(&game_path))
         .map_err(|e| format!("Launch failed ({}): {}", bottle.source, e))
 }

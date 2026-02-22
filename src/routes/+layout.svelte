@@ -1540,6 +1540,12 @@
     position: relative;
   }
 
+  @media (max-width: 800px) {
+    .content {
+      padding: var(--space-2) var(--space-3) var(--space-3);
+    }
+  }
+
   /* --- Toasts --- */
 
   .toast {

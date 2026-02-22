@@ -1383,6 +1383,7 @@
       {#if $installedMods.length > 0}
         <button
           class="btn btn-secondary btn-deploy"
+          class:deploying
           onclick={handleDeploy}
           disabled={deploying || purging}
           title="Deploy all enabled mods to the game directory"
@@ -2511,6 +2512,13 @@
     position: relative;
   }
 
+  @media (max-width: 800px) {
+    .mods-page {
+      padding: var(--space-3) var(--space-3);
+      gap: var(--space-2);
+    }
+  }
+
   /* Two-column content grid */
   .content-grid {
     display: grid;
@@ -2760,6 +2768,7 @@
   .game-banner {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: var(--space-3);
     padding: var(--space-3) var(--space-4);
     background: var(--surface);
@@ -2846,6 +2855,7 @@
   .game-banner-actions {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: var(--space-2);
     flex-shrink: 0;
   }
@@ -2857,6 +2867,7 @@
     display: flex;
     align-items: center;
     justify-content: flex-end;
+    flex-wrap: wrap;
     gap: var(--space-2);
     flex-shrink: 0;
   }
@@ -4328,6 +4339,7 @@
   .mod-detail-panel {
     width: 280px;
     min-width: 240px;
+    max-width: 320px;
     flex-shrink: 0;
     border-radius: var(--radius-lg);
     background: var(--bg-primary);
@@ -4335,6 +4347,7 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    overflow-y: auto;
     animation: detailSlideIn 0.15s var(--ease-out);
   }
 
@@ -4600,6 +4613,10 @@
     min-width: 100px;
   }
 
+  .btn-deploy.deploying {
+    min-width: 160px;
+  }
+
   .deploy-progress-track {
     position: absolute;
     inset: 0;
@@ -4616,9 +4633,6 @@
     position: relative;
     z-index: 1;
     font-size: 12px;
-    max-width: 120px;
-    overflow: hidden;
-    text-overflow: ellipsis;
     white-space: nowrap;
   }
 
