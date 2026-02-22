@@ -122,8 +122,7 @@ git add \
   src-tauri/tauri.conf.json \
   package.json \
   package-lock.json \
-  src-tauri/Cargo.toml \
-  src-tauri/Cargo.lock
+  src-tauri/Cargo.toml
 
 git commit -m "$(cat <<EOF
 v${VERSION}
