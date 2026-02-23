@@ -247,7 +247,7 @@
   });
 
   $effect(() => {
-    if (activeTab === "browse_mods" && $selectedGame && account?.is_premium) {
+    if (activeTab === "browse_mods" && $selectedGame && account?.connected) {
       loadBrowseMods();
       loadBrowseCategories();
       loadBrowseInstalledIds();
@@ -1823,7 +1823,7 @@
         <WebViewToggle
           bind:this={browseWebviewToggle}
           url={`https://www.nexusmods.com/${getGameSlug()}/mods/`}
-          defaultMode={account?.is_premium ? "app" : "website"}
+          defaultMode={account?.connected ? "app" : "website"}
           onModeChange={(m) => browseViewMode = m}
         />
         {#if !browseModsLoading && browseModsTotalCount > 0 && browseViewMode === "app"}
@@ -1853,22 +1853,6 @@
         <p class="premium-gate-desc">Connect your NexusMods account in Settings to browse mods in-app.</p>
         <button class="btn btn-accent" onclick={() => goto("/settings")}>Go to Settings</button>
         <p class="premium-gate-hint">Or switch to "Website" above to browse NexusMods directly.</p>
-      </div>
-    {:else if !account?.is_premium}
-      <div class="premium-gate">
-        <div class="premium-gate-icon">
-          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#ff9f0a" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 2L2 7l10 5 10-5-10-5z" />
-            <path d="M2 17l10 5 10-5" />
-            <path d="M2 12l10 5 10-5" />
-          </svg>
-        </div>
-        <h3 class="premium-gate-title">Premium Required for In-App Browsing</h3>
-        <p class="premium-gate-desc">In-app mod browsing uses the NexusMods API and is available to Premium members. Free users can browse the website directly.</p>
-        <button class="btn btn-accent" onclick={() => safeOpenUrl(`https://www.nexusmods.com/${getGameSlug()}/mods/`)}>
-          Open NexusMods.com
-        </button>
-        <p class="premium-gate-hint">Switch to "Website" above to browse within Corkscrew, or upgrade to Premium on NexusMods for full in-app access.</p>
       </div>
     {:else}
       {#if selectedBrowseMod}
@@ -2267,7 +2251,7 @@
         <WebViewToggle
           bind:this={collectionsWebviewToggle}
           url={`https://next.nexusmods.com/${getGameSlug()}/collections`}
-          defaultMode={account?.is_premium ? "app" : "website"}
+          defaultMode={account?.connected ? "app" : "website"}
           onModeChange={(m) => collectionsViewMode = m}
         />
         {#if account?.connected}
@@ -2306,22 +2290,6 @@
         <p class="premium-gate-desc">Connect your NexusMods account in Settings to browse collections in-app.</p>
         <button class="btn btn-accent" onclick={() => goto("/settings")}>Go to Settings</button>
         <p class="premium-gate-hint">Or switch to "Website" above to browse NexusMods Collections directly.</p>
-      </div>
-    {:else if !account?.is_premium}
-      <div class="premium-gate">
-        <div class="premium-gate-icon">
-          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#ff9f0a" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 2L2 7l10 5 10-5-10-5z" />
-            <path d="M2 17l10 5 10-5" />
-            <path d="M2 12l10 5 10-5" />
-          </svg>
-        </div>
-        <h3 class="premium-gate-title">Premium Required for In-App Collections</h3>
-        <p class="premium-gate-desc">In-app collection browsing uses the NexusMods API and is available to Premium members.</p>
-        <button class="btn btn-accent" onclick={() => safeOpenUrl(`https://next.nexusmods.com/${getGameSlug()}/collections`)}>
-          Open NexusMods Collections
-        </button>
-        <p class="premium-gate-hint">Switch to "Website" above to browse within Corkscrew, or upgrade to Premium on NexusMods for full in-app access.</p>
       </div>
     {:else if loading || loadingDetail}
       <div class="loading-container">

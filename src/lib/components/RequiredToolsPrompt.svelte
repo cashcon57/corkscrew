@@ -79,7 +79,9 @@
           {/if}
           <div class="tool-info">
             <span class="tool-name">{tool.tool_name}</span>
-            {#if tool.wine_compat === "not_recommended" && tool.recommended_alternative}
+            {#if errors[tool.tool_id]}
+              <span class="tool-error">{errors[tool.tool_id]}</span>
+            {:else if tool.wine_compat === "not_recommended" && tool.recommended_alternative}
               <span class="tool-warning">
                 Not recommended for Wine — use {tools.find(t => t.tool_id === tool.recommended_alternative)?.tool_name ?? tool.recommended_alternative} instead
               </span>
@@ -97,7 +99,9 @@
             {:else if installing.has(tool.tool_id)}
               <span class="status-badge installing">Installing...</span>
             {:else if errors[tool.tool_id]}
-              <span class="status-badge error" title={errors[tool.tool_id]}>Failed</span>
+              <button class="status-badge error retry-btn" title={errors[tool.tool_id]} onclick={() => handleInstallTool(tool)}>
+                Failed — Retry
+              </button>
             {:else if tool.can_auto_install}
               <button class="btn btn-sm btn-accent" onclick={() => handleInstallTool(tool)}>Install</button>
             {:else if tool.download_url}
@@ -204,6 +208,7 @@
     flex-direction: column;
     gap: 2px;
     min-width: 0;
+    flex: 1;
   }
 
   .tool-name {
@@ -220,6 +225,18 @@
   .tool-note {
     font-size: 0.75rem;
     color: var(--text-secondary, #aaa);
+  }
+
+  .tool-error {
+    font-size: 0.72rem;
+    color: #ef4444;
+    line-height: 1.3;
+    max-width: 280px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
   }
 
   .tool-status {
@@ -245,6 +262,18 @@
 
   .status-badge.error {
     color: #ef4444;
+  }
+
+  .retry-btn {
+    background: transparent;
+    border: 1px solid #ef4444;
+    cursor: pointer;
+    border-radius: 4px;
+    transition: background 0.15s;
+  }
+
+  .retry-btn:hover {
+    background: rgba(239, 68, 68, 0.1);
   }
 
   .status-badge.manual {

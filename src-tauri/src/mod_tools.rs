@@ -384,8 +384,8 @@ fn builtin_tools() -> Vec<ModTool> {
             category: "Cleaning".into(),
             can_auto_install: true,
             github_repo: Some("TES5Edit/TES5Edit".into()),
-            nexus_mod_id: None,
-            nexus_game_slug: None,
+            nexus_mod_id: Some(164),
+            nexus_game_slug: Some("skyrimspecialedition".into()),
             download_url: None,
             license: "MPL-2.0".into(),
             wine_notes: Some("Works well under Wine/Proton".into()),
@@ -508,10 +508,10 @@ fn builtin_tools() -> Vec<ModTool> {
             detected_path: None,
             requires_wine: true,
             category: "INI".into(),
-            can_auto_install: false,
+            can_auto_install: true,
             github_repo: None,
-            nexus_mod_id: None,
-            nexus_game_slug: None,
+            nexus_mod_id: Some(631),
+            nexus_game_slug: Some("site".into()),
             download_url: Some("https://www.nexusmods.com/site/mods/631".into()),
             license: "CC BY-NC-SA 4.0".into(),
             wine_notes: Some("Python-based; may work under Wine. Corkscrew's built-in INI editor provides similar functionality natively.".into()),
@@ -759,8 +759,8 @@ fn pick_asset<'a>(tool_id: &str, assets: &'a [GitHubAsset]) -> Option<&'a GitHub
 /// Download and install a tool from GitHub releases or NexusMods into the game's
 /// Tools directory.
 ///
-/// Tries GitHub first (if `github_repo` is set), then falls back to NexusMods
-/// (if `nexus_mod_id` is set and user has a Nexus API key with premium).
+/// Tries GitHub first (if `github_repo` is set). If that fails, falls back to
+/// NexusMods (if `nexus_mod_id` is set and user has a Nexus API key with premium).
 ///
 /// Returns the path to the installed tool's executable.
 pub async fn install_tool(tool_id: &str, game_data_dir: &Path) -> Result<String> {
@@ -774,9 +774,26 @@ pub async fn install_tool(tool_id: &str, game_data_dir: &Path) -> Result<String>
         .user_agent(format!("Corkscrew/{}", env!("CARGO_PKG_VERSION")))
         .build()?;
 
-    // Try GitHub first, then NexusMods
+    let has_nexus = tool_def.nexus_mod_id.is_some() && tool_def.nexus_game_slug.is_some();
+
+    // Try GitHub first, then fall back to NexusMods
     let (archive_bytes, archive_name) = if let Some(github_repo) = &tool_def.github_repo {
-        install_tool_from_github(tool_id, github_repo, &client).await?
+        match install_tool_from_github(tool_id, github_repo, &client).await {
+            Ok(result) => result,
+            Err(gh_err) => {
+                if has_nexus {
+                    let mod_id = tool_def.nexus_mod_id.unwrap();
+                    let game_slug = tool_def.nexus_game_slug.as_ref().unwrap();
+                    info!(
+                        "GitHub install failed for '{}': {}. Trying NexusMods fallback...",
+                        tool_id, gh_err
+                    );
+                    install_tool_from_nexus(tool_id, mod_id, game_slug, &client).await?
+                } else {
+                    return Err(gh_err);
+                }
+            }
+        }
     } else if let (Some(mod_id), Some(game_slug)) =
         (&tool_def.nexus_mod_id, &tool_def.nexus_game_slug)
     {
@@ -902,27 +919,40 @@ async fn install_tool_from_nexus(
         ));
     }
 
-    // Get the mod's files list and pick the latest main file
+    // Get the mod's files list and pick the latest file
     let files = nexus
         .get_mod_files(game_slug, mod_id)
         .await
         .map_err(|e| ToolError::Other(format!("Failed to fetch mod files: {}", e)))?;
 
-    // Find the latest main file (category_id 1 = MAIN, category_id 4 = OLD_VERSION)
-    let main_file = files
-        .iter()
-        .filter(|f| {
-            f.get("category_id")
-                .and_then(|v| v.as_i64())
-                .map(|c| c == 1) // MAIN category
-                .unwrap_or(false)
-        })
-        .max_by_key(|f| {
-            f.get("uploaded_timestamp")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0)
-        })
-        .ok_or_else(|| ToolError::Other("No main file found on NexusMods page".into()))?;
+    // NexusMods file categories:
+    // 1 = MAIN, 2 = UPDATE, 3 = OPTIONAL, 4 = OLD_VERSION, 5 = MISCELLANEOUS, 6 = ARCHIVED
+    // Try MAIN first, then UPDATE, then any non-old/archived category
+    let pick_latest = |category_ids: &[i64]| -> Option<&serde_json::Value> {
+        files
+            .iter()
+            .filter(|f| {
+                f.get("category_id")
+                    .and_then(|v| v.as_i64())
+                    .map(|c| category_ids.contains(&c))
+                    .unwrap_or(false)
+            })
+            .max_by_key(|f| {
+                f.get("uploaded_timestamp")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0)
+            })
+    };
+
+    let main_file = pick_latest(&[1])
+        .or_else(|| pick_latest(&[2]))
+        .or_else(|| pick_latest(&[1, 2, 3, 5]))
+        .ok_or_else(|| {
+            ToolError::Other(format!(
+                "No installable file found on NexusMods for {}/mods/{}",
+                game_slug, mod_id
+            ))
+        })?;
 
     let file_id = main_file
         .get("file_id")
