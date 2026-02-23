@@ -711,6 +711,134 @@ pub async fn install_collection(
     );
 
     // ---------------------------------------------------------------
+    // Phase 1.5: Concurrent Extraction
+    // ---------------------------------------------------------------
+    // Extract all pre-downloaded archives concurrently using dedicated
+    // blocking threads. This is the biggest single speedup: archive
+    // extraction is CPU+IO-bound and perfectly parallelizable.
+    let max_extract = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(2, max_concurrent);
+
+    // Collect archives that need extraction
+    let archives_to_extract: Vec<(usize, PathBuf, String)> = install_order
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &mod_idx)| {
+            if completed_statuses.contains_key(&i) {
+                return None;
+            }
+            let entry = &manifest.mods[mod_idx];
+            let is_already = if let Some(nexus_id) = entry.source.mod_id {
+                existing_mods
+                    .iter()
+                    .any(|m| m.nexus_mod_id == Some(nexus_id))
+            } else {
+                existing_mods
+                    .iter()
+                    .any(|m| m.name.eq_ignore_ascii_case(&entry.name))
+            };
+            if is_already {
+                return None;
+            }
+            pre_downloaded
+                .get(&i)
+                .map(|p| (i, p.clone(), entry.name.clone()))
+        })
+        .collect();
+
+    let mut pre_extracted: HashMap<usize, PathBuf> = HashMap::new();
+
+    if !archives_to_extract.is_empty() {
+        let _ = app.emit(
+            INSTALL_PROGRESS_EVENT,
+            InstallProgress::StagingPhaseStarted {
+                total_mods: archives_to_extract.len(),
+                max_concurrent: max_extract,
+            },
+        );
+
+        let extract_sem = Arc::new(Semaphore::new(max_extract));
+        let mut extract_handles = Vec::with_capacity(archives_to_extract.len());
+
+        for (install_idx, archive_path, mod_name) in &archives_to_extract {
+            let sem = extract_sem.clone();
+            let archive = archive_path.clone();
+            let idx = *install_idx;
+            let app_c = app.clone();
+            let name = mod_name.clone();
+
+            let handle = tokio::spawn(async move {
+                let _permit = sem.acquire().await.expect("semaphore closed");
+
+                let _ = app_c.emit(
+                    INSTALL_PROGRESS_EVENT,
+                    InstallProgress::StagingModStarted {
+                        mod_index: idx,
+                        mod_name: name.clone(),
+                    },
+                );
+
+                let temp_dir = std::env::temp_dir()
+                    .join(format!("corkscrew_extract_{}", idx));
+
+                let result = tokio::task::spawn_blocking(move || {
+                    if temp_dir.exists() {
+                        let _ = std::fs::remove_dir_all(&temp_dir);
+                    }
+                    let _ = std::fs::create_dir_all(&temp_dir);
+                    match crate::installer::extract_archive(&archive, &temp_dir) {
+                        Ok(_) => Ok(temp_dir),
+                        Err(e) => {
+                            let _ = std::fs::remove_dir_all(&temp_dir);
+                            Err(e.to_string())
+                        }
+                    }
+                })
+                .await;
+
+                match result {
+                    Ok(Ok(dir)) => {
+                        let _ = app_c.emit(
+                            INSTALL_PROGRESS_EVENT,
+                            InstallProgress::StagingModCompleted {
+                                mod_index: idx,
+                                mod_name: name,
+                            },
+                        );
+                        Some((idx, dir))
+                    }
+                    Ok(Err(e)) => {
+                        log::warn!("Pre-extraction failed for mod {}: {}", idx, e);
+                        None
+                    }
+                    Err(e) => {
+                        log::warn!("Extraction task panicked for mod {}: {}", idx, e);
+                        None
+                    }
+                }
+            });
+
+            extract_handles.push(handle);
+        }
+
+        // Collect extraction results
+        let extract_results = futures::future::join_all(extract_handles).await;
+        for join_result in extract_results {
+            if let Ok(Some((idx, dir))) = join_result {
+                pre_extracted.insert(idx, dir);
+            }
+        }
+
+        log::info!(
+            "Pre-extracted {}/{} archives concurrently",
+            pre_extracted.len(),
+            archives_to_extract.len()
+        );
+    }
+
+    // ---------------------------------------------------------------
     // Phase 2: Sequential Install
     // ---------------------------------------------------------------
     let _ = app.emit(
@@ -796,8 +924,9 @@ pub async fn install_collection(
             continue;
         }
 
-        // Look up pre-downloaded archive for this position (if any)
+        // Look up pre-downloaded archive and pre-extracted dir for this position
         let pre_dl = pre_downloaded.get(&i).map(|p| p.as_path());
+        let pre_ext = pre_extracted.remove(&i);
 
         let result = install_single_mod(
             app,
@@ -814,6 +943,7 @@ pub async fn install_collection(
             is_premium,
             &manifest.name,
             pre_dl,
+            pre_ext,
         )
         .await;
 
@@ -885,6 +1015,11 @@ pub async fn install_collection(
                 });
             }
         }
+    }
+
+    // Clean up any remaining pre-extracted temp dirs (for skipped/failed mods)
+    for (_idx, dir) in pre_extracted {
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // Apply plugin load order from manifest (works for any game with plugin support)
@@ -1015,6 +1150,7 @@ async fn install_single_mod(
     is_premium: bool,
     manifest_name: &str,
     pre_downloaded: Option<&Path>,
+    pre_extracted: Option<PathBuf>,
 ) -> Result<i64, InstallError> {
     let source_type = mod_entry.source.source_type.as_str();
 
@@ -1035,6 +1171,7 @@ async fn install_single_mod(
                 is_premium,
                 manifest_name,
                 pre_downloaded,
+                pre_extracted,
             )
             .await
         }
@@ -1052,6 +1189,7 @@ async fn install_single_mod(
                 api_key,
                 manifest_name,
                 pre_downloaded,
+                pre_extracted,
             )
             .await
         }
@@ -1101,6 +1239,7 @@ async fn install_nexus_mod(
     is_premium: bool,
     manifest_name: &str,
     pre_downloaded: Option<&Path>,
+    pre_extracted: Option<PathBuf>,
 ) -> Result<i64, InstallError> {
     let nexus_mod_id = mod_entry
         .source
@@ -1151,7 +1290,9 @@ async fn install_nexus_mod(
             game_id,
             bottle_name,
             data_dir,
-        )?;
+            pre_extracted,
+        )
+        .await?;
 
         let _ = db.set_nexus_ids(mod_id, nexus_mod_id, Some(nexus_file_id));
         let _ = db.set_source_url(
@@ -1195,7 +1336,9 @@ async fn install_nexus_mod(
                 game_id,
                 bottle_name,
                 data_dir,
-            )?;
+                None,
+            )
+            .await?;
 
             let _ = db.set_nexus_ids(mod_id, nexus_mod_id, Some(nexus_file_id));
             let _ = db.set_source_url(
@@ -1321,7 +1464,9 @@ async fn install_nexus_mod(
         game_id,
         bottle_name,
         data_dir,
-    )?;
+        None,
+    )
+    .await?;
 
     // Set Nexus IDs for tracking
     let _ = db.set_nexus_ids(mod_id, nexus_mod_id, Some(nexus_file_id));
@@ -1353,6 +1498,7 @@ async fn install_direct_mod(
     api_key: &Option<String>,
     manifest_name: &str,
     pre_downloaded: Option<&Path>,
+    pre_extracted: Option<PathBuf>,
 ) -> Result<i64, InstallError> {
     // If we already have a pre-downloaded archive from Phase 1, skip straight
     // to staging + deployment.
@@ -1378,7 +1524,9 @@ async fn install_direct_mod(
             game_id,
             bottle_name,
             data_dir,
-        )?;
+            pre_extracted,
+        )
+        .await?;
 
         if let Some(ref source_url) = mod_entry.source.url {
             let _ = db.set_source_url(mod_id, source_url);
@@ -1427,7 +1575,9 @@ async fn install_direct_mod(
                     game_id,
                     bottle_name,
                     data_dir,
-                )?;
+                    None,
+                )
+                .await?;
 
                 if let Some(ref source_url) = mod_entry.source.url {
                     let _ = db.set_source_url(mod_id, source_url);
@@ -1525,7 +1675,9 @@ async fn install_direct_mod(
         game_id,
         bottle_name,
         data_dir,
-    )?;
+        None,
+    )
+    .await?;
 
     if let Some(ref source_url) = mod_entry.source.url {
         let _ = db.set_source_url(mod_id, source_url);
@@ -1535,8 +1687,13 @@ async fn install_direct_mod(
 }
 
 /// Common staging and deployment pipeline for an already-downloaded archive.
+///
+/// Runs extraction and deployment on blocking threads via `spawn_blocking`
+/// so the tokio runtime stays free for other Tauri commands (app remains
+/// usable during installs). When `pre_extracted` is provided, the archive
+/// extraction step is skipped entirely.
 #[allow(clippy::too_many_arguments)]
-fn stage_and_deploy(
+async fn stage_and_deploy(
     app: &AppHandle,
     db: &Arc<ModDatabase>,
     archive_path: &Path,
@@ -1545,6 +1702,7 @@ fn stage_and_deploy(
     game_id: &str,
     bottle_name: &str,
     data_dir: &Path,
+    pre_extracted: Option<PathBuf>,
 ) -> Result<i64, InstallError> {
     let mod_name = &mod_entry.name;
 
@@ -1553,12 +1711,24 @@ fn stage_and_deploy(
         INSTALL_PROGRESS_EVENT,
         InstallProgress::StepChanged {
             mod_index,
-            step: "extracting".to_string(),
-            detail: Some(format!("Extracting '{}'...", mod_name)),
+            step: if pre_extracted.is_some() {
+                "staging".to_string()
+            } else {
+                "extracting".to_string()
+            },
+            detail: Some(format!(
+                "{} '{}'...",
+                if pre_extracted.is_some() {
+                    "Staging"
+                } else {
+                    "Extracting"
+                },
+                mod_name
+            )),
         },
     );
 
-    // Reserve DB record
+    // Reserve DB record (brief lock, fine on tokio thread)
     let next_priority = db
         .get_next_priority(game_id, bottle_name)
         .map_err(|e| InstallError::Failed(e.to_string()))?;
@@ -1576,19 +1746,40 @@ fn stage_and_deploy(
     db.set_mod_priority(mod_id, next_priority)
         .map_err(|e| InstallError::Failed(e.to_string()))?;
 
-    // Stage
-    let staging_result = staging::stage_mod(archive_path, game_id, bottle_name, mod_id, mod_name)
+    // Stage: heavy I/O — run on a dedicated blocking thread so the tokio
+    // runtime remains free for other commands (app stays usable).
+    let staging_result = {
+        let archive = archive_path.to_path_buf();
+        let gid = game_id.to_string();
+        let bn = bottle_name.to_string();
+        let mn = mod_name.clone();
+
+        tokio::task::spawn_blocking(move || {
+            if let Some(extracted_dir) = pre_extracted {
+                let result =
+                    staging::stage_mod_from_extracted(&extracted_dir, &gid, &bn, mod_id, &mn);
+                // Clean up pre-extracted temp dir
+                let _ = std::fs::remove_dir_all(&extracted_dir);
+                result
+            } else {
+                staging::stage_mod(&archive, &gid, &bn, mod_id, &mn)
+            }
+        })
+        .await
         .map_err(|e| {
-        let _ = db.remove_mod(mod_id);
-        InstallError::Failed(format!("Staging failed: {}", e))
-    })?;
+            let _ = db.remove_mod(mod_id);
+            InstallError::Failed(format!("Staging join error: {}", e))
+        })?
+        .map_err(|e| {
+            let _ = db.remove_mod(mod_id);
+            InstallError::Failed(format!("Staging failed: {}", e))
+        })?
+    };
 
     // Handle FOMOD if present and manifest provides choices
     let files_to_deploy =
         if let Ok(Some(fomod_installer)) = fomod::parse_fomod(&staging_result.staging_path) {
-            // If the manifest has FOMOD choices, use them; otherwise use defaults
             let selections = if let Some(ref choices) = mod_entry.choices {
-                // Convert manifest choices (JSON value) to HashMap<String, Vec<String>>
                 parse_fomod_choices(choices)
                     .unwrap_or_else(|| fomod::get_default_selections(&fomod_installer))
             } else {
@@ -1596,8 +1787,6 @@ fn stage_and_deploy(
             };
 
             let fomod_files = fomod::get_files_for_selections(&fomod_installer, &selections);
-
-            // Copy FOMOD-selected files into a clean staging area
 
             apply_fomod_to_staging(&staging_result.staging_path, &fomod_files)
                 .unwrap_or(staging_result.files.clone())
@@ -1697,7 +1886,7 @@ fn stage_and_deploy(
         files_to_deploy
     };
 
-    // Update DB with staging info
+    // Update DB with staging info (brief locks)
     let _ = app.emit(
         INSTALL_PROGRESS_EVENT,
         InstallProgress::StepChanged {
@@ -1714,7 +1903,7 @@ fn stage_and_deploy(
     db.store_file_hashes(mod_id, &staging_result.hashes)
         .map_err(|e| InstallError::Failed(e.to_string()))?;
 
-    // Deploy
+    // Deploy: heavy I/O — run on a blocking thread
     let _ = app.emit(
         INSTALL_PROGRESS_EVENT,
         InstallProgress::StepChanged {
@@ -1724,18 +1913,25 @@ fn stage_and_deploy(
         },
     );
 
-    if let Err(e) = deployer::deploy_mod(
-        db,
-        game_id,
-        bottle_name,
-        mod_id,
-        &staging_result.staging_path,
-        data_dir,
-        &files_to_deploy,
-    ) {
-        let _ = staging::remove_staging(&staging_result.staging_path);
-        let _ = db.remove_mod(mod_id);
-        return Err(InstallError::Failed(format!("Deploy failed: {}", e)));
+    {
+        let db_c = Arc::clone(db);
+        let gid = game_id.to_string();
+        let bn = bottle_name.to_string();
+        let sp = staging_result.staging_path.clone();
+        let dd = data_dir.to_path_buf();
+        let files = files_to_deploy.clone();
+
+        let deploy_result = tokio::task::spawn_blocking(move || {
+            deployer::deploy_mod(&db_c, &gid, &bn, mod_id, &sp, &dd, &files)
+        })
+        .await
+        .map_err(|e| InstallError::Failed(format!("Deploy join error: {}", e)))?;
+
+        if let Err(e) = deploy_result {
+            let _ = staging::remove_staging(&staging_result.staging_path);
+            let _ = db.remove_mod(mod_id);
+            return Err(InstallError::Failed(format!("Deploy failed: {}", e)));
+        }
     }
 
     Ok(mod_id)

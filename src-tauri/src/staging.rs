@@ -195,6 +195,70 @@ pub fn stage_mod(
     })
 }
 
+/// Stage a mod from a pre-extracted directory instead of an archive.
+///
+/// Skips the archive extraction step (which was already done concurrently)
+/// and copies files from the pre-extracted directory into the staging folder.
+pub fn stage_mod_from_extracted(
+    extracted_dir: &Path,
+    game_id: &str,
+    bottle_name: &str,
+    mod_id: i64,
+    mod_name: &str,
+) -> Result<StagingResult> {
+    let staging_dir = mod_staging_dir(game_id, bottle_name, mod_id, mod_name);
+
+    if staging_dir.exists() {
+        fs::remove_dir_all(&staging_dir)?;
+    }
+    fs::create_dir_all(&staging_dir)?;
+
+    let data_root = installer::find_data_root(extracted_dir);
+    debug!("Data root for pre-extracted staging: {}", data_root.display());
+
+    let mut files: Vec<String> = Vec::new();
+    let mut hashes: Vec<(String, String, u64)> = Vec::new();
+
+    for entry in WalkDir::new(&data_root).into_iter().filter_map(|e| e.ok()) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        let abs_src = entry.path();
+        let relative = abs_src
+            .strip_prefix(&data_root)
+            .map_err(|e| StagingError::Other(e.to_string()))?;
+
+        let dest_path = staging_dir.join(relative);
+
+        if let Some(parent) = dest_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        fs::copy(abs_src, &dest_path)?;
+
+        let hash = compute_sha256(&dest_path)?;
+        let file_size = fs::metadata(&dest_path)?.len();
+
+        let rel_str = relative.to_string_lossy().replace('\\', "/");
+        files.push(rel_str.clone());
+        hashes.push((rel_str, hash, file_size));
+    }
+
+    info!(
+        "Staged {} files for mod '{}' from pre-extracted dir at {}",
+        files.len(),
+        mod_name,
+        staging_dir.display()
+    );
+
+    Ok(StagingResult {
+        staging_path: staging_dir,
+        files,
+        hashes,
+    })
+}
+
 /// Remove a mod's staging directory entirely.
 pub fn remove_staging(staging_path: &Path) -> Result<()> {
     if staging_path.exists() {

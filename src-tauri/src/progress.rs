@@ -73,6 +73,18 @@ pub enum InstallProgress {
     InstallPhaseStarted {
         total_mods: usize,
     },
+    StagingPhaseStarted {
+        total_mods: usize,
+        max_concurrent: usize,
+    },
+    StagingModStarted {
+        mod_index: usize,
+        mod_name: String,
+    },
+    StagingModCompleted {
+        mod_index: usize,
+        mod_name: String,
+    },
 }
 
 #[cfg(test)]

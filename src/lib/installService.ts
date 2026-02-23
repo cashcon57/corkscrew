@@ -185,6 +185,26 @@ function handleProgressEvent(e: InstallProgressEvent) {
         };
         break;
 
+      // ---- Staging Phase (concurrent extraction) ----
+      case "stagingPhaseStarted":
+        next.phase = "staging";
+        next.step = "extracting";
+        break;
+
+      case "stagingModStarted":
+        if (next.modDetails[e.mod_index]) {
+          next.modDetails = [...next.modDetails];
+          next.modDetails[e.mod_index] = { ...next.modDetails[e.mod_index], status: "extracting" };
+        }
+        break;
+
+      case "stagingModCompleted":
+        if (next.modDetails[e.mod_index]) {
+          next.modDetails = [...next.modDetails];
+          next.modDetails[e.mod_index] = { ...next.modDetails[e.mod_index], status: "downloaded" };
+        }
+        break;
+
       // ---- Install Phase ----
       case "installPhaseStarted":
         next.phase = "installing";

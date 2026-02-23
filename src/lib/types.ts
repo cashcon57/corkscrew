@@ -1037,7 +1037,10 @@ export type InstallProgressEvent =
   | { kind: "downloadModCompleted"; mod_index: number; mod_name: string; cached: boolean }
   | { kind: "downloadModFailed"; mod_index: number; mod_name: string; error: string }
   | { kind: "allDownloadsCompleted"; downloaded: number; cached: number; failed: number; skipped: number }
-  | { kind: "installPhaseStarted"; total_mods: number };
+  | { kind: "installPhaseStarted"; total_mods: number }
+  | { kind: "stagingPhaseStarted"; total_mods: number; max_concurrent: number }
+  | { kind: "stagingModStarted"; mod_index: number; mod_name: string }
+  | { kind: "stagingModCompleted"; mod_index: number; mod_name: string };
 
 // Collection Install Checkpoint (for resume)
 export interface CollectionInstallCheckpoint {
