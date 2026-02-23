@@ -1079,22 +1079,36 @@
   {#if interruptedInstall}
     <div class="resume-banner">
       <div class="resume-info">
-        <span class="resume-icon">⚠</span>
+        <div class="resume-icon-wrap">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+            <line x1="12" y1="9" x2="12" y2="13" />
+            <line x1="12" y1="17" x2="12.01" y2="17" />
+          </svg>
+        </div>
         <div class="resume-text">
-          <span class="resume-title">Interrupted Installation</span>
+          <span class="resume-title">Interrupted Installation Detected</span>
           <span class="resume-detail">
-            "{interruptedInstall.collection_name}" — {interruptedInstall.completed_mods}/{interruptedInstall.total_mods} mods completed
+            "{interruptedInstall.collection_name}" — {interruptedInstall.completed_mods} of {interruptedInstall.total_mods} mods completed
             {#if interruptedInstall.failed_mods > 0}
-              ({interruptedInstall.failed_mods} failed)
+              <span class="resume-failed">({interruptedInstall.failed_mods} failed)</span>
             {/if}
           </span>
+          <div class="resume-progress-mini">
+            <div class="resume-progress-fill" style="width: {Math.round((interruptedInstall.completed_mods / interruptedInstall.total_mods) * 100)}%"></div>
+          </div>
         </div>
       </div>
       <div class="resume-actions">
-        <button class="btn-primary" onclick={handleResumeInstall} disabled={resuming}>
-          {resuming ? "Resuming..." : "Resume"}
+        <button class="btn btn-primary" onclick={handleResumeInstall} disabled={resuming}>
+          {#if resuming}
+            <span class="spinner spinner-sm"></span> Resuming...
+          {:else}
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3" /></svg>
+            Resume Installation
+          {/if}
         </button>
-        <button class="btn-ghost" onclick={handleDismissInstall}>Dismiss</button>
+        <button class="btn btn-ghost" onclick={handleDismissInstall}>Dismiss</button>
       </div>
     </div>
   {/if}
@@ -2766,18 +2780,40 @@
     align-items: center;
     justify-content: space-between;
     gap: var(--space-4);
-    padding: var(--space-3) var(--space-4);
-    background: rgba(255, 159, 10, 0.1);
-    border: 1px solid rgba(255, 159, 10, 0.3);
+    padding: var(--space-4) var(--space-5);
+    background: rgba(255, 159, 10, 0.08);
+    border: 2px solid rgba(255, 159, 10, 0.4);
     border-radius: var(--radius-md);
     margin-bottom: var(--space-4);
+    animation: resume-attention 2s ease-in-out 2;
   }
-  .resume-info { display: flex; align-items: center; gap: var(--space-3); }
-  .resume-icon { font-size: 20px; }
-  .resume-text { display: flex; flex-direction: column; gap: 2px; }
-  .resume-title { font-weight: 600; color: var(--text-primary); font-size: 13px; }
+
+  @keyframes resume-attention {
+    0%, 100% { border-color: rgba(255, 159, 10, 0.4); }
+    50% { border-color: rgba(255, 159, 10, 0.8); background: rgba(255, 159, 10, 0.12); }
+  }
+
+  .resume-info { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
+  .resume-icon-wrap { flex-shrink: 0; }
+  .resume-text { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .resume-title { font-weight: 700; color: var(--text-primary); font-size: 14px; }
   .resume-detail { font-size: 12px; color: var(--text-secondary); }
-  .resume-actions { display: flex; gap: var(--space-2); flex-shrink: 0; }
+  .resume-failed { color: #ef4444; font-weight: 600; }
+  .resume-progress-mini {
+    width: 100%;
+    max-width: 200px;
+    height: 4px;
+    background: rgba(255, 159, 10, 0.15);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .resume-progress-fill {
+    height: 100%;
+    background: #f59e0b;
+    border-radius: 2px;
+    transition: width 300ms ease;
+  }
+  .resume-actions { display: flex; gap: var(--space-2); flex-shrink: 0; align-items: center; }
 
   /* ---- Connect Prompt ---- */
 
