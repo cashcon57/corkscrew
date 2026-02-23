@@ -40,6 +40,8 @@ pub enum WjDownloadError {
     Unsupported(String),
     #[error("{0}")]
     Other(String),
+    #[error("Download cancelled")]
+    Cancelled,
 }
 
 // ---------------------------------------------------------------------------
@@ -86,6 +88,7 @@ pub struct WjDownloader {
     nexus_api_key: Option<String>,
     is_premium: bool,
     download_dir: PathBuf,
+    cancel_token: Option<Arc<AtomicBool>>,
 }
 
 impl WjDownloader {
@@ -111,7 +114,14 @@ impl WjDownloader {
             nexus_api_key,
             is_premium,
             download_dir,
+            cancel_token: None,
         }
+    }
+
+    /// Set a cancel token so that in-flight streaming downloads can be
+    /// interrupted mid-transfer instead of only between archives.
+    pub fn set_cancel_token(&mut self, token: Arc<AtomicBool>) {
+        self.cancel_token = Some(token);
     }
 
     // -----------------------------------------------------------------------
@@ -305,9 +315,12 @@ impl WjDownloader {
     }
 
     /// Download from MEGA using the `mega` crate.
+    ///
+    /// Streams directly to disk via `futures::io::AllowStdIo` to avoid loading
+    /// the entire file into memory (which would OOM on large archives).
     async fn download_mega(
         &self,
-        _app: &AppHandle,
+        app: &AppHandle,
         archive_name: &str,
         url: &str,
     ) -> Result<PathBuf, WjDownloadError> {
@@ -330,17 +343,28 @@ impl WjDownloader {
         let dest = self.download_dir.join(sanitize_filename(archive_name));
         let partial = dest.with_extension("partial");
 
-        // The mega crate uses futures::io::AsyncWrite. We download into an
-        // in-memory buffer and then write to disk.
-        let mut buf: Vec<u8> = Vec::with_capacity(file_node.size() as usize);
-        let cursor = futures::io::Cursor::new(&mut buf);
+        // Stream directly to disk instead of buffering in memory. The mega
+        // crate uses `futures::io::AsyncWrite`, so we wrap a std BufWriter
+        // with `AllowStdIo` to bridge sync I/O into the async trait.
+        let file = std::fs::File::create(&partial)
+            .map_err(|e| WjDownloadError::Other(format!("Failed to create MEGA temp file: {e}")))?;
+        let buf_writer = std::io::BufWriter::new(file);
+        let async_writer = futures::io::AllowStdIo::new(buf_writer);
+
+        let _ = app.emit(
+            "wabbajack-install-progress",
+            WjProgressEvent::DownloadProgress {
+                archive_name: archive_name.to_string(),
+                bytes_downloaded: 0,
+                total_bytes: file_node.size() as u64,
+            },
+        );
 
         mega_client
-            .download_node(file_node, cursor)
+            .download_node(file_node, async_writer)
             .await
             .map_err(|e| WjDownloadError::Other(format!("MEGA download failed: {e}")))?;
 
-        tokio::fs::write(&partial, &buf).await?;
         tokio::fs::rename(&partial, &dest).await?;
         Ok(dest)
     }
@@ -545,6 +569,7 @@ impl WjDownloader {
                 let status = match e {
                     WjDownloadError::UserActionRequired(_) => "user_action",
                     WjDownloadError::Unsupported(_) => "unsupported",
+                    WjDownloadError::Cancelled => "cancelled",
                     _ => "failed",
                 };
                 let _ = db.upsert_wj_archive_status(
@@ -576,14 +601,18 @@ impl WjDownloader {
     /// the archive is skipped. The checkpoint directory is removed on
     /// successful completion of all archives.
     pub async fn download_all_archives(
-        &self,
+        &mut self,
         app: &AppHandle,
         db: &Arc<ModDatabase>,
         install_id: i64,
         archives: &[WjTypedArchive],
         concurrency: usize,
-        cancel_token: &AtomicBool,
+        cancel_token: Arc<AtomicBool>,
     ) -> Result<HashMap<String, PathBuf>, WjDownloadError> {
+        // Wire up the cancel token so streaming downloads can be interrupted
+        // mid-transfer, not just between archives.
+        self.set_cancel_token(cancel_token.clone());
+
         let total = archives.len();
         let results: Arc<tokio::sync::Mutex<HashMap<String, PathBuf>>> =
             Arc::new(tokio::sync::Mutex::new(HashMap::new()));
@@ -639,31 +668,38 @@ impl WjDownloader {
                 let _ = tokio::fs::remove_file(&checkpoint_file).await;
             }
 
-            // Check shared cache again (already handled above but we
-            // refactored into a single loop).
+            // Check shared cache -- re-verify hash before trusting it.
             if let Ok(Some(cached_path)) = db.find_download_by_xxhash(&hash_str) {
                 let cached = PathBuf::from(&cached_path);
                 if cached.exists() {
-                    let _ = app.emit(
-                        "wabbajack-install-progress",
-                        WjProgressEvent::DownloadSkipped {
-                            archive_name: archive_name.clone(),
-                            reason: "already cached".into(),
-                        },
-                    );
-                    let _ = db.upsert_wj_archive_status(
-                        install_id,
-                        &hash_str,
-                        &archive_name,
-                        archive.state.source_type_name(),
-                        "verified",
-                        Some(&cached_path),
-                        None,
-                    );
-                    // Write checkpoint so future resumes are fast too.
-                    let _ = write_checkpoint(&checkpoint_file).await;
-                    results.lock().await.insert(hash_str, cached);
-                    continue;
+                    if verify_xxhash64(&cached, &archive.hash).is_ok() {
+                        let _ = app.emit(
+                            "wabbajack-install-progress",
+                            WjProgressEvent::DownloadSkipped {
+                                archive_name: archive_name.clone(),
+                                reason: "already cached".into(),
+                            },
+                        );
+                        let _ = db.upsert_wj_archive_status(
+                            install_id,
+                            &hash_str,
+                            &archive_name,
+                            archive.state.source_type_name(),
+                            "verified",
+                            Some(&cached_path),
+                            None,
+                        );
+                        // Write checkpoint so future resumes are fast too.
+                        let _ = write_checkpoint(&checkpoint_file).await;
+                        results.lock().await.insert(hash_str, cached);
+                        continue;
+                    } else {
+                        log::warn!(
+                            "Cached archive failed hash check, re-downloading: {}",
+                            archive_name
+                        );
+                        // Fall through to normal download.
+                    }
                 }
             }
 
@@ -722,6 +758,17 @@ impl WjDownloader {
                             );
                         }
                     }
+                }
+                Err(WjDownloadError::Cancelled) => {
+                    all_succeeded = false;
+                    let _ = app.emit(
+                        "wabbajack-install-progress",
+                        WjProgressEvent::DownloadFailed {
+                            archive_name: archive_name.clone(),
+                            error: "Download cancelled".into(),
+                        },
+                    );
+                    break;
                 }
                 Err(WjDownloadError::UserActionRequired(msg)) => {
                     all_succeeded = false;
@@ -813,6 +860,15 @@ impl WjDownloader {
         use tokio::io::AsyncWriteExt;
 
         while let Some(chunk_result) = stream.next().await {
+            // Check cancel token before processing each chunk.
+            if let Some(ref token) = self.cancel_token {
+                if token.load(Ordering::Relaxed) {
+                    drop(file);
+                    let _ = tokio::fs::remove_file(&partial).await;
+                    return Err(WjDownloadError::Cancelled);
+                }
+            }
+
             let chunk = chunk_result?;
             file.write_all(&chunk).await?;
             downloaded += chunk.len() as u64;
@@ -862,6 +918,15 @@ impl WjDownloader {
         use tokio::io::AsyncWriteExt;
 
         while let Some(chunk_result) = stream.next().await {
+            // Check cancel token before processing each chunk.
+            if let Some(ref token) = self.cancel_token {
+                if token.load(Ordering::Relaxed) {
+                    drop(file);
+                    let _ = tokio::fs::remove_file(&partial).await;
+                    return Err(WjDownloadError::Cancelled);
+                }
+            }
+
             let chunk = chunk_result?;
             file.write_all(&chunk).await?;
             downloaded += chunk.len() as u64;

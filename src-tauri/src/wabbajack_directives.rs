@@ -424,20 +424,23 @@ impl DirectiveProcessor {
         Ok(())
     }
 
-    /// Pack files into a Fallout 4 BA2 archive (GNRL format).
+    /// Pack files into a Fallout 4 BA2 archive (GNRL or DX10 format).
     ///
-    /// Uses the `ba2` crate's fo4 module. DX10 (texture) BA2 archives are
-    /// complex and require special chunk layouts, so we fall back to GNRL
-    /// format for those as well — the game still reads them correctly.
+    /// Uses the `ba2` crate's fo4 module. For DX10 (texture) BA2 archives,
+    /// we parse each DDS file's header to extract texture metadata (width,
+    /// height, mip count, DXGI format) and construct properly structured
+    /// DX10 file entries with mip chunk info. Non-DDS files in a DX10 archive
+    /// fall back to GNRL-style packing with a warning.
     fn pack_ba2_archive(
         &self,
         dest_path: &Path,
         file_states: &[BsaFileState],
-        _is_dx10: bool,
+        is_dx10: bool,
         temp_id: i64,
     ) -> Result<(), WjDirectiveError> {
         use ba2::fo4::{
-            Archive, ArchiveKey, ArchiveOptions, Chunk, File, Format, Version,
+            Archive, ArchiveKey, ArchiveOptions, Chunk, DX10Header, File, FileHeader, Format,
+            Version,
         };
         use ba2::CompressableFrom;
 
@@ -447,52 +450,82 @@ impl DirectiveProcessor {
             let normalized = normalize_wj_path(&fs.path);
             // Files are in the output directory, placed there by earlier directives
             let file_path = self.output_dir.join(&normalized);
-            if !file_path.exists() {
+            let resolved_path = if file_path.exists() {
+                file_path.clone()
+            } else {
                 // Try case-insensitive lookup
                 let rel = PathBuf::from(&normalized);
                 if let Some(found) = case_insensitive_find(&self.output_dir, &rel) {
-                    let data = std::fs::read(&found).map_err(|e| {
-                        WjDirectiveError::BsaFailed(format!(
-                            "Failed to read {}: {}",
-                            found.display(),
-                            e
-                        ))
-                    })?;
-                    let chunk = Chunk::from_decompressed(data.into_boxed_slice());
-                    let file: File = std::iter::once(chunk).collect();
-                    // BA2 paths use backslash-separated, lowercase paths
-                    let key_path = normalized.replace('/', "\\");
-                    let key = ArchiveKey::from(key_path.as_bytes());
-                    archive.insert(key, file);
+                    found
+                } else {
+                    warn!(
+                        "CreateBSA(BA2): file not found for packing: {} (temp_id={})",
+                        file_path.display(),
+                        temp_id
+                    );
                     continue;
                 }
-                warn!(
-                    "CreateBSA(BA2): file not found for packing: {} (temp_id={})",
-                    file_path.display(),
-                    temp_id
-                );
-                continue;
-            }
+            };
 
-            let data = std::fs::read(&file_path).map_err(|e| {
+            let data = std::fs::read(&resolved_path).map_err(|e| {
                 WjDirectiveError::BsaFailed(format!(
                     "Failed to read {}: {}",
-                    file_path.display(),
+                    resolved_path.display(),
                     e
                 ))
             })?;
 
-            let chunk = Chunk::from_decompressed(data.into_boxed_slice());
-            let file: File = std::iter::once(chunk).collect();
+            let file = if is_dx10 {
+                // For DX10 archives, try to parse DDS header for texture metadata
+                if let Some(dds_info) = parse_dds_header(&data) {
+                    let dx10_header = DX10Header {
+                        height: dds_info.height,
+                        width: dds_info.width,
+                        mip_count: dds_info.mip_count,
+                        format: dds_info.dxgi_format,
+                        flags: if dds_info.is_cubemap { 1 } else { 0 },
+                        tile_mode: 8, // Standard linear tile mode
+                    };
+
+                    // Strip DDS header, pack only the pixel data
+                    let pixel_data = data[dds_info.data_offset..].to_vec();
+                    let mip_range = 0..=(dds_info.mip_count.saturating_sub(1) as u16);
+                    let mut chunk = Chunk::from_decompressed(pixel_data.into_boxed_slice());
+                    chunk.mips = Some(mip_range);
+
+                    let mut file = File::new();
+                    file.header = FileHeader::DX10(dx10_header);
+                    file.push(chunk);
+                    file
+                } else {
+                    // Not a valid DDS or unrecognized format -- pack as GNRL-style
+                    // within the DX10 archive. This shouldn't normally happen but
+                    // handles edge cases gracefully.
+                    warn!(
+                        "CreateBSA(BA2/DX10): {} is not a valid DDS file, \
+                         packing as raw data (temp_id={})",
+                        resolved_path.display(),
+                        temp_id
+                    );
+                    let chunk = Chunk::from_decompressed(data.into_boxed_slice());
+                    std::iter::once(chunk).collect()
+                }
+            } else {
+                // GNRL format: pack raw file data as-is
+                let chunk = Chunk::from_decompressed(data.into_boxed_slice());
+                std::iter::once(chunk).collect()
+            };
+
             // BA2 paths use backslash-separated paths
             let key_path = normalized.replace('/', "\\");
             let key = ArchiveKey::from(key_path.as_bytes());
             archive.insert(key, file);
         }
 
-        // Write BA2 with GNRL format, version 1
+        // Write BA2 with the appropriate format, version 1
+        let format = if is_dx10 { Format::DX10 } else { Format::GNRL };
         let options = ArchiveOptions::builder()
-            .format(Format::GNRL)
+            .format(format)
             .version(Version::v1)
             .build();
 
@@ -857,17 +890,22 @@ impl DirectiveProcessor {
         // Concatenate ALL source files in order — Wabbajack merges all sources
         // before applying the BSDiff patch to produce the final output.
         let mut source_data = Vec::new();
+        let mut missing_sources = Vec::new();
         for sp in sources {
             let source_rel = normalize_wj_path(&sp.relative_path);
             let source_path = self.output_dir.join(&source_rel);
             if source_path.exists() {
                 source_data.extend(std::fs::read(&source_path)?);
             } else {
-                warn!(
-                    "MergedPatch source not found: {}, skipping",
-                    source_path.display()
-                );
+                missing_sources.push(source_rel);
             }
+        }
+        if !missing_sources.is_empty() {
+            return Err(WjDirectiveError::PatchFailed(format!(
+                "MergedPatch missing {} source(s): {}",
+                missing_sources.len(),
+                missing_sources.join(", ")
+            )));
         }
 
         // Read the patch from the .wabbajack ZIP
@@ -985,10 +1023,14 @@ fn dxgi_to_image_format(dxgi: u32) -> image_dds::ImageFormat {
         28 => ImageFormat::Rgba8Unorm,
         71 => ImageFormat::BC1RgbaUnorm,
         72 => ImageFormat::BC1RgbaUnormSrgb,
+        74 => ImageFormat::BC2RgbaUnorm,
+        75 => ImageFormat::BC2RgbaUnormSrgb,
         77 => ImageFormat::BC3RgbaUnorm,
         78 => ImageFormat::BC3RgbaUnormSrgb,
         80 => ImageFormat::BC4RUnorm,
+        81 => ImageFormat::BC4RSnorm,
         83 => ImageFormat::BC5RgUnorm,
+        84 => ImageFormat::BC5RgSnorm,
         87 => ImageFormat::Bgra8Unorm,
         98 => ImageFormat::BC7RgbaUnorm,
         99 => ImageFormat::BC7RgbaUnormSrgb,
@@ -1002,6 +1044,131 @@ fn dxgi_to_image_format(dxgi: u32) -> image_dds::ImageFormat {
             ImageFormat::BC7RgbaUnorm
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// DDS header parsing for BA2 DX10 texture archives
+// ---------------------------------------------------------------------------
+
+/// Metadata extracted from a DDS file header, used to construct BA2 DX10 file entries.
+struct DdsHeaderInfo {
+    width: u16,
+    height: u16,
+    mip_count: u8,
+    /// DXGI_FORMAT value (for DX10 extended header) or translated from FourCC/pixel format.
+    dxgi_format: u8,
+    /// True if the texture is a cubemap (DDS_CUBEMAP flag set).
+    is_cubemap: bool,
+    /// Byte offset where the pixel data begins (after all headers).
+    data_offset: usize,
+}
+
+/// Parse a DDS file's header to extract metadata needed for BA2 DX10 archives.
+///
+/// Supports both legacy DDS headers (with FourCC like DXT1/DXT5) and DX10-extended
+/// headers (with DXGI_FORMAT). Returns `None` if the data is not a valid DDS file
+/// or uses an unrecognized pixel format.
+///
+/// Reference: <https://learn.microsoft.com/en-us/windows/win32/direct3ddds/dx-graphics-dds-pguide>
+fn parse_dds_header(data: &[u8]) -> Option<DdsHeaderInfo> {
+    // DDS files must start with "DDS " magic (0x20534444) followed by a 124-byte header
+    if data.len() < 128 {
+        return None;
+    }
+
+    let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+    if magic != 0x20534444 {
+        // Not "DDS "
+        return None;
+    }
+
+    // DDS_HEADER starts at offset 4
+    let header = &data[4..];
+
+    let height = u32::from_le_bytes([header[8], header[9], header[10], header[11]]);
+    let width = u32::from_le_bytes([header[12], header[13], header[14], header[15]]);
+    let mip_count = u32::from_le_bytes([header[24], header[25], header[26], header[27]]);
+    let caps2 = u32::from_le_bytes([header[104], header[105], header[106], header[107]]);
+
+    // DDS_HEADER.ddspf (pixel format) starts at offset 72 within the header (76 from file start)
+    let pf_flags = u32::from_le_bytes([header[76], header[77], header[78], header[79]]);
+    let pf_fourcc = u32::from_le_bytes([header[80], header[81], header[82], header[83]]);
+
+    let is_cubemap = (caps2 & 0x200) != 0; // DDSCAPS2_CUBEMAP
+
+    // DDPF_FOURCC = 0x4
+    let has_fourcc = (pf_flags & 0x4) != 0;
+
+    let (dxgi_format, data_offset) = if has_fourcc && pf_fourcc == u32::from_le_bytes(*b"DX10") {
+        // DX10 extended header follows the standard 124-byte DDS header
+        // DDS_HEADER_DXT10 is 20 bytes starting at offset 128
+        if data.len() < 148 {
+            return None;
+        }
+        let dxgi = u32::from_le_bytes([data[128], data[129], data[130], data[131]]);
+        (dxgi as u8, 148usize)
+    } else if has_fourcc {
+        // Legacy FourCC: translate common formats to DXGI_FORMAT values
+        let dxgi = match &pf_fourcc.to_le_bytes() {
+            b"DXT1" => 71u32, // DXGI_FORMAT_BC1_UNORM
+            b"DXT3" => 74,    // DXGI_FORMAT_BC2_UNORM
+            b"DXT5" => 77,    // DXGI_FORMAT_BC3_UNORM
+            b"ATI1" | b"BC4U" => 80, // DXGI_FORMAT_BC4_UNORM
+            b"ATI2" | b"BC5U" => 83, // DXGI_FORMAT_BC5_UNORM
+            _ => {
+                warn!(
+                    "DDS: unrecognized FourCC {:?}, cannot determine DXGI format",
+                    std::str::from_utf8(&pf_fourcc.to_le_bytes()).unwrap_or("????")
+                );
+                return None;
+            }
+        };
+        (dxgi as u8, 128usize)
+    } else {
+        // Uncompressed format -- check for common RGBA layouts
+        let rgb_bit_count =
+            u32::from_le_bytes([header[84], header[85], header[86], header[87]]);
+        let r_mask = u32::from_le_bytes([header[88], header[89], header[90], header[91]]);
+        let g_mask = u32::from_le_bytes([header[92], header[93], header[94], header[95]]);
+        let b_mask = u32::from_le_bytes([header[96], header[97], header[98], header[99]]);
+        let a_mask =
+            u32::from_le_bytes([header[100], header[101], header[102], header[103]]);
+
+        let dxgi = if rgb_bit_count == 32
+            && r_mask == 0x000000FF
+            && g_mask == 0x0000FF00
+            && b_mask == 0x00FF0000
+            && a_mask == 0xFF000000
+        {
+            28u32 // DXGI_FORMAT_R8G8B8A8_UNORM
+        } else if rgb_bit_count == 32
+            && b_mask == 0x000000FF
+            && g_mask == 0x0000FF00
+            && r_mask == 0x00FF0000
+            && a_mask == 0xFF000000
+        {
+            87u32 // DXGI_FORMAT_B8G8R8A8_UNORM
+        } else {
+            warn!(
+                "DDS: unrecognized uncompressed format (bits={}, R={:#x}, G={:#x}, B={:#x}, A={:#x})",
+                rgb_bit_count, r_mask, g_mask, b_mask, a_mask
+            );
+            return None;
+        };
+        (dxgi as u8, 128usize)
+    };
+
+    // Ensure mip_count is at least 1
+    let mip_count = std::cmp::max(1, mip_count);
+
+    Some(DdsHeaderInfo {
+        width: width as u16,
+        height: height as u16,
+        mip_count: mip_count as u8,
+        dxgi_format,
+        is_cubemap,
+        data_offset,
+    })
 }
 
 // ---------------------------------------------------------------------------

@@ -527,9 +527,9 @@ pub async fn install_wabbajack_modlist(
         oauth::AuthMethod::None => (None, false),
     };
 
-    let downloader = WjDownloader::new(nexus_api_key, is_premium, download_dir.to_path_buf());
+    let mut downloader = WjDownloader::new(nexus_api_key, is_premium, download_dir.to_path_buf());
     let archive_download_paths = downloader
-        .download_all_archives(app, db, install_id, &modlist.archives, 8, &cancel_token)
+        .download_all_archives(app, db, install_id, &modlist.archives, 8, cancel_token.clone())
         .await
         .map_err(|e| WjInstallError::Download(e.to_string()))?;
 

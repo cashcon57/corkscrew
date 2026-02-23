@@ -107,6 +107,14 @@ pub async fn install_collection(
     // Determine game slug for Nexus API
     let game_slug = game_id_to_nexus_slug(game_id);
 
+    // Validate collection is for the correct game
+    if !manifest.game_domain.is_empty() && manifest.game_domain != game_slug {
+        return Err(format!(
+            "Collection is for '{}' but target game is '{}' ({})",
+            manifest.game_domain, game_slug, game_id
+        ));
+    }
+
     // Load existing mods for already-installed detection
     let existing_mods = db.list_mods(game_id, bottle_name).unwrap_or_default();
 
@@ -870,10 +878,12 @@ fn stage_and_deploy(
 
     // Apply collection patches (BSDiff) if any
     if let Some(ref patches) = mod_entry.patches {
+        let mut patch_failures = 0u32;
         for (rel_path, b64_patch) in patches {
             let file_path = staging_result.staging_path.join(rel_path);
             if !file_path.exists() {
                 log::warn!("Collection patch target not found: {}", file_path.display());
+                patch_failures += 1;
                 continue;
             }
             let patch_bytes = match base64::Engine::decode(
@@ -883,6 +893,7 @@ fn stage_and_deploy(
                 Ok(b) => b,
                 Err(e) => {
                     log::warn!("Failed to decode patch for {}: {}", rel_path, e);
+                    patch_failures += 1;
                     continue;
                 }
             };
@@ -890,6 +901,7 @@ fn stage_and_deploy(
                 Ok(d) => d,
                 Err(e) => {
                     log::warn!("Failed to read patch target {}: {}", rel_path, e);
+                    patch_failures += 1;
                     continue;
                 }
             };
@@ -899,16 +911,38 @@ fn stage_and_deploy(
                     let mut target_data = Vec::with_capacity(target_size);
                     if let Err(e) = patcher.apply(&source_data, &mut target_data) {
                         log::warn!("Failed to apply patch for {}: {}", rel_path, e);
+                        patch_failures += 1;
                         continue;
                     }
                     if let Err(e) = std::fs::write(&file_path, &target_data) {
                         log::warn!("Failed to write patched file {}: {}", rel_path, e);
+                        patch_failures += 1;
                     }
                 }
                 Err(e) => {
                     log::warn!("Invalid BSDiff patch for {}: {}", rel_path, e);
+                    patch_failures += 1;
                 }
             }
+        }
+        if patch_failures > 0 {
+            log::warn!(
+                "{} of {} patches failed for mod '{}'",
+                patch_failures,
+                patches.len(),
+                mod_name
+            );
+            let _ = app.emit(
+                INSTALL_PROGRESS_EVENT,
+                InstallProgress::StepChanged {
+                    mod_index,
+                    step: "warning".to_string(),
+                    detail: Some(format!(
+                        "{} patch(es) failed to apply for '{}'",
+                        patch_failures, mod_name
+                    )),
+                },
+            );
         }
     }
 
