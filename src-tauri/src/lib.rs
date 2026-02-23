@@ -3080,6 +3080,33 @@ async fn get_all_interrupted_installs(
 }
 
 #[tauri::command]
+async fn get_checkpoint_mod_names(
+    checkpoint_id: i64,
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    let checkpoint = state
+        .db
+        .get_active_checkpoint_by_id(checkpoint_id)
+        .map_err(|e| format!("Failed to query checkpoint: {}", e))?
+        .ok_or_else(|| "Checkpoint not found".to_string())?;
+
+    let manifest: serde_json::Value = serde_json::from_str(&checkpoint.manifest_json)
+        .map_err(|e| format!("Failed to parse manifest: {}", e))?;
+
+    let names: Vec<String> = manifest
+        .get("mods")
+        .and_then(|m| m.as_array())
+        .map(|mods| {
+            mods.iter()
+                .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(names)
+}
+
+#[tauri::command]
 async fn resume_collection_install_cmd(
     app: AppHandle,
     checkpoint_id: i64,
@@ -4173,6 +4200,7 @@ pub fn run() {
             install_collection_cmd,
             get_incomplete_collection_installs,
             get_all_interrupted_installs,
+            get_checkpoint_mod_names,
             resume_collection_install_cmd,
             abandon_collection_install,
             get_pending_wabbajack_installs,

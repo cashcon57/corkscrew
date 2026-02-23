@@ -11,16 +11,36 @@
   let isActive = $derived(status?.active ?? false);
   let phase = $derived(status?.phase ?? "");
   let dl = $derived(status?.downloadProgress ?? { total: 0, completed: 0, failed: 0, cached: 0, maxConcurrent: 0, active: [] });
-  let inst = $derived(status?.installProgress ?? { current: 0, total: 0, currentMod: "", step: "" });
+  let inst = $derived(status?.installProgress ?? { current: 0, total: 0, currentMod: "", step: "", stepDetail: "" });
   let mods = $derived(status?.modDetails ?? []);
   let actions = $derived(status?.userActions ?? []);
   let result = $derived(status?.result ?? null);
+  let overallProgress = $derived(status?.overallProgress ?? 0);
+  let downloadSpeed = $derived(status?.downloadSpeed ?? 0);
+  let downloadEta = $derived(status?.downloadEta ?? "");
 
   let dlPercent = $derived(dl.total > 0 ? Math.round((dl.completed / dl.total) * 100) : 0);
   let instPercent = $derived(inst.total > 0 ? Math.round((inst.current / inst.total) * 100) : 0);
 
+  // Staging progress
+  let stagingCount = $derived(mods.filter((m) => m.status === "extracting").length);
+  let stagingDone = $derived(
+    mods.filter((m) => !["pending", "queued", "downloading", "extracting"].includes(m.status)).length,
+  );
+  let stagingTotal = $derived(dl.total || mods.length);
+  let stagingPercent = $derived(stagingTotal > 0 ? Math.round((stagingDone / stagingTotal) * 100) : 0);
+
   // Mod log: show 10 items when collapsed, all when expanded
   let visibleMods = $derived(modLogExpanded ? mods : mods.slice(0, 10));
+
+  // Phase timeline
+  const phases = [
+    { id: "downloading", label: "Download" },
+    { id: "staging", label: "Extract" },
+    { id: "installing", label: "Install" },
+    { id: "complete", label: "Done" },
+  ] as const;
+  const phaseOrder = ["downloading", "staging", "installing", "complete"];
 
   function formatBytes(bytes: number): string {
     if (bytes >= 1_073_741_824) return (bytes / 1_073_741_824).toFixed(1) + " GB";
@@ -47,6 +67,18 @@
   function handleCancel() {
     dismissInstall();
     goto("/collections");
+  }
+
+  function humanizeStep(step: string, detail: string): string {
+    if (detail) return detail;
+    switch (step) {
+      case "preparing": return "Preparing...";
+      case "extracting": return "Extracting archive...";
+      case "deploying": return "Deploying files...";
+      case "registering": return "Registering in database...";
+      case "resuming": return "Resuming...";
+      default: return step;
+    }
   }
 </script>
 
@@ -127,6 +159,40 @@
         </button>
       </div>
     {:else}
+      <!-- Phase Timeline -->
+      <div class="phase-timeline">
+        {#each phases as step, i}
+          {@const currentIdx = phaseOrder.indexOf(phase)}
+          {@const stepIdx = phaseOrder.indexOf(step.id)}
+          {@const isActivePhase = step.id === phase}
+          {@const isDone = stepIdx < currentIdx}
+          <div class="timeline-step" class:active={isActivePhase} class:done={isDone} class:future={stepIdx > currentIdx}>
+            <div class="timeline-dot">
+              {#if isDone}
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
+              {:else if isActivePhase}
+                <div class="timeline-pulse"></div>
+              {/if}
+            </div>
+            <span class="timeline-label">{step.label}</span>
+          </div>
+          {#if i < phases.length - 1}
+            <div class="timeline-connector" class:done={stepIdx < currentIdx}></div>
+          {/if}
+        {/each}
+      </div>
+
+      <!-- Overall Progress -->
+      <section class="overall-progress-section">
+        <div class="overall-header">
+          <span class="overall-label">OVERALL PROGRESS</span>
+          <span class="overall-percent">{overallProgress}%</span>
+        </div>
+        <div class="progress-track progress-track-lg">
+          <div class="progress-fill progress-fill-overall progress-active" style="width: {overallProgress}%"></div>
+        </div>
+      </section>
+
       <!-- Download Phase -->
       <section class="phase-section">
         <div class="phase-header">
@@ -145,9 +211,15 @@
           {#if dl.failed > 0}
             <span class="fail-badge">{dl.failed} failed</span>
           {/if}
+          {#if downloadSpeed > 0 && phase === "downloading"}
+            <span class="speed-badge">{formatBytes(downloadSpeed)}/s</span>
+          {/if}
+          {#if downloadEta && phase === "downloading"}
+            <span class="eta-badge">{downloadEta}</span>
+          {/if}
         </div>
         <div class="progress-track">
-          <div class="progress-fill" style="width: {dlPercent}%"></div>
+          <div class="progress-fill" class:progress-active={phase === "downloading" && dl.active.length > 0} style="width: {dlPercent}%"></div>
         </div>
 
         {#if dl.active.length > 0}
@@ -173,6 +245,28 @@
         {/if}
       </section>
 
+      <!-- Staging Phase -->
+      {#if phase === "staging" || phase === "installing"}
+        <section class="phase-section">
+          <div class="phase-header">
+            <h3 class="phase-title">
+              <svg class:icon-spin={phase === "staging"} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+              </svg>
+              EXTRACTION
+            </h3>
+            <span class="phase-count">{stagingDone} / {stagingTotal}</span>
+            {#if stagingCount > 0}
+              <span class="cache-badge">{stagingCount} extracting</span>
+            {/if}
+          </div>
+          <div class="progress-track">
+            <div class="progress-fill" class:progress-active={phase === "staging"} style="width: {stagingPercent}%"></div>
+          </div>
+        </section>
+      {/if}
+
       <!-- Install Phase -->
       {#if phase === "installing"}
         <section class="phase-section">
@@ -186,12 +280,12 @@
             <span class="phase-count">{inst.current} / {inst.total}</span>
           </div>
           <div class="progress-track">
-            <div class="progress-fill" style="width: {instPercent}%"></div>
+            <div class="progress-fill" class:progress-active={true} style="width: {instPercent}%"></div>
           </div>
           {#if inst.currentMod}
             <div class="install-detail">
               <span class="current-mod" title={inst.currentMod}>{inst.currentMod}</span>
-              <span class="current-step">{inst.step}</span>
+              <span class="current-step">{humanizeStep(inst.step, inst.stepDetail)}</span>
             </div>
           {/if}
         </section>
@@ -271,13 +365,13 @@
               {:else if mod.status === "queued"}
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.5"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>
               {:else if mod.status === "downloading"}
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--system-accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
+                <svg class="icon-bounce" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--system-accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
               {:else if mod.status === "downloaded" || mod.status === "cached"}
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
               {:else if mod.status === "extracting"}
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
+                <svg class="icon-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
               {:else if mod.status === "deploying"}
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--system-accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>
+                <svg class="icon-bounce" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--system-accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>
               {:else if mod.status === "done"}
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
               {:else if mod.status === "failed"}
@@ -304,7 +398,7 @@
     </section>
 
     <!-- Cancel Button (during active install) -->
-    {#if phase === "downloading" || phase === "installing"}
+    {#if phase === "downloading" || phase === "installing" || phase === "staging"}
       <div class="footer-actions">
         <button class="btn btn-ghost-danger" onclick={handleCancel}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -391,6 +485,125 @@
     color: var(--text-secondary);
   }
 
+  /* ---- Phase Timeline ---- */
+
+  .phase-timeline {
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    margin-bottom: var(--space-5);
+    padding: var(--space-3) var(--space-4);
+  }
+
+  .timeline-step {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-1);
+    min-width: 64px;
+  }
+
+  .timeline-dot {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 2px solid var(--separator);
+    background: var(--surface);
+    transition: all 0.3s ease;
+  }
+
+  .timeline-step.active .timeline-dot {
+    border-color: var(--system-accent);
+    background: var(--system-accent);
+    color: white;
+  }
+
+  .timeline-step.done .timeline-dot {
+    border-color: #22c55e;
+    background: #22c55e;
+    color: white;
+  }
+
+  .timeline-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+  }
+
+  .timeline-step.active .timeline-label {
+    color: var(--system-accent);
+  }
+
+  .timeline-step.done .timeline-label {
+    color: #22c55e;
+  }
+
+  .timeline-connector {
+    flex: 1;
+    height: 2px;
+    background: var(--separator);
+    margin: 0 var(--space-1);
+    margin-top: 12px;
+    transition: background 0.3s ease;
+  }
+
+  .timeline-connector.done {
+    background: #22c55e;
+  }
+
+  .timeline-pulse {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: white;
+    animation: pulse 1.5s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(0.7); }
+  }
+
+  /* ---- Overall Progress ---- */
+
+  .overall-progress-section {
+    margin-bottom: var(--space-4);
+  }
+
+  .overall-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: var(--space-2);
+  }
+
+  .overall-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-secondary);
+  }
+
+  .overall-percent {
+    font-size: 18px;
+    font-weight: 700;
+    font-family: var(--font-mono);
+    color: var(--text-primary);
+  }
+
+  .progress-track-lg {
+    height: 12px;
+    border-radius: 6px;
+  }
+
+  .progress-fill-overall {
+    background: linear-gradient(90deg, var(--system-accent), color-mix(in srgb, var(--system-accent) 70%, #22c55e));
+  }
+
   /* ---- Phase Sections ---- */
 
   .phase-section {
@@ -406,6 +619,7 @@
     align-items: center;
     gap: var(--space-3);
     margin-bottom: var(--space-3);
+    flex-wrap: wrap;
   }
 
   .phase-title {
@@ -445,6 +659,25 @@
     border-radius: 100px;
   }
 
+  .speed-badge {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--system-accent);
+    background: color-mix(in srgb, var(--system-accent) 12%, transparent);
+    padding: 2px 8px;
+    border-radius: 100px;
+    font-family: var(--font-mono);
+  }
+
+  .eta-badge {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    background: var(--surface-hover);
+    padding: 2px 8px;
+    border-radius: 100px;
+  }
+
   /* ---- Progress Bars ---- */
 
   .progress-track {
@@ -453,6 +686,7 @@
     background: var(--bg-tertiary);
     border-radius: 4px;
     overflow: hidden;
+    position: relative;
   }
 
   .progress-track-sm {
@@ -463,8 +697,17 @@
     height: 100%;
     background: var(--system-accent);
     border-radius: 4px;
-    transition: width 300ms var(--ease);
+    transition: width 300ms ease;
     min-width: 0;
+  }
+
+  .progress-active {
+    animation: progress-pulse 2s ease-in-out infinite;
+  }
+
+  @keyframes progress-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
   }
 
   /* ---- Active Downloads ---- */
@@ -553,7 +796,6 @@
   .current-step {
     font-size: 12px;
     color: var(--text-tertiary);
-    text-transform: capitalize;
     flex-shrink: 0;
     font-style: italic;
   }
@@ -648,7 +890,7 @@
   .chevron {
     margin-left: auto;
     color: var(--text-tertiary);
-    transition: transform var(--duration-fast) var(--ease);
+    transition: transform 0.15s ease;
   }
 
   .chevron.expanded {
@@ -810,6 +1052,25 @@
     background: var(--surface-hover);
   }
 
+  /* ---- Animated Icons ---- */
+
+  .icon-spin {
+    animation: spin 2s linear infinite;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  .icon-bounce {
+    animation: bounce 1s ease-in-out infinite;
+  }
+
+  @keyframes bounce {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(2px); }
+  }
+
   /* ---- Footer ---- */
 
   .footer-actions {
@@ -828,7 +1089,7 @@
     border-radius: var(--radius);
     font-weight: 600;
     cursor: pointer;
-    transition: all var(--duration-fast) var(--ease);
+    transition: all 0.15s ease;
     white-space: nowrap;
   }
 

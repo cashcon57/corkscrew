@@ -59,6 +59,7 @@ export interface ModProgressDetail {
   error?: string;
   downloadBytes?: number;
   downloadTotal?: number;
+  stepDetail?: string;
 }
 
 export interface UserActionItem {
@@ -87,6 +88,7 @@ export interface CollectionInstallStatus {
     total: number;
     currentMod: string;
     step: string;
+    stepDetail: string;
   };
   // Per-mod details
   modDetails: ModProgressDetail[];
@@ -97,6 +99,10 @@ export interface CollectionInstallStatus {
   result: { installed: number; skipped: number; failed: number } | null;
   // User actions
   userActions: UserActionItem[];
+  // Overall progress
+  overallProgress: number;
+  downloadSpeed: number;
+  downloadEta: string;
   // Legacy compat fields
   currentMod: string;
   step: string;

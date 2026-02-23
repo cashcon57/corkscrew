@@ -9,7 +9,7 @@
   import { getVersion } from "@tauri-apps/api/app";
   import { check } from "@tauri-apps/plugin-updater";
   import { relaunch } from "@tauri-apps/plugin-process";
-  import { downloadFromNexus, getAllGames, getDownloadQueue, retryDownload, cancelDownload, clearFinishedDownloads, onDownloadQueueUpdate, listProfiles, listInstalledCollections, getConfig, launchGame, getAllInterruptedInstalls, resumeCollectionInstall, abandonCollectionInstall, getPendingWabbajackInstalls, checkSkyrimVersion, getPinnedGameVersion, pinGameVersion } from "$lib/api";
+  import { downloadFromNexus, getAllGames, getDownloadQueue, retryDownload, cancelDownload, clearFinishedDownloads, onDownloadQueueUpdate, listProfiles, listInstalledCollections, getConfig, launchGame, getAllInterruptedInstalls, resumeCollectionInstall, abandonCollectionInstall, getCheckpointModNames, getPendingWabbajackInstalls, checkSkyrimVersion, getPinnedGameVersion, pinGameVersion } from "$lib/api";
   import { resumeInstallTracking } from "$lib/installService";
   import type { CollectionInstallCheckpoint, WabbajackInstallStatus } from "$lib/types";
   import { get } from "svelte/store";
@@ -341,7 +341,9 @@
     try {
       const cp = interruptedInstall;
       const modStatuses: Record<string, string> = cp.mod_statuses ? JSON.parse(cp.mod_statuses) : {};
-      await resumeInstallTracking(cp.collection_name, cp.total_mods, cp.completed_mods, modStatuses);
+      let modNames: string[] = [];
+      try { modNames = await getCheckpointModNames(cp.id); } catch { /* fallback to Mod N */ }
+      await resumeInstallTracking(cp.collection_name, cp.total_mods, cp.completed_mods, modStatuses, modNames);
       interruptedInstall = null;
       resumeCollectionInstall(cp.id).catch((e: unknown) => wrappedShowError(`Resume failed: ${e}`));
       navigate("collections");
@@ -933,9 +935,14 @@
           <span class="status-detail">
             {#if $collectionInstallStatus.phase === "downloading"}
               Downloading {$collectionInstallStatus.downloadProgress.completed}/{$collectionInstallStatus.downloadProgress.total}
-              {#if $collectionInstallStatus.downloadProgress.active.length > 0}
-                &mdash; {$collectionInstallStatus.downloadProgress.active[0].modName}
+              {#if $collectionInstallStatus.downloadSpeed > 0}
+                &mdash; {formatBytes($collectionInstallStatus.downloadSpeed)}/s
               {/if}
+              {#if $collectionInstallStatus.downloadEta}
+                &mdash; {$collectionInstallStatus.downloadEta}
+              {/if}
+            {:else if $collectionInstallStatus.phase === "staging"}
+              Extracting...
             {:else if $collectionInstallStatus.phase === "installing"}
               Installing {$collectionInstallStatus.installProgress.current}/{$collectionInstallStatus.installProgress.total}
               {#if $collectionInstallStatus.installProgress.currentMod}
@@ -945,38 +952,20 @@
               Complete
             {:else}
               {$collectionInstallStatus.current}/{$collectionInstallStatus.total}
-              {#if $collectionInstallStatus.currentMod}
-                &mdash; {$collectionInstallStatus.currentMod}
-              {/if}
             {/if}
           </span>
         </div>
+        {#if $collectionInstallStatus.phase !== "complete"}
+          <span class="status-percent">{$collectionInstallStatus.overallProgress}%</span>
+        {/if}
         <svg class="status-chevron" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
           <polyline points="4.5 2.5 8 6 4.5 9.5" />
         </svg>
       </div>
       <div class="status-progress-track">
-        {#if $collectionInstallStatus.phase === "downloading"}
-          <div class="status-progress-fill"
-            style="width: {$collectionInstallStatus.downloadProgress.total > 0
-              ? ($collectionInstallStatus.downloadProgress.completed / $collectionInstallStatus.downloadProgress.total) * 100
-              : 0}%">
-          </div>
-        {:else if $collectionInstallStatus.phase === "installing"}
-          <div class="status-progress-fill"
-            style="width: {$collectionInstallStatus.installProgress.total > 0
-              ? ($collectionInstallStatus.installProgress.current / $collectionInstallStatus.installProgress.total) * 100
-              : 0}%">
-          </div>
-        {:else if $collectionInstallStatus.phase === "complete"}
-          <div class="status-progress-fill status-progress-complete" style="width: 100%"></div>
-        {:else}
-          <div class="status-progress-fill"
-            style="width: {$collectionInstallStatus.total > 0
-              ? ($collectionInstallStatus.current / $collectionInstallStatus.total) * 100
-              : 0}%">
-          </div>
-        {/if}
+        <div class="status-progress-fill" class:status-progress-complete={$collectionInstallStatus.phase === "complete"}
+          style="width: {$collectionInstallStatus.overallProgress}%">
+        </div>
       </div>
     </button>
   {/if}
@@ -1857,6 +1846,14 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .status-percent {
+    font-size: 11px;
+    font-weight: 700;
+    font-family: var(--font-mono);
+    color: var(--system-accent);
+    flex-shrink: 0;
   }
 
   .status-chevron {

@@ -13,6 +13,61 @@ import type { InstallProgressEvent } from "$lib/types";
 let unlisten: (() => void) | null = null;
 let timer: ReturnType<typeof setInterval> | null = null;
 
+// Speed tracking — rolling window
+let speedSamples: { time: number; bytes: number }[] = [];
+const SPEED_WINDOW_MS = 5000;
+let cumulativeDownloaded = 0;
+
+function calculateSpeed(currentBytes: number): number {
+  const now = Date.now();
+  cumulativeDownloaded = currentBytes;
+  speedSamples.push({ time: now, bytes: currentBytes });
+  speedSamples = speedSamples.filter((s) => now - s.time <= SPEED_WINDOW_MS);
+  if (speedSamples.length < 2) return 0;
+  const oldest = speedSamples[0];
+  const elapsed = (now - oldest.time) / 1000;
+  if (elapsed <= 0) return 0;
+  return (currentBytes - oldest.bytes) / elapsed;
+}
+
+function formatEta(remainingBytes: number, speed: number): string {
+  if (speed <= 0) return "";
+  const secs = remainingBytes / speed;
+  if (secs < 60) return "< 1 min";
+  if (secs < 3600) return `~${Math.ceil(secs / 60)} min`;
+  const hrs = Math.floor(secs / 3600);
+  const mins = Math.ceil((secs % 3600) / 60);
+  return `~${hrs}h ${mins}m`;
+}
+
+function computeOverallProgress(s: CollectionInstallStatus): number {
+  const DL_WEIGHT = 0.40;
+  const STAGING_WEIGHT = 0.20;
+  const INSTALL_WEIGHT = 0.40;
+
+  const dlTotal = s.downloadProgress.total || 1;
+  const dlProgress = s.downloadProgress.completed / dlTotal;
+
+  // Count staging-done mods (not pending/queued/downloading/extracting)
+  const stagingDone = s.modDetails.filter(
+    (m) => !["pending", "queued", "downloading", "extracting"].includes(m.status),
+  ).length;
+  const stagingTotal = s.modDetails.length || 1;
+  const stagingProgress = stagingDone / stagingTotal;
+
+  const instTotal = s.installProgress.total || 1;
+  const instDone = s.modDetails.filter(
+    (m) => m.status === "done" || m.status === "failed" || m.status === "skipped" || m.status === "user_action",
+  ).length;
+  const instProgress = instDone / instTotal;
+
+  if (s.phase === "complete") return 100;
+  if (s.phase === "downloading") return Math.round(dlProgress * DL_WEIGHT * 100);
+  if (s.phase === "staging") return Math.round((DL_WEIGHT + stagingProgress * STAGING_WEIGHT) * 100);
+  if (s.phase === "installing") return Math.round((DL_WEIGHT + STAGING_WEIGHT + instProgress * INSTALL_WEIGHT) * 100);
+  return 0;
+}
+
 function formatElapsed(startTime: number): string {
   const secs = Math.floor((Date.now() - startTime) / 1000);
   if (secs < 60) return `${secs}s`;
@@ -53,12 +108,16 @@ export async function startInstallTracking(
       total: totalMods,
       currentMod: "",
       step: "preparing",
+      stepDetail: "",
     },
     modDetails,
     startTime: now,
     elapsed: "0s",
     result: null,
     userActions: [],
+    overallProgress: 0,
+    downloadSpeed: 0,
+    downloadEta: "",
     // Legacy compat
     currentMod: "",
     step: "preparing",
@@ -108,7 +167,7 @@ function handleProgressEvent(e: InstallProgressEvent) {
       case "downloadModStarted":
         if (next.modDetails[e.mod_index]) {
           next.modDetails = [...next.modDetails];
-          next.modDetails[e.mod_index] = { ...next.modDetails[e.mod_index], status: "downloading" };
+          next.modDetails[e.mod_index] = { ...next.modDetails[e.mod_index], name: e.mod_name, status: "downloading" };
         }
         // Add to active downloads
         next.downloadProgress = {
@@ -120,7 +179,7 @@ function handleProgressEvent(e: InstallProgressEvent) {
         };
         break;
 
-      case "downloadProgress":
+      case "downloadProgress": {
         // Update per-mod download bytes
         if (next.modDetails[e.mod_index]) {
           next.modDetails = [...next.modDetails];
@@ -131,15 +190,20 @@ function handleProgressEvent(e: InstallProgressEvent) {
           };
         }
         // Update active download list
-        next.downloadProgress = {
-          ...next.downloadProgress,
-          active: next.downloadProgress.active.map((d) =>
-            d.modIndex === e.mod_index
-              ? { ...d, downloaded: e.downloaded, total: e.total }
-              : d,
-          ),
-        };
+        const updatedActive = next.downloadProgress.active.map((d) =>
+          d.modIndex === e.mod_index
+            ? { ...d, downloaded: e.downloaded, total: e.total }
+            : d,
+        );
+        next.downloadProgress = { ...next.downloadProgress, active: updatedActive };
+        // Speed + ETA
+        const totalActiveBytes = updatedActive.reduce((sum, d) => sum + d.downloaded, 0);
+        const speed = calculateSpeed(totalActiveBytes);
+        const totalRemaining = updatedActive.reduce((sum, d) => sum + Math.max(0, d.total - d.downloaded), 0);
+        next.downloadSpeed = speed;
+        next.downloadEta = formatEta(totalRemaining, speed);
         break;
+      }
 
       case "downloadModCompleted":
         if (next.modDetails[e.mod_index]) {
@@ -221,6 +285,7 @@ function handleProgressEvent(e: InstallProgressEvent) {
           current: e.mod_index + 1,
           currentMod: e.mod_name,
           step: "preparing",
+          stepDetail: "",
         };
         // Legacy compat
         next.currentMod = e.mod_name;
@@ -230,7 +295,7 @@ function handleProgressEvent(e: InstallProgressEvent) {
 
         if (next.modDetails[e.mod_index]) {
           next.modDetails = [...next.modDetails];
-          next.modDetails[e.mod_index] = { ...next.modDetails[e.mod_index], status: "extracting" };
+          next.modDetails[e.mod_index] = { ...next.modDetails[e.mod_index], name: e.mod_name, status: "extracting" };
         }
         break;
 
@@ -238,12 +303,13 @@ function handleProgressEvent(e: InstallProgressEvent) {
         next.installProgress = {
           ...next.installProgress,
           step: e.step,
+          stepDetail: e.detail ?? "",
         };
         next.step = e.step;
         if (next.modDetails[e.mod_index]) {
           const stepStatus = e.step === "deploying" ? "deploying" as const : "extracting" as const;
           next.modDetails = [...next.modDetails];
-          next.modDetails[e.mod_index] = { ...next.modDetails[e.mod_index], status: stepStatus };
+          next.modDetails[e.mod_index] = { ...next.modDetails[e.mod_index], status: stepStatus, stepDetail: e.detail ?? undefined };
         }
         break;
 
@@ -288,9 +354,11 @@ function handleProgressEvent(e: InstallProgressEvent) {
           skipped: e.skipped,
           failed: e.failed,
         };
+        next.overallProgress = 100;
         break;
     }
 
+    next.overallProgress = computeOverallProgress(next);
     return next;
   });
 }
@@ -301,6 +369,7 @@ export async function resumeInstallTracking(
   totalMods: number,
   completedMods: number,
   modStatuses: Record<string, string>,
+  modNames?: string[],
 ) {
   stopInstallTracking();
 
@@ -316,7 +385,7 @@ export async function resumeInstallTracking(
     else if (status === "skipped") mappedStatus = "skipped";
 
     modDetails.push({
-      name: `Mod ${i + 1}`,
+      name: modNames?.[i] ?? `Mod ${i + 1}`,
       index: i,
       status: mappedStatus,
     });
@@ -339,12 +408,16 @@ export async function resumeInstallTracking(
       total: totalMods,
       currentMod: "",
       step: "resuming",
+      stepDetail: "",
     },
     modDetails,
     startTime: now,
     elapsed: "0s",
     result: null,
     userActions: [],
+    overallProgress: totalMods > 0 ? Math.round((completedMods / totalMods) * 100) : 0,
+    downloadSpeed: 0,
+    downloadEta: "",
     currentMod: "",
     step: "resuming",
     current: completedMods,
@@ -375,6 +448,8 @@ export function stopInstallTracking() {
     clearInterval(timer);
     timer = null;
   }
+  speedSamples = [];
+  cumulativeDownloaded = 0;
 }
 
 /** Mark install as finished and deactivate after a delay. */

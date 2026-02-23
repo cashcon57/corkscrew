@@ -1349,6 +1349,10 @@ export async function getAllInterruptedInstalls(): Promise<
   return invoke("get_all_interrupted_installs");
 }
 
+export async function getCheckpointModNames(checkpointId: number): Promise<string[]> {
+  return invoke("get_checkpoint_mod_names", { checkpointId });
+}
+
 export async function resumeCollectionInstall(
   checkpointId: number,
 ): Promise<Record<string, unknown>> {
