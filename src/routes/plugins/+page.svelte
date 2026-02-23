@@ -332,7 +332,7 @@
             role="listitem"
           >
             <span class="col-drag">
-              <svg class="drag-handle" width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
+              <svg class="drag-handle" width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-label="Drag to reorder {plugin.filename}">
                 <circle cx="4" cy="2.5" r="1" /><circle cx="8" cy="2.5" r="1" />
                 <circle cx="4" cy="6" r="1" /><circle cx="8" cy="6" r="1" />
                 <circle cx="4" cy="9.5" r="1" /><circle cx="8" cy="9.5" r="1" />
@@ -348,6 +348,9 @@
                 onclick={() => handleToggle(plugin)}
                 disabled={togglingPlugin === plugin.filename || isMasterPlugin(plugin)}
                 title={isMasterPlugin(plugin) ? "Master plugins are always active" : plugin.enabled ? "Disable plugin" : "Enable plugin"}
+                aria-label="{isMasterPlugin(plugin) ? 'Master plugin (always active)' : plugin.enabled ? 'Disable' : 'Enable'} {plugin.filename}"
+                aria-pressed={plugin.enabled}
+                role="switch"
               >
                 <span class="toggle-thumb"></span>
               </button>
