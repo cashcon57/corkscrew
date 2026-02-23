@@ -118,40 +118,72 @@ pub fn extract_archive(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathB
     }
 }
 
-/// Extract a `.zip` archive using the `zip` crate.
+/// Extract a `.zip` archive using the `zip` crate with parallel file writes.
+///
+/// Phase 1: sequential scan to collect entry metadata + create directories.
+/// Phase 2: parallel extraction of file entries using rayon (each thread
+/// opens its own ZipArchive handle for thread-safe random access).
 fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
+    use rayon::prelude::*;
+
     let file = fs::File::open(archive_path)?;
     let mut archive = ZipArchive::new(file)?;
-    let mut extracted: Vec<PathBuf> = Vec::new();
+    let total = archive.len();
 
-    for i in 0..archive.len() {
-        let mut entry = archive.by_index(i)?;
-
-        // Sanitise the path coming out of the archive to prevent traversal.
+    // Phase 1: Scan entries — create directories, collect file indices
+    let mut file_indices: Vec<usize> = Vec::new();
+    for i in 0..total {
+        let entry = archive.by_index(i)?;
         let relative = match entry.enclosed_name() {
             Some(p) => p.to_path_buf(),
-            None => {
-                warn!("Skipping potentially unsafe zip entry: {:?}", entry.name());
-                continue;
-            }
+            None => continue,
         };
-
         let out_path = dest_dir.join(&relative);
-
         if entry.is_dir() {
             fs::create_dir_all(&out_path)?;
         } else {
             if let Some(parent) = out_path.parent() {
-                fs::create_dir_all(parent)?;
+                let _ = fs::create_dir_all(parent);
+            }
+            file_indices.push(i);
+        }
+    }
+    drop(archive); // Close the initial handle
+
+    // Phase 2: Parallel extraction — each rayon thread opens its own archive
+    let archive_path_owned = archive_path.to_path_buf();
+    let dest_dir_owned = dest_dir.to_path_buf();
+
+    let results: Vec<std::result::Result<PathBuf, InstallerError>> = file_indices
+        .par_iter()
+        .map(|&idx| {
+            let f = fs::File::open(&archive_path_owned)?;
+            let mut arc = ZipArchive::new(f)
+                .map_err(InstallerError::Zip)?;
+            let mut entry = arc.by_index(idx)
+                .map_err(InstallerError::Zip)?;
+
+            let relative = entry.enclosed_name()
+                .ok_or_else(|| InstallerError::Io(io::Error::new(io::ErrorKind::InvalidData, "unsafe zip entry")))?
+                .to_path_buf();
+            let out_path = dest_dir_owned.join(&relative);
+
+            if let Some(parent) = out_path.parent() {
+                let _ = fs::create_dir_all(parent);
             }
             let mut out_file = fs::File::create(&out_path)?;
             io::copy(&mut entry, &mut out_file)?;
-            extracted.push(out_path);
-        }
+            Ok(out_path)
+        })
+        .collect();
+
+    let mut extracted = Vec::with_capacity(results.len());
+    for r in results {
+        extracted.push(r?);
     }
 
     info!(
-        "Extracted {} files from ZIP: {}",
+        "Extracted {} files from ZIP (parallel): {}",
         extracted.len(),
         archive_path.display()
     );
