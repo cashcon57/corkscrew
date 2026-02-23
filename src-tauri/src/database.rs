@@ -237,7 +237,9 @@ impl ModDatabase {
             nexus_mod_id: row.get(3)?,
             nexus_file_id: row.get(10)?,
             source_url: row.get(11)?,
-            source_type: row.get::<_, Option<String>>(18)?.unwrap_or_else(|| "manual".to_string()),
+            source_type: row
+                .get::<_, Option<String>>(18)?
+                .unwrap_or_else(|| "manual".to_string()),
             name: row.get(4)?,
             version: row.get(5)?,
             archive_name: row.get(6)?,
@@ -305,7 +307,10 @@ impl ModDatabase {
             let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
             conn.execute("DELETE FROM installed_mods WHERE id = ?1", params![mod_id])?;
             // Clean up profile_mods references (no FK constraint on mod_id)
-            let _ = conn.execute("DELETE FROM profile_mods WHERE mod_id = ?1", params![mod_id]);
+            let _ = conn.execute(
+                "DELETE FROM profile_mods WHERE mod_id = ?1",
+                params![mod_id],
+            );
             drop(conn);
             let _ = self.clear_conflict_rules_for_mod(mod_id);
         }
@@ -549,12 +554,12 @@ impl ModDatabase {
     pub fn batch_add_deployment_entries(
         &self,
         entries: &[(
-            &str,  // game_id
-            &str,  // bottle_name
-            i64,   // mod_id
-            &str,  // relative_path
-            &str,  // staging_path
-            &str,  // deploy_method
+            &str, // game_id
+            &str, // bottle_name
+            i64,  // mod_id
+            &str, // relative_path
+            &str, // staging_path
+            &str, // deploy_method
         )],
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
@@ -567,7 +572,15 @@ impl ModDatabase {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7)",
             )?;
             for (game_id, bottle_name, mod_id, rel_path, staging_path, method) in entries {
-                stmt.execute(params![game_id, bottle_name, mod_id, rel_path, staging_path, method, deployed_at])?;
+                stmt.execute(params![
+                    game_id,
+                    bottle_name,
+                    mod_id,
+                    rel_path,
+                    staging_path,
+                    method,
+                    deployed_at
+                ])?;
             }
         }
         tx.commit()?;
@@ -1053,8 +1066,9 @@ impl ModDatabase {
     ) -> Result<i64> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         // Sum file_size for downloads that are ONLY referenced by this collection
-        let size: i64 = conn.prepare(
-            "SELECT COALESCE(SUM(dr.file_size), 0)
+        let size: i64 = conn
+            .prepare(
+                "SELECT COALESCE(SUM(dr.file_size), 0)
              FROM download_registry dr
              JOIN download_collection_refs dcr ON dcr.download_id = dr.id
              WHERE dcr.collection_name = ?1
@@ -1064,16 +1078,16 @@ impl ModDatabase {
                    SELECT download_id FROM download_collection_refs
                    WHERE collection_name != ?1
                )",
-        )?.query_row(params![collection_name, game_id, bottle_name], |row| row.get(0))?;
+            )?
+            .query_row(params![collection_name, game_id, bottle_name], |row| {
+                row.get(0)
+            })?;
         Ok(size)
     }
 
     /// Batch-check which (nexus_mod_id, nexus_file_id) pairs exist in the download registry.
     /// Returns the subset of input pairs that have a matching downloaded file on disk.
-    pub fn batch_check_cached_files(
-        &self,
-        pairs: &[(i64, i64)],
-    ) -> Result<Vec<(i64, i64)>> {
+    pub fn batch_check_cached_files(&self, pairs: &[(i64, i64)]) -> Result<Vec<(i64, i64)>> {
         if pairs.is_empty() {
             return Ok(Vec::new());
         }
@@ -1835,15 +1849,27 @@ impl ModDatabase {
 
         // Subtract previous status contribution
         if let Some(ref prev) = prev_status {
-            if is_complete(prev) { completed_delta -= 1; }
-            if is_failed(prev) { failed_delta -= 1; }
-            if is_skipped(prev) { skipped_delta -= 1; }
+            if is_complete(prev) {
+                completed_delta -= 1;
+            }
+            if is_failed(prev) {
+                failed_delta -= 1;
+            }
+            if is_skipped(prev) {
+                skipped_delta -= 1;
+            }
         }
 
         // Add new status contribution
-        if is_complete(status) { completed_delta += 1; }
-        if is_failed(status) { failed_delta += 1; }
-        if is_skipped(status) { skipped_delta += 1; }
+        if is_complete(status) {
+            completed_delta += 1;
+        }
+        if is_failed(status) {
+            failed_delta += 1;
+        }
+        if is_skipped(status) {
+            skipped_delta += 1;
+        }
 
         tx.execute(
             "UPDATE collection_install_checkpoints
@@ -1853,7 +1879,13 @@ impl ModDatabase {
                  skipped_mods = MAX(0, skipped_mods + ?4),
                  updated_at = datetime('now')
              WHERE id = ?5",
-            params![new_json, completed_delta, failed_delta, skipped_delta, checkpoint_id],
+            params![
+                new_json,
+                completed_delta,
+                failed_delta,
+                skipped_delta,
+                checkpoint_id
+            ],
         )?;
 
         tx.commit()?;
@@ -2036,7 +2068,19 @@ impl ModDatabase {
     /// List all pending (incomplete) Wabbajack installs.
     pub fn list_pending_wj_installs(
         &self,
-    ) -> Result<Vec<(i64, String, String, String, i64, i64, i64, i64, Option<String>)>> {
+    ) -> Result<
+        Vec<(
+            i64,
+            String,
+            String,
+            String,
+            i64,
+            i64,
+            i64,
+            i64,
+            Option<String>,
+        )>,
+    > {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT id, modlist_name, modlist_version, status,

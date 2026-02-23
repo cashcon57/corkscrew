@@ -88,10 +88,8 @@ pub fn parse_mod_files(files: &[serde_json::Value]) -> Vec<NexusModFile> {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string(),
-                category: category_name(
-                    f.get("category_id").and_then(|v| v.as_i64()).unwrap_or(0),
-                )
-                .to_string(),
+                category: category_name(f.get("category_id").and_then(|v| v.as_i64()).unwrap_or(0))
+                    .to_string(),
             })
         })
         .collect()
@@ -226,35 +224,75 @@ pub struct NexusModInfo {
 fn parse_nexus_mod(v: &serde_json::Value) -> Option<NexusModInfo> {
     Some(NexusModInfo {
         mod_id: v.get("mod_id").and_then(|x| x.as_i64())?,
-        name: v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-        summary: v.get("summary").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-        description: v.get("description").and_then(|x| x.as_str()).map(|s| s.to_string()),
-        author: v.get("author").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        name: v
+            .get("name")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        summary: v
+            .get("summary")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        description: v
+            .get("description")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string()),
+        author: v
+            .get("author")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
         category_id: v.get("category_id").and_then(|x| x.as_i64()).unwrap_or(0),
-        version: v.get("version").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-        endorsement_count: v.get("endorsement_count").and_then(|x| x.as_i64()).unwrap_or(0),
-        unique_downloads: v.get("mod_unique_downloads").and_then(|x| x.as_i64())
+        version: v
+            .get("version")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        endorsement_count: v
+            .get("endorsement_count")
+            .and_then(|x| x.as_i64())
+            .unwrap_or(0),
+        unique_downloads: v
+            .get("mod_unique_downloads")
+            .and_then(|x| x.as_i64())
             .or_else(|| v.get("unique_downloads").and_then(|x| x.as_i64()))
             .unwrap_or(0),
-        picture_url: v.get("picture_url").and_then(|x| x.as_str()).map(|s| s.to_string()),
-        updated_at: v.get("updated_timestamp")
+        picture_url: v
+            .get("picture_url")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string()),
+        updated_at: v
+            .get("updated_timestamp")
             .and_then(|x| x.as_i64())
             .map(|ts| {
                 chrono::DateTime::from_timestamp(ts, 0)
                     .map(|dt| dt.format("%Y-%m-%d").to_string())
                     .unwrap_or_default()
             })
-            .or_else(|| v.get("updated_time").and_then(|x| x.as_str()).map(|s| s.to_string())),
-        created_at: v.get("created_timestamp")
+            .or_else(|| {
+                v.get("updated_time")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string())
+            }),
+        created_at: v
+            .get("created_timestamp")
             .and_then(|x| x.as_i64())
             .map(|ts| {
                 chrono::DateTime::from_timestamp(ts, 0)
                     .map(|dt| dt.format("%Y-%m-%d").to_string())
                     .unwrap_or_default()
             })
-            .or_else(|| v.get("created_time").and_then(|x| x.as_str()).map(|s| s.to_string())),
+            .or_else(|| {
+                v.get("created_time")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string())
+            }),
         available: v.get("available").and_then(|x| x.as_bool()).unwrap_or(true),
-        adult_content: v.get("contains_adult_content").and_then(|x| x.as_bool()).unwrap_or(false),
+        adult_content: v
+            .get("contains_adult_content")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false),
     })
 }
 
@@ -365,17 +403,11 @@ impl NexusClient {
         headers.insert(USER_AGENT, HeaderValue::from_str(&ua).unwrap());
 
         // NexusMods API compliance headers
-        headers.insert(
-            "Application-Name",
-            HeaderValue::from_static("Corkscrew"),
-        );
+        headers.insert("Application-Name", HeaderValue::from_static("Corkscrew"));
         let app_version = HeaderValue::from_str(env!("CARGO_PKG_VERSION"))
             .unwrap_or_else(|_| HeaderValue::from_static("0.0.0"));
         headers.insert("Application-Version", app_version);
-        headers.insert(
-            "Protocol-Version",
-            HeaderValue::from_static("0.15.5"),
-        );
+        headers.insert("Protocol-Version", HeaderValue::from_static("0.15.5"));
 
         let client = reqwest::Client::builder()
             .default_headers(headers)
@@ -772,11 +804,7 @@ impl NexusClient {
     ///
     /// When `category` is `"all"`, fetches trending + latest + updated
     /// concurrently and deduplicates by mod_id, returning the combined set.
-    pub async fn browse_mods(
-        &self,
-        game_slug: &str,
-        category: &str,
-    ) -> Result<Vec<NexusModInfo>> {
+    pub async fn browse_mods(&self, game_slug: &str, category: &str) -> Result<Vec<NexusModInfo>> {
         if category == "all" {
             // Fetch all three endpoints concurrently for maximum coverage
             let (trending, latest, updated) = tokio::join!(
@@ -796,11 +824,15 @@ impl NexusClient {
             }
             Ok(combined)
         } else {
-            self.browse_mods_single(game_slug, match category {
-                "latest" => "latest_added",
-                "updated" => "updated",
-                _ => "trending",
-            }).await
+            self.browse_mods_single(
+                game_slug,
+                match category {
+                    "latest" => "latest_added",
+                    "updated" => "updated",
+                    _ => "trending",
+                },
+            )
+            .await
         }
     }
 
@@ -825,11 +857,7 @@ impl NexusClient {
     }
 
     /// Get detailed information for a single mod, returned as NexusModInfo.
-    pub async fn get_mod_info(
-        &self,
-        game_slug: &str,
-        mod_id: i64,
-    ) -> Result<NexusModInfo> {
+    pub async fn get_mod_info(&self, game_slug: &str, mod_id: i64) -> Result<NexusModInfo> {
         let json = self.get_mod(game_slug, mod_id).await?;
         parse_nexus_mod(&json).ok_or_else(|| NexusError::Api {
             status: 0,
@@ -934,11 +962,7 @@ impl NexusClient {
     }
 
     /// Abstain from endorsing a mod on NexusMods.
-    pub async fn abstain_mod(
-        &self,
-        game_slug: &str,
-        mod_id: i64,
-    ) -> Result<EndorseResponse> {
+    pub async fn abstain_mod(&self, game_slug: &str, mod_id: i64) -> Result<EndorseResponse> {
         let url = format!("{NEXUS_API_BASE}/games/{game_slug}/mods/{mod_id}/abstain.json");
         let json = self.post_json(&url, None).await?;
         Ok(EndorseResponse {
@@ -967,10 +991,7 @@ impl NexusClient {
                     .filter_map(|v| {
                         Some(UserEndorsement {
                             mod_id: v.get("mod_id").and_then(|x| x.as_i64())?,
-                            domain_name: v
-                                .get("domain_name")
-                                .and_then(|x| x.as_str())?
-                                .to_string(),
+                            domain_name: v.get("domain_name").and_then(|x| x.as_str())?.to_string(),
                             status: v
                                 .get("status")
                                 .and_then(|x| x.as_str())
@@ -1019,10 +1040,7 @@ pub struct NexusCategory {
 
 impl NexusClient {
     /// Fetch the full category tree for a game from v1 REST API.
-    pub async fn get_game_categories(
-        &self,
-        game_slug: &str,
-    ) -> Result<Vec<NexusCategory>> {
+    pub async fn get_game_categories(&self, game_slug: &str) -> Result<Vec<NexusCategory>> {
         let url = format!("{NEXUS_API_BASE}/games/{game_slug}/categories.json");
         let json = self.get_json(&url).await?;
         let categories = json
@@ -1033,10 +1051,18 @@ impl NexusClient {
             .filter_map(|v| {
                 Some(NexusCategory {
                     category_id: v.get("category_id").and_then(|x| x.as_i64())?,
-                    name: v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    name: v
+                        .get("name")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string(),
                     parent_category: v.get("parent_category").and_then(|x| {
                         let id = x.as_i64().unwrap_or(0);
-                        if id == 0 { None } else { Some(id) }
+                        if id == 0 {
+                            None
+                        } else {
+                            Some(id)
+                        }
                     }),
                 })
             })
@@ -1066,17 +1092,11 @@ fn nexus_graphql_headers(api_key: &str) -> HeaderMap {
         headers.insert("apikey", val);
     }
     headers.insert("Content-Type", HeaderValue::from_static("application/json"));
-    headers.insert(
-        "Application-Name",
-        HeaderValue::from_static("Corkscrew"),
-    );
+    headers.insert("Application-Name", HeaderValue::from_static("Corkscrew"));
     let app_version = HeaderValue::from_str(env!("CARGO_PKG_VERSION"))
         .unwrap_or_else(|_| HeaderValue::from_static("0.0.0"));
     headers.insert("Application-Version", app_version);
-    headers.insert(
-        "Protocol-Version",
-        HeaderValue::from_static("0.15.5"),
-    );
+    headers.insert("Protocol-Version", HeaderValue::from_static("0.15.5"));
     headers
 }
 
@@ -1295,22 +1315,55 @@ pub async fn graphql_search_mods(
         .filter_map(|v| {
             Some(NexusModInfo {
                 mod_id: v.get("modId").and_then(|x| x.as_i64())?,
-                name: v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                summary: v.get("summary").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                name: v
+                    .get("name")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                summary: v
+                    .get("summary")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
                 description: None, // GraphQL search doesn't return full description
-                author: v.get("author").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                category_id: v.get("modCategory")
+                author: v
+                    .get("author")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                category_id: v
+                    .get("modCategory")
                     .and_then(|c| c.get("id"))
                     .and_then(|x| x.as_i64())
                     .unwrap_or(0),
-                version: v.get("version").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                version: v
+                    .get("version")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
                 endorsement_count: v.get("endorsements").and_then(|x| x.as_i64()).unwrap_or(0),
                 unique_downloads: v.get("downloads").and_then(|x| x.as_i64()).unwrap_or(0),
-                picture_url: v.get("pictureUrl").and_then(|x| x.as_str()).map(String::from),
-                updated_at: v.get("updatedAt").and_then(|x| x.as_str()).map(String::from),
-                created_at: v.get("createdAt").and_then(|x| x.as_str()).map(String::from),
-                available: v.get("status").and_then(|x| x.as_str()).map(|s| s == "published").unwrap_or(true),
-                adult_content: v.get("adultContent").and_then(|x| x.as_bool()).unwrap_or(false),
+                picture_url: v
+                    .get("pictureUrl")
+                    .and_then(|x| x.as_str())
+                    .map(String::from),
+                updated_at: v
+                    .get("updatedAt")
+                    .and_then(|x| x.as_str())
+                    .map(String::from),
+                created_at: v
+                    .get("createdAt")
+                    .and_then(|x| x.as_str())
+                    .map(String::from),
+                available: v
+                    .get("status")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s == "published")
+                    .unwrap_or(true),
+                adult_content: v
+                    .get("adultContent")
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(false),
             })
         })
         .collect();

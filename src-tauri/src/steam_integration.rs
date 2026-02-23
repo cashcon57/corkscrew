@@ -174,12 +174,8 @@ fn parse_vdf_fields(data: &[u8]) -> Option<(Vec<VdfField>, usize)> {
                 if pos + 4 > data.len() {
                     return None;
                 }
-                let value = u32::from_le_bytes([
-                    data[pos],
-                    data[pos + 1],
-                    data[pos + 2],
-                    data[pos + 3],
-                ]);
+                let value =
+                    u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
                 pos += 4;
                 fields.push(VdfField::Uint32 { key, value });
             }
@@ -412,8 +408,7 @@ pub fn add_to_steam(steam_info: &SteamInfo, exe_path: &str, icon_path: &str) -> 
 
         // Parse existing entries
         let mut entries = if shortcuts_path.exists() {
-            let data = std::fs::read(&shortcuts_path)
-                .context("Failed to read shortcuts.vdf")?;
+            let data = std::fs::read(&shortcuts_path).context("Failed to read shortcuts.vdf")?;
             parse_shortcuts_vdf(&data).unwrap_or_default()
         } else {
             Vec::new()
@@ -439,8 +434,7 @@ pub fn add_to_steam(steam_info: &SteamInfo, exe_path: &str, icon_path: &str) -> 
             std::fs::create_dir_all(parent)?;
         }
 
-        std::fs::write(&shortcuts_path, &vdf_data)
-            .context("Failed to write shortcuts.vdf")?;
+        std::fs::write(&shortcuts_path, &vdf_data).context("Failed to write shortcuts.vdf")?;
     }
 
     Ok(())
@@ -455,8 +449,7 @@ pub fn remove_from_steam(steam_info: &SteamInfo) -> Result<()> {
             continue;
         }
 
-        let data = std::fs::read(&shortcuts_path)
-            .context("Failed to read shortcuts.vdf")?;
+        let data = std::fs::read(&shortcuts_path).context("Failed to read shortcuts.vdf")?;
 
         let mut entries = parse_shortcuts_vdf(&data).unwrap_or_default();
 
@@ -470,8 +463,7 @@ pub fn remove_from_steam(steam_info: &SteamInfo) -> Result<()> {
             }
 
             let vdf_data = write_shortcuts_vdf(&entries);
-            std::fs::write(&shortcuts_path, &vdf_data)
-                .context("Failed to write shortcuts.vdf")?;
+            std::fs::write(&shortcuts_path, &vdf_data).context("Failed to write shortcuts.vdf")?;
 
             log::info!("Removed Corkscrew from shortcuts.vdf");
         }
@@ -600,8 +592,7 @@ pub fn setup_steam_integration() -> Result<SteamStatus> {
     if let Some(ref info) = steam_info {
         // Determine icon path
         let home = dirs::home_dir().unwrap_or_default();
-        let icon_path = home
-            .join(".local/share/icons/hicolor/128x128/apps/corkscrew.png");
+        let icon_path = home.join(".local/share/icons/hicolor/128x128/apps/corkscrew.png");
         let icon_str = if icon_path.exists() {
             icon_path.to_string_lossy().into_owned()
         } else {
@@ -656,9 +647,11 @@ mod tests {
 
     #[test]
     fn test_vdf_roundtrip() {
-        let entries = vec![
-            build_corkscrew_entry("0", "/opt/Corkscrew.AppImage", "/opt/icon.png"),
-        ];
+        let entries = vec![build_corkscrew_entry(
+            "0",
+            "/opt/Corkscrew.AppImage",
+            "/opt/icon.png",
+        )];
 
         let data = write_shortcuts_vdf(&entries);
         let parsed = parse_shortcuts_vdf(&data).expect("Failed to parse VDF");

@@ -497,7 +497,10 @@ pub async fn install_collection(
     let _ = app.emit(
         INSTALL_PROGRESS_EVENT,
         InstallProgress::Initializing {
-            message: format!("Loading existing mods for {} ({} in collection)...", game_id, total_mods),
+            message: format!(
+                "Loading existing mods for {} ({} in collection)...",
+                game_id, total_mods
+            ),
         },
     );
     let existing_mods = db.list_mods(game_id, bottle_name).unwrap_or_default();
@@ -510,7 +513,13 @@ pub async fn install_collection(
             log::info!(
                 "Resuming collection install from checkpoint {} ({}/{} completed)",
                 id,
-                statuses.values().filter(|s| matches!(s.as_str(), "installed" | "already_installed" | "skipped" | "user_action")).count(),
+                statuses
+                    .values()
+                    .filter(|s| matches!(
+                        s.as_str(),
+                        "installed" | "already_installed" | "skipped" | "user_action"
+                    ))
+                    .count(),
                 total_mods,
             );
             (id, statuses)
@@ -535,7 +544,11 @@ pub async fn install_collection(
     let _ = app.emit(
         INSTALL_PROGRESS_EVENT,
         InstallProgress::Initializing {
-            message: format!("Preparing download phase ({} mods, {} already installed)...", total_mods, existing_mods.len()),
+            message: format!(
+                "Preparing download phase ({} mods, {} already installed)...",
+                total_mods,
+                existing_mods.len()
+            ),
         },
     );
 
@@ -557,8 +570,7 @@ pub async fn install_collection(
             let cores = std::thread::available_parallelism()
                 .map(|n| n.get())
                 .unwrap_or(4);
-            let is_apple_silicon =
-                cfg!(target_arch = "aarch64") && cfg!(target_os = "macos");
+            let is_apple_silicon = cfg!(target_arch = "aarch64") && cfg!(target_os = "macos");
             let is_steam_os = std::path::Path::new("/etc/steamos-release").exists();
             if is_steam_os {
                 cores.clamp(4, 8)
@@ -815,8 +827,7 @@ pub async fn install_collection(
                     },
                 );
 
-                let temp_dir = std::env::temp_dir()
-                    .join(format!("corkscrew_extract_{}", idx));
+                let temp_dir = std::env::temp_dir().join(format!("corkscrew_extract_{}", idx));
 
                 let result = tokio::task::spawn_blocking(move || {
                     if temp_dir.exists() {
@@ -1841,17 +1852,16 @@ async fn stage_and_deploy(
                 patch_failures += 1;
                 continue;
             }
-            let patch_bytes = match base64::Engine::decode(
-                &base64::engine::general_purpose::STANDARD,
-                b64_patch,
-            ) {
-                Ok(b) => b,
-                Err(e) => {
-                    log::warn!("Failed to decode patch for {}: {}", rel_path, e);
-                    patch_failures += 1;
-                    continue;
-                }
-            };
+            let patch_bytes =
+                match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64_patch)
+                {
+                    Ok(b) => b,
+                    Err(e) => {
+                        log::warn!("Failed to decode patch for {}: {}", rel_path, e);
+                        patch_failures += 1;
+                        continue;
+                    }
+                };
             let source_data = match std::fs::read(&file_path) {
                 Ok(d) => d,
                 Err(e) => {

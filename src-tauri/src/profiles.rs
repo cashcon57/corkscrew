@@ -173,11 +173,7 @@ pub fn delete_profile(db: &ModDatabase, profile_id: i64) -> Result<()> {
 }
 
 /// Deactivate a profile (set is_active = 0).
-pub fn deactivate_profile(
-    db: &ModDatabase,
-    game_id: &str,
-    bottle_name: &str,
-) -> Result<()> {
+pub fn deactivate_profile(db: &ModDatabase, game_id: &str, bottle_name: &str) -> Result<()> {
     let conn = db.conn().map_err(|e| ProfileError::Other(e.to_string()))?;
     conn.execute(
         "UPDATE profiles SET is_active = 0
@@ -492,8 +488,9 @@ pub fn backup_saves(
             if let Some(parent) = dest.parent() {
                 let _ = fs::create_dir_all(parent);
             }
-            fs::copy(src, &dest)
-                .map_err(|e| ProfileError::Other(format!("Failed to copy save {}: {}", src.display(), e)))?;
+            fs::copy(src, &dest).map_err(|e| {
+                ProfileError::Other(format!("Failed to copy save {}: {}", src.display(), e))
+            })?;
             count += 1;
         }
     }
@@ -542,10 +539,7 @@ pub fn restore_saves(
         .map_err(|e| ProfileError::Other(format!("Failed to create save dir: {}", e)))?;
 
     let mut count = 0;
-    for entry in WalkDir::new(&backup_dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in WalkDir::new(&backup_dir).into_iter().filter_map(|e| e.ok()) {
         let src = entry.path();
         let relative = match src.strip_prefix(&backup_dir) {
             Ok(r) => r,
@@ -560,8 +554,9 @@ pub fn restore_saves(
             if let Some(parent) = dest.parent() {
                 let _ = fs::create_dir_all(parent);
             }
-            fs::copy(src, &dest)
-                .map_err(|e| ProfileError::Other(format!("Failed to restore save {}: {}", src.display(), e)))?;
+            fs::copy(src, &dest).map_err(|e| {
+                ProfileError::Other(format!("Failed to restore save {}: {}", src.display(), e))
+            })?;
             count += 1;
         }
     }
@@ -587,11 +582,7 @@ pub struct ProfileSaveInfo {
 }
 
 /// Check if a profile has backed-up saves and get stats.
-pub fn get_profile_save_info(
-    profile_id: i64,
-    game_id: &str,
-    bottle_name: &str,
-) -> ProfileSaveInfo {
+pub fn get_profile_save_info(profile_id: i64, game_id: &str, bottle_name: &str) -> ProfileSaveInfo {
     let backup_dir = profile_saves_dir(game_id, bottle_name, profile_id);
 
     if !backup_dir.exists() {

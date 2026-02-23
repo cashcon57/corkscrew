@@ -173,10 +173,7 @@ const STEAM_COMMON: &[&str] = &["Program Files (x86)", "Steam", "steamapps", "co
 /// Attempt to locate a game inside a Wine bottle.
 fn find_game_path(bottle: &Bottle, entry: &GameEntry) -> Option<PathBuf> {
     // Determine the Steam directory name.
-    let steam_dir_name = entry
-        .steam_dir
-        .as_deref()
-        .unwrap_or(&entry.name);
+    let steam_dir_name = entry.steam_dir.as_deref().unwrap_or(&entry.name);
 
     // 1. Check default Steam library.
     if let Some(common) = bottle.find_path(STEAM_COMMON) {
@@ -194,7 +191,11 @@ fn find_game_path(bottle: &Bottle, entry: &GameEntry) -> Option<PathBuf> {
             Some(vdf_path)
         } else {
             let alt = steam_dir.join("config").join("libraryfolders.vdf");
-            if alt.exists() { Some(alt) } else { None }
+            if alt.exists() {
+                Some(alt)
+            } else {
+                None
+            }
         };
 
         if let Some(vdf) = vdf_path {
@@ -272,13 +273,19 @@ fn parse_library_folders_vdf(vdf_path: &Path) -> Option<Vec<PathBuf>> {
             }
         }
     }
-    if paths.is_empty() { None } else { Some(paths) }
+    if paths.is_empty() {
+        None
+    } else {
+        Some(paths)
+    }
 }
 
 fn strip_vdf_key<'a>(line: &'a str, key: &str) -> Option<&'a str> {
     let line = line.trim();
     let expected = format!("\"{}\"", key);
-    if !line.starts_with(&expected) { return None; }
+    if !line.starts_with(&expected) {
+        return None;
+    }
     Some(line[expected.len()..].trim())
 }
 
@@ -345,7 +352,11 @@ mod tests {
         let entries = entries();
         assert!(!entries.is_empty());
         // Should have at least 70 games
-        assert!(entries.len() >= 70, "Expected 70+ games, got {}", entries.len());
+        assert!(
+            entries.len() >= 70,
+            "Expected 70+ games, got {}",
+            entries.len()
+        );
     }
 
     #[test]
@@ -358,10 +369,7 @@ mod tests {
     fn no_stubs_in_supported_list() {
         let supported = list_supported_games();
         for game in &supported {
-            assert!(
-                !game.game_id.is_empty(),
-                "Empty game_id in supported list"
-            );
+            assert!(!game.game_id.is_empty(), "Empty game_id in supported list");
         }
         // Cyberpunk was a stub in original data but we added real data
         assert!(supported.iter().any(|g| g.game_id == "cyberpunk2077"));

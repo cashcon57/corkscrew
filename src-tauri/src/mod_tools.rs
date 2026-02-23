@@ -332,7 +332,9 @@ pub fn detect_required_tools_wabbajack(
 /// since Pandora is backwards-compatible with both.
 fn suppress_replaced_tools(results: &mut Vec<RequiredTool>, detected_tools: &[ModTool]) {
     let pandora_available = results.iter().any(|t| t.tool_id == "pandora")
-        || detected_tools.iter().any(|t| t.id == "pandora" && t.detected_path.is_some());
+        || detected_tools
+            .iter()
+            .any(|t| t.id == "pandora" && t.detected_path.is_some());
 
     if pandora_available {
         results.retain(|t| t.tool_id != "nemesis" && t.tool_id != "fnis");
@@ -938,11 +940,7 @@ fn pick_asset<'a>(tool_id: &str, assets: &'a [GitHubAsset]) -> Option<&'a GitHub
 /// NexusMods (if `nexus_mod_id` is set and user has a Nexus API key with premium).
 ///
 /// Returns the path to the installed tool's executable.
-pub async fn install_tool(
-    tool_id: &str,
-    game_data_dir: &Path,
-    app: &AppHandle,
-) -> Result<String> {
+pub async fn install_tool(tool_id: &str, game_data_dir: &Path, app: &AppHandle) -> Result<String> {
     let tool_def = find_tool_def(tool_id)?;
 
     if !tool_def.can_auto_install {
@@ -958,37 +956,38 @@ pub async fn install_tool(
     // --- Phase 1: Download ---
     emit_progress(app, tool_id, "downloading", "Fetching from GitHub...");
 
-    let (archive_bytes, archive_name, version_tag) = if let Some(github_repo) = &tool_def.github_repo {
-        match install_tool_from_github(tool_id, github_repo, &client).await {
-            Ok(result) => result,
-            Err(gh_err) => {
-                if has_nexus {
-                    let mod_id = tool_def.nexus_mod_id.unwrap();
-                    let game_slug = tool_def.nexus_game_slug.as_ref().unwrap();
-                    info!(
-                        "GitHub install failed for '{}': {}. Trying NexusMods fallback...",
-                        tool_id, gh_err
-                    );
-                    emit_progress(
-                        app,
-                        tool_id,
-                        "downloading",
-                        "GitHub unavailable, downloading from NexusMods...",
-                    );
-                    install_tool_from_nexus(tool_id, mod_id, game_slug, &client).await?
-                } else {
-                    return Err(gh_err);
+    let (archive_bytes, archive_name, version_tag) =
+        if let Some(github_repo) = &tool_def.github_repo {
+            match install_tool_from_github(tool_id, github_repo, &client).await {
+                Ok(result) => result,
+                Err(gh_err) => {
+                    if has_nexus {
+                        let mod_id = tool_def.nexus_mod_id.unwrap();
+                        let game_slug = tool_def.nexus_game_slug.as_ref().unwrap();
+                        info!(
+                            "GitHub install failed for '{}': {}. Trying NexusMods fallback...",
+                            tool_id, gh_err
+                        );
+                        emit_progress(
+                            app,
+                            tool_id,
+                            "downloading",
+                            "GitHub unavailable, downloading from NexusMods...",
+                        );
+                        install_tool_from_nexus(tool_id, mod_id, game_slug, &client).await?
+                    } else {
+                        return Err(gh_err);
+                    }
                 }
             }
-        }
-    } else if let (Some(mod_id), Some(game_slug)) =
-        (&tool_def.nexus_mod_id, &tool_def.nexus_game_slug)
-    {
-        emit_progress(app, tool_id, "downloading", "Downloading from NexusMods...");
-        install_tool_from_nexus(tool_id, *mod_id, game_slug, &client).await?
-    } else {
-        return Err(ToolError::NoAutoInstall(tool_id.to_string()));
-    };
+        } else if let (Some(mod_id), Some(game_slug)) =
+            (&tool_def.nexus_mod_id, &tool_def.nexus_game_slug)
+        {
+            emit_progress(app, tool_id, "downloading", "Downloading from NexusMods...");
+            install_tool_from_nexus(tool_id, *mod_id, game_slug, &client).await?
+        } else {
+            return Err(ToolError::NoAutoInstall(tool_id.to_string()));
+        };
 
     // --- Phase 2: Extract ---
     let size_mb = archive_bytes.len() as f64 / 1_048_576.0;
@@ -1205,10 +1204,7 @@ async fn install_tool_from_nexus(
         .map(|t| t.to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
-    info!(
-        "Found NexusMods file: {} (id: {})",
-        file_name, file_id
-    );
+    info!("Found NexusMods file: {} (id: {})", file_name, file_id);
 
     // Get download links (premium-only automated download)
     let links = nexus
@@ -1450,7 +1446,10 @@ pub async fn check_tool_update(tool_id: &str, game_data_dir: &Path) -> Result<To
     let game_dir = game_data_dir.parent().unwrap_or(game_data_dir);
     let tool_dir = game_dir.join(TOOLS_DIR).join(&tool_def.id);
     let version_file = tool_dir.join(".version");
-    let installed_version = fs::read_to_string(&version_file).unwrap_or_default().trim().to_string();
+    let installed_version = fs::read_to_string(&version_file)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
 
     // Check GitHub first
     if let Some(github_repo) = &tool_def.github_repo {
@@ -1462,8 +1461,8 @@ pub async fn check_tool_update(tool_id: &str, game_data_dir: &Path) -> Result<To
             Ok(resp) => {
                 if let Ok(release) = resp.json::<GitHubRelease>().await {
                     let latest = release.tag_name.clone();
-                    let update_available = !installed_version.is_empty()
-                        && installed_version != latest;
+                    let update_available =
+                        !installed_version.is_empty() && installed_version != latest;
                     return Ok(ToolUpdateInfo {
                         tool_id: tool_id.to_string(),
                         tool_name: tool_def.name.clone(),
@@ -1479,9 +1478,7 @@ pub async fn check_tool_update(tool_id: &str, game_data_dir: &Path) -> Result<To
     }
 
     // Fallback: NexusMods — check latest file upload timestamp
-    if let (Some(mod_id), Some(game_slug)) =
-        (&tool_def.nexus_mod_id, &tool_def.nexus_game_slug)
-    {
+    if let (Some(mod_id), Some(game_slug)) = (&tool_def.nexus_mod_id, &tool_def.nexus_game_slug) {
         let api_key = crate::config::get_config()
             .ok()
             .and_then(|c| c.nexus_api_key);
@@ -1514,8 +1511,8 @@ pub async fn check_tool_update(tool_id: &str, game_data_dir: &Path) -> Result<To
                     .unwrap_or("unknown")
                     .to_string();
 
-                let update_available = !installed_version.is_empty()
-                    && installed_version != latest_ts.to_string();
+                let update_available =
+                    !installed_version.is_empty() && installed_version != latest_ts.to_string();
 
                 return Ok(ToolUpdateInfo {
                     tool_id: tool_id.to_string(),

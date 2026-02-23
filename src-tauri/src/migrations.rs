@@ -542,7 +542,9 @@ fn migrate_v6_to_v7(conn: &Connection) -> Result<()> {
 fn migrate_v7_to_v8(conn: &Connection) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
 
-    match tx.execute_batch("ALTER TABLE installed_mods ADD COLUMN source_type TEXT NOT NULL DEFAULT 'manual'") {
+    match tx.execute_batch(
+        "ALTER TABLE installed_mods ADD COLUMN source_type TEXT NOT NULL DEFAULT 'manual'",
+    ) {
         Ok(_) => {}
         Err(e) => {
             let msg = e.to_string();

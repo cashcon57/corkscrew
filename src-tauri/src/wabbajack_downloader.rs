@@ -94,11 +94,7 @@ pub struct WjDownloader {
 impl WjDownloader {
     /// Create a new downloader. If `nexus_api_key` is supplied the downloader
     /// can make NexusMods API calls; `is_premium` gates automated downloads.
-    pub fn new(
-        nexus_api_key: Option<String>,
-        is_premium: bool,
-        download_dir: PathBuf,
-    ) -> Self {
+    pub fn new(nexus_api_key: Option<String>, is_premium: bool, download_dir: PathBuf) -> Self {
         let ua = format!("Corkscrew/{}", env!("CARGO_PKG_VERSION"));
         let mut default_headers = HeaderMap::new();
         default_headers.insert(USER_AGENT, HeaderValue::from_str(&ua).unwrap());
@@ -223,11 +219,7 @@ impl WjDownloader {
         );
 
         // First request -- may return the file directly or an HTML warning.
-        let resp = self
-            .http_client
-            .get(&initial_url)
-            .send()
-            .await?;
+        let resp = self.http_client.get(&initial_url).send().await?;
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
@@ -275,18 +267,16 @@ impl WjDownloader {
             } else {
                 // Strategy 2: Look for any anchor whose href contains
                 // "download" and "confirm".
-                let link_url = scraper::Selector::parse("a[href]")
-                    .ok()
-                    .and_then(|sel| {
-                        document.select(&sel).find_map(|el| {
-                            let href = el.value().attr("href")?;
-                            if href.contains("download") && href.contains("confirm") {
-                                Some(href.to_owned())
-                            } else {
-                                None
-                            }
-                        })
-                    });
+                let link_url = scraper::Selector::parse("a[href]").ok().and_then(|sel| {
+                    document.select(&sel).find_map(|el| {
+                        let href = el.value().attr("href")?;
+                        if href.contains("download") && href.contains("confirm") {
+                            Some(href.to_owned())
+                        } else {
+                            None
+                        }
+                    })
+                });
 
                 if let Some(url) = link_url {
                     // Relative URLs need the host prepended.
@@ -376,13 +366,7 @@ impl WjDownloader {
         archive_name: &str,
         url: &str,
     ) -> Result<PathBuf, WjDownloadError> {
-        let page_html = self
-            .http_client
-            .get(url)
-            .send()
-            .await?
-            .text()
-            .await?;
+        let page_html = self.http_client.get(url).send().await?.text().await?;
 
         // Extract the real download URL from the MediaFire page.
         // Scope the HTML parsing so the non-Send `scraper::Html` is dropped
@@ -397,9 +381,7 @@ impl WjDownloader {
                 .next()
                 .and_then(|el| el.value().attr("href").map(|s| s.to_owned()))
                 .ok_or_else(|| {
-                    WjDownloadError::Other(
-                        "Could not find download link on MediaFire page".into(),
-                    )
+                    WjDownloadError::Other("Could not find download link on MediaFire page".into())
                 })?
         };
 
@@ -442,14 +424,9 @@ impl WjDownloader {
         let all_games = crate::games::detect_all_games();
         let detected = all_games
             .iter()
-            .find(|g| {
-                g.nexus_slug == domain
-                    || g.game_id.eq_ignore_ascii_case(game)
-            })
+            .find(|g| g.nexus_slug == domain || g.game_id.eq_ignore_ascii_case(game))
             .ok_or_else(|| {
-                WjDownloadError::Other(format!(
-                    "Cannot detect install path for game '{game}'"
-                ))
+                WjDownloadError::Other(format!("Cannot detect install path for game '{game}'"))
             })?;
 
         let source = detected.game_path.join(game_file.replace('\\', "/"));
@@ -508,21 +485,13 @@ impl WjDownloader {
             WjArchiveState::Http { url, headers } => {
                 self.download_http(app, name, url, headers).await
             }
-            WjArchiveState::GoogleDrive { id } => {
-                self.download_google_drive(app, name, id).await
-            }
-            WjArchiveState::Mega { url } => {
-                self.download_mega(app, name, url).await
-            }
-            WjArchiveState::MediaFire { url } => {
-                self.download_mediafire(app, name, url).await
-            }
+            WjArchiveState::GoogleDrive { id } => self.download_google_drive(app, name, id).await,
+            WjArchiveState::Mega { url } => self.download_mega(app, name, url).await,
+            WjArchiveState::MediaFire { url } => self.download_mediafire(app, name, url).await,
             WjArchiveState::WabbajackCDN { url } => {
                 self.download_wabbajack_cdn(app, name, url).await
             }
-            WjArchiveState::ModDB { url } => {
-                self.download_moddb(app, name, url).await
-            }
+            WjArchiveState::ModDB { url } => self.download_moddb(app, name, url).await,
             WjArchiveState::GameFileSource {
                 game, game_file, ..
             } => {
@@ -532,21 +501,15 @@ impl WjDownloader {
             WjArchiveState::Manual { url, prompt } => {
                 self.download_manual(app, name, url, prompt).await
             }
-            WjArchiveState::LoversLab { url, .. } => {
-                Err(WjDownloadError::UserActionRequired(format!(
-                    "LoversLab downloads require manual action: {url}"
-                )))
-            }
-            WjArchiveState::VectorPlexus { url, .. } => {
-                Err(WjDownloadError::UserActionRequired(format!(
-                    "VectorPlexus downloads require manual action: {url}"
-                )))
-            }
-            WjArchiveState::TESAlliance { url, .. } => {
-                Err(WjDownloadError::UserActionRequired(format!(
-                    "TESAlliance downloads require manual action: {url}"
-                )))
-            }
+            WjArchiveState::LoversLab { url, .. } => Err(WjDownloadError::UserActionRequired(
+                format!("LoversLab downloads require manual action: {url}"),
+            )),
+            WjArchiveState::VectorPlexus { url, .. } => Err(WjDownloadError::UserActionRequired(
+                format!("VectorPlexus downloads require manual action: {url}"),
+            )),
+            WjArchiveState::TESAlliance { url, .. } => Err(WjDownloadError::UserActionRequired(
+                format!("TESAlliance downloads require manual action: {url}"),
+            )),
             WjArchiveState::Bethesda { .. } => Err(WjDownloadError::Unsupported(
                 "Bethesda.net downloads are not supported".into(),
             )),
@@ -639,7 +602,8 @@ impl WjDownloader {
             // ----- Resume checkpoint check -----
             // If a checkpoint file exists for this archive hash, the archive
             // was already successfully downloaded and verified in a prior run.
-            let checkpoint_file = checkpoint_dir.join(format!("{}.done", sanitize_filename(&hash_str)));
+            let checkpoint_file =
+                checkpoint_dir.join(format!("{}.done", sanitize_filename(&hash_str)));
             if checkpoint_file.exists() {
                 // The downloaded file should still be on disk.
                 let dest = self.download_dir.join(sanitize_filename(&archive_name));
@@ -830,9 +794,7 @@ impl WjDownloader {
         url: &str,
         extra_headers: &HeaderMap,
     ) -> Result<PathBuf, WjDownloadError> {
-        let dest = self
-            .download_dir
-            .join(sanitize_filename(archive_name));
+        let dest = self.download_dir.join(sanitize_filename(archive_name));
         let partial = dest.with_extension("partial");
 
         let resp = self
@@ -845,9 +807,7 @@ impl WjDownloader {
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
-            return Err(WjDownloadError::Other(format!(
-                "HTTP {status}: {body}"
-            )));
+            return Err(WjDownloadError::Other(format!("HTTP {status}: {body}")));
         }
 
         let total_bytes = resp.content_length().unwrap_or(0);
@@ -904,9 +864,7 @@ impl WjDownloader {
         archive_name: &str,
         resp: reqwest::Response,
     ) -> Result<PathBuf, WjDownloadError> {
-        let dest = self
-            .download_dir
-            .join(sanitize_filename(archive_name));
+        let dest = self.download_dir.join(sanitize_filename(archive_name));
         let partial = dest.with_extension("partial");
 
         let total_bytes = resp.content_length().unwrap_or(0);
@@ -1061,10 +1019,7 @@ mod tests {
         assert_eq!(wj_game_to_nexus_domain("Fallout4"), "fallout4");
         assert_eq!(wj_game_to_nexus_domain("Oblivion"), "oblivion");
         // Unknown game falls back to lowercase.
-        assert_eq!(
-            wj_game_to_nexus_domain("SomeNewGame"),
-            "somenewgame"
-        );
+        assert_eq!(wj_game_to_nexus_domain("SomeNewGame"), "somenewgame");
     }
 
     #[test]
@@ -1074,7 +1029,10 @@ mod tests {
             sanitize_filename("mod with spaces.7z"),
             "mod_with_spaces.7z"
         );
-        assert_eq!(sanitize_filename("../../../etc/passwd"), ".._.._.._etc_passwd");
+        assert_eq!(
+            sanitize_filename("../../../etc/passwd"),
+            ".._.._.._etc_passwd"
+        );
         assert_eq!(sanitize_filename(""), "download");
     }
 
@@ -1153,7 +1111,10 @@ mod tests {
 
         // File should contain a timestamp (numeric string).
         let contents = tokio::fs::read_to_string(&checkpoint_path).await.unwrap();
-        assert!(contents.parse::<u64>().is_ok(), "Expected numeric timestamp, got: {contents}");
+        assert!(
+            contents.parse::<u64>().is_ok(),
+            "Expected numeric timestamp, got: {contents}"
+        );
     }
 
     #[tokio::test]
@@ -1163,8 +1124,12 @@ mod tests {
         tokio::fs::create_dir_all(&checkpoint_dir).await.unwrap();
 
         // Write a few checkpoint files.
-        write_checkpoint(&checkpoint_dir.join("hash1.done")).await.unwrap();
-        write_checkpoint(&checkpoint_dir.join("hash2.done")).await.unwrap();
+        write_checkpoint(&checkpoint_dir.join("hash1.done"))
+            .await
+            .unwrap();
+        write_checkpoint(&checkpoint_dir.join("hash2.done"))
+            .await
+            .unwrap();
         assert!(checkpoint_dir.exists());
 
         // Simulate cleanup on success.

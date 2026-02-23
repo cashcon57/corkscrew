@@ -299,21 +299,12 @@ async fn graphql_query<T: serde::de::DeserializeOwned>(
 ) -> Result<T, CollectionsError> {
     // Build default headers with NexusMods API compliance fields
     let mut headers = HeaderMap::new();
-    headers.insert(
-        "Content-Type",
-        HeaderValue::from_static("application/json"),
-    );
-    headers.insert(
-        "Application-Name",
-        HeaderValue::from_static("Corkscrew"),
-    );
+    headers.insert("Content-Type", HeaderValue::from_static("application/json"));
+    headers.insert("Application-Name", HeaderValue::from_static("Corkscrew"));
     let app_version = HeaderValue::from_str(env!("CARGO_PKG_VERSION"))
         .unwrap_or_else(|_| HeaderValue::from_static("0.0.0"));
     headers.insert("Application-Version", app_version);
-    headers.insert(
-        "Protocol-Version",
-        HeaderValue::from_static("0.15.5"),
-    );
+    headers.insert("Protocol-Version", HeaderValue::from_static("0.15.5"));
 
     let client = reqwest::Client::builder()
         .user_agent(format!("Corkscrew/{}", env!("CARGO_PKG_VERSION")))
@@ -602,10 +593,7 @@ pub async fn get_revisions(
     let result: Vec<CollectionRevision> = revisions
         .iter()
         .map(|rev| {
-            let mod_files = rev
-                .get("modCount")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
+            let mod_files = rev.get("modCount").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
             CollectionRevision {
                 revision_number: rev

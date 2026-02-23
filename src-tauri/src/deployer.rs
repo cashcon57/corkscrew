@@ -202,7 +202,9 @@ pub fn deploy_mod(
                     Err(e) => {
                         warn!(
                             "Hardlink failed for {} → {}: {} (falling back to copy)",
-                            src.display(), dst.display(), e
+                            src.display(),
+                            dst.display(),
+                            e
                         );
                         if fs::copy(&src, &dst).is_err() {
                             return None;
@@ -229,7 +231,14 @@ pub fn deploy_mod(
         .iter()
         .filter_map(|opt| {
             opt.as_ref().map(|(rel_path, method)| {
-                (game_id, bottle_name, mod_id, rel_path.as_str(), staging_str.as_str(), *method)
+                (
+                    game_id,
+                    bottle_name,
+                    mod_id,
+                    rel_path.as_str(),
+                    staging_str.as_str(),
+                    *method,
+                )
             })
         })
         .collect();
@@ -267,7 +276,15 @@ pub fn deploy_mod_atomic(
     data_dir: &Path,
     files: &[String],
 ) -> Result<DeployResult> {
-    match deploy_mod(db, game_id, bottle_name, mod_id, staging_path, data_dir, files) {
+    match deploy_mod(
+        db,
+        game_id,
+        bottle_name,
+        mod_id,
+        staging_path,
+        data_dir,
+        files,
+    ) {
         Ok(result) => Ok(result),
         Err(e) => {
             warn!(

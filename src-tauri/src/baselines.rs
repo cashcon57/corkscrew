@@ -37,9 +37,7 @@ fn is_skyrim_stock_pattern(rel_path: &str) -> bool {
 
     // Creation Club content: cc*.esm, cc*.esl, cc*.bsa
     if lower.starts_with("cc")
-        && (lower.ends_with(".esm")
-            || lower.ends_with(".esl")
-            || lower.ends_with(".bsa"))
+        && (lower.ends_with(".esm") || lower.ends_with(".esl") || lower.ends_with(".bsa"))
     {
         return true;
     }

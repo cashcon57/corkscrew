@@ -29,12 +29,7 @@ const GOG_PATHS: &[&[&str]] = &[
     &["GOG Games", "Fallout 4"],
     &["GOG Games", "Fallout 4 GOTY"],
     &["Program Files", "GOG Galaxy", "Games", "Fallout 4"],
-    &[
-        "Program Files (x86)",
-        "GOG Galaxy",
-        "Games",
-        "Fallout 4",
-    ],
+    &["Program Files (x86)", "GOG Galaxy", "Games", "Fallout 4"],
     &["Games", "Fallout 4"],
 ];
 

@@ -152,12 +152,11 @@ const ENB_PATTERNS: &[&str] = &[
 
 /// Save file extensions and directories (case-insensitive).
 const SAVE_PATTERNS: &[&str] = &[
-    ".ess",     // Skyrim saves
-    ".skse",    // SKSE co-saves
-    ".bak",     // Save backups
-    "saves/",   // Save directory
+    ".ess",   // Skyrim saves
+    ".skse",  // SKSE co-saves
+    ".bak",   // Save backups
+    "saves/", // Save directory
 ];
-
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -175,9 +174,7 @@ pub fn scan_game_directory(
     bottle_name: &str,
     data_dir: &Path,
 ) -> Result<CleanReport> {
-    let conn = db
-        .conn()
-        .map_err(|e| CleanerError::Other(e.to_string()))?;
+    let conn = db.conn().map_err(|e| CleanerError::Other(e.to_string()))?;
 
     // Load snapshot paths into a HashSet for O(1) lookup
     let mut stmt = conn.prepare(
@@ -196,7 +193,9 @@ pub fn scan_game_directory(
             Some(baseline) => {
                 info!(
                     "No snapshot for {}/{}; using built-in baseline ({} stock files)",
-                    game_id, bottle_name, baseline.len()
+                    game_id,
+                    bottle_name,
+                    baseline.len()
                 );
                 baseline
             }
@@ -262,7 +261,11 @@ pub fn scan_game_directory(
         let file_size = fs::metadata(abs_path).map(|m| m.len()).unwrap_or(0);
         let is_managed = managed_paths.contains(&rel_str);
         let is_enb = is_enb_file(&rel_str);
-        let category = if is_save { "save".to_string() } else { categorize_file(&rel_str) };
+        let category = if is_save {
+            "save".to_string()
+        } else {
+            categorize_file(&rel_str)
+        };
 
         if is_enb {
             enb_files.push(rel_str.clone());
@@ -362,9 +365,7 @@ pub fn clean_game_directory(
     // If not dry_run and we removed managed files, also clear their manifest entries
     if !options.dry_run && !options.orphans_only {
         // Clear deployment manifest for this game/bottle since we're cleaning everything
-        let conn = db
-            .conn()
-            .map_err(|e| CleanerError::Other(e.to_string()))?;
+        let conn = db.conn().map_err(|e| CleanerError::Other(e.to_string()))?;
         conn.execute(
             "DELETE FROM deployment_manifest WHERE game_id = ?1 AND bottle_name = ?2",
             params![game_id, bottle_name],
@@ -414,10 +415,7 @@ fn categorize_file(rel_path: &str) -> String {
     }
 
     // Plugin files
-    if lower.ends_with(".esp")
-        || lower.ends_with(".esm")
-        || lower.ends_with(".esl")
-    {
+    if lower.ends_with(".esp") || lower.ends_with(".esm") || lower.ends_with(".esl") {
         return "plugin".to_string();
     }
 
@@ -437,7 +435,12 @@ fn categorize_file(rel_path: &str) -> String {
     }
 
     // Sound/music
-    if lower.contains("sound/") || lower.contains("music/") || lower.ends_with(".wav") || lower.ends_with(".xwm") || lower.ends_with(".fuz") {
+    if lower.contains("sound/")
+        || lower.contains("music/")
+        || lower.ends_with(".wav")
+        || lower.ends_with(".xwm")
+        || lower.ends_with(".fuz")
+    {
         return "sound".to_string();
     }
 
@@ -628,7 +631,11 @@ mod tests {
         assert_eq!(report.save_files.len(), 2);
         // Saves are now included in non_stock_files (category "save") for opt-in removal
         assert_eq!(report.non_stock_files.len(), 3); // mod.esp + 2 saves
-        let save_count = report.non_stock_files.iter().filter(|f| f.category == "save").count();
+        let save_count = report
+            .non_stock_files
+            .iter()
+            .filter(|f| f.category == "save")
+            .count();
         assert_eq!(save_count, 2);
     }
 
@@ -648,8 +655,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result =
-            clean_game_directory(&db, "skyrimse", "Gaming", &data_dir, &options).unwrap();
+        let result = clean_game_directory(&db, "skyrimse", "Gaming", &data_dir, &options).unwrap();
         assert_eq!(result.removed_files.len(), 1);
         assert!(result.dry_run);
 
@@ -670,8 +676,7 @@ mod tests {
         fs::write(data_dir.join("meshes/modded.nif"), b"modded").unwrap();
 
         let options = CleanOptions::default();
-        let result =
-            clean_game_directory(&db, "skyrimse", "Gaming", &data_dir, &options).unwrap();
+        let result = clean_game_directory(&db, "skyrimse", "Gaming", &data_dir, &options).unwrap();
 
         assert_eq!(result.removed_files.len(), 2);
         assert!(!result.dry_run);
@@ -691,19 +696,14 @@ mod tests {
         integrity::create_game_snapshot(&db, "skyrimse", "Gaming", &data_dir).unwrap();
 
         fs::write(data_dir.join("mod.esp"), b"mod").unwrap();
-        fs::write(
-            data_dir.join("MyMod/Config/important.ini"),
-            b"keep this",
-        )
-        .unwrap();
+        fs::write(data_dir.join("MyMod/Config/important.ini"), b"keep this").unwrap();
 
         let options = CleanOptions {
             exclude_patterns: vec!["MyMod/Config/*".to_string()],
             ..Default::default()
         };
 
-        let result =
-            clean_game_directory(&db, "skyrimse", "Gaming", &data_dir, &options).unwrap();
+        let result = clean_game_directory(&db, "skyrimse", "Gaming", &data_dir, &options).unwrap();
 
         assert_eq!(result.removed_files.len(), 1); // Only mod.esp
         assert_eq!(result.skipped_files.len(), 1); // Excluded config
@@ -723,8 +723,7 @@ mod tests {
         fs::write(data_dir.join("mod.esp"), b"mod").unwrap();
 
         let options = CleanOptions::default(); // remove_enb = false
-        let result =
-            clean_game_directory(&db, "skyrimse", "Gaming", &data_dir, &options).unwrap();
+        let result = clean_game_directory(&db, "skyrimse", "Gaming", &data_dir, &options).unwrap();
 
         assert_eq!(result.removed_files.len(), 1); // Only mod.esp
         assert!(data_dir.join("d3d11.dll").exists()); // ENB preserved

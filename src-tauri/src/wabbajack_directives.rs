@@ -98,15 +98,11 @@ impl DirectiveProcessor {
             } => self.process_patched_from_archive(to, archive_hash_path, *patch_id, hash),
 
             WjDirective::InlineFile {
-                to,
-                source_data_id,
-                ..
+                to, source_data_id, ..
             } => self.process_inline_file(to, *source_data_id),
 
             WjDirective::RemappedInlineFile {
-                to,
-                source_data_id,
-                ..
+                to, source_data_id, ..
             } => self.process_remapped_inline_file(to, *source_data_id),
 
             WjDirective::CreateBSA {
@@ -309,16 +305,17 @@ impl DirectiveProcessor {
             verify_output_hash(&dest_path, expected_hash)?;
         }
 
-        debug!("PatchedFromArchive: {} (patch {}) -> {}", source_path.display(), patch_id, to);
+        debug!(
+            "PatchedFromArchive: {} (patch {}) -> {}",
+            source_path.display(),
+            patch_id,
+            to
+        );
         Ok(())
     }
 
     /// Read an inline file from the .wabbajack ZIP and write to output.
-    fn process_inline_file(
-        &self,
-        to: &str,
-        source_data_id: i64,
-    ) -> Result<(), WjDirectiveError> {
+    fn process_inline_file(&self, to: &str, source_data_id: i64) -> Result<(), WjDirectiveError> {
         let entry_name = source_data_id.to_string();
         let data = read_wj_zip_entry(&self.wabbajack_path, &entry_name)?;
 
@@ -372,7 +369,10 @@ impl DirectiveProcessor {
         ensure_parent_dir(&dest_path)?;
 
         if file_states.is_empty() {
-            warn!("CreateBSA: {} -> {} has no file states, skipping", temp_id, to);
+            warn!(
+                "CreateBSA: {} -> {} has no file states, skipping",
+                temp_id, to
+            );
             return Ok(());
         }
 
@@ -397,7 +397,11 @@ impl DirectiveProcessor {
             file_states.len(),
             to,
             if is_ba2 {
-                if is_dx10 { "BA2/DX10" } else { "BA2/GNRL" }
+                if is_dx10 {
+                    "BA2/DX10"
+                } else {
+                    "BA2/GNRL"
+                }
             } else {
                 "BSA/TES4"
             }
@@ -630,9 +634,7 @@ impl DirectiveProcessor {
             } else if lower.ends_with(".dds") || lower.ends_with(".tga") || lower.ends_with(".png")
             {
                 archive_types |= ArchiveTypes::TEXTURES;
-            } else if lower.ends_with(".wav")
-                || lower.ends_with(".xwm")
-                || lower.ends_with(".fuz")
+            } else if lower.ends_with(".wav") || lower.ends_with(".xwm") || lower.ends_with(".fuz")
             {
                 archive_types |= ArchiveTypes::SOUNDS;
             } else if lower.ends_with(".lip") || lower.contains("voice") {
@@ -646,19 +648,13 @@ impl DirectiveProcessor {
             // BSA paths use backslashes. Split into directory + filename.
             let bsa_path = normalized.replace('/', "\\");
             let (dir_part, file_part) = if let Some(pos) = bsa_path.rfind('\\') {
-                (
-                    bsa_path[..pos].to_string(),
-                    bsa_path[pos + 1..].to_string(),
-                )
+                (bsa_path[..pos].to_string(), bsa_path[pos + 1..].to_string())
             } else {
                 // File at root level
                 (String::new(), bsa_path)
             };
 
-            dir_map
-                .entry(dir_part)
-                .or_default()
-                .push((file_part, data));
+            dir_map.entry(dir_part).or_default().push((file_part, data));
         }
 
         // Build the archive from grouped directories
@@ -835,19 +831,13 @@ impl DirectiveProcessor {
         };
 
         // Re-encode to DDS
-        let new_dds = image_dds::dds_from_image(
-            &resized,
-            target_format,
-            Quality::Normal,
-            mipmaps,
-        )
-        .map_err(|e| {
-            WjDirectiveError::TextureFailed(format!(
-                "Failed to encode DDS (format {:?}): {}",
-                target_format,
-                e
-            ))
-        })?;
+        let new_dds = image_dds::dds_from_image(&resized, target_format, Quality::Normal, mipmaps)
+            .map_err(|e| {
+                WjDirectiveError::TextureFailed(format!(
+                    "Failed to encode DDS (format {:?}): {}",
+                    target_format, e
+                ))
+            })?;
 
         // Write the DDS to destination
         let mut output_file = std::fs::File::create(dest_path).map_err(|e| {
@@ -919,11 +909,9 @@ impl DirectiveProcessor {
         let target_size = patcher.hint_target_size() as usize;
         let mut target_data = Vec::with_capacity(target_size);
 
-        patcher
-            .apply(&source_data, &mut target_data)
-            .map_err(|e| {
-                WjDirectiveError::PatchFailed(format!("Merge patch apply failed: {}", e))
-            })?;
+        patcher.apply(&source_data, &mut target_data).map_err(|e| {
+            WjDirectiveError::PatchFailed(format!("Merge patch apply failed: {}", e))
+        })?;
 
         // Write output
         let dest_path = self.resolve_output_path(to);
@@ -957,10 +945,7 @@ impl DirectiveProcessor {
     ///
     /// Looks up the archive extraction directory by `base_hash`, then
     /// constructs the full path using the parts (relative path components).
-    fn resolve_archive_file(
-        &self,
-        ahp: &ArchiveHashPath,
-    ) -> Result<PathBuf, WjDirectiveError> {
+    fn resolve_archive_file(&self, ahp: &ArchiveHashPath) -> Result<PathBuf, WjDirectiveError> {
         let hash_str = &ahp.base_hash.0;
 
         let archive_dir = self
@@ -1037,10 +1022,7 @@ fn dxgi_to_image_format(dxgi: u32) -> image_dds::ImageFormat {
         // Default to BC7 for unrecognized formats -- it handles all texture
         // types reasonably well and is the most common modern format
         other => {
-            warn!(
-                "Unknown DXGI_FORMAT {}, defaulting to BC7_UNorm",
-                other
-            );
+            warn!("Unknown DXGI_FORMAT {}, defaulting to BC7_UNorm", other);
             ImageFormat::BC7RgbaUnorm
         }
     }
@@ -1110,9 +1092,9 @@ fn parse_dds_header(data: &[u8]) -> Option<DdsHeaderInfo> {
     } else if has_fourcc {
         // Legacy FourCC: translate common formats to DXGI_FORMAT values
         let dxgi = match &pf_fourcc.to_le_bytes() {
-            b"DXT1" => 71u32, // DXGI_FORMAT_BC1_UNORM
-            b"DXT3" => 74,    // DXGI_FORMAT_BC2_UNORM
-            b"DXT5" => 77,    // DXGI_FORMAT_BC3_UNORM
+            b"DXT1" => 71u32,        // DXGI_FORMAT_BC1_UNORM
+            b"DXT3" => 74,           // DXGI_FORMAT_BC2_UNORM
+            b"DXT5" => 77,           // DXGI_FORMAT_BC3_UNORM
             b"ATI1" | b"BC4U" => 80, // DXGI_FORMAT_BC4_UNORM
             b"ATI2" | b"BC5U" => 83, // DXGI_FORMAT_BC5_UNORM
             _ => {
@@ -1126,13 +1108,11 @@ fn parse_dds_header(data: &[u8]) -> Option<DdsHeaderInfo> {
         (dxgi as u8, 128usize)
     } else {
         // Uncompressed format -- check for common RGBA layouts
-        let rgb_bit_count =
-            u32::from_le_bytes([header[84], header[85], header[86], header[87]]);
+        let rgb_bit_count = u32::from_le_bytes([header[84], header[85], header[86], header[87]]);
         let r_mask = u32::from_le_bytes([header[88], header[89], header[90], header[91]]);
         let g_mask = u32::from_le_bytes([header[92], header[93], header[94], header[95]]);
         let b_mask = u32::from_le_bytes([header[96], header[97], header[98], header[99]]);
-        let a_mask =
-            u32::from_le_bytes([header[100], header[101], header[102], header[103]]);
+        let a_mask = u32::from_le_bytes([header[100], header[101], header[102], header[103]]);
 
         let dxgi = if rgb_bit_count == 32
             && r_mask == 0x000000FF
@@ -1386,9 +1366,7 @@ mod tests {
         let result = verify_output_hash(&file_path, &wrong_hash);
         assert!(result.is_err());
         match result.unwrap_err() {
-            WjDirectiveError::HashMismatch {
-                path, expected, ..
-            } => {
+            WjDirectiveError::HashMismatch { path, expected, .. } => {
                 assert!(path.contains("test.bin"));
                 assert_eq!(expected, wrong_hash.0);
             }
@@ -1508,10 +1486,8 @@ mod tests {
             .process_from_archive("mods/ArmorMod/textures/armor/cuirass.dds", &ahp)
             .unwrap();
 
-        let written = std::fs::read(
-            output_dir.join("mods/ArmorMod/textures/armor/cuirass.dds"),
-        )
-        .unwrap();
+        let written =
+            std::fs::read(output_dir.join("mods/ArmorMod/textures/armor/cuirass.dds")).unwrap();
         assert_eq!(written, b"DDS texture data");
     }
 
@@ -1575,12 +1551,21 @@ mod tests {
     fn test_dxgi_to_image_format_known_values() {
         use image_dds::ImageFormat;
 
-        assert!(matches!(dxgi_to_image_format(71), ImageFormat::BC1RgbaUnorm));
-        assert!(matches!(dxgi_to_image_format(77), ImageFormat::BC3RgbaUnorm));
+        assert!(matches!(
+            dxgi_to_image_format(71),
+            ImageFormat::BC1RgbaUnorm
+        ));
+        assert!(matches!(
+            dxgi_to_image_format(77),
+            ImageFormat::BC3RgbaUnorm
+        ));
         assert!(matches!(dxgi_to_image_format(80), ImageFormat::BC4RUnorm));
         assert!(matches!(dxgi_to_image_format(83), ImageFormat::BC5RgUnorm));
         assert!(matches!(dxgi_to_image_format(87), ImageFormat::Bgra8Unorm));
-        assert!(matches!(dxgi_to_image_format(98), ImageFormat::BC7RgbaUnorm));
+        assert!(matches!(
+            dxgi_to_image_format(98),
+            ImageFormat::BC7RgbaUnorm
+        ));
         assert!(matches!(dxgi_to_image_format(28), ImageFormat::Rgba8Unorm));
     }
 
@@ -1588,7 +1573,10 @@ mod tests {
     fn test_dxgi_to_image_format_unknown_defaults_to_bc7() {
         use image_dds::ImageFormat;
         // Unknown format should default to BC7
-        assert!(matches!(dxgi_to_image_format(999), ImageFormat::BC7RgbaUnorm));
+        assert!(matches!(
+            dxgi_to_image_format(999),
+            ImageFormat::BC7RgbaUnorm
+        ));
     }
 
     #[test]

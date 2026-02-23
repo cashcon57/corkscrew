@@ -213,7 +213,10 @@ pub fn find_crash_logs(game_path: &Path, bottle_path: &Path, game_id: &str) -> V
     let log_dir = script_extender_log_dir(bottle_path, game_id);
 
     if !log_dir.is_dir() {
-        debug!("Script extender log directory does not exist: {}", log_dir.display());
+        debug!(
+            "Script extender log directory does not exist: {}",
+            log_dir.display()
+        );
         return Vec::new();
     }
 

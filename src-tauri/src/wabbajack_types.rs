@@ -760,10 +760,7 @@ mod tests {
             Path::new("/bottles/skyrim/drive_c/Games/Skyrim"),
             Path::new("/bottles/skyrim/modorganizer"),
         );
-        assert_eq!(
-            result,
-            "/bottles/skyrim/drive_c/Games/Skyrim/Data/scripts"
-        );
+        assert_eq!(result, "/bottles/skyrim/drive_c/Games/Skyrim/Data/scripts");
     }
 
     #[test]
@@ -844,9 +841,7 @@ mod tests {
         };
         assert_eq!(state.source_type_name(), "Nexus");
 
-        let state = WjArchiveState::Mega {
-            url: String::new(),
-        };
+        let state = WjArchiveState::Mega { url: String::new() };
         assert_eq!(state.source_type_name(), "Mega");
     }
 

@@ -331,7 +331,10 @@ pub fn sync_plugins(
         let key = plugin_name.to_lowercase();
 
         // Skip implicit plugins already added.
-        if game_implicit_plugins.iter().any(|&i| i.to_lowercase() == key) {
+        if game_implicit_plugins
+            .iter()
+            .any(|&i| i.to_lowercase() == key)
+        {
             continue;
         }
 
@@ -661,7 +664,13 @@ mod tests {
         let plugins_file = tmp.path().join("plugins.txt");
         let loadorder_file = tmp.path().join("loadorder.txt");
 
-        sync_plugins(&data_dir, &plugins_file, &loadorder_file, SKYRIM_SE_IMPLICIT_PLUGINS).unwrap();
+        sync_plugins(
+            &data_dir,
+            &plugins_file,
+            &loadorder_file,
+            SKYRIM_SE_IMPLICIT_PLUGINS,
+        )
+        .unwrap();
 
         // Verify plugins.txt was created.
         let entries = read_plugins_txt(&plugins_file).unwrap();
@@ -712,7 +721,13 @@ mod tests {
         )
         .unwrap();
 
-        sync_plugins(&data_dir, &plugins_file, &loadorder_file, SKYRIM_SE_IMPLICIT_PLUGINS).unwrap();
+        sync_plugins(
+            &data_dir,
+            &plugins_file,
+            &loadorder_file,
+            SKYRIM_SE_IMPLICIT_PLUGINS,
+        )
+        .unwrap();
 
         let entries = read_plugins_txt(&plugins_file).unwrap();
         let user_mod = entries
@@ -752,7 +767,13 @@ mod tests {
         )
         .unwrap();
 
-        sync_plugins(&data_dir, &plugins_file, &loadorder_file, SKYRIM_SE_IMPLICIT_PLUGINS).unwrap();
+        sync_plugins(
+            &data_dir,
+            &plugins_file,
+            &loadorder_file,
+            SKYRIM_SE_IMPLICIT_PLUGINS,
+        )
+        .unwrap();
 
         let entries = read_plugins_txt(&plugins_file).unwrap();
         assert!(
@@ -993,10 +1014,7 @@ mod tests {
         .unwrap();
 
         let result = toggle_plugin(&pf, &lo, "Light.esl", false).unwrap();
-        let entry = result
-            .iter()
-            .find(|e| e.filename == "Light.esl")
-            .unwrap();
+        let entry = result.iter().find(|e| e.filename == "Light.esl").unwrap();
         assert!(entry.enabled, "ESL must stay enabled even when toggled off");
     }
 
@@ -1016,10 +1034,7 @@ mod tests {
         .unwrap();
 
         let result = toggle_plugin(&pf, &lo, "UserMod.esp", false).unwrap();
-        let entry = result
-            .iter()
-            .find(|e| e.filename == "UserMod.esp")
-            .unwrap();
+        let entry = result.iter().find(|e| e.filename == "UserMod.esp").unwrap();
         assert!(!entry.enabled, "ESP files can be disabled normally");
     }
 }

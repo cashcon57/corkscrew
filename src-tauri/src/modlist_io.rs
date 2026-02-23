@@ -590,7 +590,11 @@ mod tests {
             nexus_file_id: None,
             archive_name: format!("{}.zip", name.to_lowercase().replace(' ', "_")),
             source_url: None,
-            source_type: if nexus_mod_id.is_some() { "nexus".to_string() } else { "manual".to_string() },
+            source_type: if nexus_mod_id.is_some() {
+                "nexus".to_string()
+            } else {
+                "manual".to_string()
+            },
             installed_files: vec![format!(
                 "data/meshes/{}.nif",
                 name.to_lowercase().replace(' ', "_")

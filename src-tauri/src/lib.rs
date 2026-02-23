@@ -82,7 +82,8 @@ use wabbajack::{ModlistSummary, ParsedModlist};
 struct AppState {
     db: Arc<ModDatabase>,
     download_queue: Arc<download_queue::DownloadQueue>,
-    wj_cancel_tokens: std::sync::Mutex<std::collections::HashMap<i64, Arc<std::sync::atomic::AtomicBool>>>,
+    wj_cancel_tokens:
+        std::sync::Mutex<std::collections::HashMap<i64, Arc<std::sync::atomic::AtomicBool>>>,
 }
 
 /// Resolve a bottle by name, returning a useful error if not found.
@@ -1582,7 +1583,10 @@ fn set_mod_collection_name_cmd(
     collection_name: String,
     state: State<AppState>,
 ) -> Result<(), String> {
-    state.db.set_collection_name(mod_id, &collection_name).map_err(|e| e.to_string())
+    state
+        .db
+        .set_collection_name(mod_id, &collection_name)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1723,7 +1727,10 @@ async fn delete_collection_cmd(
 
             // Clean orphaned rollback staging directories
             if let Err(e) = rollback::cleanup_mod_version_staging(&db, m.id) {
-                errors.push(format!("Failed to clean rollback staging for '{}': {}", m.name, e));
+                errors.push(format!(
+                    "Failed to clean rollback staging for '{}': {}",
+                    m.name, e
+                ));
             }
 
             // Remove staging
@@ -1736,12 +1743,15 @@ async fn delete_collection_cmd(
             }
 
             // Find download record — try nexus IDs first, fall back to archive name
-            let download = if let (Some(nmod_id), Some(nfile_id)) = (m.nexus_mod_id, m.nexus_file_id) {
-                db.find_download_by_nexus_ids(nmod_id, nfile_id).ok().flatten()
-            } else {
-                None
-            }
-            .or_else(|| db.find_download_by_name(&m.archive_name).ok().flatten());
+            let download =
+                if let (Some(nmod_id), Some(nfile_id)) = (m.nexus_mod_id, m.nexus_file_id) {
+                    db.find_download_by_nexus_ids(nmod_id, nfile_id)
+                        .ok()
+                        .flatten()
+                } else {
+                    None
+                }
+                .or_else(|| db.find_download_by_name(&m.archive_name).ok().flatten());
 
             if let Some(dl) = download {
                 // Check uniqueness before removing the ref
@@ -1753,7 +1763,8 @@ async fn delete_collection_cmd(
                 if delete_unique_downloads && is_unique {
                     if let Err(e) = std::fs::remove_file(&dl.archive_path) {
                         if Path::new(&dl.archive_path).exists() {
-                            errors.push(format!("Failed to delete download for '{}': {}", m.name, e));
+                            errors
+                                .push(format!("Failed to delete download for '{}': {}", m.name, e));
                         }
                     } else {
                         downloads_removed += 1;
@@ -1769,7 +1780,10 @@ async fn delete_collection_cmd(
                     &game_id,
                     &bottle_name,
                 ) {
-                    errors.push(format!("Failed to remove download ref for '{}': {}", m.name, e));
+                    errors.push(format!(
+                        "Failed to remove download ref for '{}': {}",
+                        m.name, e
+                    ));
                 }
             }
 
@@ -2610,11 +2624,25 @@ fn get_sysctl_string(name: &str) -> String {
     };
     let mut size: libc::size_t = 0;
     unsafe {
-        if libc::sysctlbyname(cname.as_ptr(), std::ptr::null_mut(), &mut size, std::ptr::null_mut(), 0) != 0 {
+        if libc::sysctlbyname(
+            cname.as_ptr(),
+            std::ptr::null_mut(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        ) != 0
+        {
             return String::new();
         }
         let mut buf = vec![0u8; size];
-        if libc::sysctlbyname(cname.as_ptr(), buf.as_mut_ptr() as *mut libc::c_void, &mut size, std::ptr::null_mut(), 0) != 0 {
+        if libc::sysctlbyname(
+            cname.as_ptr(),
+            buf.as_mut_ptr() as *mut libc::c_void,
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        ) != 0
+        {
             return String::new();
         }
         // Remove trailing null
@@ -2635,7 +2663,14 @@ fn get_sysctl_u64(name: &str) -> u64 {
     let mut val: u64 = 0;
     let mut size = std::mem::size_of::<u64>() as libc::size_t;
     unsafe {
-        if libc::sysctlbyname(cname.as_ptr(), &mut val as *mut u64 as *mut libc::c_void, &mut size, std::ptr::null_mut(), 0) != 0 {
+        if libc::sysctlbyname(
+            cname.as_ptr(),
+            &mut val as *mut u64 as *mut libc::c_void,
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        ) != 0
+        {
             return 0;
         }
     }
@@ -2688,7 +2723,14 @@ fn get_platform_detail() -> PlatformInfo {
         (brand, mem)
     };
 
-    PlatformInfo { os, is_steam_os, cpu_cores, cpu_brand, memory_gb, arch }
+    PlatformInfo {
+        os,
+        is_steam_os,
+        cpu_cores,
+        cpu_brand,
+        memory_gb,
+        arch,
+    }
 }
 
 #[tauri::command]
@@ -2775,20 +2817,19 @@ struct DlcInfo {
 }
 
 #[tauri::command]
-fn check_dlc_status(
-    game_id: String,
-    bottle_name: String,
-) -> Result<DlcStatus, String> {
+fn check_dlc_status(game_id: String, bottle_name: String) -> Result<DlcStatus, String> {
     let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
 
     let dlc_files: &[(&str, &str)] = match game_id.as_str() {
         "skyrimse" => SKYRIM_SE_DLC_FILES,
         "fallout4" => FALLOUT4_DLC_FILES,
-        _ => return Ok(DlcStatus {
-            all_present: true,
-            dlcs: vec![],
-            game_initialized: true,
-        }),
+        _ => {
+            return Ok(DlcStatus {
+                all_present: true,
+                dlcs: vec![],
+                game_initialized: true,
+            })
+        }
     };
 
     // Check if base game is initialized
@@ -2889,8 +2930,7 @@ fn scan_game_directory(
     let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
     let db = &state.db;
 
-    cleaner::scan_game_directory(db, &game_id, &bottle_name, &data_dir)
-        .map_err(|e| e.to_string())
+    cleaner::scan_game_directory(db, &game_id, &bottle_name, &data_dir).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -2925,7 +2965,10 @@ fn clean_game_directory(
                     })
                     .collect();
             let _ = plugins::skyrim_plugins::write_plugins_txt(&plugins_file, &vanilla_entries);
-            log::info!("Reset plugins.txt to {} vanilla entries after clean", vanilla_entries.len());
+            log::info!(
+                "Reset plugins.txt to {} vanilla entries after clean",
+                vanilla_entries.len()
+            );
 
             // Also reset loadorder.txt if it exists alongside plugins.txt
             if let Some(parent) = plugins_file.parent() {
@@ -2995,8 +3038,7 @@ async fn download_wabbajack_file(url: String, filename: String) -> Result<String
         .await
         .map_err(|e| format!("Failed to read download: {e}"))?;
 
-    std::fs::write(&dest, &bytes)
-        .map_err(|e| format!("Failed to save file: {e}"))?;
+    std::fs::write(&dest, &bytes).map_err(|e| format!("Failed to save file: {e}"))?;
 
     Ok(dest.to_string_lossy().to_string())
 }
@@ -3184,7 +3226,11 @@ fn find_crash_logs_cmd(game_id: String, bottle_name: String) -> Result<Vec<Crash
     let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
 
     let game_path = PathBuf::from(&game.game_path);
-    Ok(crashlog::find_crash_logs(&game_path, &bottle.path, &game_id))
+    Ok(crashlog::find_crash_logs(
+        &game_path,
+        &bottle.path,
+        &game_id,
+    ))
 }
 
 #[tauri::command]
@@ -3208,18 +3254,26 @@ async fn fetch_url_text(url: String) -> Result<String, String> {
         // Blob URL: github.com/user/repo/blob/main/FILE → raw.githubusercontent.com/user/repo/main/FILE
         url.replace("github.com", "raw.githubusercontent.com")
             .replace("/blob/", "/")
-    } else if url.contains("github.com") && !url.contains("/raw/") && !url.contains("raw.githubusercontent.com") {
+    } else if url.contains("github.com")
+        && !url.contains("/raw/")
+        && !url.contains("raw.githubusercontent.com")
+    {
         // Plain repo URL: github.com/user/repo → try raw README.md
         let trimmed = url.trim_end_matches('/');
         let raw_base = trimmed.replace("github.com", "raw.githubusercontent.com");
         // Try main branch first, fall back to master
         let main_url = format!("{}/main/README.md", raw_base);
-        let resp = client.get(&main_url)
+        let resp = client
+            .get(&main_url)
             .header("Accept", "text/plain, text/markdown, */*")
-            .send().await;
+            .send()
+            .await;
         if let Ok(r) = resp {
             if r.status().is_success() {
-                return r.text().await.map_err(|e| format!("Failed to read response: {e}"));
+                return r
+                    .text()
+                    .await
+                    .map_err(|e| format!("Failed to read response: {e}"));
             }
         }
         format!("{}/master/README.md", raw_base)
@@ -3295,10 +3349,7 @@ async fn endorse_mod(
 }
 
 #[tauri::command]
-async fn abstain_mod(
-    game_slug: String,
-    mod_id: i64,
-) -> Result<nexus::EndorseResponse, String> {
+async fn abstain_mod(game_slug: String, mod_id: i64) -> Result<nexus::EndorseResponse, String> {
     let api_key = config::get_config()
         .ok()
         .and_then(|c| c.nexus_api_key)
@@ -3362,9 +3413,7 @@ async fn search_nexus_mods_cmd(
 }
 
 #[tauri::command]
-async fn get_game_categories_cmd(
-    game_slug: String,
-) -> Result<Vec<NexusCategory>, String> {
+async fn get_game_categories_cmd(game_slug: String) -> Result<Vec<NexusCategory>, String> {
     let api_key = config::get_config()
         .ok()
         .and_then(|c| c.nexus_api_key)
@@ -3395,7 +3444,13 @@ async fn browse_collections_cmd(
     let st = search_text.as_deref().filter(|s| !s.is_empty());
 
     collections::browse_collections(
-        api_key.as_deref(), &game_domain, count, offset, sf, sd, st,
+        api_key.as_deref(),
+        &game_domain,
+        count,
+        offset,
+        sf,
+        sd,
+        st,
         author.as_deref(),
         min_downloads,
         min_endorsements,
@@ -3561,19 +3616,21 @@ async fn get_pending_wabbajack_installs(
 
     Ok(rows
         .into_iter()
-        .map(|(id, name, version, status, total_a, completed_a, total_d, completed_d, error)| {
-            serde_json::json!({
-                "install_id": id,
-                "modlist_name": name,
-                "modlist_version": version,
-                "status": status,
-                "total_archives": total_a,
-                "completed_archives": completed_a,
-                "total_directives": total_d,
-                "completed_directives": completed_d,
-                "error_message": error,
-            })
-        })
+        .map(
+            |(id, name, version, status, total_a, completed_a, total_d, completed_d, error)| {
+                serde_json::json!({
+                    "install_id": id,
+                    "modlist_name": name,
+                    "modlist_version": version,
+                    "status": status,
+                    "total_archives": total_a,
+                    "completed_archives": completed_a,
+                    "total_directives": total_d,
+                    "completed_directives": completed_d,
+                    "error_message": error,
+                })
+            },
+        )
         .collect())
 }
 
@@ -3794,8 +3851,7 @@ fn execute_modlist_import(
     let imported =
         modlist_io::read_modlist_file(Path::new(&file_path)).map_err(|e| e.to_string())?;
     let db = &state.db;
-    modlist_io::execute_import(db, &imported, &game_id, &bottle_name)
-        .map_err(|e| e.to_string())
+    modlist_io::execute_import(db, &imported, &game_id, &bottle_name).map_err(|e| e.to_string())
 }
 
 // --- Disk Budget Commands ---
@@ -3834,10 +3890,7 @@ fn get_available_disk_space_cmd(path: String) -> Result<u64, String> {
 // --- Staging Info Commands ---
 
 #[tauri::command]
-fn get_staging_info(
-    game_id: String,
-    bottle_name: String,
-) -> Result<serde_json::Value, String> {
+fn get_staging_info(game_id: String, bottle_name: String) -> Result<serde_json::Value, String> {
     let staging_root = staging::staging_root();
     let staging_dir = staging::staging_base_dir(&game_id, &bottle_name);
 
@@ -3868,9 +3921,8 @@ fn set_staging_directory(path: Option<String>) -> Result<(), String> {
             // Validate path exists or can be created
             let path_buf = std::path::PathBuf::from(p);
             if !path_buf.exists() {
-                std::fs::create_dir_all(&path_buf).map_err(|e| {
-                    format!("Cannot create staging directory '{}': {}", p, e)
-                })?;
+                std::fs::create_dir_all(&path_buf)
+                    .map_err(|e| format!("Cannot create staging directory '{}': {}", p, e))?;
             }
             config::set_config_value("staging_dir", p).map_err(|e| e.to_string())
         }
@@ -4173,9 +4225,7 @@ async fn create_browser_webview(
     }
 
     let parsed_url: tauri::Url = url.parse().map_err(|e: url::ParseError| e.to_string())?;
-    let window = app
-        .get_window("main")
-        .ok_or("Main window not found")?;
+    let window = app.get_window("main").ok_or("Main window not found")?;
 
     let builder = tauri::webview::WebviewBuilder::new(
         "browser-panel",
@@ -4239,9 +4289,7 @@ async fn get_nexus_mod_files(
     mod_id: i64,
 ) -> Result<Vec<nexus::NexusModFile>, String> {
     let cfg = config::get_config().map_err(|e| e.to_string())?;
-    let api_key = cfg
-        .nexus_api_key
-        .ok_or("No Nexus API key configured")?;
+    let api_key = cfg.nexus_api_key.ok_or("No Nexus API key configured")?;
 
     let client = nexus::NexusClient::new(api_key);
     let raw_files = client
@@ -4263,9 +4311,7 @@ async fn download_and_install_nexus_mod(
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     let cfg = config::get_config().map_err(|e| e.to_string())?;
-    let api_key = cfg
-        .nexus_api_key
-        .ok_or("No Nexus API key configured")?;
+    let api_key = cfg.nexus_api_key.ok_or("No Nexus API key configured")?;
 
     let client = nexus::NexusClient::new(api_key);
 
@@ -4376,17 +4422,13 @@ async fn download_and_install_nexus_mod(
         .map_err(|e| e.to_string())?;
 
     // Stage
-    let staging_result = staging::stage_mod(
-        &archive_path,
-        &game_id,
-        &bottle_name,
-        db_mod_id,
-        &mod_name,
-    )
-    .map_err(|e| {
-        let _ = db.remove_mod(db_mod_id);
-        format!("Staging failed: {e}")
-    })?;
+    let staging_result =
+        staging::stage_mod(&archive_path, &game_id, &bottle_name, db_mod_id, &mod_name).map_err(
+            |e| {
+                let _ = db.remove_mod(db_mod_id);
+                format!("Staging failed: {e}")
+            },
+        )?;
 
     // Update DB
     db.set_staging_path(db_mod_id, &staging_result.staging_path.to_string_lossy())
@@ -4462,7 +4504,10 @@ fn check_cached_files(
     mod_file_pairs: Vec<(i64, i64)>,
     state: State<AppState>,
 ) -> Result<Vec<(i64, i64)>, String> {
-    state.db.batch_check_cached_files(&mod_file_pairs).map_err(|e| e.to_string())
+    state
+        .db
+        .batch_check_cached_files(&mod_file_pairs)
+        .map_err(|e| e.to_string())
 }
 
 // --- Steam Integration ---
@@ -4526,7 +4571,10 @@ pub fn run() {
             match db.load_queue_items() {
                 Ok(items) => {
                     if !items.is_empty() {
-                        log::info!("Restored {} download queue items from database", items.len());
+                        log::info!(
+                            "Restored {} download queue items from database",
+                            items.len()
+                        );
                         queue.load_from(items);
                     }
                 }

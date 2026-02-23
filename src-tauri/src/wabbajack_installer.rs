@@ -12,8 +12,8 @@
 use crate::database::ModDatabase;
 use crate::nexus;
 use crate::oauth;
-use crate::wabbajack_downloader::WjDownloader;
 use crate::wabbajack_directives::DirectiveProcessor;
+use crate::wabbajack_downloader::WjDownloader;
 use crate::wabbajack_types::*;
 
 use serde::Serialize;
@@ -159,16 +159,17 @@ pub enum WjInstallProgressEvent {
 fn parse_wabbajack_file_typed(path: &Path) -> Result<WjTypedModlist, String> {
     let file =
         std::fs::File::open(path).map_err(|e| format!("Cannot open .wabbajack file: {}", e))?;
-    let mut archive =
-        zip::ZipArchive::new(file).map_err(|e| format!("Not a valid ZIP/.wabbajack file: {}", e))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|e| format!("Not a valid ZIP/.wabbajack file: {}", e))?;
 
     let modlist_json = {
-        let try_entry = |archive: &mut zip::ZipArchive<std::fs::File>, name: &str| -> Result<String, String> {
-            let mut entry = archive.by_name(name).map_err(|e| e.to_string())?;
-            let mut buf = String::new();
-            entry.read_to_string(&mut buf).map_err(|e| e.to_string())?;
-            Ok(buf)
-        };
+        let try_entry =
+            |archive: &mut zip::ZipArchive<std::fs::File>, name: &str| -> Result<String, String> {
+                let mut entry = archive.by_name(name).map_err(|e| e.to_string())?;
+                let mut buf = String::new();
+                entry.read_to_string(&mut buf).map_err(|e| e.to_string())?;
+                Ok(buf)
+            };
         try_entry(&mut archive, "modlist")
             .or_else(|_| try_entry(&mut archive, "modlist.json"))
             .map_err(|_| {
@@ -239,12 +240,10 @@ async fn check_nexus_premium() -> bool {
             let client = nexus::NexusClient::new(key);
             client.is_premium().await
         }
-        oauth::AuthMethod::OAuth(tokens) => {
-            match oauth::parse_user_info(&tokens.access_token) {
-                Ok(user) => user.is_premium,
-                Err(_) => false,
-            }
-        }
+        oauth::AuthMethod::OAuth(tokens) => match oauth::parse_user_info(&tokens.access_token) {
+            Ok(user) => user.is_premium,
+            Err(_) => false,
+        },
         oauth::AuthMethod::None => false,
     }
 }
@@ -271,8 +270,7 @@ pub async fn preflight_check(
     emit_progress(app, &WjInstallProgressEvent::PreFlightStarted);
 
     // 1. Parse the .wabbajack file (typed)
-    let modlist = parse_wabbajack_file_typed(wabbajack_path)
-        .map_err(WjInstallError::Parse)?;
+    let modlist = parse_wabbajack_file_typed(wabbajack_path).map_err(WjInstallError::Parse)?;
 
     let total_archives = modlist.archives.len();
     let total_directives = modlist.directives.len();
@@ -417,13 +415,9 @@ pub async fn install_wabbajack_modlist(
     // -----------------------------------------------------------------------
     // Step 1: Parse the .wabbajack file
     // -----------------------------------------------------------------------
-    log::info!(
-        "Parsing Wabbajack modlist: {:?}",
-        wabbajack_path
-    );
+    log::info!("Parsing Wabbajack modlist: {:?}", wabbajack_path);
 
-    let modlist = parse_wabbajack_file_typed(wabbajack_path)
-        .map_err(WjInstallError::Parse)?;
+    let modlist = parse_wabbajack_file_typed(wabbajack_path).map_err(WjInstallError::Parse)?;
 
     let total_archives = modlist.archives.len();
     let total_directives = modlist.directives.len();
@@ -529,7 +523,14 @@ pub async fn install_wabbajack_modlist(
 
     let mut downloader = WjDownloader::new(nexus_api_key, is_premium, download_dir.to_path_buf());
     let archive_download_paths = downloader
-        .download_all_archives(app, db, install_id, &modlist.archives, 8, cancel_token.clone())
+        .download_all_archives(
+            app,
+            db,
+            install_id,
+            &modlist.archives,
+            8,
+            cancel_token.clone(),
+        )
         .await
         .map_err(|e| WjInstallError::Download(e.to_string()))?;
 
@@ -630,10 +631,8 @@ pub async fn install_wabbajack_modlist(
         let bottle = bottles.iter().find(|b| b.name == bottle_name);
         bottle
             .and_then(|b| {
-                crate::games::with_plugin(game_id, |plugin| {
-                    plugin.detect(b).map(|g| g.data_dir)
-                })
-                .flatten()
+                crate::games::with_plugin(game_id, |plugin| plugin.detect(b).map(|g| g.data_dir))
+                    .flatten()
             })
             .unwrap_or_else(|| install_dir.join("Data"))
     };
@@ -908,7 +907,10 @@ pub(crate) async fn install_wabbajack_modlist_cmd(
 
         match result {
             Ok(res) => {
-                log::info!("Wabbajack install {} completed successfully", res.install_id);
+                log::info!(
+                    "Wabbajack install {} completed successfully",
+                    res.install_id
+                );
             }
             Err(WjInstallError::Cancelled) => {
                 log::info!("Wabbajack install {} was cancelled", install_id);
@@ -941,13 +943,13 @@ pub(crate) async fn cancel_wabbajack_install(
     let tokens = state.wj_cancel_tokens.lock().unwrap();
     if let Some(token) = tokens.get(&install_id) {
         token.store(true, Ordering::Relaxed);
-        log::info!("Cancellation requested for wabbajack install {}", install_id);
+        log::info!(
+            "Cancellation requested for wabbajack install {}",
+            install_id
+        );
         Ok(())
     } else {
-        Err(format!(
-            "No active install found with id {}",
-            install_id
-        ))
+        Err(format!("No active install found with id {}", install_id))
     }
 }
 
@@ -993,8 +995,14 @@ pub(crate) async fn get_wabbajack_install_status(
         .map_err(|e| format!("Database error: {}", e))?
         .ok_or_else(|| format!("Install {} not found", install_id))?;
 
-    let (status, total_archives, completed_archives, total_directives, completed_directives, error_message) =
-        status_row;
+    let (
+        status,
+        total_archives,
+        completed_archives,
+        total_directives,
+        completed_directives,
+        error_message,
+    ) = status_row;
 
     Ok(serde_json::json!({
         "install_id": install_id,
@@ -1026,7 +1034,10 @@ mod tests {
     fn test_get_available_disk_space_nonexistent() {
         // Should walk up to nearest existing ancestor
         let space = get_available_disk_space(Path::new("/tmp/nonexistent/deeply/nested/path"));
-        assert!(space > 0, "Expected non-zero disk space for existing ancestor");
+        assert!(
+            space > 0,
+            "Expected non-zero disk space for existing ancestor"
+        );
     }
 
     #[test]

@@ -220,7 +220,10 @@ pub fn stage_mod_from_extracted(
     fs::create_dir_all(&staging_dir)?;
 
     let data_root = installer::find_data_root(extracted_dir);
-    debug!("Data root for pre-extracted staging: {}", data_root.display());
+    debug!(
+        "Data root for pre-extracted staging: {}",
+        data_root.display()
+    );
 
     // Collect all file entries first, then process in parallel
     let entries: Vec<_> = WalkDir::new(&data_root)

@@ -46,13 +46,15 @@ impl ConditionBlock {
             return true;
         }
         match self.operator.as_str() {
-            "Or" => self.flags.iter().any(|dep| {
-                flags.get(&dep.flag).map_or(false, |v| v == &dep.value)
-            }),
+            "Or" => self
+                .flags
+                .iter()
+                .any(|dep| flags.get(&dep.flag).map_or(false, |v| v == &dep.value)),
             // Default to And
-            _ => self.flags.iter().all(|dep| {
-                flags.get(&dep.flag).map_or(false, |v| v == &dep.value)
-            }),
+            _ => self
+                .flags
+                .iter()
+                .all(|dep| flags.get(&dep.flag).map_or(false, |v| v == &dep.value)),
         }
     }
 }
@@ -242,10 +244,7 @@ fn parse_condition_block(
 ///   <flag name="someFlag">On</flag>
 /// </conditionFlags>
 /// ```
-fn parse_condition_flags(
-    reader: &mut Reader<&[u8]>,
-    buf: &mut Vec<u8>,
-) -> HashMap<String, String> {
+fn parse_condition_flags(reader: &mut Reader<&[u8]>, buf: &mut Vec<u8>) -> HashMap<String, String> {
     let mut flags = HashMap::new();
     let mut depth = 1u32;
     loop {
@@ -1058,10 +1057,7 @@ mod tests {
         let selections = get_default_selections(&installer);
 
         // Dark was selected.
-        assert_eq!(
-            selections.get("Style"),
-            Some(&vec!["Dark".to_string()])
-        );
+        assert_eq!(selections.get("Style"), Some(&vec!["Dark".to_string()]));
         // DarkPatches step was visible → group was processed.
         assert!(selections.contains_key("DarkPatches"));
         // LightPatches step was NOT visible → group was NOT processed.
