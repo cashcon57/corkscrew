@@ -2405,6 +2405,51 @@ fn detect_wabbajack_tools(
 struct PlatformInfo {
     os: String,
     is_steam_os: bool,
+    cpu_cores: usize,
+    cpu_brand: String,
+    memory_gb: u64,
+    arch: String,
+}
+
+#[cfg(target_os = "macos")]
+fn get_sysctl_string(name: &str) -> String {
+    use std::ffi::CString;
+    let cname = match CString::new(name) {
+        Ok(c) => c,
+        Err(_) => return String::new(),
+    };
+    let mut size: libc::size_t = 0;
+    unsafe {
+        if libc::sysctlbyname(cname.as_ptr(), std::ptr::null_mut(), &mut size, std::ptr::null_mut(), 0) != 0 {
+            return String::new();
+        }
+        let mut buf = vec![0u8; size];
+        if libc::sysctlbyname(cname.as_ptr(), buf.as_mut_ptr() as *mut libc::c_void, &mut size, std::ptr::null_mut(), 0) != 0 {
+            return String::new();
+        }
+        // Remove trailing null
+        if let Some(pos) = buf.iter().position(|&b| b == 0) {
+            buf.truncate(pos);
+        }
+        String::from_utf8_lossy(&buf).to_string()
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn get_sysctl_u64(name: &str) -> u64 {
+    use std::ffi::CString;
+    let cname = match CString::new(name) {
+        Ok(c) => c,
+        Err(_) => return 0,
+    };
+    let mut val: u64 = 0;
+    let mut size = std::mem::size_of::<u64>() as libc::size_t;
+    unsafe {
+        if libc::sysctlbyname(cname.as_ptr(), &mut val as *mut u64 as *mut libc::c_void, &mut size, std::ptr::null_mut(), 0) != 0 {
+            return 0;
+        }
+    }
+    val
 }
 
 #[tauri::command]
@@ -2415,7 +2460,63 @@ fn get_platform_detail() -> PlatformInfo {
     } else {
         false
     };
-    PlatformInfo { os, is_steam_os }
+
+    let cpu_cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+
+    let arch = std::env::consts::ARCH.to_string();
+
+    #[cfg(target_os = "macos")]
+    let (cpu_brand, memory_gb) = {
+        let brand = get_sysctl_string("machdep.cpu.brand_string");
+        let mem_bytes = get_sysctl_u64("hw.memsize");
+        (brand, mem_bytes / (1024 * 1024 * 1024))
+    };
+
+    #[cfg(target_os = "linux")]
+    let (cpu_brand, memory_gb) = {
+        let brand = std::fs::read_to_string("/proc/cpuinfo")
+            .ok()
+            .and_then(|s| {
+                s.lines()
+                    .find(|l| l.starts_with("model name"))
+                    .and_then(|l| l.split(':').nth(1))
+                    .map(|s| s.trim().to_string())
+            })
+            .unwrap_or_default();
+        let mem = std::fs::read_to_string("/proc/meminfo")
+            .ok()
+            .and_then(|s| {
+                s.lines()
+                    .find(|l| l.starts_with("MemTotal"))
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .and_then(|v| v.parse::<u64>().ok())
+            })
+            .unwrap_or(0)
+            / (1024 * 1024); // kB → GB
+        (brand, mem)
+    };
+
+    PlatformInfo { os, is_steam_os, cpu_cores, cpu_brand, memory_gb, arch }
+}
+
+#[tauri::command]
+fn get_optimal_download_threads() -> usize {
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+
+    let is_apple_silicon = cfg!(target_arch = "aarch64") && cfg!(target_os = "macos");
+    let is_steam_os = std::path::Path::new("/etc/steamos-release").exists();
+
+    if is_steam_os {
+        cores.min(4)
+    } else if is_apple_silicon {
+        (cores / 2).clamp(4, 8)
+    } else {
+        (cores / 2).clamp(3, 6)
+    }
 }
 
 // --- FOMOD ---
@@ -3909,6 +4010,7 @@ pub fn run() {
             detect_collection_tools,
             detect_wabbajack_tools,
             get_platform_detail,
+            get_optimal_download_threads,
             detect_fomod,
             get_fomod_defaults,
             get_fomod_files,

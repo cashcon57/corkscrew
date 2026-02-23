@@ -1331,6 +1331,10 @@ export async function getPlatformDetail(): Promise<PlatformInfo> {
   return invoke("get_platform_detail");
 }
 
+export async function getOptimalDownloadThreads(): Promise<number> {
+  return invoke("get_optimal_download_threads");
+}
+
 // Embedded Browser Webview
 export async function createBrowserWebview(
   url: string,

@@ -42,6 +42,37 @@ pub enum InstallProgress {
         url: Option<String>,
         instructions: Option<String>,
     },
+    DownloadPhaseStarted {
+        total_downloads: usize,
+        max_concurrent: usize,
+    },
+    DownloadQueued {
+        mod_index: usize,
+        mod_name: String,
+    },
+    DownloadModStarted {
+        mod_index: usize,
+        mod_name: String,
+    },
+    DownloadModCompleted {
+        mod_index: usize,
+        mod_name: String,
+        cached: bool,
+    },
+    DownloadModFailed {
+        mod_index: usize,
+        mod_name: String,
+        error: String,
+    },
+    AllDownloadsCompleted {
+        downloaded: usize,
+        cached: usize,
+        failed: usize,
+        skipped: usize,
+    },
+    InstallPhaseStarted {
+        total_mods: usize,
+    },
 }
 
 #[cfg(test)]

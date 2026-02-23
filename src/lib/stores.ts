@@ -45,9 +45,59 @@ export const activeCollection = writable<CollectionSummary | null>(null);
 export const collectionList = writable<CollectionSummary[]>([]);
 
 // Collection install progress (global — visible from any page)
+export interface DownloadItem {
+  modName: string;
+  modIndex: number;
+  downloaded: number;
+  total: number;
+}
+
+export interface ModProgressDetail {
+  name: string;
+  index: number;
+  status: "pending" | "queued" | "downloading" | "downloaded" | "cached" | "extracting" | "deploying" | "done" | "failed" | "skipped" | "user_action";
+  error?: string;
+  downloadBytes?: number;
+  downloadTotal?: number;
+}
+
+export interface UserActionItem {
+  modName: string;
+  action: string;
+  url?: string;
+  instructions?: string;
+}
+
 export interface CollectionInstallStatus {
   active: boolean;
   collectionName: string;
+  phase: "downloading" | "installing" | "complete" | "failed" | "";
+  // Download phase
+  downloadProgress: {
+    total: number;
+    completed: number;
+    failed: number;
+    cached: number;
+    maxConcurrent: number;
+    active: DownloadItem[];
+  };
+  // Install phase (legacy compat + install phase)
+  installProgress: {
+    current: number;
+    total: number;
+    currentMod: string;
+    step: string;
+  };
+  // Per-mod details
+  modDetails: ModProgressDetail[];
+  // Timing
+  startTime: number;
+  elapsed: string;
+  // Result
+  result: { installed: number; skipped: number; failed: number } | null;
+  // User actions
+  userActions: UserActionItem[];
+  // Legacy compat fields
   currentMod: string;
   step: string;
   current: number;

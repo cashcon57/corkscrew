@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
+use tokio::sync::Semaphore;
 
 use crate::bottles;
 use crate::collections::{self, CollectionManifest, CollectionModEntry};
@@ -36,6 +38,12 @@ pub struct ModInstallDetail {
     pub instructions: Option<String>,
 }
 
+/// Result of a download-only operation (no extract/deploy).
+struct DownloadResult {
+    archive_path: PathBuf,
+    cached: bool,
+}
+
 /// Map internal game IDs to NexusMods domain slugs.
 fn game_id_to_nexus_slug(game_id: &str) -> &str {
     match game_id {
@@ -50,10 +58,323 @@ fn game_id_to_nexus_slug(game_id: &str) -> &str {
     }
 }
 
+/// Download a mod archive without extracting or deploying it.
+///
+/// Checks the dedup cache first; if found and the archive still exists on disk,
+/// returns the cached path.  Otherwise performs the actual download and registers
+/// the result in the dedup registry.
+#[allow(clippy::too_many_arguments)]
+async fn download_mod_archive(
+    app: &AppHandle,
+    db: &Arc<ModDatabase>,
+    queue: &Arc<DownloadQueue>,
+    mod_entry: &CollectionModEntry,
+    mod_index: usize,
+    game_slug: &str,
+    download_dir: &Path,
+    api_key: &Option<String>,
+    manifest_name: &str,
+    game_id: &str,
+    bottle_name: &str,
+) -> Result<DownloadResult, InstallError> {
+    let source_type = mod_entry.source.source_type.as_str();
+
+    match source_type {
+        "nexus" => {
+            download_nexus_archive(
+                app,
+                db,
+                queue,
+                mod_entry,
+                mod_index,
+                game_slug,
+                download_dir,
+                api_key,
+                manifest_name,
+                game_id,
+                bottle_name,
+            )
+            .await
+        }
+        "direct" => {
+            download_direct_archive(
+                app,
+                db,
+                queue,
+                mod_entry,
+                mod_index,
+                download_dir,
+                api_key,
+                manifest_name,
+                game_id,
+                bottle_name,
+            )
+            .await
+        }
+        _ => Err(InstallError::Failed(format!(
+            "Cannot pre-download source type '{}' for '{}'",
+            source_type, mod_entry.name
+        ))),
+    }
+}
+
+/// Download-only path for a Nexus mod.  Returns the archive path without
+/// extracting or deploying anything.
+#[allow(clippy::too_many_arguments)]
+async fn download_nexus_archive(
+    app: &AppHandle,
+    db: &Arc<ModDatabase>,
+    queue: &Arc<DownloadQueue>,
+    mod_entry: &CollectionModEntry,
+    mod_index: usize,
+    game_slug: &str,
+    download_dir: &Path,
+    api_key: &Option<String>,
+    manifest_name: &str,
+    game_id: &str,
+    bottle_name: &str,
+) -> Result<DownloadResult, InstallError> {
+    let nexus_mod_id = mod_entry
+        .source
+        .mod_id
+        .ok_or_else(|| InstallError::Failed(format!("No Nexus mod ID for '{}'", mod_entry.name)))?;
+    let nexus_file_id = mod_entry.source.file_id.ok_or_else(|| {
+        InstallError::Failed(format!("No Nexus file ID for '{}'", mod_entry.name))
+    })?;
+
+    // Check dedup cache
+    if let Ok(Some(existing)) = db.find_download_by_nexus_ids(nexus_mod_id, nexus_file_id) {
+        let path = PathBuf::from(&existing.archive_path);
+        if path.exists() {
+            log::info!(
+                "Reusing cached download for '{}' (nexus {}:{})",
+                mod_entry.name,
+                nexus_mod_id,
+                nexus_file_id
+            );
+            let _ =
+                db.add_download_collection_ref(existing.id, manifest_name, game_id, bottle_name);
+            return Ok(DownloadResult {
+                archive_path: path,
+                cached: true,
+            });
+        }
+    }
+
+    let key = api_key
+        .as_ref()
+        .ok_or_else(|| InstallError::Failed("No API key configured".to_string()))?;
+    let client = NexusClient::new(key.clone());
+
+    // Get download links
+    let links = client
+        .get_download_links(game_slug, nexus_mod_id, nexus_file_id, None, None)
+        .await
+        .map_err(|e| InstallError::Failed(format!("Download links failed: {}", e)))?;
+
+    let download_url = &links
+        .first()
+        .ok_or_else(|| {
+            InstallError::Failed("No download links returned by NexusMods API".to_string())
+        })?
+        .uri;
+
+    // Enqueue in download queue for tracking
+    let queue_id = queue.enqueue(
+        &mod_entry.name,
+        download_url.rsplit('/').next().unwrap_or(&mod_entry.name),
+        Some(nexus_mod_id),
+        Some(nexus_file_id),
+        None,
+        Some(game_slug),
+    );
+    queue.set_downloading(queue_id);
+    let _ = app.emit(DOWNLOAD_QUEUE_EVENT, queue.get_all());
+
+    // Download with progress
+    let last_emit = std::sync::Mutex::new(std::time::Instant::now());
+    let app_clone = app.clone();
+    let queue_clone = Arc::clone(queue);
+    let archive_path = client
+        .download_file(
+            download_url,
+            download_dir,
+            Some(move |downloaded, total| {
+                let mut last = last_emit.lock().unwrap_or_else(|e| e.into_inner());
+                if last.elapsed().as_millis() >= 100 || downloaded == total {
+                    queue_clone.set_progress(queue_id, downloaded, total);
+                    let _ = app_clone.emit(
+                        INSTALL_PROGRESS_EVENT,
+                        InstallProgress::DownloadProgress {
+                            mod_index,
+                            downloaded,
+                            total,
+                        },
+                    );
+                    *last = std::time::Instant::now();
+                }
+            }),
+        )
+        .await
+        .map_err(|e| {
+            queue.set_failed(queue_id, &e.to_string());
+            let _ = app.emit(DOWNLOAD_QUEUE_EVENT, queue.get_all());
+            InstallError::Failed(format!("Download failed: {}", e))
+        })?;
+
+    queue.set_completed(queue_id);
+    let _ = app.emit(DOWNLOAD_QUEUE_EVENT, queue.get_all());
+
+    // Register in dedup registry
+    let archive_name = archive_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let sha = staging::compute_sha256(&archive_path).ok();
+    let file_size = std::fs::metadata(&archive_path)
+        .map(|m| m.len() as i64)
+        .unwrap_or(0);
+    if let Ok(dl_id) = db.register_download(
+        &archive_path.to_string_lossy(),
+        &archive_name,
+        Some(nexus_mod_id),
+        Some(nexus_file_id),
+        sha.as_deref(),
+        file_size,
+    ) {
+        let _ = db.add_download_collection_ref(dl_id, manifest_name, game_id, bottle_name);
+    }
+
+    Ok(DownloadResult {
+        archive_path,
+        cached: false,
+    })
+}
+
+/// Download-only path for a direct-URL mod.
+#[allow(clippy::too_many_arguments)]
+async fn download_direct_archive(
+    app: &AppHandle,
+    db: &Arc<ModDatabase>,
+    queue: &Arc<DownloadQueue>,
+    mod_entry: &CollectionModEntry,
+    mod_index: usize,
+    download_dir: &Path,
+    api_key: &Option<String>,
+    manifest_name: &str,
+    game_id: &str,
+    bottle_name: &str,
+) -> Result<DownloadResult, InstallError> {
+    let url =
+        mod_entry.source.url.as_ref().ok_or_else(|| {
+            InstallError::Failed(format!("No download URL for '{}'", mod_entry.name))
+        })?;
+
+    // Check dedup by filename
+    let url_filename = url
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .split('?')
+        .next()
+        .unwrap_or("");
+    if !url_filename.is_empty() {
+        if let Ok(Some(existing)) = db.find_download_by_name(url_filename) {
+            let path = PathBuf::from(&existing.archive_path);
+            if path.exists() {
+                log::info!(
+                    "Reusing cached download for '{}' ({})",
+                    mod_entry.name,
+                    url_filename
+                );
+                return Ok(DownloadResult {
+                    archive_path: path,
+                    cached: true,
+                });
+            }
+        }
+    }
+
+    // Enqueue in download queue for tracking
+    let queue_id = queue.enqueue(
+        &mod_entry.name,
+        url_filename,
+        mod_entry.source.mod_id,
+        mod_entry.source.file_id,
+        Some(url),
+        None,
+    );
+    queue.set_downloading(queue_id);
+    let _ = app.emit(DOWNLOAD_QUEUE_EVENT, queue.get_all());
+
+    // Download
+    let dummy_key = api_key.as_deref().unwrap_or("").to_string();
+    let client = NexusClient::new(dummy_key);
+
+    let app_clone = app.clone();
+    let last_emit = std::sync::Mutex::new(std::time::Instant::now());
+    let queue_clone = Arc::clone(queue);
+    let archive_path = client
+        .download_file(
+            url,
+            download_dir,
+            Some(move |downloaded, total| {
+                let mut last = last_emit.lock().unwrap_or_else(|e| e.into_inner());
+                if last.elapsed().as_millis() >= 100 || downloaded == total {
+                    queue_clone.set_progress(queue_id, downloaded, total);
+                    let _ = app_clone.emit(
+                        INSTALL_PROGRESS_EVENT,
+                        InstallProgress::DownloadProgress {
+                            mod_index,
+                            downloaded,
+                            total,
+                        },
+                    );
+                    *last = std::time::Instant::now();
+                }
+            }),
+        )
+        .await
+        .map_err(|e| {
+            queue.set_failed(queue_id, &e.to_string());
+            let _ = app.emit(DOWNLOAD_QUEUE_EVENT, queue.get_all());
+            InstallError::Failed(format!("Download failed: {}", e))
+        })?;
+
+    queue.set_completed(queue_id);
+    let _ = app.emit(DOWNLOAD_QUEUE_EVENT, queue.get_all());
+
+    // Register in dedup registry
+    let archive_name = archive_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let sha = staging::compute_sha256(&archive_path).ok();
+    let file_size = std::fs::metadata(&archive_path)
+        .map(|m| m.len() as i64)
+        .unwrap_or(0);
+    if let Ok(dl_id) = db.register_download(
+        &archive_path.to_string_lossy(),
+        &archive_name,
+        mod_entry.source.mod_id,
+        mod_entry.source.file_id,
+        sha.as_deref(),
+        file_size,
+    ) {
+        let _ = db.add_download_collection_ref(dl_id, manifest_name, game_id, bottle_name);
+    }
+
+    Ok(DownloadResult {
+        archive_path,
+        cached: false,
+    })
+}
+
 /// Install a NexusMods collection into the given game/bottle.
 ///
-/// This orchestrates the full pipeline: resolve order, download (premium only),
-/// extract, stage, deploy, and sync plugins.
+/// This orchestrates the full pipeline in two phases:
+/// Phase 1: Concurrent downloads (nexus + direct mods only, guarded by semaphore)
+/// Phase 2: Sequential install (extract, stage, deploy each mod in order)
 pub async fn install_collection(
     app: &AppHandle,
     db: &Arc<ModDatabase>,
@@ -118,6 +439,218 @@ pub async fn install_collection(
     // Load existing mods for already-installed detection
     let existing_mods = db.list_mods(game_id, bottle_name).unwrap_or_default();
 
+    // ---------------------------------------------------------------
+    // Phase 1: Concurrent Downloads
+    // ---------------------------------------------------------------
+    // Only nexus/direct mods that are NOT already installed and (for
+    // nexus) require premium are eligible for concurrent download.
+    // browse/manual/bundled types are skipped here and handled in
+    // Phase 2 as before.
+
+    // Determine concurrency limit from config or platform heuristics
+    let max_concurrent = config::get_config()
+        .ok()
+        .and_then(|c| c.extra.get("download_threads").and_then(|v| v.as_u64()))
+        .map(|v| v as usize)
+        .unwrap_or_else(|| {
+            let cores = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4);
+            let is_apple_silicon =
+                cfg!(target_arch = "aarch64") && cfg!(target_os = "macos");
+            let is_steam_os = std::path::Path::new("/etc/steamos-release").exists();
+            if is_steam_os {
+                cores.min(4)
+            } else if is_apple_silicon {
+                (cores / 2).clamp(4, 8)
+            } else {
+                (cores / 2).clamp(3, 6)
+            }
+        });
+
+    // Build list of (order_position, manifest_index) pairs eligible for pre-download
+    let mut downloadable: Vec<(usize, usize)> = Vec::new();
+    for (i, &mod_idx) in install_order.iter().enumerate() {
+        let entry = &manifest.mods[mod_idx];
+        let stype = entry.source.source_type.as_str();
+
+        // Skip types that cannot be pre-downloaded
+        if !matches!(stype, "nexus" | "direct") {
+            continue;
+        }
+
+        // Skip nexus mods when user is not premium (they need manual browser download)
+        if stype == "nexus" && !is_premium {
+            continue;
+        }
+
+        // Skip already-installed mods
+        let is_already = if let Some(nexus_id) = entry.source.mod_id {
+            existing_mods
+                .iter()
+                .any(|m| m.nexus_mod_id == Some(nexus_id))
+        } else {
+            existing_mods
+                .iter()
+                .any(|m| m.name.eq_ignore_ascii_case(&entry.name))
+        };
+        if is_already {
+            continue;
+        }
+
+        downloadable.push((i, mod_idx));
+    }
+
+    let total_downloads = downloadable.len();
+
+    let _ = app.emit(
+        INSTALL_PROGRESS_EVENT,
+        InstallProgress::DownloadPhaseStarted {
+            total_downloads,
+            max_concurrent,
+        },
+    );
+
+    let semaphore = Arc::new(Semaphore::new(max_concurrent));
+    let mut handles = Vec::with_capacity(total_downloads);
+
+    for &(order_pos, mod_idx) in &downloadable {
+        let entry = manifest.mods[mod_idx].clone();
+        let mod_name = entry.name.clone();
+
+        let _ = app.emit(
+            INSTALL_PROGRESS_EVENT,
+            InstallProgress::DownloadQueued {
+                mod_index: order_pos,
+                mod_name: mod_name.clone(),
+            },
+        );
+
+        // Clone what the spawned task needs
+        let app_h = app.clone();
+        let db_c = Arc::clone(db);
+        let queue_c = Arc::clone(queue);
+        let sem_c = Arc::clone(&semaphore);
+        let game_slug_c = game_slug.to_string();
+        let download_dir_c = download_dir.clone();
+        let api_key_c = api_key.clone();
+        let manifest_name_c = manifest.name.clone();
+        let game_id_c = game_id.to_string();
+        let bottle_name_c = bottle_name.to_string();
+
+        let handle = tokio::spawn(async move {
+            let _permit = sem_c.acquire().await.expect("semaphore closed");
+
+            let _ = app_h.emit(
+                INSTALL_PROGRESS_EVENT,
+                InstallProgress::DownloadModStarted {
+                    mod_index: order_pos,
+                    mod_name: mod_name.clone(),
+                },
+            );
+
+            let result = download_mod_archive(
+                &app_h,
+                &db_c,
+                &queue_c,
+                &entry,
+                order_pos,
+                &game_slug_c,
+                &download_dir_c,
+                &api_key_c,
+                &manifest_name_c,
+                &game_id_c,
+                &bottle_name_c,
+            )
+            .await;
+
+            match &result {
+                Ok(dl) => {
+                    let _ = app_h.emit(
+                        INSTALL_PROGRESS_EVENT,
+                        InstallProgress::DownloadModCompleted {
+                            mod_index: order_pos,
+                            mod_name: mod_name.clone(),
+                            cached: dl.cached,
+                        },
+                    );
+                }
+                Err(InstallError::Failed(err)) => {
+                    let _ = app_h.emit(
+                        INSTALL_PROGRESS_EVENT,
+                        InstallProgress::DownloadModFailed {
+                            mod_index: order_pos,
+                            mod_name: mod_name.clone(),
+                            error: err.clone(),
+                        },
+                    );
+                }
+                Err(InstallError::UserAction { action, .. }) => {
+                    let _ = app_h.emit(
+                        INSTALL_PROGRESS_EVENT,
+                        InstallProgress::DownloadModFailed {
+                            mod_index: order_pos,
+                            mod_name: mod_name.clone(),
+                            error: action.clone(),
+                        },
+                    );
+                }
+            }
+
+            (order_pos, result)
+        });
+
+        handles.push(handle);
+    }
+
+    // Wait for all download tasks
+    let download_results = futures::future::join_all(handles).await;
+
+    // Collect successful downloads into a map: order_position -> archive path
+    let mut pre_downloaded: HashMap<usize, PathBuf> = HashMap::new();
+    let mut dl_downloaded = 0usize;
+    let mut dl_cached = 0usize;
+    let mut dl_failed = 0usize;
+    let dl_skipped = total_mods - total_downloads; // browse/manual/bundled/non-premium/already-installed
+
+    for join_result in download_results {
+        match join_result {
+            Ok((order_pos, Ok(dl))) => {
+                if dl.cached {
+                    dl_cached += 1;
+                } else {
+                    dl_downloaded += 1;
+                }
+                pre_downloaded.insert(order_pos, dl.archive_path);
+            }
+            Ok((_order_pos, Err(_))) => {
+                dl_failed += 1;
+            }
+            Err(join_err) => {
+                log::error!("Download task panicked: {}", join_err);
+                dl_failed += 1;
+            }
+        }
+    }
+
+    let _ = app.emit(
+        INSTALL_PROGRESS_EVENT,
+        InstallProgress::AllDownloadsCompleted {
+            downloaded: dl_downloaded,
+            cached: dl_cached,
+            failed: dl_failed,
+            skipped: dl_skipped,
+        },
+    );
+
+    // ---------------------------------------------------------------
+    // Phase 2: Sequential Install
+    // ---------------------------------------------------------------
+    let _ = app.emit(
+        INSTALL_PROGRESS_EVENT,
+        InstallProgress::InstallPhaseStarted { total_mods },
+    );
+
     for (i, &mod_idx) in install_order.iter().enumerate() {
         let mod_entry = &manifest.mods[mod_idx];
         let mod_name = &mod_entry.name;
@@ -163,6 +696,9 @@ pub async fn install_collection(
             continue;
         }
 
+        // Look up pre-downloaded archive for this position (if any)
+        let pre_dl = pre_downloaded.get(&i).map(|p| p.as_path());
+
         let result = install_single_mod(
             app,
             db,
@@ -177,6 +713,7 @@ pub async fn install_collection(
             &api_key,
             is_premium,
             &manifest.name,
+            pre_dl,
         )
         .await;
 
@@ -353,6 +890,9 @@ enum InstallError {
 }
 
 /// Install a single mod from a collection entry.
+///
+/// If `pre_downloaded` is `Some`, the archive at that path is used directly
+/// (skipping the download step).  Otherwise the mod is downloaded as before.
 #[allow(clippy::too_many_arguments)]
 async fn install_single_mod(
     app: &AppHandle,
@@ -368,6 +908,7 @@ async fn install_single_mod(
     api_key: &Option<String>,
     is_premium: bool,
     manifest_name: &str,
+    pre_downloaded: Option<&Path>,
 ) -> Result<i64, InstallError> {
     let source_type = mod_entry.source.source_type.as_str();
 
@@ -387,6 +928,7 @@ async fn install_single_mod(
                 api_key,
                 is_premium,
                 manifest_name,
+                pre_downloaded,
             )
             .await
         }
@@ -403,6 +945,7 @@ async fn install_single_mod(
                 download_dir,
                 api_key,
                 manifest_name,
+                pre_downloaded,
             )
             .await
         }
@@ -433,6 +976,9 @@ async fn install_single_mod(
 }
 
 /// Install a mod from Nexus Mods (premium only for API downloads).
+///
+/// When `pre_downloaded` is provided the download step is skipped entirely and
+/// the archive at that path is used for staging + deployment.
 #[allow(clippy::too_many_arguments)]
 async fn install_nexus_mod(
     app: &AppHandle,
@@ -448,6 +994,7 @@ async fn install_nexus_mod(
     api_key: &Option<String>,
     is_premium: bool,
     manifest_name: &str,
+    pre_downloaded: Option<&Path>,
 ) -> Result<i64, InstallError> {
     let nexus_mod_id = mod_entry
         .source
@@ -473,6 +1020,46 @@ async fn install_nexus_mod(
             instructions: Some("Click 'Slow Download' on the NexusMods page, then install the downloaded archive via the Mods tab.".to_string()),
         });
     }
+
+    // If we already have a pre-downloaded archive from Phase 1, skip straight
+    // to staging + deployment.
+    if let Some(archive) = pre_downloaded {
+        let _ = app.emit(
+            INSTALL_PROGRESS_EVENT,
+            InstallProgress::StepChanged {
+                mod_index,
+                step: "pre-downloaded".to_string(),
+                detail: Some(format!(
+                    "Using pre-downloaded archive for '{}'",
+                    mod_entry.name
+                )),
+            },
+        );
+
+        let mod_id = stage_and_deploy(
+            app,
+            db,
+            archive,
+            mod_entry,
+            mod_index,
+            game_id,
+            bottle_name,
+            data_dir,
+        )?;
+
+        let _ = db.set_nexus_ids(mod_id, nexus_mod_id, Some(nexus_file_id));
+        let _ = db.set_source_url(
+            mod_id,
+            &format!(
+                "https://www.nexusmods.com/{}/mods/{}",
+                game_slug, nexus_mod_id
+            ),
+        );
+        return Ok(mod_id);
+    }
+
+    // Fallback: no pre-downloaded archive — download now (shouldn't normally
+    // happen in the two-phase flow, but handles edge cases).
 
     // Check download registry for existing archive (dedup)
     if let Ok(Some(existing)) = db.find_download_by_nexus_ids(nexus_mod_id, nexus_file_id) {
@@ -644,6 +1231,8 @@ async fn install_nexus_mod(
 }
 
 /// Install a mod from a direct download URL.
+///
+/// When `pre_downloaded` is provided the download step is skipped entirely.
 #[allow(clippy::too_many_arguments)]
 async fn install_direct_mod(
     app: &AppHandle,
@@ -657,7 +1246,41 @@ async fn install_direct_mod(
     download_dir: &Path,
     api_key: &Option<String>,
     manifest_name: &str,
+    pre_downloaded: Option<&Path>,
 ) -> Result<i64, InstallError> {
+    // If we already have a pre-downloaded archive from Phase 1, skip straight
+    // to staging + deployment.
+    if let Some(archive) = pre_downloaded {
+        let _ = app.emit(
+            INSTALL_PROGRESS_EVENT,
+            InstallProgress::StepChanged {
+                mod_index,
+                step: "pre-downloaded".to_string(),
+                detail: Some(format!(
+                    "Using pre-downloaded archive for '{}'",
+                    mod_entry.name
+                )),
+            },
+        );
+
+        let mod_id = stage_and_deploy(
+            app,
+            db,
+            archive,
+            mod_entry,
+            mod_index,
+            game_id,
+            bottle_name,
+            data_dir,
+        )?;
+
+        if let Some(ref source_url) = mod_entry.source.url {
+            let _ = db.set_source_url(mod_id, source_url);
+        }
+        return Ok(mod_id);
+    }
+
+    // Fallback: no pre-downloaded archive — download now.
     let url =
         mod_entry.source.url.as_ref().ok_or_else(|| {
             InstallError::Failed(format!("No download URL for '{}'", mod_entry.name))

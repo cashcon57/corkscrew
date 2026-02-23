@@ -1015,6 +1015,10 @@ export interface RequiredTool {
 export interface PlatformInfo {
   os: string;
   is_steam_os: boolean;
+  cpu_cores: number;
+  cpu_brand: string;
+  memory_gb: number;
+  arch: string;
 }
 
 // Install Progress Events
@@ -1026,4 +1030,11 @@ export type InstallProgressEvent =
   | { kind: "modCompleted"; mod_index: number; mod_name: string; mod_id: number }
   | { kind: "modFailed"; mod_index: number; mod_name: string; error: string }
   | { kind: "collectionCompleted"; installed: number; skipped: number; failed: number }
-  | { kind: "userActionRequired"; mod_index: number; mod_name: string; action: string; url: string | null; instructions: string | null };
+  | { kind: "userActionRequired"; mod_index: number; mod_name: string; action: string; url: string | null; instructions: string | null }
+  | { kind: "downloadPhaseStarted"; total_downloads: number; max_concurrent: number }
+  | { kind: "downloadQueued"; mod_index: number; mod_name: string }
+  | { kind: "downloadModStarted"; mod_index: number; mod_name: string }
+  | { kind: "downloadModCompleted"; mod_index: number; mod_name: string; cached: boolean }
+  | { kind: "downloadModFailed"; mod_index: number; mod_name: string; error: string }
+  | { kind: "allDownloadsCompleted"; downloaded: number; cached: number; failed: number; skipped: number }
+  | { kind: "installPhaseStarted"; total_mods: number };

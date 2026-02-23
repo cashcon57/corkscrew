@@ -14,7 +14,6 @@
     setConfigValue,
     getConfig,
     installCollection,
-    onInstallProgress,
     listInstalledCollections,
     switchCollection,
     deleteCollection,
@@ -26,9 +25,9 @@
     downloadAndInstallNexusMod,
     closeBrowserWebview,
   } from "$lib/api";
+  import { startInstallTracking, stopInstallTracking } from "$lib/installService";
   import { listen } from "@tauri-apps/api/event";
   import type { CollectionSummary, CollectionDiff, RequiredTool } from "$lib/types";
-  import type { InstallProgressEvent } from "$lib/types";
   import { config } from "$lib/stores";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { marked } from "marked";
@@ -235,16 +234,9 @@
   let selectedMods = $state<CollectionMod[]>([]);
   let loadingDetail = $state(false);
   let installing = $state(false);
-  let installStep = $state("");
-  let installModName = $state("");
-  let installProgress = $state({ current: 0, total: 0 });
   let installResult = $state<{ installed: number; already_installed: number; skipped: number; failed: number; details: { name: string; status: string; error: string | null; url: string | null; instructions: string | null }[] } | null>(null);
-  let installStartTime = $state<number>(0);
-  let installElapsed = $state("");
-  let elapsedInterval: ReturnType<typeof setInterval> | null = null;
   let renderedDescription = $state("");
   let userActions = $state<Array<{mod_name: string, action: string, url: string | null, instructions: string | null}>>([]);
-  let installUnlisten: (() => void) | null = null;
 
   // Floating install button
   let statsBarEl = $state<HTMLElement | null>(null);
@@ -645,8 +637,6 @@
   });
 
   onDestroy(() => {
-    if (installUnlisten) { installUnlisten(); installUnlisten = null; }
-    if (elapsedInterval) { clearInterval(elapsedInterval); elapsedInterval = null; }
     statsBarObserver?.disconnect();
     // Close any active webviews when navigating away
     closeBrowserWebview().catch(() => {});
@@ -828,60 +818,17 @@
     if (!selectedCollection || !$selectedGame) return;
 
     installing = true;
-    installStep = "preparing";
-    installModName = "";
-    installProgress = { current: 0, total: 0 };
     installResult = null;
     userActions = [];
-    installStartTime = Date.now();
-    collectionInstallStatus.set({
-      active: true,
-      collectionName: selectedCollection.name,
-      currentMod: "",
-      step: "preparing",
-      current: 0,
-      total: 0,
-    });
-    installElapsed = "0s";
-    elapsedInterval = setInterval(() => {
-      const secs = Math.floor((Date.now() - installStartTime) / 1000);
-      if (secs < 60) installElapsed = `${secs}s`;
-      else installElapsed = `${Math.floor(secs / 60)}m ${secs % 60}s`;
-    }, 1000);
+
+    // Start the centralized install tracking service
+    const modNames = manifest.mods.map((m: { name: string }) => m.name);
+    await startInstallTracking(selectedCollection.name, modNames.length, modNames);
+
+    // Navigate to the progress page
+    goto('/collections/progress');
 
     try {
-      // Subscribe to progress events
-      installUnlisten = await onInstallProgress((event: InstallProgressEvent) => {
-        if (event.kind === "modStarted") {
-          installModName = event.mod_name;
-          installProgress = { current: event.mod_index + 1, total: event.total_mods };
-          installStep = "preparing";
-          collectionInstallStatus.set({
-            active: true,
-            collectionName: selectedCollection!.name,
-            currentMod: event.mod_name,
-            step: "preparing",
-            current: event.mod_index + 1,
-            total: event.total_mods,
-          });
-        } else if (event.kind === "stepChanged") {
-          installStep = event.step;
-          collectionInstallStatus.update(s => s ? { ...s, step: event.step } : s);
-        } else if (event.kind === "downloadProgress") {
-          installStep = "downloading";
-          collectionInstallStatus.update(s => s ? { ...s, step: "downloading" } : s);
-        } else if (event.kind === "modCompleted") {
-          installStep = "";
-        } else if (event.kind === "modFailed") {
-          installStep = "";
-        } else if (event.kind === "userActionRequired") {
-          userActions = [...userActions, { mod_name: event.mod_name, action: event.action, url: event.url, instructions: event.instructions }];
-        } else if (event.kind === "collectionCompleted") {
-          installStep = "complete";
-          collectionInstallStatus.set(null);
-        }
-      });
-
       const result = await installCollection(
         manifest,
         $selectedGame.game_id,
@@ -890,19 +837,17 @@
 
       installResult = result;
 
-      // Toast is minimal — details shown in the result panel below
+      // Toast is minimal — details shown on the progress page
       if (result.failed === 0 && result.skipped === 0) {
         showSuccess(`Collection "${selectedCollection.name}" installed successfully`);
       }
     } catch (e: unknown) {
       showError(`Collection install failed: ${e}`);
+      // Update the store to reflect failure
+      collectionInstallStatus.update(s => s ? { ...s, phase: "failed" as const } : s);
+      stopInstallTracking();
     } finally {
       installing = false;
-      installStep = "";
-      installModName = "";
-      collectionInstallStatus.set(null);
-      if (elapsedInterval) { clearInterval(elapsedInterval); elapsedInterval = null; }
-      if (installUnlisten) { installUnlisten(); installUnlisten = null; }
     }
   }
 
@@ -1520,64 +1465,44 @@
               <div class="install-progress-header">
                 <span class="spinner-sm"></span>
                 <span>
-                  {#if installProgress.total > 0}
-                    Installing mod {installProgress.current} of {installProgress.total}
+                  {#if $collectionInstallStatus?.phase === "downloading"}
+                    Downloading {$collectionInstallStatus.downloadProgress.completed}/{$collectionInstallStatus.downloadProgress.total}
+                  {:else if $collectionInstallStatus?.phase === "installing" && $collectionInstallStatus.installProgress.total > 0}
+                    Installing mod {$collectionInstallStatus.installProgress.current} of {$collectionInstallStatus.installProgress.total}
                   {:else}
                     Preparing...
                   {/if}
                 </span>
-                {#if installProgress.total > 0}
+                {#if $collectionInstallStatus?.phase === "installing" && $collectionInstallStatus.installProgress.total > 0}
                   <span class="install-progress-pct">
-                    {Math.round((installProgress.current / installProgress.total) * 100)}%
+                    {Math.round(($collectionInstallStatus.installProgress.current / $collectionInstallStatus.installProgress.total) * 100)}%
                   </span>
                 {/if}
               </div>
-              {#if installModName}
+              {#if $collectionInstallStatus?.installProgress.currentMod}
                 <div class="install-progress-mod">
-                  {installModName}
-                  {#if installStep && installStepLabels[installStep]}
-                    <span class="install-progress-step-inline">{installStepLabels[installStep]}</span>
+                  {$collectionInstallStatus.installProgress.currentMod}
+                  {#if $collectionInstallStatus.installProgress.step && installStepLabels[$collectionInstallStatus.installProgress.step]}
+                    <span class="install-progress-step-inline">{installStepLabels[$collectionInstallStatus.installProgress.step]}</span>
                   {/if}
                 </div>
-              {:else if installStep && installStepLabels[installStep]}
-                <div class="install-progress-step">{installStepLabels[installStep]}</div>
+              {:else if $collectionInstallStatus?.installProgress.step && installStepLabels[$collectionInstallStatus.installProgress.step]}
+                <div class="install-progress-step">{installStepLabels[$collectionInstallStatus.installProgress.step]}</div>
               {/if}
-              {#if installProgress.total > 0}
+              {#if $collectionInstallStatus?.total && $collectionInstallStatus.total > 0}
                 <div class="install-progress-bar-row">
                   <div class="install-progress-bar">
                     <div
                       class="install-progress-fill"
-                      style="width: {(installProgress.current / installProgress.total) * 100}%"
+                      style="width: {($collectionInstallStatus.current / $collectionInstallStatus.total) * 100}%"
                     ></div>
                   </div>
-                  <span class="install-progress-elapsed">{installElapsed}</span>
+                  <span class="install-progress-elapsed">{$collectionInstallStatus.elapsed}</span>
                 </div>
               {/if}
-              {#if userActions.length > 0}
-                <div class="user-actions-list">
-                  <h4 class="user-actions-title">Manual Downloads Required</h4>
-                  {#each userActions as action}
-                    <div class="user-action-item">
-                      <div class="user-action-info">
-                        <span class="user-action-mod">{action.mod_name}</span>
-                        {#if action.instructions}
-                          <span class="user-action-instructions">{action.instructions}</span>
-                        {/if}
-                      </div>
-                      {#if action.url}
-                        <button class="btn btn-secondary btn-sm" onclick={() => safeOpenUrl(action.url)}>
-                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
-                            <polyline points="15 3 21 3 21 9" />
-                            <line x1="10" y1="14" x2="21" y2="3" />
-                          </svg>
-                          Open in Browser
-                        </button>
-                      {/if}
-                    </div>
-                  {/each}
-                </div>
-              {/if}
+              <button class="btn btn-secondary btn-sm" style="margin-top: 8px;" onclick={() => goto('/collections/progress')}>
+                View Details
+              </button>
             </div>
           {:else if installResult}
             <div class="install-result-panel">

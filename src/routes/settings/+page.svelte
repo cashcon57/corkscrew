@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, applyToolIniEdits, getPlatformDetail } from "$lib/api";
+  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads } from "$lib/api";
   import { config, showError, showSuccess, selectedGame, skseStatus, currentPage, appVersion, updateReady, updateVersion, updateNotes, updateChecking, updateError, triggerUpdateCheck, controllerMode } from "$lib/stores";
   import type { AppConfig, ModTool, PlatformInfo } from "$lib/types";
   import ThemeToggle from "$lib/components/ThemeToggle.svelte";
@@ -28,6 +28,11 @@
   let savingAutoDelete = $state(false);
   let installingSkse = $state(false);
   let showComparisonDialog = $state(false);
+
+  // Download concurrency
+  let downloadThreads = $state("auto");
+  let optimalThreads = $state(6);
+  let savingThreads = $state(false);
 
   // Download archive management
   interface DownloadArchive {
@@ -80,7 +85,7 @@
   const notRecommendedTools = $derived(modTools.filter(t => t.wine_compat === "not_recommended"));
 
   // Platform detection via Tauri command
-  let platformInfo = $state<PlatformInfo>({ os: "macos", is_steam_os: false });
+  let platformInfo = $state<PlatformInfo>({ os: "macos", is_steam_os: false, cpu_cores: 0, cpu_brand: "", memory_gb: 0, arch: "" });
   const isMac = $derived(platformInfo.os === "macos");
   const isLinux = $derived(platformInfo.os === "linux");
   const isSteamOS = $derived(platformInfo.is_steam_os);
@@ -167,6 +172,18 @@
         skseStatus.set(status);
       } catch { /* ignore */ }
     }
+
+    // Load download threads config
+    try {
+      optimalThreads = await getOptimalDownloadThreads();
+      const cfg2 = await getConfig();
+      const saved = (cfg2 as Record<string, unknown>).download_threads;
+      if (saved && saved !== "auto") {
+        downloadThreads = String(saved);
+      } else {
+        downloadThreads = "auto";
+      }
+    } catch { /* ignore */ }
 
     // Load download stats
     try {
@@ -325,6 +342,19 @@
       showError(`Failed to save setting: ${e}`);
     } finally {
       savingAutoDelete = false;
+    }
+  }
+
+  async function saveDownloadThreads(value: string) {
+    savingThreads = true;
+    try {
+      downloadThreads = value;
+      await setConfigValue("download_threads", value);
+      showSuccess(`Download threads set to ${value === "auto" ? `auto (${optimalThreads})` : value}`);
+    } catch (e: unknown) {
+      showError(`Failed to save setting: ${e}`);
+    } finally {
+      savingThreads = false;
     }
   }
 
@@ -807,6 +837,41 @@
   <!-- Nexus Mods Account -->
   <SettingsAuthSection />
 
+  <!-- Performance -->
+  <div class="section">
+    <h2 class="section-title">Performance</h2>
+    <div class="section-card">
+      <div class="card-row">
+        <div class="toggle-info">
+          <span class="row-label">Download Threads</span>
+          <span class="toggle-description">
+            Number of simultaneous mod downloads during collection installs.
+            {#if platformInfo.cpu_brand}
+              Detected: {platformInfo.cpu_brand} ({platformInfo.cpu_cores} cores, {platformInfo.memory_gb} GB RAM)
+            {/if}
+          </span>
+        </div>
+        <div class="row-control">
+          <select
+            class="settings-select"
+            value={downloadThreads}
+            onchange={(e) => saveDownloadThreads(e.currentTarget.value)}
+            disabled={savingThreads}
+          >
+            <option value="auto">Auto ({optimalThreads})</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+            <option value="4">4</option>
+            <option value="6">6</option>
+            <option value="8">8</option>
+            <option value="10">10</option>
+            <option value="12">12</option>
+          </select>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Downloads -->
   <div class="section">
     <h2 class="section-title">Downloads</h2>
@@ -1250,6 +1315,30 @@
 
   .settings-input::placeholder {
     color: var(--text-tertiary);
+  }
+
+  .settings-select {
+    padding: var(--space-2) var(--space-3);
+    background: var(--bg-base);
+    border: 1px solid var(--separator-opaque);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-size: 13px;
+    font-family: var(--font-sans);
+    outline: none;
+    cursor: pointer;
+    min-width: 120px;
+    transition: border-color var(--duration) var(--ease);
+  }
+
+  .settings-select:focus {
+    border-color: var(--system-accent);
+    box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.15);
+  }
+
+  .settings-select:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   /* --- Buttons --- */

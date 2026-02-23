@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import "../app.css";
+  import { goto } from "$app/navigation";
   import { currentPage, errorMessage, successMessage, selectedGame, selectedBottle, showError, showSuccess, appVersion, collectionInstallStatus, updateReady as updateReadyStore, updateVersion as updateVersionStore, updateNotes as updateNotesStore, updateChecking as updateCheckingStore, updateError as updateErrorStore, setUpdateCheckFn, notificationCount, showNotificationLog, activeProfile, profileList, activeCollection, collectionList, sidebarCollapsed, controllerMode } from "$lib/stores";
   import { initTheme } from "$lib/theme";
   import { openUrl } from "@tauri-apps/plugin-opener";
@@ -784,27 +785,66 @@
   </div>
 
   {#if $collectionInstallStatus?.active}
-    <div class="global-status-bar">
+    <button class="global-status-bar" onclick={() => goto('/collections/progress')}>
       <div class="status-bar-content">
-        <div class="status-spinner"></div>
+        {#if $collectionInstallStatus.phase === "complete"}
+          <svg class="status-check" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="var(--green, #30d158)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="3 7 6 10 11 4" />
+          </svg>
+        {:else}
+          <div class="status-spinner"></div>
+        {/if}
         <div class="status-text">
           <span class="status-collection">{$collectionInstallStatus.collectionName}</span>
           <span class="status-detail">
-            {$collectionInstallStatus.current}/{$collectionInstallStatus.total}
-            {#if $collectionInstallStatus.currentMod}
-              &mdash; {$collectionInstallStatus.currentMod}
+            {#if $collectionInstallStatus.phase === "downloading"}
+              Downloading {$collectionInstallStatus.downloadProgress.completed}/{$collectionInstallStatus.downloadProgress.total}
+              {#if $collectionInstallStatus.downloadProgress.active.length > 0}
+                &mdash; {$collectionInstallStatus.downloadProgress.active[0].modName}
+              {/if}
+            {:else if $collectionInstallStatus.phase === "installing"}
+              Installing {$collectionInstallStatus.installProgress.current}/{$collectionInstallStatus.installProgress.total}
+              {#if $collectionInstallStatus.installProgress.currentMod}
+                &mdash; {$collectionInstallStatus.installProgress.currentMod}
+              {/if}
+            {:else if $collectionInstallStatus.phase === "complete"}
+              Complete
+            {:else}
+              {$collectionInstallStatus.current}/{$collectionInstallStatus.total}
+              {#if $collectionInstallStatus.currentMod}
+                &mdash; {$collectionInstallStatus.currentMod}
+              {/if}
             {/if}
           </span>
         </div>
+        <svg class="status-chevron" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="4.5 2.5 8 6 4.5 9.5" />
+        </svg>
       </div>
       <div class="status-progress-track">
-        <div class="status-progress-fill"
-          style="width: {$collectionInstallStatus.total > 0
-            ? ($collectionInstallStatus.current / $collectionInstallStatus.total) * 100
-            : 0}%">
-        </div>
+        {#if $collectionInstallStatus.phase === "downloading"}
+          <div class="status-progress-fill"
+            style="width: {$collectionInstallStatus.downloadProgress.total > 0
+              ? ($collectionInstallStatus.downloadProgress.completed / $collectionInstallStatus.downloadProgress.total) * 100
+              : 0}%">
+          </div>
+        {:else if $collectionInstallStatus.phase === "installing"}
+          <div class="status-progress-fill"
+            style="width: {$collectionInstallStatus.installProgress.total > 0
+              ? ($collectionInstallStatus.installProgress.current / $collectionInstallStatus.installProgress.total) * 100
+              : 0}%">
+          </div>
+        {:else if $collectionInstallStatus.phase === "complete"}
+          <div class="status-progress-fill status-progress-complete" style="width: 100%"></div>
+        {:else}
+          <div class="status-progress-fill"
+            style="width: {$collectionInstallStatus.total > 0
+              ? ($collectionInstallStatus.current / $collectionInstallStatus.total) * 100
+              : 0}%">
+          </div>
+        {/if}
       </div>
-    </div>
+    </button>
   {/if}
 
   <!-- Download queue popover — rendered at app-shell level to escape sidebar overflow:hidden -->
@@ -1584,6 +1624,15 @@
     padding: 10px 12px;
     z-index: 300;
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+    cursor: pointer;
+    transition: background var(--duration-fast) var(--ease), box-shadow var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease);
+    text-align: left;
+  }
+
+  .global-status-bar:hover {
+    background: var(--bg-elevated, var(--bg-secondary));
+    border-color: var(--accent-subtle, var(--border));
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
   }
 
   .status-bar-content {
@@ -1603,6 +1652,10 @@
     flex-shrink: 0;
   }
 
+  .status-check {
+    flex-shrink: 0;
+  }
+
   @keyframes spin {
     to { transform: rotate(360deg); }
   }
@@ -1613,6 +1666,7 @@
     gap: 2px;
     min-width: 0;
     overflow: hidden;
+    flex: 1;
   }
 
   .status-collection {
@@ -1632,6 +1686,17 @@
     text-overflow: ellipsis;
   }
 
+  .status-chevron {
+    flex-shrink: 0;
+    color: var(--text-tertiary);
+    transition: transform var(--duration-fast) var(--ease);
+  }
+
+  .global-status-bar:hover .status-chevron {
+    color: var(--text-secondary);
+    transform: translateX(2px);
+  }
+
   .status-progress-track {
     height: 3px;
     background: var(--bg-tertiary);
@@ -1644,6 +1709,10 @@
     background: var(--accent);
     border-radius: 2px;
     transition: width 0.3s ease;
+  }
+
+  .status-progress-complete {
+    background: var(--green, #30d158);
   }
 
   /* Controller mode: larger touch targets for Steam Deck */
