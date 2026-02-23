@@ -924,6 +924,18 @@ export async function deleteCollection(
   });
 }
 
+export async function getCollectionDownloadSize(
+  gameId: string,
+  bottleName: string,
+  collectionName: string
+): Promise<number> {
+  return invoke("collection_download_size_cmd", {
+    gameId,
+    bottleName,
+    collectionName,
+  });
+}
+
 export async function getCollectionDiff(
   gameId: string,
   bottleName: string,

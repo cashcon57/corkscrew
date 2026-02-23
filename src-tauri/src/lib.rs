@@ -1631,6 +1631,19 @@ fn switch_collection_cmd(
 }
 
 #[tauri::command]
+fn collection_download_size_cmd(
+    game_id: String,
+    bottle_name: String,
+    collection_name: String,
+    state: State<'_, AppState>,
+) -> Result<i64, String> {
+    state
+        .db
+        .collection_unique_download_size(&game_id, &bottle_name, &collection_name)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn delete_collection_cmd(
     app: AppHandle,
     game_id: String,
@@ -4327,6 +4340,7 @@ pub fn run() {
             set_mod_collection_name_cmd,
             switch_collection_cmd,
             delete_collection_cmd,
+            collection_download_size_cmd,
             get_collection_diff_cmd,
             get_deployment_health,
             // Notes & Tags

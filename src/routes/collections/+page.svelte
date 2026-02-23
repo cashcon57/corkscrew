@@ -19,6 +19,7 @@
     listInstalledCollections,
     switchCollection,
     deleteCollection,
+    getCollectionDownloadSize,
     getCollectionDiff,
     getInstalledMods,
     detectCollectionTools,
@@ -67,7 +68,9 @@
   let switchingCollection = $state<string | null>(null);
   let deletingCollection = $state<string | null>(null);
   let confirmDeleteCollection = $state<string | null>(null);
-  let deleteKeepDownloads = $state(true);
+  let deleteKeepDownloads = $state(false);
+  let deleteDownloadSize = $state<number | null>(null);
+  let deleteDownloadSizeLoading = $state(false);
   let collectionDiffs = $state<Record<string, CollectionDiff | "loading" | "error">>({});
 
   // Local detail view
@@ -156,6 +159,29 @@
       case "cleaning_downloads": return "Removing downloads...";
       case "removing_from_db": return "Removing from database...";
       default: return step;
+    }
+  }
+
+  function formatDiskSize(bytes: number): string {
+    if (bytes >= 1_073_741_824) return (bytes / 1_073_741_824).toFixed(1) + " GB";
+    if (bytes >= 1_048_576) return (bytes / 1_048_576).toFixed(1) + " MB";
+    if (bytes >= 1024) return (bytes / 1024).toFixed(1) + " KB";
+    return bytes + " B";
+  }
+
+  async function showDeleteConfirmation(name: string) {
+    const game = $selectedGame;
+    if (!game) return;
+    confirmDeleteCollection = name;
+    deleteKeepDownloads = false;
+    deleteDownloadSize = null;
+    deleteDownloadSizeLoading = true;
+    try {
+      deleteDownloadSize = await getCollectionDownloadSize(game.game_id, game.bottle_name, name);
+    } catch {
+      deleteDownloadSize = null;
+    } finally {
+      deleteDownloadSizeLoading = false;
     }
   }
 
@@ -950,7 +976,7 @@
 
     // Start the centralized install tracking service
     const modNames = manifest.mods.map((m: { name: string }) => m.name);
-    await startInstallTracking(selectedCollection.name, modNames.length, modNames);
+    await startInstallTracking(selectedCollection.name, modNames.length, modNames, selectedCollection.description || selectedCollection.summary);
 
     // Navigate to the progress page
     goto('/collections/progress');
@@ -1289,31 +1315,12 @@
             >
               {switchingCollection === selectedMyCollection.name ? "Activating..." : "Activate Collection"}
             </button>
-            {#if confirmDeleteCollection === selectedMyCollection.name}
-              <div class="delete-confirm">
-                <label class="keep-downloads-label">
-                  <input type="checkbox" bind:checked={deleteKeepDownloads} />
-                  Keep shared downloads
-                </label>
-                <button
-                  class="btn btn-danger btn-sm"
-                  onclick={() => { handleDeleteCollection(selectedMyCollection!.name); }}
-                  disabled={deletingCollection === selectedMyCollection.name}
-                >
-                  {deletingCollection === selectedMyCollection.name ? "Deleting..." : "Confirm Delete"}
-                </button>
-                <button class="btn btn-ghost btn-sm" onclick={() => confirmDeleteCollection = null}>
-                  Cancel
-                </button>
-              </div>
-            {:else}
-              <button
-                class="btn btn-ghost-danger"
-                onclick={() => confirmDeleteCollection = selectedMyCollection!.name}
-              >
-                Delete Collection
-              </button>
-            {/if}
+            <button
+              class="btn btn-ghost-danger"
+              onclick={() => showDeleteConfirmation(selectedMyCollection!.name)}
+            >
+              Delete Collection
+            </button>
           </div>
         </div>
       </div>
@@ -1385,7 +1392,7 @@
                 </button>
                 <button
                   class="btn btn-ghost-danger btn-sm"
-                  onclick={(e) => { e.stopPropagation(); confirmDeleteCollection = col.name; viewLocalCollection(col); }}
+                  onclick={(e) => { e.stopPropagation(); showDeleteConfirmation(col.name); }}
                 >
                   Delete
                 </button>
@@ -2731,6 +2738,79 @@
   </div>
 {/if}
 
+<!-- Delete Confirmation Modal -->
+{#if confirmDeleteCollection}
+  <div class="modal-overlay" onclick={() => { if (!deletingCollection) confirmDeleteCollection = null; }} role="dialog" aria-modal="true" aria-label="Confirm deletion">
+    <div class="modal-dialog" onclick={(e) => e.stopPropagation()} role="document">
+      <div class="modal-icon">
+        <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+          <line x1="12" y1="9" x2="12" y2="13" />
+          <line x1="12" y1="17" x2="12.01" y2="17" />
+        </svg>
+      </div>
+      <h3 class="modal-title">Delete '{confirmDeleteCollection}'?</h3>
+      <p class="modal-desc">This will uninstall all mods in this collection, remove staging files, and clean up the database. This cannot be undone.</p>
+
+      <div class="modal-option">
+        <label class="modal-checkbox-label">
+          <input type="checkbox" bind:checked={deleteKeepDownloads} />
+          <span class="modal-checkbox-text">
+            Also delete downloaded archives
+            {#if deleteDownloadSizeLoading}
+              <span class="modal-size-loading">calculating...</span>
+            {:else if deleteDownloadSize != null && deleteDownloadSize > 0}
+              <span class="modal-size-badge">saves {formatDiskSize(deleteDownloadSize)}</span>
+            {:else if deleteDownloadSize === 0}
+              <span class="modal-size-note">no unique downloads</span>
+            {/if}
+          </span>
+        </label>
+        {#if !deleteKeepDownloads}
+          <p class="modal-option-hint">Downloaded archives are kept so you can reinstall later without re-downloading.</p>
+        {:else}
+          <p class="modal-option-hint modal-option-hint-warn">Archives unique to this collection will be permanently deleted.</p>
+        {/if}
+      </div>
+
+      <div class="modal-actions">
+        <button
+          class="btn btn-danger"
+          onclick={() => handleDeleteCollection(confirmDeleteCollection!)}
+          disabled={deletingCollection === confirmDeleteCollection}
+        >
+          {#if deletingCollection === confirmDeleteCollection}
+            <svg class="icon-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="12" y1="2" x2="12" y2="6" />
+              <line x1="12" y1="18" x2="12" y2="22" />
+              <line x1="4.93" y1="4.93" x2="7.76" y2="7.76" />
+              <line x1="16.24" y1="16.24" x2="19.07" y2="19.07" />
+              <line x1="2" y1="12" x2="6" y2="12" />
+              <line x1="18" y1="12" x2="22" y2="12" />
+              <line x1="4.93" y1="19.07" x2="7.76" y2="16.24" />
+              <line x1="16.24" y1="7.76" x2="19.07" y2="4.93" />
+            </svg>
+            Deleting...
+          {:else}
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="3 6 5 6 21 6" />
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+            </svg>
+            Delete Collection
+          {/if}
+        </button>
+        <button
+          class="btn btn-ghost"
+          onclick={() => confirmDeleteCollection = null}
+          disabled={deletingCollection === confirmDeleteCollection}
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
 <style>
   /* ---- Page Layout ---- */
 
@@ -3003,6 +3083,7 @@
   }
 
   @keyframes spin { to { transform: rotate(360deg); } }
+  .icon-spin { animation: spin 1.5s linear infinite; }
 
   .loading-title {
     font-size: 15px;
@@ -4164,23 +4245,117 @@
     margin-top: var(--space-2);
   }
 
-  .delete-confirm {
+  /* ---- Delete Confirmation Modal ---- */
+
+  .modal-dialog {
+    background: var(--bg-grouped);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius-lg, 12px);
+    width: min(440px, 90vw);
+    padding: var(--space-6);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: var(--space-4);
+  }
+
+  .modal-icon {
+    flex-shrink: 0;
+  }
+
+  .modal-title {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin: 0;
+    letter-spacing: -0.02em;
+  }
+
+  .modal-desc {
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+    margin: 0;
+    max-width: 360px;
+  }
+
+  .modal-option {
+    width: 100%;
+    background: var(--surface);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius);
+    padding: var(--space-3) var(--space-4);
+    text-align: left;
+  }
+
+  .modal-checkbox-label {
     display: flex;
     align-items: center;
     gap: var(--space-2);
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-primary);
   }
 
-  .keep-downloads-label {
+  .modal-checkbox-label input {
+    accent-color: var(--system-accent);
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+  }
+
+  .modal-checkbox-text {
     display: flex;
     align-items: center;
-    gap: var(--space-1);
-    font-size: 12px;
-    color: var(--text-secondary);
-    cursor: pointer;
+    gap: var(--space-2);
+    flex-wrap: wrap;
   }
 
-  .keep-downloads-label input {
-    accent-color: var(--system-accent);
+  .modal-size-badge {
+    font-size: 11px;
+    font-weight: 600;
+    color: #22c55e;
+    background: rgba(34, 197, 94, 0.12);
+    padding: 1px 8px;
+    border-radius: 100px;
+    font-family: var(--font-mono);
+  }
+
+  .modal-size-loading {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    font-style: italic;
+  }
+
+  .modal-size-note {
+    font-size: 11px;
+    color: var(--text-tertiary);
+  }
+
+  .modal-option-hint {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin: var(--space-2) 0 0 24px;
+    line-height: 1.4;
+  }
+
+  .modal-option-hint-warn {
+    color: #f59e0b;
+  }
+
+  .modal-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    width: 100%;
+    justify-content: center;
+  }
+
+  .modal-actions .btn-danger {
+    padding: var(--space-2) var(--space-5);
   }
 
   /* ---- Local Detail View ---- */

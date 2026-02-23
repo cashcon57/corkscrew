@@ -1040,6 +1040,30 @@ impl ModDatabase {
         Ok(())
     }
 
+    /// Get the total size of downloads unique to a collection (i.e. not shared with other collections).
+    pub fn collection_unique_download_size(
+        &self,
+        game_id: &str,
+        bottle_name: &str,
+        collection_name: &str,
+    ) -> Result<i64> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        // Sum file_size for downloads that are ONLY referenced by this collection
+        let size: i64 = conn.prepare(
+            "SELECT COALESCE(SUM(dr.file_size), 0)
+             FROM download_registry dr
+             JOIN download_collection_refs dcr ON dcr.download_id = dr.id
+             WHERE dcr.collection_name = ?1
+               AND dcr.game_id = ?2
+               AND dcr.bottle_name = ?3
+               AND dr.id NOT IN (
+                   SELECT download_id FROM download_collection_refs
+                   WHERE collection_name != ?1
+               )",
+        )?.query_row(params![collection_name, game_id, bottle_name], |row| row.get(0))?;
+        Ok(size)
+    }
+
     /// Delete orphaned download_registry rows that have no collection references.
     pub fn cleanup_orphaned_downloads(&self) -> Result<usize> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());

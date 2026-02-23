@@ -4,6 +4,8 @@
   import { collectionInstallStatus } from "$lib/stores";
   import { dismissInstall } from "$lib/installService";
   import { openUrl } from "@tauri-apps/plugin-opener";
+  import { marked } from "marked";
+  import DOMPurify from "dompurify";
 
   let modLogExpanded = $state(false);
   let modLogAutoExpanded = $state(false);
@@ -24,6 +26,11 @@
   let downloadEta = $derived(status?.downloadEta ?? "");
 
   let logEntries = $derived(status?.logEntries ?? []);
+  let collectionDescription = $derived(status?.collectionDescription ?? "");
+  let descriptionExpanded = $state(false);
+  let renderedDescription = $derived(
+    collectionDescription ? DOMPurify.sanitize(marked.parse(collectionDescription) as string) : "",
+  );
 
   let dlPercent = $derived(dl.total > 0 ? Math.round((dl.completed / dl.total) * 100) : 0);
   let instPercent = $derived(inst.total > 0 ? Math.round((inst.current / inst.total) * 100) : 0);
@@ -280,6 +287,32 @@
         </span>
       </div>
     </header>
+
+    <!-- Collection Description -->
+    {#if renderedDescription}
+      <section class="phase-section description-section">
+        <button class="collapsible-header" onclick={() => descriptionExpanded = !descriptionExpanded}>
+          <h3 class="phase-title">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+              <polyline points="14 2 14 8 20 8" />
+              <line x1="16" y1="13" x2="8" y2="13" />
+              <line x1="16" y1="17" x2="8" y2="17" />
+              <polyline points="10 9 9 9 8 9" />
+            </svg>
+            ABOUT THIS COLLECTION
+          </h3>
+          <svg class="chevron" class:expanded={descriptionExpanded} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
+        </button>
+        {#if descriptionExpanded}
+          <div class="description-content rendered-markdown">
+            {@html renderedDescription}
+          </div>
+        {/if}
+      </section>
+    {/if}
 
     {#if phase === "complete"}
       <!-- Completion Panel -->
@@ -1972,5 +2005,79 @@
 
   .verbose-log-list::-webkit-scrollbar-thumb:hover {
     background: var(--scrollbar-thumb-hover);
+  }
+
+  /* ---- Collection Description ---- */
+
+  .description-section .collapsible-header {
+    margin-bottom: 0;
+  }
+
+  .description-content {
+    margin-top: var(--space-3);
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text-secondary);
+    max-height: 300px;
+    overflow-y: auto;
+    padding-right: var(--space-2);
+  }
+
+  .description-content :global(h1),
+  .description-content :global(h2),
+  .description-content :global(h3) {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin: var(--space-3) 0 var(--space-1) 0;
+  }
+
+  .description-content :global(p) {
+    margin: var(--space-2) 0;
+  }
+
+  .description-content :global(a) {
+    color: var(--system-accent);
+    text-decoration: none;
+  }
+
+  .description-content :global(a:hover) {
+    text-decoration: underline;
+  }
+
+  .description-content :global(ul),
+  .description-content :global(ol) {
+    padding-left: var(--space-4);
+    margin: var(--space-2) 0;
+  }
+
+  .description-content :global(li) {
+    margin: var(--space-1) 0;
+  }
+
+  .description-content :global(code) {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    background: var(--bg-tertiary);
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+
+  .description-content :global(img) {
+    max-width: 100%;
+    border-radius: var(--radius-sm);
+  }
+
+  .description-content::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  .description-content::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .description-content::-webkit-scrollbar-thumb {
+    background: var(--scrollbar-thumb);
+    border-radius: 3px;
   }
 </style>

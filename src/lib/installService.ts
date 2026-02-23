@@ -93,6 +93,7 @@ export async function startInstallTracking(
   collectionName: string,
   totalMods: number,
   modNames: string[],
+  description?: string,
 ) {
   // Clean up any previous tracking
   stopInstallTracking();
@@ -133,6 +134,7 @@ export async function startInstallTracking(
     downloadSpeed: 0,
     downloadEta: "",
     logEntries: [{ timestamp: Date.now(), message: `Starting installation of '${collectionName}' (${totalMods} mods)`, level: "info" as const }],
+    collectionDescription: description,
     // Legacy compat
     currentMod: "",
     step: "preparing",

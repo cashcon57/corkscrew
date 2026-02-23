@@ -72,6 +72,7 @@ export interface UserActionItem {
 export interface CollectionInstallStatus {
   active: boolean;
   collectionName: string;
+  collectionDescription?: string;
   phase: "downloading" | "staging" | "installing" | "complete" | "failed" | "";
   // Download phase
   downloadProgress: {
