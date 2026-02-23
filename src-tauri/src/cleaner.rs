@@ -158,14 +158,6 @@ const SAVE_PATTERNS: &[&str] = &[
     "saves/",   // Save directory
 ];
 
-/// SKSE-related paths that should always be preserved during cleanup.
-/// These live inside the game's Data directory.
-const SKSE_PATTERNS: &[&str] = &[
-    "skse/",            // SKSE plugins, configs, logs
-    "skse64_loader.exe",
-    "skse64_1_6_",      // SKSE DLLs (version-specific prefix)
-    "skse64_steam_loader.dll",
-];
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -259,11 +251,6 @@ pub fn scan_game_directory(
         // When using built-in baseline, also check stock patterns
         // (catches CC content not in the explicit list, video files, etc.)
         if using_builtin && baselines::is_stock_pattern(game_id, &rel_str) {
-            continue;
-        }
-
-        // Skip SKSE files — always preserved
-        if is_skse_file(&rel_str) {
             continue;
         }
 
@@ -471,17 +458,6 @@ fn categorize_file(rel_path: &str) -> String {
 fn is_enb_file(rel_path: &str) -> bool {
     let lower = rel_path.to_lowercase();
     for pattern in ENB_PATTERNS {
-        if lower.starts_with(pattern) || lower.contains(&format!("/{}", pattern)) {
-            return true;
-        }
-    }
-    false
-}
-
-/// Check if a file is SKSE-related (always preserved during cleanup).
-fn is_skse_file(rel_path: &str) -> bool {
-    let lower = rel_path.to_lowercase();
-    for pattern in SKSE_PATTERNS {
         if lower.starts_with(pattern) || lower.contains(&format!("/{}", pattern)) {
             return true;
         }
@@ -732,27 +708,6 @@ mod tests {
         assert_eq!(result.removed_files.len(), 1); // Only mod.esp
         assert_eq!(result.skipped_files.len(), 1); // Excluded config
         assert!(data_dir.join("MyMod/Config/important.ini").exists());
-    }
-
-    #[test]
-    fn clean_preserves_skse_files() {
-        let (db, tmp) = test_db();
-        let data_dir = tmp.path().join("data");
-        fs::create_dir_all(data_dir.join("SKSE/Plugins")).unwrap();
-
-        fs::write(data_dir.join("Skyrim.esm"), b"master").unwrap();
-        integrity::create_game_snapshot(&db, "skyrimse", "Gaming", &data_dir).unwrap();
-
-        fs::write(data_dir.join("mod.esp"), b"mod").unwrap();
-        fs::write(data_dir.join("SKSE/Plugins/test.dll"), b"skse plugin").unwrap();
-
-        let options = CleanOptions::default();
-        let result =
-            clean_game_directory(&db, "skyrimse", "Gaming", &data_dir, &options).unwrap();
-
-        // mod.esp removed, SKSE file preserved (never appears in report)
-        assert_eq!(result.removed_files.len(), 1);
-        assert!(data_dir.join("SKSE/Plugins/test.dll").exists());
     }
 
     #[test]

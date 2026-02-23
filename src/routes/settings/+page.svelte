@@ -734,7 +734,7 @@
                       Remove saves ({cleanReport.save_files.length} files)
                     </label>
                   {/if}
-                  <span class="clean-option-note">SKSE files are always preserved</span>
+                  <span class="clean-option-note">SKSE can be reinstalled after cleaning</span>
                 </div>
                 <div class="clean-actions">
                   <button

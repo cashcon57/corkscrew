@@ -63,6 +63,15 @@ pub fn supports_plugin_order(game_id: &str) -> bool {
     matches!(game_id, "skyrimse" | "fallout4")
 }
 
+/// Returns the implicit (always-loaded) plugins for a given game.
+pub fn get_implicit_plugins(game_id: &str) -> &'static [&'static str] {
+    match game_id {
+        "skyrimse" => SKYRIM_SE_IMPLICIT_PLUGINS,
+        "fallout4" => FALLOUT4_IMPLICIT_PLUGINS,
+        _ => &[],
+    }
+}
+
 // ---------------------------------------------------------------------------
 // PluginEntry
 // ---------------------------------------------------------------------------

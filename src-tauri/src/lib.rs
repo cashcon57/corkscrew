@@ -2900,11 +2900,45 @@ fn clean_game_directory(
     options: cleaner::CleanOptions,
     state: State<AppState>,
 ) -> Result<cleaner::CleanResult, String> {
-    let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
+    let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
     let db = &state.db;
 
-    cleaner::clean_game_directory(db, &game_id, &bottle_name, &data_dir, &options)
-        .map_err(|e| e.to_string())
+    let result = cleaner::clean_game_directory(db, &game_id, &bottle_name, &data_dir, &options)
+        .map_err(|e| e.to_string())?;
+
+    // After a full clean (not orphans-only), reset plugins.txt to vanilla state
+    // so the load order doesn't show stale entries for removed plugins
+    if !options.dry_run && !options.orphans_only && !result.removed_files.is_empty() {
+        if let Some(plugins_file) = games::with_plugin(&game_id, |plugin| {
+            plugin.get_plugins_file(Path::new(&game.game_path), &bottle)
+        })
+        .flatten()
+        {
+            // Build vanilla plugin list from stock ESMs still on disk
+            let vanilla_entries: Vec<plugins::skyrim_plugins::PluginEntry> =
+                plugins::skyrim_plugins::get_implicit_plugins(&game_id)
+                    .iter()
+                    .filter(|name| data_dir.join(name).exists())
+                    .map(|name| plugins::skyrim_plugins::PluginEntry {
+                        filename: name.to_string(),
+                        enabled: true,
+                    })
+                    .collect();
+            let _ = plugins::skyrim_plugins::write_plugins_txt(&plugins_file, &vanilla_entries);
+            log::info!("Reset plugins.txt to {} vanilla entries after clean", vanilla_entries.len());
+
+            // Also reset loadorder.txt if it exists alongside plugins.txt
+            if let Some(parent) = plugins_file.parent() {
+                let loadorder_file = parent.join("loadorder.txt");
+                if loadorder_file.exists() {
+                    let _ = std::fs::remove_file(&loadorder_file);
+                    log::info!("Removed stale loadorder.txt after clean");
+                }
+            }
+        }
+    }
+
+    Ok(result)
 }
 
 // --- Wabbajack Modlists ---
