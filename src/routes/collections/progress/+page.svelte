@@ -5,6 +5,7 @@
   import { openUrl } from "@tauri-apps/plugin-opener";
 
   let modLogExpanded = $state(false);
+  let modLogAutoExpanded = $state(false);
   let userActionsExpanded = $state(true);
 
   let status = $derived($collectionInstallStatus);
@@ -23,7 +24,8 @@
   let instPercent = $derived(inst.total > 0 ? Math.round((inst.current / inst.total) * 100) : 0);
 
   // Staging progress — count only mods that have completed extraction (past extracting phase)
-  let stagingCount = $derived(mods.filter((m) => m.status === "extracting").length);
+  let extractingMods = $derived(mods.filter((m) => m.status === "extracting"));
+  let stagingCount = $derived(extractingMods.length);
   let stagingDone = $derived(
     mods.filter((m) => ["staged", "deploying", "done", "failed", "skipped", "user_action"].includes(m.status)).length,
   );
@@ -33,6 +35,57 @@
   // Activity feed — currently active mods surfaced to the top
   const ACTIVE_STATUSES = new Set(["downloading", "extracting", "deploying"]);
   let activeWorkMods = $derived(mods.filter((m) => ACTIVE_STATUSES.has(m.status)));
+
+  // Mod log summary stats
+  let modsDone = $derived(mods.filter((m) => m.status === "done").length);
+  let modsFailed = $derived(mods.filter((m) => m.status === "failed").length);
+  let modsSkipped = $derived(mods.filter((m) => m.status === "skipped" || m.status === "user_action").length);
+  let modsPending = $derived(mods.filter((m) => ["pending", "queued"].includes(m.status)).length);
+
+  // Recently completed — track mods that just finished for brief display in activity
+  let recentlyCompleted = $state<{ name: string; index: number; status: string; timestamp: number }[]>([]);
+  let prevModStatuses = $state<Map<number, string>>(new Map());
+  let recentTick = $state(0);
+
+  $effect(() => {
+    const now = Date.now();
+    const newRecent: typeof recentlyCompleted = [];
+
+    for (const mod of mods) {
+      const prev = prevModStatuses.get(mod.index);
+      if (prev && ACTIVE_STATUSES.has(prev) && !ACTIVE_STATUSES.has(mod.status)) {
+        newRecent.push({ name: mod.name, index: mod.index, status: mod.status, timestamp: now });
+      }
+    }
+
+    if (newRecent.length > 0) {
+      recentlyCompleted = [...recentlyCompleted.filter((r) => now - r.timestamp < 3000), ...newRecent].slice(-5);
+    } else {
+      recentlyCompleted = recentlyCompleted.filter((r) => now - r.timestamp < 3000);
+    }
+
+    // Update previous statuses
+    const nextMap = new Map<number, string>();
+    for (const mod of mods) {
+      nextMap.set(mod.index, mod.status);
+    }
+    prevModStatuses = nextMap;
+  });
+
+  // Auto-expand mod log when first failure occurs
+  $effect(() => {
+    if (modsFailed > 0 && !modLogAutoExpanded) {
+      modLogExpanded = true;
+      modLogAutoExpanded = true;
+    }
+  });
+
+  // Tick timer to drive opacity fading on recently-completed items
+  $effect(() => {
+    if (recentlyCompleted.length === 0) return;
+    const interval = setInterval(() => { recentTick++; }, 200);
+    return () => clearInterval(interval);
+  });
 
   // Mod log: show 10 items when collapsed, all when expanded
   let visibleMods = $derived(modLogExpanded ? mods : mods.slice(0, 10));
@@ -268,6 +321,22 @@
           <div class="progress-track">
             <div class="progress-fill" class:progress-active={phase === "staging"} style="width: {stagingPercent}%"></div>
           </div>
+          {#if extractingMods.length > 0}
+            <div class="extracting-list">
+              {#each extractingMods as mod (mod.index)}
+                <div class="extracting-item">
+                  <svg class="icon-spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--system-accent)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="3" />
+                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                  </svg>
+                  <span class="extracting-name" title={mod.name}>{mod.name}</span>
+                  {#if mod.stepDetail}
+                    <span class="extracting-detail">{mod.stepDetail}</span>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+          {/if}
         </section>
       {/if}
 
@@ -341,8 +410,8 @@
       </section>
     {/if}
 
-    <!-- Activity Feed — currently active items -->
-    {#if activeWorkMods.length > 0 && phase !== "complete"}
+    <!-- Activity Feed — currently active items + recently completed -->
+    {#if (activeWorkMods.length > 0 || recentlyCompleted.length > 0) && phase !== "complete"}
       <section class="phase-section activity-section">
         <div class="activity-header">
           <h3 class="phase-title">
@@ -358,9 +427,12 @@
             </svg>
             ACTIVITY
           </h3>
-          <span class="activity-count">{activeWorkMods.length} active</span>
+          {#if activeWorkMods.length > 0}
+            <span class="activity-count">{activeWorkMods.length} active</span>
+          {/if}
         </div>
         <div class="activity-list">
+          <!-- Currently active mods -->
           {#each activeWorkMods as mod (mod.index)}
             <div class="activity-item">
               <span class="activity-icon">
@@ -389,6 +461,29 @@
               {/if}
             </div>
           {/each}
+          <!-- Recently completed mods (fade out after 3s) -->
+          {#each recentlyCompleted as recent (recent.index)}
+            {@const _tick = recentTick}
+            {@const age = Date.now() - recent.timestamp}
+            {@const opacity = Math.max(0, 1 - age / 3000)}
+            <div class="activity-item activity-item-recent" style="opacity: {opacity}">
+              <span class="activity-icon">
+                {#if recent.status === "done" || recent.status === "staged"}
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
+                {:else if recent.status === "failed"}
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+                {:else if recent.status === "cached" || recent.status === "downloaded"}
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
+                {:else}
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text-tertiary)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14" /></svg>
+                {/if}
+              </span>
+              <span class="activity-name activity-name-faded" title={recent.name}>{recent.name}</span>
+              <span class="activity-status activity-status-done">
+                {recent.status === "done" ? "completed" : recent.status === "failed" ? "failed" : recent.status}
+              </span>
+            </div>
+          {/each}
         </div>
       </section>
     {/if}
@@ -408,6 +503,20 @@
           MOD LOG
         </h3>
         <span class="phase-count">{mods.length} mods</span>
+        <div class="log-summary-chips">
+          {#if modsDone > 0}
+            <span class="summary-chip chip-done">{modsDone} done</span>
+          {/if}
+          {#if modsFailed > 0}
+            <span class="summary-chip chip-failed">{modsFailed} failed</span>
+          {/if}
+          {#if modsSkipped > 0}
+            <span class="summary-chip chip-skipped">{modsSkipped} skipped</span>
+          {/if}
+          {#if modsPending > 0}
+            <span class="summary-chip chip-pending">{modsPending} pending</span>
+          {/if}
+        </div>
         <svg class="chevron" class:expanded={modLogExpanded} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <polyline points="6 9 12 15 18 9" />
         </svg>
@@ -828,6 +937,44 @@
     flex-shrink: 0;
   }
 
+  /* ---- Extracting List ---- */
+
+  .extracting-list {
+    margin-top: var(--space-3);
+    padding-top: var(--space-3);
+    border-top: 1px solid var(--separator);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .extracting-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: 3px var(--space-2);
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+  }
+
+  .extracting-name {
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--text-primary);
+    font-weight: 500;
+  }
+
+  .extracting-detail {
+    flex-shrink: 0;
+    font-size: 11px;
+    color: var(--text-tertiary);
+    font-style: italic;
+    font-family: var(--font-mono);
+  }
+
   /* ---- Install Detail ---- */
 
   .install-detail {
@@ -1015,6 +1162,47 @@
     font-style: italic;
   }
 
+  /* ---- Mod Log Summary Chips ---- */
+
+  .log-summary-chips {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .summary-chip {
+    display: inline-flex;
+    align-items: center;
+    font-size: 10px;
+    font-weight: 700;
+    padding: 1px 7px;
+    border-radius: 100px;
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.02em;
+  }
+
+  .chip-done {
+    color: #22c55e;
+    background: rgba(34, 197, 94, 0.12);
+  }
+
+  .chip-failed {
+    color: #ef4444;
+    background: rgba(239, 68, 68, 0.12);
+  }
+
+  .chip-skipped {
+    color: #f59e0b;
+    background: rgba(245, 158, 11, 0.12);
+  }
+
+  .chip-pending {
+    color: var(--text-tertiary);
+    background: var(--surface-hover);
+  }
+
   /* ---- Mod Log ---- */
 
   .mod-log-section .collapsible-header {
@@ -1188,6 +1376,21 @@
     background: var(--system-accent);
     border-radius: 2px;
     transition: width 300ms ease;
+  }
+
+  .activity-item-recent {
+    background: transparent;
+    border-color: transparent;
+    transition: opacity 0.5s ease-out;
+  }
+
+  .activity-name-faded {
+    color: var(--text-tertiary);
+  }
+
+  .activity-status-done {
+    color: #22c55e;
+    font-weight: 600;
   }
 
   /* ---- Animated Icons ---- */

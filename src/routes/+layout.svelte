@@ -948,14 +948,14 @@
                 &mdash; {$collectionInstallStatus.downloadEta}
               {/if}
             {:else if $collectionInstallStatus.phase === "staging"}
-              Extracting...
+              Extracting {$collectionInstallStatus.modDetails?.filter(m => m.status === "extracting").length ?? 0} mods...
             {:else if $collectionInstallStatus.phase === "installing"}
               Installing {$collectionInstallStatus.installProgress.current}/{$collectionInstallStatus.installProgress.total}
               {#if $collectionInstallStatus.installProgress.currentMod}
                 &mdash; {$collectionInstallStatus.installProgress.currentMod}
               {/if}
             {:else if $collectionInstallStatus.phase === "complete"}
-              Complete
+              {$collectionInstallStatus.result?.installed ?? 0} installed{#if ($collectionInstallStatus.result?.failed ?? 0) > 0}, {$collectionInstallStatus.result?.failed} failed{/if}
             {:else}
               {$collectionInstallStatus.current}/{$collectionInstallStatus.total}
             {/if}
