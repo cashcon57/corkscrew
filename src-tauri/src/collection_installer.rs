@@ -514,7 +514,8 @@ pub async fn install_collection(
     // browse/manual/bundled types are skipped here and handled in
     // Phase 2 as before.
 
-    // Determine concurrency limit from config or platform heuristics
+    // Determine concurrency limit from config or platform heuristics.
+    // Network downloads are IO-bound, so we can safely run more than CPU core count.
     let max_concurrent = config::get_config()
         .ok()
         .and_then(|c| c.extra.get("download_threads").and_then(|v| v.as_u64()))
@@ -527,11 +528,11 @@ pub async fn install_collection(
                 cfg!(target_arch = "aarch64") && cfg!(target_os = "macos");
             let is_steam_os = std::path::Path::new("/etc/steamos-release").exists();
             if is_steam_os {
-                cores.min(4)
+                cores.clamp(4, 8)
             } else if is_apple_silicon {
-                (cores / 2).clamp(4, 8)
+                cores.clamp(6, 16)
             } else {
-                (cores / 2).clamp(3, 6)
+                cores.clamp(4, 12)
             }
         });
 
@@ -716,10 +717,11 @@ pub async fn install_collection(
     // Extract all pre-downloaded archives concurrently using dedicated
     // blocking threads. This is the biggest single speedup: archive
     // extraction is CPU+IO-bound and perfectly parallelizable.
+    // Extraction is CPU+IO-bound — use all available cores for max throughput.
     let max_extract = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
-        .clamp(2, max_concurrent);
+        .clamp(4, 16);
 
     // Collect archives that need extraction
     let archives_to_extract: Vec<(usize, PathBuf, String)> = install_order

@@ -55,7 +55,7 @@ export interface DownloadItem {
 export interface ModProgressDetail {
   name: string;
   index: number;
-  status: "pending" | "queued" | "downloading" | "downloaded" | "cached" | "extracting" | "deploying" | "done" | "failed" | "skipped" | "user_action";
+  status: "pending" | "queued" | "downloading" | "downloaded" | "cached" | "extracting" | "staged" | "deploying" | "done" | "failed" | "skipped" | "user_action";
   error?: string;
   downloadBytes?: number;
   downloadTotal?: number;

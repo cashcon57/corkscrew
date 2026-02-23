@@ -346,7 +346,7 @@
       await resumeInstallTracking(cp.collection_name, cp.total_mods, cp.completed_mods, modStatuses, modNames);
       interruptedInstall = null;
       resumeCollectionInstall(cp.id).catch((e: unknown) => wrappedShowError(`Resume failed: ${e}`));
-      navigate("collections");
+      goto("/collections/progress");
     } catch (e) {
       wrappedShowError(`Failed to resume install: ${e}`);
     } finally {
@@ -560,6 +560,10 @@
 
   function navigate(page: string) {
     currentPage.set(page);
+    // If we're on a sub-route (e.g. /collections/progress), navigate back to root
+    if (window.location.pathname !== "/") {
+      goto("/");
+    }
   }
 
   async function handleRetryDownload(id: number) {
@@ -889,26 +893,28 @@
       {/if}
 
       {#if interruptedInstall || interruptedWj}
-        <div class="resume-banner" role="alert">
-          <div class="resume-banner-icon">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-              <line x1="12" y1="9" x2="12" y2="13" />
-              <line x1="12" y1="17" x2="12.01" y2="17" />
+        <div class="resume-banner resume-banner-prominent" role="alert">
+          <div class="resume-banner-icon resume-icon-pulse">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10" />
+              <polygon points="10 8 16 12 10 16" fill="currentColor" stroke="none" />
             </svg>
           </div>
           <div class="resume-banner-text">
-            <strong>Interrupted Installation</strong>
+            <strong class="resume-title">Resume Installation</strong>
             {#if interruptedInstall}
-              "{interruptedInstall.collection_name}" &mdash; {interruptedInstall.completed_mods}/{interruptedInstall.total_mods} mods completed
+              <span class="resume-detail">"{interruptedInstall.collection_name}" &mdash; {interruptedInstall.completed_mods}/{interruptedInstall.total_mods} mods completed</span>
             {:else if interruptedWj}
-              "{interruptedWj.modlist_name}" &mdash; interrupted
+              <span class="resume-detail">"{interruptedWj.modlist_name}" &mdash; interrupted</span>
             {/if}
           </div>
           <div class="resume-banner-actions">
             {#if interruptedInstall}
-              <button class="btn btn-accent btn-sm" onclick={handleResumeInterrupted} disabled={resumingInstall}>
-                {resumingInstall ? "Resuming..." : "Resume"}
+              <button class="btn btn-accent btn-sm resume-btn-cta" onclick={handleResumeInterrupted} disabled={resumingInstall}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                  <polygon points="5 3 19 12 5 21" />
+                </svg>
+                {resumingInstall ? "Resuming..." : "Resume Now"}
               </button>
             {/if}
             <button class="btn btn-ghost btn-sm" onclick={handleDismissInterrupted}>Dismiss</button>
@@ -1450,6 +1456,47 @@
     border: 1px solid rgba(255, 170, 0, 0.25);
     border-radius: var(--radius-md, 8px);
     font-size: 13px;
+  }
+
+  .resume-banner-prominent {
+    padding: 14px 20px;
+    background: linear-gradient(135deg, rgba(0, 122, 255, 0.10), rgba(0, 122, 255, 0.04));
+    border: 1px solid rgba(0, 122, 255, 0.35);
+    border-radius: var(--radius-lg, 12px);
+    animation: resume-fade-in 0.3s ease-out;
+    box-shadow: 0 0 20px rgba(0, 122, 255, 0.08);
+  }
+
+  @keyframes resume-fade-in {
+    from { opacity: 0; transform: translateY(-8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .resume-icon-pulse {
+    color: var(--system-accent, #007aff);
+    animation: icon-glow 2s ease-in-out infinite;
+  }
+
+  @keyframes icon-glow {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+  }
+
+  .resume-title {
+    font-size: 14px;
+  }
+
+  .resume-detail {
+    display: block;
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-top: 2px;
+  }
+
+  .resume-btn-cta {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
   }
 
   .resume-banner-icon {

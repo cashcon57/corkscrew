@@ -22,12 +22,12 @@
   let dlPercent = $derived(dl.total > 0 ? Math.round((dl.completed / dl.total) * 100) : 0);
   let instPercent = $derived(inst.total > 0 ? Math.round((inst.current / inst.total) * 100) : 0);
 
-  // Staging progress
+  // Staging progress — count only mods that have completed extraction (past extracting phase)
   let stagingCount = $derived(mods.filter((m) => m.status === "extracting").length);
   let stagingDone = $derived(
-    mods.filter((m) => !["pending", "queued", "downloading", "extracting"].includes(m.status)).length,
+    mods.filter((m) => ["staged", "deploying", "done", "failed", "skipped", "user_action"].includes(m.status)).length,
   );
-  let stagingTotal = $derived(dl.total || mods.length);
+  let stagingTotal = $derived(mods.length);
   let stagingPercent = $derived(stagingTotal > 0 ? Math.round((stagingDone / stagingTotal) * 100) : 0);
 
   // Mod log: show 10 items when collapsed, all when expanded
@@ -366,7 +366,7 @@
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.5"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>
               {:else if mod.status === "downloading"}
                 <svg class="icon-bounce" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--system-accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
-              {:else if mod.status === "downloaded" || mod.status === "cached"}
+              {:else if mod.status === "downloaded" || mod.status === "cached" || mod.status === "staged"}
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
               {:else if mod.status === "extracting"}
                 <svg class="icon-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>

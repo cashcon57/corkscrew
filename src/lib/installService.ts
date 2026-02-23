@@ -18,6 +18,20 @@ let speedSamples: { time: number; bytes: number }[] = [];
 const SPEED_WINDOW_MS = 5000;
 let cumulativeDownloaded = 0;
 
+// Event throttling — batch rapid events to avoid overwhelming the UI
+let pendingEvent: InstallProgressEvent | null = null;
+let throttleTimer: ReturnType<typeof setTimeout> | null = null;
+const THROTTLE_MS = 50; // max ~20 UI updates per second for non-critical events
+
+// Events that should always update immediately (phase transitions, completions)
+const IMMEDIATE_EVENTS = new Set([
+  "downloadPhaseStarted", "allDownloadsCompleted",
+  "stagingPhaseStarted", "installPhaseStarted",
+  "modCompleted", "modFailed", "collectionCompleted",
+  "userActionRequired", "downloadModStarted", "downloadModCompleted", "downloadModFailed",
+  "stagingModStarted", "stagingModCompleted",
+]);
+
 function calculateSpeed(currentBytes: number): number {
   const now = Date.now();
   cumulativeDownloaded = currentBytes;
@@ -48,9 +62,9 @@ function computeOverallProgress(s: CollectionInstallStatus): number {
   const dlTotal = s.downloadProgress.total || 1;
   const dlProgress = s.downloadProgress.completed / dlTotal;
 
-  // Count staging-done mods (not pending/queued/downloading/extracting)
+  // Count mods that completed extraction (past extracting phase)
   const stagingDone = s.modDetails.filter(
-    (m) => !["pending", "queued", "downloading", "extracting"].includes(m.status),
+    (m) => ["staged", "deploying", "done", "failed", "skipped", "user_action"].includes(m.status),
   ).length;
   const stagingTotal = s.modDetails.length || 1;
   const stagingProgress = stagingDone / stagingTotal;
@@ -135,9 +149,30 @@ export async function startInstallTracking(
     });
   }, 1000);
 
-  // Subscribe to progress events
+  // Subscribe to progress events with throttling for non-critical updates
   unlisten = await listen<InstallProgressEvent>("install-progress", (event) => {
-    handleProgressEvent(event.payload);
+    const e = event.payload;
+    if (IMMEDIATE_EVENTS.has(e.kind)) {
+      // Flush any pending throttled event first, then handle immediately
+      if (pendingEvent) {
+        handleProgressEvent(pendingEvent);
+        pendingEvent = null;
+        if (throttleTimer) { clearTimeout(throttleTimer); throttleTimer = null; }
+      }
+      handleProgressEvent(e);
+    } else {
+      // Throttle high-frequency events (downloadProgress, stepChanged, modStarted, etc.)
+      pendingEvent = e;
+      if (!throttleTimer) {
+        throttleTimer = setTimeout(() => {
+          if (pendingEvent) {
+            handleProgressEvent(pendingEvent);
+            pendingEvent = null;
+          }
+          throttleTimer = null;
+        }, THROTTLE_MS);
+      }
+    }
   });
 }
 
@@ -265,7 +300,7 @@ function handleProgressEvent(e: InstallProgressEvent) {
       case "stagingModCompleted":
         if (next.modDetails[e.mod_index]) {
           next.modDetails = [...next.modDetails];
-          next.modDetails[e.mod_index] = { ...next.modDetails[e.mod_index], status: "downloaded" };
+          next.modDetails[e.mod_index] = { ...next.modDetails[e.mod_index], status: "staged" };
         }
         break;
 
@@ -434,7 +469,26 @@ export async function resumeInstallTracking(
   }, 1000);
 
   unlisten = await listen<InstallProgressEvent>("install-progress", (event) => {
-    handleProgressEvent(event.payload);
+    const e = event.payload;
+    if (IMMEDIATE_EVENTS.has(e.kind)) {
+      if (pendingEvent) {
+        handleProgressEvent(pendingEvent);
+        pendingEvent = null;
+        if (throttleTimer) { clearTimeout(throttleTimer); throttleTimer = null; }
+      }
+      handleProgressEvent(e);
+    } else {
+      pendingEvent = e;
+      if (!throttleTimer) {
+        throttleTimer = setTimeout(() => {
+          if (pendingEvent) {
+            handleProgressEvent(pendingEvent);
+            pendingEvent = null;
+          }
+          throttleTimer = null;
+        }, THROTTLE_MS);
+      }
+    }
   });
 }
 
@@ -450,6 +504,8 @@ export function stopInstallTracking() {
   }
   speedSamples = [];
   cumulativeDownloaded = 0;
+  pendingEvent = null;
+  if (throttleTimer) { clearTimeout(throttleTimer); throttleTimer = null; }
 }
 
 /** Mark install as finished and deactivate after a delay. */
