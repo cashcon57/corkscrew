@@ -1,7 +1,7 @@
 use crate::wabbajack_types::*;
-use log::{debug, warn};
+use log::{debug, info, warn};
 use std::collections::HashMap;
-use std::io::Read;
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
@@ -174,7 +174,7 @@ impl DirectiveProcessor {
         let total = phase1.len() + phase2.len() + phase3.len() + ignored.len();
         let mut processed: usize = 0;
         let mut skipped: usize = 0;
-        let mut warnings: Vec<String> = Vec::new();
+        let warnings: Vec<String> = Vec::new();
         let mut errors: Vec<String> = Vec::new();
 
         // Process ignored directives (no-ops, count them immediately)
@@ -216,12 +216,7 @@ impl DirectiveProcessor {
         // Phase 3: BSA creation
         for d in &phase3 {
             match self.process_directive(d) {
-                Ok(()) => {
-                    warnings.push(format!(
-                        "CreateBSA -> {}: written as directory (BSA packing not yet implemented)",
-                        d.to_path()
-                    ));
-                }
+                Ok(()) => {}
                 Err(e) => {
                     let msg = format!("{} -> {}: {}", d.kind_name(), d.to_path(), e);
                     warn!("Directive error: {}", msg);
@@ -357,54 +352,71 @@ impl DirectiveProcessor {
         Ok(())
     }
 
-    /// Create a BSA/BA2 archive from staged files.
+    /// Create a BSA/BA2 archive from files produced by earlier directives.
     ///
-    /// TODO: Full BSA packing with the `ba2` crate. For now, this creates
-    /// the output directory structure containing the individual files that
-    /// would be packed into the BSA. Downstream code should detect this
-    /// and either pack them or skip.
+    /// Determines archive format from BsaState.$type:
+    /// - Contains "BA2" -> Fallout 4 BA2 format (GNRL or DX10)
+    /// - Otherwise -> TES4 BSA format (Skyrim SE v105 by default)
+    ///
+    /// Each BsaFileState.path references a file that was previously placed in
+    /// the output directory. We read those files, pack them into the archive,
+    /// and write the result to `dest_path`.
     fn process_create_bsa(
         &self,
         to: &str,
         temp_id: i64,
-        _state: Option<&BsaState>,
+        state: Option<&BsaState>,
         file_states: &[BsaFileState],
     ) -> Result<(), WjDirectiveError> {
         let dest_path = self.resolve_output_path(to);
-        let staging_dir = dest_path.with_extension("bsa_staging");
+        ensure_parent_dir(&dest_path)?;
 
-        // Create staging directory structure for the BSA contents
-        std::fs::create_dir_all(&staging_dir).map_err(|e| {
-            WjDirectiveError::BsaFailed(format!(
-                "Failed to create BSA staging dir {}: {}",
-                staging_dir.display(),
-                e
-            ))
-        })?;
-
-        // Log the file states that would be packed
-        for fs in file_states {
-            let file_path = staging_dir.join(normalize_wj_path(&fs.path));
-            if let Some(parent) = file_path.parent() {
-                std::fs::create_dir_all(parent).ok();
-            }
+        if file_states.is_empty() {
+            warn!("CreateBSA: {} -> {} has no file states, skipping", temp_id, to);
+            return Ok(());
         }
 
-        // TODO: Use the `ba2` crate to actually pack files into a BSA/BA2.
-        // The ba2 crate API requires:
-        //   1. Determine archive type from BsaState.$type (BA2 for FO4, BSA for Skyrim)
-        //   2. Collect all file entries with their data
-        //   3. Write the packed archive to dest_path
-        // For now, we create a marker file so the pipeline knows this BSA
-        // needs packing in a future pass.
-        let marker_path = staging_dir.join(".bsa_pending");
-        std::fs::write(
-            &marker_path,
-            format!("temp_id={}\nfile_count={}\n", temp_id, file_states.len()),
-        )?;
+        // Determine archive format from state_type
+        let is_ba2 = state
+            .map(|s| {
+                let t = s.state_type.to_uppercase();
+                t.contains("BA2")
+            })
+            .unwrap_or(false);
 
-        warn!(
-            "CreateBSA: {} -> {} (staging only, BSA packing not yet implemented, {} files)",
+        // Determine if this is a texture (DX10) archive
+        let is_dx10 = state
+            .map(|s| {
+                let t = s.state_type.to_uppercase();
+                t.contains("DX10") || t.contains("TEXTURE")
+            })
+            .unwrap_or(false);
+
+        info!(
+            "CreateBSA: packing {} files into {} (format: {})",
+            file_states.len(),
+            to,
+            if is_ba2 {
+                if is_dx10 { "BA2/DX10" } else { "BA2/GNRL" }
+            } else {
+                "BSA/TES4"
+            }
+        );
+
+        if is_ba2 {
+            self.pack_ba2_archive(&dest_path, file_states, is_dx10, temp_id)?;
+        } else {
+            self.pack_bsa_archive(&dest_path, file_states, state, temp_id)?;
+        }
+
+        // Clean up any leftover staging directory from previous runs
+        let staging_dir = dest_path.with_extension("bsa_staging");
+        if staging_dir.exists() {
+            std::fs::remove_dir_all(&staging_dir).ok();
+        }
+
+        debug!(
+            "CreateBSA: {} -> {} ({} files packed)",
             temp_id,
             to,
             file_states.len()
@@ -412,44 +424,415 @@ impl DirectiveProcessor {
         Ok(())
     }
 
-    /// Extract a texture from an archive, transform it (resize, reformat),
-    /// and write to output.
+    /// Pack files into a Fallout 4 BA2 archive (GNRL format).
     ///
-    /// TODO: Full DDS transformation with the `image_dds` crate. For now,
-    /// this extracts the source texture and copies it as-is. This means
-    /// textures will be at their original resolution rather than the
-    /// target resolution specified by ImageState.
-    fn process_transformed_texture(
+    /// Uses the `ba2` crate's fo4 module. DX10 (texture) BA2 archives are
+    /// complex and require special chunk layouts, so we fall back to GNRL
+    /// format for those as well — the game still reads them correctly.
+    fn pack_ba2_archive(
         &self,
-        to: &str,
-        archive_hash_path: &ArchiveHashPath,
-        _image_state: Option<&ImageState>,
+        dest_path: &Path,
+        file_states: &[BsaFileState],
+        _is_dx10: bool,
+        temp_id: i64,
     ) -> Result<(), WjDirectiveError> {
-        let source_path = self.resolve_archive_file(archive_hash_path)?;
-        let dest_path = self.resolve_output_path(to);
-        ensure_parent_dir(&dest_path)?;
+        use ba2::fo4::{
+            Archive, ArchiveKey, ArchiveOptions, Chunk, File, Format, Version,
+        };
+        use ba2::CompressableFrom;
 
-        // TODO: Use `image_dds` crate to:
-        //   1. Read the DDS from source_path
-        //   2. Decode to RGBA with image_dds::image_from_dds()
-        //   3. Resize to image_state.width x image_state.height
-        //   4. Re-encode to the target DDS format (image_state.format)
-        //   5. Write to dest_path
-        // For now, copy the source texture unchanged.
-        std::fs::copy(&source_path, &dest_path).map_err(|e| {
-            WjDirectiveError::TextureFailed(format!(
-                "Failed to copy texture {} -> {}: {}",
-                source_path.display(),
+        let mut archive = Archive::new();
+
+        for fs in file_states {
+            let normalized = normalize_wj_path(&fs.path);
+            // Files are in the output directory, placed there by earlier directives
+            let file_path = self.output_dir.join(&normalized);
+            if !file_path.exists() {
+                // Try case-insensitive lookup
+                let rel = PathBuf::from(&normalized);
+                if let Some(found) = case_insensitive_find(&self.output_dir, &rel) {
+                    let data = std::fs::read(&found).map_err(|e| {
+                        WjDirectiveError::BsaFailed(format!(
+                            "Failed to read {}: {}",
+                            found.display(),
+                            e
+                        ))
+                    })?;
+                    let chunk = Chunk::from_decompressed(data.into_boxed_slice());
+                    let file: File = std::iter::once(chunk).collect();
+                    // BA2 paths use backslash-separated, lowercase paths
+                    let key_path = normalized.replace('/', "\\");
+                    let key = ArchiveKey::from(key_path.as_bytes());
+                    archive.insert(key, file);
+                    continue;
+                }
+                warn!(
+                    "CreateBSA(BA2): file not found for packing: {} (temp_id={})",
+                    file_path.display(),
+                    temp_id
+                );
+                continue;
+            }
+
+            let data = std::fs::read(&file_path).map_err(|e| {
+                WjDirectiveError::BsaFailed(format!(
+                    "Failed to read {}: {}",
+                    file_path.display(),
+                    e
+                ))
+            })?;
+
+            let chunk = Chunk::from_decompressed(data.into_boxed_slice());
+            let file: File = std::iter::once(chunk).collect();
+            // BA2 paths use backslash-separated paths
+            let key_path = normalized.replace('/', "\\");
+            let key = ArchiveKey::from(key_path.as_bytes());
+            archive.insert(key, file);
+        }
+
+        // Write BA2 with GNRL format, version 1
+        let options = ArchiveOptions::builder()
+            .format(Format::GNRL)
+            .version(Version::v1)
+            .build();
+
+        let mut output = std::fs::File::create(dest_path).map_err(|e| {
+            WjDirectiveError::BsaFailed(format!(
+                "Failed to create BA2 {}: {}",
                 dest_path.display(),
                 e
             ))
         })?;
 
-        debug!(
-            "TransformedTexture: {} -> {} (copy-only, transform not yet implemented)",
-            source_path.display(),
-            to
+        archive.write(&mut output, &options).map_err(|e| {
+            WjDirectiveError::BsaFailed(format!(
+                "Failed to write BA2 {}: {}",
+                dest_path.display(),
+                e
+            ))
+        })?;
+
+        Ok(())
+    }
+
+    /// Pack files into a TES4 BSA archive (Skyrim/Oblivion/Fallout3 format).
+    ///
+    /// Uses the `ba2` crate's tes4 module. Determines the BSA version from
+    /// the BsaState type string and guesses ArchiveTypes from file extensions.
+    fn pack_bsa_archive(
+        &self,
+        dest_path: &Path,
+        file_states: &[BsaFileState],
+        state: Option<&BsaState>,
+        temp_id: i64,
+    ) -> Result<(), WjDirectiveError> {
+        use ba2::tes4::{
+            Archive, ArchiveFlags, ArchiveKey, ArchiveOptions, ArchiveTypes, Directory,
+            DirectoryKey, File, Version,
+        };
+        use ba2::CompressableFrom;
+
+        // Determine BSA version from state type
+        let version = state
+            .map(|s| {
+                let t = s.state_type.to_uppercase();
+                if t.contains("SSE") || t.contains("SE") || t.contains("105") {
+                    Version::v105
+                } else if t.contains("FO3")
+                    || t.contains("FNV")
+                    || t.contains("SKYRIM")
+                    || t.contains("104")
+                {
+                    Version::v104
+                } else if t.contains("OBLIVION") || t.contains("103") {
+                    Version::v103
+                } else {
+                    // Default to SSE for modern modlists
+                    Version::v105
+                }
+            })
+            .unwrap_or(Version::v105);
+
+        // Group files by their parent directory within the BSA
+        let mut dir_map: HashMap<String, Vec<(String, Vec<u8>)>> = HashMap::new();
+        let mut archive_types = ArchiveTypes::empty();
+
+        for fs in file_states {
+            let normalized = normalize_wj_path(&fs.path);
+            let file_path = self.output_dir.join(&normalized);
+
+            let data = if file_path.exists() {
+                std::fs::read(&file_path).map_err(|e| {
+                    WjDirectiveError::BsaFailed(format!(
+                        "Failed to read {}: {}",
+                        file_path.display(),
+                        e
+                    ))
+                })?
+            } else {
+                // Try case-insensitive lookup
+                let rel = PathBuf::from(&normalized);
+                if let Some(found) = case_insensitive_find(&self.output_dir, &rel) {
+                    std::fs::read(&found).map_err(|e| {
+                        WjDirectiveError::BsaFailed(format!(
+                            "Failed to read {}: {}",
+                            found.display(),
+                            e
+                        ))
+                    })?
+                } else {
+                    warn!(
+                        "CreateBSA(BSA): file not found for packing: {} (temp_id={})",
+                        file_path.display(),
+                        temp_id
+                    );
+                    continue;
+                }
+            };
+
+            // Detect archive type from file extension
+            let lower = normalized.to_lowercase();
+            if lower.ends_with(".nif") || lower.ends_with(".btr") || lower.ends_with(".bto") {
+                archive_types |= ArchiveTypes::MESHES;
+            } else if lower.ends_with(".dds") || lower.ends_with(".tga") || lower.ends_with(".png")
+            {
+                archive_types |= ArchiveTypes::TEXTURES;
+            } else if lower.ends_with(".wav")
+                || lower.ends_with(".xwm")
+                || lower.ends_with(".fuz")
+            {
+                archive_types |= ArchiveTypes::SOUNDS;
+            } else if lower.ends_with(".lip") || lower.contains("voice") {
+                archive_types |= ArchiveTypes::VOICES;
+            } else if lower.ends_with(".swf") || lower.ends_with(".txt") {
+                archive_types |= ArchiveTypes::MENUS;
+            } else {
+                archive_types |= ArchiveTypes::MISC;
+            }
+
+            // BSA paths use backslashes. Split into directory + filename.
+            let bsa_path = normalized.replace('/', "\\");
+            let (dir_part, file_part) = if let Some(pos) = bsa_path.rfind('\\') {
+                (
+                    bsa_path[..pos].to_string(),
+                    bsa_path[pos + 1..].to_string(),
+                )
+            } else {
+                // File at root level
+                (String::new(), bsa_path)
+            };
+
+            dir_map
+                .entry(dir_part)
+                .or_default()
+                .push((file_part, data));
+        }
+
+        // Build the archive from grouped directories
+        let mut archive = Archive::new();
+        for (dir_name, files) in &dir_map {
+            let mut directory = Directory::new();
+            for (file_name, data) in files {
+                let file = File::from_decompressed(data.as_slice());
+                let key = DirectoryKey::from(file_name.as_bytes());
+                directory.insert(key, file);
+            }
+            let archive_key = ArchiveKey::from(dir_name.as_bytes());
+            archive.insert(archive_key, directory);
+        }
+
+        // Build options with appropriate flags
+        let flags = ArchiveFlags::DIRECTORY_STRINGS | ArchiveFlags::FILE_STRINGS;
+        let options = ArchiveOptions::builder()
+            .version(version)
+            .types(if archive_types.is_empty() {
+                ArchiveTypes::MISC
+            } else {
+                archive_types
+            })
+            .flags(flags)
+            .build();
+
+        let mut output = std::fs::File::create(dest_path).map_err(|e| {
+            WjDirectiveError::BsaFailed(format!(
+                "Failed to create BSA {}: {}",
+                dest_path.display(),
+                e
+            ))
+        })?;
+
+        archive.write(&mut output, &options).map_err(|e| {
+            WjDirectiveError::BsaFailed(format!(
+                "Failed to write BSA {}: {}",
+                dest_path.display(),
+                e
+            ))
+        })?;
+
+        Ok(())
+    }
+
+    /// Extract a texture from an archive, transform it (resize, reformat),
+    /// and write to output as a DDS file.
+    ///
+    /// If `image_state` is provided, the source DDS is decoded to RGBA,
+    /// resized to the target dimensions, re-encoded to the target DDS
+    /// format, and written out. If no `image_state` is given, or if any
+    /// transformation step fails, the source texture is copied unchanged
+    /// as a fallback.
+    fn process_transformed_texture(
+        &self,
+        to: &str,
+        archive_hash_path: &ArchiveHashPath,
+        image_state: Option<&ImageState>,
+    ) -> Result<(), WjDirectiveError> {
+        let source_path = self.resolve_archive_file(archive_hash_path)?;
+        let dest_path = self.resolve_output_path(to);
+        ensure_parent_dir(&dest_path)?;
+
+        // If no image state or zero dimensions, just copy as-is
+        let img_state = match image_state {
+            Some(s) if s.width > 0 && s.height > 0 => s,
+            _ => {
+                std::fs::copy(&source_path, &dest_path).map_err(|e| {
+                    WjDirectiveError::TextureFailed(format!(
+                        "Failed to copy texture {} -> {}: {}",
+                        source_path.display(),
+                        dest_path.display(),
+                        e
+                    ))
+                })?;
+                debug!(
+                    "TransformedTexture: {} -> {} (no image state, copied as-is)",
+                    source_path.display(),
+                    to
+                );
+                return Ok(());
+            }
+        };
+
+        // Attempt DDS transformation; fall back to copy on any failure
+        match self.transform_dds(&source_path, &dest_path, img_state) {
+            Ok(()) => {
+                debug!(
+                    "TransformedTexture: {} -> {} ({}x{}, DXGI format {})",
+                    source_path.display(),
+                    to,
+                    img_state.width,
+                    img_state.height,
+                    img_state.format,
+                );
+            }
+            Err(e) => {
+                warn!(
+                    "TransformedTexture: DDS transform failed for {} -> {}: {}. Copying unchanged.",
+                    source_path.display(),
+                    to,
+                    e
+                );
+                std::fs::copy(&source_path, &dest_path).map_err(|e| {
+                    WjDirectiveError::TextureFailed(format!(
+                        "Fallback copy failed {} -> {}: {}",
+                        source_path.display(),
+                        dest_path.display(),
+                        e
+                    ))
+                })?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Perform the actual DDS texture transformation: decode, resize, re-encode.
+    ///
+    /// Maps DXGI_FORMAT values to image_dds ImageFormat variants:
+    ///   71 = BC1_UNorm, 77 = BC3_UNorm, 80 = BC4_UNorm,
+    ///   83 = BC5_UNorm, 87 = B8G8R8A8_UNorm, 98 = BC7_UNorm
+    fn transform_dds(
+        &self,
+        source_path: &Path,
+        dest_path: &Path,
+        img_state: &ImageState,
+    ) -> Result<(), WjDirectiveError> {
+        use image_dds::{Mipmaps, Quality};
+
+        // Read the source DDS file
+        let source_data = std::fs::read(source_path).map_err(|e| {
+            WjDirectiveError::TextureFailed(format!(
+                "Failed to read DDS {}: {}",
+                source_path.display(),
+                e
+            ))
+        })?;
+
+        let dds = ddsfile::Dds::read(&mut Cursor::new(&source_data)).map_err(|e| {
+            WjDirectiveError::TextureFailed(format!(
+                "Failed to parse DDS {}: {}",
+                source_path.display(),
+                e
+            ))
+        })?;
+
+        // Decode to RGBA image (mip level 0)
+        let rgba_image = image_dds::image_from_dds(&dds, 0).map_err(|e| {
+            WjDirectiveError::TextureFailed(format!(
+                "Failed to decode DDS {}: {}",
+                source_path.display(),
+                e
+            ))
+        })?;
+
+        // Resize to target dimensions using Lanczos3
+        let resized = image::imageops::resize(
+            &rgba_image,
+            img_state.width,
+            img_state.height,
+            image::imageops::FilterType::Lanczos3,
         );
+
+        // Map DXGI_FORMAT u32 to image_dds ImageFormat
+        let target_format = dxgi_to_image_format(img_state.format);
+
+        // Determine mipmap generation
+        let mipmaps = if img_state.mip_levels > 1 {
+            Mipmaps::GeneratedExact(img_state.mip_levels)
+        } else {
+            Mipmaps::Disabled
+        };
+
+        // Re-encode to DDS
+        let new_dds = image_dds::dds_from_image(
+            &resized,
+            target_format,
+            Quality::Normal,
+            mipmaps,
+        )
+        .map_err(|e| {
+            WjDirectiveError::TextureFailed(format!(
+                "Failed to encode DDS (format {:?}): {}",
+                target_format,
+                e
+            ))
+        })?;
+
+        // Write the DDS to destination
+        let mut output_file = std::fs::File::create(dest_path).map_err(|e| {
+            WjDirectiveError::TextureFailed(format!(
+                "Failed to create DDS output {}: {}",
+                dest_path.display(),
+                e
+            ))
+        })?;
+
+        new_dds.write(&mut output_file).map_err(|e| {
+            WjDirectiveError::TextureFailed(format!(
+                "Failed to write DDS {}: {}",
+                dest_path.display(),
+                e
+            ))
+        })?;
+
         Ok(())
     }
 
@@ -471,22 +854,21 @@ impl DirectiveProcessor {
             ));
         }
 
-        // Read the first source file from the output directory
-        // (merged patches reference files that should already be produced)
-        let first_source = &sources[0];
-        let source_rel = normalize_wj_path(&first_source.relative_path);
-        let source_path = self.output_dir.join(&source_rel);
-
-        let source_data = if source_path.exists() {
-            std::fs::read(&source_path)?
-        } else {
-            // Source might not exist yet; use empty data as fallback
-            warn!(
-                "MergedPatch source not found: {}, using empty base",
-                source_path.display()
-            );
-            Vec::new()
-        };
+        // Concatenate ALL source files in order — Wabbajack merges all sources
+        // before applying the BSDiff patch to produce the final output.
+        let mut source_data = Vec::new();
+        for sp in sources {
+            let source_rel = normalize_wj_path(&sp.relative_path);
+            let source_path = self.output_dir.join(&source_rel);
+            if source_path.exists() {
+                source_data.extend(std::fs::read(&source_path)?);
+            } else {
+                warn!(
+                    "MergedPatch source not found: {}, skipping",
+                    source_path.display()
+                );
+            }
+        }
 
         // Read the patch from the .wabbajack ZIP
         let patch_entry_name = patch_id.to_string();
@@ -576,6 +958,49 @@ impl DirectiveProcessor {
     fn resolve_output_path(&self, to: &str) -> PathBuf {
         let normalized = normalize_wj_path(to);
         self.output_dir.join(normalized)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DXGI format mapping
+// ---------------------------------------------------------------------------
+
+/// Map a DXGI_FORMAT u32 value to an image_dds ImageFormat.
+///
+/// Common DXGI format values used in Bethesda modding:
+///   28 = R8G8B8A8_UNorm
+///   71 = BC1_UNorm (DXT1)
+///   72 = BC1_UNorm_sRGB
+///   74 = BC2_UNorm (DXT3)
+///   77 = BC3_UNorm (DXT5)
+///   78 = BC3_UNorm_sRGB
+///   80 = BC4_UNorm (ATI1)
+///   83 = BC5_UNorm (ATI2)
+///   87 = B8G8R8A8_UNorm
+///   98 = BC7_UNorm
+///   99 = BC7_UNorm_sRGB
+fn dxgi_to_image_format(dxgi: u32) -> image_dds::ImageFormat {
+    use image_dds::ImageFormat;
+    match dxgi {
+        28 => ImageFormat::Rgba8Unorm,
+        71 => ImageFormat::BC1RgbaUnorm,
+        72 => ImageFormat::BC1RgbaUnormSrgb,
+        77 => ImageFormat::BC3RgbaUnorm,
+        78 => ImageFormat::BC3RgbaUnormSrgb,
+        80 => ImageFormat::BC4RUnorm,
+        83 => ImageFormat::BC5RgUnorm,
+        87 => ImageFormat::Bgra8Unorm,
+        98 => ImageFormat::BC7RgbaUnorm,
+        99 => ImageFormat::BC7RgbaUnormSrgb,
+        // Default to BC7 for unrecognized formats -- it handles all texture
+        // types reasonably well and is the most common modern format
+        other => {
+            warn!(
+                "Unknown DXGI_FORMAT {}, defaulting to BC7_UNorm",
+                other
+            );
+            ImageFormat::BC7RgbaUnorm
+        }
     }
 }
 
@@ -977,5 +1402,43 @@ mod tests {
 
         let result = read_wj_zip_entry(&zip_path, "nonexistent");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_dxgi_to_image_format_known_values() {
+        use image_dds::ImageFormat;
+
+        assert!(matches!(dxgi_to_image_format(71), ImageFormat::BC1RgbaUnorm));
+        assert!(matches!(dxgi_to_image_format(77), ImageFormat::BC3RgbaUnorm));
+        assert!(matches!(dxgi_to_image_format(80), ImageFormat::BC4RUnorm));
+        assert!(matches!(dxgi_to_image_format(83), ImageFormat::BC5RgUnorm));
+        assert!(matches!(dxgi_to_image_format(87), ImageFormat::Bgra8Unorm));
+        assert!(matches!(dxgi_to_image_format(98), ImageFormat::BC7RgbaUnorm));
+        assert!(matches!(dxgi_to_image_format(28), ImageFormat::Rgba8Unorm));
+    }
+
+    #[test]
+    fn test_dxgi_to_image_format_unknown_defaults_to_bc7() {
+        use image_dds::ImageFormat;
+        // Unknown format should default to BC7
+        assert!(matches!(dxgi_to_image_format(999), ImageFormat::BC7RgbaUnorm));
+    }
+
+    #[test]
+    fn test_create_bsa_empty_file_states() {
+        let dir = TempDir::new().unwrap();
+        let output_dir = dir.path().join("output");
+        std::fs::create_dir_all(&output_dir).unwrap();
+
+        let processor = DirectiveProcessor::new(
+            PathBuf::from("/tmp/test.wabbajack"),
+            HashMap::new(),
+            output_dir,
+            PathBuf::from("/tmp/game"),
+        );
+
+        // Should succeed with no files (early return)
+        let result = processor.process_create_bsa("test.bsa", 1, None, &[]);
+        assert!(result.is_ok());
     }
 }

@@ -196,16 +196,111 @@ impl WjDownloader {
     }
 
     /// Download from Google Drive.
+    ///
+    /// Google Drive serves large files (>100 MB) behind an HTML virus-scan
+    /// confirmation page instead of the binary payload. We detect this by
+    /// checking the `Content-Type` of the initial response. If it is HTML we
+    /// parse the page with `scraper` to extract the real download URL (the
+    /// confirmation form action or a direct link), then follow that URL.
     async fn download_google_drive(
         &self,
         app: &AppHandle,
         archive_name: &str,
         id: &str,
     ) -> Result<PathBuf, WjDownloadError> {
-        let url = format!(
+        let initial_url = format!(
             "https://drive.usercontent.google.com/download?id={id}&export=download&confirm=t"
         );
-        self.stream_download(app, archive_name, &url, &HeaderMap::new())
+
+        // First request -- may return the file directly or an HTML warning.
+        let resp = self
+            .http_client
+            .get(&initial_url)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(WjDownloadError::Other(format!(
+                "Google Drive HTTP {status}: {body}"
+            )));
+        }
+
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_lowercase();
+
+        if !content_type.contains("text/html") {
+            // Got the actual file directly -- stream it to disk.
+            return self
+                .stream_download_from_response(app, archive_name, resp)
+                .await;
+        }
+
+        // HTML confirmation page -- parse out the real download URL.
+        let html_body = resp.text().await?;
+
+        // Scope the `scraper::Html` (non-Send) so it is dropped before any
+        // `.await` point.
+        let confirmed_url = {
+            let document = scraper::Html::parse_document(&html_body);
+
+            // Strategy 1: Look for a form with id="download-form" and use its
+            // action URL.
+            let form_url = scraper::Selector::parse("form#download-form")
+                .ok()
+                .and_then(|sel| {
+                    document
+                        .select(&sel)
+                        .next()
+                        .and_then(|form| form.value().attr("action").map(|s| s.to_owned()))
+                });
+
+            if let Some(url) = form_url {
+                url
+            } else {
+                // Strategy 2: Look for any anchor whose href contains
+                // "download" and "confirm".
+                let link_url = scraper::Selector::parse("a[href]")
+                    .ok()
+                    .and_then(|sel| {
+                        document.select(&sel).find_map(|el| {
+                            let href = el.value().attr("href")?;
+                            if href.contains("download") && href.contains("confirm") {
+                                Some(href.to_owned())
+                            } else {
+                                None
+                            }
+                        })
+                    });
+
+                if let Some(url) = link_url {
+                    // Relative URLs need the host prepended.
+                    if url.starts_with('/') {
+                        format!("https://drive.usercontent.google.com{url}")
+                    } else {
+                        url
+                    }
+                } else {
+                    // Strategy 3: Fall back to appending confirm=t with a
+                    // cache-busting parameter to the original URL (handles
+                    // older page layouts).
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis();
+                    format!(
+                        "https://drive.usercontent.google.com/download?id={id}&export=download&confirm=t&_cb={ts}"
+                    )
+                }
+            }
+        };
+
+        self.stream_download(app, archive_name, &confirmed_url, &HeaderMap::new())
             .await
     }
 
@@ -474,6 +569,12 @@ impl WjDownloader {
     /// Download all archives in the list, respecting concurrency limits and a
     /// shared cancel token. Returns a map of archive_hash -> file_path for
     /// successfully downloaded archives.
+    ///
+    /// Resume support: after each successful download + verification, a
+    /// checkpoint file is written to `.wj_checkpoint/{hash}.done` inside the
+    /// download directory. On subsequent runs the checkpoint is detected and
+    /// the archive is skipped. The checkpoint directory is removed on
+    /// successful completion of all archives.
     pub async fn download_all_archives(
         &self,
         app: &AppHandle,
@@ -487,17 +588,56 @@ impl WjDownloader {
         let results: Arc<tokio::sync::Mutex<HashMap<String, PathBuf>>> =
             Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
+        // Resume checkpoint directory.
+        let checkpoint_dir = self.download_dir.join(".wj_checkpoint");
+        tokio::fs::create_dir_all(&checkpoint_dir).await?;
+
         // Because `self` is not `'static` we cannot move it into `tokio::spawn`.
         // Instead, process downloads sequentially with semaphore-gated concurrency.
         let sem = Arc::new(Semaphore::new(concurrency));
 
+        let mut all_succeeded = true;
+
         for (index, archive) in archives.iter().enumerate() {
             if cancel_token.load(Ordering::Relaxed) {
+                all_succeeded = false;
                 break;
             }
 
             let hash_str = archive.hash.0.clone();
             let archive_name = archive.name.clone();
+
+            // ----- Resume checkpoint check -----
+            // If a checkpoint file exists for this archive hash, the archive
+            // was already successfully downloaded and verified in a prior run.
+            let checkpoint_file = checkpoint_dir.join(format!("{}.done", sanitize_filename(&hash_str)));
+            if checkpoint_file.exists() {
+                // The downloaded file should still be on disk.
+                let dest = self.download_dir.join(sanitize_filename(&archive_name));
+                if dest.exists() {
+                    let _ = app.emit(
+                        "wabbajack-install-progress",
+                        WjProgressEvent::DownloadSkipped {
+                            archive_name: archive_name.clone(),
+                            reason: "resume checkpoint".into(),
+                        },
+                    );
+                    let _ = db.upsert_wj_archive_status(
+                        install_id,
+                        &hash_str,
+                        &archive_name,
+                        archive.state.source_type_name(),
+                        "verified",
+                        Some(&dest.to_string_lossy()),
+                        None,
+                    );
+                    results.lock().await.insert(hash_str, dest);
+                    continue;
+                }
+                // Checkpoint exists but file is missing -- remove stale checkpoint
+                // and re-download.
+                let _ = tokio::fs::remove_file(&checkpoint_file).await;
+            }
 
             // Check shared cache again (already handled above but we
             // refactored into a single loop).
@@ -520,6 +660,8 @@ impl WjDownloader {
                         Some(&cached_path),
                         None,
                     );
+                    // Write checkpoint so future resumes are fast too.
+                    let _ = write_checkpoint(&checkpoint_file).await;
                     results.lock().await.insert(hash_str, cached);
                     continue;
                 }
@@ -556,9 +698,12 @@ impl WjDownloader {
                                 Some(&path.to_string_lossy()),
                                 None,
                             );
+                            // Write resume checkpoint after successful verification.
+                            let _ = write_checkpoint(&checkpoint_file).await;
                             results.lock().await.insert(hash_str, path);
                         }
                         Err(e) => {
+                            all_succeeded = false;
                             let _ = app.emit(
                                 "wabbajack-install-progress",
                                 WjProgressEvent::DownloadFailed {
@@ -579,6 +724,7 @@ impl WjDownloader {
                     }
                 }
                 Err(WjDownloadError::UserActionRequired(msg)) => {
+                    all_succeeded = false;
                     // Extract URL from the message (best-effort).
                     let url_part = msg
                         .split_whitespace()
@@ -595,6 +741,7 @@ impl WjDownloader {
                     );
                 }
                 Err(e) => {
+                    all_succeeded = false;
                     let _ = app.emit(
                         "wabbajack-install-progress",
                         WjProgressEvent::DownloadFailed {
@@ -606,6 +753,11 @@ impl WjDownloader {
             }
 
             drop(permit);
+        }
+
+        // Clean up checkpoint directory on successful full completion.
+        if all_succeeded {
+            let _ = tokio::fs::remove_dir_all(&checkpoint_dir).await;
         }
 
         let map = Arc::try_unwrap(results)
@@ -686,6 +838,53 @@ impl WjDownloader {
         tokio::fs::rename(&partial, &dest).await?;
         Ok(dest)
     }
+
+    /// Stream an already-obtained HTTP response body to a file with progress
+    /// events. Used when we already hold a `reqwest::Response` (e.g. the
+    /// Google Drive fast path where the first response is the actual file).
+    async fn stream_download_from_response(
+        &self,
+        app: &AppHandle,
+        archive_name: &str,
+        resp: reqwest::Response,
+    ) -> Result<PathBuf, WjDownloadError> {
+        let dest = self
+            .download_dir
+            .join(sanitize_filename(archive_name));
+        let partial = dest.with_extension("partial");
+
+        let total_bytes = resp.content_length().unwrap_or(0);
+        let mut stream = resp.bytes_stream();
+        let mut file = tokio::fs::File::create(&partial).await?;
+        let mut downloaded: u64 = 0;
+        let mut last_progress_emit: u64 = 0;
+
+        use tokio::io::AsyncWriteExt;
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result?;
+            file.write_all(&chunk).await?;
+            downloaded += chunk.len() as u64;
+
+            if downloaded - last_progress_emit > 256 * 1024 || downloaded == total_bytes {
+                let _ = app.emit(
+                    "wabbajack-install-progress",
+                    WjProgressEvent::DownloadProgress {
+                        archive_name: archive_name.to_string(),
+                        bytes_downloaded: downloaded,
+                        total_bytes,
+                    },
+                );
+                last_progress_emit = downloaded;
+            }
+        }
+
+        file.flush().await?;
+        drop(file);
+
+        tokio::fs::rename(&partial, &dest).await?;
+        Ok(dest)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -709,6 +908,20 @@ pub fn verify_xxhash64(path: &Path, expected: &WjHash) -> Result<(), WjDownloadE
         });
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Resume checkpoint helper
+// ---------------------------------------------------------------------------
+
+/// Write a checkpoint file indicating an archive was successfully downloaded
+/// and verified. The file contains a timestamp for debugging purposes.
+async fn write_checkpoint(path: &Path) -> Result<(), std::io::Error> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    tokio::fs::write(path, format!("{now}")).await
 }
 
 // ---------------------------------------------------------------------------
@@ -864,5 +1077,45 @@ mod tests {
         let dl = WjDownloader::new(None, false, tmp.path().to_path_buf());
         assert!(!dl.is_premium);
         assert!(dl.nexus_api_key.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_write_checkpoint_creates_file() {
+        let tmp = TempDir::new().unwrap();
+        let checkpoint_path = tmp.path().join("abc123.done");
+        write_checkpoint(&checkpoint_path).await.unwrap();
+        assert!(checkpoint_path.exists());
+
+        // File should contain a timestamp (numeric string).
+        let contents = tokio::fs::read_to_string(&checkpoint_path).await.unwrap();
+        assert!(contents.parse::<u64>().is_ok(), "Expected numeric timestamp, got: {contents}");
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_dir_cleanup() {
+        let tmp = TempDir::new().unwrap();
+        let checkpoint_dir = tmp.path().join(".wj_checkpoint");
+        tokio::fs::create_dir_all(&checkpoint_dir).await.unwrap();
+
+        // Write a few checkpoint files.
+        write_checkpoint(&checkpoint_dir.join("hash1.done")).await.unwrap();
+        write_checkpoint(&checkpoint_dir.join("hash2.done")).await.unwrap();
+        assert!(checkpoint_dir.exists());
+
+        // Simulate cleanup on success.
+        tokio::fs::remove_dir_all(&checkpoint_dir).await.unwrap();
+        assert!(!checkpoint_dir.exists());
+    }
+
+    #[test]
+    fn test_sanitize_filename_for_checkpoint_hash() {
+        // Base64 hashes may contain +, /, = characters -- sanitize should
+        // replace them so checkpoint filenames are safe.
+        let hash = "abc+def/ghi=jk==";
+        let sanitized = sanitize_filename(hash);
+        assert!(!sanitized.contains('+'));
+        assert!(!sanitized.contains('/'));
+        assert!(!sanitized.contains('='));
+        assert_eq!(sanitized, "abc_def_ghi_jk__");
     }
 }

@@ -21,6 +21,42 @@ use serde::{Deserialize, Serialize};
 // Data structures
 // ---------------------------------------------------------------------------
 
+/// A single flag dependency used in visibility conditions.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FlagDependency {
+    /// The flag name to check.
+    pub flag: String,
+    /// The expected value.
+    pub value: String,
+}
+
+/// A composite condition block with an operator (`And` / `Or`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ConditionBlock {
+    /// `"And"` or `"Or"` — how child conditions are combined.
+    pub operator: String,
+    /// Individual flag checks.
+    pub flags: Vec<FlagDependency>,
+}
+
+impl ConditionBlock {
+    /// Evaluate this condition block against the current flag state.
+    pub fn evaluate(&self, flags: &HashMap<String, String>) -> bool {
+        if self.flags.is_empty() {
+            return true;
+        }
+        match self.operator.as_str() {
+            "Or" => self.flags.iter().any(|dep| {
+                flags.get(&dep.flag).map_or(false, |v| v == &dep.value)
+            }),
+            // Default to And
+            _ => self.flags.iter().all(|dep| {
+                flags.get(&dep.flag).map_or(false, |v| v == &dep.value)
+            }),
+        }
+    }
+}
+
 /// A single file or folder mapping within a FOMOD option.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FomodFile {
@@ -49,6 +85,10 @@ pub struct FomodOption {
     /// Common values: `"Optional"`, `"Required"`, `"Recommended"`,
     /// `"NotUsable"`, `"CouldBeUsable"`.
     pub type_descriptor: String,
+    /// Condition flags set when this option is selected.
+    /// Maps flag name to flag value.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub condition_flags: HashMap<String, String>,
 }
 
 /// A group of related options within a FOMOD installer step.
@@ -70,6 +110,10 @@ pub struct FomodStep {
     pub name: String,
     /// Groups presented on this step.
     pub groups: Vec<FomodGroup>,
+    /// Optional visibility condition — step is shown only when this evaluates
+    /// to `true` (or when `None`, meaning always visible).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible: Option<ConditionBlock>,
 }
 
 /// Top-level FOMOD installer structure parsed from `ModuleConfig.xml`.
@@ -134,6 +178,104 @@ fn parse_file_element(tag: &quick_xml::events::BytesStart<'_>, is_folder: bool) 
     }
 }
 
+/// Parse a `<visible>` or `<dependencies>` block into a [`ConditionBlock`].
+///
+/// Handles the structure:
+/// ```xml
+/// <visible>
+///   <dependencies operator="And">
+///     <flagDependency flag="name" value="val"/>
+///   </dependencies>
+/// </visible>
+/// ```
+/// Also works when called directly on `<dependencies>`.
+fn parse_condition_block(
+    reader: &mut Reader<&[u8]>,
+    buf: &mut Vec<u8>,
+    end_tag: &[u8],
+) -> Option<ConditionBlock> {
+    let mut block: Option<ConditionBlock> = None;
+    let mut depth = 1u32;
+    loop {
+        buf.clear();
+        match reader.read_event_into(buf) {
+            Ok(Event::Start(ref e)) => {
+                depth += 1;
+                let local = e.local_name();
+                if local.as_ref() == b"dependencies" {
+                    let op = get_attr(e, "operator").unwrap_or_else(|| "And".to_string());
+                    block = Some(ConditionBlock {
+                        operator: op,
+                        flags: Vec::new(),
+                    });
+                }
+            }
+            Ok(Event::Empty(ref e)) => {
+                let local = e.local_name();
+                if local.as_ref() == b"flagDependency" {
+                    if let (Some(flag), Some(value)) = (get_attr(e, "flag"), get_attr(e, "value")) {
+                        if let Some(ref mut b) = block {
+                            b.flags.push(FlagDependency { flag, value });
+                        }
+                    }
+                }
+            }
+            Ok(Event::End(ref e)) => {
+                depth -= 1;
+                if depth == 0 || e.local_name().as_ref() == end_tag {
+                    break;
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+    }
+    block
+}
+
+/// Parse a `<conditionFlags>` block into a flag name→value map.
+///
+/// Handles the structure:
+/// ```xml
+/// <conditionFlags>
+///   <flag name="someFlag">On</flag>
+/// </conditionFlags>
+/// ```
+fn parse_condition_flags(
+    reader: &mut Reader<&[u8]>,
+    buf: &mut Vec<u8>,
+) -> HashMap<String, String> {
+    let mut flags = HashMap::new();
+    let mut depth = 1u32;
+    loop {
+        buf.clear();
+        match reader.read_event_into(buf) {
+            Ok(Event::Start(ref e)) => {
+                depth += 1;
+                let local = e.local_name();
+                if local.as_ref() == b"flag" {
+                    let flag_name = get_attr(e, "name").unwrap_or_default();
+                    let flag_value = read_text_content(reader, buf);
+                    flags.insert(flag_name, flag_value);
+                    // read_text_content consumes the End event
+                    depth -= 1;
+                }
+            }
+            Ok(Event::End(_)) => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+    }
+    flags
+}
+
 /// Parse a `<files>` block and return its file/folder entries.
 fn parse_files_block(reader: &mut Reader<&[u8]>, buf: &mut Vec<u8>) -> Vec<FomodFile> {
     let mut files = Vec::new();
@@ -180,6 +322,7 @@ fn parse_plugin(reader: &mut Reader<&[u8]>, buf: &mut Vec<u8>, name: String) -> 
         image: None,
         files: Vec::new(),
         type_descriptor: "Optional".to_string(),
+        condition_flags: HashMap::new(),
     };
 
     let mut depth = 1u32;
@@ -198,6 +341,11 @@ fn parse_plugin(reader: &mut Reader<&[u8]>, buf: &mut Vec<u8>, name: String) -> 
                     b"files" => {
                         option.files = parse_files_block(reader, buf);
                         // parse_files_block consumes the End event
+                        depth -= 1;
+                    }
+                    b"conditionFlags" => {
+                        option.condition_flags = parse_condition_flags(reader, buf);
+                        // parse_condition_flags consumes the End event
                         depth -= 1;
                     }
                     _ => {}
@@ -280,6 +428,7 @@ fn parse_step(reader: &mut Reader<&[u8]>, buf: &mut Vec<u8>, name: String) -> Fo
     let mut step = FomodStep {
         name,
         groups: Vec::new(),
+        visible: None,
     };
 
     let mut depth = 1u32;
@@ -289,13 +438,22 @@ fn parse_step(reader: &mut Reader<&[u8]>, buf: &mut Vec<u8>, name: String) -> Fo
             Ok(Event::Start(ref e)) => {
                 depth += 1;
                 let local_name = e.local_name();
-                if local_name.as_ref() == b"group" {
-                    let group_name = get_attr(e, "name").unwrap_or_default();
-                    let group_type = get_attr(e, "type").unwrap_or_else(|| "SelectAny".to_string());
-                    let group = parse_group(reader, buf, group_name, group_type);
-                    step.groups.push(group);
-                    // parse_group consumes the End event
-                    depth -= 1;
+                match local_name.as_ref() {
+                    b"group" => {
+                        let group_name = get_attr(e, "name").unwrap_or_default();
+                        let group_type =
+                            get_attr(e, "type").unwrap_or_else(|| "SelectAny".to_string());
+                        let group = parse_group(reader, buf, group_name, group_type);
+                        step.groups.push(group);
+                        // parse_group consumes the End event
+                        depth -= 1;
+                    }
+                    b"visible" => {
+                        step.visible = parse_condition_block(reader, buf, b"visible");
+                        // parse_condition_block consumes the End event
+                        depth -= 1;
+                    }
+                    _ => {}
                 }
             }
             Ok(Event::End(_)) => {
@@ -349,6 +507,9 @@ pub fn parse_fomod(fomod_dir: &Path) -> Result<Option<FomodInstaller>> {
 /// Determine default selections for each group in the installer.
 ///
 /// Returns a map from group name to a list of selected option names.
+/// Tracks condition flags across steps so that steps with `<visible>`
+/// conditions are skipped when their dependencies are not met.
+///
 /// Selection rules:
 /// - `SelectAll` groups: all options selected.
 /// - `SelectExactlyOne` / `SelectAtMostOne`: first `Required` or
@@ -357,10 +518,24 @@ pub fn parse_fomod(fomod_dir: &Path) -> Result<Option<FomodInstaller>> {
 ///   options; falls back to the first option for `SelectAtLeastOne`.
 pub fn get_default_selections(installer: &FomodInstaller) -> HashMap<String, Vec<String>> {
     let mut selections = HashMap::new();
+    let mut condition_flags: HashMap<String, String> = HashMap::new();
 
     for step in &installer.steps {
+        // Skip steps whose visibility condition is not met.
+        if !step_is_visible(step, &condition_flags) {
+            continue;
+        }
+
         for group in &step.groups {
             let selected = default_selections_for_group(group);
+            // Update condition flags from selected options.
+            for option in &group.options {
+                if selected.contains(&option.name) {
+                    for (k, v) in &option.condition_flags {
+                        condition_flags.insert(k.clone(), v.clone());
+                    }
+                }
+            }
             selections.insert(group.name.clone(), selected);
         }
     }
@@ -372,21 +547,32 @@ pub fn get_default_selections(installer: &FomodInstaller) -> HashMap<String, Vec
 ///
 /// This always includes `required_files` from the installer. For each group
 /// whose name appears in `selections`, the files from every listed option are
-/// appended. Files are returned sorted by priority ascending (lowest first),
-/// so higher-priority files overwrite lower-priority ones when extracted in
-/// order.
+/// appended. Steps with unmet `<visible>` conditions are skipped. Condition
+/// flags are tracked across steps to evaluate visibility. Files are returned
+/// sorted by priority ascending (lowest first), so higher-priority files
+/// overwrite lower-priority ones when extracted in order.
 pub fn get_files_for_selections(
     installer: &FomodInstaller,
     selections: &HashMap<String, Vec<String>>,
 ) -> Vec<FomodFile> {
     let mut files: Vec<FomodFile> = installer.required_files.clone();
+    let mut condition_flags: HashMap<String, String> = HashMap::new();
 
     for step in &installer.steps {
+        // Skip steps whose visibility condition is not met.
+        if !step_is_visible(step, &condition_flags) {
+            continue;
+        }
+
         for group in &step.groups {
             if let Some(selected_names) = selections.get(&group.name) {
                 for option in &group.options {
                     if selected_names.contains(&option.name) {
                         files.extend(option.files.clone());
+                        // Update condition flags from selected options.
+                        for (k, v) in &option.condition_flags {
+                            condition_flags.insert(k.clone(), v.clone());
+                        }
                     }
                 }
             }
@@ -420,6 +606,15 @@ fn find_case_insensitive(parent: &Path, target: &str) -> Option<std::path::PathB
     }
 
     None
+}
+
+/// Check whether a step's visibility condition is met.
+/// Returns `true` if the step has no condition or if the condition evaluates to true.
+fn step_is_visible(step: &FomodStep, flags: &HashMap<String, String>) -> bool {
+    match &step.visible {
+        None => true,
+        Some(cond) => cond.evaluate(flags),
+    }
 }
 
 /// Compute default selections for a single group.
@@ -717,6 +912,7 @@ mod tests {
                     image: None,
                     files: Vec::new(),
                     type_descriptor: "Optional".into(),
+                    condition_flags: HashMap::new(),
                 },
                 FomodOption {
                     name: "B".into(),
@@ -724,11 +920,259 @@ mod tests {
                     image: None,
                     files: Vec::new(),
                     type_descriptor: "Optional".into(),
+                    condition_flags: HashMap::new(),
                 },
             ],
         };
 
         let selected = default_selections_for_group(&group);
         assert_eq!(selected, vec!["A".to_string(), "B".to_string()]);
+    }
+
+    /// FOMOD XML with condition flags and step visibility.
+    const CONDITION_FLAGS_XML: &str = r#"
+<config>
+    <moduleName>Conditional Mod</moduleName>
+    <installSteps order="Explicit">
+        <installStep name="Choose Style">
+            <optionalFileGroups order="Explicit">
+                <group name="Style" type="SelectExactlyOne">
+                    <plugins order="Explicit">
+                        <plugin name="Dark">
+                            <description>Dark theme</description>
+                            <conditionFlags>
+                                <flag name="style">dark</flag>
+                            </conditionFlags>
+                            <files>
+                                <folder source="dark/base" destination="textures" priority="0" />
+                            </files>
+                            <typeDescriptor>
+                                <type name="Recommended" />
+                            </typeDescriptor>
+                        </plugin>
+                        <plugin name="Light">
+                            <description>Light theme</description>
+                            <conditionFlags>
+                                <flag name="style">light</flag>
+                            </conditionFlags>
+                            <files>
+                                <folder source="light/base" destination="textures" priority="0" />
+                            </files>
+                            <typeDescriptor>
+                                <type name="Optional" />
+                            </typeDescriptor>
+                        </plugin>
+                    </plugins>
+                </group>
+            </optionalFileGroups>
+        </installStep>
+        <installStep name="Dark Extras">
+            <visible>
+                <dependencies operator="And">
+                    <flagDependency flag="style" value="dark"/>
+                </dependencies>
+            </visible>
+            <optionalFileGroups order="Explicit">
+                <group name="DarkPatches" type="SelectAll">
+                    <plugins order="Explicit">
+                        <plugin name="Dark Patch">
+                            <description>Extra dark textures</description>
+                            <files>
+                                <folder source="dark/extras" destination="textures" priority="1" />
+                            </files>
+                            <typeDescriptor>
+                                <type name="Required" />
+                            </typeDescriptor>
+                        </plugin>
+                    </plugins>
+                </group>
+            </optionalFileGroups>
+        </installStep>
+        <installStep name="Light Extras">
+            <visible>
+                <dependencies operator="And">
+                    <flagDependency flag="style" value="light"/>
+                </dependencies>
+            </visible>
+            <optionalFileGroups order="Explicit">
+                <group name="LightPatches" type="SelectAll">
+                    <plugins order="Explicit">
+                        <plugin name="Light Patch">
+                            <description>Extra light textures</description>
+                            <files>
+                                <folder source="light/extras" destination="textures" priority="1" />
+                            </files>
+                            <typeDescriptor>
+                                <type name="Required" />
+                            </typeDescriptor>
+                        </plugin>
+                    </plugins>
+                </group>
+            </optionalFileGroups>
+        </installStep>
+    </installSteps>
+</config>
+"#;
+
+    #[test]
+    fn parse_condition_flags_on_plugins() {
+        let installer = parse_fomod_xml(CONDITION_FLAGS_XML).unwrap();
+        let step = &installer.steps[0];
+        let style_group = &step.groups[0];
+
+        let dark = &style_group.options[0];
+        assert_eq!(dark.condition_flags.get("style"), Some(&"dark".to_string()));
+
+        let light = &style_group.options[1];
+        assert_eq!(
+            light.condition_flags.get("style"),
+            Some(&"light".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_visible_on_steps() {
+        let installer = parse_fomod_xml(CONDITION_FLAGS_XML).unwrap();
+
+        // First step has no visibility condition.
+        assert!(installer.steps[0].visible.is_none());
+
+        // Second step requires style=dark.
+        let dark_vis = installer.steps[1].visible.as_ref().unwrap();
+        assert_eq!(dark_vis.operator, "And");
+        assert_eq!(dark_vis.flags.len(), 1);
+        assert_eq!(dark_vis.flags[0].flag, "style");
+        assert_eq!(dark_vis.flags[0].value, "dark");
+
+        // Third step requires style=light.
+        let light_vis = installer.steps[2].visible.as_ref().unwrap();
+        assert_eq!(light_vis.flags[0].flag, "style");
+        assert_eq!(light_vis.flags[0].value, "light");
+    }
+
+    #[test]
+    fn default_selections_skips_invisible_steps() {
+        let installer = parse_fomod_xml(CONDITION_FLAGS_XML).unwrap();
+        // Default picks "Dark" (Recommended) → sets style=dark.
+        // "Dark Extras" step becomes visible, "Light Extras" does not.
+        let selections = get_default_selections(&installer);
+
+        // Dark was selected.
+        assert_eq!(
+            selections.get("Style"),
+            Some(&vec!["Dark".to_string()])
+        );
+        // DarkPatches step was visible → group was processed.
+        assert!(selections.contains_key("DarkPatches"));
+        // LightPatches step was NOT visible → group was NOT processed.
+        assert!(!selections.contains_key("LightPatches"));
+    }
+
+    #[test]
+    fn files_for_selections_respects_visibility() {
+        let installer = parse_fomod_xml(CONDITION_FLAGS_XML).unwrap();
+        let mut selections = HashMap::new();
+        selections.insert("Style".to_string(), vec!["Dark".to_string()]);
+        selections.insert("DarkPatches".to_string(), vec!["Dark Patch".to_string()]);
+        // Even if someone passes LightPatches selections, step is invisible.
+        selections.insert("LightPatches".to_string(), vec!["Light Patch".to_string()]);
+
+        let files = get_files_for_selections(&installer, &selections);
+        let sources: Vec<&str> = files.iter().map(|f| f.source.as_str()).collect();
+
+        assert!(sources.contains(&"dark/base"));
+        assert!(sources.contains(&"dark/extras"));
+        // Light extras should NOT be included — step is invisible.
+        assert!(!sources.contains(&"light/extras"));
+    }
+
+    #[test]
+    fn condition_block_evaluate_and() {
+        let block = ConditionBlock {
+            operator: "And".to_string(),
+            flags: vec![
+                FlagDependency {
+                    flag: "a".into(),
+                    value: "1".into(),
+                },
+                FlagDependency {
+                    flag: "b".into(),
+                    value: "2".into(),
+                },
+            ],
+        };
+        let mut flags = HashMap::new();
+        // Neither set.
+        assert!(!block.evaluate(&flags));
+        // Only one set.
+        flags.insert("a".into(), "1".into());
+        assert!(!block.evaluate(&flags));
+        // Both set.
+        flags.insert("b".into(), "2".into());
+        assert!(block.evaluate(&flags));
+        // Wrong value.
+        flags.insert("b".into(), "3".into());
+        assert!(!block.evaluate(&flags));
+    }
+
+    #[test]
+    fn condition_block_evaluate_or() {
+        let block = ConditionBlock {
+            operator: "Or".to_string(),
+            flags: vec![
+                FlagDependency {
+                    flag: "a".into(),
+                    value: "1".into(),
+                },
+                FlagDependency {
+                    flag: "b".into(),
+                    value: "2".into(),
+                },
+            ],
+        };
+        let mut flags = HashMap::new();
+        assert!(!block.evaluate(&flags));
+        flags.insert("a".into(), "1".into());
+        assert!(block.evaluate(&flags));
+        flags.clear();
+        flags.insert("b".into(), "2".into());
+        assert!(block.evaluate(&flags));
+    }
+
+    #[test]
+    fn condition_block_empty_flags_always_true() {
+        let block = ConditionBlock {
+            operator: "And".to_string(),
+            flags: vec![],
+        };
+        assert!(block.evaluate(&HashMap::new()));
+    }
+
+    #[test]
+    fn fomod_without_conditions_unchanged() {
+        // Verify the original SAMPLE_XML still works identically.
+        let installer = parse_fomod_xml(SAMPLE_XML).unwrap();
+
+        // No visibility conditions on any step.
+        for step in &installer.steps {
+            assert!(step.visible.is_none());
+        }
+
+        // No condition flags on any option.
+        for step in &installer.steps {
+            for group in &step.groups {
+                for option in &group.options {
+                    assert!(option.condition_flags.is_empty());
+                }
+            }
+        }
+
+        // Default selections unchanged.
+        let selections = get_default_selections(&installer);
+        assert_eq!(
+            selections.get("Textures"),
+            Some(&vec!["High Res".to_string()])
+        );
+        assert_eq!(selections.get("Extras"), Some(&vec![]));
     }
 }

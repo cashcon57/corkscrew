@@ -868,6 +868,72 @@ fn stage_and_deploy(
             staging_result.files.clone()
         };
 
+    // Apply collection patches (BSDiff) if any
+    if let Some(ref patches) = mod_entry.patches {
+        for (rel_path, b64_patch) in patches {
+            let file_path = staging_result.staging_path.join(rel_path);
+            if !file_path.exists() {
+                log::warn!("Collection patch target not found: {}", file_path.display());
+                continue;
+            }
+            let patch_bytes = match base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD,
+                b64_patch,
+            ) {
+                Ok(b) => b,
+                Err(e) => {
+                    log::warn!("Failed to decode patch for {}: {}", rel_path, e);
+                    continue;
+                }
+            };
+            let source_data = match std::fs::read(&file_path) {
+                Ok(d) => d,
+                Err(e) => {
+                    log::warn!("Failed to read patch target {}: {}", rel_path, e);
+                    continue;
+                }
+            };
+            match qbsdiff::Bspatch::new(&patch_bytes) {
+                Ok(patcher) => {
+                    let target_size = patcher.hint_target_size() as usize;
+                    let mut target_data = Vec::with_capacity(target_size);
+                    if let Err(e) = patcher.apply(&source_data, &mut target_data) {
+                        log::warn!("Failed to apply patch for {}: {}", rel_path, e);
+                        continue;
+                    }
+                    if let Err(e) = std::fs::write(&file_path, &target_data) {
+                        log::warn!("Failed to write patched file {}: {}", rel_path, e);
+                    }
+                }
+                Err(e) => {
+                    log::warn!("Invalid BSDiff patch for {}: {}", rel_path, e);
+                }
+            }
+        }
+    }
+
+    // Apply file overrides — when non-empty, only deploy listed files
+    let files_to_deploy = if !mod_entry.file_overrides.is_empty() {
+        files_to_deploy
+            .into_iter()
+            .filter(|f| {
+                let staging_prefix = staging_result.staging_path.to_string_lossy();
+                let rel = f
+                    .strip_prefix(staging_prefix.as_ref())
+                    .unwrap_or(f)
+                    .trim_start_matches('/')
+                    .trim_start_matches('\\')
+                    .replace('\\', "/");
+                mod_entry.file_overrides.iter().any(|ov| {
+                    let norm_ov = ov.replace('\\', "/");
+                    rel == norm_ov || rel.ends_with(&format!("/{}", norm_ov))
+                })
+            })
+            .collect()
+    } else {
+        files_to_deploy
+    };
+
     // Update DB with staging info
     let _ = app.emit(
         INSTALL_PROGRESS_EVENT,

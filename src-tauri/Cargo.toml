@@ -89,5 +89,13 @@ mega = "0.8"
 scraper = "0.25"
 qbsdiff = "1"
 
+# BSA/BA2 archive creation (Bethesda game archives)
+ba2 = "3"
+
+# DDS texture transformation
+image = "0.25"
+ddsfile = "0.5"
+image_dds = { version = "0.7", features = ["ddsfile", "image"] }
+
 [dev-dependencies]
 tempfile = "3"
