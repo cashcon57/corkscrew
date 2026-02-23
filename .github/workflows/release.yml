@@ -49,16 +49,23 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: cargo tauri build --target x86_64-unknown-linux-gnu
 
+      - name: Collect artifacts to flat directory
+        run: |
+          mkdir -p flat-artifacts
+          cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage flat-artifacts/ 2>/dev/null || true
+          cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage.tar.gz flat-artifacts/ 2>/dev/null || true
+          cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage.tar.gz.sig flat-artifacts/ 2>/dev/null || true
+          cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage.sig flat-artifacts/ 2>/dev/null || true
+          cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb flat-artifacts/ 2>/dev/null || true
+          cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/rpm/*.rpm flat-artifacts/ 2>/dev/null || true
+          echo "Collected artifacts:"
+          ls -lh flat-artifacts/
+
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
         with:
           name: linux-x86_64-unknown-linux-gnu
-          path: |
-            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
-            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.tar.gz
-            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.sig
-            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb
-            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/rpm/*.rpm
+          path: flat-artifacts/
 
   release:
     name: Publish Release

@@ -26,7 +26,7 @@ Corkscrew installs, manages, and organizes mods for Windows games running throug
 
 It works by reading and writing directly to your Wine bottle's filesystem, the same way the game itself sees it. Your bottles, your mods, no middleman.
 
-> **v1.12** — Fallout 4 full support (plugin load order, mod tools, INI presets, crash logs), collection install verbose log with activity pulse animation, mod tool update checking, game-aware tool registry, and install progress UX improvements.
+> **v1.13** — Apple Developer code signing and notarization (no more Gatekeeper bypass), mod endorsements, per-profile game save management, pre-install game directory cleanup, DLC detection for collections, SteamOS/Steam Deck integration, download cache % on collections, and updater UX improvements.
 
 ---
 
@@ -91,13 +91,7 @@ Download the latest release for your platform from the [Releases page](https://g
 |--------|-------------|
 | `.dmg` | Apple Silicon (M1+) and Intel |
 
-After dragging to Applications:
-
-> **Note:** The app is not yet code-signed with an Apple Developer certificate. macOS Gatekeeper will block it on first launch. Run:
-> ```bash
-> xattr -cr /Applications/Corkscrew.app
-> ```
-> Or: right-click the app → **Open** → click "Open" in the dialog.
+After dragging to Applications, double-click to launch. The app is code-signed and notarized with an Apple Developer certificate — Gatekeeper will allow it to open immediately.
 
 #### Linux
 
@@ -166,6 +160,7 @@ Corkscrew includes an in-app auto-updater. When a new version is published on Gi
 - **Modlist export/import** — Export your mod setup as a portable JSON modlist and import it on another machine or share it with others, with diff comparison between modlists.
 - **Mod dependency tracking** — Define requires/conflicts/patches relationships between mods. The dependency checker surfaces missing requirements and active conflicts before you launch.
 - **Pre-flight installation checks** — Run a comprehensive pre-deployment check covering disk space, staging integrity, bottle health, and file conflicts before deploying.
+- **Pre-install game directory cleanup** — Before installing a collection, scan the game directory for non-stock files (leftover mods, ENB presets, orphaned files) using the integrity snapshot system. Flexible cleanup options: remove loose files, archives, ENB files, orphaned-only mode, and custom exclude patterns.
 - **Disk space budget** — Real-time disk usage dashboard showing staging, deployment, and available space with per-install impact estimates.
 - **Auto-categorization** — Mods are automatically classified by content type (Plugins, Textures, Models, SKSE Plugins, UI, Audio, Scripts, ENB, ReShade) using file-path heuristics.
 
@@ -196,6 +191,9 @@ Corkscrew includes an in-app auto-updater. When a new version is published on Gi
 - **Install progress dashboard** — Real-time collection install progress with phase indicators (downloading → staging → installing → complete), per-mod status tracking, download speed, activity feed with recently-completed items, summary chips (done/failed/skipped/pending counts), stall detection (warns after 30s of zero speed), auto-expanding mod log on first failure, expandable verbose log with timestamped event stream, and an activity pulse orb that modulates animation speed based on event throughput.
 - **Failed install handling** — Dedicated failure panel with error summary, "Installed with errors" state, and post-completion navigation buttons (View Mods, Load Order, Back to Collections).
 - **Resume interrupted installs** — If a collection install is interrupted, a resume banner with mini progress bar appears on the collections page.
+- **Mod endorsements** — Endorse or abstain on mods directly from Corkscrew via the NexusMods API. Endorsement status is shown in the overflow menu, detail panel, and context menu.
+- **Download cache coverage** — When browsing collections, each collection card shows the percentage of required files already cached locally, with filter chips for "90%+ Cached" and "100% Cached".
+- **DLC detection** — Before installing a collection, Corkscrew checks that required DLC files are present in the game directory and warns if any are missing.
 - **Update checking** — Check installed mods against Nexus for available updates.
 - **Collection diff** — Compare your locally installed collection against the author's latest revision to see added, removed, and updated mods.
 - **Tool requirement detection** — Before installing a Collection or Wabbajack modlist, Corkscrew scans for required modding tools (SKSE, Nemesis, BodySlide, etc.) and prompts you to install missing tools before proceeding. Integrated tools (LOOT) are hidden since they're built into Corkscrew. Pandora automatically suppresses Nemesis/FNIS requirements since it's backwards-compatible with both.
@@ -213,6 +211,7 @@ Corkscrew includes an in-app auto-updater. When a new version is published on Gi
 ### Profiles
 - **Save and switch** — Snapshot your current mod states, priorities, and plugin load order into named profiles.
 - **Instant activation** — Switch profiles in one click: purges current deployment, applies the target profile's states, redeploys, and restores plugin order.
+- **Per-profile game saves** — Optionally backup and restore game saves when switching profiles. Outgoing profile saves are backed up, incoming profile saves are restored. Toggle in Settings.
 - **Auto-profile on collection install** — A named profile snapshot is automatically created after each collection installation.
 
 ### Wabbajack Modlists
@@ -251,8 +250,10 @@ Corkscrew includes an in-app auto-updater. When a new version is published on Gi
 - **Platform-aware settings** — Detects macOS, Linux, and SteamOS, showing platform-relevant compatibility layers and recommendations.
 - **macOS vibrancy** — Native translucent materials that follow the active window state.
 - **Light and dark themes** — System-following by default with manual toggle.
+- **Apple Developer signed and notarized** — The macOS app is code-signed with a Developer ID certificate and notarized by Apple. Users can launch directly from the DMG without any terminal commands or Gatekeeper bypass.
+- **SteamOS / Steam Deck integration** — Auto-detect Steam Deck hardware, register Corkscrew as a non-Steam game in Steam library, create `.desktop` entry with NXM protocol handler, and auto-enable controller mode on Deck.
 - **Cross-platform** — Native app for both macOS and Linux (SteamOS, Fedora, Ubuntu).
-- **In-app auto-updater** — Check for and install signed updates directly from within Corkscrew. Shows a success toast when an update was applied on restart.
+- **In-app auto-updater** — Check for and install signed updates directly from within Corkscrew. View multi-version changelogs, dismiss updates per-version, and choose when to install. Shows a success toast when an update was applied on restart.
 
 ---
 
@@ -368,6 +369,10 @@ Key workflows tested end-to-end:
 - Wine bottle diagnostics with automated fixes
 - Wabbajack gallery browsing and local `.wabbajack` file parsing
 - In-app auto-updater with signed releases
+- Mod endorsements via NexusMods API
+- Per-profile game save backup/restore
+- Pre-install game directory cleanup
+- Apple Developer code signing and notarization
 
 ### Known Limitations
 
@@ -377,7 +382,7 @@ Key workflows tested end-to-end:
 - **Wabbajack installation** — The full Wabbajack install pipeline is implemented with real downloads (NexusMods, HTTP, MediaFire, ModDB), directive processing (BSDiff patching, inline files), and deployment. **Not yet implemented**: BSA/BA2 packing (CreateBSA), DDS texture transformation (TransformedTexture), merged patches (MergedPatch), Google Drive downloads, Wabbajack CDN downloads, and game file source extraction. Complex modlists using these features will partially fail. Install resume after interruption is stubbed but not yet functional.
 - **FOMOD conditionals** — The FOMOD installer handles group selection, type badges, and file mapping. Conditional visibility, option dependencies, and mutually-exclusive groups are not yet supported — the installer uses defaults for these cases.
 - **NexusMods SSO** — The SSO/OAuth2 module (with PKCE) is fully implemented and ready to use. Currently awaiting NexusMods approval of the "Corkscrew" application slug. In the meantime, API key authentication works.
-- **macOS code signing** — The app is not signed with an Apple Developer certificate. Users need to bypass Gatekeeper on first launch (see [Installation](#installation)).
+- **macOS code signing** — Fully signed and notarized with an Apple Developer certificate as of v1.13. No Gatekeeper bypass needed.
 
 ### Roadmap
 
@@ -405,7 +410,6 @@ Key workflows tested end-to-end:
 - Resizable table columns with persistent widths
 
 **Long-term:**
-- Apple Developer code signing
 - Flatpak distribution
 - Community modlist sharing
 
@@ -471,7 +475,7 @@ src/                          Svelte frontend
 │   └── settings/+page.svelte Config, game tools, auth, INI, diagnostics
 └── app.css                   Design system (tokens, themes, vibrancy, animations)
 
-src-tauri/src/                Rust backend (~48 modules, 580 tests)
+src-tauri/src/                Rust backend (~50 modules, 595 tests)
 ├── lib.rs              Tauri command handlers (~171 IPC commands)
 ├── bottles.rs          Bottle detection (9 sources, macOS + Linux)
 ├── bottle_config.rs    Wine bottle settings (MSync, MetalFX, env vars)
@@ -518,6 +522,8 @@ src-tauri/src/                Rust backend (~48 modules, 580 tests)
 ├── mod_tools.rs        Mod tool detection, auto-install, launch + tool signatures
 ├── session_tracker.rs  Game session logging + stability analysis
 ├── download_queue.rs   Download queue with retry + progress events
+├── cleaner.rs          Pre-install game directory cleanup engine
+├── steam_integration.rs  SteamOS/Steam Deck detection + Steam shortcut management
 ├── plugins/
 │   ├── skyrim_se.rs          Skyrim SE detection (Steam + GOG paths)
 │   ├── fallout4.rs           Fallout 4 detection (Steam + GOG paths)
@@ -559,7 +565,7 @@ cargo tauri dev    # Development mode with hot-reload
 
 ```bash
 # Run tests
-cd src-tauri && cargo test           # 566 Rust tests
+cd src-tauri && cargo test           # 595 Rust tests
 npx svelte-check --threshold error   # Frontend type checking
 ```
 

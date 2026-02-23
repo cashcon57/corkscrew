@@ -9,7 +9,7 @@
   import { getVersion } from "@tauri-apps/api/app";
   import { check } from "@tauri-apps/plugin-updater";
   import { relaunch } from "@tauri-apps/plugin-process";
-  import { downloadFromNexus, getAllGames, getDownloadQueue, retryDownload, cancelDownload, clearFinishedDownloads, onDownloadQueueUpdate, listProfiles, listInstalledCollections, getConfig, setConfigValue, launchGame, getAllInterruptedInstalls, resumeCollectionInstall, abandonCollectionInstall, getCheckpointModNames, getPendingWabbajackInstalls, checkSkyrimVersion, getPinnedGameVersion, pinGameVersion } from "$lib/api";
+  import { downloadFromNexus, getAllGames, getDownloadQueue, retryDownload, cancelDownload, clearFinishedDownloads, onDownloadQueueUpdate, listProfiles, listInstalledCollections, getConfig, setConfigValue, launchGame, getAllInterruptedInstalls, resumeCollectionInstall, abandonCollectionInstall, getCheckpointModNames, getPendingWabbajackInstalls, checkSkyrimVersion, getPinnedGameVersion, pinGameVersion, checkSteamStatus, addToSteam } from "$lib/api";
   import { resumeInstallTracking } from "$lib/installService";
   import type { CollectionInstallCheckpoint, WabbajackInstallStatus } from "$lib/types";
   import { get } from "svelte/store";
@@ -108,6 +108,9 @@
   // Game version change detection
   let versionWarning = $state<{ oldVersion: string; newVersion: string } | null>(null);
 
+  // Steam integration prompt (Linux only)
+  let showSteamPrompt = $state(false);
+
   // Friendly error message mapping for download errors
   function friendlyError(raw: string): string {
     const lower = raw.toLowerCase();
@@ -127,6 +130,10 @@
   let updateReady = $state(false);
   let showUpdateBanner = $state(false);
   let updateNotesExpanded = $state(false);
+  let updateObject = $state<any>(null); // Holds the Tauri Update object
+  let multiVersionChangelog = $state<Array<{ version: string; body: string; date: string }>>([]);
+  let changelogLoading = $state(false);
+  let changelogExpanded = $state(false);
 
   // Queue popover positioning (fixed to escape sidebar overflow:hidden)
   let queueBtnEl = $state<HTMLElement | null>(null);
@@ -185,6 +192,9 @@
 
     // Check for interrupted installs from previous session
     checkInterruptedInstalls();
+
+    // Steam integration: auto-register on SteamOS, prompt on regular Linux
+    checkSteamIntegration();
 
     // Subscribe to download queue updates
     getDownloadQueue().then(items => queueItems = items).catch(() => {});
@@ -375,6 +385,48 @@
     }
   }
 
+  async function checkSteamIntegration() {
+    try {
+      const status = await checkSteamStatus();
+      if (!status.installed) return; // No Steam = nothing to do
+
+      if (status.registered) return; // Already registered
+
+      // Check if user already declined
+      const cfg = await getConfig();
+      if ((cfg as Record<string, unknown>).steam_integration_declined) return;
+
+      if (status.is_deck) {
+        // Auto-register on Steam Deck — it's the expected behavior
+        try {
+          await addToSteam();
+          wrappedShowSuccess("Added Corkscrew to your Steam library");
+          controllerMode.set(true); // Auto-enable controller mode on Deck
+        } catch (e) {
+          console.warn("[steam] Auto-registration failed:", e);
+        }
+      } else {
+        // Regular Linux — show a one-time prompt
+        showSteamPrompt = true;
+      }
+    } catch { /* Steam integration not available */ }
+  }
+
+  async function handleSteamPromptAccept() {
+    showSteamPrompt = false;
+    try {
+      await addToSteam();
+      wrappedShowSuccess("Added Corkscrew to your Steam library");
+    } catch (e) {
+      wrappedShowError(`Failed to add to Steam: ${e}`);
+    }
+  }
+
+  async function handleSteamPromptDecline() {
+    showSteamPrompt = false;
+    try { await setConfigValue("steam_integration_declined", "true"); } catch {}
+  }
+
   async function loadDetectedGames() {
     try {
       detectedGames = await getAllGames();
@@ -529,30 +581,27 @@
     try {
       const update = await check();
       if (update) {
+        // Check if user dismissed this specific version
+        try {
+          const cfg = await getConfig();
+          const dismissed = (cfg as Record<string, unknown>).dismissed_update_version;
+          if (dismissed === update.version) {
+            // User already dismissed this version — don't show banner
+            updateCheckingStore.set(false);
+            return;
+          }
+        } catch { /* config not available */ }
+
         updateAvailable = true;
         updateVersion = update.version;
         updateBody = update.body ?? null;
+        updateObject = update;
         updateVersionStore.set(update.version);
         updateNotesStore.set(update.body ?? null);
         showUpdateBanner = true;
-        update.downloadAndInstall((progress) => {
-          if (progress.event === "Started" && progress.data.contentLength) {
-            updateDownloading = true;
-          } else if (progress.event === "Progress") {
-            updateProgress += progress.data.chunkLength;
-          } else if (progress.event === "Finished") {
-            updateReady = true;
-            updateDownloading = false;
-            updateReadyStore.set(true);
-          }
-        }).then(() => {
-          updateReady = true;
-          updateDownloading = false;
-          updateReadyStore.set(true);
-        }).catch((e) => {
-          updateDownloading = false;
-          console.warn("[updater] Download failed:", e);
-        });
+
+        // Fetch multi-version changelog
+        fetchMultiVersionChangelog();
       }
     } catch (e) {
       console.warn("[updater] Check failed:", e);
@@ -560,6 +609,79 @@
     } finally {
       updateCheckingStore.set(false);
     }
+  }
+
+  async function fetchMultiVersionChangelog() {
+    changelogLoading = true;
+    try {
+      const res = await fetch("https://api.github.com/repos/cashcon57/corkscrew/releases");
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const releases: Array<{ tag_name: string; body: string; published_at: string }> = await res.json();
+
+      const current = $appVersion;
+      const latest = updateVersion;
+
+      // Filter releases between current (exclusive) and latest (inclusive)
+      const changelog = releases
+        .filter((r) => {
+          const v = r.tag_name.replace(/^v/, "");
+          return v !== current && compareVersions(v, current) > 0 && compareVersions(v, latest) <= 0;
+        })
+        .map((r) => ({
+          version: r.tag_name,
+          body: r.body || "No release notes.",
+          date: new Date(r.published_at).toLocaleDateString(),
+        }))
+        .sort((a, b) => compareVersions(b.version.replace(/^v/, ""), a.version.replace(/^v/, "")));
+
+      multiVersionChangelog = changelog;
+    } catch (e) {
+      console.warn("[updater] Failed to fetch changelog:", e);
+    } finally {
+      changelogLoading = false;
+    }
+  }
+
+  /** Compare semver strings: returns >0 if a > b, <0 if a < b, 0 if equal */
+  function compareVersions(a: string, b: string): number {
+    const pa = a.split(".").map(Number);
+    const pb = b.split(".").map(Number);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+      const na = pa[i] ?? 0;
+      const nb = pb[i] ?? 0;
+      if (na !== nb) return na - nb;
+    }
+    return 0;
+  }
+
+  async function handleStartUpdate() {
+    if (!updateObject) return;
+    updateDownloading = true;
+    try {
+      await updateObject.downloadAndInstall((progress: any) => {
+        if (progress.event === "Started" && progress.data.contentLength) {
+          updateDownloading = true;
+        } else if (progress.event === "Progress") {
+          updateProgress += progress.data.chunkLength;
+        } else if (progress.event === "Finished") {
+          updateReady = true;
+          updateDownloading = false;
+          updateReadyStore.set(true);
+        }
+      });
+      updateReady = true;
+      updateDownloading = false;
+      updateReadyStore.set(true);
+    } catch (e) {
+      updateDownloading = false;
+      console.warn("[updater] Download failed:", e);
+    }
+  }
+
+  async function handleDismissUpdate() {
+    showUpdateBanner = false;
+    // Persist dismissal for this version
+    try { await setConfigValue("dismissed_update_version", updateVersion); } catch {}
   }
 
   // Register so settings page can trigger manual checks
@@ -850,15 +972,17 @@
                 <polyline points="23 4 23 10 17 10" />
                 <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
               </svg>
-              <span>Update available: <strong>v{updateVersion}</strong></span>
+              <span>Corkscrew <strong>v{updateVersion}</strong> available</span>
             </div>
             <div class="update-banner-actions">
               {#if updateReady}
                 <button class="btn btn-accent btn-sm" onclick={handleRelaunch}>Restart to Update</button>
               {:else if updateDownloading}
                 <span class="update-banner-downloading"><span class="spinner spinner-sm"></span> Downloading...</span>
+              {:else}
+                <button class="btn btn-accent btn-sm" onclick={handleStartUpdate}>Update Now</button>
               {/if}
-              <button class="update-banner-dismiss" onclick={() => showUpdateBanner = false} aria-label="Dismiss">
+              <button class="update-banner-dismiss" onclick={handleDismissUpdate} aria-label="Dismiss update" title="Remind me later">
                 <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
                   <line x1="2" y1="2" x2="8" y2="8" />
                   <line x1="8" y1="2" x2="2" y2="8" />
@@ -866,11 +990,30 @@
               </button>
             </div>
           </div>
-          {#if updateBody}
-            <div class="update-banner-notes" class:expanded={updateNotesExpanded}>
-              <div class="update-notes-content">
-                {updateBody}
+
+          <!-- Multi-version changelog -->
+          {#if multiVersionChangelog.length > 0}
+            <button class="update-notes-toggle" onclick={() => changelogExpanded = !changelogExpanded}>
+              {changelogExpanded ? "Hide changelog" : `View changelog (${multiVersionChangelog.length} version${multiVersionChangelog.length > 1 ? "s" : ""})`}
+            </button>
+            {#if changelogExpanded}
+              <div class="update-changelog">
+                {#each multiVersionChangelog as release}
+                  <div class="changelog-entry">
+                    <div class="changelog-version-header">
+                      <strong>{release.version}</strong>
+                      <span class="changelog-date">{release.date}</span>
+                    </div>
+                    <div class="changelog-body">{release.body}</div>
+                  </div>
+                {/each}
               </div>
+            {/if}
+          {:else if changelogLoading}
+            <span class="update-banner-downloading" style="margin-top: 6px;"><span class="spinner spinner-sm"></span> Loading changelog...</span>
+          {:else if updateBody}
+            <div class="update-banner-notes" class:expanded={updateNotesExpanded}>
+              <div class="update-notes-content">{updateBody}</div>
             </div>
             {#if updateBody.length > 150}
               <button class="update-notes-toggle" onclick={() => updateNotesExpanded = !updateNotesExpanded}>
@@ -899,6 +1042,24 @@
               Acknowledge
             </button>
             <button class="btn btn-ghost btn-sm" onclick={handleDismissVersionWarning}>Dismiss</button>
+          </div>
+        </div>
+      {/if}
+
+      {#if showSteamPrompt}
+        <div class="resume-banner" role="alert" style="background: rgba(102, 192, 244, 0.08); border-color: rgba(102, 192, 244, 0.25);">
+          <div class="resume-banner-icon" style="color: #66c0f4;">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M11.979 0C5.678 0 .511 4.86.022 11.037l6.432 2.658c.545-.371 1.203-.59 1.912-.59.063 0 .125.004.188.006l2.861-4.142V8.91c0-2.495 2.028-4.524 4.524-4.524 2.494 0 4.524 2.031 4.524 4.527s-2.03 4.525-4.524 4.525h-.105l-4.076 2.911c0 .052.004.105.004.159 0 1.875-1.515 3.396-3.39 3.396-1.635 0-3.016-1.173-3.331-2.727L.436 15.27C1.862 20.307 6.486 24 11.979 24c6.627 0 12-5.373 12-12s-5.372-12-12-12z"/>
+            </svg>
+          </div>
+          <div class="resume-banner-text">
+            <strong>Add to Steam Library?</strong>
+            Access Corkscrew from Steam's game mode and your library
+          </div>
+          <div class="resume-banner-actions">
+            <button class="btn btn-accent btn-sm" onclick={handleSteamPromptAccept}>Add to Steam</button>
+            <button class="btn btn-ghost btn-sm" onclick={handleSteamPromptDecline}>No thanks</button>
           </div>
         </div>
       {/if}
@@ -1484,6 +1645,45 @@
 
   .update-notes-toggle:hover {
     text-decoration: underline;
+  }
+
+  .update-changelog {
+    margin-top: var(--space-2, 8px);
+    max-height: 300px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2, 8px);
+  }
+
+  .changelog-entry {
+    padding: var(--space-2, 8px);
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: var(--radius-sm, 4px);
+    border: 1px solid var(--separator);
+  }
+
+  .changelog-version-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 4px;
+    font-size: 12px;
+    color: var(--text-primary);
+  }
+
+  .changelog-date {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    font-weight: 400;
+  }
+
+  .changelog-body {
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    white-space: pre-wrap;
+    word-break: break-word;
   }
 
   /* --- Resume banner --- */

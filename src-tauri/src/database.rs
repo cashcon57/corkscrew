@@ -1064,6 +1064,46 @@ impl ModDatabase {
         Ok(size)
     }
 
+    /// Batch-check which (nexus_mod_id, nexus_file_id) pairs exist in the download registry.
+    /// Returns the subset of input pairs that have a matching downloaded file.
+    pub fn batch_check_cached_files(
+        &self,
+        pairs: &[(i64, i64)],
+    ) -> Result<Vec<(i64, i64)>> {
+        if pairs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Build a single query with OR conditions (batched for large sets)
+        // For efficiency, load all cached (mod_id, file_id) pairs into a HashSet
+        let mut cached: std::collections::HashSet<(i64, i64)> = std::collections::HashSet::new();
+
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT nexus_mod_id, nexus_file_id
+             FROM download_registry
+             WHERE nexus_mod_id IS NOT NULL AND nexus_file_id IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        for row in rows {
+            if let Ok(pair) = row {
+                cached.insert(pair);
+            }
+        }
+
+        // Return only the input pairs that exist in the cache
+        let matched: Vec<(i64, i64)> = pairs
+            .iter()
+            .filter(|p| cached.contains(p))
+            .cloned()
+            .collect();
+
+        Ok(matched)
+    }
+
     /// Delete orphaned download_registry rows that have no collection references.
     pub fn cleanup_orphaned_downloads(&self) -> Result<usize> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());

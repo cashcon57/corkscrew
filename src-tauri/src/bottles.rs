@@ -72,6 +72,39 @@ impl Bottle {
         users.join("crossover").join("AppData").join("Local")
     }
 
+    /// Best-effort path to a user's Documents directory.
+    ///
+    /// Iterates over user directories looking for `Documents` or `My Documents`.
+    /// Falls back to the CrossOver default user path.
+    pub fn documents_dir(&self) -> PathBuf {
+        let users = self.users_dir();
+        if users.exists() {
+            if let Ok(entries) = fs::read_dir(&users) {
+                for entry in entries.flatten() {
+                    let user_dir = entry.path();
+                    if !user_dir.is_dir() {
+                        continue;
+                    }
+
+                    // Standard Documents path
+                    let docs = user_dir.join("Documents");
+                    if docs.exists() {
+                        return docs;
+                    }
+
+                    // Legacy "My Documents" path
+                    let my_docs = user_dir.join("My Documents");
+                    if my_docs.exists() {
+                        return my_docs;
+                    }
+                }
+            }
+        }
+
+        // Default fallback (CrossOver convention)
+        users.join("crossover").join("Documents")
+    }
+
     /// Returns `true` if the bottle's `drive_c` directory exists on disk.
     pub fn exists(&self) -> bool {
         self.drive_c().exists()

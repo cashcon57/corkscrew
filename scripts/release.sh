@@ -78,10 +78,24 @@ echo "  tauri.conf.json  → $VERSION"
 echo "  package.json     → $VERSION"
 echo "  Cargo.toml       → $VERSION"
 
-# --- Build macOS ---
+# --- Load signing credentials ---
 export TAURI_SIGNING_PRIVATE_KEY
 TAURI_SIGNING_PRIVATE_KEY="$(cat "$KEY_FILE")"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$KEY_PASSWORD"
+
+# Apple code signing + notarization
+APPLE_CREDS="$HOME/.corkscrew-keys/apple-signing.env"
+if [[ -f "$APPLE_CREDS" ]]; then
+  # shellcheck disable=SC1090
+  source "$APPLE_CREDS"
+  echo "Apple signing credentials loaded — builds will be signed + notarized."
+else
+  echo "WARNING: Apple signing credentials not found at $APPLE_CREDS"
+  echo "         Release builds will NOT be signed/notarized."
+  echo "         Run ./scripts/setup-apple-signing.sh to configure."
+  read -r -p "Continue without signing? [y/N] " confirm
+  [[ "$confirm" =~ ^[Yy]$ ]] || exit 1
+fi
 
 echo ""
 echo "=== Building macOS (Apple Silicon) ==="

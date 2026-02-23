@@ -1,5 +1,6 @@
 pub mod bottle_config;
 pub mod bottles;
+pub mod cleaner;
 pub mod collection_installer;
 pub mod collections;
 pub mod config;
@@ -38,6 +39,7 @@ pub mod rollback;
 pub mod session_tracker;
 pub mod skse;
 pub mod staging;
+pub mod steam_integration;
 pub mod wabbajack;
 pub mod wabbajack_directives;
 pub mod wabbajack_downloader;
@@ -45,6 +47,7 @@ pub mod wabbajack_installer;
 pub mod wabbajack_types;
 pub mod wine_diagnostic;
 
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -2256,6 +2259,23 @@ fn activate_profile(
     // Look up the game
     let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
 
+    // Check if per-profile saves is enabled
+    let saves_enabled = config::get_config_value("profile_saves_enabled")
+        .ok()
+        .flatten()
+        .map(|v| v == "true")
+        .unwrap_or(false);
+
+    // Resolve saves directory for the game
+    let saves_dir = if saves_enabled {
+        games::with_plugin(&game_id, |plugin| {
+            plugin.get_saves_dir(Path::new(&game.game_path), &bottle)
+        })
+        .flatten()
+    } else {
+        None
+    };
+
     // 1. Save current state to the currently active profile (if any)
     if let Ok(Some(current_active)) = profiles::get_active_profile(db, &game_id, &bottle_name) {
         let plugins_file = if plugins::skyrim_plugins::supports_plugin_order(&game_id) {
@@ -2274,6 +2294,11 @@ fn activate_profile(
             &bottle_name,
             plugins_file.as_deref(),
         );
+
+        // Backup current saves for the outgoing profile
+        if let Some(ref sd) = saves_dir {
+            let _ = profiles::backup_saves(current_active.id, &game_id, &bottle_name, sd);
+        }
     }
 
     // 2. Purge current deployment
@@ -2291,7 +2316,12 @@ fn activate_profile(
     // 5. Redeploy enabled mods
     let _ = deployer::redeploy_all(db, &game_id, &bottle_name, &data_dir);
 
-    // 6. Apply plugin states
+    // 6. Restore saves for the incoming profile
+    if let Some(ref sd) = saves_dir {
+        let _ = profiles::restore_saves(profile_id, &game_id, &bottle_name, sd);
+    }
+
+    // 7. Apply plugin states
     let plugin_states = profiles::get_plugin_states(db, profile_id).map_err(|e| e.to_string())?;
 
     if !plugin_states.is_empty() && plugins::skyrim_plugins::supports_plugin_order(&game_id) {
@@ -2318,11 +2348,54 @@ fn activate_profile(
         }
     }
 
-    // 7. Mark profile as active
+    // 8. Mark profile as active
     profiles::set_active_profile(db, &game_id, &bottle_name, profile_id)
         .map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+#[tauri::command]
+fn get_profile_save_info(
+    profile_id: i64,
+    game_id: String,
+    bottle_name: String,
+) -> profiles::ProfileSaveInfo {
+    profiles::get_profile_save_info(profile_id, &game_id, &bottle_name)
+}
+
+#[tauri::command]
+fn backup_profile_saves(
+    profile_id: i64,
+    game_id: String,
+    bottle_name: String,
+) -> Result<usize, String> {
+    let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
+    let saves_dir = games::with_plugin(&game_id, |plugin| {
+        plugin.get_saves_dir(Path::new(&game.game_path), &bottle)
+    })
+    .flatten()
+    .ok_or("Game does not have a known saves directory")?;
+
+    profiles::backup_saves(profile_id, &game_id, &bottle_name, &saves_dir)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn restore_profile_saves(
+    profile_id: i64,
+    game_id: String,
+    bottle_name: String,
+) -> Result<usize, String> {
+    let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
+    let saves_dir = games::with_plugin(&game_id, |plugin| {
+        plugin.get_saves_dir(Path::new(&game.game_path), &bottle)
+    })
+    .flatten()
+    .ok_or("Game does not have a known saves directory")?;
+
+    profiles::restore_saves(profile_id, &game_id, &bottle_name, &saves_dir)
+        .map_err(|e| e.to_string())
 }
 
 // --- Update Checking ---
@@ -2646,6 +2719,114 @@ fn get_fomod_files(
     Ok(fomod::get_files_for_selections(&installer, &selections))
 }
 
+// --- DLC Detection ---
+
+/// Expected DLC files for Skyrim SE (ESMs + BSAs).
+const SKYRIM_SE_DLC_FILES: &[(&str, &str)] = &[
+    ("Dawnguard.esm", "Dawnguard"),
+    ("Dawnguard.bsa", "Dawnguard"),
+    ("HearthFires.esm", "Hearthfire"),
+    ("HearthFires.bsa", "Hearthfire"),
+    ("Dragonborn.esm", "Dragonborn"),
+    ("Dragonborn.bsa", "Dragonborn"),
+];
+
+/// Expected DLC files for Fallout 4.
+const FALLOUT4_DLC_FILES: &[(&str, &str)] = &[
+    ("DLCRobot.esm", "Automatron"),
+    ("DLCworkshop01.esm", "Wasteland Workshop"),
+    ("DLCworkshop02.esm", "Contraptions Workshop"),
+    ("DLCworkshop03.esm", "Vault-Tec Workshop"),
+    ("DLCCoast.esm", "Far Harbor"),
+    ("DLCNukaWorld.esm", "Nuka-World"),
+];
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct DlcStatus {
+    /// Whether all expected DLC files are present.
+    all_present: bool,
+    /// Per-DLC detection results.
+    dlcs: Vec<DlcInfo>,
+    /// Whether the game has been initialized (base game ESM exists).
+    game_initialized: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct DlcInfo {
+    /// DLC name (e.g., "Dawnguard", "Dragonborn").
+    name: String,
+    /// Whether all files for this DLC are present.
+    present: bool,
+    /// Files that are missing.
+    missing_files: Vec<String>,
+}
+
+#[tauri::command]
+fn check_dlc_status(
+    game_id: String,
+    bottle_name: String,
+) -> Result<DlcStatus, String> {
+    let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
+
+    let dlc_files: &[(&str, &str)] = match game_id.as_str() {
+        "skyrimse" => SKYRIM_SE_DLC_FILES,
+        "fallout4" => FALLOUT4_DLC_FILES,
+        _ => return Ok(DlcStatus {
+            all_present: true,
+            dlcs: vec![],
+            game_initialized: true,
+        }),
+    };
+
+    // Check if base game is initialized
+    let base_esm = match game_id.as_str() {
+        "skyrimse" => "Skyrim.esm",
+        "fallout4" => "Fallout4.esm",
+        _ => "",
+    };
+    let game_initialized = if base_esm.is_empty() {
+        true
+    } else {
+        data_dir.join(base_esm).exists()
+    };
+
+    // Group by DLC name and check each file
+    let mut dlc_map: std::collections::BTreeMap<String, Vec<(String, bool)>> =
+        std::collections::BTreeMap::new();
+    for (filename, dlc_name) in dlc_files {
+        let present = data_dir.join(filename).exists();
+        dlc_map
+            .entry(dlc_name.to_string())
+            .or_default()
+            .push((filename.to_string(), present));
+    }
+
+    let mut dlcs = Vec::new();
+    let mut all_present = true;
+    for (name, files) in &dlc_map {
+        let missing: Vec<String> = files
+            .iter()
+            .filter(|(_, p)| !p)
+            .map(|(f, _)| f.clone())
+            .collect();
+        let present = missing.is_empty();
+        if !present {
+            all_present = false;
+        }
+        dlcs.push(DlcInfo {
+            name: name.clone(),
+            present,
+            missing_files: missing,
+        });
+    }
+
+    Ok(DlcStatus {
+        all_present,
+        dlcs,
+        game_initialized,
+    })
+}
+
 // --- Integrity ---
 
 #[tauri::command]
@@ -2682,6 +2863,35 @@ fn has_game_snapshot(
 ) -> Result<bool, String> {
     let db = &state.db;
     integrity::has_snapshot(db, &game_id, &bottle_name).map_err(|e| e.to_string())
+}
+
+// --- Game Directory Cleaner ---
+
+#[tauri::command]
+fn scan_game_directory(
+    game_id: String,
+    bottle_name: String,
+    state: State<AppState>,
+) -> Result<cleaner::CleanReport, String> {
+    let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
+    let db = &state.db;
+
+    cleaner::scan_game_directory(db, &game_id, &bottle_name, &data_dir)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn clean_game_directory(
+    game_id: String,
+    bottle_name: String,
+    options: cleaner::CleanOptions,
+    state: State<AppState>,
+) -> Result<cleaner::CleanResult, String> {
+    let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
+    let db = &state.db;
+
+    cleaner::clean_game_directory(db, &game_id, &bottle_name, &data_dir, &options)
+        .map_err(|e| e.to_string())
 }
 
 // --- Wabbajack Modlists ---
@@ -3014,6 +3224,54 @@ async fn get_nexus_mod_detail(
     let client = nexus::NexusClient::new(api_key);
     client
         .get_mod_info(&game_slug, mod_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+// --- Endorsements ---
+
+#[tauri::command]
+async fn endorse_mod(
+    game_slug: String,
+    mod_id: i64,
+    version: Option<String>,
+) -> Result<nexus::EndorseResponse, String> {
+    let api_key = config::get_config()
+        .ok()
+        .and_then(|c| c.nexus_api_key)
+        .ok_or_else(|| "No NexusMods API key configured".to_string())?;
+    let client = nexus::NexusClient::new(api_key);
+    client
+        .endorse_mod(&game_slug, mod_id, version.as_deref())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn abstain_mod(
+    game_slug: String,
+    mod_id: i64,
+) -> Result<nexus::EndorseResponse, String> {
+    let api_key = config::get_config()
+        .ok()
+        .and_then(|c| c.nexus_api_key)
+        .ok_or_else(|| "No NexusMods API key configured".to_string())?;
+    let client = nexus::NexusClient::new(api_key);
+    client
+        .abstain_mod(&game_slug, mod_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_user_endorsements() -> Result<Vec<nexus::UserEndorsement>, String> {
+    let api_key = config::get_config()
+        .ok()
+        .and_then(|c| c.nexus_api_key)
+        .ok_or_else(|| "No NexusMods API key configured".to_string())?;
+    let client = nexus::NexusClient::new(api_key);
+    client
+        .get_user_endorsements()
         .await
         .map_err(|e| e.to_string())
 }
@@ -4150,6 +4408,45 @@ async fn download_and_install_nexus_mod(
     serde_json::to_value(installed).map_err(|e| e.to_string())
 }
 
+// --- Download Cache Check ---
+
+#[tauri::command]
+fn check_cached_files(
+    mod_file_pairs: Vec<(i64, i64)>,
+    state: State<AppState>,
+) -> Result<Vec<(i64, i64)>, String> {
+    state.db.batch_check_cached_files(&mod_file_pairs).map_err(|e| e.to_string())
+}
+
+// --- Steam Integration ---
+
+#[tauri::command]
+fn detect_steam() -> Option<steam_integration::SteamInfo> {
+    steam_integration::detect_steam_installation()
+}
+
+#[tauri::command]
+fn check_steam_status() -> steam_integration::SteamStatus {
+    steam_integration::get_steam_status()
+}
+
+#[tauri::command]
+fn add_to_steam() -> Result<steam_integration::SteamStatus, String> {
+    steam_integration::setup_steam_integration().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn remove_from_steam() -> Result<(), String> {
+    let info = steam_integration::detect_steam_installation()
+        .ok_or_else(|| "Steam not found".to_string())?;
+    steam_integration::remove_from_steam(&info).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn is_steam_deck() -> bool {
+    steam_integration::is_steam_deck()
+}
+
 // --- App Entry Point ---
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -4250,6 +4547,9 @@ pub fn run() {
             rename_profile_cmd,
             save_profile_snapshot,
             activate_profile,
+            get_profile_save_info,
+            backup_profile_saves,
+            restore_profile_saves,
             check_mod_updates,
             detect_mod_tools_cmd,
             install_mod_tool,
@@ -4265,9 +4565,12 @@ pub fn run() {
             detect_fomod,
             get_fomod_defaults,
             get_fomod_files,
+            check_dlc_status,
             create_game_snapshot,
             check_game_integrity,
             has_game_snapshot,
+            scan_game_directory,
+            clean_game_directory,
             get_wabbajack_modlists,
             parse_wabbajack_file,
             download_wabbajack_file,
@@ -4296,6 +4599,9 @@ pub fn run() {
             // Collections & Nexus Browse
             browse_nexus_mods_cmd,
             get_nexus_mod_detail,
+            endorse_mod,
+            abstain_mod,
+            get_user_endorsements,
             search_nexus_mods_cmd,
             get_game_categories_cmd,
             browse_collections_cmd,
@@ -4408,6 +4714,14 @@ pub fn run() {
             // Nexus Mod Files & Direct Download
             get_nexus_mod_files,
             download_and_install_nexus_mod,
+            // Download Cache
+            check_cached_files,
+            // Steam Integration
+            detect_steam,
+            check_steam_status,
+            add_to_steam,
+            remove_from_steam,
+            is_steam_deck,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

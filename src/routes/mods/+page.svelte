@@ -44,8 +44,11 @@
     getAvailableDiskSpace,
     setModCollectionName,
     listInstalledCollections,
+    endorseMod,
+    abstainMod,
+    getUserEndorsements,
   } from "$lib/api";
-  import type { InstallProgressEvent, DeploymentHealth, ConflictSuggestion, ResolutionResult, DeployProgress, ModTool } from "$lib/types";
+  import type { InstallProgressEvent, DeploymentHealth, ConflictSuggestion, ResolutionResult, DeployProgress, ModTool, UserEndorsement } from "$lib/types";
   import {
     selectedGame,
     installedMods,
@@ -146,6 +149,10 @@
 
   // Mod overflow menu state
   let overflowMenuModId = $state<number | null>(null);
+
+  // Endorsements
+  let endorsements = $state<Map<number, string>>(new Map()); // mod_id -> status
+  let endorsingModId = $state<number | null>(null);
 
   // Duplicate mod detection
   let duplicateDialog = $state<{ newMod: InstalledMod; oldMod: InstalledMod } | null>(null);
@@ -593,6 +600,8 @@
       } catch {
         modTools = [];
       }
+      // Load endorsements in background (best-effort)
+      loadEndorsements(game.nexus_slug);
     } catch (e: unknown) {
       if (thisLoad !== loadGeneration) return;
       showError(`Failed to load mods: ${e}`);
@@ -600,6 +609,53 @@
       if (thisLoad === loadGeneration) {
         loadingMods = false;
       }
+    }
+  }
+
+  async function loadEndorsements(gameSlug: string) {
+    try {
+      const userEndorsements = await getUserEndorsements();
+      const map = new Map<number, string>();
+      for (const e of userEndorsements) {
+        if (e.domain_name === gameSlug) {
+          map.set(e.mod_id, e.status);
+        }
+      }
+      endorsements = map;
+    } catch {
+      // Endorsement loading is best-effort
+    }
+  }
+
+  async function handleEndorseMod(modId: number, nexusModId: number, version: string) {
+    if (!activeGame) return;
+    endorsingModId = modId;
+    try {
+      const result = await endorseMod(activeGame.nexus_slug, nexusModId, version);
+      const map = new Map(endorsements);
+      map.set(nexusModId, result.status);
+      endorsements = map;
+      showSuccess(`Endorsed! ${result.message}`);
+    } catch (e) {
+      showError(`Failed to endorse: ${e}`);
+    } finally {
+      endorsingModId = null;
+    }
+  }
+
+  async function handleAbstainMod(modId: number, nexusModId: number) {
+    if (!activeGame) return;
+    endorsingModId = modId;
+    try {
+      const result = await abstainMod(activeGame.nexus_slug, nexusModId);
+      const map = new Map(endorsements);
+      map.set(nexusModId, result.status);
+      endorsements = map;
+      showSuccess(`Endorsement removed. ${result.message}`);
+    } catch (e) {
+      showError(`Failed to remove endorsement: ${e}`);
+    } finally {
+      endorsingModId = null;
     }
   }
 
@@ -2620,6 +2676,21 @@
                                 </svg>
                                 Check for Update
                               </button>
+                              {#if endorsements.get(mod.nexus_mod_id!) === "Endorsed"}
+                                <button class="overflow-item" onclick={(e) => { e.stopPropagation(); overflowMenuModId = null; handleAbstainMod(mod.id, mod.nexus_mod_id!); }} disabled={endorsingModId === mod.id}>
+                                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3zm7-13h2.67A2.31 2.31 0 0 1 22 4v7a2.31 2.31 0 0 1-2.33 2H17" />
+                                  </svg>
+                                  Remove Endorsement
+                                </button>
+                              {:else}
+                                <button class="overflow-item" onclick={(e) => { e.stopPropagation(); overflowMenuModId = null; handleEndorseMod(mod.id, mod.nexus_mod_id!, mod.version); }} disabled={endorsingModId === mod.id}>
+                                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3" />
+                                  </svg>
+                                  Endorse Mod
+                                </button>
+                              {/if}
                               <button class="overflow-item" onclick={(e) => { e.stopPropagation(); overflowMenuModId = null; openUrl(`https://www.nexusmods.com/skyrimspecialedition/mods/${mod.nexus_mod_id}`); }}>
                                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                   <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" />
@@ -2719,6 +2790,22 @@
                   <a class="detail-value detail-link" href="https://www.nexusmods.com/{activeGame?.nexus_slug}/mods/{detailMod.nexus_mod_id}" target="_blank" rel="noopener noreferrer">
                     Mod #{detailMod.nexus_mod_id}
                   </a>
+                </div>
+                <div class="detail-row">
+                  <span class="detail-label">Endorse</span>
+                  <span class="detail-value">
+                    {#if endorsements.get(detailMod.nexus_mod_id) === "Endorsed"}
+                      <button class="btn btn-sm endorse-btn endorsed" onclick={() => handleAbstainMod(detailMod!.id, detailMod!.nexus_mod_id!)} disabled={endorsingModId === detailMod.id}>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3" /></svg>
+                        Endorsed
+                      </button>
+                    {:else}
+                      <button class="btn btn-sm endorse-btn" onclick={() => handleEndorseMod(detailMod!.id, detailMod!.nexus_mod_id!, detailMod!.version)} disabled={endorsingModId === detailMod.id}>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3" /></svg>
+                        Endorse
+                      </button>
+                    {/if}
+                  </span>
                 </div>
               {/if}
             </div>
@@ -2914,6 +3001,15 @@
         <button class="context-item" onclick={() => { handleCheckSingleUpdate(contextMenuMod!); closeContextMenu(); }}>
           Check for Update
         </button>
+        {#if endorsements.get(contextMenuMod.nexus_mod_id) === "Endorsed"}
+          <button class="context-item" onclick={() => { handleAbstainMod(contextMenuMod!.id, contextMenuMod!.nexus_mod_id!); closeContextMenu(); }}>
+            Remove Endorsement
+          </button>
+        {:else}
+          <button class="context-item" onclick={() => { handleEndorseMod(contextMenuMod!.id, contextMenuMod!.nexus_mod_id!, contextMenuMod!.version); closeContextMenu(); }}>
+            Endorse Mod
+          </button>
+        {/if}
         <button class="context-item" onclick={() => { openUrl(`https://www.nexusmods.com/skyrimspecialedition/mods/${contextMenuMod!.nexus_mod_id}`); closeContextMenu(); }}>
           Open on Nexus
         </button>
@@ -5533,5 +5629,36 @@
     display: flex;
     justify-content: flex-end;
     gap: 8px;
+  }
+
+  .endorse-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    padding: 3px 8px;
+    border-radius: 4px;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-primary);
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .endorse-btn:hover {
+    background: var(--bg-primary);
+    color: var(--text-primary);
+  }
+
+  .endorse-btn.endorsed {
+    background: rgba(34, 197, 94, 0.15);
+    color: #22c55e;
+    border-color: rgba(34, 197, 94, 0.3);
+  }
+
+  .endorse-btn.endorsed:hover {
+    background: rgba(239, 68, 68, 0.15);
+    color: #ef4444;
+    border-color: rgba(239, 68, 68, 0.3);
   }
 </style>

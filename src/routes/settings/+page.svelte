@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
-  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, checkModToolUpdate, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads } from "$lib/api";
+  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, checkModToolUpdate, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads, checkSteamStatus, addToSteam, removeFromSteam } from "$lib/api";
+  import type { SteamStatus } from "$lib/types";
   import { config, showError, showSuccess, selectedGame, skseStatus, currentPage, appVersion, updateReady, updateVersion, updateNotes, updateChecking, updateError, triggerUpdateCheck, controllerMode } from "$lib/stores";
   import type { AppConfig, ModTool, PlatformInfo, ToolInstallProgress, ToolUpdateInfo } from "$lib/types";
   import { listen } from "@tauri-apps/api/event";
@@ -48,6 +49,10 @@
   let clearingAll = $state(false);
   let showArchiveList = $state(false);
   let downloadsStats = $state<{ total_size_bytes: number; archive_count: number; directory: string } | null>(null);
+
+  // Steam integration (Linux only)
+  let steamStatus = $state<SteamStatus | null>(null);
+  let steamLoading = $state(false);
 
   // Mod tools
   let modTools = $state<ModTool[]>([]);
@@ -214,6 +219,11 @@
         loadingTools = false;
       }
     }
+
+    // Check Steam integration status (Linux only)
+    try {
+      steamStatus = await checkSteamStatus();
+    } catch { /* not on Linux or Steam not available */ }
 
   });
 
@@ -539,6 +549,26 @@
           type="button"
           role="switch"
           aria-checked={$controllerMode}
+        >
+          <span class="toggle-thumb"></span>
+        </button>
+      </div>
+      <div class="card-row appearance-row">
+        <div class="toggle-info">
+          <span class="row-label">Per-Profile Saves</span>
+          <span class="toggle-description">Backup and restore game saves when switching mod profiles</span>
+        </div>
+        <button
+          class="toggle-switch"
+          class:toggle-on={$config?.profile_saves_enabled === "true"}
+          onclick={() => {
+            const current = $config?.profile_saves_enabled === "true";
+            const next = !current;
+            setConfigValue("profile_saves_enabled", String(next)).catch(() => {});
+          }}
+          type="button"
+          role="switch"
+          aria-checked={$config?.profile_saves_enabled === "true"}
         >
           <span class="toggle-thumb"></span>
         </button>
@@ -1206,6 +1236,58 @@
               >Download</a>
             </div>
           {/each}
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  <!-- Steam / Linux Integration -->
+  {#if steamStatus}
+    <div class="section">
+      <h2 class="section-title">Steam Integration</h2>
+      <div class="section-card">
+        <div class="card-row">
+          <span class="row-label">Steam</span>
+          <span class="row-value">{steamStatus.installed ? "Detected" : "Not found"}</span>
+        </div>
+        {#if steamStatus.is_deck}
+          <div class="card-row">
+            <span class="row-label">Device</span>
+            <span class="row-value">Steam Deck</span>
+          </div>
+        {/if}
+        <div class="card-row">
+          <span class="row-label">Library Status</span>
+          <div class="row-value" style="display: flex; align-items: center; gap: 8px;">
+            {#if steamStatus.registered}
+              <span style="color: var(--green);">Registered</span>
+              <button
+                class="btn-ghost btn-sm"
+                onclick={async () => { steamLoading = true; try { await removeFromSteam(); steamStatus = await checkSteamStatus(); showSuccess("Removed from Steam"); } catch (e) { showError(`Failed: ${e}`); } finally { steamLoading = false; } }}
+                disabled={steamLoading}
+                type="button"
+              >Remove</button>
+            {:else}
+              <span style="color: var(--text-tertiary);">Not registered</span>
+              {#if steamStatus.installed}
+                <button
+                  class="btn btn-accent btn-sm"
+                  onclick={async () => { steamLoading = true; try { steamStatus = await addToSteam(); showSuccess("Added to Steam library"); } catch (e) { showError(`Failed: ${e}`); } finally { steamLoading = false; } }}
+                  disabled={steamLoading}
+                  type="button"
+                >Add to Steam</button>
+              {/if}
+            {/if}
+          </div>
+        </div>
+        <div class="card-row">
+          <span class="row-label">Controller Mode</span>
+          <div class="row-value">
+            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+              <input type="checkbox" checked={$controllerMode} onchange={(e) => controllerMode.set((e.target as HTMLInputElement).checked)} />
+              Larger touch targets for gamepad/touchscreen
+            </label>
+          </div>
         </div>
       </div>
     </div>

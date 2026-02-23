@@ -70,6 +70,15 @@ import type {
   ImportResult,
   NexusModInfo,
   NexusModFile,
+  SteamInfo,
+  SteamStatus,
+  CleanReport,
+  CleanOptions,
+  CleanResult,
+  EndorseResponse,
+  UserEndorsement,
+  ProfileSaveInfo,
+  DlcStatus,
 } from "./types";
 
 // Bottles
@@ -479,6 +488,31 @@ export async function activateProfile(
   return invoke("activate_profile", { profileId, gameId, bottleName });
 }
 
+// Profile Save Management
+export async function getProfileSaveInfo(
+  profileId: number,
+  gameId: string,
+  bottleName: string
+): Promise<ProfileSaveInfo> {
+  return invoke("get_profile_save_info", { profileId, gameId, bottleName });
+}
+
+export async function backupProfileSaves(
+  profileId: number,
+  gameId: string,
+  bottleName: string
+): Promise<number> {
+  return invoke("backup_profile_saves", { profileId, gameId, bottleName });
+}
+
+export async function restoreProfileSaves(
+  profileId: number,
+  gameId: string,
+  bottleName: string
+): Promise<number> {
+  return invoke("restore_profile_saves", { profileId, gameId, bottleName });
+}
+
 // Update Checking
 export async function checkModUpdates(
   gameId: string,
@@ -507,6 +541,14 @@ export async function getFomodFiles(
   return invoke("get_fomod_files", { installer, selections });
 }
 
+// DLC Detection
+export async function checkDlcStatus(
+  gameId: string,
+  bottleName: string
+): Promise<DlcStatus> {
+  return invoke("check_dlc_status", { gameId, bottleName });
+}
+
 // Integrity
 export async function createGameSnapshot(
   gameId: string,
@@ -527,6 +569,22 @@ export async function hasGameSnapshot(
   bottleName: string
 ): Promise<boolean> {
   return invoke("has_game_snapshot", { gameId, bottleName });
+}
+
+// Game Directory Cleaner
+export async function scanGameDirectory(
+  gameId: string,
+  bottleName: string
+): Promise<CleanReport> {
+  return invoke("scan_game_directory", { gameId, bottleName });
+}
+
+export async function cleanGameDirectory(
+  gameId: string,
+  bottleName: string,
+  options: CleanOptions
+): Promise<CleanResult> {
+  return invoke("clean_game_directory", { gameId, bottleName, options });
 }
 
 // Wabbajack Modlists
@@ -658,6 +716,26 @@ export async function getNexusModDetail(
   modId: number,
 ): Promise<NexusModInfo> {
   return invoke("get_nexus_mod_detail", { gameSlug, modId });
+}
+
+// NexusMods Endorsements
+export async function endorseMod(
+  gameSlug: string,
+  modId: number,
+  version?: string
+): Promise<EndorseResponse> {
+  return invoke("endorse_mod", { gameSlug, modId, version: version ?? null });
+}
+
+export async function abstainMod(
+  gameSlug: string,
+  modId: number
+): Promise<EndorseResponse> {
+  return invoke("abstain_mod", { gameSlug, modId });
+}
+
+export async function getUserEndorsements(): Promise<UserEndorsement[]> {
+  return invoke("get_user_endorsements");
 }
 
 // NexusMods Search (GraphQL v2)
@@ -1458,4 +1536,34 @@ export async function downloadAndInstallNexusMod(
     gameId,
     bottleName,
   });
+}
+
+// --- Download Cache ---
+
+export async function checkCachedFiles(
+  modFilePairs: [number, number][],
+): Promise<[number, number][]> {
+  return invoke("check_cached_files", { modFilePairs });
+}
+
+// --- Steam Integration ---
+
+export async function detectSteam(): Promise<SteamInfo | null> {
+  return invoke("detect_steam");
+}
+
+export async function checkSteamStatus(): Promise<SteamStatus> {
+  return invoke("check_steam_status");
+}
+
+export async function addToSteam(): Promise<SteamStatus> {
+  return invoke("add_to_steam");
+}
+
+export async function removeFromSteam(): Promise<void> {
+  return invoke("remove_from_steam");
+}
+
+export async function isSteamDeck(): Promise<boolean> {
+  return invoke("is_steam_deck");
 }

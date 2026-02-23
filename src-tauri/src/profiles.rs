@@ -414,6 +414,201 @@ pub fn snapshot_current_state(
 }
 
 // ---------------------------------------------------------------------------
+// Profile save management
+// ---------------------------------------------------------------------------
+
+/// Get the directory where a profile's saves are backed up.
+///
+/// Layout: `<staging_root>/saves/<game_id>/<sanitized_bottle>/<profile_id>/`
+pub fn profile_saves_dir(game_id: &str, bottle_name: &str, profile_id: i64) -> std::path::PathBuf {
+    let sanitized_bottle = bottle_name.replace(['/', '\\', ' '], "_");
+    crate::config::data_dir()
+        .join("saves")
+        .join(game_id)
+        .join(sanitized_bottle)
+        .join(profile_id.to_string())
+}
+
+/// Backup saves from the game save directory to the profile's save backup dir.
+///
+/// This copies all save files from `saves_dir` into the profile-specific backup.
+/// Existing backup files for this profile are replaced.
+pub fn backup_saves(
+    profile_id: i64,
+    game_id: &str,
+    bottle_name: &str,
+    saves_dir: &Path,
+) -> Result<usize> {
+    use std::fs;
+    use walkdir::WalkDir;
+
+    if !saves_dir.exists() {
+        log::info!(
+            "Saves dir does not exist for {}/{}, nothing to backup",
+            game_id,
+            bottle_name
+        );
+        return Ok(0);
+    }
+
+    let backup_dir = profile_saves_dir(game_id, bottle_name, profile_id);
+
+    // Clear existing backup
+    if backup_dir.exists() {
+        fs::remove_dir_all(&backup_dir)
+            .map_err(|e| ProfileError::Other(format!("Failed to clear save backup: {}", e)))?;
+    }
+    fs::create_dir_all(&backup_dir)
+        .map_err(|e| ProfileError::Other(format!("Failed to create save backup dir: {}", e)))?;
+
+    let mut count = 0;
+    for entry in WalkDir::new(saves_dir).into_iter().filter_map(|e| e.ok()) {
+        let src = entry.path();
+        let relative = match src.strip_prefix(saves_dir) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+
+        let dest = backup_dir.join(relative);
+
+        if entry.file_type().is_dir() {
+            let _ = fs::create_dir_all(&dest);
+        } else if entry.file_type().is_file() {
+            if let Some(parent) = dest.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            fs::copy(src, &dest)
+                .map_err(|e| ProfileError::Other(format!("Failed to copy save {}: {}", src.display(), e)))?;
+            count += 1;
+        }
+    }
+
+    log::info!(
+        "Backed up {} save files for profile {} ({}/{})",
+        count,
+        profile_id,
+        game_id,
+        bottle_name
+    );
+
+    Ok(count)
+}
+
+/// Restore saves from a profile's backup into the game save directory.
+///
+/// This clears the current save directory and copies the backed-up files in.
+/// If the profile has no backed-up saves, the save directory is left untouched.
+pub fn restore_saves(
+    profile_id: i64,
+    game_id: &str,
+    bottle_name: &str,
+    saves_dir: &Path,
+) -> Result<usize> {
+    use std::fs;
+    use walkdir::WalkDir;
+
+    let backup_dir = profile_saves_dir(game_id, bottle_name, profile_id);
+    if !backup_dir.exists() {
+        log::info!(
+            "No save backup exists for profile {} ({}/{})",
+            profile_id,
+            game_id,
+            bottle_name
+        );
+        return Ok(0);
+    }
+
+    // Clear current saves
+    if saves_dir.exists() {
+        fs::remove_dir_all(saves_dir)
+            .map_err(|e| ProfileError::Other(format!("Failed to clear save dir: {}", e)))?;
+    }
+    fs::create_dir_all(saves_dir)
+        .map_err(|e| ProfileError::Other(format!("Failed to create save dir: {}", e)))?;
+
+    let mut count = 0;
+    for entry in WalkDir::new(&backup_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let src = entry.path();
+        let relative = match src.strip_prefix(&backup_dir) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+
+        let dest = saves_dir.join(relative);
+
+        if entry.file_type().is_dir() {
+            let _ = fs::create_dir_all(&dest);
+        } else if entry.file_type().is_file() {
+            if let Some(parent) = dest.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            fs::copy(src, &dest)
+                .map_err(|e| ProfileError::Other(format!("Failed to restore save {}: {}", src.display(), e)))?;
+            count += 1;
+        }
+    }
+
+    log::info!(
+        "Restored {} save files for profile {} ({}/{})",
+        count,
+        profile_id,
+        game_id,
+        bottle_name
+    );
+
+    Ok(count)
+}
+
+/// Get info about a profile's backed-up saves.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProfileSaveInfo {
+    pub profile_id: i64,
+    pub file_count: usize,
+    pub total_size: u64,
+    pub has_backup: bool,
+}
+
+/// Check if a profile has backed-up saves and get stats.
+pub fn get_profile_save_info(
+    profile_id: i64,
+    game_id: &str,
+    bottle_name: &str,
+) -> ProfileSaveInfo {
+    let backup_dir = profile_saves_dir(game_id, bottle_name, profile_id);
+
+    if !backup_dir.exists() {
+        return ProfileSaveInfo {
+            profile_id,
+            file_count: 0,
+            total_size: 0,
+            has_backup: false,
+        };
+    }
+
+    let mut file_count = 0;
+    let mut total_size: u64 = 0;
+    for entry in walkdir::WalkDir::new(&backup_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if entry.file_type().is_file() {
+            file_count += 1;
+            total_size += entry.metadata().map(|m| m.len()).unwrap_or(0);
+        }
+    }
+
+    ProfileSaveInfo {
+        profile_id,
+        file_count,
+        total_size,
+        has_backup: file_count > 0,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

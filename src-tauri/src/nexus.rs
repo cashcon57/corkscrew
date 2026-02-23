@@ -863,6 +863,147 @@ impl NexusClient {
         self.download_file(&link.uri, download_dir, progress_callback)
             .await
     }
+
+    // -- Endorsements -------------------------------------------------------
+
+    /// POST JSON to a NexusMods API endpoint.
+    async fn post_json(
+        &self,
+        url: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value> {
+        self.rate_limit.throttle().await;
+
+        let mut req = self.client.post(url);
+        if let Some(b) = body {
+            req = req.json(&b);
+        }
+
+        let response = req.send().await?;
+        self.rate_limit.update_from_response(&response);
+        let status = response.status();
+
+        if status.as_u16() == 429 {
+            let retry_after = response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(5);
+            return Err(NexusError::RateLimited { retry_after });
+        }
+
+        if !status.is_success() {
+            let message = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "no response body".into());
+            return Err(NexusError::Api {
+                status: status.as_u16(),
+                message,
+            });
+        }
+
+        Ok(response.json().await?)
+    }
+
+    /// Endorse a mod on NexusMods.
+    ///
+    /// Returns the new endorsement status (e.g., "Endorsed").
+    pub async fn endorse_mod(
+        &self,
+        game_slug: &str,
+        mod_id: i64,
+        version: Option<&str>,
+    ) -> Result<EndorseResponse> {
+        let url = format!("{NEXUS_API_BASE}/games/{game_slug}/mods/{mod_id}/endorse.json");
+        let body = version.map(|v| serde_json::json!({ "Version": v }));
+        let json = self.post_json(&url, body).await?;
+        Ok(EndorseResponse {
+            status: json
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unknown")
+                .to_string(),
+            message: json
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        })
+    }
+
+    /// Abstain from endorsing a mod on NexusMods.
+    pub async fn abstain_mod(
+        &self,
+        game_slug: &str,
+        mod_id: i64,
+    ) -> Result<EndorseResponse> {
+        let url = format!("{NEXUS_API_BASE}/games/{game_slug}/mods/{mod_id}/abstain.json");
+        let json = self.post_json(&url, None).await?;
+        Ok(EndorseResponse {
+            status: json
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unknown")
+                .to_string(),
+            message: json
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        })
+    }
+
+    /// Get the user's endorsement list to determine which mods they've endorsed.
+    pub async fn get_user_endorsements(&self) -> Result<Vec<UserEndorsement>> {
+        let url = format!("{NEXUS_API_BASE}/user/endorsements.json");
+        let json = self.get_json(&url).await?;
+
+        let endorsements = json
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| {
+                        Some(UserEndorsement {
+                            mod_id: v.get("mod_id").and_then(|x| x.as_i64())?,
+                            domain_name: v
+                                .get("domain_name")
+                                .and_then(|x| x.as_str())?
+                                .to_string(),
+                            status: v
+                                .get("status")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("Undecided")
+                                .to_string(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(endorsements)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Endorsement types
+// ---------------------------------------------------------------------------
+
+/// Response from an endorse/abstain API call.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EndorseResponse {
+    pub status: String,
+    pub message: String,
+}
+
+/// A single endorsement entry from the user's endorsement list.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UserEndorsement {
+    pub mod_id: i64,
+    pub domain_name: String,
+    /// "Endorsed", "Abstained", or "Undecided"
+    pub status: String,
 }
 
 // ---------------------------------------------------------------------------

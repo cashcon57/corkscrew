@@ -44,6 +44,12 @@ pub trait GamePlugin: Send + Sync {
     /// Return the path to the plugin load-order file (e.g. `plugins.txt`),
     /// if applicable for this game. Not all games use plugin files.
     fn get_plugins_file(&self, game_path: &Path, bottle: &Bottle) -> Option<PathBuf>;
+
+    /// Return the directory where game saves are stored, if known.
+    /// Used for per-profile save management.
+    fn get_saves_dir(&self, _game_path: &Path, _bottle: &Bottle) -> Option<PathBuf> {
+        None // Default: game doesn't have a known saves directory
+    }
 }
 
 // ---------------------------------------------------------------------------

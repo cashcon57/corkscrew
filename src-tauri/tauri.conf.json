@@ -72,6 +72,7 @@
     ],
     "macOS": {
       "minimumSystemVersion": "10.15",
+      "entitlements": "./Entitlements.plist",
       "dmg": {
         "appPosition": {
           "x": 180,

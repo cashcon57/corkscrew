@@ -1,0 +1,735 @@
+//! Game directory cleaner for pre-install preparation.
+//!
+//! Scans the game data directory against the baseline snapshot to identify
+//! non-stock files (leftover mods, loose scripts, textures, etc.) and provides
+//! options to clean them before a fresh collection install.
+//!
+//! The cleaner leverages the existing integrity snapshot system
+//! (`game_file_snapshots`) rather than maintaining a hardcoded vanilla file
+//! list, making it game-agnostic.
+
+use std::collections::HashSet;
+use std::fs;
+use std::io;
+use std::path::Path;
+
+use log::{info, warn};
+use rusqlite::params;
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+use walkdir::WalkDir;
+
+use crate::database::ModDatabase;
+
+// ---------------------------------------------------------------------------
+// Error type
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Error)]
+pub enum CleanerError {
+    #[error("SQLite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+
+    #[error("I/O error: {0}")]
+    Io(#[from] io::Error),
+
+    #[error("WalkDir error: {0}")]
+    WalkDir(#[from] walkdir::Error),
+
+    #[error("No baseline snapshot exists for {0}/{1}. Run the game once to create a snapshot, then try again.")]
+    NoSnapshot(String, String),
+
+    #[error("{0}")]
+    Other(String),
+}
+
+pub type Result<T> = std::result::Result<T, CleanerError>;
+
+// ---------------------------------------------------------------------------
+// Data types
+// ---------------------------------------------------------------------------
+
+/// Report from scanning the game directory for non-stock files.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CleanReport {
+    /// Files present on disk that are NOT in the baseline snapshot.
+    pub non_stock_files: Vec<NonStockFile>,
+    /// Total size of all non-stock files in bytes.
+    pub total_size: u64,
+    /// Number of files in the baseline snapshot.
+    pub snapshot_file_count: usize,
+    /// Number of files currently on disk.
+    pub disk_file_count: usize,
+    /// Files that are tracked in the deployment manifest (managed by Corkscrew).
+    pub managed_count: usize,
+    /// Files that are NOT tracked — true orphans from manual installs or other tools.
+    pub orphaned_count: usize,
+    /// ENB-related files detected (d3d11.dll, enbseries/, etc.).
+    pub enb_files: Vec<String>,
+    /// Save-related files detected (excluded from cleaning by default).
+    pub save_files: Vec<String>,
+}
+
+/// A single non-stock file with metadata.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NonStockFile {
+    /// Path relative to the data directory.
+    pub relative_path: String,
+    /// File size in bytes.
+    pub size: u64,
+    /// Whether this file is tracked in the deployment manifest.
+    pub is_managed: bool,
+    /// File category (plugin, mesh, texture, script, bsa, enb, other).
+    pub category: String,
+}
+
+/// Options for the clean operation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CleanOptions {
+    /// Remove loose mod files (meshes, textures, scripts, plugins).
+    pub remove_loose_files: bool,
+    /// Remove non-stock BSA/BA2 archives.
+    pub remove_archives: bool,
+    /// Remove ENB files (d3d11.dll, enbseries/, etc.).
+    pub remove_enb: bool,
+    /// Only remove unmanaged/orphaned files (skip files tracked in manifest).
+    pub orphans_only: bool,
+    /// Preview what would be removed without actually deleting.
+    pub dry_run: bool,
+    /// Glob patterns to exclude from cleaning (e.g., "SKSE/Plugins/*").
+    pub exclude_patterns: Vec<String>,
+}
+
+impl Default for CleanOptions {
+    fn default() -> Self {
+        Self {
+            remove_loose_files: true,
+            remove_archives: true,
+            remove_enb: false,
+            orphans_only: false,
+            dry_run: false,
+            exclude_patterns: Vec::new(),
+        }
+    }
+}
+
+/// Result of a clean operation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CleanResult {
+    /// Files that were removed (or would be removed in dry_run mode).
+    pub removed_files: Vec<String>,
+    /// Files that were skipped due to exclude patterns or options.
+    pub skipped_files: Vec<String>,
+    /// Total bytes freed (or that would be freed).
+    pub bytes_freed: u64,
+    /// Whether this was a dry run.
+    pub dry_run: bool,
+}
+
+// ---------------------------------------------------------------------------
+// ENB / save detection patterns
+// ---------------------------------------------------------------------------
+
+/// Known ENB-related files and directories (case-insensitive check).
+const ENB_PATTERNS: &[&str] = &[
+    "d3d11.dll",
+    "d3d9.dll",
+    "d3dcompiler_46e.dll",
+    "enbseries",
+    "enblocal.ini",
+    "enbseries.ini",
+    "enbadaptation.fx",
+    "enbbloom.fx",
+    "enbeffect.fx",
+    "enbeffectprepass.fx",
+    "enblens.fx",
+    "enbpalette",
+];
+
+/// Save file extensions and directories (case-insensitive).
+const SAVE_PATTERNS: &[&str] = &[
+    ".ess",     // Skyrim saves
+    ".skse",    // SKSE co-saves
+    ".bak",     // Save backups
+    "saves/",   // Save directory
+];
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/// Scan the game data directory for non-stock files.
+///
+/// Compares all files on disk against the baseline snapshot stored in
+/// `game_file_snapshots`. Any file not in the snapshot is considered
+/// non-stock. Also cross-references the `deployment_manifest` to
+/// distinguish managed files from orphans.
+pub fn scan_game_directory(
+    db: &ModDatabase,
+    game_id: &str,
+    bottle_name: &str,
+    data_dir: &Path,
+) -> Result<CleanReport> {
+    let conn = db
+        .conn()
+        .map_err(|e| CleanerError::Other(e.to_string()))?;
+
+    // Load snapshot paths into a HashSet for O(1) lookup
+    let mut stmt = conn.prepare(
+        "SELECT relative_path FROM game_file_snapshots
+         WHERE game_id = ?1 AND bottle_name = ?2",
+    )?;
+    let snapshot_paths: HashSet<String> = stmt
+        .query_map(params![game_id, bottle_name], |row| row.get::<_, String>(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    if snapshot_paths.is_empty() {
+        return Err(CleanerError::NoSnapshot(
+            game_id.to_string(),
+            bottle_name.to_string(),
+        ));
+    }
+
+    // Load deployment manifest paths into a HashSet
+    let mut manifest_stmt = conn.prepare(
+        "SELECT relative_path FROM deployment_manifest
+         WHERE game_id = ?1 AND bottle_name = ?2",
+    )?;
+    let managed_paths: HashSet<String> = manifest_stmt
+        .query_map(params![game_id, bottle_name], |row| row.get::<_, String>(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let mut non_stock_files = Vec::new();
+    let mut enb_files = Vec::new();
+    let mut save_files = Vec::new();
+    let mut total_size: u64 = 0;
+    let mut disk_file_count = 0usize;
+    let mut managed_count = 0usize;
+    let mut orphaned_count = 0usize;
+
+    for entry in WalkDir::new(data_dir).into_iter().filter_map(|e| e.ok()) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        let abs_path = entry.path();
+        let relative = match abs_path.strip_prefix(data_dir) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+
+        let rel_str = relative.to_string_lossy().replace('\\', "/");
+        disk_file_count += 1;
+
+        // Skip files that are in the baseline snapshot (stock files)
+        if snapshot_paths.contains(&rel_str) {
+            continue;
+        }
+
+        // Check if it's a save file
+        if is_save_file(&rel_str) {
+            save_files.push(rel_str.clone());
+            continue;
+        }
+
+        let file_size = fs::metadata(abs_path).map(|m| m.len()).unwrap_or(0);
+        let is_managed = managed_paths.contains(&rel_str);
+        let is_enb = is_enb_file(&rel_str);
+        let category = categorize_file(&rel_str);
+
+        if is_enb {
+            enb_files.push(rel_str.clone());
+        }
+
+        if is_managed {
+            managed_count += 1;
+        } else {
+            orphaned_count += 1;
+        }
+
+        total_size += file_size;
+
+        non_stock_files.push(NonStockFile {
+            relative_path: rel_str,
+            size: file_size,
+            is_managed,
+            category,
+        });
+    }
+
+    Ok(CleanReport {
+        non_stock_files,
+        total_size,
+        snapshot_file_count: snapshot_paths.len(),
+        disk_file_count,
+        managed_count,
+        orphaned_count,
+        enb_files,
+        save_files,
+    })
+}
+
+/// Clean non-stock files from the game directory based on provided options.
+pub fn clean_game_directory(
+    db: &ModDatabase,
+    game_id: &str,
+    bottle_name: &str,
+    data_dir: &Path,
+    options: &CleanOptions,
+) -> Result<CleanResult> {
+    // First, scan to get the full report
+    let report = scan_game_directory(db, game_id, bottle_name, data_dir)?;
+
+    let mut removed_files = Vec::new();
+    let mut skipped_files = Vec::new();
+    let mut bytes_freed: u64 = 0;
+
+    for file in &report.non_stock_files {
+        // Check exclude patterns
+        if matches_exclude_pattern(&file.relative_path, &options.exclude_patterns) {
+            skipped_files.push(file.relative_path.clone());
+            continue;
+        }
+
+        // Check orphans_only filter
+        if options.orphans_only && file.is_managed {
+            skipped_files.push(file.relative_path.clone());
+            continue;
+        }
+
+        // Check category filters
+        let dominated_by_category = match file.category.as_str() {
+            "enb" => !options.remove_enb,
+            "bsa" | "ba2" => !options.remove_archives,
+            _ => !options.remove_loose_files,
+        };
+
+        if dominated_by_category {
+            skipped_files.push(file.relative_path.clone());
+            continue;
+        }
+
+        // This file should be removed
+        let abs_path = data_dir.join(&file.relative_path);
+
+        if options.dry_run {
+            removed_files.push(file.relative_path.clone());
+            bytes_freed += file.size;
+        } else if abs_path.exists() {
+            match fs::remove_file(&abs_path) {
+                Ok(()) => {
+                    removed_files.push(file.relative_path.clone());
+                    bytes_freed += file.size;
+                    // Prune empty parent directories
+                    prune_empty_dirs(&abs_path, data_dir);
+                }
+                Err(e) => {
+                    warn!("Failed to remove {}: {}", abs_path.display(), e);
+                    skipped_files.push(file.relative_path.clone());
+                }
+            }
+        }
+    }
+
+    // If not dry_run and we removed managed files, also clear their manifest entries
+    if !options.dry_run && !options.orphans_only {
+        // Clear deployment manifest for this game/bottle since we're cleaning everything
+        let conn = db
+            .conn()
+            .map_err(|e| CleanerError::Other(e.to_string()))?;
+        conn.execute(
+            "DELETE FROM deployment_manifest WHERE game_id = ?1 AND bottle_name = ?2",
+            params![game_id, bottle_name],
+        )?;
+
+        // Also clear installed_files arrays in installed_mods and disable mods
+        conn.execute(
+            "UPDATE installed_mods SET enabled = 0 WHERE game_id = ?1 AND bottle_name = ?2",
+            params![game_id, bottle_name],
+        )?;
+    }
+
+    if !options.dry_run {
+        info!(
+            "Cleaned game directory for {}/{}: {} files removed ({} bytes freed), {} skipped",
+            game_id,
+            bottle_name,
+            removed_files.len(),
+            bytes_freed,
+            skipped_files.len()
+        );
+    }
+
+    Ok(CleanResult {
+        removed_files,
+        skipped_files,
+        bytes_freed,
+        dry_run: options.dry_run,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Categorize a file based on its extension/path.
+fn categorize_file(rel_path: &str) -> String {
+    let lower = rel_path.to_lowercase();
+
+    if is_enb_file(rel_path) {
+        return "enb".to_string();
+    }
+
+    // BSA/BA2 archives
+    if lower.ends_with(".bsa") || lower.ends_with(".ba2") {
+        return "bsa".to_string();
+    }
+
+    // Plugin files
+    if lower.ends_with(".esp")
+        || lower.ends_with(".esm")
+        || lower.ends_with(".esl")
+    {
+        return "plugin".to_string();
+    }
+
+    // Meshes
+    if lower.contains("meshes/") || lower.ends_with(".nif") {
+        return "mesh".to_string();
+    }
+
+    // Textures
+    if lower.contains("textures/") || lower.ends_with(".dds") {
+        return "texture".to_string();
+    }
+
+    // Scripts
+    if lower.contains("scripts/") || lower.ends_with(".pex") || lower.ends_with(".psc") {
+        return "script".to_string();
+    }
+
+    // Sound/music
+    if lower.contains("sound/") || lower.contains("music/") || lower.ends_with(".wav") || lower.ends_with(".xwm") || lower.ends_with(".fuz") {
+        return "sound".to_string();
+    }
+
+    // Interface/UI
+    if lower.contains("interface/") || lower.ends_with(".swf") {
+        return "interface".to_string();
+    }
+
+    // SKSE plugins
+    if lower.contains("skse/") || lower.ends_with(".dll") {
+        return "skse".to_string();
+    }
+
+    "other".to_string()
+}
+
+/// Check if a file is ENB-related (case-insensitive).
+fn is_enb_file(rel_path: &str) -> bool {
+    let lower = rel_path.to_lowercase();
+    for pattern in ENB_PATTERNS {
+        if lower.starts_with(pattern) || lower.contains(&format!("/{}", pattern)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Check if a file is a save file.
+fn is_save_file(rel_path: &str) -> bool {
+    let lower = rel_path.to_lowercase();
+    for pattern in SAVE_PATTERNS {
+        if pattern.ends_with('/') {
+            if lower.starts_with(pattern) || lower.contains(&format!("/{}", pattern)) {
+                return true;
+            }
+        } else if lower.ends_with(pattern) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Check if a file matches any exclude pattern.
+/// Supports simple glob-like matching: * matches any sequence of non-/ characters.
+fn matches_exclude_pattern(rel_path: &str, patterns: &[String]) -> bool {
+    let lower = rel_path.to_lowercase();
+    for pattern in patterns {
+        let pat_lower = pattern.to_lowercase().replace('\\', "/");
+        if simple_glob_match(&pat_lower, &lower) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Simple glob matcher supporting * as wildcard for any sequence of characters.
+fn simple_glob_match(pattern: &str, text: &str) -> bool {
+    let parts: Vec<&str> = pattern.split('*').collect();
+    if parts.len() == 1 {
+        // No wildcards — exact match or prefix
+        return text == pattern || text.starts_with(pattern);
+    }
+
+    let mut pos = 0;
+    for (i, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        match text[pos..].find(part) {
+            Some(found) => {
+                // First part must match at start
+                if i == 0 && found != 0 {
+                    return false;
+                }
+                pos += found + part.len();
+            }
+            None => return false,
+        }
+    }
+
+    // Last part must match at end if pattern doesn't end with *
+    if !pattern.ends_with('*') {
+        if let Some(last_part) = parts.last() {
+            if !last_part.is_empty() {
+                return text.ends_with(last_part);
+            }
+        }
+    }
+
+    true
+}
+
+/// Walk up from a removed file and prune empty directories up to (not including)
+/// `stop_at`.
+fn prune_empty_dirs(removed_file: &Path, stop_at: &Path) {
+    let mut current = removed_file.parent().map(|p| p.to_path_buf());
+    while let Some(dir) = current {
+        if dir == stop_at || !dir.starts_with(stop_at) {
+            break;
+        }
+        // Try to remove — will only succeed if empty
+        if fs::remove_dir(&dir).is_err() {
+            break;
+        }
+        current = dir.parent().map(|p| p.to_path_buf());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::integrity;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    fn test_db() -> (ModDatabase, TempDir) {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("test.db");
+        let db = ModDatabase::new(&db_path).unwrap();
+        integrity::init_schema(&db).unwrap();
+        (db, tmp)
+    }
+
+    #[test]
+    fn scan_identifies_non_stock_files() {
+        let (db, tmp) = test_db();
+        let data_dir = tmp.path().join("data");
+        fs::create_dir_all(data_dir.join("meshes")).unwrap();
+
+        // Stock files
+        fs::write(data_dir.join("Skyrim.esm"), b"master").unwrap();
+        fs::write(data_dir.join("meshes/vanilla.nif"), b"mesh").unwrap();
+
+        // Create baseline snapshot
+        integrity::create_game_snapshot(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+
+        // Add non-stock files
+        fs::write(data_dir.join("mod.esp"), b"mod plugin").unwrap();
+        fs::write(data_dir.join("meshes/modded.nif"), b"modded mesh").unwrap();
+
+        let report = scan_game_directory(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+        assert_eq!(report.non_stock_files.len(), 2);
+        assert_eq!(report.snapshot_file_count, 2);
+        assert_eq!(report.disk_file_count, 4);
+        assert_eq!(report.orphaned_count, 2);
+        assert!(report.total_size > 0);
+    }
+
+    #[test]
+    fn scan_detects_enb_files() {
+        let (db, tmp) = test_db();
+        let data_dir = tmp.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+
+        fs::write(data_dir.join("Skyrim.esm"), b"master").unwrap();
+        integrity::create_game_snapshot(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+
+        // Add ENB files
+        fs::write(data_dir.join("d3d11.dll"), b"enb").unwrap();
+        fs::create_dir_all(data_dir.join("enbseries")).unwrap();
+        fs::write(data_dir.join("enbseries/effect.fx"), b"fx").unwrap();
+
+        let report = scan_game_directory(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+        assert_eq!(report.enb_files.len(), 2);
+    }
+
+    #[test]
+    fn scan_excludes_save_files() {
+        let (db, tmp) = test_db();
+        let data_dir = tmp.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+
+        fs::write(data_dir.join("Skyrim.esm"), b"master").unwrap();
+        integrity::create_game_snapshot(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+
+        // Add save files
+        fs::write(data_dir.join("quicksave.ess"), b"save").unwrap();
+        fs::write(data_dir.join("quicksave.skse"), b"cosave").unwrap();
+
+        // Add a mod file
+        fs::write(data_dir.join("mod.esp"), b"mod").unwrap();
+
+        let report = scan_game_directory(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+        assert_eq!(report.save_files.len(), 2);
+        assert_eq!(report.non_stock_files.len(), 1); // Only mod.esp
+    }
+
+    #[test]
+    fn clean_dry_run_removes_nothing() {
+        let (db, tmp) = test_db();
+        let data_dir = tmp.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+
+        fs::write(data_dir.join("Skyrim.esm"), b"master").unwrap();
+        integrity::create_game_snapshot(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+
+        fs::write(data_dir.join("mod.esp"), b"mod").unwrap();
+
+        let options = CleanOptions {
+            dry_run: true,
+            ..Default::default()
+        };
+
+        let result =
+            clean_game_directory(&db, "skyrimse", "Gaming", &data_dir, &options).unwrap();
+        assert_eq!(result.removed_files.len(), 1);
+        assert!(result.dry_run);
+
+        // File should still exist
+        assert!(data_dir.join("mod.esp").exists());
+    }
+
+    #[test]
+    fn clean_removes_non_stock_files() {
+        let (db, tmp) = test_db();
+        let data_dir = tmp.path().join("data");
+        fs::create_dir_all(data_dir.join("meshes")).unwrap();
+
+        fs::write(data_dir.join("Skyrim.esm"), b"master").unwrap();
+        integrity::create_game_snapshot(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+
+        fs::write(data_dir.join("mod.esp"), b"mod plugin").unwrap();
+        fs::write(data_dir.join("meshes/modded.nif"), b"modded").unwrap();
+
+        let options = CleanOptions::default();
+        let result =
+            clean_game_directory(&db, "skyrimse", "Gaming", &data_dir, &options).unwrap();
+
+        assert_eq!(result.removed_files.len(), 2);
+        assert!(!result.dry_run);
+        assert!(!data_dir.join("mod.esp").exists());
+        assert!(!data_dir.join("meshes/modded.nif").exists());
+        // Stock file should remain
+        assert!(data_dir.join("Skyrim.esm").exists());
+    }
+
+    #[test]
+    fn clean_respects_exclude_patterns() {
+        let (db, tmp) = test_db();
+        let data_dir = tmp.path().join("data");
+        fs::create_dir_all(data_dir.join("SKSE/Plugins")).unwrap();
+
+        fs::write(data_dir.join("Skyrim.esm"), b"master").unwrap();
+        integrity::create_game_snapshot(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+
+        fs::write(data_dir.join("mod.esp"), b"mod").unwrap();
+        fs::write(
+            data_dir.join("SKSE/Plugins/important.dll"),
+            b"keep this",
+        )
+        .unwrap();
+
+        let options = CleanOptions {
+            exclude_patterns: vec!["SKSE/Plugins/*".to_string()],
+            ..Default::default()
+        };
+
+        let result =
+            clean_game_directory(&db, "skyrimse", "Gaming", &data_dir, &options).unwrap();
+
+        assert_eq!(result.removed_files.len(), 1); // Only mod.esp
+        assert_eq!(result.skipped_files.len(), 1); // SKSE plugin
+        assert!(data_dir.join("SKSE/Plugins/important.dll").exists());
+    }
+
+    #[test]
+    fn clean_skips_enb_by_default() {
+        let (db, tmp) = test_db();
+        let data_dir = tmp.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+
+        fs::write(data_dir.join("Skyrim.esm"), b"master").unwrap();
+        integrity::create_game_snapshot(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+
+        fs::write(data_dir.join("d3d11.dll"), b"enb").unwrap();
+        fs::write(data_dir.join("mod.esp"), b"mod").unwrap();
+
+        let options = CleanOptions::default(); // remove_enb = false
+        let result =
+            clean_game_directory(&db, "skyrimse", "Gaming", &data_dir, &options).unwrap();
+
+        assert_eq!(result.removed_files.len(), 1); // Only mod.esp
+        assert!(data_dir.join("d3d11.dll").exists()); // ENB preserved
+    }
+
+    #[test]
+    fn no_snapshot_returns_error() {
+        let (db, _tmp) = test_db();
+        let data_dir = PathBuf::from("/nonexistent");
+
+        let result = scan_game_directory(&db, "skyrimse", "Gaming", &data_dir);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("No baseline snapshot"));
+    }
+
+    #[test]
+    fn categorize_file_works() {
+        assert_eq!(categorize_file("mod.esp"), "plugin");
+        assert_eq!(categorize_file("mod.esm"), "plugin");
+        assert_eq!(categorize_file("meshes/armor.nif"), "mesh");
+        assert_eq!(categorize_file("textures/body.dds"), "texture");
+        assert_eq!(categorize_file("scripts/main.pex"), "script");
+        assert_eq!(categorize_file("d3d11.dll"), "enb");
+        assert_eq!(categorize_file("mod.bsa"), "bsa");
+        assert_eq!(categorize_file("readme.txt"), "other");
+    }
+
+    #[test]
+    fn glob_matching_works() {
+        assert!(simple_glob_match("SKSE/Plugins/*", "SKSE/Plugins/test.dll"));
+        assert!(simple_glob_match("*.esp", "mod.esp"));
+        assert!(!simple_glob_match("*.esp", "mod.esm"));
+        assert!(simple_glob_match("meshes/*", "meshes/armor.nif"));
+        assert!(!simple_glob_match("meshes/*", "textures/body.dds"));
+    }
+}

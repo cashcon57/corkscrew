@@ -98,6 +98,12 @@ impl GamePlugin for Fallout4Plugin {
         }
         Some(path)
     }
+
+    fn get_saves_dir(&self, _game_path: &Path, bottle: &Bottle) -> Option<PathBuf> {
+        let docs = bottle.documents_dir();
+        let saves = docs.join("My Games").join("Fallout4").join("Saves");
+        Some(saves)
+    }
 }
 
 // ---------------------------------------------------------------------------

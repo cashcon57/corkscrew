@@ -256,6 +256,13 @@ export interface Profile {
   created_at: string;
 }
 
+export interface ProfileSaveInfo {
+  profile_id: number;
+  file_count: number;
+  total_size: number;
+  has_backup: boolean;
+}
+
 export interface ModUpdateInfo {
   mod_id: number;
   nexus_mod_id: number;
@@ -271,6 +278,56 @@ export interface IntegrityReport {
   unknown_files: string[];
   missing_files: string[];
   total_scanned: number;
+}
+
+// Game Directory Cleaner
+
+export interface NonStockFile {
+  relative_path: string;
+  size: number;
+  is_managed: boolean;
+  category: string;
+}
+
+export interface CleanReport {
+  non_stock_files: NonStockFile[];
+  total_size: number;
+  snapshot_file_count: number;
+  disk_file_count: number;
+  managed_count: number;
+  orphaned_count: number;
+  enb_files: string[];
+  save_files: string[];
+}
+
+export interface CleanOptions {
+  remove_loose_files: boolean;
+  remove_archives: boolean;
+  remove_enb: boolean;
+  orphans_only: boolean;
+  dry_run: boolean;
+  exclude_patterns: string[];
+}
+
+export interface CleanResult {
+  removed_files: string[];
+  skipped_files: string[];
+  bytes_freed: number;
+  dry_run: boolean;
+}
+
+// DLC Detection
+
+export interface DlcStatus {
+  all_present: boolean;
+  dlcs: DlcInfo[];
+  game_initialized: boolean;
+}
+
+export interface DlcInfo {
+  name: string;
+  present: boolean;
+  missing_files: string[];
 }
 
 // Wabbajack Modlists
@@ -423,6 +480,19 @@ export interface NexusSearchResult {
   total_count: number;
   offset: number;
   has_more: boolean;
+}
+
+// Endorsements
+
+export interface EndorseResponse {
+  status: string;
+  message: string;
+}
+
+export interface UserEndorsement {
+  mod_id: number;
+  domain_name: string;
+  status: string;
 }
 
 export interface NexusCategory {
@@ -1095,4 +1165,17 @@ export interface WabbajackInstallStatus {
   total_directives: number;
   completed_directives: number;
   error_message: string | null;
+}
+
+// Steam Integration
+export interface SteamInfo {
+  steam_root: string;
+  userdata_dirs: string[];
+  is_steam_deck: boolean;
+}
+
+export interface SteamStatus {
+  installed: boolean;
+  registered: boolean;
+  is_deck: boolean;
 }

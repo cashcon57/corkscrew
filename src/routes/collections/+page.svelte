@@ -30,10 +30,16 @@
     getIncompleteCollectionInstalls,
     resumeCollectionInstall,
     abandonCollectionInstall,
+    checkCachedFiles,
+    scanGameDirectory,
+    cleanGameDirectory,
+    hasGameSnapshot,
+    checkDlcStatus,
+    launchGame,
   } from "$lib/api";
   import { startInstallTracking, stopInstallTracking, resumeInstallTracking } from "$lib/installService";
   import { listen } from "@tauri-apps/api/event";
-  import type { CollectionSummary, CollectionDiff, RequiredTool } from "$lib/types";
+  import type { CollectionSummary, CollectionDiff, RequiredTool, CleanReport, CleanOptions, DlcStatus } from "$lib/types";
   import { config } from "$lib/stores";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { marked } from "marked";
@@ -320,16 +326,23 @@
   let showCollectionsAdvancedFilters = $state(false);
   let collectionsAuthorTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // Download cache percentage per collection (slug → { cached, total })
+  let cacheData = $state<Map<string, { cached: number; total: number }>>(new Map());
+  let cacheFilter = $state<"all" | "90" | "100">("all");
+  let loadingCache = $state(false);
+
   const collectionsActiveFilterCount = $derived(
     (collectionsAuthorFilter.trim() ? 1 : 0) +
     (collectionsMinDownloads !== null ? 1 : 0) +
-    (collectionsMinEndorsements !== null ? 1 : 0)
+    (collectionsMinEndorsements !== null ? 1 : 0) +
+    (cacheFilter !== "all" ? 1 : 0)
   );
 
   function clearAllCollectionsFilters() {
     collectionsAuthorFilter = "";
     collectionsMinDownloads = null;
     collectionsMinEndorsements = null;
+    cacheFilter = "all";
     reloadWithSort();
   }
 
@@ -360,6 +373,26 @@
   let showToolsPrompt = $state(false);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let pendingManifest = $state<(CollectionManifest & Record<string, unknown>) | null>(null);
+
+  // Pre-install cleanup
+  let showCleanupModal = $state(false);
+  let cleanReport = $state<CleanReport | null>(null);
+  let cleanScanning = $state(false);
+  let cleanRunning = $state(false);
+  let cleanOptions = $state<CleanOptions>({
+    remove_loose_files: true,
+    remove_archives: true,
+    remove_enb: false,
+    orphans_only: false,
+    dry_run: false,
+    exclude_patterns: [],
+  });
+  let cleanExcludeInput = $state("");
+
+  // DLC Detection
+  let showDlcWarning = $state(false);
+  let dlcStatus = $state<DlcStatus | null>(null);
+  let dlcLaunching = $state(false);
 
   // ---- Mod Browse State ----
   let browseMods = $state<NexusModInfo[]>([]);
@@ -725,6 +758,17 @@
       result = result.filter(c => c.adult_content);
     }
 
+    // Cache filter
+    if (cacheFilter !== "all") {
+      const threshold = cacheFilter === "100" ? 100 : 90;
+      result = result.filter(c => {
+        const data = cacheData.get(c.slug);
+        if (!data || data.total === 0) return false;
+        const pct = Math.round((data.cached / data.total) * 100);
+        return pct >= threshold;
+      });
+    }
+
     filtered = result;
   });
 
@@ -862,10 +906,60 @@
       );
       collections = result.collections;
       collectionsTotalCount = result.total_count;
+      // Compute download cache percentages in background
+      computeCachePercentages(result.collections);
     } catch (e: unknown) {
       showError(`Failed to load collections: ${e}`);
     } finally {
       loading = false;
+    }
+  }
+
+  /** Fetch mod lists for visible collections and compute cache percentages. */
+  async function computeCachePercentages(cols: CollectionInfo[]) {
+    if (cols.length === 0) return;
+    loadingCache = true;
+    try {
+      // Fetch mod lists for all visible collections in parallel
+      const modLists = await Promise.allSettled(
+        cols.map(c => getCollectionMods(c.slug, c.latest_revision))
+      );
+
+      // Build a global set of (mod_id, file_id) pairs + per-collection index
+      const allPairs: [number, number][] = [];
+      const collectionPairMap = new Map<string, [number, number][]>();
+
+      for (let i = 0; i < cols.length; i++) {
+        const result = modLists[i];
+        if (result.status !== "fulfilled") continue;
+
+        const mods = result.value;
+        const pairs: [number, number][] = [];
+        for (const mod of mods) {
+          if (mod.nexus_mod_id != null && mod.nexus_file_id != null) {
+            pairs.push([mod.nexus_mod_id, mod.nexus_file_id]);
+          }
+        }
+        collectionPairMap.set(cols[i].slug, pairs);
+        allPairs.push(...pairs);
+      }
+
+      // Single batch call to backend
+      const cachedPairs = allPairs.length > 0 ? await checkCachedFiles(allPairs) : [];
+      const cachedSet = new Set(cachedPairs.map(p => `${p[0]}:${p[1]}`));
+
+      // Compute per-collection stats
+      const newCacheData = new Map<string, { cached: number; total: number }>();
+      for (const [slug, pairs] of collectionPairMap) {
+        const cached = pairs.filter(p => cachedSet.has(`${p[0]}:${p[1]}`)).length;
+        newCacheData.set(slug, { cached, total: pairs.length });
+      }
+
+      cacheData = newCacheData;
+    } catch (e) {
+      console.warn("[cache] Failed to compute cache percentages:", e);
+    } finally {
+      loadingCache = false;
     }
   }
 
@@ -964,7 +1058,149 @@
       // Tool detection is best-effort; proceed with install if it fails
     }
 
-    await proceedWithInstall(manifest);
+    // Check if game directory needs cleaning before install
+    await checkPreInstallCleanup(manifest);
+  }
+
+  async function checkPreInstallCleanup(manifest: CollectionManifest & Record<string, unknown>) {
+    if (!$selectedGame) return;
+
+    try {
+      // Check DLC status first
+      const dlc = await checkDlcStatus($selectedGame.game_id, $selectedGame.bottle_name);
+      if (!dlc.all_present && dlc.dlcs.length > 0) {
+        dlcStatus = dlc;
+        pendingManifest = manifest;
+        showDlcWarning = true;
+        return;
+      }
+
+      // Only offer cleanup if a baseline snapshot exists
+      const hasSnap = await hasGameSnapshot($selectedGame.game_id, $selectedGame.bottle_name);
+      if (!hasSnap) {
+        // No snapshot = can't determine stock vs non-stock, skip cleanup
+        await proceedWithInstall(manifest);
+        return;
+      }
+
+      cleanScanning = true;
+      pendingManifest = manifest;
+
+      const report = await scanGameDirectory($selectedGame.game_id, $selectedGame.bottle_name);
+      cleanScanning = false;
+
+      if (report.non_stock_files.length === 0) {
+        // Game directory is already clean
+        await proceedWithInstall(manifest);
+        return;
+      }
+
+      // Show cleanup modal
+      cleanReport = report;
+      showCleanupModal = true;
+    } catch {
+      // Cleanup scan is best-effort; proceed if it fails
+      cleanScanning = false;
+      await proceedWithInstall(manifest);
+    }
+  }
+
+  async function handleCleanAndInstall() {
+    if (!$selectedGame || !pendingManifest) return;
+
+    cleanRunning = true;
+    try {
+      // Parse exclude patterns from the input
+      const patterns = cleanExcludeInput
+        .split("\n")
+        .map((p) => p.trim())
+        .filter((p) => p.length > 0);
+      const options: CleanOptions = {
+        ...cleanOptions,
+        exclude_patterns: patterns,
+        dry_run: false,
+      };
+
+      const result = await cleanGameDirectory(
+        $selectedGame.game_id,
+        $selectedGame.bottle_name,
+        options
+      );
+
+      showSuccess(`Cleaned ${result.removed_files.length} files (${formatSize(result.bytes_freed)} freed)`);
+    } catch (e) {
+      showError(`Cleanup failed: ${e}`);
+    } finally {
+      cleanRunning = false;
+      showCleanupModal = false;
+      cleanReport = null;
+    }
+
+    // Proceed with the install
+    await proceedWithInstall(pendingManifest);
+  }
+
+  function handleSkipCleanup() {
+    showCleanupModal = false;
+    cleanReport = null;
+    if (pendingManifest) {
+      proceedWithInstall(pendingManifest);
+    }
+  }
+
+  function handleCancelCleanup() {
+    showCleanupModal = false;
+    cleanReport = null;
+    pendingManifest = null;
+  }
+
+  async function handleDlcContinue() {
+    // User chose to continue despite missing DLC
+    showDlcWarning = false;
+    dlcStatus = null;
+    if (pendingManifest) {
+      // Continue to cleanup check
+      const manifest = pendingManifest;
+      if (!$selectedGame) return;
+      try {
+        const hasSnap = await hasGameSnapshot($selectedGame.game_id, $selectedGame.bottle_name);
+        if (!hasSnap) {
+          await proceedWithInstall(manifest);
+          return;
+        }
+        cleanScanning = true;
+        const report = await scanGameDirectory($selectedGame.game_id, $selectedGame.bottle_name);
+        cleanScanning = false;
+        if (report.non_stock_files.length === 0) {
+          await proceedWithInstall(manifest);
+          return;
+        }
+        cleanReport = report;
+        showCleanupModal = true;
+      } catch {
+        cleanScanning = false;
+        await proceedWithInstall(manifest);
+      }
+    }
+  }
+
+  async function handleDlcLaunchGame() {
+    if (!$selectedGame) return;
+    dlcLaunching = true;
+    try {
+      await launchGame($selectedGame.game_id, $selectedGame.bottle_name, false);
+      showSuccess("Game launched. Close it after reaching the main menu, then try installing again.");
+    } catch (e) {
+      showError(`Failed to launch game: ${e}`);
+    } finally {
+      dlcLaunching = false;
+    }
+  }
+
+  function handleDlcCancel() {
+    showDlcWarning = false;
+    dlcStatus = null;
+    pendingManifest = null;
   }
 
   async function proceedWithInstall(manifest: CollectionManifest & Record<string, unknown>) {
@@ -2397,6 +2633,15 @@
               <button class="filter-pill" class:active={collectionsMinEndorsements === 10000} onclick={() => { collectionsMinEndorsements = 10000; reloadWithSort(); }}>10K+</button>
             </div>
           </div>
+
+          <div class="filter-section">
+            <label class="filter-label">Download Cache {#if loadingCache}<span class="spinner-xs"></span>{/if}</label>
+            <div class="filter-pills">
+              <button class="filter-pill" class:active={cacheFilter === "all"} onclick={() => { cacheFilter = "all"; }}>All</button>
+              <button class="filter-pill" class:active={cacheFilter === "90"} onclick={() => { cacheFilter = "90"; }}>90%+ Cached</button>
+              <button class="filter-pill" class:active={cacheFilter === "100"} onclick={() => { cacheFilter = "100"; }}>100% Cached</button>
+            </div>
+          </div>
         </div>
       {/if}
 
@@ -2418,6 +2663,12 @@
             <span class="filter-chip">
               Endorsements: {formatNumber(collectionsMinEndorsements)}+
               <button onclick={() => { collectionsMinEndorsements = null; reloadWithSort(); }}>&times;</button>
+            </span>
+          {/if}
+          {#if cacheFilter !== "all"}
+            <span class="filter-chip">
+              Cache: {cacheFilter === "100" ? "100%" : "90%+"}
+              <button onclick={() => { cacheFilter = "all"; }}>&times;</button>
             </span>
           {/if}
           <button class="filter-chip filter-chip-clear" onclick={clearAllCollectionsFilters}>
@@ -2521,6 +2772,25 @@
                   {/if}
                 </div>
 
+                {#if cacheData.has(collection.slug)}
+                  {@const cd = cacheData.get(collection.slug)}
+                  {#if cd && cd.total > 0}
+                    {@const pct = Math.round((cd.cached / cd.total) * 100)}
+                    <div class="cache-badge" class:cache-full={pct === 100} class:cache-high={pct >= 90 && pct < 100}>
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                        {#if pct === 100}
+                          <polyline points="20 6 9 17 4 12" />
+                        {:else}
+                          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                          <polyline points="7 10 12 15 17 10" />
+                          <line x1="12" y1="15" x2="12" y2="3" />
+                        {/if}
+                      </svg>
+                      {pct}% cached
+                    </div>
+                  {/if}
+                {/if}
+
                 <div class="card-actions">
                   <button
                     class="btn btn-accent btn-sm"
@@ -2585,6 +2855,159 @@
       pendingTools = [];
     }}
   />
+{/if}
+
+<!-- DLC Warning Modal -->
+{#if showDlcWarning && dlcStatus}
+  <div class="modal-overlay" onclick={handleDlcCancel} role="presentation">
+    <div class="cleanup-modal" onclick={(e) => e.stopPropagation()} role="dialog" aria-label="DLC warning">
+      <div class="cleanup-header">
+        <h3 class="cleanup-title">Missing DLC Files</h3>
+        <button class="cleanup-close" onclick={handleDlcCancel}>&times;</button>
+      </div>
+
+      <div class="cleanup-body">
+        <div class="cleanup-summary">
+          {#if !dlcStatus.game_initialized}
+            <p class="cleanup-info">
+              The game hasn't been initialized yet. You need to <strong>launch the game at least once</strong>
+              so it can create its configuration files and extract DLC content.
+            </p>
+          {:else}
+            <p class="cleanup-info">
+              Some DLC files are missing from the game directory. Many collection mods depend on DLC content.
+              You may need to <strong>launch the game once</strong> to initialize DLC, or verify your game files through Steam/GOG.
+            </p>
+          {/if}
+        </div>
+
+        <div class="dlc-list">
+          {#each dlcStatus.dlcs as dlc}
+            <div class="dlc-item" class:dlc-present={dlc.present} class:dlc-missing={!dlc.present}>
+              <span class="dlc-icon">{dlc.present ? '✓' : '✗'}</span>
+              <span class="dlc-name">{dlc.name}</span>
+              {#if !dlc.present && dlc.missing_files.length > 0}
+                <span class="dlc-detail">Missing: {dlc.missing_files.join(', ')}</span>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      </div>
+
+      <div class="cleanup-actions">
+        <button class="btn btn-ghost" onclick={handleDlcCancel}>Cancel</button>
+        <button class="btn btn-secondary" onclick={handleDlcLaunchGame} disabled={dlcLaunching}>
+          {dlcLaunching ? 'Launching...' : 'Launch Game to Initialize'}
+        </button>
+        <button class="btn btn-primary" onclick={handleDlcContinue}>Install Anyway</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- Pre-Install Cleanup Modal -->
+{#if showCleanupModal && cleanReport}
+  <div class="modal-overlay" onclick={handleCancelCleanup} role="presentation">
+    <div class="cleanup-modal" onclick={(e) => e.stopPropagation()} role="dialog" aria-label="Pre-install cleanup">
+      <div class="cleanup-header">
+        <h3 class="cleanup-title">Pre-Install Cleanup</h3>
+        <button class="cleanup-close" onclick={handleCancelCleanup}>&times;</button>
+      </div>
+
+      <div class="cleanup-body">
+        <div class="cleanup-summary">
+          <p class="cleanup-info">
+            Found <strong>{cleanReport.non_stock_files.length}</strong> non-stock files
+            ({formatSize(cleanReport.total_size)}) in the game directory.
+            Cleaning these before installing a collection ensures a fresh start.
+          </p>
+
+          <div class="cleanup-stats">
+            <div class="cleanup-stat">
+              <span class="cleanup-stat-value">{cleanReport.orphaned_count}</span>
+              <span class="cleanup-stat-label">Orphaned</span>
+            </div>
+            <div class="cleanup-stat">
+              <span class="cleanup-stat-value">{cleanReport.managed_count}</span>
+              <span class="cleanup-stat-label">Managed</span>
+            </div>
+            {#if cleanReport.enb_files.length > 0}
+              <div class="cleanup-stat">
+                <span class="cleanup-stat-value">{cleanReport.enb_files.length}</span>
+                <span class="cleanup-stat-label">ENB Files</span>
+              </div>
+            {/if}
+            {#if cleanReport.save_files.length > 0}
+              <div class="cleanup-stat">
+                <span class="cleanup-stat-value">{cleanReport.save_files.length}</span>
+                <span class="cleanup-stat-label">Saves (safe)</span>
+              </div>
+            {/if}
+          </div>
+        </div>
+
+        <div class="cleanup-options">
+          <h4>Clean Options</h4>
+          <label class="cleanup-checkbox">
+            <input type="checkbox" bind:checked={cleanOptions.remove_loose_files} />
+            Remove loose mod files (plugins, meshes, textures, scripts)
+          </label>
+          <label class="cleanup-checkbox">
+            <input type="checkbox" bind:checked={cleanOptions.remove_archives} />
+            Remove non-stock BSA/BA2 archives
+          </label>
+          <label class="cleanup-checkbox">
+            <input type="checkbox" bind:checked={cleanOptions.remove_enb} />
+            Remove ENB files ({cleanReport.enb_files.length} found)
+          </label>
+          <label class="cleanup-checkbox">
+            <input type="checkbox" bind:checked={cleanOptions.orphans_only} />
+            Only remove orphaned files (skip Corkscrew-managed files)
+          </label>
+        </div>
+
+        <details class="cleanup-advanced">
+          <summary>Exclude Patterns</summary>
+          <p class="cleanup-hint">One glob pattern per line (e.g., <code>SKSE/Plugins/*</code>)</p>
+          <textarea
+            class="cleanup-exclude-input"
+            bind:value={cleanExcludeInput}
+            placeholder="SKSE/Plugins/*&#10;SkyUI_SE.bsa"
+            rows="3"
+          ></textarea>
+        </details>
+
+        {#if cleanReport.save_files.length > 0}
+          <div class="cleanup-save-notice">
+            Save files ({cleanReport.save_files.length}) are automatically excluded from cleanup.
+          </div>
+        {/if}
+      </div>
+
+      <div class="cleanup-footer">
+        <button class="btn btn-ghost" onclick={handleCancelCleanup} disabled={cleanRunning}>Cancel</button>
+        <button class="btn btn-secondary" onclick={handleSkipCleanup} disabled={cleanRunning}>Skip & Install</button>
+        <button class="btn btn-primary" onclick={handleCleanAndInstall} disabled={cleanRunning}>
+          {#if cleanRunning}
+            <div class="spinner-sm"></div>
+            Cleaning...
+          {:else}
+            Clean & Install
+          {/if}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- Scanning overlay -->
+{#if cleanScanning}
+  <div class="modal-overlay" role="presentation">
+    <div class="cleanup-scanning">
+      <div class="spinner-sm"></div>
+      <span>Scanning game directory...</span>
+    </div>
+  </div>
 {/if}
 
 <!-- File Picker Modal -->
@@ -3354,7 +3777,31 @@
     color: var(--text-tertiary);
   }
 
-  /* removed .size-estimate — replaced by actual download sizes */
+  .cache-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    padding: 3px 8px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--separator);
+    margin-bottom: var(--space-2);
+  }
+
+  .cache-badge.cache-full {
+    color: var(--green, #30d158);
+    background: rgba(48, 209, 88, 0.1);
+    border-color: rgba(48, 209, 88, 0.25);
+  }
+
+  .cache-badge.cache-high {
+    color: var(--accent, #d98f40);
+    background: rgba(217, 143, 64, 0.1);
+    border-color: rgba(217, 143, 64, 0.25);
+  }
 
   .card-actions {
     display: flex;
@@ -5390,5 +5837,250 @@
     color: #ef4444;
     margin: 0 0 4px 0;
     line-height: 1.4;
+  }
+
+  /* Pre-Install Cleanup Modal */
+  .cleanup-modal {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-primary);
+    border-radius: 12px;
+    width: 560px;
+    max-width: 90vw;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+  }
+
+  .cleanup-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border-primary);
+  }
+
+  .cleanup-title {
+    font-size: 16px;
+    font-weight: 600;
+    margin: 0;
+    color: var(--text-primary);
+  }
+
+  .cleanup-close {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 20px;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 4px;
+    line-height: 1;
+  }
+
+  .cleanup-close:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+  }
+
+  .cleanup-body {
+    padding: 20px;
+    overflow-y: auto;
+    flex: 1;
+  }
+
+  .cleanup-summary {
+    margin-bottom: 16px;
+  }
+
+  .cleanup-info {
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin: 0 0 12px 0;
+    line-height: 1.5;
+  }
+
+  .cleanup-info strong {
+    color: var(--text-primary);
+  }
+
+  .cleanup-stats {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  .cleanup-stat {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    background: var(--bg-tertiary);
+    padding: 8px 16px;
+    border-radius: 8px;
+    min-width: 80px;
+  }
+
+  .cleanup-stat-value {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+  }
+
+  .cleanup-stat-label {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-top: 2px;
+  }
+
+  .cleanup-options {
+    margin-bottom: 16px;
+  }
+
+  .cleanup-options h4 {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0 0 8px 0;
+  }
+
+  .cleanup-checkbox {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--text-secondary);
+    padding: 4px 0;
+    cursor: pointer;
+  }
+
+  .cleanup-checkbox input[type="checkbox"] {
+    accent-color: var(--system-accent);
+    width: 16px;
+    height: 16px;
+  }
+
+  .cleanup-advanced {
+    margin-bottom: 12px;
+  }
+
+  .cleanup-advanced summary {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    cursor: pointer;
+    padding: 4px 0;
+  }
+
+  .cleanup-advanced summary:hover {
+    color: var(--text-primary);
+  }
+
+  .cleanup-hint {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin: 8px 0 4px 0;
+  }
+
+  .cleanup-hint code {
+    background: var(--bg-tertiary);
+    padding: 1px 4px;
+    border-radius: 3px;
+    font-size: 11px;
+  }
+
+  .cleanup-exclude-input {
+    width: 100%;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-primary);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    padding: 8px;
+    resize: vertical;
+  }
+
+  .cleanup-exclude-input:focus {
+    outline: none;
+    border-color: var(--system-accent);
+  }
+
+  .cleanup-save-notice {
+    font-size: 12px;
+    color: #22c55e;
+    background: rgba(34, 197, 94, 0.1);
+    border: 1px solid rgba(34, 197, 94, 0.2);
+    border-radius: 6px;
+    padding: 8px 12px;
+  }
+
+  .cleanup-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 16px 20px;
+    border-top: 1px solid var(--border-primary);
+  }
+
+  .cleanup-scanning {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-primary);
+    border-radius: 8px;
+    padding: 16px 24px;
+    color: var(--text-secondary);
+    font-size: 13px;
+  }
+
+  /* DLC Warning Modal */
+  .dlc-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 12px;
+  }
+
+  .dlc-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--bg-tertiary);
+    border-radius: 6px;
+    font-size: 13px;
+  }
+
+  .dlc-icon {
+    font-size: 14px;
+    width: 18px;
+    text-align: center;
+    flex-shrink: 0;
+  }
+
+  .dlc-present .dlc-icon {
+    color: #22c55e;
+  }
+
+  .dlc-missing .dlc-icon {
+    color: #ef4444;
+  }
+
+  .dlc-name {
+    font-weight: 500;
+    color: var(--text-primary);
+  }
+
+  .dlc-present .dlc-name {
+    opacity: 0.6;
+  }
+
+  .dlc-detail {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-left: auto;
+    font-family: var(--font-mono);
   }
 </style>

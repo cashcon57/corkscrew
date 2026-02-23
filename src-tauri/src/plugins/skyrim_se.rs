@@ -102,6 +102,15 @@ impl GamePlugin for SkyrimSEPlugin {
         }
         Some(path)
     }
+
+    fn get_saves_dir(&self, _game_path: &Path, bottle: &Bottle) -> Option<PathBuf> {
+        let docs = bottle.documents_dir();
+        let saves = docs
+            .join("My Games")
+            .join("Skyrim Special Edition")
+            .join("Saves");
+        Some(saves)
+    }
 }
 
 // ---------------------------------------------------------------------------
