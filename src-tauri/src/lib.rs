@@ -1631,135 +1631,139 @@ fn switch_collection_cmd(
 }
 
 #[tauri::command]
-fn delete_collection_cmd(
+async fn delete_collection_cmd(
     game_id: String,
     bottle_name: String,
     collection_name: String,
     delete_unique_downloads: bool,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
-    let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
-    let db = &state.db;
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
 
-    // Get mods in this collection
-    let collection_mods = db
-        .list_mods_by_collection(&game_id, &bottle_name, &collection_name)
-        .map_err(|e| e.to_string())?;
+        // Get mods in this collection
+        let collection_mods = db
+            .list_mods_by_collection(&game_id, &bottle_name, &collection_name)
+            .map_err(|e| e.to_string())?;
 
-    let mut mods_removed = 0usize;
-    let mut downloads_removed = 0usize;
-    let mut errors: Vec<String> = Vec::new();
+        let mut mods_removed = 0usize;
+        let mut downloads_removed = 0usize;
+        let mut errors: Vec<String> = Vec::new();
 
-    // Collect plugin filenames for rule cleanup
-    let mut plugin_names: Vec<String> = Vec::new();
+        // Collect plugin filenames for rule cleanup
+        let mut plugin_names: Vec<String> = Vec::new();
 
-    for m in &collection_mods {
-        // Gather plugin filenames before removal
-        for file in &m.installed_files {
-            let lower = file.to_lowercase();
-            if lower.ends_with(".esp") || lower.ends_with(".esm") || lower.ends_with(".esl") {
-                if let Some(fname) = Path::new(file).file_name().and_then(|f| f.to_str()) {
-                    plugin_names.push(fname.to_string());
-                }
-            }
-        }
-
-        // Undeploy
-        if let Err(e) = deployer::undeploy_mod(db, &game_id, &bottle_name, m.id, &data_dir) {
-            errors.push(format!("Failed to undeploy '{}': {}", m.name, e));
-        }
-
-        // Clean orphaned rollback staging directories
-        if let Err(e) = rollback::cleanup_mod_version_staging(db, m.id) {
-            errors.push(format!("Failed to clean rollback staging for '{}': {}", m.name, e));
-        }
-
-        // Remove staging
-        if let Some(sp) = &m.staging_path {
-            if let Err(e) = std::fs::remove_dir_all(sp) {
-                if Path::new(sp).exists() {
-                    errors.push(format!("Failed to remove staging for '{}': {}", m.name, e));
-                }
-            }
-        }
-
-        // Find download record — try nexus IDs first, fall back to archive name
-        let download = if let (Some(nmod_id), Some(nfile_id)) = (m.nexus_mod_id, m.nexus_file_id) {
-            db.find_download_by_nexus_ids(nmod_id, nfile_id).ok().flatten()
-        } else {
-            None
-        }
-        .or_else(|| db.find_download_by_name(&m.archive_name).ok().flatten());
-
-        if let Some(dl) = download {
-            // Check uniqueness before removing the ref
-            let is_unique = db
-                .is_download_unique_to_collection(dl.id, &collection_name)
-                .unwrap_or(false);
-
-            // Optionally delete the actual archive file if unique to this collection
-            if delete_unique_downloads && is_unique {
-                if let Err(e) = std::fs::remove_file(&dl.archive_path) {
-                    if Path::new(&dl.archive_path).exists() {
-                        errors.push(format!("Failed to delete download for '{}': {}", m.name, e));
+        for m in &collection_mods {
+            // Gather plugin filenames before removal
+            for file in &m.installed_files {
+                let lower = file.to_lowercase();
+                if lower.ends_with(".esp") || lower.ends_with(".esm") || lower.ends_with(".esl") {
+                    if let Some(fname) = Path::new(file).file_name().and_then(|f| f.to_str()) {
+                        plugin_names.push(fname.to_string());
                     }
-                } else {
-                    downloads_removed += 1;
                 }
             }
 
-            // Always clean up the collection ref
-            if let Err(e) = db.remove_download_collection_ref(
-                dl.id,
-                &collection_name,
-                &game_id,
-                &bottle_name,
-            ) {
-                errors.push(format!("Failed to remove download ref for '{}': {}", m.name, e));
+            // Undeploy
+            if let Err(e) = deployer::undeploy_mod(&db, &game_id, &bottle_name, m.id, &data_dir) {
+                errors.push(format!("Failed to undeploy '{}': {}", m.name, e));
+            }
+
+            // Clean orphaned rollback staging directories
+            if let Err(e) = rollback::cleanup_mod_version_staging(&db, m.id) {
+                errors.push(format!("Failed to clean rollback staging for '{}': {}", m.name, e));
+            }
+
+            // Remove staging
+            if let Some(sp) = &m.staging_path {
+                if let Err(e) = std::fs::remove_dir_all(sp) {
+                    if Path::new(sp).exists() {
+                        errors.push(format!("Failed to remove staging for '{}': {}", m.name, e));
+                    }
+                }
+            }
+
+            // Find download record — try nexus IDs first, fall back to archive name
+            let download = if let (Some(nmod_id), Some(nfile_id)) = (m.nexus_mod_id, m.nexus_file_id) {
+                db.find_download_by_nexus_ids(nmod_id, nfile_id).ok().flatten()
+            } else {
+                None
+            }
+            .or_else(|| db.find_download_by_name(&m.archive_name).ok().flatten());
+
+            if let Some(dl) = download {
+                // Check uniqueness before removing the ref
+                let is_unique = db
+                    .is_download_unique_to_collection(dl.id, &collection_name)
+                    .unwrap_or(false);
+
+                // Optionally delete the actual archive file if unique to this collection
+                if delete_unique_downloads && is_unique {
+                    if let Err(e) = std::fs::remove_file(&dl.archive_path) {
+                        if Path::new(&dl.archive_path).exists() {
+                            errors.push(format!("Failed to delete download for '{}': {}", m.name, e));
+                        }
+                    } else {
+                        downloads_removed += 1;
+                    }
+                }
+
+                // Always clean up the collection ref
+                if let Err(e) = db.remove_download_collection_ref(
+                    dl.id,
+                    &collection_name,
+                    &game_id,
+                    &bottle_name,
+                ) {
+                    errors.push(format!("Failed to remove download ref for '{}': {}", m.name, e));
+                }
+            }
+
+            // Remove from DB (cascades deployment_manifest, file_hashes; also cleans profile_mods)
+            if let Err(e) = db.remove_mod(m.id) {
+                errors.push(format!("Failed to remove mod '{}' from DB: {}", m.name, e));
+            } else {
+                mods_removed += 1;
             }
         }
 
-        // Remove from DB (cascades deployment_manifest, file_hashes; also cleans profile_mods)
-        if let Err(e) = db.remove_mod(m.id) {
-            errors.push(format!("Failed to remove mod '{}' from DB: {}", m.name, e));
-        } else {
-            mods_removed += 1;
+        // Clean orphaned download_registry rows
+        if let Err(e) = db.cleanup_orphaned_downloads() {
+            errors.push(format!("Failed to clean orphaned downloads: {}", e));
         }
-    }
 
-    // Clean orphaned download_registry rows
-    if let Err(e) = db.cleanup_orphaned_downloads() {
-        errors.push(format!("Failed to clean orphaned downloads: {}", e));
-    }
-
-    // Clean plugin rules for removed mods' plugins
-    if !plugin_names.is_empty() {
-        if let Err(e) =
-            loot_rules::remove_rules_for_plugins(db, &game_id, &bottle_name, &plugin_names)
-        {
-            errors.push(format!("Failed to clean plugin rules: {}", e));
+        // Clean plugin rules for removed mods' plugins
+        if !plugin_names.is_empty() {
+            if let Err(e) =
+                loot_rules::remove_rules_for_plugins(&db, &game_id, &bottle_name, &plugin_names)
+            {
+                errors.push(format!("Failed to clean plugin rules: {}", e));
+            }
         }
-    }
 
-    // Clean up collection metadata
-    if let Err(e) = db.remove_collection_metadata(&game_id, &bottle_name, &collection_name) {
-        errors.push(format!("Failed to remove collection metadata: {}", e));
-    }
+        // Clean up collection metadata
+        if let Err(e) = db.remove_collection_metadata(&game_id, &bottle_name, &collection_name) {
+            errors.push(format!("Failed to remove collection metadata: {}", e));
+        }
 
-    // Redeploy remaining mods to restore any files that were shadowed
-    if let Err(e) = deployer::redeploy_all(db, &game_id, &bottle_name, &data_dir) {
-        errors.push(format!("Failed to redeploy remaining mods: {}", e));
-    }
+        // Redeploy remaining mods to restore any files that were shadowed
+        if let Err(e) = deployer::redeploy_all(&db, &game_id, &bottle_name, &data_dir) {
+            errors.push(format!("Failed to redeploy remaining mods: {}", e));
+        }
 
-    if game_id == "skyrimse" {
-        let _ = sync_skyrim_plugins_for_game(&game, &bottle);
-    }
+        if game_id == "skyrimse" {
+            let _ = sync_skyrim_plugins_for_game(&game, &bottle);
+        }
 
-    Ok(serde_json::json!({
-        "mods_removed": mods_removed,
-        "downloads_removed": downloads_removed,
-        "errors": errors,
-    }))
+        Ok(serde_json::json!({
+            "mods_removed": mods_removed,
+            "downloads_removed": downloads_removed,
+            "errors": errors,
+        }))
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
 }
 
 #[tauri::command]
