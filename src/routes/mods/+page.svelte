@@ -471,7 +471,10 @@
         }
       }
       selectedModIds = new Set();
-      if (activeGame) await loadMods(activeGame);
+      if (activeGame) {
+        await loadMods(activeGame);
+        await refreshHealth(activeGame);
+      }
     } finally {
       bulkOperating = null;
     }
@@ -487,7 +490,10 @@
         }
       }
       selectedModIds = new Set();
-      if (activeGame) await loadMods(activeGame);
+      if (activeGame) {
+        await loadMods(activeGame);
+        await refreshHealth(activeGame);
+      }
     } finally {
       bulkOperating = null;
     }
@@ -502,7 +508,10 @@
         }
       }
       selectedModIds = new Set();
-      if (activeGame) await loadMods(activeGame);
+      if (activeGame) {
+        await loadMods(activeGame);
+        await refreshHealth(activeGame);
+      }
     } finally {
       bulkOperating = null;
     }
@@ -746,6 +755,7 @@
       showSuccess(`Uninstalled — ${(removed as string[]).length} files removed`);
       confirmUninstall = null;
       await loadMods(game);
+      await refreshHealth(game);
     } catch (e: unknown) {
       showError(`Uninstall failed: ${e}`);
     }
@@ -758,6 +768,7 @@
     try {
       await toggleMod(mod.id, game.game_id, game.bottle_name, !mod.enabled);
       await loadMods(game);
+      await refreshHealth(game);
     } catch (e: unknown) {
       showError(`Failed to toggle mod: ${e}`);
     } finally {
@@ -4019,6 +4030,17 @@
     display: flex;
     gap: var(--space-1);
     align-items: center;
+    position: absolute;
+    right: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 10;
+    background: var(--surface-primary);
+    padding: 2px 6px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-primary);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+    white-space: nowrap;
   }
 
   /* --- Nexus link --- */
