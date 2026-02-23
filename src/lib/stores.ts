@@ -103,11 +103,19 @@ export interface CollectionInstallStatus {
   overallProgress: number;
   downloadSpeed: number;
   downloadEta: string;
+  // Verbose log entries
+  logEntries: LogEntry[];
   // Legacy compat fields
   currentMod: string;
   step: string;
   current: number;
   total: number;
+}
+
+export interface LogEntry {
+  timestamp: number;
+  message: string;
+  level: "info" | "warn" | "error";
 }
 export const collectionInstallStatus = writable<CollectionInstallStatus | null>(null);
 

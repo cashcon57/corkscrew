@@ -1016,6 +1016,13 @@ export interface ToolInstallProgress {
   detail: string;
 }
 
+export interface ToolUpdateInfo {
+  tool_id: string;
+  tool_name: string;
+  latest_version: string;
+  update_available: boolean;
+}
+
 // Platform Detection
 
 export interface PlatformInfo {
@@ -1046,7 +1053,8 @@ export type InstallProgressEvent =
   | { kind: "installPhaseStarted"; total_mods: number }
   | { kind: "stagingPhaseStarted"; total_mods: number; max_concurrent: number }
   | { kind: "stagingModStarted"; mod_index: number; mod_name: string }
-  | { kind: "stagingModCompleted"; mod_index: number; mod_name: string };
+  | { kind: "stagingModCompleted"; mod_index: number; mod_name: string }
+  | { kind: "initializing"; message: string };
 
 // Collection Uninstall Progress Events
 

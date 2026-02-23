@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
-  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads } from "$lib/api";
+  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, checkModToolUpdate, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads } from "$lib/api";
   import { config, showError, showSuccess, selectedGame, skseStatus, currentPage, appVersion, updateReady, updateVersion, updateNotes, updateChecking, updateError, triggerUpdateCheck, controllerMode } from "$lib/stores";
-  import type { AppConfig, ModTool, PlatformInfo, ToolInstallProgress } from "$lib/types";
+  import type { AppConfig, ModTool, PlatformInfo, ToolInstallProgress, ToolUpdateInfo } from "$lib/types";
   import { listen } from "@tauri-apps/api/event";
   import ThemeToggle from "$lib/components/ThemeToggle.svelte";
   import SettingsAuthSection from "./settings-auth-section.svelte";
@@ -57,6 +57,8 @@
   let uninstallingTool = $state<string | null>(null);
   let reinstallingTool = $state<string | null>(null);
   let toolProgress = $state<Record<string, ToolInstallProgress>>({});
+  let checkingUpdate = $state<string | null>(null);
+  let toolUpdateResults = $state<Record<string, ToolUpdateInfo>>({});
 
   const game = $derived($selectedGame);
   const skse = $derived($skseStatus);
@@ -73,6 +75,10 @@
     bethini: "/icons/bethini.png",
     dyndolod: "/icons/dyndolod.png",
     skse: "/icons/skse.png",
+    // Fallout 4 tools
+    f4se: "/icons/skse.png",
+    fo4edit: "/icons/xedit.png",
+    bodyslide_fo4: "/icons/bodyslide.png",
   };
 
   // Layer icon mapping (layer icon key → image path, only for layers with real icons)
@@ -299,6 +305,24 @@
       reinstallingTool = null;
       const { [toolId]: _, ...rest } = toolProgress;
       toolProgress = rest;
+    }
+  }
+
+  async function handleCheckToolUpdate(toolId: string) {
+    if (!game) return;
+    checkingUpdate = toolId;
+    try {
+      const info = await checkModToolUpdate(toolId, game.game_id, game.bottle_name);
+      toolUpdateResults = { ...toolUpdateResults, [toolId]: info };
+      if (info.update_available) {
+        showSuccess(`Update available for ${info.tool_name}: ${info.latest_version}`);
+      } else {
+        showSuccess(`${info.tool_name} is up to date`);
+      }
+    } catch (e: unknown) {
+      showError(`Failed to check for updates: ${e}`);
+    } finally {
+      checkingUpdate = null;
     }
   }
 
@@ -616,7 +640,11 @@
                   </div>
                   <div class="tool-action">
                     {#if tool.detected_path}
-                      <span class="badge badge-green">Installed</span>
+                      {#if toolUpdateResults[tool.id]?.update_available}
+                        <span class="badge badge-amber" title="Update available: {toolUpdateResults[tool.id].latest_version}">Update</span>
+                      {:else}
+                        <span class="badge badge-green">Installed</span>
+                      {/if}
                       <button
                         class="btn-primary btn-sm"
                         onclick={() => handleLaunchTool(tool.id)}
@@ -626,6 +654,19 @@
                         {launchingTool === tool.id ? "..." : "Launch"}
                       </button>
                       {#if tool.can_auto_install}
+                        <button
+                          class="btn-secondary btn-sm"
+                          onclick={() => handleCheckToolUpdate(tool.id)}
+                          disabled={checkingUpdate === tool.id}
+                          type="button"
+                          title="Check for updates"
+                        >
+                          {#if checkingUpdate === tool.id}
+                            <span class="spinner-xs"></span>
+                          {:else}
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+                          {/if}
+                        </button>
                         <button
                           class="btn-secondary btn-sm"
                           onclick={() => handleReinstallTool(tool.id)}
@@ -708,7 +749,11 @@
                   </div>
                   <div class="tool-action">
                     {#if tool.detected_path}
-                      <span class="badge badge-green">Installed</span>
+                      {#if toolUpdateResults[tool.id]?.update_available}
+                        <span class="badge badge-amber" title="Update available: {toolUpdateResults[tool.id].latest_version}">Update</span>
+                      {:else}
+                        <span class="badge badge-green">Installed</span>
+                      {/if}
                       <button
                         class="btn-primary btn-sm"
                         onclick={() => handleLaunchTool(tool.id)}
@@ -717,6 +762,21 @@
                       >
                         {launchingTool === tool.id ? "..." : "Launch"}
                       </button>
+                      {#if tool.can_auto_install}
+                        <button
+                          class="btn-secondary btn-sm"
+                          onclick={() => handleCheckToolUpdate(tool.id)}
+                          disabled={checkingUpdate === tool.id}
+                          type="button"
+                          title="Check for updates"
+                        >
+                          {#if checkingUpdate === tool.id}
+                            <span class="spinner-xs"></span>
+                          {:else}
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+                          {/if}
+                        </button>
+                      {/if}
                       <button
                         class="btn-delete-sm"
                         onclick={() => handleUninstallTool(tool.id)}
@@ -798,6 +858,21 @@
                       >
                         {launchingTool === tool.id ? "..." : "Launch"}
                       </button>
+                      {#if tool.can_auto_install}
+                        <button
+                          class="btn-secondary btn-sm"
+                          onclick={() => handleCheckToolUpdate(tool.id)}
+                          disabled={checkingUpdate === tool.id}
+                          type="button"
+                          title="Check for updates"
+                        >
+                          {#if checkingUpdate === tool.id}
+                            <span class="spinner-xs"></span>
+                          {:else}
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+                          {/if}
+                        </button>
+                      {/if}
                       <button
                         class="btn-delete-sm"
                         onclick={() => handleUninstallTool(tool.id)}

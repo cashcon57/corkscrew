@@ -7,7 +7,7 @@
  */
 import { listen } from "@tauri-apps/api/event";
 import { collectionInstallStatus } from "$lib/stores";
-import type { CollectionInstallStatus, ModProgressDetail } from "$lib/stores";
+import type { CollectionInstallStatus, ModProgressDetail, LogEntry } from "$lib/stores";
 import type { InstallProgressEvent } from "$lib/types";
 
 let unlisten: (() => void) | null = null;
@@ -29,7 +29,7 @@ const IMMEDIATE_EVENTS = new Set([
   "stagingPhaseStarted", "installPhaseStarted",
   "modCompleted", "modFailed", "collectionCompleted",
   "userActionRequired", "downloadModStarted", "downloadModCompleted", "downloadModFailed",
-  "stagingModStarted", "stagingModCompleted",
+  "stagingModStarted", "stagingModCompleted", "initializing",
 ]);
 
 function calculateSpeed(currentBytes: number): number {
@@ -132,6 +132,7 @@ export async function startInstallTracking(
     overallProgress: 0,
     downloadSpeed: 0,
     downloadEta: "",
+    logEntries: [{ timestamp: Date.now(), message: `Starting installation of '${collectionName}' (${totalMods} mods)`, level: "info" as const }],
     // Legacy compat
     currentMod: "",
     step: "preparing",
@@ -176,12 +177,45 @@ export async function startInstallTracking(
   });
 }
 
+function logMessageForEvent(e: InstallProgressEvent): { message: string; level: LogEntry["level"] } | null {
+  switch (e.kind) {
+    case "initializing": return { message: e.message, level: "info" };
+    case "downloadPhaseStarted": return { message: `Download phase started (${e.total_downloads} files, ${e.max_concurrent} threads)`, level: "info" };
+    case "downloadModStarted": return { message: `Downloading: ${e.mod_name}`, level: "info" };
+    case "downloadModCompleted": return { message: `${e.cached ? "Cached" : "Downloaded"}: ${e.mod_name}`, level: "info" };
+    case "downloadModFailed": return { message: `Download failed: ${e.mod_name} — ${e.error}`, level: "error" };
+    case "allDownloadsCompleted": return { message: `Downloads complete (${e.downloaded} downloaded, ${e.cached} cached, ${e.failed} failed, ${e.skipped} skipped)`, level: "info" };
+    case "stagingPhaseStarted": return { message: `Extraction phase started (${e.total_mods} archives, ${e.max_concurrent} threads)`, level: "info" };
+    case "stagingModStarted": return { message: `Extracting: ${e.mod_name}`, level: "info" };
+    case "stagingModCompleted": return { message: `Extracted: ${e.mod_name}`, level: "info" };
+    case "installPhaseStarted": return { message: `Install phase started (${e.total_mods} mods)`, level: "info" };
+    case "modStarted": return { message: `Installing ${e.mod_index + 1}/${e.total_mods}: ${e.mod_name}`, level: "info" };
+    case "modCompleted": return { message: `Installed: ${e.mod_name}`, level: "info" };
+    case "modFailed": return { message: `Install failed: ${e.mod_name} — ${e.error}`, level: "error" };
+    case "userActionRequired": return { message: `Action required: ${e.mod_name} — ${e.action}`, level: "warn" };
+    case "collectionCompleted": return { message: `Collection complete (${e.installed} installed, ${e.skipped} skipped, ${e.failed} failed)`, level: e.failed > 0 ? "warn" : "info" };
+    case "stepChanged": return e.detail ? { message: `  ${e.detail}`, level: "info" } : null;
+    default: return null;
+  }
+}
+
 function handleProgressEvent(e: InstallProgressEvent) {
   collectionInstallStatus.update((s) => {
     if (!s) return s;
     const next = { ...s };
 
+    // Append log entry
+    const logMsg = logMessageForEvent(e);
+    if (logMsg) {
+      next.logEntries = [...next.logEntries, { timestamp: Date.now(), ...logMsg }];
+    }
+
     switch (e.kind) {
+      // ---- Initialization ----
+      case "initializing":
+        // Only adds to log, no state change needed
+        break;
+
       // ---- Download Phase ----
       case "downloadPhaseStarted":
         next.phase = "downloading";
@@ -453,6 +487,7 @@ export async function resumeInstallTracking(
     overallProgress: totalMods > 0 ? Math.round((completedMods / totalMods) * 100) : 0,
     downloadSpeed: 0,
     downloadEta: "",
+    logEntries: [{ timestamp: Date.now(), message: `Resuming installation of '${collectionName}' (${completedMods}/${totalMods} completed)`, level: "info" as const }],
     currentMod: "",
     step: "resuming",
     current: completedMods,

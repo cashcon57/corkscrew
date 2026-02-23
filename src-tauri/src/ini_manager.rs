@@ -50,24 +50,25 @@ pub struct IniPreset {
     pub settings: Vec<IniSetting>,
 }
 
-/// Find Skyrim INI files within a wine bottle.
+/// Find game INI files within a wine bottle.
 pub fn find_ini_files(bottle: &Bottle, game_id: &str) -> Vec<PathBuf> {
-    if game_id != "skyrimse" && game_id != "skyrim" {
-        return Vec::new();
-    }
-
     let appdata_local = bottle.appdata_local();
-    let skyrim_dir = if game_id == "skyrimse" {
-        appdata_local.join("Skyrim Special Edition")
-    } else {
-        appdata_local.join("Skyrim")
+
+    let (dir_name, ini_names): (&str, &[&str]) = match game_id {
+        "skyrimse" => (
+            "Skyrim Special Edition",
+            &["Skyrim.ini", "SkyrimPrefs.ini", "SkyrimCustom.ini"],
+        ),
+        "skyrim" => ("Skyrim", &["Skyrim.ini", "SkyrimPrefs.ini", "SkyrimCustom.ini"]),
+        "fallout4" => ("Fallout4", &["Fallout4.ini", "Fallout4Prefs.ini"]),
+        _ => return Vec::new(),
     };
 
-    let ini_names = ["Skyrim.ini", "SkyrimPrefs.ini", "SkyrimCustom.ini"];
+    let game_dir = appdata_local.join(dir_name);
     let mut found = Vec::new();
 
-    for name in &ini_names {
-        let path = skyrim_dir.join(name);
+    for name in ini_names {
+        let path = game_dir.join(name);
         if path.exists() {
             found.push(path);
         }
@@ -198,129 +199,88 @@ pub fn set_setting(path: &Path, section: &str, key: &str, value: &str) -> Result
 
 /// Get built-in presets for a game.
 pub fn builtin_presets(game_id: &str) -> Vec<IniPreset> {
-    if game_id != "skyrimse" && game_id != "skyrim" {
-        return Vec::new();
+    match game_id {
+        "skyrimse" | "skyrim" => skyrim_presets(),
+        "fallout4" => fallout4_presets(),
+        _ => Vec::new(),
     }
+}
 
+fn skyrim_presets() -> Vec<IniPreset> {
     vec![
         IniPreset {
             name: "Steam Deck Optimized".to_string(),
             description: "Optimized settings for Steam Deck (720p, medium quality)".to_string(),
             settings: vec![
-                IniSetting {
-                    file_name: "SkyrimPrefs.ini".into(),
-                    section: "Display".into(),
-                    key: "iSize W".into(),
-                    value: "1280".into(),
-                },
-                IniSetting {
-                    file_name: "SkyrimPrefs.ini".into(),
-                    section: "Display".into(),
-                    key: "iSize H".into(),
-                    value: "800".into(),
-                },
-                IniSetting {
-                    file_name: "SkyrimPrefs.ini".into(),
-                    section: "Display".into(),
-                    key: "bFull Screen".into(),
-                    value: "1".into(),
-                },
-                IniSetting {
-                    file_name: "SkyrimPrefs.ini".into(),
-                    section: "Display".into(),
-                    key: "bBorderless".into(),
-                    value: "1".into(),
-                },
-                IniSetting {
-                    file_name: "SkyrimPrefs.ini".into(),
-                    section: "Display".into(),
-                    key: "iShadowMapResolution".into(),
-                    value: "1024".into(),
-                },
-                IniSetting {
-                    file_name: "Skyrim.ini".into(),
-                    section: "General".into(),
-                    key: "bAlwaysActive".into(),
-                    value: "1".into(),
-                },
+                IniSetting { file_name: "SkyrimPrefs.ini".into(), section: "Display".into(), key: "iSize W".into(), value: "1280".into() },
+                IniSetting { file_name: "SkyrimPrefs.ini".into(), section: "Display".into(), key: "iSize H".into(), value: "800".into() },
+                IniSetting { file_name: "SkyrimPrefs.ini".into(), section: "Display".into(), key: "bFull Screen".into(), value: "1".into() },
+                IniSetting { file_name: "SkyrimPrefs.ini".into(), section: "Display".into(), key: "bBorderless".into(), value: "1".into() },
+                IniSetting { file_name: "SkyrimPrefs.ini".into(), section: "Display".into(), key: "iShadowMapResolution".into(), value: "1024".into() },
+                IniSetting { file_name: "Skyrim.ini".into(), section: "General".into(), key: "bAlwaysActive".into(), value: "1".into() },
             ],
         },
         IniPreset {
             name: "High Quality".to_string(),
             description: "Maximum visual quality for powerful systems".to_string(),
             settings: vec![
-                IniSetting {
-                    file_name: "SkyrimPrefs.ini".into(),
-                    section: "Display".into(),
-                    key: "iShadowMapResolution".into(),
-                    value: "4096".into(),
-                },
-                IniSetting {
-                    file_name: "SkyrimPrefs.ini".into(),
-                    section: "Display".into(),
-                    key: "fShadowDistance".into(),
-                    value: "8000.0000".into(),
-                },
-                IniSetting {
-                    file_name: "SkyrimPrefs.ini".into(),
-                    section: "Display".into(),
-                    key: "iMaxAnisotropy".into(),
-                    value: "16".into(),
-                },
-                IniSetting {
-                    file_name: "SkyrimPrefs.ini".into(),
-                    section: "Display".into(),
-                    key: "bTreesReceiveShadows".into(),
-                    value: "1".into(),
-                },
-                IniSetting {
-                    file_name: "SkyrimPrefs.ini".into(),
-                    section: "Display".into(),
-                    key: "bDrawLandShadows".into(),
-                    value: "1".into(),
-                },
+                IniSetting { file_name: "SkyrimPrefs.ini".into(), section: "Display".into(), key: "iShadowMapResolution".into(), value: "4096".into() },
+                IniSetting { file_name: "SkyrimPrefs.ini".into(), section: "Display".into(), key: "fShadowDistance".into(), value: "8000.0000".into() },
+                IniSetting { file_name: "SkyrimPrefs.ini".into(), section: "Display".into(), key: "iMaxAnisotropy".into(), value: "16".into() },
+                IniSetting { file_name: "SkyrimPrefs.ini".into(), section: "Display".into(), key: "bTreesReceiveShadows".into(), value: "1".into() },
+                IniSetting { file_name: "SkyrimPrefs.ini".into(), section: "Display".into(), key: "bDrawLandShadows".into(), value: "1".into() },
             ],
         },
         IniPreset {
             name: "Performance".to_string(),
             description: "Reduced quality for better frame rates".to_string(),
             settings: vec![
-                IniSetting {
-                    file_name: "SkyrimPrefs.ini".into(),
-                    section: "Display".into(),
-                    key: "iShadowMapResolution".into(),
-                    value: "512".into(),
-                },
-                IniSetting {
-                    file_name: "SkyrimPrefs.ini".into(),
-                    section: "Display".into(),
-                    key: "fShadowDistance".into(),
-                    value: "2000.0000".into(),
-                },
-                IniSetting {
-                    file_name: "SkyrimPrefs.ini".into(),
-                    section: "Display".into(),
-                    key: "bTreesReceiveShadows".into(),
-                    value: "0".into(),
-                },
-                IniSetting {
-                    file_name: "SkyrimPrefs.ini".into(),
-                    section: "Display".into(),
-                    key: "bDrawLandShadows".into(),
-                    value: "0".into(),
-                },
-                IniSetting {
-                    file_name: "SkyrimPrefs.ini".into(),
-                    section: "Display".into(),
-                    key: "iMaxAnisotropy".into(),
-                    value: "4".into(),
-                },
-                IniSetting {
-                    file_name: "Skyrim.ini".into(),
-                    section: "General".into(),
-                    key: "bAlwaysActive".into(),
-                    value: "1".into(),
-                },
+                IniSetting { file_name: "SkyrimPrefs.ini".into(), section: "Display".into(), key: "iShadowMapResolution".into(), value: "512".into() },
+                IniSetting { file_name: "SkyrimPrefs.ini".into(), section: "Display".into(), key: "fShadowDistance".into(), value: "2000.0000".into() },
+                IniSetting { file_name: "SkyrimPrefs.ini".into(), section: "Display".into(), key: "bTreesReceiveShadows".into(), value: "0".into() },
+                IniSetting { file_name: "SkyrimPrefs.ini".into(), section: "Display".into(), key: "bDrawLandShadows".into(), value: "0".into() },
+                IniSetting { file_name: "SkyrimPrefs.ini".into(), section: "Display".into(), key: "iMaxAnisotropy".into(), value: "4".into() },
+                IniSetting { file_name: "Skyrim.ini".into(), section: "General".into(), key: "bAlwaysActive".into(), value: "1".into() },
+            ],
+        },
+    ]
+}
+
+fn fallout4_presets() -> Vec<IniPreset> {
+    vec![
+        IniPreset {
+            name: "Steam Deck Optimized".to_string(),
+            description: "Optimized settings for Steam Deck (720p, medium quality)".to_string(),
+            settings: vec![
+                IniSetting { file_name: "Fallout4Prefs.ini".into(), section: "Display".into(), key: "iSize W".into(), value: "1280".into() },
+                IniSetting { file_name: "Fallout4Prefs.ini".into(), section: "Display".into(), key: "iSize H".into(), value: "800".into() },
+                IniSetting { file_name: "Fallout4Prefs.ini".into(), section: "Display".into(), key: "bFull Screen".into(), value: "1".into() },
+                IniSetting { file_name: "Fallout4Prefs.ini".into(), section: "Display".into(), key: "bBorderless".into(), value: "1".into() },
+                IniSetting { file_name: "Fallout4Prefs.ini".into(), section: "Display".into(), key: "iShadowMapResolution".into(), value: "1024".into() },
+                IniSetting { file_name: "Fallout4.ini".into(), section: "General".into(), key: "bAlwaysActive".into(), value: "1".into() },
+            ],
+        },
+        IniPreset {
+            name: "High Quality".to_string(),
+            description: "Maximum visual quality for powerful systems".to_string(),
+            settings: vec![
+                IniSetting { file_name: "Fallout4Prefs.ini".into(), section: "Display".into(), key: "iShadowMapResolution".into(), value: "4096".into() },
+                IniSetting { file_name: "Fallout4Prefs.ini".into(), section: "Display".into(), key: "fDirShadowDistance".into(), value: "20000.0000".into() },
+                IniSetting { file_name: "Fallout4Prefs.ini".into(), section: "Display".into(), key: "iMaxAnisotropy".into(), value: "16".into() },
+                IniSetting { file_name: "Fallout4Prefs.ini".into(), section: "Display".into(), key: "bTreesReceiveShadows".into(), value: "1".into() },
+                IniSetting { file_name: "Fallout4Prefs.ini".into(), section: "Display".into(), key: "bDrawLandShadows".into(), value: "1".into() },
+            ],
+        },
+        IniPreset {
+            name: "Performance".to_string(),
+            description: "Reduced quality for better frame rates".to_string(),
+            settings: vec![
+                IniSetting { file_name: "Fallout4Prefs.ini".into(), section: "Display".into(), key: "iShadowMapResolution".into(), value: "512".into() },
+                IniSetting { file_name: "Fallout4Prefs.ini".into(), section: "Display".into(), key: "fDirShadowDistance".into(), value: "3000.0000".into() },
+                IniSetting { file_name: "Fallout4Prefs.ini".into(), section: "Display".into(), key: "bTreesReceiveShadows".into(), value: "0".into() },
+                IniSetting { file_name: "Fallout4Prefs.ini".into(), section: "Display".into(), key: "bDrawLandShadows".into(), value: "0".into() },
+                IniSetting { file_name: "Fallout4Prefs.ini".into(), section: "Display".into(), key: "iMaxAnisotropy".into(), value: "4".into() },
+                IniSetting { file_name: "Fallout4.ini".into(), section: "General".into(), key: "bAlwaysActive".into(), value: "1".into() },
             ],
         },
     ]

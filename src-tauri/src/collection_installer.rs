@@ -420,6 +420,14 @@ pub async fn install_collection(
     bottle_name: &str,
     resume_checkpoint: Option<(i64, HashMap<usize, String>)>,
 ) -> Result<CollectionInstallResult, String> {
+    // Emit initialization progress so the UI shows something immediately
+    let _ = app.emit(
+        INSTALL_PROGRESS_EVENT,
+        InstallProgress::Initializing {
+            message: "Resolving game and bottle paths...".to_string(),
+        },
+    );
+
     // Resolve game and paths
     let bottle = bottles::find_bottle_by_name(bottle_name)
         .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
@@ -443,6 +451,12 @@ pub async fn install_collection(
     }
 
     // Check premium status once upfront
+    let _ = app.emit(
+        INSTALL_PROGRESS_EVENT,
+        InstallProgress::Initializing {
+            message: "Checking NexusMods account status...".to_string(),
+        },
+    );
     let api_key = config::get_config().ok().and_then(|c| c.nexus_api_key);
 
     let is_premium = if let Some(ref key) = api_key {
@@ -453,6 +467,12 @@ pub async fn install_collection(
     };
 
     // Resolve install order (topological sort respecting mod rules)
+    let _ = app.emit(
+        INSTALL_PROGRESS_EVENT,
+        InstallProgress::Initializing {
+            message: "Resolving install order...".to_string(),
+        },
+    );
     let install_order = collections::resolve_install_order(manifest);
     let total_mods = install_order.len();
 
@@ -474,6 +494,12 @@ pub async fn install_collection(
     }
 
     // Load existing mods for already-installed detection
+    let _ = app.emit(
+        INSTALL_PROGRESS_EVENT,
+        InstallProgress::Initializing {
+            message: format!("Loading existing mods for {} ({} in collection)...", game_id, total_mods),
+        },
+    );
     let existing_mods = db.list_mods(game_id, bottle_name).unwrap_or_default();
 
     // ---------------------------------------------------------------
@@ -505,6 +531,13 @@ pub async fn install_collection(
             (id, HashMap::new())
         }
     };
+
+    let _ = app.emit(
+        INSTALL_PROGRESS_EVENT,
+        InstallProgress::Initializing {
+            message: format!("Preparing download phase ({} mods, {} already installed)...", total_mods, existing_mods.len()),
+        },
+    );
 
     // ---------------------------------------------------------------
     // Phase 1: Concurrent Downloads
@@ -1050,10 +1083,12 @@ pub async fn install_collection(
                 .parent()
                 .map(|p| p.join("loadorder.txt"))
                 .unwrap_or_else(|| pf.with_file_name("loadorder.txt"));
+            let implicit = plugins::skyrim_plugins::implicit_plugins_for_game(game_id);
             let _ = plugins::skyrim_plugins::sync_plugins(
                 Path::new(&game.data_dir),
                 &pf,
                 &loadorder_file,
+                implicit,
             );
         }
     }

@@ -85,6 +85,9 @@ pub enum InstallProgress {
         mod_index: usize,
         mod_name: String,
     },
+    Initializing {
+        message: String,
+    },
 }
 
 #[cfg(test)]

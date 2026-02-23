@@ -7,6 +7,8 @@
   let modLogExpanded = $state(false);
   let modLogAutoExpanded = $state(false);
   let userActionsExpanded = $state(true);
+  let verboseLogExpanded = $state(false);
+  let verboseLogEl: HTMLDivElement | undefined = $state();
 
   let status = $derived($collectionInstallStatus);
   let isActive = $derived(status?.active ?? false);
@@ -19,6 +21,8 @@
   let overallProgress = $derived(status?.overallProgress ?? 0);
   let downloadSpeed = $derived(status?.downloadSpeed ?? 0);
   let downloadEta = $derived(status?.downloadEta ?? "");
+
+  let logEntries = $derived(status?.logEntries ?? []);
 
   let dlPercent = $derived(dl.total > 0 ? Math.round((dl.completed / dl.total) * 100) : 0);
   let instPercent = $derived(inst.total > 0 ? Math.round((inst.current / inst.total) * 100) : 0);
@@ -115,6 +119,48 @@
     return () => clearInterval(interval);
   });
 
+  // Activity pulse — modulate animation speed by event throughput
+  let eventTimestamps = $state<number[]>([]);
+  let pulseSpeed = $state(0); // 0 = stopped, higher = faster (events/min)
+
+  $effect(() => {
+    // Track log entry count changes as a proxy for events
+    const count = logEntries.length;
+    if (count > 0) {
+      const now = Date.now();
+      eventTimestamps = [...eventTimestamps.filter((t) => now - t < 60_000), now];
+      pulseSpeed = eventTimestamps.length; // events in last 60s
+    }
+  });
+
+  // Fade pulse to 0 if no events for 10s
+  $effect(() => {
+    if (phase === "complete" || phase === "failed" || phase === "") {
+      pulseSpeed = 0;
+      return;
+    }
+    const interval = setInterval(() => {
+      const now = Date.now();
+      const recent = eventTimestamps.filter((t) => now - t < 10_000);
+      if (recent.length === 0) pulseSpeed = 0;
+    }, 2000);
+    return () => clearInterval(interval);
+  });
+
+  // Derived animation duration: fast = 0.6s, slow = 3s, stopped = 0
+  let pulseDuration = $derived(
+    pulseSpeed === 0 ? 0 : Math.max(0.6, 3 - (pulseSpeed / 30) * 2.4),
+  );
+
+  // Auto-scroll verbose log to bottom
+  $effect(() => {
+    if (verboseLogExpanded && verboseLogEl && logEntries.length > 0) {
+      requestAnimationFrame(() => {
+        if (verboseLogEl) verboseLogEl.scrollTop = verboseLogEl.scrollHeight;
+      });
+    }
+  });
+
   // Mod log: show 10 items when collapsed, all when expanded
   let visibleMods = $derived(modLogExpanded ? mods : mods.slice(0, 10));
 
@@ -147,6 +193,11 @@
         openUrl(url);
       }
     } catch { /* ignore */ }
+  }
+
+  function formatLogTime(ts: number): string {
+    const d = new Date(ts);
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
   }
 
   function handleCancel() {
@@ -366,11 +417,22 @@
       <!-- Overall Progress -->
       <section class="overall-progress-section">
         <div class="overall-header">
-          <span class="overall-label">OVERALL PROGRESS</span>
+          <div class="overall-left">
+            {#if pulseDuration > 0}
+              <span class="activity-orb" style="--orb-duration: {pulseDuration}s">
+                <span class="activity-orb-inner"></span>
+              </span>
+            {:else}
+              <span class="activity-orb activity-orb-idle">
+                <span class="activity-orb-inner"></span>
+              </span>
+            {/if}
+            <span class="overall-label">OVERALL PROGRESS</span>
+          </div>
           <span class="overall-percent">{overallProgress}%</span>
         </div>
         <div class="progress-track progress-track-lg">
-          <div class="progress-fill progress-fill-overall progress-active" style="width: {overallProgress}%"></div>
+          <div class="progress-fill progress-fill-overall" class:progress-active={pulseDuration > 0} style="width: {overallProgress}%"></div>
         </div>
       </section>
 
@@ -692,6 +754,38 @@
       </div>
     </section>
 
+    <!-- Verbose Log -->
+    <section class="phase-section verbose-log-section">
+      <button class="collapsible-header" onclick={() => verboseLogExpanded = !verboseLogExpanded}>
+        <h3 class="phase-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="4 17 10 11 4 5" />
+            <line x1="12" y1="19" x2="20" y2="19" />
+          </svg>
+          VERBOSE LOG
+        </h3>
+        <span class="phase-count">{logEntries.length} entries</span>
+        <svg class="chevron" class:expanded={verboseLogExpanded} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </button>
+      {#if verboseLogExpanded}
+        <div class="verbose-log-list" bind:this={verboseLogEl}>
+          {#each logEntries as entry, i (i)}
+            <div class="log-entry" class:log-warn={entry.level === "warn"} class:log-error={entry.level === "error"}>
+              <span class="log-time">{formatLogTime(entry.timestamp)}</span>
+              <span class="log-msg">{entry.message}</span>
+            </div>
+          {/each}
+          {#if logEntries.length === 0}
+            <div class="log-entry log-empty">
+              <span class="log-msg">Waiting for events...</span>
+            </div>
+          {/if}
+        </div>
+      {/if}
+    </section>
+
     <!-- Cancel Button (during active install) -->
     {#if phase === "downloading" || phase === "installing" || phase === "staging"}
       <div class="footer-actions">
@@ -875,12 +969,72 @@
     margin-bottom: var(--space-2);
   }
 
+  .overall-left {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
   .overall-label {
     font-size: 11px;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--text-secondary);
+  }
+
+  /* ---- Activity Orb ---- */
+
+  .activity-orb {
+    position: relative;
+    width: 12px;
+    height: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+
+  .activity-orb-inner {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--system-accent);
+    box-shadow: 0 0 6px color-mix(in srgb, var(--system-accent) 60%, transparent);
+  }
+
+  .activity-orb:not(.activity-orb-idle)::before {
+    content: "";
+    position: absolute;
+    inset: -2px;
+    border-radius: 50%;
+    border: 2px solid color-mix(in srgb, var(--system-accent) 40%, transparent);
+    animation: orb-ping var(--orb-duration, 2s) ease-out infinite;
+  }
+
+  .activity-orb:not(.activity-orb-idle) {
+    --orb-duration: inherit;
+  }
+
+  .activity-orb:not(.activity-orb-idle) .activity-orb-inner {
+    animation: orb-glow var(--orb-duration, 2s) ease-in-out infinite;
+  }
+
+  .activity-orb-idle .activity-orb-inner {
+    background: var(--text-tertiary);
+    box-shadow: none;
+    opacity: 0.4;
+  }
+
+  @keyframes orb-ping {
+    0% { transform: scale(1); opacity: 0.6; }
+    70% { transform: scale(1.8); opacity: 0; }
+    100% { transform: scale(1.8); opacity: 0; }
+  }
+
+  @keyframes orb-glow {
+    0%, 100% { box-shadow: 0 0 4px color-mix(in srgb, var(--system-accent) 40%, transparent); }
+    50% { box-shadow: 0 0 10px color-mix(in srgb, var(--system-accent) 80%, transparent); }
   }
 
   .overall-percent {
@@ -1435,12 +1589,12 @@
 
   .mod-log-list {
     margin-top: var(--space-3);
-    max-height: 360px;
+    max-height: 340px;
     overflow-y: auto;
   }
 
   .mod-log-list.expanded {
-    max-height: 500px;
+    max-height: 70vh;
   }
 
   .mod-entry {
@@ -1733,6 +1887,72 @@
   }
 
   .mod-log-list::-webkit-scrollbar-thumb:hover {
+    background: var(--scrollbar-thumb-hover);
+  }
+
+  /* ---- Verbose Log ---- */
+
+  .verbose-log-section {
+    background: var(--bg-tertiary);
+    border-color: var(--separator);
+  }
+
+  .verbose-log-list {
+    margin-top: var(--space-3);
+    max-height: 300px;
+    overflow-y: auto;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.6;
+    background: color-mix(in srgb, #000 30%, var(--bg-tertiary));
+    border-radius: var(--radius-sm);
+    padding: var(--space-2);
+  }
+
+  .log-entry {
+    display: flex;
+    gap: var(--space-2);
+    padding: 1px 0;
+  }
+
+  .log-time {
+    flex-shrink: 0;
+    color: var(--text-tertiary);
+    opacity: 0.6;
+  }
+
+  .log-msg {
+    color: var(--text-secondary);
+    word-break: break-word;
+  }
+
+  .log-warn .log-msg {
+    color: #f59e0b;
+  }
+
+  .log-error .log-msg {
+    color: #ef4444;
+  }
+
+  .log-empty .log-msg {
+    color: var(--text-tertiary);
+    font-style: italic;
+  }
+
+  .verbose-log-list::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  .verbose-log-list::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .verbose-log-list::-webkit-scrollbar-thumb {
+    background: var(--scrollbar-thumb);
+    border-radius: 3px;
+  }
+
+  .verbose-log-list::-webkit-scrollbar-thumb:hover {
     background: var(--scrollbar-thumb-hover);
   }
 </style>

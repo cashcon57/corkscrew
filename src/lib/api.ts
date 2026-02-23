@@ -980,6 +980,14 @@ export async function reinstallModTool(
   return invoke("reinstall_mod_tool", { toolId, gameId, bottleName });
 }
 
+export async function checkModToolUpdate(
+  toolId: string,
+  gameId: string,
+  bottleName: string
+): Promise<import("$lib/types").ToolUpdateInfo> {
+  return invoke("check_mod_tool_update", { toolId, gameId, bottleName });
+}
+
 export async function applyToolIniEdits(
   toolId: string,
   gameId: string,

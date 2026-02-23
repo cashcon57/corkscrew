@@ -209,6 +209,25 @@ pub const TOOL_SIGNATURES: &[ToolSignature] = &[
         nexus_mod_ids: &[],
         name_patterns: &["nif optimizer", "nifoptimizer"],
     },
+    // -- Fallout 4 tools --
+    ToolSignature {
+        tool_id: "f4se",
+        tool_name: "F4SE",
+        nexus_mod_ids: &[42147],
+        name_patterns: &["f4se_", "f4se"],
+    },
+    ToolSignature {
+        tool_id: "fo4edit",
+        tool_name: "FO4Edit (xEdit)",
+        nexus_mod_ids: &[2737],
+        name_patterns: &["fo4edit"],
+    },
+    ToolSignature {
+        tool_id: "bodyslide_fo4",
+        tool_name: "BodySlide & Outfit Studio (FO4)",
+        nexus_mod_ids: &[25],
+        name_patterns: &[],
+    },
 ];
 
 /// A tool detected as required by a collection or wabbajack modlist.
@@ -370,9 +389,89 @@ struct GitHubAsset {
 // Tool Registry
 // ---------------------------------------------------------------------------
 
-/// Built-in tool definitions for Skyrim SE modding.
+/// Built-in tool definitions, filtered by game ID.
+///
+/// Returns the tools relevant to the specified game. Shared tools (Wrye Bash,
+/// BethINI, CAO) appear for all supported games.
+fn builtin_tools_for_game(game_id: &str) -> Vec<ModTool> {
+    match game_id {
+        "skyrimse" => skyrim_se_tools(),
+        "fallout4" => fallout4_tools(),
+        _ => vec![],
+    }
+}
+
+/// Backwards-compatible alias — returns Skyrim SE tools.
 fn builtin_tools() -> Vec<ModTool> {
+    skyrim_se_tools()
+}
+
+/// All builtin tools across all games (for tool detection by signature).
+fn all_builtin_tools() -> Vec<ModTool> {
+    let mut tools = skyrim_se_tools();
+    for fo4_tool in fallout4_tools() {
+        if !tools.iter().any(|t| t.id == fo4_tool.id) {
+            tools.push(fo4_tool);
+        }
+    }
+    tools
+}
+
+// ---------------------------------------------------------------------------
+// Shared tools (used by both Skyrim SE and Fallout 4)
+// ---------------------------------------------------------------------------
+
+fn shared_tools() -> Vec<ModTool> {
     vec![
+        ModTool {
+            id: "wryebash".into(),
+            name: "Wrye Bash".into(),
+            description: "Bashed patch creation and leveled list merging".into(),
+            exe_names: vec!["Wrye Bash.exe".into()],
+            detected_path: None,
+            requires_wine: true,
+            category: "Patching".into(),
+            can_auto_install: true,
+            github_repo: Some("wrye-bash/wrye-bash".into()),
+            nexus_mod_id: None,
+            nexus_game_slug: None,
+            download_url: None,
+            license: "GPL-3.0".into(),
+            wine_notes: Some("Native Linux support since v312; also works via Wine".into()),
+            wine_compat: "good".into(),
+            recommended_alternative: None,
+            recommended_ini_edits: vec![],
+            support_url: None,
+        },
+        ModTool {
+            id: "bethini".into(),
+            name: "BethINI Pie".into(),
+            description: "INI configuration optimizer".into(),
+            exe_names: vec!["BethINI.exe".into(), "Bethini Pie.exe".into()],
+            detected_path: None,
+            requires_wine: true,
+            category: "INI".into(),
+            can_auto_install: true,
+            github_repo: None,
+            nexus_mod_id: Some(631),
+            nexus_game_slug: Some("site".into()),
+            download_url: Some("https://www.nexusmods.com/site/mods/631".into()),
+            license: "CC BY-NC-SA 4.0".into(),
+            wine_notes: Some("Python-based; may work under Wine. Corkscrew's built-in INI editor provides similar functionality natively.".into()),
+            wine_compat: "limited".into(),
+            recommended_alternative: None,
+            recommended_ini_edits: vec![],
+            support_url: None,
+        },
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// Skyrim SE tools
+// ---------------------------------------------------------------------------
+
+fn skyrim_se_tools() -> Vec<ModTool> {
+    let mut tools = vec![
         // ---- Frameworks ----
         ModTool {
             id: "skse".into(),
@@ -509,47 +608,7 @@ fn builtin_tools() -> Vec<ModTool> {
             recommended_ini_edits: vec![],
             support_url: None,
         },
-        ModTool {
-            id: "wryebash".into(),
-            name: "Wrye Bash".into(),
-            description: "Bashed patch creation and leveled list merging".into(),
-            exe_names: vec!["Wrye Bash.exe".into()],
-            detected_path: None,
-            requires_wine: true,
-            category: "Patching".into(),
-            can_auto_install: true,
-            github_repo: Some("wrye-bash/wrye-bash".into()),
-            nexus_mod_id: None,
-            nexus_game_slug: None,
-            download_url: None,
-            license: "GPL-3.0".into(),
-            wine_notes: Some("Native Linux support since v312; also works via Wine".into()),
-            wine_compat: "good".into(),
-            recommended_alternative: None,
-            recommended_ini_edits: vec![],
-            support_url: None,
-        },
         // ---- Tools with limited Wine compatibility ----
-        ModTool {
-            id: "bethini".into(),
-            name: "BethINI Pie".into(),
-            description: "INI configuration optimizer".into(),
-            exe_names: vec!["BethINI.exe".into(), "Bethini Pie.exe".into()],
-            detected_path: None,
-            requires_wine: true,
-            category: "INI".into(),
-            can_auto_install: true,
-            github_repo: None,
-            nexus_mod_id: Some(631),
-            nexus_game_slug: Some("site".into()),
-            download_url: Some("https://www.nexusmods.com/site/mods/631".into()),
-            license: "CC BY-NC-SA 4.0".into(),
-            wine_notes: Some("Python-based; may work under Wine. Corkscrew's built-in INI editor provides similar functionality natively.".into()),
-            wine_compat: "limited".into(),
-            recommended_alternative: None,
-            recommended_ini_edits: vec![],
-            support_url: None,
-        },
         ModTool {
             id: "dyndolod".into(),
             name: "DynDOLOD".into(),
@@ -613,12 +672,93 @@ fn builtin_tools() -> Vec<ModTool> {
             recommended_ini_edits: vec![],
             support_url: None,
         },
-    ]
+    ];
+    tools.extend(shared_tools());
+    tools
 }
 
-/// Look up a tool definition by ID.
+// ---------------------------------------------------------------------------
+// Fallout 4 tools
+// ---------------------------------------------------------------------------
+
+fn fallout4_tools() -> Vec<ModTool> {
+    let mut tools = vec![
+        // ---- Frameworks ----
+        ModTool {
+            id: "f4se".into(),
+            name: "F4SE".into(),
+            description: "Fallout 4 Script Extender — required by most Fallout 4 mods".into(),
+            exe_names: vec!["f4se_loader.exe".into()],
+            detected_path: None,
+            requires_wine: true,
+            category: "Framework".into(),
+            can_auto_install: true,
+            github_repo: Some("ianpatt/f4se".into()),
+            nexus_mod_id: None,
+            nexus_game_slug: None,
+            download_url: None,
+            license: "Proprietary".into(),
+            wine_notes: Some("Works under Wine/Proton".into()),
+            wine_compat: "good".into(),
+            recommended_alternative: None,
+            recommended_ini_edits: vec![],
+            support_url: Some("https://f4se.silverlock.org/".into()),
+        },
+        // ---- Recommended tools ----
+        ModTool {
+            id: "fo4edit".into(),
+            name: "FO4Edit (xEdit)".into(),
+            description: "Plugin cleaning and conflict resolution for Fallout 4".into(),
+            exe_names: vec![
+                "FO4Edit.exe".into(),
+                "FO4Edit64.exe".into(),
+                "xEdit.exe".into(),
+                "xTESEdit.exe".into(),
+                "xTESEdit64.exe".into(),
+            ],
+            detected_path: None,
+            requires_wine: true,
+            category: "Cleaning".into(),
+            can_auto_install: true,
+            github_repo: Some("TES5Edit/TES5Edit".into()),
+            nexus_mod_id: Some(2737),
+            nexus_game_slug: Some("fallout4".into()),
+            download_url: None,
+            license: "MPL-2.0".into(),
+            wine_notes: Some("Works well under Wine/Proton".into()),
+            wine_compat: "good".into(),
+            recommended_alternative: None,
+            recommended_ini_edits: vec![],
+            support_url: Some("https://ko-fi.com/elminsterau".into()),
+        },
+        ModTool {
+            id: "bodyslide_fo4".into(),
+            name: "BodySlide & Outfit Studio".into(),
+            description: "Body and outfit customization for Fallout 4".into(),
+            exe_names: vec!["BodySlide.exe".into(), "OutfitStudio.exe".into()],
+            detected_path: None,
+            requires_wine: true,
+            category: "Body".into(),
+            can_auto_install: true,
+            github_repo: None,
+            nexus_mod_id: Some(25),
+            nexus_game_slug: Some("fallout4".into()),
+            download_url: Some("https://www.nexusmods.com/fallout4/mods/25".into()),
+            license: "GPL-3.0".into(),
+            wine_notes: Some("Works under Wine with some setup".into()),
+            wine_compat: "good".into(),
+            recommended_alternative: None,
+            recommended_ini_edits: vec![],
+            support_url: None,
+        },
+    ];
+    tools.extend(shared_tools());
+    tools
+}
+
+/// Look up a tool definition by ID (searches all games).
 fn find_tool_def(tool_id: &str) -> Result<ModTool> {
-    builtin_tools()
+    all_builtin_tools()
         .into_iter()
         .find(|t| t.id == tool_id)
         .ok_or_else(|| ToolError::NotFound(tool_id.to_string()))
@@ -634,7 +774,12 @@ const TOOLS_DIR: &str = "Tools";
 /// Scan the game data directory (and parent) for known modding tools.
 /// Returns the list of built-in tools with `detected_path` populated where found.
 pub fn detect_tools(game_data_dir: &Path) -> Vec<ModTool> {
-    let mut tools = builtin_tools();
+    detect_tools_for_game(game_data_dir, "skyrimse")
+}
+
+/// Scan the game data directory for modding tools relevant to the specified game.
+pub fn detect_tools_for_game(game_data_dir: &Path, game_id: &str) -> Vec<ModTool> {
+    let mut tools = builtin_tools_for_game(game_id);
 
     let game_dir = game_data_dir.parent().unwrap_or(game_data_dir);
     let tools_dir = game_dir.join(TOOLS_DIR);
@@ -813,7 +958,7 @@ pub async fn install_tool(
     // --- Phase 1: Download ---
     emit_progress(app, tool_id, "downloading", "Fetching from GitHub...");
 
-    let (archive_bytes, archive_name) = if let Some(github_repo) = &tool_def.github_repo {
+    let (archive_bytes, archive_name, version_tag) = if let Some(github_repo) = &tool_def.github_repo {
         match install_tool_from_github(tool_id, github_repo, &client).await {
             Ok(result) => result,
             Err(gh_err) => {
@@ -882,9 +1027,14 @@ pub async fn install_tool(
     // Tool-specific post-install: rename xEdit executables for game mode detection
     if tool_id == "sseedit" {
         rename_xedit_for_game(&tool_dir, "SSEEdit");
+    } else if tool_id == "fo4edit" {
+        rename_xedit_for_game(&tool_dir, "FO4Edit");
     }
 
     let exe_path = find_tool_exe(&tool_def, &tool_dir).ok_or(ToolError::ExeNotFound)?;
+
+    // Write version marker for future update checks
+    write_version_marker(&tool_dir, &version_tag);
 
     emit_progress(app, tool_id, "done", "Installed successfully");
     info!("Tool '{}' installed to: {}", tool_id, exe_path.display());
@@ -901,6 +1051,8 @@ fn rename_xedit_for_game(tool_dir: &Path, prefix: &str) {
     let renames = [
         ("xTESEdit.exe", format!("{}Edit.exe", prefix)),
         ("xTESEdit64.exe", format!("{}Edit64.exe", prefix)),
+        ("xFOEdit.exe", format!("{}Edit.exe", prefix)),
+        ("xFOEdit64.exe", format!("{}Edit64.exe", prefix)),
     ];
     for (from, to) in &renames {
         let src = tool_dir.join(from);
@@ -916,12 +1068,12 @@ fn rename_xedit_for_game(tool_dir: &Path, prefix: &str) {
 }
 
 /// Download tool archive from GitHub releases.
-/// Returns (bytes, filename).
+/// Returns (bytes, filename, version_tag).
 async fn install_tool_from_github(
     tool_id: &str,
     github_repo: &str,
     client: &reqwest::Client,
-) -> Result<(Vec<u8>, String)> {
+) -> Result<(Vec<u8>, String, String)> {
     info!(
         "Installing mod tool '{}' from GitHub: {}",
         tool_id, github_repo
@@ -961,17 +1113,17 @@ async fn install_tool_from_github(
         .await?
         .to_vec();
 
-    Ok((bytes, asset.name.clone()))
+    Ok((bytes, asset.name.clone(), release.tag_name))
 }
 
 /// Download tool archive from NexusMods (requires premium API key).
-/// Returns (bytes, filename).
+/// Returns (bytes, filename, version_string).
 async fn install_tool_from_nexus(
     tool_id: &str,
     mod_id: i64,
     game_slug: &str,
     client: &reqwest::Client,
-) -> Result<(Vec<u8>, String)> {
+) -> Result<(Vec<u8>, String, String)> {
     info!(
         "Installing mod tool '{}' from NexusMods: {}/mods/{}",
         tool_id, game_slug, mod_id
@@ -1046,6 +1198,13 @@ async fn install_tool_from_nexus(
         .unwrap_or("download.zip")
         .to_string();
 
+    // Use the file's uploaded_timestamp as version marker for NexusMods tools
+    let version_marker = main_file
+        .get("uploaded_timestamp")
+        .and_then(|v| v.as_i64())
+        .map(|t| t.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
     info!(
         "Found NexusMods file: {} (id: {})",
         file_name, file_id
@@ -1078,7 +1237,7 @@ async fn install_tool_from_nexus(
         bytes.len()
     );
 
-    Ok((bytes, file_name))
+    Ok((bytes, file_name, version_marker))
 }
 
 /// Extract a ZIP archive from bytes into the target directory.
@@ -1247,6 +1406,139 @@ pub async fn reinstall_tool(
     info!("Reinstalling mod tool '{}'", tool_id);
     uninstall_tool(tool_id, game_data_dir, None)?;
     install_tool(tool_id, game_data_dir, app).await
+}
+
+// ---------------------------------------------------------------------------
+// Update Check
+// ---------------------------------------------------------------------------
+
+/// Result of checking for a tool update.
+#[derive(Clone, Debug, Serialize)]
+pub struct ToolUpdateInfo {
+    pub tool_id: String,
+    pub tool_name: String,
+    pub latest_version: String,
+    pub update_available: bool,
+}
+
+/// Check for an available update for a tool by querying GitHub releases or
+/// NexusMods file timestamps.
+///
+/// For tools with a GitHub repo, compares the latest release tag to the
+/// currently installed version (stored in a `.version` marker file inside the
+/// tool directory).
+///
+/// For NexusMods-only tools, compares the latest file upload timestamp to the
+/// one stored during installation.
+pub async fn check_tool_update(tool_id: &str, game_data_dir: &Path) -> Result<ToolUpdateInfo> {
+    let tool_def = find_tool_def(tool_id)?;
+
+    if !tool_def.can_auto_install {
+        return Ok(ToolUpdateInfo {
+            tool_id: tool_id.to_string(),
+            tool_name: tool_def.name.clone(),
+            latest_version: "N/A".to_string(),
+            update_available: false,
+        });
+    }
+
+    let client = reqwest::Client::builder()
+        .user_agent(format!("Corkscrew/{}", env!("CARGO_PKG_VERSION")))
+        .build()?;
+
+    // Read the installed version marker
+    let game_dir = game_data_dir.parent().unwrap_or(game_data_dir);
+    let tool_dir = game_dir.join(TOOLS_DIR).join(&tool_def.id);
+    let version_file = tool_dir.join(".version");
+    let installed_version = fs::read_to_string(&version_file).unwrap_or_default().trim().to_string();
+
+    // Check GitHub first
+    if let Some(github_repo) = &tool_def.github_repo {
+        let api_url = format!(
+            "https://api.github.com/repos/{}/releases/latest",
+            github_repo
+        );
+        match client.get(&api_url).send().await {
+            Ok(resp) => {
+                if let Ok(release) = resp.json::<GitHubRelease>().await {
+                    let latest = release.tag_name.clone();
+                    let update_available = !installed_version.is_empty()
+                        && installed_version != latest;
+                    return Ok(ToolUpdateInfo {
+                        tool_id: tool_id.to_string(),
+                        tool_name: tool_def.name.clone(),
+                        latest_version: latest,
+                        update_available,
+                    });
+                }
+            }
+            Err(e) => {
+                info!("GitHub check failed for '{}': {}", tool_id, e);
+            }
+        }
+    }
+
+    // Fallback: NexusMods — check latest file upload timestamp
+    if let (Some(mod_id), Some(game_slug)) =
+        (&tool_def.nexus_mod_id, &tool_def.nexus_game_slug)
+    {
+        let api_key = crate::config::get_config()
+            .ok()
+            .and_then(|c| c.nexus_api_key);
+        if let Some(key) = api_key {
+            let nexus = crate::nexus::NexusClient::new(key);
+            if let Ok(files) = nexus.get_mod_files(game_slug, *mod_id).await {
+                // Find latest file upload timestamp
+                let latest_ts = files
+                    .iter()
+                    .filter(|f| {
+                        f.get("category_id")
+                            .and_then(|v| v.as_i64())
+                            .map(|c| [1, 2, 3, 5].contains(&c))
+                            .unwrap_or(false)
+                    })
+                    .filter_map(|f| f.get("uploaded_timestamp").and_then(|v| v.as_i64()))
+                    .max()
+                    .unwrap_or(0);
+
+                let latest_version_name = files
+                    .iter()
+                    .filter(|f| {
+                        f.get("uploaded_timestamp")
+                            .and_then(|v| v.as_i64())
+                            .map(|t| t == latest_ts)
+                            .unwrap_or(false)
+                    })
+                    .filter_map(|f| f.get("version").and_then(|v| v.as_str()))
+                    .next()
+                    .unwrap_or("unknown")
+                    .to_string();
+
+                let update_available = !installed_version.is_empty()
+                    && installed_version != latest_ts.to_string();
+
+                return Ok(ToolUpdateInfo {
+                    tool_id: tool_id.to_string(),
+                    tool_name: tool_def.name.clone(),
+                    latest_version: latest_version_name,
+                    update_available,
+                });
+            }
+        }
+    }
+
+    Ok(ToolUpdateInfo {
+        tool_id: tool_id.to_string(),
+        tool_name: tool_def.name.clone(),
+        latest_version: "Unable to check".to_string(),
+        update_available: false,
+    })
+}
+
+/// Write a version marker file after successful tool installation.
+fn write_version_marker(tool_dir: &Path, version: &str) {
+    let marker = tool_dir.join(".version");
+    let _ = fs::write(&marker, version);
 }
 
 // ---------------------------------------------------------------------------

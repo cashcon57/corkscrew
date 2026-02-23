@@ -327,7 +327,7 @@ fn install_mod_cmd(
                 detail: Some("Syncing plugin load order...".to_string()),
             },
         );
-        let _ = sync_skyrim_plugins_for_game(&game, &bottle);
+        let _ = sync_plugins_for_game(&game, &bottle);
     }
 
     // Set source type if provided
@@ -390,7 +390,7 @@ fn uninstall_mod(
 
     // Sync Skyrim plugins if applicable
     if game_id == "skyrimse" {
-        let _ = sync_skyrim_plugins_for_game(&game, &bottle);
+        let _ = sync_plugins_for_game(&game, &bottle);
     }
 
     Ok(removed)
@@ -440,7 +440,7 @@ fn toggle_mod(
 
         // Sync Skyrim plugins if applicable
         if game_id == "skyrimse" {
-            let _ = sync_skyrim_plugins_for_game(&game, &bottle);
+            let _ = sync_plugins_for_game(&game, &bottle);
         }
     }
     // Legacy mods (no staging_path): only the DB flag changes
@@ -450,7 +450,7 @@ fn toggle_mod(
 
 #[tauri::command]
 fn get_plugin_order(game_id: String, bottle_name: String) -> Result<Vec<PluginEntry>, String> {
-    if game_id != "skyrimse" {
+    if !plugins::skyrim_plugins::supports_plugin_order(&game_id) {
         return Ok(vec![]);
     }
 
@@ -570,7 +570,7 @@ async fn download_from_nexus(
         }
 
         if game_id == "skyrimse" {
-            let _ = sync_skyrim_plugins_for_game(&game, &bottle);
+            let _ = sync_plugins_for_game(&game, &bottle);
         }
 
         // Auto-delete archive if setting is enabled
@@ -1336,7 +1336,7 @@ fn resolve_all_conflicts_cmd(
         deployer::redeploy_all(db, &game_id, &bottle_name, &data_dir).map_err(|e| e.to_string())?;
         if game_id == "skyrimse" {
             let bottle = resolve_bottle(&bottle_name)?;
-            let _ = sync_skyrim_plugins_for_game(&game, &bottle);
+            let _ = sync_plugins_for_game(&game, &bottle);
         }
     }
 
@@ -1395,7 +1395,7 @@ fn reorder_mods(
 
     // Sync plugins after redeploy
     if game_id == "skyrimse" {
-        let _ = sync_skyrim_plugins_for_game(&game, &bottle);
+        let _ = sync_plugins_for_game(&game, &bottle);
     }
 
     Ok(())
@@ -1439,7 +1439,7 @@ fn redeploy_all_mods(
     .map_err(|e| e.to_string())?;
 
     if game_id == "skyrimse" {
-        let _ = sync_skyrim_plugins_for_game(&game, &bottle);
+        let _ = sync_plugins_for_game(&game, &bottle);
     }
 
     Ok(serde_json::json!({
@@ -1462,7 +1462,7 @@ fn purge_deployment_cmd(
         .map_err(|e| e.to_string())?;
 
     if game_id == "skyrimse" {
-        let _ = sync_skyrim_plugins_for_game(&game, &bottle);
+        let _ = sync_plugins_for_game(&game, &bottle);
     }
 
     Ok(removed)
@@ -1621,7 +1621,7 @@ fn switch_collection_cmd(
 
     // 5. Sync plugins if Skyrim SE
     if game_id == "skyrimse" {
-        let _ = sync_skyrim_plugins_for_game(&game, &bottle);
+        let _ = sync_plugins_for_game(&game, &bottle);
     }
 
     Ok(serde_json::json!({
@@ -1815,7 +1815,7 @@ async fn delete_collection_cmd(
         );
 
         if game_id == "skyrimse" {
-            let _ = sync_skyrim_plugins_for_game(&game, &bottle);
+            let _ = sync_plugins_for_game(&game, &bottle);
         }
 
         // Emit: uninstall completed
@@ -2209,8 +2209,8 @@ fn save_profile_snapshot(
 ) -> Result<(), String> {
     let db = &state.db;
 
-    // Determine plugins file path
-    let plugins_file = if game_id == "skyrimse" {
+    // Determine plugins file path (for Bethesda games with plugin load order)
+    let plugins_file = if plugins::skyrim_plugins::supports_plugin_order(&game_id) {
         let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
 
         games::with_plugin(&game_id, |plugin| {
@@ -2245,7 +2245,7 @@ fn activate_profile(
 
     // 1. Save current state to the currently active profile (if any)
     if let Ok(Some(current_active)) = profiles::get_active_profile(db, &game_id, &bottle_name) {
-        let plugins_file = if game_id == "skyrimse" {
+        let plugins_file = if plugins::skyrim_plugins::supports_plugin_order(&game_id) {
             games::with_plugin(&game_id, |plugin| {
                 plugin.get_plugins_file(Path::new(&game.game_path), &bottle)
             })
@@ -2281,7 +2281,7 @@ fn activate_profile(
     // 6. Apply plugin states
     let plugin_states = profiles::get_plugin_states(db, profile_id).map_err(|e| e.to_string())?;
 
-    if !plugin_states.is_empty() && game_id == "skyrimse" {
+    if !plugin_states.is_empty() && plugins::skyrim_plugins::supports_plugin_order(&game_id) {
         let plugins_file = games::with_plugin(&game_id, |plugin| {
             plugin.get_plugins_file(Path::new(&game.game_path), &bottle)
         })
@@ -2371,7 +2371,7 @@ fn detect_mod_tools_cmd(
     _state: State<AppState>,
 ) -> Result<Vec<mod_tools::ModTool>, String> {
     let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
-    Ok(mod_tools::detect_tools(&data_dir))
+    Ok(mod_tools::detect_tools_for_game(&data_dir, &game_id))
 }
 
 #[tauri::command]
@@ -2407,7 +2407,7 @@ fn launch_mod_tool(
     state: State<AppState>,
 ) -> Result<LaunchResult, String> {
     let (bottle, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
-    let tools = mod_tools::detect_tools(&data_dir);
+    let tools = mod_tools::detect_tools_for_game(&data_dir, &game_id);
     let tool = tools
         .iter()
         .find(|t| t.id == tool_id)
@@ -2434,6 +2434,18 @@ async fn reinstall_mod_tool(
 ) -> Result<String, String> {
     let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
     mod_tools::reinstall_tool(&tool_id, &data_dir, &app)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn check_mod_tool_update(
+    tool_id: String,
+    game_id: String,
+    bottle_name: String,
+) -> Result<mod_tools::ToolUpdateInfo, String> {
+    let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
+    mod_tools::check_tool_update(&tool_id, &data_dir)
         .await
         .map_err(|e| e.to_string())
 }
@@ -2744,7 +2756,12 @@ fn get_current_plugins(game_id: &str, bottle_name: &str) -> Vec<PluginEntry> {
     }
 }
 
-fn sync_skyrim_plugins_for_game(game: &DetectedGame, bottle: &Bottle) -> Result<(), String> {
+fn sync_plugins_for_game(game: &DetectedGame, bottle: &Bottle) -> Result<(), String> {
+    // Only sync for games that support Bethesda-style plugin load order
+    if !plugins::skyrim_plugins::supports_plugin_order(&game.game_id) {
+        return Ok(());
+    }
+
     let game_path = Path::new(&game.game_path);
     let data_dir = Path::new(&game.data_dir);
 
@@ -2754,12 +2771,12 @@ fn sync_skyrim_plugins_for_game(game: &DetectedGame, bottle: &Bottle) -> Result<
     .flatten();
 
     if let Some(pf) = plugins_file {
-        // Derive loadorder.txt path from plugins.txt path
         let loadorder_file = pf
             .parent()
             .map(|p| p.join("loadorder.txt"))
             .unwrap_or_else(|| pf.with_file_name("loadorder.txt"));
-        plugins::skyrim_plugins::sync_plugins(data_dir, &pf, &loadorder_file)
+        let implicit = plugins::skyrim_plugins::implicit_plugins_for_game(&game.game_id);
+        plugins::skyrim_plugins::sync_plugins(data_dir, &pf, &loadorder_file, implicit)
             .map_err(|e| e.to_string())?;
     }
 
@@ -2897,7 +2914,7 @@ fn find_crash_logs_cmd(game_id: String, bottle_name: String) -> Result<Vec<Crash
     let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
 
     let game_path = PathBuf::from(&game.game_path);
-    Ok(crashlog::find_crash_logs(&game_path, &bottle.path))
+    Ok(crashlog::find_crash_logs(&game_path, &bottle.path, &game_id))
 }
 
 #[tauri::command]
@@ -4089,7 +4106,7 @@ async fn download_and_install_nexus_mod(
 
     // Sync plugins if Skyrim
     if game_id == "skyrimse" {
-        let _ = sync_skyrim_plugins_for_game(&game, &bottle);
+        let _ = sync_plugins_for_game(&game, &bottle);
     }
 
     // Auto-delete archive if setting enabled
@@ -4226,6 +4243,7 @@ pub fn run() {
             uninstall_mod_tool,
             launch_mod_tool,
             reinstall_mod_tool,
+            check_mod_tool_update,
             apply_tool_ini_edits_cmd,
             detect_collection_tools,
             detect_wabbajack_tools,

@@ -9,7 +9,7 @@
   import { getVersion } from "@tauri-apps/api/app";
   import { check } from "@tauri-apps/plugin-updater";
   import { relaunch } from "@tauri-apps/plugin-process";
-  import { downloadFromNexus, getAllGames, getDownloadQueue, retryDownload, cancelDownload, clearFinishedDownloads, onDownloadQueueUpdate, listProfiles, listInstalledCollections, getConfig, launchGame, getAllInterruptedInstalls, resumeCollectionInstall, abandonCollectionInstall, getCheckpointModNames, getPendingWabbajackInstalls, checkSkyrimVersion, getPinnedGameVersion, pinGameVersion } from "$lib/api";
+  import { downloadFromNexus, getAllGames, getDownloadQueue, retryDownload, cancelDownload, clearFinishedDownloads, onDownloadQueueUpdate, listProfiles, listInstalledCollections, getConfig, setConfigValue, launchGame, getAllInterruptedInstalls, resumeCollectionInstall, abandonCollectionInstall, getCheckpointModNames, getPendingWabbajackInstalls, checkSkyrimVersion, getPinnedGameVersion, pinGameVersion } from "$lib/api";
   import { resumeInstallTracking } from "$lib/installService";
   import type { CollectionInstallCheckpoint, WabbajackInstallStatus } from "$lib/types";
   import { get } from "svelte/store";
@@ -159,7 +159,18 @@
   onMount(() => {
     initTheme();
     loadDetectedGames();
-    getVersion().then(v => appVersion.set(v)).catch(() => {});
+    getVersion().then(async (v) => {
+      appVersion.set(v);
+      // Show "Updated successfully!" toast if the app version changed since last launch
+      try {
+        const cfg = await getConfig();
+        const lastVersion = (cfg as Record<string, unknown>).last_known_version;
+        if (lastVersion && lastVersion !== v) {
+          wrappedShowSuccess(`Updated to v${v} successfully!`);
+        }
+        await setConfigValue("last_known_version", v);
+      } catch { /* config not available yet */ }
+    }).catch(() => {});
 
     // Check if first-run wizard should show
     getConfig().then(config => {

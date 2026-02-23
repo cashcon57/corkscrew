@@ -29,6 +29,9 @@
     bethini: "/icons/bethini.png",
     dyndolod: "/icons/dyndolod.png",
     skse: "/icons/skse.png",
+    f4se: "/icons/skse.png",
+    fo4edit: "/icons/xedit.png",
+    bodyslide_fo4: "/icons/bodyslide.png",
   };
 
   const uninstalledTools = $derived(

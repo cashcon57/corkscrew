@@ -179,19 +179,28 @@ struct RelevantObject {
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Return the SKSE log directory path for a given bottle.
+/// Return the script extender log directory path for a given game and bottle.
 ///
-/// The standard CrashLoggerSSE output path is:
-/// `[bottle]/drive_c/users/crossover/Documents/My Games/Skyrim Special Edition/SKSE/`
-pub fn skse_log_dir(bottle_path: &Path) -> PathBuf {
+/// Skyrim SE: `[bottle]/drive_c/users/crossover/Documents/My Games/Skyrim Special Edition/SKSE/`
+/// Fallout 4: `[bottle]/drive_c/users/crossover/Documents/My Games/Fallout4/F4SE/`
+pub fn script_extender_log_dir(bottle_path: &Path, game_id: &str) -> PathBuf {
+    let (game_dir, se_dir) = match game_id {
+        "fallout4" => ("Fallout4", "F4SE"),
+        _ => ("Skyrim Special Edition", "SKSE"),
+    };
     bottle_path
         .join("drive_c")
         .join("users")
         .join("crossover")
         .join("Documents")
         .join("My Games")
-        .join("Skyrim Special Edition")
-        .join("SKSE")
+        .join(game_dir)
+        .join(se_dir)
+}
+
+/// Legacy alias for backwards compatibility.
+pub fn skse_log_dir(bottle_path: &Path) -> PathBuf {
+    script_extender_log_dir(bottle_path, "skyrimse")
 }
 
 /// Find all crash logs in the SKSE directory for a game.
@@ -199,12 +208,12 @@ pub fn skse_log_dir(bottle_path: &Path) -> PathBuf {
 /// Returns a list of [`CrashLogEntry`] summaries sorted by timestamp
 /// (most recent first). Each entry includes a quick one-line summary
 /// derived from the exception line without performing full analysis.
-pub fn find_crash_logs(game_path: &Path, bottle_path: &Path) -> Vec<CrashLogEntry> {
-    let _ = game_path; // reserved for future per-game path resolution
-    let log_dir = skse_log_dir(bottle_path);
+pub fn find_crash_logs(game_path: &Path, bottle_path: &Path, game_id: &str) -> Vec<CrashLogEntry> {
+    let _ = game_path;
+    let log_dir = script_extender_log_dir(bottle_path, game_id);
 
     if !log_dir.is_dir() {
-        debug!("SKSE log directory does not exist: {}", log_dir.display());
+        debug!("Script extender log directory does not exist: {}", log_dir.display());
         return Vec::new();
     }
 
@@ -1994,7 +2003,7 @@ Nothing to see here.
         fs::write(skse_dir.join("skse64.log"), "Not a crash log").unwrap();
 
         let game_path = tmp.path().join("drive_c").join("Games").join("Skyrim");
-        let entries = find_crash_logs(&game_path, tmp.path());
+        let entries = find_crash_logs(&game_path, tmp.path(), "skyrimse");
 
         assert_eq!(entries.len(), 2);
         // Most recent first.
@@ -2007,7 +2016,7 @@ Nothing to see here.
     fn test_find_crash_logs_empty_directory() {
         let tmp = tempfile::tempdir().unwrap();
         let game_path = tmp.path().join("games").join("skyrim");
-        let entries = find_crash_logs(&game_path, tmp.path());
+        let entries = find_crash_logs(&game_path, tmp.path(), "skyrimse");
         assert!(entries.is_empty());
     }
 

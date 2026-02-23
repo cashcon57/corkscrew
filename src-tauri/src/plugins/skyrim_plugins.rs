@@ -1,8 +1,8 @@
-//! Plugin load order management for Skyrim Special Edition.
+//! Plugin load order management for Bethesda games.
 //!
 //! Handles reading, writing, and synchronising `plugins.txt` and
-//! `loadorder.txt` files used by Skyrim SE to determine which plugins
-//! are active and in what order they are loaded.
+//! `loadorder.txt` files used by Bethesda games (Skyrim SE, Fallout 4, etc.)
+//! to determine which plugins are active and in what order they are loaded.
 //!
 //! ## File formats
 //!
@@ -26,15 +26,42 @@ use serde::{Deserialize, Serialize};
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Plugins that are always implicitly loaded by the engine in this order.
-/// They do not need to appear in `plugins.txt` (though they sometimes do).
-pub const IMPLICIT_PLUGINS: &[&str] = &[
+/// Skyrim SE implicit plugins — always loaded by the engine in this order.
+pub const SKYRIM_SE_IMPLICIT_PLUGINS: &[&str] = &[
     "Skyrim.esm",
     "Update.esm",
     "Dawnguard.esm",
     "HearthFires.esm",
     "Dragonborn.esm",
 ];
+
+/// Fallout 4 implicit plugins — always loaded by the engine in this order.
+pub const FALLOUT4_IMPLICIT_PLUGINS: &[&str] = &[
+    "Fallout4.esm",
+    "DLCRobot.esm",
+    "DLCworkshop01.esm",
+    "DLCworkshop02.esm",
+    "DLCworkshop03.esm",
+    "DLCCoast.esm",
+    "DLCNukaWorld.esm",
+];
+
+/// Legacy alias for backwards compatibility.
+pub const IMPLICIT_PLUGINS: &[&str] = SKYRIM_SE_IMPLICIT_PLUGINS;
+
+/// Get the implicit plugins list for a given game ID.
+pub fn implicit_plugins_for_game(game_id: &str) -> &'static [&'static str] {
+    match game_id {
+        "skyrimse" => SKYRIM_SE_IMPLICIT_PLUGINS,
+        "fallout4" => FALLOUT4_IMPLICIT_PLUGINS,
+        _ => &[],
+    }
+}
+
+/// Game IDs that support Bethesda-style plugin load order.
+pub fn supports_plugin_order(game_id: &str) -> bool {
+    matches!(game_id, "skyrimse" | "fallout4")
+}
 
 // ---------------------------------------------------------------------------
 // PluginEntry
@@ -230,7 +257,12 @@ fn is_plugin_file(filename: &str) -> bool {
 /// 4. Removes entries for plugins no longer on disk.
 /// 5. Ensures implicit (base game) plugins are present and enabled.
 /// 6. Writes the updated `plugins.txt` and `loadorder.txt`.
-pub fn sync_plugins(data_dir: &Path, plugins_file: &Path, loadorder_file: &Path) -> Result<()> {
+pub fn sync_plugins(
+    data_dir: &Path,
+    plugins_file: &Path,
+    loadorder_file: &Path,
+    game_implicit_plugins: &[&str],
+) -> Result<()> {
     let on_disk = discover_plugins(data_dir)?;
 
     // Build a set of filenames on disk for quick lookup (case-insensitive).
@@ -250,7 +282,7 @@ pub fn sync_plugins(data_dir: &Path, plugins_file: &Path, loadorder_file: &Path)
         .collect();
 
     // Ensure implicit plugins are present and enabled.
-    for &implicit in IMPLICIT_PLUGINS {
+    for &implicit in game_implicit_plugins {
         let key = implicit.to_lowercase();
         if on_disk_lower.contains(&key) {
             existing_map
@@ -267,7 +299,7 @@ pub fn sync_plugins(data_dir: &Path, plugins_file: &Path, loadorder_file: &Path)
     let mut result: Vec<PluginEntry> = Vec::new();
 
     // First add implicit plugins in their canonical order.
-    for &implicit in IMPLICIT_PLUGINS {
+    for &implicit in game_implicit_plugins {
         let key = implicit.to_lowercase();
         if on_disk_lower.contains(&key) {
             // Use the on-disk filename casing.
@@ -290,7 +322,7 @@ pub fn sync_plugins(data_dir: &Path, plugins_file: &Path, loadorder_file: &Path)
         let key = plugin_name.to_lowercase();
 
         // Skip implicit plugins already added.
-        if IMPLICIT_PLUGINS.iter().any(|&i| i.to_lowercase() == key) {
+        if game_implicit_plugins.iter().any(|&i| i.to_lowercase() == key) {
             continue;
         }
 
@@ -620,7 +652,7 @@ mod tests {
         let plugins_file = tmp.path().join("plugins.txt");
         let loadorder_file = tmp.path().join("loadorder.txt");
 
-        sync_plugins(&data_dir, &plugins_file, &loadorder_file).unwrap();
+        sync_plugins(&data_dir, &plugins_file, &loadorder_file, SKYRIM_SE_IMPLICIT_PLUGINS).unwrap();
 
         // Verify plugins.txt was created.
         let entries = read_plugins_txt(&plugins_file).unwrap();
@@ -671,7 +703,7 @@ mod tests {
         )
         .unwrap();
 
-        sync_plugins(&data_dir, &plugins_file, &loadorder_file).unwrap();
+        sync_plugins(&data_dir, &plugins_file, &loadorder_file, SKYRIM_SE_IMPLICIT_PLUGINS).unwrap();
 
         let entries = read_plugins_txt(&plugins_file).unwrap();
         let user_mod = entries
@@ -711,7 +743,7 @@ mod tests {
         )
         .unwrap();
 
-        sync_plugins(&data_dir, &plugins_file, &loadorder_file).unwrap();
+        sync_plugins(&data_dir, &plugins_file, &loadorder_file, SKYRIM_SE_IMPLICIT_PLUGINS).unwrap();
 
         let entries = read_plugins_txt(&plugins_file).unwrap();
         assert!(
@@ -857,7 +889,7 @@ mod tests {
         )
         .unwrap();
 
-        sync_plugins(&data_dir, &pf, &lo).unwrap();
+        sync_plugins(&data_dir, &pf, &lo, SKYRIM_SE_IMPLICIT_PLUGINS).unwrap();
         let entries = read_plugins_txt(&pf).unwrap();
 
         let master = entries
@@ -902,7 +934,7 @@ mod tests {
         )
         .unwrap();
 
-        sync_plugins(&data_dir, &pf, &lo).unwrap();
+        sync_plugins(&data_dir, &pf, &lo, SKYRIM_SE_IMPLICIT_PLUGINS).unwrap();
         let entries = read_plugins_txt(&pf).unwrap();
 
         let esl = entries
