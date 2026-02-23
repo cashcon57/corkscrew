@@ -191,6 +191,14 @@
   }
 
   const enabledCount = $derived(plugins.filter((p) => p.enabled).length);
+
+  // Search/filter
+  let pluginSearch = $state("");
+  let filteredPlugins = $derived(
+    pluginSearch.trim()
+      ? plugins.filter((p) => p.filename.toLowerCase().includes(pluginSearch.toLowerCase()))
+      : plugins
+  );
 </script>
 
 <div class="plugins-page">
@@ -257,6 +265,30 @@
           {/if}
         </button>
       </div>
+      <div class="toolbar-right">
+        <div class="plugin-search-box">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="8" />
+            <line x1="21" y1="21" x2="16.65" y2="16.65" />
+          </svg>
+          <input
+            type="text"
+            placeholder="Filter plugins..."
+            bind:value={pluginSearch}
+            class="plugin-search-input"
+          />
+          {#if pluginSearch}
+            <button class="plugin-search-clear" onclick={() => pluginSearch = ""}>
+              <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+                <line x1="3" y1="3" x2="9" y2="9" /><line x1="9" y1="3" x2="3" y2="9" />
+              </svg>
+            </button>
+          {/if}
+        </div>
+        {#if pluginSearch}
+          <span class="filter-count">{filteredPlugins.length} of {plugins.length}</span>
+        {/if}
+      </div>
       {#if sortMessage}
         <span class="sort-message">{sortMessage}</span>
       {/if}
@@ -316,19 +348,20 @@
       </div>
 
       <div class="list-body">
-        {#each plugins as plugin, i}
+        {#each filteredPlugins as plugin, i}
           {@const pluginWarnings = getWarningsForPlugin(plugin.filename)}
+          {@const realIndex = plugins.indexOf(plugin)}
           <div
             class="list-row"
             class:row-disabled={!plugin.enabled}
             class:row-has-warning={pluginWarnings.some(w => w.level === "warn" || w.level === "error")}
-            class:row-dragging={dragIndex === i}
-            class:row-drag-over={dragOverIndex === i && dragIndex !== i}
-            draggable="true"
-            ondragstart={(e) => handleDragStart(e, i)}
-            ondragover={(e) => handleDragOver(e, i)}
+            class:row-dragging={dragIndex === realIndex}
+            class:row-drag-over={dragOverIndex === realIndex && dragIndex !== realIndex}
+            draggable={!pluginSearch}
+            ondragstart={(e) => pluginSearch ? e.preventDefault() : handleDragStart(e, realIndex)}
+            ondragover={(e) => pluginSearch ? null : handleDragOver(e, realIndex)}
             ondragend={handleDragEnd}
-            ondrop={(e) => handleDrop(e, i)}
+            ondrop={(e) => pluginSearch ? null : handleDrop(e, realIndex)}
             role="listitem"
           >
             <span class="col-drag">
@@ -339,7 +372,7 @@
               </svg>
             </span>
             <span class="col-index">
-              <span class="index-num">{i}</span>
+              <span class="index-num">{realIndex}</span>
             </span>
             <span class="col-toggle">
               <button
@@ -518,11 +551,74 @@
     align-items: center;
     justify-content: space-between;
     gap: var(--space-3);
+    flex-wrap: wrap;
   }
 
   .toolbar-left {
     display: flex;
     gap: var(--space-2);
+    align-items: center;
+  }
+
+  .toolbar-right {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .plugin-search-box {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    background: var(--surface);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius);
+    padding: 4px 10px;
+    min-width: 160px;
+  }
+
+  .plugin-search-box:focus-within {
+    border-color: var(--system-accent);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--system-accent) 20%, transparent);
+  }
+
+  .plugin-search-input {
+    border: none;
+    background: transparent;
+    outline: none;
+    color: var(--text-primary);
+    font-size: 12px;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .plugin-search-input::placeholder {
+    color: var(--text-tertiary);
+  }
+
+  .plugin-search-clear {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: none;
+    padding: 2px;
+    cursor: pointer;
+    color: var(--text-tertiary);
+    border-radius: 50%;
+  }
+
+  .plugin-search-clear:hover {
+    color: var(--text-primary);
+    background: var(--surface-hover);
+  }
+
+  .filter-count {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    font-family: var(--font-mono);
+    white-space: nowrap;
   }
 
   .btn {
