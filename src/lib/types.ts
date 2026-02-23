@@ -1042,6 +1042,17 @@ export type InstallProgressEvent =
   | { kind: "stagingModStarted"; mod_index: number; mod_name: string }
   | { kind: "stagingModCompleted"; mod_index: number; mod_name: string };
 
+// Collection Uninstall Progress Events
+
+export type UninstallProgressEvent =
+  | { kind: "uninstallStarted"; collection_name: string; total_mods: number }
+  | { kind: "modUninstalling"; mod_index: number; mod_name: string; step: string }
+  | { kind: "modUninstalled"; mod_index: number; mod_name: string }
+  | { kind: "modUninstallFailed"; mod_index: number; mod_name: string; error: string }
+  | { kind: "redeployStarted" }
+  | { kind: "redeployCompleted" }
+  | { kind: "uninstallCompleted"; mods_removed: number; downloads_removed: number; errors: string[] };
+
 // Collection Install Checkpoint (for resume)
 export interface CollectionInstallCheckpoint {
   id: number;

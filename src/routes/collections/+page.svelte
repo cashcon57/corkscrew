@@ -1,7 +1,9 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { goto } from "$app/navigation";
-  import { selectedGame, showError, showSuccess, collectionInstallStatus } from "$lib/stores";
+  import { selectedGame, showError, showSuccess, collectionInstallStatus, collectionUninstallStatus } from "$lib/stores";
+  import type { CollectionUninstallStatus } from "$lib/stores";
+  import type { UninstallProgressEvent } from "$lib/types";
   import type { CollectionInfo, CollectionManifest, CollectionMod, CollectionSearchResult, InstalledMod, NexusModInfo, NexusCategory, NexusSearchResult, NexusModFile, CollectionInstallCheckpoint } from "$lib/types";
   import {
     browseCollections,
@@ -145,20 +147,97 @@
     }
   }
 
+  let unlistenUninstall: (() => void) | null = null;
+
+  function humanizeUninstallStep(step: string): string {
+    switch (step) {
+      case "undeploying": return "Removing deployed files...";
+      case "cleaning_staging": return "Cleaning staging files...";
+      case "cleaning_downloads": return "Removing downloads...";
+      case "removing_from_db": return "Removing from database...";
+      default: return step;
+    }
+  }
+
   async function handleDeleteCollection(name: string) {
     const game = $selectedGame;
     if (!game) return;
     deletingCollection = name;
+    confirmDeleteCollection = null;
+
+    // Initialize uninstall status
+    collectionUninstallStatus.set({
+      active: true,
+      collectionName: name,
+      totalMods: 0,
+      currentMod: 0,
+      currentModName: "",
+      currentStep: "",
+      completed: 0,
+      failed: 0,
+      phase: "removing",
+      errors: [],
+      result: null,
+    });
+
+    // Listen for progress events
+    unlistenUninstall = await listen<UninstallProgressEvent>("uninstall-progress", (event) => {
+      const e = event.payload;
+      collectionUninstallStatus.update((s) => {
+        if (!s) return s;
+        const next = { ...s };
+
+        switch (e.kind) {
+          case "uninstallStarted":
+            next.totalMods = e.total_mods;
+            break;
+          case "modUninstalling":
+            next.currentMod = e.mod_index + 1;
+            next.currentModName = e.mod_name;
+            next.currentStep = e.step;
+            break;
+          case "modUninstalled":
+            next.completed = next.completed + 1;
+            break;
+          case "modUninstallFailed":
+            next.failed = next.failed + 1;
+            next.errors = [...next.errors, `${e.mod_name}: ${e.error}`];
+            break;
+          case "redeployStarted":
+            next.phase = "redeploying";
+            next.currentModName = "";
+            next.currentStep = "Redeploying remaining mods...";
+            break;
+          case "redeployCompleted":
+            break;
+          case "uninstallCompleted":
+            next.phase = "complete";
+            next.result = { modsRemoved: e.mods_removed, downloadsRemoved: e.downloads_removed };
+            if (e.errors.length > 0) {
+              next.errors = e.errors;
+            }
+            break;
+        }
+        return next;
+      });
+    });
+
     try {
-      const result = await deleteCollection(game.game_id, game.bottle_name, name, !deleteKeepDownloads);
-      showSuccess(`Removed "${name}" (${result.mods_removed} mods${result.downloads_removed > 0 ? `, ${result.downloads_removed} downloads` : ""})`);
-      confirmDeleteCollection = null;
-      await loadMyCollections();
+      await deleteCollection(game.game_id, game.bottle_name, name, !deleteKeepDownloads);
     } catch (e: unknown) {
       showError(`Failed to delete: ${e}`);
+      collectionUninstallStatus.set(null);
     } finally {
+      unlistenUninstall?.();
+      unlistenUninstall = null;
       deletingCollection = null;
     }
+  }
+
+  function dismissUninstall() {
+    collectionUninstallStatus.set(null);
+    backToMyCollections();
+    loadMyCollections();
   }
 
   $effect(() => {
@@ -1204,7 +1283,7 @@
                 </label>
                 <button
                   class="btn btn-danger btn-sm"
-                  onclick={() => { handleDeleteCollection(selectedMyCollection!.name); backToMyCollections(); }}
+                  onclick={() => { handleDeleteCollection(selectedMyCollection!.name); }}
                   disabled={deletingCollection === selectedMyCollection.name}
                 >
                   {deletingCollection === selectedMyCollection.name ? "Deleting..." : "Confirm Delete"}
@@ -2581,6 +2660,92 @@
               </div>
             </div>
           {/each}
+        </div>
+      {/if}
+    </div>
+  </div>
+{/if}
+
+<!-- Uninstall Progress Modal -->
+{#if $collectionUninstallStatus?.active}
+  {@const us = $collectionUninstallStatus}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <div class="uninstall-overlay" onclick={(e) => { if (us.phase === "complete") dismissUninstall(); }}>
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <div class="uninstall-modal" onclick={(e) => e.stopPropagation()}>
+      {#if us.phase === "complete"}
+        <!-- Completion State -->
+        <div class="uninstall-complete">
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+            <polyline points="22 4 12 14.01 9 11.01" />
+          </svg>
+          <h3 class="uninstall-title">Collection Removed</h3>
+          <p class="uninstall-subtitle">"{us.collectionName}" has been uninstalled</p>
+          <div class="uninstall-result-chips">
+            <span class="result-chip result-success">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12" /></svg>
+              {us.result?.modsRemoved ?? 0} mods removed
+            </span>
+            {#if (us.result?.downloadsRemoved ?? 0) > 0}
+              <span class="result-chip result-neutral">
+                {us.result?.downloadsRemoved} downloads cleaned
+              </span>
+            {/if}
+            {#if us.failed > 0}
+              <span class="result-chip result-error">
+                {us.failed} errors
+              </span>
+            {/if}
+          </div>
+          {#if us.errors.length > 0}
+            <div class="uninstall-errors">
+              {#each us.errors.slice(0, 5) as err}
+                <p class="uninstall-error-line">{err}</p>
+              {/each}
+              {#if us.errors.length > 5}
+                <p class="uninstall-error-line">...and {us.errors.length - 5} more</p>
+              {/if}
+            </div>
+          {/if}
+          <button class="btn btn-primary" onclick={dismissUninstall}>Done</button>
+        </div>
+      {:else}
+        <!-- In-Progress State -->
+        <div class="uninstall-progress">
+          <h3 class="uninstall-title">
+            {us.phase === "redeploying" ? "Redeploying Remaining Mods" : `Removing "${us.collectionName}"`}
+          </h3>
+
+          {#if us.phase === "removing" && us.totalMods > 0}
+            <div class="uninstall-bar-header">
+              <span class="uninstall-bar-label">{us.currentMod} / {us.totalMods}</span>
+              <span class="uninstall-bar-percent">{Math.round((us.currentMod / us.totalMods) * 100)}%</span>
+            </div>
+            <div class="uninstall-track">
+              <div class="uninstall-fill uninstall-fill-active" style="width: {(us.currentMod / us.totalMods) * 100}%"></div>
+            </div>
+          {:else if us.phase === "redeploying"}
+            <div class="uninstall-track">
+              <div class="uninstall-fill uninstall-fill-active uninstall-fill-indeterminate"></div>
+            </div>
+          {/if}
+
+          {#if us.currentModName}
+            <div class="uninstall-current">
+              <span class="uninstall-mod-name">{us.currentModName}</span>
+              <span class="uninstall-step">{humanizeUninstallStep(us.currentStep)}</span>
+            </div>
+          {/if}
+
+          {#if us.failed > 0}
+            <div class="uninstall-fail-badge">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+              {us.failed} error{us.failed > 1 ? "s" : ""}
+            </div>
+          {/if}
         </div>
       {/if}
     </div>
@@ -4850,5 +5015,204 @@
     font-size: 11px;
     color: var(--text-tertiary);
     font-variant-numeric: tabular-nums;
+  }
+
+  /* ---- Uninstall Progress Modal ---- */
+
+  .uninstall-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    background: rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(4px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    animation: uninstall-fade-in 0.2s ease;
+  }
+
+  @keyframes uninstall-fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  .uninstall-modal {
+    background: var(--bg-secondary);
+    border: 1px solid var(--separator);
+    border-radius: 12px;
+    padding: var(--space-8);
+    width: 440px;
+    max-width: 90vw;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+    animation: uninstall-modal-in 0.25s ease;
+  }
+
+  @keyframes uninstall-modal-in {
+    from { opacity: 0; transform: scale(0.95) translateY(8px); }
+    to { opacity: 1; transform: scale(1) translateY(0); }
+  }
+
+  .uninstall-progress,
+  .uninstall-complete {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: var(--space-4);
+  }
+
+  .uninstall-title {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin: 0;
+    letter-spacing: -0.02em;
+  }
+
+  .uninstall-subtitle {
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin: 0;
+  }
+
+  .uninstall-bar-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+  }
+
+  .uninstall-bar-label {
+    font-size: 13px;
+    font-weight: 600;
+    font-family: var(--font-mono);
+    color: var(--text-secondary);
+  }
+
+  .uninstall-bar-percent {
+    font-size: 14px;
+    font-weight: 700;
+    font-family: var(--font-mono);
+    color: var(--text-primary);
+  }
+
+  .uninstall-track {
+    width: 100%;
+    height: 10px;
+    background: var(--bg-tertiary);
+    border-radius: 5px;
+    overflow: hidden;
+    position: relative;
+  }
+
+  .uninstall-fill {
+    height: 100%;
+    border-radius: 5px;
+    background: var(--system-accent);
+    transition: width 300ms ease;
+  }
+
+  .uninstall-fill-active {
+    animation: uninstall-pulse 2s ease-in-out infinite;
+  }
+
+  @keyframes uninstall-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+  }
+
+  .uninstall-fill-indeterminate {
+    width: 40% !important;
+    animation: uninstall-indeterminate 1.5s ease-in-out infinite;
+  }
+
+  @keyframes uninstall-indeterminate {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(350%); }
+  }
+
+  .uninstall-current {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    width: 100%;
+  }
+
+  .uninstall-mod-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .uninstall-step {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    font-style: italic;
+  }
+
+  .uninstall-fail-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    font-size: 12px;
+    font-weight: 600;
+    color: #ef4444;
+    background: rgba(239, 68, 68, 0.12);
+    padding: 4px 12px;
+    border-radius: 100px;
+  }
+
+  .uninstall-result-chips {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+
+  .result-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: 4px 12px;
+    border-radius: 100px;
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  .result-success {
+    color: #22c55e;
+    background: rgba(34, 197, 94, 0.12);
+  }
+
+  .result-neutral {
+    color: var(--text-secondary);
+    background: var(--surface-hover);
+  }
+
+  .result-error {
+    color: #ef4444;
+    background: rgba(239, 68, 68, 0.12);
+  }
+
+  .uninstall-errors {
+    width: 100%;
+    max-height: 120px;
+    overflow-y: auto;
+    text-align: left;
+    padding: var(--space-2) var(--space-3);
+    background: rgba(239, 68, 68, 0.06);
+    border: 1px solid rgba(239, 68, 68, 0.15);
+    border-radius: var(--radius-sm);
+  }
+
+  .uninstall-error-line {
+    font-size: 11px;
+    color: #ef4444;
+    margin: 0 0 4px 0;
+    line-height: 1.4;
   }
 </style>

@@ -111,6 +111,22 @@ export interface CollectionInstallStatus {
 }
 export const collectionInstallStatus = writable<CollectionInstallStatus | null>(null);
 
+// Collection uninstall progress (global — visible from any page)
+export interface CollectionUninstallStatus {
+  active: boolean;
+  collectionName: string;
+  totalMods: number;
+  currentMod: number;
+  currentModName: string;
+  currentStep: string;
+  completed: number;
+  failed: number;
+  phase: "removing" | "redeploying" | "complete";
+  errors: string[];
+  result: { modsRemoved: number; downloadsRemoved: number } | null;
+}
+export const collectionUninstallStatus = writable<CollectionUninstallStatus | null>(null);
+
 // SKSE state
 export const skseStatus = writable<SkseStatus | null>(null);
 

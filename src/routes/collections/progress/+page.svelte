@@ -30,6 +30,10 @@
   let stagingTotal = $derived(mods.length);
   let stagingPercent = $derived(stagingTotal > 0 ? Math.round((stagingDone / stagingTotal) * 100) : 0);
 
+  // Activity feed — currently active mods surfaced to the top
+  const ACTIVE_STATUSES = new Set(["downloading", "extracting", "deploying"]);
+  let activeWorkMods = $derived(mods.filter((m) => ACTIVE_STATUSES.has(m.status)));
+
   // Mod log: show 10 items when collapsed, all when expanded
   let visibleMods = $derived(modLogExpanded ? mods : mods.slice(0, 10));
 
@@ -334,6 +338,58 @@
             {/each}
           </div>
         {/if}
+      </section>
+    {/if}
+
+    <!-- Activity Feed — currently active items -->
+    {#if activeWorkMods.length > 0 && phase !== "complete"}
+      <section class="phase-section activity-section">
+        <div class="activity-header">
+          <h3 class="phase-title">
+            <svg class="icon-spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--system-accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="12" y1="2" x2="12" y2="6" />
+              <line x1="12" y1="18" x2="12" y2="22" />
+              <line x1="4.93" y1="4.93" x2="7.76" y2="7.76" />
+              <line x1="16.24" y1="16.24" x2="19.07" y2="19.07" />
+              <line x1="2" y1="12" x2="6" y2="12" />
+              <line x1="18" y1="12" x2="22" y2="12" />
+              <line x1="4.93" y1="19.07" x2="7.76" y2="16.24" />
+              <line x1="16.24" y1="7.76" x2="19.07" y2="4.93" />
+            </svg>
+            ACTIVITY
+          </h3>
+          <span class="activity-count">{activeWorkMods.length} active</span>
+        </div>
+        <div class="activity-list">
+          {#each activeWorkMods as mod (mod.index)}
+            <div class="activity-item">
+              <span class="activity-icon">
+                {#if mod.status === "downloading"}
+                  <svg class="icon-bounce" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--system-accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
+                {:else if mod.status === "extracting"}
+                  <svg class="icon-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--system-accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
+                {:else if mod.status === "deploying"}
+                  <svg class="icon-bounce" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--system-accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>
+                {/if}
+              </span>
+              <span class="activity-name" title={mod.name}>{mod.name}</span>
+              <span class="activity-status">
+                {#if mod.status === "downloading" && mod.downloadBytes && mod.downloadTotal}
+                  {formatBytes(mod.downloadBytes)} / {formatBytes(mod.downloadTotal)}
+                {:else if mod.stepDetail}
+                  {mod.stepDetail}
+                {:else}
+                  {mod.status}
+                {/if}
+              </span>
+              {#if mod.status === "downloading" && mod.downloadTotal && mod.downloadTotal > 0}
+                <div class="activity-bar">
+                  <div class="activity-bar-fill" style="width: {Math.min(100, Math.round(((mod.downloadBytes ?? 0) / mod.downloadTotal) * 100))}%"></div>
+                </div>
+              {/if}
+            </div>
+          {/each}
+        </div>
       </section>
     {/if}
 
@@ -1050,6 +1106,88 @@
 
   .show-all-btn:hover {
     background: var(--surface-hover);
+  }
+
+  /* ---- Activity Feed ---- */
+
+  .activity-section {
+    border-color: color-mix(in srgb, var(--system-accent) 30%, var(--separator));
+    background: color-mix(in srgb, var(--system-accent) 4%, var(--surface));
+  }
+
+  .activity-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    margin-bottom: var(--space-3);
+  }
+
+  .activity-count {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--system-accent);
+    background: color-mix(in srgb, var(--system-accent) 12%, transparent);
+    padding: 2px 8px;
+    border-radius: 100px;
+    font-family: var(--font-mono);
+  }
+
+  .activity-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .activity-item {
+    display: grid;
+    grid-template-columns: 20px 1fr auto;
+    grid-template-rows: auto auto;
+    gap: 0 var(--space-2);
+    align-items: center;
+    padding: var(--space-2) var(--space-2);
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--system-accent) 6%, var(--surface));
+    border: 1px solid color-mix(in srgb, var(--system-accent) 15%, transparent);
+  }
+
+  .activity-icon {
+    grid-row: 1 / -1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .activity-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
+
+  .activity-status {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    font-family: var(--font-mono);
+    white-space: nowrap;
+  }
+
+  .activity-bar {
+    grid-column: 2 / -1;
+    height: 3px;
+    background: var(--bg-tertiary);
+    border-radius: 2px;
+    overflow: hidden;
+    margin-top: 2px;
+  }
+
+  .activity-bar-fill {
+    height: 100%;
+    background: var(--system-accent);
+    border-radius: 2px;
+    transition: width 300ms ease;
   }
 
   /* ---- Animated Icons ---- */

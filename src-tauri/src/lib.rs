@@ -1632,6 +1632,7 @@ fn switch_collection_cmd(
 
 #[tauri::command]
 async fn delete_collection_cmd(
+    app: AppHandle,
     game_id: String,
     bottle_name: String,
     collection_name: String,
@@ -1647,14 +1648,36 @@ async fn delete_collection_cmd(
             .list_mods_by_collection(&game_id, &bottle_name, &collection_name)
             .map_err(|e| e.to_string())?;
 
+        let total_mods = collection_mods.len();
         let mut mods_removed = 0usize;
         let mut downloads_removed = 0usize;
         let mut errors: Vec<String> = Vec::new();
 
+        // Emit: uninstall started
+        let _ = app.emit(
+            "uninstall-progress",
+            serde_json::json!({
+                "kind": "uninstallStarted",
+                "collection_name": &collection_name,
+                "total_mods": total_mods,
+            }),
+        );
+
         // Collect plugin filenames for rule cleanup
         let mut plugin_names: Vec<String> = Vec::new();
 
-        for m in &collection_mods {
+        for (idx, m) in collection_mods.iter().enumerate() {
+            // Emit: mod uninstalling — undeploy
+            let _ = app.emit(
+                "uninstall-progress",
+                serde_json::json!({
+                    "kind": "modUninstalling",
+                    "mod_index": idx,
+                    "mod_name": &m.name,
+                    "step": "undeploying",
+                }),
+            );
+
             // Gather plugin filenames before removal
             for file in &m.installed_files {
                 let lower = file.to_lowercase();
@@ -1669,6 +1692,17 @@ async fn delete_collection_cmd(
             if let Err(e) = deployer::undeploy_mod(&db, &game_id, &bottle_name, m.id, &data_dir) {
                 errors.push(format!("Failed to undeploy '{}': {}", m.name, e));
             }
+
+            // Emit: cleaning staging
+            let _ = app.emit(
+                "uninstall-progress",
+                serde_json::json!({
+                    "kind": "modUninstalling",
+                    "mod_index": idx,
+                    "mod_name": &m.name,
+                    "step": "cleaning_staging",
+                }),
+            );
 
             // Clean orphaned rollback staging directories
             if let Err(e) = rollback::cleanup_mod_version_staging(&db, m.id) {
@@ -1722,9 +1756,26 @@ async fn delete_collection_cmd(
 
             // Remove from DB (cascades deployment_manifest, file_hashes; also cleans profile_mods)
             if let Err(e) = db.remove_mod(m.id) {
+                let _ = app.emit(
+                    "uninstall-progress",
+                    serde_json::json!({
+                        "kind": "modUninstallFailed",
+                        "mod_index": idx,
+                        "mod_name": &m.name,
+                        "error": e.to_string(),
+                    }),
+                );
                 errors.push(format!("Failed to remove mod '{}' from DB: {}", m.name, e));
             } else {
                 mods_removed += 1;
+                let _ = app.emit(
+                    "uninstall-progress",
+                    serde_json::json!({
+                        "kind": "modUninstalled",
+                        "mod_index": idx,
+                        "mod_name": &m.name,
+                    }),
+                );
             }
         }
 
@@ -1747,14 +1798,36 @@ async fn delete_collection_cmd(
             errors.push(format!("Failed to remove collection metadata: {}", e));
         }
 
+        // Emit: redeploy phase
+        let _ = app.emit(
+            "uninstall-progress",
+            serde_json::json!({ "kind": "redeployStarted" }),
+        );
+
         // Redeploy remaining mods to restore any files that were shadowed
         if let Err(e) = deployer::redeploy_all(&db, &game_id, &bottle_name, &data_dir) {
             errors.push(format!("Failed to redeploy remaining mods: {}", e));
         }
 
+        let _ = app.emit(
+            "uninstall-progress",
+            serde_json::json!({ "kind": "redeployCompleted" }),
+        );
+
         if game_id == "skyrimse" {
             let _ = sync_skyrim_plugins_for_game(&game, &bottle);
         }
+
+        // Emit: uninstall completed
+        let _ = app.emit(
+            "uninstall-progress",
+            serde_json::json!({
+                "kind": "uninstallCompleted",
+                "mods_removed": mods_removed,
+                "downloads_removed": downloads_removed,
+                "errors": &errors,
+            }),
+        );
 
         Ok(serde_json::json!({
             "mods_removed": mods_removed,

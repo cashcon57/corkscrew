@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from "svelte";
   import "../app.css";
   import { goto } from "$app/navigation";
-  import { currentPage, errorMessage, successMessage, selectedGame, selectedBottle, showError, showSuccess, appVersion, collectionInstallStatus, updateReady as updateReadyStore, updateVersion as updateVersionStore, updateNotes as updateNotesStore, updateChecking as updateCheckingStore, updateError as updateErrorStore, setUpdateCheckFn, notificationCount, showNotificationLog, activeProfile, profileList, activeCollection, collectionList, sidebarCollapsed, controllerMode } from "$lib/stores";
+  import { currentPage, errorMessage, successMessage, selectedGame, selectedBottle, showError, showSuccess, appVersion, collectionInstallStatus, collectionUninstallStatus, updateReady as updateReadyStore, updateVersion as updateVersionStore, updateNotes as updateNotesStore, updateChecking as updateCheckingStore, updateError as updateErrorStore, setUpdateCheckFn, notificationCount, showNotificationLog, activeProfile, profileList, activeCollection, collectionList, sidebarCollapsed, controllerMode } from "$lib/stores";
   import { initTheme } from "$lib/theme";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
@@ -976,6 +976,37 @@
     </button>
   {/if}
 
+  {#if $collectionUninstallStatus?.active && $collectionUninstallStatus.phase !== "complete"}
+    <div class="global-status-bar global-status-bar-uninstall">
+      <div class="status-bar-content">
+        <div class="status-spinner status-spinner-red"></div>
+        <div class="status-text">
+          <span class="status-collection">{$collectionUninstallStatus.collectionName}</span>
+          <span class="status-detail">
+            {#if $collectionUninstallStatus.phase === "removing"}
+              Removing {$collectionUninstallStatus.currentMod}/{$collectionUninstallStatus.totalMods}
+              {#if $collectionUninstallStatus.currentModName}
+                &mdash; {$collectionUninstallStatus.currentModName}
+              {/if}
+            {:else if $collectionUninstallStatus.phase === "redeploying"}
+              Redeploying remaining mods...
+            {/if}
+          </span>
+        </div>
+        {#if $collectionUninstallStatus.totalMods > 0 && $collectionUninstallStatus.phase === "removing"}
+          <span class="status-percent">{Math.round(($collectionUninstallStatus.currentMod / $collectionUninstallStatus.totalMods) * 100)}%</span>
+        {/if}
+      </div>
+      {#if $collectionUninstallStatus.totalMods > 0}
+        <div class="status-progress-track">
+          <div class="status-progress-fill status-progress-fill-red"
+            style="width: {$collectionUninstallStatus.phase === "redeploying" ? 100 : ($collectionUninstallStatus.currentMod / $collectionUninstallStatus.totalMods) * 100}%">
+          </div>
+        </div>
+      {/if}
+    </div>
+  {/if}
+
   <!-- Download queue popover — rendered at app-shell level to escape sidebar overflow:hidden -->
   {#if showQueue}
     <div class="queue-popover" style={popoverStyle}>
@@ -1930,6 +1961,20 @@
 
   .status-progress-complete {
     background: var(--green, #30d158);
+  }
+
+  .global-status-bar-uninstall {
+    cursor: default;
+    bottom: 16px;
+    border-color: rgba(239, 68, 68, 0.3);
+  }
+
+  .status-spinner-red {
+    border-top-color: #ef4444;
+  }
+
+  .status-progress-fill-red {
+    background: #ef4444;
   }
 
   /* Controller mode: larger touch targets for Steam Deck */
