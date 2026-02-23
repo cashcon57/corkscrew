@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from "svelte";
   import { goto } from "$app/navigation";
   import { selectedGame, showError, showSuccess, collectionInstallStatus } from "$lib/stores";
-  import type { CollectionInfo, CollectionManifest, CollectionMod, CollectionSearchResult, InstalledMod, NexusModInfo, NexusCategory, NexusSearchResult } from "$lib/types";
+  import type { CollectionInfo, CollectionManifest, CollectionMod, CollectionSearchResult, InstalledMod, NexusModInfo, NexusCategory, NexusSearchResult, NexusModFile } from "$lib/types";
   import {
     browseCollections,
     browseNexusMods,
@@ -21,7 +21,11 @@
     getCollectionDiff,
     getInstalledMods,
     detectCollectionTools,
+    getModFiles,
+    downloadAndInstallNexusMod,
+    closeBrowserWebview,
   } from "$lib/api";
+  import { listen } from "@tauri-apps/api/event";
   import type { CollectionSummary, CollectionDiff, RequiredTool } from "$lib/types";
   import type { InstallProgressEvent } from "$lib/types";
   import { config } from "$lib/stores";
@@ -32,6 +36,7 @@
   import RequiredToolsPrompt from "$lib/components/RequiredToolsPrompt.svelte";
   import NexusLogo from "$lib/components/NexusLogo.svelte";
   import WabbajackLogo from "$lib/components/WabbajackLogo.svelte";
+  import WebViewToggle from "$lib/components/WebViewToggle.svelte";
 
   const NEXUS_API_KEY_URL = "https://www.nexusmods.com/users/myaccount?tab=api+access";
 
@@ -160,7 +165,7 @@
   });
 
   $effect(() => {
-    if (activeTab === "browse_mods" && $selectedGame) {
+    if (activeTab === "browse_mods" && $selectedGame && account?.is_premium) {
       loadBrowseMods();
       loadBrowseCategories();
       loadBrowseInstalledIds();
@@ -190,7 +195,7 @@
   let loading = $state(false);
   let searchQuery = $state("");
   let gameFilter = $state("all");
-  let showNsfw = $state(false);
+  let nsfwFilter = $state<"hide" | "show" | "only">("hide");
   let sortField = $state<"endorsements" | "downloads" | "name" | "rating" | "created" | "updated" | "mods">("endorsements");
   let sortDirection = $state<"asc" | "desc">("desc");
   let collectionsTotalCount = $state(0);
@@ -255,7 +260,7 @@
   let browseMods = $state<NexusModInfo[]>([]);
   let browseModsLoading = $state(false);
   let browseModsSearch = $state("");
-  let browseModsShowNsfw = $state(false);
+  let browseNsfwFilter = $state<"hide" | "show" | "only">("hide");
   let browseModsSort = $state<"endorsements" | "downloads" | "name" | "updated" | "createdAt">("endorsements");
   let browseModsTotalCount = $state(0);
   let browseModsOffset = $state(0);
@@ -274,6 +279,20 @@
   let browseMinEndorsements = $state<number | null>(null);
   let showBrowseAdvancedFilters = $state(false);
   let browseAuthorTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // WebView toggle state
+  let browseWebviewToggle: WebViewToggle | null = $state(null);
+  let collectionsWebviewToggle: WebViewToggle | null = $state(null);
+  let browseViewMode = $state<"app" | "website">("app");
+  let collectionsViewMode = $state<"app" | "website">("app");
+
+  // Download & file picker state
+  let showFilePicker = $state(false);
+  let filePickerMod = $state<NexusModInfo | null>(null);
+  let filePickerFiles = $state<NexusModFile[]>([]);
+  let loadingFiles = $state(false);
+  let downloadingFile = $state<number | null>(null);
+  let downloadProgress = $state<{ downloaded: number; total: number } | null>(null);
 
   const browseActiveFilterCount = $derived(
     (browseAuthorFilter.trim() ? 1 : 0) +
@@ -368,19 +387,27 @@
           browseModsSort === "name" ? "ASC" : "DESC",
           BROWSE_PAGE_SIZE,
           browseModsOffset,
-          browseModsShowNsfw,
+          browseNsfwFilter !== "hide",
           browseCategoryId || null,
           browseAuthorFilter.trim() || null,
           computeUpdatedSince(browseUpdatePeriod),
           browseMinDownloads,
           browseMinEndorsements,
         );
-        browseMods = result.mods;
+        let mods = result.mods;
+        if (browseNsfwFilter === "only") {
+          mods = mods.filter(m => m.adult_content);
+        }
+        browseMods = mods;
         browseModsTotalCount = result.total_count;
         browseModsHasMore = result.has_more;
       } else {
         // Fallback to v1 REST browse
-        browseMods = await browseNexusMods(slug, "all");
+        let mods = await browseNexusMods(slug, "all");
+        if (browseNsfwFilter === "only") {
+          mods = mods.filter(m => m.adult_content);
+        }
+        browseMods = mods;
         browseModsTotalCount = browseMods.length;
         browseModsHasMore = false;
       }
@@ -442,18 +469,91 @@
   function openModPage(mod: NexusModInfo) {
     const game = $selectedGame;
     if (!game) return;
-    const slugMap: Record<string, string> = {
-      skyrimse: "skyrimspecialedition",
-      skyrim: "skyrim",
-      fallout4: "fallout4",
-      fallout3: "fallout3",
-      falloutnv: "newvegas",
-      oblivion: "oblivion",
-      morrowind: "morrowind",
-      starfield: "starfield",
-    };
-    const slug = slugMap[game.game_id] ?? game.game_id;
+    const slug = getGameSlug();
     safeOpenUrl(`https://www.nexusmods.com/${slug}/mods/${mod.mod_id}`);
+  }
+
+  function cycleNsfwFilter(current: "hide" | "show" | "only"): "hide" | "show" | "only" {
+    if (current === "hide") return "show";
+    if (current === "show") return "only";
+    return "hide";
+  }
+
+  function nsfwLabel(state: "hide" | "show" | "only"): string {
+    if (state === "hide") return "NSFW Off";
+    if (state === "show") return "NSFW On";
+    return "NSFW Only";
+  }
+
+  function nsfwIcon(state: "hide" | "show" | "only"): string {
+    if (state === "hide") return "";
+    if (state === "show") return "\u2713";
+    return "\u2500";
+  }
+
+  // --- Download & File Picker ---
+  async function openFilePicker(mod: NexusModInfo) {
+    const slug = getGameSlug();
+    if (!slug) return;
+    filePickerMod = mod;
+    showFilePicker = true;
+    loadingFiles = true;
+    try {
+      const files = await getModFiles(slug, mod.mod_id);
+      // Filter out deleted/archived, sort: main first
+      const categoryOrder: Record<string, number> = { main: 0, update: 1, optional: 2, miscellaneous: 3, old_version: 4 };
+      filePickerFiles = files
+        .filter(f => f.category !== "deleted" && f.category !== "archived")
+        .sort((a, b) => (categoryOrder[a.category] ?? 5) - (categoryOrder[b.category] ?? 5));
+    } catch (e) {
+      showError(`Failed to load mod files: ${e}`);
+      showFilePicker = false;
+      filePickerMod = null;
+    } finally {
+      loadingFiles = false;
+    }
+  }
+
+  function closeFilePicker() {
+    showFilePicker = false;
+    filePickerMod = null;
+    filePickerFiles = [];
+    downloadingFile = null;
+    downloadProgress = null;
+  }
+
+  async function handleDownloadFile(file: NexusModFile) {
+    const game = $selectedGame;
+    if (!game || !filePickerMod) return;
+    const slug = getGameSlug();
+    if (!slug) return;
+
+    downloadingFile = file.file_id;
+    downloadProgress = { downloaded: 0, total: 0 };
+
+    // Listen for download progress events
+    const unlisten = await listen<{ downloaded: number; total: number; mod_name: string }>("download-progress", (e) => {
+      downloadProgress = { downloaded: e.payload.downloaded, total: e.payload.total };
+    });
+
+    try {
+      await downloadAndInstallNexusMod(slug, filePickerMod.mod_id, file.file_id, game.game_id, game.bottle_name);
+      showSuccess(`Installed "${filePickerMod.name}" successfully`);
+      browseInstalledNexusIds = new Set([...browseInstalledNexusIds, filePickerMod.mod_id]);
+      closeFilePicker();
+    } catch (e) {
+      showError(`Download failed: ${e}`);
+    } finally {
+      unlisten();
+      downloadingFile = null;
+      downloadProgress = null;
+    }
+  }
+
+  function formatFileSize(kb: number): string {
+    if (kb >= 1_048_576) return `${(kb / 1_048_576).toFixed(1)} GB`;
+    if (kb >= 1024) return `${(kb / 1024).toFixed(1)} MB`;
+    return `${kb} KB`;
   }
 
   const gameOptions = $derived.by(() => {
@@ -464,8 +564,10 @@
   $effect(() => {
     let result = collections;
 
-    if (!showNsfw) {
+    if (nsfwFilter === "hide") {
       result = result.filter(c => !c.adult_content);
+    } else if (nsfwFilter === "only") {
+      result = result.filter(c => c.adult_content);
     }
 
     filtered = result;
@@ -495,6 +597,8 @@
     if (installUnlisten) { installUnlisten(); installUnlisten = null; }
     if (elapsedInterval) { clearInterval(elapsedInterval); elapsedInterval = null; }
     statsBarObserver?.disconnect();
+    // Close any active webviews when navigating away
+    closeBrowserWebview().catch(() => {});
   });
 
   async function checkAccount() {
@@ -829,21 +933,21 @@
 <div class="collections-page">
   <!-- Tab Switcher -->
   <div class="tab-bar">
-    <button class="tab-btn" class:tab-active={activeTab === "my"} onclick={() => activeTab = "my"}>
+    <button class="tab-btn" class:tab-active={activeTab === "my"} onclick={() => { closeBrowserWebview().catch(() => {}); activeTab = "my"; }}>
       My Collections
       {#if myCollections.length > 0}
         <span class="tab-count">{myCollections.length}</span>
       {/if}
     </button>
-    <button class="tab-btn" class:tab-active={activeTab === "nexus"} onclick={() => activeTab = "nexus"}>
+    <button class="tab-btn" class:tab-active={activeTab === "nexus"} onclick={() => { closeBrowserWebview().catch(() => {}); activeTab = "nexus"; }}>
       <NexusLogo size={14} />
       Nexus Mods Collections
     </button>
-    <button class="tab-btn" class:tab-active={activeTab === "wabbajack"} onclick={() => activeTab = "wabbajack"}>
+    <button class="tab-btn" class:tab-active={activeTab === "wabbajack"} onclick={() => { closeBrowserWebview().catch(() => {}); activeTab = "wabbajack"; }}>
       <WabbajackLogo size={14} />
       Wabbajack Lists
     </button>
-    <button class="tab-btn" class:tab-active={activeTab === "browse_mods"} onclick={() => activeTab = "browse_mods"}>
+    <button class="tab-btn" class:tab-active={activeTab === "browse_mods"} onclick={() => { closeBrowserWebview().catch(() => {}); activeTab = "browse_mods"; }}>
       <NexusLogo size={14} />
       Browse Nexus
     </button>
@@ -1576,7 +1680,13 @@
         <p class="page-subtitle">Discover mods on NexusMods for {$selectedGame?.display_name ?? "your game"}</p>
       </div>
       <div class="header-right">
-        {#if !browseModsLoading && browseModsTotalCount > 0}
+        <WebViewToggle
+          bind:this={browseWebviewToggle}
+          url={`https://www.nexusmods.com/${getGameSlug()}/mods/`}
+          defaultMode={account?.is_premium ? "app" : "website"}
+          onModeChange={(m) => browseViewMode = m}
+        />
+        {#if !browseModsLoading && browseModsTotalCount > 0 && browseViewMode === "app"}
           <div class="stat-pill">
             <span class="stat-value">{browseModsTotalCount.toLocaleString()}</span>
             <span class="stat-label">{browseModsTotalCount === 1 ? "mod" : "mods"}</span>
@@ -1585,10 +1695,40 @@
       </div>
     </header>
 
-    {#if !$selectedGame}
+    {#if browseViewMode === "website"}
+      <div class="webview-placeholder">
+        <p class="webview-hint">Browsing NexusMods directly. Switch to "In-App" to use built-in search and filters.</p>
+      </div>
+    {:else if !$selectedGame}
       <div class="empty-state">
         <p class="empty-title">No game selected</p>
         <p class="empty-detail">Select a game from the sidebar to browse mods.</p>
+      </div>
+    {:else if !account?.connected}
+      <div class="premium-gate">
+        <div class="premium-gate-icon">
+          <NexusLogo size={40} />
+        </div>
+        <h3 class="premium-gate-title">Connect to NexusMods</h3>
+        <p class="premium-gate-desc">Connect your NexusMods account in Settings to browse mods in-app.</p>
+        <button class="btn btn-accent" onclick={() => goto("/settings")}>Go to Settings</button>
+        <p class="premium-gate-hint">Or switch to "Website" above to browse NexusMods directly.</p>
+      </div>
+    {:else if !account?.is_premium}
+      <div class="premium-gate">
+        <div class="premium-gate-icon">
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#ff9f0a" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2L2 7l10 5 10-5-10-5z" />
+            <path d="M2 17l10 5 10-5" />
+            <path d="M2 12l10 5 10-5" />
+          </svg>
+        </div>
+        <h3 class="premium-gate-title">Premium Required for In-App Browsing</h3>
+        <p class="premium-gate-desc">In-app mod browsing uses the NexusMods API and is available to Premium members. Free users can browse the website directly.</p>
+        <button class="btn btn-accent" onclick={() => safeOpenUrl(`https://www.nexusmods.com/${getGameSlug()}/mods/`)}>
+          Open NexusMods.com
+        </button>
+        <p class="premium-gate-hint">Switch to "Website" above to browse within Corkscrew, or upgrade to Premium on NexusMods for full in-app access.</p>
       </div>
     {:else}
       <div class="filters-bar">
@@ -1618,10 +1758,16 @@
             <option value="createdAt">Sort: Recently Added</option>
           </select>
         </div>
-        <label class="nsfw-toggle">
-          <input type="checkbox" bind:checked={browseModsShowNsfw} onchange={() => loadBrowseMods()} />
-          <span>NSFW</span>
-        </label>
+        <button
+          class="nsfw-cycle-btn"
+          class:nsfw-show={browseNsfwFilter === "show"}
+          class:nsfw-only={browseNsfwFilter === "only"}
+          onclick={() => { browseNsfwFilter = cycleNsfwFilter(browseNsfwFilter); loadBrowseMods(); }}
+          title={browseNsfwFilter === "hide" ? "NSFW hidden" : browseNsfwFilter === "show" ? "NSFW included" : "NSFW only"}
+        >
+          <span class="nsfw-indicator">{nsfwIcon(browseNsfwFilter)}</span>
+          {nsfwLabel(browseNsfwFilter)}
+        </button>
         <button class="filter-toggle" onclick={() => showBrowseAdvancedFilters = !showBrowseAdvancedFilters}>
           Filters {showBrowseAdvancedFilters ? '\u25B2' : '\u25BC'}
           {#if browseActiveFilterCount > 0}<span class="filter-badge">{browseActiveFilterCount}</span>{/if}
@@ -1723,7 +1869,7 @@
       {:else}
         <div class="mod-browse-grid">
           {#each browseMods as mod}
-            <button class="mod-browse-card" onclick={() => openModPage(mod)}>
+            <div class="mod-browse-card" onclick={() => openModPage(mod)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === "Enter") openModPage(mod); }}>
               {#if browseInstalledNexusIds.has(mod.mod_id)}
                 <div class="browse-installed-badge">Installed</div>
               {/if}
@@ -1762,8 +1908,22 @@
                     <span class="mod-browse-stat mod-browse-version">v{mod.version}</span>
                   {/if}
                 </div>
+                {#if account?.is_premium && !browseInstalledNexusIds.has(mod.mod_id)}
+                  <button
+                    class="btn btn-accent btn-sm mod-download-btn"
+                    onclick={(e) => { e.stopPropagation(); openFilePicker(mod); }}
+                    title="Download & Install"
+                  >
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                      <polyline points="7 10 12 15 17 10" />
+                      <line x1="12" y1="15" x2="12" y2="3" />
+                    </svg>
+                    Install
+                  </button>
+                {/if}
               </div>
-            </button>
+            </div>
           {/each}
         </div>
 
@@ -1800,7 +1960,7 @@
           </div>
         {/if}
 
-        <p class="browse-mods-hint">Click a mod to view it on NexusMods. Free users download via the website; premium users can use NXM links.</p>
+        <p class="browse-mods-hint">Click a mod to view it on NexusMods. Use the Install button to download and install directly.</p>
       {/if}
     {/if}
 
@@ -1812,6 +1972,12 @@
         <p class="page-subtitle">Browse and install curated mod collections from Nexus Mods</p>
       </div>
       <div class="header-right">
+        <WebViewToggle
+          bind:this={collectionsWebviewToggle}
+          url={`https://next.nexusmods.com/${getGameSlug()}/collections`}
+          defaultMode={account?.is_premium ? "app" : "website"}
+          onModeChange={(m) => collectionsViewMode = m}
+        />
         {#if account?.connected}
           <div class="account-badge">
             <div class="account-avatar-sm">
@@ -1835,7 +2001,37 @@
       </div>
     </header>
 
-    {#if loading || loadingDetail}
+    {#if collectionsViewMode === "website"}
+      <div class="webview-placeholder">
+        <p class="webview-hint">Browsing NexusMods Collections directly. Switch to "In-App" to use built-in search and filters.</p>
+      </div>
+    {:else if !account?.connected}
+      <div class="premium-gate">
+        <div class="premium-gate-icon">
+          <NexusLogo size={40} />
+        </div>
+        <h3 class="premium-gate-title">Connect to NexusMods</h3>
+        <p class="premium-gate-desc">Connect your NexusMods account in Settings to browse collections in-app.</p>
+        <button class="btn btn-accent" onclick={() => goto("/settings")}>Go to Settings</button>
+        <p class="premium-gate-hint">Or switch to "Website" above to browse NexusMods Collections directly.</p>
+      </div>
+    {:else if !account?.is_premium}
+      <div class="premium-gate">
+        <div class="premium-gate-icon">
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#ff9f0a" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2L2 7l10 5 10-5-10-5z" />
+            <path d="M2 17l10 5 10-5" />
+            <path d="M2 12l10 5 10-5" />
+          </svg>
+        </div>
+        <h3 class="premium-gate-title">Premium Required for In-App Collections</h3>
+        <p class="premium-gate-desc">In-app collection browsing uses the NexusMods API and is available to Premium members.</p>
+        <button class="btn btn-accent" onclick={() => safeOpenUrl(`https://next.nexusmods.com/${getGameSlug()}/collections`)}>
+          Open NexusMods Collections
+        </button>
+        <p class="premium-gate-hint">Switch to "Website" above to browse within Corkscrew, or upgrade to Premium on NexusMods for full in-app access.</p>
+      </div>
+    {:else if loading || loadingDetail}
       <div class="loading-container">
         <div class="loading-card">
           <div class="spinner"><div class="spinner-ring"></div></div>
@@ -1870,10 +2066,16 @@
             <option value={game}>{gameDomainDisplay(game)}</option>
           {/each}
         </select>
-        <label class="nsfw-toggle">
-          <input type="checkbox" bind:checked={showNsfw} />
-          <span>NSFW</span>
-        </label>
+        <button
+          class="nsfw-cycle-btn"
+          class:nsfw-show={nsfwFilter === "show"}
+          class:nsfw-only={nsfwFilter === "only"}
+          onclick={() => { nsfwFilter = cycleNsfwFilter(nsfwFilter); }}
+          title={nsfwFilter === "hide" ? "NSFW hidden" : nsfwFilter === "show" ? "NSFW included" : "NSFW only"}
+        >
+          <span class="nsfw-indicator">{nsfwIcon(nsfwFilter)}</span>
+          {nsfwLabel(nsfwFilter)}
+        </button>
         <div class="sort-group">
           <select class="filter-select" bind:value={sortField} onchange={reloadWithSort}>
             <option value="endorsements">Sort: Endorsements</option>
@@ -2118,6 +2320,71 @@
       pendingTools = [];
     }}
   />
+{/if}
+
+<!-- File Picker Modal -->
+{#if showFilePicker && filePickerMod}
+  <div class="modal-overlay" onclick={closeFilePicker} role="presentation">
+    <div class="file-picker-modal" onclick={(e) => e.stopPropagation()} role="dialog" aria-label="Select file to download">
+      <div class="file-picker-header">
+        <h3 class="file-picker-title">Download: {filePickerMod.name}</h3>
+        <button class="file-picker-close" onclick={closeFilePicker}>&times;</button>
+      </div>
+
+      {#if loadingFiles}
+        <div class="file-picker-loading">
+          <div class="spinner-sm"></div>
+          <span>Loading available files...</span>
+        </div>
+      {:else if filePickerFiles.length === 0}
+        <div class="file-picker-empty">
+          <p>No downloadable files found for this mod.</p>
+        </div>
+      {:else}
+        <div class="file-picker-list">
+          {#each filePickerFiles as file}
+            <div class="file-picker-item" class:file-downloading={downloadingFile === file.file_id}>
+              <div class="file-picker-info">
+                <div class="file-picker-name">{file.name}</div>
+                <div class="file-picker-meta">
+                  <span class="file-category-badge" class:file-cat-main={file.category === "main"} class:file-cat-optional={file.category === "optional"} class:file-cat-update={file.category === "update"}>
+                    {file.category}
+                  </span>
+                  {#if file.version}<span class="file-version">v{file.version}</span>{/if}
+                  <span class="file-size">{formatFileSize(file.size_kb)}</span>
+                </div>
+                {#if file.description}
+                  <p class="file-picker-desc">{file.description}</p>
+                {/if}
+              </div>
+              <div class="file-picker-action">
+                {#if downloadingFile === file.file_id}
+                  <div class="download-progress-bar">
+                    <div class="download-progress-fill" style="width: {downloadProgress && downloadProgress.total > 0 ? Math.round((downloadProgress.downloaded / downloadProgress.total) * 100) : 0}%"></div>
+                  </div>
+                  <span class="download-progress-text">
+                    {#if downloadProgress && downloadProgress.total > 0}
+                      {Math.round((downloadProgress.downloaded / downloadProgress.total) * 100)}%
+                    {:else}
+                      Starting...
+                    {/if}
+                  </span>
+                {:else}
+                  <button
+                    class="btn btn-accent btn-sm"
+                    disabled={downloadingFile !== null}
+                    onclick={() => handleDownloadFile(file)}
+                  >
+                    Install
+                  </button>
+                {/if}
+              </div>
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </div>
+  </div>
 {/if}
 
 <style>
@@ -4030,5 +4297,312 @@
   .filter-chip-clear:hover {
     background: var(--surface-active);
     color: var(--text-primary);
+  }
+
+  /* ---- Premium Gate ---- */
+
+  .premium-gate {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: var(--space-4);
+    padding: var(--space-16) var(--space-10);
+    max-width: 480px;
+    margin: 0 auto;
+  }
+
+  .premium-gate-icon {
+    color: var(--text-quaternary);
+    margin-bottom: var(--space-2);
+  }
+
+  .premium-gate-title {
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--text-primary);
+  }
+
+  .premium-gate-desc {
+    font-size: 14px;
+    color: var(--text-secondary);
+    line-height: 1.6;
+  }
+
+  .premium-gate-hint {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    margin-top: var(--space-2);
+  }
+
+  /* ---- Webview Placeholder ---- */
+
+  .webview-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 120px;
+    padding: var(--space-8);
+  }
+
+  .webview-hint {
+    font-size: 13px;
+    color: var(--text-tertiary);
+    text-align: center;
+  }
+
+  /* ---- NSFW 3-State Toggle ---- */
+
+  .nsfw-cycle-btn {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: var(--space-2) var(--space-3);
+    background: var(--bg-tertiary);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius);
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all var(--duration-fast) var(--ease);
+    white-space: nowrap;
+  }
+
+  .nsfw-cycle-btn:hover {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+  }
+
+  .nsfw-cycle-btn.nsfw-show {
+    background: rgba(255, 159, 10, 0.1);
+    border-color: rgba(255, 159, 10, 0.3);
+    color: #ff9f0a;
+  }
+
+  .nsfw-cycle-btn.nsfw-only {
+    background: rgba(255, 69, 58, 0.1);
+    border-color: rgba(255, 69, 58, 0.3);
+    color: #ff453a;
+  }
+
+  .nsfw-indicator {
+    font-size: 11px;
+    font-weight: 700;
+    width: 14px;
+    text-align: center;
+  }
+
+  /* ---- Download Button on Mod Cards ---- */
+
+  .mod-download-btn {
+    margin-top: var(--space-2);
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    width: 100%;
+    justify-content: center;
+  }
+
+  /* ---- File Picker Modal ---- */
+
+  .modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    backdrop-filter: blur(4px);
+  }
+
+  .file-picker-modal {
+    background: var(--bg-grouped);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius-lg, 12px);
+    width: min(560px, 90vw);
+    max-height: 70vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  }
+
+  .file-picker-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-4) var(--space-6);
+    border-bottom: 1px solid var(--separator);
+    flex-shrink: 0;
+  }
+
+  .file-picker-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 420px;
+  }
+
+  .file-picker-close {
+    width: 28px;
+    height: 28px;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    border: none;
+    color: var(--text-tertiary);
+    font-size: 18px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .file-picker-close:hover {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+  }
+
+  .file-picker-loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-3);
+    padding: var(--space-10);
+    color: var(--text-secondary);
+    font-size: 13px;
+  }
+
+  .file-picker-empty {
+    padding: var(--space-10);
+    text-align: center;
+    color: var(--text-tertiary);
+    font-size: 13px;
+  }
+
+  .file-picker-list {
+    overflow-y: auto;
+    padding: var(--space-2);
+  }
+
+  .file-picker-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-4);
+    padding: var(--space-3) var(--space-4);
+    border-radius: var(--radius);
+    transition: background var(--duration-fast) var(--ease);
+  }
+
+  .file-picker-item:hover {
+    background: var(--surface-hover);
+  }
+
+  .file-picker-item.file-downloading {
+    background: rgba(0, 122, 255, 0.05);
+  }
+
+  .file-picker-info {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .file-picker-name {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .file-picker-meta {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-top: var(--space-1);
+    font-size: 12px;
+    color: var(--text-tertiary);
+  }
+
+  .file-category-badge {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    padding: 1px 5px;
+    border-radius: 100px;
+    background: var(--surface-hover);
+    color: var(--text-secondary);
+  }
+
+  .file-cat-main {
+    background: rgba(48, 209, 88, 0.15);
+    color: #30d158;
+  }
+
+  .file-cat-optional {
+    background: rgba(0, 122, 255, 0.15);
+    color: var(--system-accent);
+  }
+
+  .file-cat-update {
+    background: rgba(255, 159, 10, 0.15);
+    color: #ff9f0a;
+  }
+
+  .file-version {
+    color: var(--text-tertiary);
+  }
+
+  .file-size {
+    color: var(--text-tertiary);
+  }
+
+  .file-picker-desc {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    margin-top: var(--space-1);
+    line-height: 1.4;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
+
+  .file-picker-action {
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-1);
+    min-width: 80px;
+  }
+
+  .download-progress-bar {
+    width: 80px;
+    height: 4px;
+    background: var(--separator);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .download-progress-fill {
+    height: 100%;
+    background: var(--system-accent);
+    border-radius: 2px;
+    transition: width 0.3s ease;
+  }
+
+  .download-progress-text {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    font-variant-numeric: tabular-nums;
   }
 </style>

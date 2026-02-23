@@ -48,7 +48,7 @@ pub mod wine_diagnostic;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use bottles::Bottle;
 use collections::{
@@ -2729,24 +2729,40 @@ fn analyze_crash_log_cmd(log_path: String) -> Result<CrashReport, String> {
 
 #[tauri::command]
 async fn fetch_url_text(url: String) -> Result<String, String> {
-    // Convert GitHub blob URLs to raw URLs so we get the raw file content
-    // instead of the full GitHub HTML page.
-    let resolved_url = if url.contains("github.com") && url.contains("/blob/") {
-        url.replace("github.com", "raw.githubusercontent.com")
-            .replace("/blob/", "/")
-    } else {
-        url.clone()
-    };
-
     let client = reqwest::Client::builder()
         .user_agent(format!("Corkscrew/{}", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| e.to_string())?;
 
+    // Convert GitHub URLs to raw content URLs so we get raw markdown
+    // instead of the full GitHub HTML page with navigation chrome.
+    let resolved_url = if url.contains("github.com") && url.contains("/blob/") {
+        // Blob URL: github.com/user/repo/blob/main/FILE → raw.githubusercontent.com/user/repo/main/FILE
+        url.replace("github.com", "raw.githubusercontent.com")
+            .replace("/blob/", "/")
+    } else if url.contains("github.com") && !url.contains("/raw/") && !url.contains("raw.githubusercontent.com") {
+        // Plain repo URL: github.com/user/repo → try raw README.md
+        let trimmed = url.trim_end_matches('/');
+        let raw_base = trimmed.replace("github.com", "raw.githubusercontent.com");
+        // Try main branch first, fall back to master
+        let main_url = format!("{}/main/README.md", raw_base);
+        let resp = client.get(&main_url)
+            .header("Accept", "text/plain, text/markdown, */*")
+            .send().await;
+        if let Ok(r) = resp {
+            if r.status().is_success() {
+                return r.text().await.map_err(|e| format!("Failed to read response: {e}"));
+            }
+        }
+        format!("{}/master/README.md", raw_base)
+    } else {
+        url.clone()
+    };
+
     let resp = client
         .get(&resolved_url)
-        .header("Accept", "text/html, text/markdown, text/plain, */*")
+        .header("Accept", "text/plain, text/markdown, */*")
         .send()
         .await
         .map_err(|e| format!("Failed to fetch URL: {e}"))?;
@@ -3468,6 +3484,305 @@ fn has_compatible_fomod_recipe(
     fomod_recipes::has_compatible_recipe(&state.db, mod_id, current_hash.as_deref())
 }
 
+// --- Browser WebView Management ---
+
+#[tauri::command]
+async fn create_browser_webview(
+    app: AppHandle,
+    url: String,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    // Close existing browser panel if any
+    if let Some(existing) = app.get_webview("browser-panel") {
+        let _ = existing.close();
+    }
+
+    let parsed_url: tauri::Url = url.parse().map_err(|e: url::ParseError| e.to_string())?;
+    let window = app
+        .get_window("main")
+        .ok_or("Main window not found")?;
+
+    let builder = tauri::webview::WebviewBuilder::new(
+        "browser-panel",
+        tauri::WebviewUrl::External(parsed_url),
+    );
+
+    window
+        .add_child(
+            builder,
+            tauri::LogicalPosition::new(x, y),
+            tauri::LogicalSize::new(width, height),
+        )
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn resize_browser_webview(
+    app: AppHandle,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    let webview = app
+        .get_webview("browser-panel")
+        .ok_or("Browser panel not found")?;
+    webview
+        .set_position(tauri::LogicalPosition::new(x, y))
+        .map_err(|e| e.to_string())?;
+    webview
+        .set_size(tauri::LogicalSize::new(width, height))
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn close_browser_webview(app: AppHandle) -> Result<(), String> {
+    if let Some(webview) = app.get_webview("browser-panel") {
+        webview.close().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn navigate_browser_webview(app: AppHandle, url: String) -> Result<(), String> {
+    let webview = app
+        .get_webview("browser-panel")
+        .ok_or("Browser panel not found")?;
+    let parsed_url: tauri::Url = url.parse().map_err(|e: url::ParseError| e.to_string())?;
+    webview.navigate(parsed_url).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// --- Nexus Mod Files & Direct Download ---
+
+#[tauri::command]
+async fn get_nexus_mod_files(
+    game_slug: String,
+    mod_id: i64,
+) -> Result<Vec<nexus::NexusModFile>, String> {
+    let cfg = config::get_config().map_err(|e| e.to_string())?;
+    let api_key = cfg
+        .nexus_api_key
+        .ok_or("No Nexus API key configured")?;
+
+    let client = nexus::NexusClient::new(api_key);
+    let raw_files = client
+        .get_mod_files(&game_slug, mod_id)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(nexus::parse_mod_files(&raw_files))
+}
+
+#[tauri::command]
+async fn download_and_install_nexus_mod(
+    app: AppHandle,
+    game_slug: String,
+    mod_id: i64,
+    file_id: i64,
+    game_id: String,
+    bottle_name: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let cfg = config::get_config().map_err(|e| e.to_string())?;
+    let api_key = cfg
+        .nexus_api_key
+        .ok_or("No Nexus API key configured")?;
+
+    let client = nexus::NexusClient::new(api_key);
+
+    // Enforce premium (backend safety check)
+    if !client.is_premium().await {
+        return Err("Premium membership required for direct downloads".to_string());
+    }
+
+    // Get mod info for name/version
+    let mod_info = client
+        .get_mod(&game_slug, mod_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mod_name = mod_info
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Unknown Mod")
+        .to_string();
+    let mod_version = mod_info
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    // Emit progress: starting
+    let _ = app.emit(
+        "install-progress",
+        serde_json::json!({
+            "kind": "modStarted",
+            "mod_index": 0,
+            "total_mods": 1,
+            "mod_name": &mod_name,
+        }),
+    );
+
+    // Get download links (premium: no key/expires needed)
+    let links = client
+        .get_download_links(&game_slug, mod_id, file_id, None, None)
+        .await
+        .map_err(|e| e.to_string())?;
+    let link = links.first().ok_or("No download links available")?;
+
+    // Download
+    let download_dir = cfg
+        .download_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(config::downloads_dir);
+
+    let _ = app.emit(
+        "install-progress",
+        serde_json::json!({
+            "kind": "stepChanged",
+            "mod_index": 0,
+            "step": "downloading",
+            "detail": format!("Downloading {}...", mod_name),
+        }),
+    );
+
+    let app_clone = app.clone();
+    let dl_mod_name = mod_name.clone();
+    let archive_path = client
+        .download_file(
+            &link.uri,
+            &download_dir,
+            Some(move |downloaded: u64, total: u64| {
+                let _ = app_clone.emit(
+                    "download-progress",
+                    serde_json::json!({
+                        "downloaded": downloaded,
+                        "total": total,
+                        "mod_name": &dl_mod_name,
+                    }),
+                );
+            }),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Stage & Deploy (reuse existing install pattern)
+    let _ = app.emit(
+        "install-progress",
+        serde_json::json!({
+            "kind": "stepChanged",
+            "mod_index": 0,
+            "step": "installing",
+            "detail": format!("Installing {}...", mod_name),
+        }),
+    );
+
+    let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
+    let db = &state.db;
+
+    let next_priority = db
+        .get_next_priority(&game_id, &bottle_name)
+        .map_err(|e| e.to_string())?;
+    let db_mod_id = db
+        .add_mod(
+            &game_id,
+            &bottle_name,
+            Some(mod_id),
+            &mod_name,
+            &mod_version,
+            &archive_path.to_string_lossy(),
+            &[],
+        )
+        .map_err(|e| e.to_string())?;
+    db.set_mod_priority(db_mod_id, next_priority)
+        .map_err(|e| e.to_string())?;
+
+    // Stage
+    let staging_result = staging::stage_mod(
+        &archive_path,
+        &game_id,
+        &bottle_name,
+        db_mod_id,
+        &mod_name,
+    )
+    .map_err(|e| {
+        let _ = db.remove_mod(db_mod_id);
+        format!("Staging failed: {e}")
+    })?;
+
+    // Update DB
+    db.set_staging_path(db_mod_id, &staging_result.staging_path.to_string_lossy())
+        .map_err(|e| e.to_string())?;
+    db.update_installed_files(db_mod_id, &staging_result.files)
+        .map_err(|e| e.to_string())?;
+    db.store_file_hashes(db_mod_id, &staging_result.hashes)
+        .map_err(|e| e.to_string())?;
+
+    // Deploy
+    deployer::deploy_mod(
+        db,
+        &game_id,
+        &bottle_name,
+        db_mod_id,
+        &staging_result.staging_path,
+        &data_dir,
+        &staging_result.files,
+    )
+    .map_err(|e| {
+        let _ = staging::remove_staging(&staging_result.staging_path);
+        let _ = db.remove_mod(db_mod_id);
+        format!("Deploy failed: {e}")
+    })?;
+
+    // Set source
+    let _ = db.set_mod_source(
+        db_mod_id,
+        "nexus",
+        Some(&format!(
+            "https://www.nexusmods.com/{}/mods/{}",
+            game_slug, mod_id
+        )),
+    );
+
+    // Sync plugins if Skyrim
+    if game_id == "skyrimse" {
+        let _ = sync_skyrim_plugins_for_game(&game, &bottle);
+    }
+
+    // Auto-delete archive if setting enabled
+    if cfg
+        .extra
+        .get("auto_delete_archives")
+        .and_then(|v| v.as_str())
+        == Some("true")
+    {
+        let _ = std::fs::remove_file(&archive_path);
+    }
+
+    let installed = db
+        .get_mod(db_mod_id)
+        .map_err(|e| e.to_string())?
+        .ok_or("Failed to retrieve installed mod")?;
+
+    let _ = app.emit(
+        "install-progress",
+        serde_json::json!({
+            "kind": "modCompleted",
+            "mod_index": 0,
+            "mod_name": &installed.name,
+            "mod_id": db_mod_id,
+        }),
+    );
+
+    serde_json::to_value(installed).map_err(|e| e.to_string())
+}
+
 // --- App Entry Point ---
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -3706,6 +4021,14 @@ pub fn run() {
             list_fomod_recipes,
             delete_fomod_recipe,
             has_compatible_fomod_recipe,
+            // Embedded Browser Webview
+            create_browser_webview,
+            resize_browser_webview,
+            close_browser_webview,
+            navigate_browser_webview,
+            // Nexus Mod Files & Direct Download
+            get_nexus_mod_files,
+            download_and_install_nexus_mod,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

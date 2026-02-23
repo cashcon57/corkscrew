@@ -55,6 +55,46 @@ pub struct NexusModFile {
     pub file_name: String,
     pub size_kb: i64,
     pub description: String,
+    pub category: String,
+}
+
+/// Parse raw JSON file entries from the NexusMods API into typed structs.
+pub fn parse_mod_files(files: &[serde_json::Value]) -> Vec<NexusModFile> {
+    fn category_name(id: i64) -> &'static str {
+        match id {
+            1 => "main",
+            2 => "update",
+            3 => "optional",
+            4 => "old_version",
+            5 => "miscellaneous",
+            6 => "deleted",
+            7 => "archived",
+            _ => "unknown",
+        }
+    }
+
+    files
+        .iter()
+        .filter_map(|f| {
+            Some(NexusModFile {
+                mod_id: f.get("mod_id")?.as_i64()?,
+                file_id: f.get("file_id")?.as_i64()?,
+                name: f.get("name")?.as_str().unwrap_or("").to_string(),
+                version: f.get("version")?.as_str().unwrap_or("").to_string(),
+                file_name: f.get("file_name")?.as_str().unwrap_or("").to_string(),
+                size_kb: f.get("size_kb").and_then(|v| v.as_i64()).unwrap_or(0),
+                description: f
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                category: category_name(
+                    f.get("category_id").and_then(|v| v.as_i64()).unwrap_or(0),
+                )
+                .to_string(),
+            })
+        })
+        .collect()
 }
 
 /// A parsed `nxm://` link handed to the application by the browser / OS.
@@ -988,20 +1028,20 @@ pub async fn graphql_search_mods(
         if !since.is_empty() {
             filter.insert(
                 "updatedAt".into(),
-                serde_json::json!([{ "value": since, "op": "GREATER_THAN" }]),
+                serde_json::json!([{ "value": since, "op": "GT" }]),
             );
         }
     }
     if let Some(min_dl) = min_downloads {
         filter.insert(
             "downloads".into(),
-            serde_json::json!([{ "value": min_dl, "op": "GREATER_THAN" }]),
+            serde_json::json!([{ "value": min_dl, "op": "GT" }]),
         );
     }
     if let Some(min_end) = min_endorsements {
         filter.insert(
             "endorsements".into(),
-            serde_json::json!([{ "value": min_end, "op": "GREATER_THAN" }]),
+            serde_json::json!([{ "value": min_end, "op": "GT" }]),
         );
     }
     filter.insert("op".into(), serde_json::json!("AND"));

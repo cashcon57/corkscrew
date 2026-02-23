@@ -69,6 +69,7 @@ import type {
   SkseAvailableBuilds,
   ImportResult,
   NexusModInfo,
+  NexusModFile,
 } from "./types";
 
 // Bottles
@@ -1321,4 +1322,56 @@ export async function detectWabbajackTools(
 // Platform Detection
 export async function getPlatformDetail(): Promise<PlatformInfo> {
   return invoke("get_platform_detail");
+}
+
+// Embedded Browser Webview
+export async function createBrowserWebview(
+  url: string,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+): Promise<void> {
+  return invoke("create_browser_webview", { url, x, y, width, height });
+}
+
+export async function resizeBrowserWebview(
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+): Promise<void> {
+  return invoke("resize_browser_webview", { x, y, width, height });
+}
+
+export async function closeBrowserWebview(): Promise<void> {
+  return invoke("close_browser_webview");
+}
+
+export async function navigateBrowserWebview(url: string): Promise<void> {
+  return invoke("navigate_browser_webview", { url });
+}
+
+// Nexus Mod Files & Direct Download
+export async function getModFiles(
+  gameSlug: string,
+  modId: number,
+): Promise<NexusModFile[]> {
+  return invoke("get_nexus_mod_files", { gameSlug, modId });
+}
+
+export async function downloadAndInstallNexusMod(
+  gameSlug: string,
+  modId: number,
+  fileId: number,
+  gameId: string,
+  bottleName: string,
+): Promise<InstalledMod> {
+  return invoke("download_and_install_nexus_mod", {
+    gameSlug,
+    modId,
+    fileId,
+    gameId,
+    bottleName,
+  });
 }

@@ -430,6 +430,17 @@ export interface NexusCategory {
   parent_category: number | null;
 }
 
+export interface NexusModFile {
+  mod_id: number;
+  file_id: number;
+  name: string;
+  version: string;
+  file_name: string;
+  size_kb: number;
+  description: string;
+  category: string;
+}
+
 // Collections
 
 export interface CollectionInfo {

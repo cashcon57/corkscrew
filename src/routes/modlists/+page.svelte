@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { open } from "@tauri-apps/plugin-dialog";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import {
@@ -8,6 +8,7 @@
     parseWabbajackFile,
     downloadWabbajackFile,
     detectWabbajackTools,
+    closeBrowserWebview,
   } from "$lib/api";
   import { showError, showSuccess, selectedGame } from "$lib/stores";
   import type { ModlistSummary, ParsedModlist, RequiredTool } from "$lib/types";
@@ -16,13 +17,14 @@
   import CompatibilityPanel from "$lib/components/CompatibilityPanel.svelte";
   import RequiredToolsPrompt from "$lib/components/RequiredToolsPrompt.svelte";
   import WabbajackLogo from "$lib/components/WabbajackLogo.svelte";
+  import WebViewToggle from "$lib/components/WebViewToggle.svelte";
 
   let modlists = $state<ModlistSummary[]>([]);
   let filtered = $state<ModlistSummary[]>([]);
   let loading = $state(true);
   let searchQuery = $state("");
   let gameFilter = $state("all");
-  let showNsfw = $state(false);
+  let nsfwFilter = $state<"hide" | "show" | "only">("hide");
   let sortField = $state<"title" | "author" | "download_size" | "install_size">("title");
   let sortDirection = $state<"asc" | "desc">("asc");
 
@@ -30,6 +32,10 @@
   let maxInstallSize = $state<number | null>(null);
   let tagFilter = $state<string[]>([]);
   let showAdvancedFilters = $state(false);
+
+  // WebView toggle state
+  let webviewToggle: WebViewToggle | null = $state(null);
+  let viewMode = $state<"app" | "website">("app");
 
   // Detail view state
   let selectedModlist = $state<ModlistSummary | null>(null);
@@ -75,8 +81,10 @@
     let result = modlists;
 
     // Filter by NSFW
-    if (!showNsfw) {
+    if (nsfwFilter === "hide") {
       result = result.filter((m) => !m.nsfw);
+    } else if (nsfwFilter === "only") {
+      result = result.filter((m) => m.nsfw);
     }
 
     // Filter by game
@@ -119,6 +127,28 @@
     });
 
     filtered = result;
+  });
+
+  function cycleNsfwFilter(current: "hide" | "show" | "only"): "hide" | "show" | "only" {
+    if (current === "hide") return "show";
+    if (current === "show") return "only";
+    return "hide";
+  }
+
+  function nsfwLabel(state: "hide" | "show" | "only"): string {
+    if (state === "hide") return "NSFW Off";
+    if (state === "show") return "NSFW On";
+    return "NSFW Only";
+  }
+
+  function nsfwIcon(state: "hide" | "show" | "only"): string {
+    if (state === "hide") return "";
+    if (state === "show") return "\u2713";
+    return "\u2500";
+  }
+
+  onDestroy(() => {
+    closeBrowserWebview().catch(() => {});
   });
 
   onMount(async () => {
@@ -653,13 +683,18 @@
         </p>
       </div>
       <div class="header-right">
+        <WebViewToggle
+          bind:this={webviewToggle}
+          url="https://www.wabbajack.org/gallery"
+          onModeChange={(m) => viewMode = m}
+        />
         <button class="btn btn-accent btn-sm" onclick={openLocalFile}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
           </svg>
           Open .wabbajack
         </button>
-        {#if !loading}
+        {#if !loading && viewMode === "app"}
           <div class="stat-pill">
             <span class="stat-value">{filtered.length}</span>
             <span class="stat-label">{filtered.length === 1 ? "List" : "Lists"}</span>
@@ -668,7 +703,11 @@
       </div>
     </header>
 
-    {#if loading}
+    {#if viewMode === "website"}
+      <div class="webview-placeholder">
+        <p class="webview-hint">Browsing Wabbajack Gallery directly. Switch to "In-App" to use built-in search and filters.</p>
+      </div>
+    {:else if loading}
       <div class="loading-container">
         <div class="loading-card">
           <div class="spinner"><div class="spinner-ring"></div></div>
@@ -693,10 +732,16 @@
             <option value={game}>{gameDomainDisplay(game)}</option>
           {/each}
         </select>
-        <label class="nsfw-toggle">
-          <input type="checkbox" bind:checked={showNsfw} />
-          <span>NSFW</span>
-        </label>
+        <button
+          class="nsfw-cycle-btn"
+          class:nsfw-show={nsfwFilter === "show"}
+          class:nsfw-only={nsfwFilter === "only"}
+          onclick={() => nsfwFilter = cycleNsfwFilter(nsfwFilter)}
+          title={nsfwFilter === "hide" ? "NSFW hidden" : nsfwFilter === "show" ? "NSFW included" : "NSFW only"}
+        >
+          <span class="nsfw-indicator">{nsfwIcon(nsfwFilter)}</span>
+          {nsfwLabel(nsfwFilter)}
+        </button>
         <button class="filter-toggle" onclick={() => showAdvancedFilters = !showAdvancedFilters}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <line x1="4" y1="6" x2="20" y2="6" />
@@ -1672,5 +1717,63 @@
     background: rgba(239, 68, 68, 0.1);
     border-radius: 6px;
     border: 1px solid rgba(239, 68, 68, 0.2);
+  }
+
+  /* ---- Webview Placeholder ---- */
+
+  .webview-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 120px;
+    padding: var(--space-8);
+  }
+
+  .webview-hint {
+    font-size: 13px;
+    color: var(--text-tertiary);
+    text-align: center;
+  }
+
+  /* ---- NSFW 3-State Toggle ---- */
+
+  .nsfw-cycle-btn {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: var(--space-2) var(--space-3);
+    background: var(--bg-tertiary);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius);
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all var(--duration-fast) var(--ease);
+    white-space: nowrap;
+  }
+
+  .nsfw-cycle-btn:hover {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+  }
+
+  .nsfw-cycle-btn.nsfw-show {
+    background: rgba(255, 159, 10, 0.1);
+    border-color: rgba(255, 159, 10, 0.3);
+    color: #ff9f0a;
+  }
+
+  .nsfw-cycle-btn.nsfw-only {
+    background: rgba(255, 69, 58, 0.1);
+    border-color: rgba(255, 69, 58, 0.3);
+    color: #ff453a;
+  }
+
+  .nsfw-indicator {
+    font-size: 11px;
+    font-weight: 700;
+    width: 14px;
+    text-align: center;
   }
 </style>
