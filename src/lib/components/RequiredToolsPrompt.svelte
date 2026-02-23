@@ -1,6 +1,8 @@
 <script lang="ts">
-  import type { RequiredTool } from "$lib/types";
+  import type { RequiredTool, ToolInstallProgress } from "$lib/types";
   import { installModTool } from "$lib/api";
+  import { listen } from "@tauri-apps/api/event";
+  import { onMount } from "svelte";
 
   interface Props {
     tools: RequiredTool[];
@@ -15,6 +17,7 @@
   let installing = $state<Set<string>>(new Set());
   let installed = $state<Set<string>>(new Set());
   let errors = $state<Record<string, string>>({});
+  let progress = $state<Record<string, ToolInstallProgress>>({});
 
   const toolIcons: Record<string, string> = {
     sseedit: "/icons/xedit.png",
@@ -36,6 +39,17 @@
     uninstalledTools.filter((t) => t.can_auto_install && !installing.has(t.tool_id))
   );
 
+  // Listen for progress events from the backend
+  onMount(() => {
+    let unlisten: (() => void) | undefined;
+    listen<ToolInstallProgress>("tool-install-progress", (event) => {
+      progress = { ...progress, [event.payload.tool_id]: event.payload };
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
+  });
+
   async function handleInstallTool(tool: RequiredTool) {
     const next = new Set(installing);
     next.add(tool.tool_id);
@@ -54,6 +68,9 @@
       const fin = new Set(installing);
       fin.delete(tool.tool_id);
       installing = fin;
+      // Clear progress for this tool
+      const { [tool.tool_id]: _, ...rest } = progress;
+      progress = rest;
     }
   }
 
@@ -61,6 +78,10 @@
     for (const tool of autoInstallable) {
       await handleInstallTool(tool);
     }
+  }
+
+  function progressDetail(toolId: string): string {
+    return progress[toolId]?.detail ?? "Starting...";
   }
 </script>
 
@@ -79,7 +100,9 @@
           {/if}
           <div class="tool-info">
             <span class="tool-name">{tool.tool_name}</span>
-            {#if errors[tool.tool_id]}
+            {#if installing.has(tool.tool_id)}
+              <span class="tool-progress">{progressDetail(tool.tool_id)}</span>
+            {:else if errors[tool.tool_id]}
               <span class="tool-error">{errors[tool.tool_id]}</span>
             {:else if tool.wine_compat === "not_recommended" && tool.recommended_alternative}
               <span class="tool-warning">
@@ -97,7 +120,10 @@
                 Installed
               </span>
             {:else if installing.has(tool.tool_id)}
-              <span class="status-badge installing">Installing...</span>
+              <span class="status-badge installing">
+                <span class="spinner"></span>
+                Installing
+              </span>
             {:else if errors[tool.tool_id]}
               <button class="status-badge error retry-btn" title={errors[tool.tool_id]} onclick={() => handleInstallTool(tool)}>
                 Failed — Retry
@@ -227,6 +253,12 @@
     color: var(--text-secondary, #aaa);
   }
 
+  .tool-progress {
+    font-size: 0.72rem;
+    color: var(--accent, #6366f1);
+    line-height: 1.3;
+  }
+
   .tool-error {
     font-size: 0.72rem;
     color: #ef4444;
@@ -278,6 +310,19 @@
 
   .status-badge.manual {
     color: var(--text-secondary, #aaa);
+  }
+
+  .spinner {
+    width: 12px;
+    height: 12px;
+    border: 2px solid transparent;
+    border-top-color: currentColor;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
   }
 
   .tools-actions {

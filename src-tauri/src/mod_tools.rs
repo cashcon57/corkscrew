@@ -10,11 +10,36 @@ use std::path::{Path, PathBuf};
 
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Emitter};
 use thiserror::Error;
 use walkdir::WalkDir;
 
 use crate::collections::CollectionManifest;
 use crate::wabbajack::ParsedModlist;
+
+// ---------------------------------------------------------------------------
+// Progress Events
+// ---------------------------------------------------------------------------
+
+/// Progress event emitted during tool installation.
+#[derive(Clone, Debug, Serialize)]
+pub struct ToolInstallProgress {
+    pub tool_id: String,
+    pub phase: String,
+    pub detail: String,
+}
+
+/// Emit a tool install progress event (best-effort, ignores errors).
+fn emit_progress(app: &AppHandle, tool_id: &str, phase: &str, detail: &str) {
+    let _ = app.emit(
+        "tool-install-progress",
+        ToolInstallProgress {
+            tool_id: tool_id.to_string(),
+            phase: phase.to_string(),
+            detail: detail.to_string(),
+        },
+    );
+}
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -378,6 +403,8 @@ fn builtin_tools() -> Vec<ModTool> {
                 "SSEEdit.exe".into(),
                 "SSEEdit64.exe".into(),
                 "xEdit.exe".into(),
+                "xTESEdit.exe".into(),
+                "xTESEdit64.exe".into(),
             ],
             detected_path: None,
             requires_wine: true,
@@ -443,7 +470,10 @@ fn builtin_tools() -> Vec<ModTool> {
             id: "cao".into(),
             name: "Cathedral Assets Optimizer".into(),
             description: "Texture and mesh optimization".into(),
-            exe_names: vec!["Cathedral Assets Optimizer.exe".into()],
+            exe_names: vec![
+                "Cathedral Assets Optimizer.exe".into(),
+                "Cathedral_Assets_Optimizer.exe".into(),
+            ],
             detected_path: None,
             requires_wine: true,
             category: "Optimization".into(),
@@ -763,7 +793,11 @@ fn pick_asset<'a>(tool_id: &str, assets: &'a [GitHubAsset]) -> Option<&'a GitHub
 /// NexusMods (if `nexus_mod_id` is set and user has a Nexus API key with premium).
 ///
 /// Returns the path to the installed tool's executable.
-pub async fn install_tool(tool_id: &str, game_data_dir: &Path) -> Result<String> {
+pub async fn install_tool(
+    tool_id: &str,
+    game_data_dir: &Path,
+    app: &AppHandle,
+) -> Result<String> {
     let tool_def = find_tool_def(tool_id)?;
 
     if !tool_def.can_auto_install {
@@ -776,7 +810,9 @@ pub async fn install_tool(tool_id: &str, game_data_dir: &Path) -> Result<String>
 
     let has_nexus = tool_def.nexus_mod_id.is_some() && tool_def.nexus_game_slug.is_some();
 
-    // Try GitHub first, then fall back to NexusMods
+    // --- Phase 1: Download ---
+    emit_progress(app, tool_id, "downloading", "Fetching from GitHub...");
+
     let (archive_bytes, archive_name) = if let Some(github_repo) = &tool_def.github_repo {
         match install_tool_from_github(tool_id, github_repo, &client).await {
             Ok(result) => result,
@@ -788,6 +824,12 @@ pub async fn install_tool(tool_id: &str, game_data_dir: &Path) -> Result<String>
                         "GitHub install failed for '{}': {}. Trying NexusMods fallback...",
                         tool_id, gh_err
                     );
+                    emit_progress(
+                        app,
+                        tool_id,
+                        "downloading",
+                        "GitHub unavailable, downloading from NexusMods...",
+                    );
                     install_tool_from_nexus(tool_id, mod_id, game_slug, &client).await?
                 } else {
                     return Err(gh_err);
@@ -797,12 +839,21 @@ pub async fn install_tool(tool_id: &str, game_data_dir: &Path) -> Result<String>
     } else if let (Some(mod_id), Some(game_slug)) =
         (&tool_def.nexus_mod_id, &tool_def.nexus_game_slug)
     {
+        emit_progress(app, tool_id, "downloading", "Downloading from NexusMods...");
         install_tool_from_nexus(tool_id, *mod_id, game_slug, &client).await?
     } else {
         return Err(ToolError::NoAutoInstall(tool_id.to_string()));
     };
 
-    // Prepare target directory
+    // --- Phase 2: Extract ---
+    let size_mb = archive_bytes.len() as f64 / 1_048_576.0;
+    emit_progress(
+        app,
+        tool_id,
+        "extracting",
+        &format!("Extracting {} ({:.1} MB)...", archive_name, size_mb),
+    );
+
     let tools_dir = tools_install_dir(game_data_dir)?;
     let tool_dir = tools_dir.join(&tool_def.id);
     if tool_dir.exists() {
@@ -810,7 +861,6 @@ pub async fn install_tool(tool_id: &str, game_data_dir: &Path) -> Result<String>
     }
     fs::create_dir_all(&tool_dir)?;
 
-    // Extract archive
     let name_lower = archive_name.to_lowercase();
     if name_lower.ends_with(".zip") {
         extract_zip(&archive_bytes, &tool_dir)?;
@@ -826,12 +876,43 @@ pub async fn install_tool(tool_id: &str, game_data_dir: &Path) -> Result<String>
     // Flatten single-directory archives (if archive contains just one folder)
     flatten_single_dir(&tool_dir)?;
 
-    // Find the executable in the extracted files
+    // --- Phase 3: Verify ---
+    emit_progress(app, tool_id, "verifying", "Looking for executable...");
+
+    // Tool-specific post-install: rename xEdit executables for game mode detection
+    if tool_id == "sseedit" {
+        rename_xedit_for_game(&tool_dir, "SSEEdit");
+    }
+
     let exe_path = find_tool_exe(&tool_def, &tool_dir).ok_or(ToolError::ExeNotFound)?;
 
+    emit_progress(app, tool_id, "done", "Installed successfully");
     info!("Tool '{}' installed to: {}", tool_id, exe_path.display());
 
     Ok(exe_path.to_string_lossy().to_string())
+}
+
+/// Rename xEdit's generic executables to game-specific names.
+///
+/// xEdit 4.0.4+ ships as `xTESEdit.exe` / `xFOEdit.exe` and uses its own
+/// filename to detect which game to target. We rename to `{prefix}Edit.exe`
+/// so it auto-detects the correct game mode.
+fn rename_xedit_for_game(tool_dir: &Path, prefix: &str) {
+    let renames = [
+        ("xTESEdit.exe", format!("{}Edit.exe", prefix)),
+        ("xTESEdit64.exe", format!("{}Edit64.exe", prefix)),
+    ];
+    for (from, to) in &renames {
+        let src = tool_dir.join(from);
+        let dst = tool_dir.join(to);
+        if src.exists() && !dst.exists() {
+            if let Err(e) = fs::rename(&src, &dst) {
+                info!("Could not rename {} to {}: {}", from, to, e);
+            } else {
+                info!("Renamed {} to {} for game mode detection", from, to);
+            }
+        }
+    }
 }
 
 /// Download tool archive from GitHub releases.
@@ -1158,10 +1239,14 @@ pub fn uninstall_tool(
 /// Reinstall a tool by uninstalling and re-installing from GitHub.
 ///
 /// Returns the path to the newly installed tool's executable.
-pub async fn reinstall_tool(tool_id: &str, game_data_dir: &Path) -> Result<String> {
+pub async fn reinstall_tool(
+    tool_id: &str,
+    game_data_dir: &Path,
+    app: &AppHandle,
+) -> Result<String> {
     info!("Reinstalling mod tool '{}'", tool_id);
     uninstall_tool(tool_id, game_data_dir, None)?;
-    install_tool(tool_id, game_data_dir).await
+    install_tool(tool_id, game_data_dir, app).await
 }
 
 // ---------------------------------------------------------------------------

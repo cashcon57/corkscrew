@@ -1010,6 +1010,12 @@ export interface RequiredTool {
   download_url: string | null;
 }
 
+export interface ToolInstallProgress {
+  tool_id: string;
+  phase: string;
+  detail: string;
+}
+
 // Platform Detection
 
 export interface PlatformInfo {

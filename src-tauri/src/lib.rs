@@ -2376,12 +2376,13 @@ fn detect_mod_tools_cmd(
 
 #[tauri::command]
 async fn install_mod_tool(
+    app: AppHandle,
     tool_id: String,
     game_id: String,
     bottle_name: String,
 ) -> Result<String, String> {
     let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
-    mod_tools::install_tool(&tool_id, &data_dir)
+    mod_tools::install_tool(&tool_id, &data_dir, &app)
         .await
         .map_err(|e| e.to_string())
 }
@@ -2426,12 +2427,13 @@ fn launch_mod_tool(
 
 #[tauri::command]
 async fn reinstall_mod_tool(
+    app: AppHandle,
     tool_id: String,
     game_id: String,
     bottle_name: String,
 ) -> Result<String, String> {
     let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
-    mod_tools::reinstall_tool(&tool_id, &data_dir)
+    mod_tools::reinstall_tool(&tool_id, &data_dir, &app)
         .await
         .map_err(|e| e.to_string())
 }

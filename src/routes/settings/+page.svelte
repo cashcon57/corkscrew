@@ -1,8 +1,9 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads } from "$lib/api";
   import { config, showError, showSuccess, selectedGame, skseStatus, currentPage, appVersion, updateReady, updateVersion, updateNotes, updateChecking, updateError, triggerUpdateCheck, controllerMode } from "$lib/stores";
-  import type { AppConfig, ModTool, PlatformInfo } from "$lib/types";
+  import type { AppConfig, ModTool, PlatformInfo, ToolInstallProgress } from "$lib/types";
+  import { listen } from "@tauri-apps/api/event";
   import ThemeToggle from "$lib/components/ThemeToggle.svelte";
   import SettingsAuthSection from "./settings-auth-section.svelte";
   import IniManagerPanel from "$lib/components/IniManagerPanel.svelte";
@@ -55,6 +56,7 @@
   let launchingTool = $state<string | null>(null);
   let uninstallingTool = $state<string | null>(null);
   let reinstallingTool = $state<string | null>(null);
+  let toolProgress = $state<Record<string, ToolInstallProgress>>({});
 
   const game = $derived($selectedGame);
   const skse = $derived($skseStatus);
@@ -154,6 +156,12 @@
     });
   }
 
+  let unlistenProgress: (() => void) | undefined;
+  listen<ToolInstallProgress>("tool-install-progress", (event) => {
+    toolProgress = { ...toolProgress, [event.payload.tool_id]: event.payload };
+  }).then((fn) => { unlistenProgress = fn; });
+  onDestroy(() => unlistenProgress?.());
+
   onMount(async () => {
     // Load platform info
     try { platformInfo = await getPlatformDetail(); } catch { /* fallback defaults */ }
@@ -200,6 +208,7 @@
         loadingTools = false;
       }
     }
+
   });
 
   async function handleOpenSkseDownload() {
@@ -243,6 +252,8 @@
       showError(`Failed to install tool: ${e}`);
     } finally {
       installingTool = null;
+      const { [toolId]: _, ...rest } = toolProgress;
+      toolProgress = rest;
     }
   }
 
@@ -286,6 +297,8 @@
       showError(`Failed to reinstall tool: ${e}`);
     } finally {
       reinstallingTool = null;
+      const { [toolId]: _, ...rest } = toolProgress;
+      toolProgress = rest;
     }
   }
 
@@ -646,7 +659,7 @@
                         type="button"
                       >
                         {#if installingTool === tool.id}
-                          <span class="spinner-xs"></span> Installing...
+                          <span class="spinner-xs"></span> {toolProgress[tool.id]?.detail ?? "Installing..."}
                         {:else}
                           Install
                         {/if}
