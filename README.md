@@ -26,7 +26,7 @@ Corkscrew installs, manages, and organizes mods for Windows games running throug
 
 It works by reading and writing directly to your Wine bottle's filesystem, the same way the game itself sees it. Your bottles, your mods, no middleman.
 
-> **v1.11** — Collection install progress with activity feed and stall detection, plugin search/filter, keyboard shortcuts (Cmd+A select all, Delete to uninstall, Cmd+F search), batch operation loading states, ARIA accessibility improvements, and NexusMods GraphQL API compatibility fixes.
+> **v1.12** — Fallout 4 full support (plugin load order, mod tools, INI presets, crash logs), collection install verbose log with activity pulse animation, mod tool update checking, game-aware tool registry, and install progress UX improvements.
 
 ---
 
@@ -193,7 +193,7 @@ Corkscrew includes an in-app auto-updater. When a new version is published on Gi
 - **Embedded web views** — Toggle between in-app API browsing and an embedded NexusMods/Wabbajack website view. Powered by Tauri v2 multi-webview (native child webview, not an iframe). Available on Browse Nexus, Collections, and Wabbajack Gallery pages.
 - **Collections browser** — Browse NexusMods Collections via the GraphQL v2 API with search, sorting, advanced filtering, and detailed mod/revision views.
 - **Collection installation** — Premium users can install entire NexusMods Collections with one click. The orchestrator resolves install order, downloads mods via the NexusMods API, handles FOMOD selections from the collection manifest, deploys files, and applies the collection's plugin load order. Plugin load order sync works for all games with plugin support (Skyrim SE, Fallout 4, etc.), not just Skyrim SE. Free users see a list of mods with links to download manually from the Nexus website.
-- **Install progress dashboard** — Real-time collection install progress with phase indicators (downloading → staging → installing → complete), per-mod status tracking, download speed, activity feed with recently-completed items, summary chips (done/failed/skipped/pending counts), stall detection (warns after 30s of zero speed), and auto-expanding mod log on first failure.
+- **Install progress dashboard** — Real-time collection install progress with phase indicators (downloading → staging → installing → complete), per-mod status tracking, download speed, activity feed with recently-completed items, summary chips (done/failed/skipped/pending counts), stall detection (warns after 30s of zero speed), auto-expanding mod log on first failure, expandable verbose log with timestamped event stream, and an activity pulse orb that modulates animation speed based on event throughput.
 - **Failed install handling** — Dedicated failure panel with error summary, "Installed with errors" state, and post-completion navigation buttons (View Mods, Load Order, Back to Collections).
 - **Resume interrupted installs** — If a collection install is interrupted, a resume banner with mini progress bar appears on the collections page.
 - **Update checking** — Check installed mods against Nexus for available updates.
@@ -202,7 +202,8 @@ Corkscrew includes an in-app auto-updater. When a new version is published on Gi
 - **Rate limit compliance** — All API calls respect NexusMods rate limits with graceful error handling (skip on failure, no aggressive retries).
 
 ### Plugin Load Order
-- **LOOT-powered sorting** — Automatic plugin sorting using [libloot](https://github.com/loot/libloot) (the same engine behind LOOT), with masterlist fetching from GitHub.
+- **LOOT-powered sorting** — Automatic plugin sorting using [libloot](https://github.com/loot/libloot) (the same engine behind LOOT), with masterlist fetching from GitHub. Supports all games with Bethesda plugin formats (Skyrim SE, Fallout 4, etc.).
+- **Game-aware implicit plugins** — Automatically enforces always-enabled master files per game (e.g. Skyrim.esm + DLC for Skyrim SE, Fallout4.esm + DLC for Fallout 4).
 - **Manual drag-and-drop reorder** — Fine-tune your load order after LOOT sorts.
 - **Plugin enable/disable** — Toggle individual plugins without touching the mod.
 - **Plugin search/filter** — Search plugins by filename with Cmd/Ctrl+F. Drag-and-drop is disabled during search to prevent accidental reordering.
@@ -226,20 +227,20 @@ Corkscrew includes an in-app auto-updater. When a new version is published on Gi
 - **Tool detection** — Scans the modlist for required tools and prompts for installation before proceeding.
 
 ### Crash Log Analysis
-- **Automatic detection** — Scans for Skyrim crash logs (from .NET Script Framework or Crash Logger) in your bottle.
-- **Crash diagnosis** — Parses crash logs to identify exception types, faulting modules, involved plugins, and SKSE plugins.
+- **Automatic detection** — Scans for crash logs (from .NET Script Framework, Crash Logger, or game-specific script extender logs) in your bottle. Supports Skyrim SE (SKSE) and Fallout 4 (F4SE) log directories.
+- **Crash diagnosis** — Parses crash logs to identify exception types, faulting modules, involved plugins, and script extender plugins.
 - **Suggested actions** — Provides actionable recommendations (update mod, disable mod, sort load order, check VRAM, etc.) with confidence ratings.
 - **Game session tracking** — Log play sessions with automatic duration tracking, crash detection, and stability summaries. Track which mods were changed between sessions to correlate changes with crashes.
 
 ### Game Launching & Tools
 - **Game launching** — Play your modded game straight from Corkscrew, through whatever Wine layer the bottle uses.
-- **SKSE auto-install** — Auto-detect your Skyrim version and install the correct SKSE build from GitHub with one click. Game-version-aware: picks the right SKSE release for SE (1.5.97), AE (1.6.x), or latest AE builds. Correctly detected when already installed.
-- **SKSE launching** — Launch through SKSE with one click after installation. Compatibility checks against your game version.
+- **Script extender auto-install** — Auto-detect your game version and install the correct script extender (SKSE for Skyrim SE, F4SE for Fallout 4) from GitHub with one click. Game-version-aware: picks the right release for your specific game build. Correctly detected when already installed.
+- **Script extender launching** — Launch through SKSE/F4SE with one click after installation. Compatibility checks against your game version.
 - **Skyrim SE downgrade** — Detect your Skyrim version via SHA-256 hash and create a "Stock Game" copy to lock v1.5.97 and prevent Steam auto-updates (same approach pioneered by Wabbajack).
 - **Display scaling fix** — Automatically fix Skyrim SE display scaling issues in CrossOver on macOS by detecting your screen resolution and forcing exclusive fullscreen mode.
-- **INI settings manager** — Browse, search, and edit game INI files (Skyrim.ini, SkyrimPrefs.ini, etc.) with built-in presets for common configurations like Steam Deck optimization, ultra graphics, and performance profiles.
+- **INI settings manager** — Browse, search, and edit game INI files with built-in presets for common configurations. Supports Skyrim SE (Skyrim.ini, SkyrimPrefs.ini) and Fallout 4 (Fallout4.ini, Fallout4Prefs.ini) with game-specific presets for Steam Deck optimization, ultra graphics, and performance profiles.
 - **Wine bottle diagnostics** — Comprehensive health check for Wine bottles: validates drive_c, AppData, DXVK (Linux) / D3DMetal (macOS), DLL overrides, Visual C++ redistributables, .NET, Windows version, Retina/HiDPI display, and user directories, with one-click auto-fixes for common issues.
-- **Mod tools management** — Detect, auto-install, launch, and uninstall modding tools (SSEEdit, BethINI, DynDOLOD, BodySlide, Nemesis, Pandora, Wrye Bash, etc.) directly from the settings page. Support links for tool authors included where available.
+- **Mod tools management** — Detect, auto-install, launch, and uninstall modding tools directly from the settings page. Game-aware tool registry shows relevant tools per game (SSEEdit, SKSE, DynDOLOD for Skyrim SE; FO4Edit, F4SE, BodySlide for Fallout 4; shared tools like BethINI and Wrye Bash). Check for tool updates with one click. Support links for tool authors included where available.
 - **Custom executables** — Define custom .exe launch targets per game.
 - **Game file integrity** — Take snapshots of your game directory to detect modified, unknown, or missing files later.
 - **Bottle configuration** — View and modify Wine bottle settings (Windows version, MSync, MetalFX, DXMT, environment variables) directly from Corkscrew.
@@ -251,7 +252,7 @@ Corkscrew includes an in-app auto-updater. When a new version is published on Gi
 - **macOS vibrancy** — Native translucent materials that follow the active window state.
 - **Light and dark themes** — System-following by default with manual toggle.
 - **Cross-platform** — Native app for both macOS and Linux (SteamOS, Fedora, Ubuntu).
-- **In-app auto-updater** — Check for and install signed updates directly from within Corkscrew.
+- **In-app auto-updater** — Check for and install signed updates directly from within Corkscrew. Shows a success toast when an update was applied on restart.
 
 ---
 
@@ -349,7 +350,7 @@ Adding a new game with enhanced support is a matter of writing a small plugin �
 
 ### What Works
 
-Everything listed in [Features](#features) is implemented and functional. The app has been tested primarily on macOS (Apple Silicon) with CrossOver and Whisky bottles. 80+ games are auto-detected; Skyrim SE and Fallout 4 have full-featured support including load order management.
+Everything listed in [Features](#features) is implemented and functional. The app has been tested primarily on macOS (Apple Silicon) with CrossOver and Whisky bottles. 80+ games are auto-detected; Skyrim SE and Fallout 4 have full-featured support including plugin load order management, game-specific mod tools, INI presets, and crash log analysis.
 
 Key workflows tested end-to-end:
 
@@ -371,7 +372,7 @@ Key workflows tested end-to-end:
 ### Known Limitations
 
 - **Linux testing is limited** — The app builds for Linux and handles Linux paths throughout, but primary testing has been on macOS. Community feedback on SteamOS/Proton setups is especially welcome.
-- **Enhanced game support** — 80+ games are detected and support basic mod deployment. Full-featured support (plugin load order, LOOT sorting, SKSE, plugins.txt) currently exists for Skyrim SE and Fallout 4. Other Bethesda games are next in line.
+- **Enhanced game support** — 80+ games are detected and support basic mod deployment. Full-featured support (plugin load order, LOOT sorting, script extender auto-install, INI presets, crash log analysis, game-specific mod tools) currently exists for Skyrim SE and Fallout 4. Other Bethesda games are next in line.
 - **Collections installation** — Works well for most public NexusMods collections (10–150 mods). Install order resolution, FOMOD replay, plugin sync, and profile snapshots are all functional. Binary patch application from collection manifests is not yet implemented. Collection updates require full re-download (no delta updates).
 - **Wabbajack installation** — The full Wabbajack install pipeline is implemented with real downloads (NexusMods, HTTP, MediaFire, ModDB), directive processing (BSDiff patching, inline files), and deployment. **Not yet implemented**: BSA/BA2 packing (CreateBSA), DDS texture transformation (TransformedTexture), merged patches (MergedPatch), Google Drive downloads, Wabbajack CDN downloads, and game file source extraction. Complex modlists using these features will partially fail. Install resume after interruption is stubbed but not yet functional.
 - **FOMOD conditionals** — The FOMOD installer handles group selection, type badges, and file mapping. Conditional visibility, option dependencies, and mutually-exclusive groups are not yet supported — the installer uses defaults for these cases.
@@ -470,7 +471,7 @@ src/                          Svelte frontend
 │   └── settings/+page.svelte Config, game tools, auth, INI, diagnostics
 └── app.css                   Design system (tokens, themes, vibrancy, animations)
 
-src-tauri/src/                Rust backend (~48 modules, 566 tests)
+src-tauri/src/                Rust backend (~48 modules, 580 tests)
 ├── lib.rs              Tauri command handlers (~171 IPC commands)
 ├── bottles.rs          Bottle detection (9 sources, macOS + Linux)
 ├── bottle_config.rs    Wine bottle settings (MSync, MetalFX, env vars)
