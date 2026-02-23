@@ -9,7 +9,7 @@
   import { getVersion } from "@tauri-apps/api/app";
   import { check } from "@tauri-apps/plugin-updater";
   import { relaunch } from "@tauri-apps/plugin-process";
-  import { downloadFromNexus, getAllGames, getDownloadQueue, retryDownload, cancelDownload, clearFinishedDownloads, onDownloadQueueUpdate, listProfiles, listInstalledCollections, getConfig, launchGame, getAllInterruptedInstalls, resumeCollectionInstall, abandonCollectionInstall, getPendingWabbajackInstalls } from "$lib/api";
+  import { downloadFromNexus, getAllGames, getDownloadQueue, retryDownload, cancelDownload, clearFinishedDownloads, onDownloadQueueUpdate, listProfiles, listInstalledCollections, getConfig, launchGame, getAllInterruptedInstalls, resumeCollectionInstall, abandonCollectionInstall, getPendingWabbajackInstalls, checkSkyrimVersion, getPinnedGameVersion, pinGameVersion } from "$lib/api";
   import { resumeInstallTracking } from "$lib/installService";
   import type { CollectionInstallCheckpoint, WabbajackInstallStatus } from "$lib/types";
   import { get } from "svelte/store";
@@ -104,6 +104,9 @@
   let interruptedInstall = $state<CollectionInstallCheckpoint | null>(null);
   let interruptedWj = $state<WabbajackInstallStatus | null>(null);
   let resumingInstall = $state(false);
+
+  // Game version change detection
+  let versionWarning = $state<{ oldVersion: string; newVersion: string } | null>(null);
 
   // Friendly error message mapping for download errors
   function friendlyError(raw: string): string {
@@ -383,6 +386,33 @@
     selectedBottle.set(game.bottle_name);
     loadProfilesForGame(game);
     loadCollectionsForGame(game);
+    checkGameVersion(game);
+  }
+
+  async function checkGameVersion(game: DetectedGame) {
+    if (game.game_id !== "skyrimse") return;
+    try {
+      const status = await checkSkyrimVersion(game.game_id, game.bottle_name);
+      const currentVersion = status.current_version;
+      const pinned = await getPinnedGameVersion(game.game_id, game.bottle_name);
+      if (!pinned) {
+        // First time seeing this game — pin without warning
+        await pinGameVersion(game.game_id, game.bottle_name, currentVersion);
+      } else if (pinned !== currentVersion) {
+        versionWarning = { oldVersion: pinned, newVersion: currentVersion };
+      }
+    } catch { /* version check not available */ }
+  }
+
+  function handleAcknowledgeVersion() {
+    const game = $selectedGame;
+    if (!game || !versionWarning) return;
+    pinGameVersion(game.game_id, game.bottle_name, versionWarning.newVersion);
+    versionWarning = null;
+  }
+
+  function handleDismissVersionWarning() {
+    versionWarning = null;
   }
 
   async function loadProfilesForGame(game: DetectedGame) {
@@ -831,6 +861,28 @@
               </button>
             {/if}
           {/if}
+        </div>
+      {/if}
+
+      {#if versionWarning}
+        <div class="resume-banner version-warning" role="alert">
+          <div class="resume-banner-icon">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10" />
+              <line x1="12" y1="8" x2="12" y2="12" />
+              <line x1="12" y1="16" x2="12.01" y2="16" />
+            </svg>
+          </div>
+          <div class="resume-banner-text">
+            <strong>Game Version Changed</strong>
+            {versionWarning.oldVersion} &rarr; {versionWarning.newVersion} &mdash; This may break SKSE and script-dependent mods
+          </div>
+          <div class="resume-banner-actions">
+            <button class="btn btn-accent btn-sm" onclick={handleAcknowledgeVersion}>
+              Acknowledge
+            </button>
+            <button class="btn btn-ghost btn-sm" onclick={handleDismissVersionWarning}>Dismiss</button>
+          </div>
         </div>
       {/if}
 
@@ -1425,6 +1477,15 @@
     display: flex;
     gap: var(--space-2, 8px);
     flex-shrink: 0;
+  }
+
+  .version-warning {
+    background: rgba(255, 59, 48, 0.08);
+    border-color: rgba(255, 59, 48, 0.25);
+  }
+
+  .version-warning .resume-banner-icon {
+    color: #ff3b30;
   }
 
   /* --- Content column --- */

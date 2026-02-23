@@ -192,6 +192,7 @@
     object-fit: contain;
     border-radius: 4px;
     flex-shrink: 0;
+    background: transparent;
   }
 
   .tool-row.detected {

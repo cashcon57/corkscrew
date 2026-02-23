@@ -1857,6 +1857,46 @@ impl ModDatabase {
         Ok(())
     }
 
+    // -----------------------------------------------------------------------
+    // Pinned game versions
+    // -----------------------------------------------------------------------
+
+    /// Get the pinned (last-known) game version for a game/bottle pair.
+    pub fn get_pinned_game_version(
+        &self,
+        game_id: &str,
+        bottle_name: &str,
+    ) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let result = conn
+            .query_row(
+                "SELECT version FROM pinned_game_versions
+                 WHERE game_id = ?1 AND bottle_name = ?2",
+                params![game_id, bottle_name],
+                |row| row.get(0),
+            )
+            .ok();
+        Ok(result)
+    }
+
+    /// Set (upsert) the pinned game version for a game/bottle pair.
+    pub fn set_pinned_game_version(
+        &self,
+        game_id: &str,
+        bottle_name: &str,
+        version: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "INSERT INTO pinned_game_versions (game_id, bottle_name, version, pinned_at)
+             VALUES (?1, ?2, ?3, datetime('now'))
+             ON CONFLICT(game_id, bottle_name)
+             DO UPDATE SET version = excluded.version, pinned_at = excluded.pinned_at",
+            params![game_id, bottle_name, version],
+        )?;
+        Ok(())
+    }
+
     /// List all pending (incomplete) Wabbajack installs.
     pub fn list_pending_wj_installs(
         &self,

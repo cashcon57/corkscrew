@@ -80,9 +80,10 @@
     mythic: "/icons/mythic.png",
     wine: "/icons/wine.png",
   };
-  const recommendedTools = $derived(modTools.filter(t => t.wine_compat === "good"));
-  const limitedTools = $derived(modTools.filter(t => t.wine_compat === "limited"));
-  const notRecommendedTools = $derived(modTools.filter(t => t.wine_compat === "not_recommended"));
+  // Filter out SKSE from the tools list — it has its own dedicated section above
+  const recommendedTools = $derived(modTools.filter(t => t.wine_compat === "good" && t.id !== "skse"));
+  const limitedTools = $derived(modTools.filter(t => t.wine_compat === "limited" && t.id !== "skse"));
+  const notRecommendedTools = $derived(modTools.filter(t => t.wine_compat === "not_recommended" && t.id !== "skse"));
 
   // Platform detection via Tauri command
   let platformInfo = $state<PlatformInfo>({ os: "macos", is_steam_os: false, cpu_cores: 0, cpu_brand: "", memory_gb: 0, arch: "" });
@@ -1423,6 +1424,7 @@
     object-fit: contain;
     border-radius: 3px;
     flex-shrink: 0;
+    background: transparent;
   }
 
   .tool-info {

@@ -3136,6 +3136,33 @@ async fn get_pending_wabbajack_installs(
         .collect())
 }
 
+// --- Game Version Pinning ---
+
+#[tauri::command]
+async fn get_pinned_game_version(
+    game_id: String,
+    bottle_name: String,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    state
+        .db
+        .get_pinned_game_version(&game_id, &bottle_name)
+        .map_err(|e| format!("Failed to get pinned version: {}", e))
+}
+
+#[tauri::command]
+async fn pin_game_version(
+    game_id: String,
+    bottle_name: String,
+    version: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state
+        .db
+        .set_pinned_game_version(&game_id, &bottle_name, &version)
+        .map_err(|e| format!("Failed to pin version: {}", e))
+}
+
 // --- Plugin Load Order Rules ---
 
 #[tauri::command]
@@ -4145,6 +4172,8 @@ pub fn run() {
             resume_collection_install_cmd,
             abandon_collection_install,
             get_pending_wabbajack_installs,
+            get_pinned_game_version,
+            pin_game_version,
             // Plugin Rules
             add_plugin_rule,
             remove_plugin_rule,

@@ -68,6 +68,7 @@
   import HelpTooltip from "$lib/components/HelpTooltip.svelte";
   import SkeletonRows from "$lib/components/SkeletonRows.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
+  import ConflictMap from "$lib/components/ConflictMap.svelte";
 
   let installing = $state(false);
   let installStep = $state("");
@@ -140,6 +141,7 @@
 
   // Conflict panel state
   let showConflictPanel = $state(false);
+  let showConflictMap = $state(false);
   let makingWinner = $state<number | null>(null);
 
   // Mod overflow menu state
@@ -1921,6 +1923,11 @@
     <div class="content-grid">
       <!-- LEFT: Mod list (primary focus) -->
       <div class="content-main">
+        <!-- Visual Conflict Map -->
+        {#if showConflictMap}
+          <ConflictMap visible={showConflictMap} onclose={() => { showConflictMap = false; }} />
+        {/if}
+
         <!-- Smart Conflict Resolution Panel -->
         {#if showConflictPanel && conflicts.length > 0}
           <div class="conflict-panel">
@@ -2074,6 +2081,7 @@
             </svg>
             <span>You have {conflictModIds.size} mod{conflictModIds.size === 1 ? "" : "s"} with unresolved file conflicts</span>
             <button class="banner-action" onclick={() => { showConflictPanel = true; }}>View Conflicts</button>
+            <button class="banner-action" onclick={() => { showConflictMap = true; }}>View Map</button>
             <button class="banner-dismiss" onclick={() => dismissBanner("conflicts")}>
               <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
                 <line x1="3" y1="3" x2="9" y2="9" /><line x1="9" y1="3" x2="3" y2="9" />

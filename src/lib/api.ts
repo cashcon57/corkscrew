@@ -1368,6 +1368,22 @@ export async function getPendingWabbajackInstalls(): Promise<
   return invoke("get_pending_wabbajack_installs");
 }
 
+// Game Version Pinning
+export async function getPinnedGameVersion(
+  gameId: string,
+  bottleName: string,
+): Promise<string | null> {
+  return invoke("get_pinned_game_version", { gameId, bottleName });
+}
+
+export async function pinGameVersion(
+  gameId: string,
+  bottleName: string,
+  version: string,
+): Promise<void> {
+  return invoke("pin_game_version", { gameId, bottleName, version });
+}
+
 // Embedded Browser Webview
 export async function createBrowserWebview(
   url: string,

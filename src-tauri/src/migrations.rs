@@ -19,7 +19,7 @@ pub enum MigrationError {
 pub type Result<T> = std::result::Result<T, MigrationError>;
 
 /// The current target schema version. Bump this when adding a new migration.
-const TARGET_VERSION: u32 = 11;
+const TARGET_VERSION: u32 = 12;
 
 /// Get the current schema version (0 if no version table exists).
 pub fn current_version(conn: &Connection) -> Result<u32> {
@@ -99,6 +99,11 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     if version == 10 {
         migrate_v10_to_v11(conn)?;
         version = 11;
+    }
+
+    if version == 11 {
+        migrate_v11_to_v12(conn)?;
+        version = 12;
     }
 
     let _ = version; // suppress unused warning when TARGET_VERSION == current
@@ -689,6 +694,29 @@ fn migrate_v10_to_v11(conn: &Connection) -> Result<()> {
     tx.execute("UPDATE schema_version SET version = 11", [])?;
     tx.commit()?;
     log::info!("Migration 10 → 11 complete (collection install checkpoints)");
+    Ok(())
+}
+
+/// Migration 11 → 12: Pinned game versions.
+///
+/// Stores the last-known game executable version per game/bottle so Corkscrew
+/// can warn users when Steam silently updates their game and breaks SKSE mods.
+fn migrate_v11_to_v12(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS pinned_game_versions (
+            game_id     TEXT NOT NULL,
+            bottle_name TEXT NOT NULL,
+            version     TEXT NOT NULL,
+            pinned_at   TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (game_id, bottle_name)
+        );",
+    )?;
+
+    tx.execute("UPDATE schema_version SET version = 12", [])?;
+    tx.commit()?;
+    log::info!("Migration 11 → 12 complete (pinned game versions)");
     Ok(())
 }
 
