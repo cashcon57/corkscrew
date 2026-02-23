@@ -26,7 +26,7 @@ Corkscrew installs, manages, and organizes mods for Windows games running throug
 
 It works by reading and writing directly to your Wine bottle's filesystem, the same way the game itself sees it. Your bottles, your mods, no middleman.
 
-> **v1.4** — Now with 80+ supported games, NexusMods-style advanced filtering, Wabbajack modlist installation, and comprehensive light/dark mode support.
+> **v1.6** — Full Wabbajack install pipeline (download, patch, deploy), embedded NexusMods/Wabbajack web views, premium-gated API browsing, direct mod download & install, and 80+ supported games.
 
 ---
 
@@ -156,7 +156,7 @@ Corkscrew includes an in-app auto-updater. When a new version is published on Gi
 ## Features
 
 ### Mod Management
-- **Staging-based deployment** — Mods are extracted to a staging folder first, then deployed to the game directory via hardlinks (with copy fallback). Toggle mods on/off without re-downloading or re-extracting.
+- **Staging-based deployment** — Mods are extracted to a staging folder first, then deployed to the game directory via hardlinks (with copy fallback). Toggle mods on/off without re-downloading or re-extracting. Atomic deployment with rollback on partial failure ensures the game directory is never left in a broken state.
 - **Mod installation** — Handles `.zip`, `.7z`, `.rar`, `.tar.gz`, `.tar.xz`, and `.tar.bz2` archives with smart data root detection, or drag-and-drop files directly onto the app.
 - **Priority-based conflict resolution** — Drag-reorder mods to set deployment priority. Higher-priority mods win when files overlap, with a visual conflict panel showing which mods override which files.
 - **FOMOD wizard** — Step-by-step interactive installer for mods using the FOMOD XML format, with radio/checkbox groups, option descriptions, and type badges.
@@ -185,9 +185,11 @@ Corkscrew includes an in-app auto-updater. When a new version is published on Gi
 - **API key authentication** — Connect your Nexus Mods account via API key to access premium features. SSO/OAuth module is implemented and ready for use once NexusMods approves the application.
 - **NXM protocol handling** — Registered as an `nxm://` protocol handler. Users click "Download with Mod Manager" on the Nexus Mods website, and Corkscrew receives and processes the NXM link.
 - **Strict download compliance** — Corkscrew **never automates downloads for free NexusMods users**. Free users are always directed to the Nexus Mods website to click "Slow Download" manually. Only premium users get API-initiated downloads. This is enforced at the API layer in `nexus.rs::get_download_links()`.
-- **Browse Nexus Mods** — Search and filter NexusMods mods with advanced filters (category, author, update period, min downloads/endorsements), multiple sort options, and NexusMods-style filter pills.
+- **Browse Nexus Mods** — Premium users can search and filter NexusMods mods with advanced filters (category, author, update period, min downloads/endorsements), multiple sort options, and NexusMods-style filter pills. Free users browse via an embedded NexusMods web view within the app.
+- **Direct mod download & install** — Premium users can download and install mods directly from the Browse page: pick a file from the mod's files list (grouped by category), download with real-time progress, and auto-deploy in one step.
+- **Embedded web views** — Toggle between in-app API browsing and an embedded NexusMods/Wabbajack website view. Powered by Tauri v2 multi-webview (native child webview, not an iframe). Available on Browse Nexus, Collections, and Wabbajack Gallery pages.
 - **Collections browser** — Browse NexusMods Collections via the GraphQL v2 API with search, sorting, advanced filtering, and detailed mod/revision views.
-- **Collection installation** — Premium users can install entire NexusMods Collections with one click. The orchestrator resolves install order, downloads mods via the NexusMods API, handles FOMOD selections from the collection manifest, deploys files, and applies the collection's plugin load order. Free users see a list of mods with links to download manually from the Nexus website.
+- **Collection installation** — Premium users can install entire NexusMods Collections with one click. The orchestrator resolves install order, downloads mods via the NexusMods API, handles FOMOD selections from the collection manifest, deploys files, and applies the collection's plugin load order. Plugin load order sync works for all games with plugin support (Skyrim SE, Fallout 4, etc.), not just Skyrim SE. Free users see a list of mods with links to download manually from the Nexus website.
 - **Update checking** — Check installed mods against Nexus for available updates.
 - **Collection diff** — Compare your locally installed collection against the author's latest revision to see added, removed, and updated mods.
 - **Tool requirement detection** — Before installing a Collection or Wabbajack modlist, Corkscrew scans for required modding tools (SKSE, Nemesis, BodySlide, etc.) and prompts you to install missing tools before proceeding.
@@ -206,10 +208,14 @@ Corkscrew includes an in-app auto-updater. When a new version is published on Gi
 - **Auto-profile on collection install** — A named profile snapshot is automatically created after each collection installation.
 
 ### Wabbajack Modlists
-- **Gallery browser** — Browse the full Wabbajack modlist gallery with search, game filtering, NSFW toggle, and advanced filters (install size, tags).
+- **Gallery browser** — Browse the full Wabbajack modlist gallery with search, game filtering, NSFW 3-state toggle (hide/show/only), and advanced filters (install size, tags). Toggle between in-app gallery and embedded Wabbajack website.
 - **Modlist metadata** — View archive counts, download/install sizes, tags, and version info.
 - **Local .wabbajack parsing** — Open and analyze downloaded `.wabbajack` files to see directive breakdowns, archive source breakdown (Nexus, HTTP, Mega, Google Drive, etc.), and compatibility info.
-- **Modlist installation** — Full install pipeline: pre-flight checks, NexusMods archive downloads (premium), HTTP direct downloads, directive execution (copy, patch, create, inline), staging and deployment with progress tracking and cancellation support.
+- **Full modlist installation** — Complete end-to-end pipeline with real downloads and deployment:
+  - **Download phase** — Multi-source download engine supporting NexusMods (premium), HTTP, Google Drive, MEGA, MediaFire (link scraping), Wabbajack CDN, ModDB, game file sources, and manual downloads. Semaphore-based concurrency (8 parallel), xxHash64 verification, download caching, and progress events.
+  - **Directive phase** — Processes all Wabbajack directive types: FromArchive (file extraction), PatchedFromArchive (BSDiff binary patching), InlineFile/RemappedInlineFile (embedded data with path substitution), MergedPatch (multi-source merge patching), CreateBSA (staging for BSA packing), TransformedTexture (texture copy), and IgnoredDirectly.
+  - **Deploy phase** — Hardlink-first deployment with atomic rollback on partial failure. Creates a mod record and deploys all processed files to the game's data directory.
+  - Pre-flight checks, cancellation support, and real-time progress tracking throughout.
 - **Tool detection** — Scans the modlist for required tools and prompts for installation before proceeding.
 
 ### Crash Log Analysis
@@ -353,7 +359,7 @@ Key workflows tested end-to-end:
 
 - **Linux testing is limited** — The app builds for Linux and handles Linux paths throughout, but primary testing has been on macOS. Community feedback on SteamOS/Proton setups is especially welcome.
 - **Enhanced game support** — 80+ games are detected and support basic mod deployment. Full-featured support (plugin load order, LOOT sorting, SKSE, plugins.txt) currently exists for Skyrim SE and Fallout 4. Other Bethesda games are next in line.
-- **Wabbajack installation** — The full Wabbajack install pipeline is implemented (NexusMods downloads, HTTP direct downloads, directive execution), but some edge cases with non-Nexus sources (Mega, Google Drive, LoversLab) may need manual intervention.
+- **Wabbajack installation** — The full Wabbajack install pipeline is implemented with real downloads (NexusMods, HTTP, CDN, MediaFire, ModDB), directive processing (BSDiff patching, inline files, merged patches), and deployment. BSA/BA2 packing and DDS texture transformation are staged but not yet fully implemented (files are copied as-is). Some edge cases with MEGA and Google Drive may need manual intervention.
 - **NexusMods SSO** — The SSO/OAuth2 module (with PKCE) is fully implemented and ready to use. Currently awaiting NexusMods approval of the "Corkscrew" application slug. In the meantime, API key authentication works.
 - **macOS code signing** — The app is not signed with an Apple Developer certificate. Users need to bypass Gatekeeper on first launch (see [Installation](#installation)).
 
@@ -361,7 +367,8 @@ Key workflows tested end-to-end:
 
 **In progress:**
 - Enhanced game plugins for more Bethesda titles (Oblivion, Fallout 3, Fallout NV, Starfield, Morrowind) with full load order support
-- Wabbajack modlist installation improvements (more download sources, better error recovery)
+- BSA/BA2 archive packing for Wabbajack CreateBSA directives
+- DDS texture transformation for Wabbajack TransformedTexture directives
 
 **Near-term:**
 - NexusMods SSO/OAuth authentication (pending NM app approval)
@@ -418,6 +425,7 @@ src/                          Svelte frontend
 │       ├── SessionHistoryPanel.svelte Game session log + stability summary
 │       ├── IniManagerPanel.svelte   INI file editor with presets
 │       ├── WineDiagnosticsPanel.svelte Wine bottle health diagnostics
+│       ├── WebViewToggle.svelte     In-App / Website toggle with native webview
 │       └── mods/
 │           ├── ModTableHeader.svelte    Sortable column headers
 │           ├── ModTableRow.svelte       Single mod row with hover actions
@@ -447,7 +455,7 @@ src-tauri/src/                Rust backend (~48 modules, 561 tests)
 ├── game_registry.rs    Auto-generated game plugins from Vortex data (80+ games)
 ├── installer.rs        Archive extraction (.zip, .7z, .rar, .tar.gz/xz/bz2) + data root detection
 ├── staging.rs          Staging folder management + SHA-256 hashing
-├── deployer.rs         Hardlink/copy deployment engine + manifest tracking + progress events
+├── deployer.rs         Hardlink/copy deployment engine + atomic rollback + manifest tracking
 ├── database.rs         SQLite mod tracking with versioned migrations + notification log
 ├── migrations.rs       Schema versioning + migration runner (v1→v9)
 ├── loot.rs             libloot wrapper + masterlist management
