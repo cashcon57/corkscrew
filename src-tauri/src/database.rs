@@ -576,22 +576,26 @@ impl ModDatabase {
 
     /// Remove all deployment manifest entries for a mod.
     pub fn remove_deployment_entries_for_mod(&self, mod_id: i64) -> Result<Vec<String>> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let paths = self.get_deployment_paths_for_mod(mod_id)?;
 
-        // First collect the relative paths
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "DELETE FROM deployment_manifest WHERE mod_id = ?1",
+            params![mod_id],
+        )?;
+
+        Ok(paths)
+    }
+
+    /// Get deployed file paths for a mod without deleting the manifest entries.
+    pub fn get_deployment_paths_for_mod(&self, mod_id: i64) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt =
             conn.prepare("SELECT relative_path FROM deployment_manifest WHERE mod_id = ?1")?;
         let paths: Vec<String> = stmt
             .query_map(params![mod_id], |row| row.get(0))?
             .filter_map(|r| r.ok())
             .collect();
-
-        // Then delete
-        conn.execute(
-            "DELETE FROM deployment_manifest WHERE mod_id = ?1",
-            params![mod_id],
-        )?;
-
         Ok(paths)
     }
 

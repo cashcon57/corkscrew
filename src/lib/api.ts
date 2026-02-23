@@ -465,6 +465,13 @@ export async function deleteProfile(profileId: number): Promise<void> {
   return invoke("delete_profile_cmd", { profileId });
 }
 
+export async function deactivateProfile(
+  gameId: string,
+  bottleName: string
+): Promise<void> {
+  return invoke("deactivate_profile_cmd", { gameId, bottleName });
+}
+
 export async function renameProfile(
   profileId: number,
   newName: string

@@ -1398,6 +1398,8 @@
     display: flex;
     flex-direction: column;
     gap: 3px;
+    overflow-y: auto;
+    min-height: 0;
   }
 
   .nav-item {
@@ -1457,6 +1459,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    flex-shrink: 0;
   }
 
   .sidebar-collapse-btn {
@@ -1560,7 +1563,7 @@
     background: var(--bg-elevated, rgba(255, 255, 255, 0.04));
     border: 1px solid var(--accent-subtle, rgba(217, 143, 64, 0.2));
     border-radius: var(--radius-md, 8px);
-    margin: var(--space-3, 12px) var(--space-4, 16px) 0;
+    margin: var(--space-3, 12px) var(--space-4, 16px) var(--space-4, 16px);
     padding: var(--space-3, 12px) var(--space-4, 16px);
   }
 
@@ -2204,6 +2207,14 @@
 
   :global(.controller-mode) .nav-item {
     padding: var(--space-3) var(--space-4);
+  }
+
+  :global(.controller-mode) .sidebar-footer button,
+  :global(.controller-mode) .sidebar-footer .sidebar-gh-btn,
+  :global(.controller-mode) .sidebar-footer .sidebar-collapse-btn,
+  :global(.controller-mode) .sidebar-footer .queue-btn {
+    min-height: unset;
+    font-size: unset;
   }
 
   :global(.controller-mode) :focus-visible {

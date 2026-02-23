@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
-  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, checkModToolUpdate, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads, checkSteamStatus, addToSteam, removeFromSteam } from "$lib/api";
+  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, checkModToolUpdate, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads, checkSteamStatus, addToSteam, removeFromSteam, scanGameDirectory, cleanGameDirectory } from "$lib/api";
+  import type { CleanReport, CleanResult } from "$lib/types";
   import type { SteamStatus } from "$lib/types";
   import { config, showError, showSuccess, selectedGame, skseStatus, currentPage, appVersion, updateReady, updateVersion, updateNotes, updateChecking, updateError, triggerUpdateCheck, controllerMode } from "$lib/stores";
   import type { AppConfig, ModTool, PlatformInfo, ToolInstallProgress, ToolUpdateInfo } from "$lib/types";
@@ -49,6 +50,17 @@
   let clearingAll = $state(false);
   let showArchiveList = $state(false);
   let downloadsStats = $state<{ total_size_bytes: number; archive_count: number; directory: string } | null>(null);
+
+  // Settings tabs
+  let settingsTab = $state<"general" | "game" | "system">("general");
+  let showLimitedTools = $state(false);
+  let showNotRecommendedTools = $state(false);
+
+  // Game directory cleaner
+  let cleanReport = $state<CleanReport | null>(null);
+  let scanning = $state(false);
+  let cleaning = $state(false);
+  let cleanResult = $state<CleanResult | null>(null);
 
   // Steam integration (Linux only)
   let steamStatus = $state<SteamStatus | null>(null);
@@ -233,6 +245,41 @@
       await openUrl(url);
     } catch (e: unknown) {
       showError(`Failed to open SKSE download page: ${e}`);
+    }
+  }
+
+  async function handleScanGameDir() {
+    if (!game) return;
+    scanning = true;
+    cleanResult = null;
+    cleanReport = null;
+    try {
+      cleanReport = await scanGameDirectory(game.game_id, game.bottle_name);
+    } catch (e: unknown) {
+      showError(`Scan failed: ${e}`);
+    } finally {
+      scanning = false;
+    }
+  }
+
+  async function handleCleanGameDir(orphansOnly: boolean) {
+    if (!game || !cleanReport) return;
+    cleaning = true;
+    try {
+      cleanResult = await cleanGameDirectory(game.game_id, game.bottle_name, {
+        remove_loose_files: true,
+        remove_archives: true,
+        remove_enb: false,
+        orphans_only: orphansOnly,
+        dry_run: false,
+        exclude_patterns: [],
+      });
+      showSuccess(`Removed ${cleanResult.removed_files.length} files (${formatBytes(cleanResult.bytes_freed)} freed)`);
+      cleanReport = null;
+    } catch (e: unknown) {
+      showError(`Clean failed: ${e}`);
+    } finally {
+      cleaning = false;
     }
   }
 
@@ -525,6 +572,23 @@
 <div class="settings-page">
   <h1 class="page-title">Settings</h1>
 
+  <div class="settings-tab-bar">
+    <button class="settings-tab" class:tab-active={settingsTab === "general"} onclick={() => settingsTab = "general"}>
+      General
+    </button>
+    {#if game}
+      <button class="settings-tab" class:tab-active={settingsTab === "game"} onclick={() => settingsTab = "game"}>
+        Game
+      </button>
+    {/if}
+    <button class="settings-tab" class:tab-active={settingsTab === "system"} onclick={() => settingsTab = "system"}>
+      System
+    </button>
+  </div>
+
+  <!-- ============ GENERAL TAB ============ -->
+  {#if settingsTab === "general"}
+
   <!-- Appearance -->
   <div class="section">
     <h2 class="section-title">Appearance</h2>
@@ -576,6 +640,10 @@
     </div>
   </div>
 
+  {/if}
+  <!-- ============ GAME TAB ============ -->
+  {#if settingsTab === "game"}
+
   {#if isSkyrim}
     <!-- Game Tools -->
     <div class="section">
@@ -616,6 +684,84 @@
               </button>
             {/if}
           </div>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  <!-- Game Maintenance -->
+  {#if game}
+    <div class="section">
+      <h2 class="section-title">Game Maintenance</h2>
+      <div class="section-card">
+        <div class="card-row" style="flex-direction: column; align-items: stretch; gap: 12px;">
+          <div style="display: flex; align-items: center; justify-content: space-between;">
+            <div>
+              <span class="row-label">Clean Game Directory</span>
+              <p class="row-description">Scan for and remove non-stock files from the game's Data folder. Use this to restore a clean install.</p>
+            </div>
+            <button
+              class="btn-secondary"
+              onclick={handleScanGameDir}
+              disabled={scanning}
+              type="button"
+            >
+              {scanning ? "Scanning..." : "Scan for Non-Stock Files"}
+            </button>
+          </div>
+
+          {#if cleanReport}
+            <div class="clean-report">
+              <div class="clean-report-stats">
+                <span><strong>{cleanReport.non_stock_files.length}</strong> non-stock files found</span>
+                <span class="clean-stat-sep">|</span>
+                <span><strong>{cleanReport.orphaned_count}</strong> orphaned (unmanaged)</span>
+                <span class="clean-stat-sep">|</span>
+                <span><strong>{formatBytes(cleanReport.total_size)}</strong> total</span>
+                {#if cleanReport.enb_files.length > 0}
+                  <span class="clean-stat-sep">|</span>
+                  <span>{cleanReport.enb_files.length} ENB files (kept)</span>
+                {/if}
+              </div>
+
+              {#if cleanReport.non_stock_files.length > 0}
+                <div class="clean-actions">
+                  <button
+                    class="btn-secondary"
+                    onclick={() => handleCleanGameDir(true)}
+                    disabled={cleaning}
+                    type="button"
+                    title="Only remove files not tracked by any installed mod"
+                  >
+                    {cleaning ? "Cleaning..." : "Remove Orphaned Files Only"}
+                  </button>
+                  <button
+                    class="btn-danger"
+                    onclick={() => handleCleanGameDir(false)}
+                    disabled={cleaning}
+                    type="button"
+                    title="Remove ALL non-stock files to restore vanilla game state"
+                  >
+                    {cleaning ? "Cleaning..." : "Remove All Non-Stock Files"}
+                  </button>
+                </div>
+                <p class="clean-warning">
+                  "Remove All" will restore a vanilla game directory. All deployed mods will be disabled but their staging data is kept — you can redeploy later.
+                </p>
+              {:else}
+                <p class="clean-ok">Game directory is clean — no non-stock files detected.</p>
+              {/if}
+            </div>
+          {/if}
+
+          {#if cleanResult && !cleanReport}
+            <div class="clean-result">
+              Removed {cleanResult.removed_files.length} files, freed {formatBytes(cleanResult.bytes_freed)}.
+              {#if cleanResult.skipped_files.length > 0}
+                <span class="clean-skipped">{cleanResult.skipped_files.length} files skipped (permissions or exclusions).</span>
+              {/if}
+            </div>
+          {/if}
         </div>
       </div>
     </div>
@@ -754,7 +900,12 @@
         <!-- Limited Wine compatibility tools -->
         {#if limitedTools.length > 0}
           <div class="layers-group">
-            <span class="layers-group-label">Limited Wine Compatibility</span>
+            <button class="layers-group-label collapsible-label" onclick={() => showLimitedTools = !showLimitedTools}>
+              <svg class="collapse-chevron" class:collapse-open={showLimitedTools} width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 2l4 3-4 3" /></svg>
+              Limited Wine Compatibility
+              <span class="collapse-count">{limitedTools.length}</span>
+            </button>
+            {#if showLimitedTools}
             <div class="section-card">
               {#each limitedTools as tool, i (tool.id)}
                 {#if i > 0}<div class="card-divider"></div>{/if}
@@ -835,13 +986,19 @@
                 </div>
               {/each}
             </div>
+            {/if}
           </div>
         {/if}
 
         <!-- Not recommended via Wine -->
         {#if notRecommendedTools.length > 0}
           <div class="layers-group">
-            <span class="layers-group-label tool-warn-label">Not Recommended via Wine</span>
+            <button class="layers-group-label collapsible-label tool-warn-label" onclick={() => showNotRecommendedTools = !showNotRecommendedTools}>
+              <svg class="collapse-chevron" class:collapse-open={showNotRecommendedTools} width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 2l4 3-4 3" /></svg>
+              Not Recommended via Wine
+              <span class="collapse-count">{notRecommendedTools.length}</span>
+            </button>
+            {#if showNotRecommendedTools}
             <div class="section-card tool-warn-card">
               {#each notRecommendedTools as tool, i (tool.id)}
                 {#if i > 0}<div class="card-divider"></div>{/if}
@@ -931,6 +1088,7 @@
                 </div>
               {/each}
             </div>
+            {/if}
           </div>
         {/if}
       {/if}
@@ -952,6 +1110,10 @@
       <WineDiagnosticsPanel gameId={game.game_id} bottleName={game.bottle_name} />
     </div>
   {/if}
+
+  {/if}
+  <!-- ============ GENERAL TAB (continued) ============ -->
+  {#if settingsTab === "general"}
 
   <!-- Nexus Mods Account -->
   <SettingsAuthSection />
@@ -990,6 +1152,10 @@
       </div>
     </div>
   </div>
+
+  {/if}
+  <!-- ============ SYSTEM TAB ============ -->
+  {#if settingsTab === "system"}
 
   <!-- Downloads -->
   <div class="section">
@@ -1280,18 +1446,13 @@
             {/if}
           </div>
         </div>
-        <div class="card-row">
-          <span class="row-label">Controller Mode</span>
-          <div class="row-value">
-            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-              <input type="checkbox" checked={$controllerMode} onchange={(e) => controllerMode.set((e.target as HTMLInputElement).checked)} />
-              Larger touch targets for gamepad/touchscreen
-            </label>
-          </div>
-        </div>
       </div>
     </div>
   {/if}
+
+  {/if}
+  <!-- ============ GENERAL TAB (About) ============ -->
+  {#if settingsTab === "general"}
 
   <!-- About -->
   <div class="section">
@@ -1366,6 +1527,8 @@
       </div>
     </div>
   </div>
+
+  {/if}
 </div>
 
 <style>
@@ -1380,7 +1543,42 @@
     font-weight: 700;
     letter-spacing: -0.025em;
     color: var(--text-primary);
-    margin-bottom: var(--space-8);
+    margin-bottom: var(--space-4);
+  }
+
+  /* --- Tab Bar --- */
+
+  .settings-tab-bar {
+    display: flex;
+    gap: 2px;
+    padding: 3px;
+    background: var(--bg-grouped-secondary);
+    border-radius: var(--radius-lg);
+    margin-bottom: var(--space-6);
+    box-shadow: var(--glass-edge-shadow);
+  }
+
+  .settings-tab {
+    flex: 1;
+    padding: 6px 16px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-tertiary);
+    background: transparent;
+    border: none;
+    border-radius: calc(var(--radius-lg) - 2px);
+    cursor: pointer;
+    transition: all var(--duration-fast) var(--ease);
+  }
+
+  .settings-tab:hover {
+    color: var(--text-secondary);
+  }
+
+  .settings-tab.tab-active {
+    color: var(--text-primary);
+    background: var(--bg-elevated);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
   }
 
   /* --- Sections --- */
@@ -2277,6 +2475,40 @@
     opacity: 1;
   }
 
+  .collapsible-label {
+    cursor: pointer;
+    border: none;
+    background: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    text-align: left;
+  }
+
+  .collapsible-label:hover {
+    color: var(--text-secondary) !important;
+  }
+
+  .collapse-chevron {
+    flex-shrink: 0;
+    transition: transform var(--duration-fast) var(--ease);
+  }
+
+  .collapse-chevron.collapse-open {
+    transform: rotate(90deg);
+  }
+
+  .collapse-count {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-quaternary);
+    background: var(--surface-hover);
+    padding: 0 5px;
+    border-radius: 8px;
+    margin-left: 2px;
+  }
+
   .tool-warn-label {
     color: var(--red) !important;
   }
@@ -2337,5 +2569,55 @@
   .badge-amber {
     background: color-mix(in srgb, var(--amber, #f59e0b) 15%, transparent);
     color: var(--amber, #f59e0b);
+  }
+
+  /* Game Maintenance - Clean Report */
+  .clean-report {
+    background: var(--bg-secondary, rgba(0, 0, 0, 0.15));
+    border: 1px solid var(--separator);
+    border-radius: var(--radius-sm, 6px);
+    padding: var(--space-3, 12px);
+  }
+  .clean-report-stats {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2, 8px);
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin-bottom: var(--space-3, 12px);
+  }
+  .clean-stat-sep {
+    color: var(--text-quaternary);
+  }
+  .clean-actions {
+    display: flex;
+    gap: var(--space-2, 8px);
+    margin-bottom: var(--space-2, 8px);
+  }
+  .clean-warning {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin: 0;
+  }
+  .clean-ok {
+    color: var(--green, #30d158);
+    font-size: 13px;
+    margin: 0;
+  }
+  .clean-result {
+    font-size: 13px;
+    color: var(--green, #30d158);
+    padding: var(--space-2, 8px) var(--space-3, 12px);
+    background: rgba(48, 209, 88, 0.08);
+    border-radius: var(--radius-sm, 6px);
+  }
+  .clean-skipped {
+    color: var(--text-tertiary);
+  }
+  .row-description {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    margin: 2px 0 0;
   }
 </style>

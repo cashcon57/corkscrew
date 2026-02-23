@@ -162,13 +162,28 @@ pub fn list_profiles(db: &ModDatabase, game_id: &str, bottle_name: &str) -> Resu
     Ok(profiles)
 }
 
-/// Delete a profile by ID.
+/// Delete a profile by ID (works for active or inactive profiles).
 pub fn delete_profile(db: &ModDatabase, profile_id: i64) -> Result<()> {
     let conn = db.conn().map_err(|e| ProfileError::Other(e.to_string()))?;
     let rows = conn.execute("DELETE FROM profiles WHERE id = ?1", params![profile_id])?;
     if rows == 0 {
         return Err(ProfileError::NotFound(profile_id));
     }
+    Ok(())
+}
+
+/// Deactivate a profile (set is_active = 0).
+pub fn deactivate_profile(
+    db: &ModDatabase,
+    game_id: &str,
+    bottle_name: &str,
+) -> Result<()> {
+    let conn = db.conn().map_err(|e| ProfileError::Other(e.to_string()))?;
+    conn.execute(
+        "UPDATE profiles SET is_active = 0
+         WHERE game_id = ?1 AND bottle_name = ?2 AND is_active = 1",
+        params![game_id, bottle_name],
+    )?;
     Ok(())
 }
 

@@ -3,6 +3,7 @@
     listProfiles,
     createProfile,
     deleteProfile,
+    deactivateProfile,
     renameProfile,
     saveProfileSnapshot,
     activateProfile,
@@ -85,6 +86,17 @@
       showError(`Failed to activate profile: ${e}`);
     } finally {
       activating = null;
+    }
+  }
+
+  async function handleDeactivate(id: number) {
+    if (!game) return;
+    try {
+      await deactivateProfile(game.game_id, game.bottle_name);
+      showSuccess("Profile deactivated");
+      await loadProfiles();
+    } catch (e: unknown) {
+      showError(`Failed to deactivate profile: ${e}`);
     }
   }
 
@@ -222,6 +234,13 @@
                 >
                   Save State
                 </button>
+                <button
+                  class="btn btn-sm btn-ghost"
+                  onclick={() => handleDeactivate(profile.id)}
+                  title="Deactivate profile"
+                >
+                  Deactivate
+                </button>
               {/if}
 
               <button
@@ -238,7 +257,6 @@
                 class="btn btn-sm btn-ghost btn-danger"
                 onclick={() => handleDelete(profile.id)}
                 title="Delete"
-                disabled={profile.is_active}
               >
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
                   <line x1="3" y1="4" x2="13" y2="4" />

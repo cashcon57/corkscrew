@@ -2209,6 +2209,16 @@ fn delete_profile_cmd(profile_id: i64, state: State<AppState>) -> Result<(), Str
 }
 
 #[tauri::command]
+fn deactivate_profile_cmd(
+    game_id: String,
+    bottle_name: String,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let db = &state.db;
+    profiles::deactivate_profile(db, &game_id, &bottle_name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn rename_profile_cmd(
     profile_id: i64,
     new_name: String,
@@ -4546,6 +4556,7 @@ pub fn run() {
             list_profiles_cmd,
             create_profile_cmd,
             delete_profile_cmd,
+            deactivate_profile_cmd,
             rename_profile_cmd,
             save_profile_snapshot,
             activate_profile,

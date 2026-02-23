@@ -291,31 +291,55 @@ pub fn undeploy_mod(
     mod_id: i64,
     data_dir: &Path,
 ) -> Result<Vec<String>> {
-    let removed_paths = db
-        .remove_deployment_entries_for_mod(mod_id)
+    // Query manifest paths FIRST without deleting entries.
+    // Entries are only deleted after files are successfully removed,
+    // preventing orphaned files if removal fails partway through.
+    let manifest_paths = db
+        .get_deployment_paths_for_mod(mod_id)
         .map_err(|e| DeployerError::Database(e.to_string()))?;
 
     let mut actually_removed = Vec::new();
+    let mut errors = Vec::new();
 
-    for rel_path in &removed_paths {
+    for rel_path in &manifest_paths {
         let file_path = data_dir.join(rel_path);
 
         if file_path.exists() {
-            fs::remove_file(&file_path)?;
+            match fs::remove_file(&file_path) {
+                Ok(()) => {
+                    actually_removed.push(rel_path.clone());
+                    prune_empty_dirs(&file_path, data_dir);
+                }
+                Err(e) => {
+                    errors.push(format!("{}: {}", rel_path, e));
+                    continue;
+                }
+            }
+        } else {
+            // File already gone — still count as "removed" for manifest cleanup
             actually_removed.push(rel_path.clone());
-
-            prune_empty_dirs(&file_path, data_dir);
         }
 
-        restore_next_winner(db, game_id, bottle_name, rel_path, data_dir)?;
+        // Restore next-priority mod's version of this file if applicable
+        if let Err(e) = restore_next_winner(db, game_id, bottle_name, rel_path, data_dir) {
+            warn!("Failed to restore winner for {}: {}", rel_path, e);
+        }
     }
 
+    // Now delete manifest entries — all files have been handled
+    let _ = db.remove_deployment_entries_for_mod(mod_id);
+
     info!(
-        "Undeployed mod {} ({}/{} files removed)",
+        "Undeployed mod {} ({}/{} files removed, {} errors)",
         mod_id,
         actually_removed.len(),
-        removed_paths.len()
+        manifest_paths.len(),
+        errors.len(),
     );
+
+    if !errors.is_empty() {
+        warn!("Undeploy errors for mod {}: {:?}", mod_id, errors);
+    }
 
     Ok(actually_removed)
 }
