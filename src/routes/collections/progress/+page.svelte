@@ -1,5 +1,6 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
+  import { untrack } from "svelte";
   import { collectionInstallStatus } from "$lib/stores";
   import { dismissInstall } from "$lib/installService";
   import { openUrl } from "@tauri-apps/plugin-opener";
@@ -38,15 +39,20 @@
   let isStalled = $state(false);
 
   $effect(() => {
-    if (phase !== "downloading" || dl.active.length === 0) {
+    // Depend on reactive inputs only; read own state via untrack to avoid loop
+    const _phase = phase;
+    const _dlActive = dl.active.length;
+    const _speed = downloadSpeed;
+    if (_phase !== "downloading" || _dlActive === 0) {
       stallTimestamp = 0;
       isStalled = false;
       return;
     }
-    if (downloadSpeed === 0) {
-      if (stallTimestamp === 0) {
+    if (_speed === 0) {
+      const ts = untrack(() => stallTimestamp);
+      if (ts === 0) {
         stallTimestamp = Date.now();
-      } else if (Date.now() - stallTimestamp > 30_000) {
+      } else if (Date.now() - ts > 30_000) {
         isStalled = true;
       }
     } else {
@@ -80,25 +86,29 @@
   let recentTick = $state(0);
 
   $effect(() => {
+    // Only depend on `mods`; read own state via untrack to avoid loop
+    const currentMods = mods;
     const now = Date.now();
     const newRecent: typeof recentlyCompleted = [];
 
-    for (const mod of mods) {
-      const prev = prevModStatuses.get(mod.index);
+    const prevMap = untrack(() => prevModStatuses);
+    for (const mod of currentMods) {
+      const prev = prevMap.get(mod.index);
       if (prev && ACTIVE_STATUSES.has(prev) && !ACTIVE_STATUSES.has(mod.status)) {
         newRecent.push({ name: mod.name, index: mod.index, status: mod.status, timestamp: now });
       }
     }
 
+    const oldRecent = untrack(() => recentlyCompleted);
     if (newRecent.length > 0) {
-      recentlyCompleted = [...recentlyCompleted.filter((r) => now - r.timestamp < 3000), ...newRecent].slice(-5);
+      recentlyCompleted = [...oldRecent.filter((r) => now - r.timestamp < 3000), ...newRecent].slice(-5);
     } else {
-      recentlyCompleted = recentlyCompleted.filter((r) => now - r.timestamp < 3000);
+      recentlyCompleted = oldRecent.filter((r) => now - r.timestamp < 3000);
     }
 
     // Update previous statuses
     const nextMap = new Map<number, string>();
-    for (const mod of mods) {
+    for (const mod of currentMods) {
       nextMap.set(mod.index, mod.status);
     }
     prevModStatuses = nextMap;
@@ -123,26 +133,31 @@
   let eventTimestamps = $state<number[]>([]);
   let pulseSpeed = $state(0); // 0 = stopped, higher = faster (events/min)
 
+  // Track event throughput via a plain (non-reactive) array to avoid $effect loops
+  let _eventTsArray: number[] = [];
+
   $effect(() => {
-    // Track log entry count changes as a proxy for events
+    // Only depend on logEntries.length; timestamps are non-reactive
     const count = logEntries.length;
     if (count > 0) {
       const now = Date.now();
-      eventTimestamps = [...eventTimestamps.filter((t) => now - t < 60_000), now];
-      pulseSpeed = eventTimestamps.length; // events in last 60s
+      _eventTsArray = [..._eventTsArray.filter((t) => now - t < 60_000), now];
+      eventTimestamps = _eventTsArray;
+      pulseSpeed = _eventTsArray.length;
     }
   });
 
   // Fade pulse to 0 if no events for 10s
   $effect(() => {
-    if (phase === "complete" || phase === "failed" || phase === "") {
+    const _phase = phase;
+    if (_phase === "complete" || _phase === "failed" || _phase === "") {
       pulseSpeed = 0;
       return;
     }
     const interval = setInterval(() => {
       const now = Date.now();
-      const recent = eventTimestamps.filter((t) => now - t < 10_000);
-      if (recent.length === 0) pulseSpeed = 0;
+      _eventTsArray = _eventTsArray.filter((t) => now - t < 10_000);
+      if (_eventTsArray.length === 0) pulseSpeed = 0;
     }, 2000);
     return () => clearInterval(interval);
   });
@@ -202,7 +217,10 @@
 
   function handleCancel() {
     dismissInstall();
-    goto("/collections");
+    goto("/collections").catch(() => {
+      // Fallback if SvelteKit routing fails
+      window.location.href = "/collections";
+    });
   }
 
   function humanizeStep(step: string, detail: string): string {
@@ -228,7 +246,7 @@
         <line x1="12" y1="16" x2="12.01" y2="16" />
       </svg>
       <p class="empty-title">No active installation</p>
-      <button class="btn btn-primary" onclick={() => goto('/collections')}>Back to Collections</button>
+      <button class="btn btn-primary" onclick={() => goto('/collections').catch(() => { window.location.href = '/collections'; })}>Back to Collections</button>
     </div>
   </div>
 {:else}
@@ -236,7 +254,7 @@
     <!-- Header -->
     <header class="page-header">
       <div class="header-left">
-        <button class="btn btn-ghost" onclick={() => goto('/collections')}>
+        <button class="btn btn-ghost" onclick={() => goto('/collections').catch(() => { window.location.href = '/collections'; })}>
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <polyline points="15 18 9 12 15 6" />
           </svg>
@@ -321,15 +339,15 @@
         {/if}
         <p class="completion-elapsed">Total time: {status.elapsed}</p>
         <div class="completion-actions">
-          <button class="btn btn-primary" onclick={() => { dismissInstall(); goto('/mods'); }}>
+          <button class="btn btn-primary" onclick={() => { dismissInstall(); goto('/mods').catch(() => { window.location.href = '/mods'; }); }}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2" /><line x1="8" y1="21" x2="16" y2="21" /><line x1="12" y1="17" x2="12" y2="21" /></svg>
             View Mods
           </button>
-          <button class="btn btn-secondary" onclick={() => { dismissInstall(); goto('/plugins'); }}>
+          <button class="btn btn-secondary" onclick={() => { dismissInstall(); goto('/plugins').catch(() => { window.location.href = '/plugins'; }); }}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6" /><line x1="8" y1="12" x2="21" y2="12" /><line x1="8" y1="18" x2="21" y2="18" /><line x1="3" y1="6" x2="3.01" y2="6" /><line x1="3" y1="12" x2="3.01" y2="12" /><line x1="3" y1="18" x2="3.01" y2="18" /></svg>
             Load Order
           </button>
-          <button class="btn btn-ghost" onclick={() => { dismissInstall(); goto('/collections'); }}>
+          <button class="btn btn-ghost" onclick={() => { dismissInstall(); goto('/collections').catch(() => { window.location.href = '/collections'; }); }}>
             Back to Collections
           </button>
         </div>
@@ -382,7 +400,7 @@
         {/if}
         <p class="completion-elapsed">Time elapsed: {status.elapsed}</p>
         <div class="completion-actions">
-          <button class="btn btn-primary" onclick={() => { dismissInstall(); goto('/collections'); }}>
+          <button class="btn btn-primary" onclick={() => { dismissInstall(); goto('/collections').catch(() => { window.location.href = '/collections'; }); }}>
             Back to Collections
           </button>
           <button class="btn btn-ghost" onclick={handleCancel}>
