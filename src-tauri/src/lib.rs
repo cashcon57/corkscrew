@@ -3037,6 +3037,7 @@ async fn install_collection_cmd(
         &manifest,
         &game_id,
         &bottle_name,
+        None, // fresh install, no resume checkpoint
     )
     .await?;
 
@@ -3047,6 +3048,82 @@ async fn install_collection_cmd(
         "failed": result.failed,
         "details": result.details,
     }))
+}
+
+// --- Collection Install Resume ---
+
+#[tauri::command]
+async fn get_incomplete_collection_installs(
+    game_id: String,
+    bottle_name: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<database::CollectionInstallCheckpoint>, String> {
+    let checkpoint = state
+        .db
+        .get_active_checkpoint(&game_id, &bottle_name)
+        .map_err(|e| format!("Failed to query checkpoints: {}", e))?;
+    Ok(checkpoint.into_iter().collect())
+}
+
+#[tauri::command]
+async fn resume_collection_install_cmd(
+    app: AppHandle,
+    checkpoint_id: i64,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let result = collection_installer::resume_collection_install(
+        &app,
+        &state.db,
+        &state.download_queue,
+        checkpoint_id,
+    )
+    .await?;
+
+    Ok(serde_json::json!({
+        "installed": result.installed,
+        "already_installed": result.already_installed,
+        "skipped": result.skipped,
+        "failed": result.failed,
+        "details": result.details,
+    }))
+}
+
+#[tauri::command]
+async fn abandon_collection_install(
+    checkpoint_id: i64,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state
+        .db
+        .abandon_checkpoint(checkpoint_id)
+        .map_err(|e| format!("Failed to abandon checkpoint: {}", e))
+}
+
+#[tauri::command]
+async fn get_pending_wabbajack_installs(
+    state: State<'_, AppState>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let rows = state
+        .db
+        .list_pending_wj_installs()
+        .map_err(|e| format!("Failed to query pending installs: {}", e))?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(id, name, version, status, total_a, completed_a, total_d, completed_d, error)| {
+            serde_json::json!({
+                "install_id": id,
+                "modlist_name": name,
+                "modlist_version": version,
+                "status": status,
+                "total_archives": total_a,
+                "completed_archives": completed_a,
+                "total_directives": total_d,
+                "completed_directives": completed_d,
+                "error_message": error,
+            })
+        })
+        .collect())
 }
 
 // --- Plugin Load Order Rules ---
@@ -4053,6 +4130,10 @@ pub fn run() {
             get_collection_mods,
             parse_collection_bundle_cmd,
             install_collection_cmd,
+            get_incomplete_collection_installs,
+            resume_collection_install_cmd,
+            abandon_collection_install,
+            get_pending_wabbajack_installs,
             // Plugin Rules
             add_plugin_rule,
             remove_plugin_rule,

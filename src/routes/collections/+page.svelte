@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from "svelte";
   import { goto } from "$app/navigation";
   import { selectedGame, showError, showSuccess, collectionInstallStatus } from "$lib/stores";
-  import type { CollectionInfo, CollectionManifest, CollectionMod, CollectionSearchResult, InstalledMod, NexusModInfo, NexusCategory, NexusSearchResult, NexusModFile } from "$lib/types";
+  import type { CollectionInfo, CollectionManifest, CollectionMod, CollectionSearchResult, InstalledMod, NexusModInfo, NexusCategory, NexusSearchResult, NexusModFile, CollectionInstallCheckpoint } from "$lib/types";
   import {
     browseCollections,
     browseNexusMods,
@@ -24,8 +24,11 @@
     getNexusModDetail,
     downloadAndInstallNexusMod,
     closeBrowserWebview,
+    getIncompleteCollectionInstalls,
+    resumeCollectionInstall,
+    abandonCollectionInstall,
   } from "$lib/api";
-  import { startInstallTracking, stopInstallTracking } from "$lib/installService";
+  import { startInstallTracking, stopInstallTracking, resumeInstallTracking } from "$lib/installService";
   import { listen } from "@tauri-apps/api/event";
   import type { CollectionSummary, CollectionDiff, RequiredTool } from "$lib/types";
   import { config } from "$lib/stores";
@@ -242,6 +245,10 @@
   let statsBarEl = $state<HTMLElement | null>(null);
   let showFloatingInstall = $state(false);
   let statsBarObserver: IntersectionObserver | null = null;
+
+  // Resume interrupted install
+  let interruptedInstall = $state<CollectionInstallCheckpoint | null>(null);
+  let resuming = $state(false);
 
   // Tool requirement detection
   let pendingTools = $state<RequiredTool[]>([]);
@@ -618,6 +625,18 @@
 
   onMount(async () => {
     await checkAccount();
+    // Check for interrupted collection installs
+    const game = $selectedGame;
+    if (game) {
+      try {
+        const incomplete = await getIncompleteCollectionInstalls(game.game_id, game.bottle_name);
+        if (incomplete.length > 0) {
+          interruptedInstall = incomplete[0];
+        }
+      } catch {
+        // Silently ignore — not critical
+      }
+    }
   });
 
   // Track when stats bar scrolls out of view for floating install button
@@ -641,6 +660,35 @@
     // Close any active webviews when navigating away
     closeBrowserWebview().catch(() => {});
   });
+
+  async function handleResumeInstall() {
+    if (!interruptedInstall) return;
+    resuming = true;
+    try {
+      const modStatuses = JSON.parse(interruptedInstall.mod_statuses) as Record<string, string>;
+      await resumeInstallTracking(
+        interruptedInstall.collection_name,
+        interruptedInstall.total_mods,
+        interruptedInstall.completed_mods,
+        modStatuses,
+      );
+      goto("/collections/progress");
+      resumeCollectionInstall(interruptedInstall.id).catch(() => {});
+    } catch (e: unknown) {
+      showError(`Failed to resume: ${e}`);
+      resuming = false;
+    }
+  }
+
+  async function handleDismissInstall() {
+    if (!interruptedInstall) return;
+    try {
+      await abandonCollectionInstall(interruptedInstall.id);
+    } catch {
+      // ignore
+    }
+    interruptedInstall = null;
+  }
 
   async function checkAccount() {
     checkingAuth = true;
@@ -948,6 +996,29 @@
       Browse Nexus
     </button>
   </div>
+
+  {#if interruptedInstall}
+    <div class="resume-banner">
+      <div class="resume-info">
+        <span class="resume-icon">⚠</span>
+        <div class="resume-text">
+          <span class="resume-title">Interrupted Installation</span>
+          <span class="resume-detail">
+            "{interruptedInstall.collection_name}" — {interruptedInstall.completed_mods}/{interruptedInstall.total_mods} mods completed
+            {#if interruptedInstall.failed_mods > 0}
+              ({interruptedInstall.failed_mods} failed)
+            {/if}
+          </span>
+        </div>
+      </div>
+      <div class="resume-actions">
+        <button class="btn-primary" onclick={handleResumeInstall} disabled={resuming}>
+          {resuming ? "Resuming..." : "Resume"}
+        </button>
+        <button class="btn-ghost" onclick={handleDismissInstall}>Dismiss</button>
+      </div>
+    </div>
+  {/if}
 
   {#if activeTab === "my"}
     <!-- My Collections Tab -->
@@ -2522,6 +2593,26 @@
   .collections-page {
     padding: var(--space-2) 0 var(--space-12) 0;
   }
+
+  /* ---- Resume Banner ---- */
+
+  .resume-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-4);
+    padding: var(--space-3) var(--space-4);
+    background: rgba(255, 159, 10, 0.1);
+    border: 1px solid rgba(255, 159, 10, 0.3);
+    border-radius: var(--radius-md);
+    margin-bottom: var(--space-4);
+  }
+  .resume-info { display: flex; align-items: center; gap: var(--space-3); }
+  .resume-icon { font-size: 20px; }
+  .resume-text { display: flex; flex-direction: column; gap: 2px; }
+  .resume-title { font-weight: 600; color: var(--text-primary); font-size: 13px; }
+  .resume-detail { font-size: 12px; color: var(--text-secondary); }
+  .resume-actions { display: flex; gap: var(--space-2); flex-shrink: 0; }
 
   /* ---- Connect Prompt ---- */
 

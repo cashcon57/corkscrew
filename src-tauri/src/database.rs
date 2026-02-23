@@ -139,6 +139,25 @@ pub struct ConflictModInfo {
     pub priority: i32,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CollectionInstallCheckpoint {
+    pub id: i64,
+    pub collection_name: String,
+    pub game_id: String,
+    pub bottle_name: String,
+    #[serde(skip_serializing)]
+    pub manifest_json: String,
+    pub status: String,
+    pub total_mods: i64,
+    pub completed_mods: i64,
+    pub failed_mods: i64,
+    pub skipped_mods: i64,
+    pub mod_statuses: String,
+    pub error_message: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 // ---------------------------------------------------------------------------
 // ModDatabase
 // ---------------------------------------------------------------------------
@@ -1610,6 +1629,230 @@ impl ModDatabase {
             })
             .ok();
         Ok(result)
+    }
+
+    // -----------------------------------------------------------------------
+    // Collection Install Checkpoints
+    // -----------------------------------------------------------------------
+
+    /// Create or replace a collection install checkpoint.
+    pub fn create_collection_checkpoint(
+        &self,
+        collection_name: &str,
+        game_id: &str,
+        bottle_name: &str,
+        manifest_json: &str,
+        total_mods: usize,
+    ) -> Result<i64> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "INSERT OR REPLACE INTO collection_install_checkpoints
+                (collection_name, game_id, bottle_name, manifest_json, status,
+                 total_mods, completed_mods, failed_mods, skipped_mods, mod_statuses,
+                 created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 'in_progress', ?5, 0, 0, 0, '{}',
+                     datetime('now'), datetime('now'))",
+            params![
+                collection_name,
+                game_id,
+                bottle_name,
+                manifest_json,
+                total_mods as i64,
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Update the status of a single mod within a checkpoint.
+    pub fn update_checkpoint_mod_status(
+        &self,
+        checkpoint_id: i64,
+        mod_index: usize,
+        status: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.unchecked_transaction()?;
+
+        // Read current mod_statuses JSON
+        let current_json: String = tx
+            .prepare("SELECT mod_statuses FROM collection_install_checkpoints WHERE id = ?1")?
+            .query_row(params![checkpoint_id], |row| row.get(0))
+            .unwrap_or_else(|_| "{}".to_string());
+
+        let mut statuses: std::collections::HashMap<String, String> =
+            serde_json::from_str(&current_json).unwrap_or_default();
+
+        // Check if this index was already counted (for counter adjustment)
+        let prev_status = statuses.get(&mod_index.to_string()).cloned();
+        statuses.insert(mod_index.to_string(), status.to_string());
+
+        let new_json = serde_json::to_string(&statuses).unwrap_or_else(|_| "{}".to_string());
+
+        // Calculate counter deltas
+        let is_complete = |s: &str| matches!(s, "installed" | "already_installed");
+        let is_failed = |s: &str| s == "failed";
+        let is_skipped = |s: &str| matches!(s, "skipped" | "user_action");
+
+        let mut completed_delta: i64 = 0;
+        let mut failed_delta: i64 = 0;
+        let mut skipped_delta: i64 = 0;
+
+        // Subtract previous status contribution
+        if let Some(ref prev) = prev_status {
+            if is_complete(prev) { completed_delta -= 1; }
+            if is_failed(prev) { failed_delta -= 1; }
+            if is_skipped(prev) { skipped_delta -= 1; }
+        }
+
+        // Add new status contribution
+        if is_complete(status) { completed_delta += 1; }
+        if is_failed(status) { failed_delta += 1; }
+        if is_skipped(status) { skipped_delta += 1; }
+
+        tx.execute(
+            "UPDATE collection_install_checkpoints
+             SET mod_statuses = ?1,
+                 completed_mods = MAX(0, completed_mods + ?2),
+                 failed_mods = MAX(0, failed_mods + ?3),
+                 skipped_mods = MAX(0, skipped_mods + ?4),
+                 updated_at = datetime('now')
+             WHERE id = ?5",
+            params![new_json, completed_delta, failed_delta, skipped_delta, checkpoint_id],
+        )?;
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Get the active (in_progress) checkpoint for a game/bottle pair.
+    pub fn get_active_checkpoint(
+        &self,
+        game_id: &str,
+        bottle_name: &str,
+    ) -> Result<Option<CollectionInstallCheckpoint>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let result = conn
+            .prepare(
+                "SELECT id, collection_name, game_id, bottle_name, manifest_json,
+                        status, total_mods, completed_mods, failed_mods, skipped_mods,
+                        mod_statuses, error_message, created_at, updated_at
+                 FROM collection_install_checkpoints
+                 WHERE game_id = ?1 AND bottle_name = ?2 AND status = 'in_progress'
+                 ORDER BY updated_at DESC LIMIT 1",
+            )?
+            .query_row(params![game_id, bottle_name], |row| {
+                Ok(CollectionInstallCheckpoint {
+                    id: row.get(0)?,
+                    collection_name: row.get(1)?,
+                    game_id: row.get(2)?,
+                    bottle_name: row.get(3)?,
+                    manifest_json: row.get(4)?,
+                    status: row.get(5)?,
+                    total_mods: row.get(6)?,
+                    completed_mods: row.get(7)?,
+                    failed_mods: row.get(8)?,
+                    skipped_mods: row.get(9)?,
+                    mod_statuses: row.get(10)?,
+                    error_message: row.get(11)?,
+                    created_at: row.get(12)?,
+                    updated_at: row.get(13)?,
+                })
+            })
+            .ok();
+        Ok(result)
+    }
+
+    /// Get a checkpoint by its ID (regardless of status).
+    pub fn get_active_checkpoint_by_id(
+        &self,
+        checkpoint_id: i64,
+    ) -> Result<Option<CollectionInstallCheckpoint>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let result = conn
+            .prepare(
+                "SELECT id, collection_name, game_id, bottle_name, manifest_json,
+                        status, total_mods, completed_mods, failed_mods, skipped_mods,
+                        mod_statuses, error_message, created_at, updated_at
+                 FROM collection_install_checkpoints
+                 WHERE id = ?1 AND status = 'in_progress'",
+            )?
+            .query_row(params![checkpoint_id], |row| {
+                Ok(CollectionInstallCheckpoint {
+                    id: row.get(0)?,
+                    collection_name: row.get(1)?,
+                    game_id: row.get(2)?,
+                    bottle_name: row.get(3)?,
+                    manifest_json: row.get(4)?,
+                    status: row.get(5)?,
+                    total_mods: row.get(6)?,
+                    completed_mods: row.get(7)?,
+                    failed_mods: row.get(8)?,
+                    skipped_mods: row.get(9)?,
+                    mod_statuses: row.get(10)?,
+                    error_message: row.get(11)?,
+                    created_at: row.get(12)?,
+                    updated_at: row.get(13)?,
+                })
+            })
+            .ok();
+        Ok(result)
+    }
+
+    /// Mark a checkpoint as completed.
+    pub fn complete_checkpoint(&self, checkpoint_id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "UPDATE collection_install_checkpoints
+             SET status = 'completed', updated_at = datetime('now')
+             WHERE id = ?1",
+            params![checkpoint_id],
+        )?;
+        Ok(())
+    }
+
+    /// Mark a checkpoint as abandoned (user chose to dismiss).
+    pub fn abandon_checkpoint(&self, checkpoint_id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "UPDATE collection_install_checkpoints
+             SET status = 'abandoned', updated_at = datetime('now')
+             WHERE id = ?1",
+            params![checkpoint_id],
+        )?;
+        Ok(())
+    }
+
+    /// List all pending (incomplete) Wabbajack installs.
+    pub fn list_pending_wj_installs(
+        &self,
+    ) -> Result<Vec<(i64, String, String, String, i64, i64, i64, i64, Option<String>)>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT id, modlist_name, modlist_version, status,
+                    total_archives, completed_archives,
+                    total_directives, completed_directives,
+                    error_message
+             FROM wabbajack_installs
+             WHERE status NOT IN ('completed', 'cancelled')
+             ORDER BY updated_at DESC",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                ))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
     }
 }
 

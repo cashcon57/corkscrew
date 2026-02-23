@@ -275,6 +275,76 @@ function handleProgressEvent(e: InstallProgressEvent) {
   });
 }
 
+/** Resume tracking a previously interrupted collection install. */
+export async function resumeInstallTracking(
+  collectionName: string,
+  totalMods: number,
+  completedMods: number,
+  modStatuses: Record<string, string>,
+) {
+  stopInstallTracking();
+
+  const now = Date.now();
+
+  const modDetails: ModProgressDetail[] = [];
+  for (let i = 0; i < totalMods; i++) {
+    const status = modStatuses[String(i)];
+    let mappedStatus: ModProgressDetail["status"] = "pending";
+    if (status === "installed" || status === "already_installed") mappedStatus = "done";
+    else if (status === "failed") mappedStatus = "failed";
+    else if (status === "user_action") mappedStatus = "user_action";
+    else if (status === "skipped") mappedStatus = "skipped";
+
+    modDetails.push({
+      name: `Mod ${i + 1}`,
+      index: i,
+      status: mappedStatus,
+    });
+  }
+
+  const initial: CollectionInstallStatus = {
+    active: true,
+    collectionName,
+    phase: "downloading",
+    downloadProgress: {
+      total: 0,
+      completed: 0,
+      failed: 0,
+      cached: 0,
+      maxConcurrent: 0,
+      active: [],
+    },
+    installProgress: {
+      current: completedMods,
+      total: totalMods,
+      currentMod: "",
+      step: "resuming",
+    },
+    modDetails,
+    startTime: now,
+    elapsed: "0s",
+    result: null,
+    userActions: [],
+    currentMod: "",
+    step: "resuming",
+    current: completedMods,
+    total: totalMods,
+  };
+
+  collectionInstallStatus.set(initial);
+
+  timer = setInterval(() => {
+    collectionInstallStatus.update((s) => {
+      if (!s) return s;
+      return { ...s, elapsed: formatElapsed(s.startTime) };
+    });
+  }, 1000);
+
+  unlisten = await listen<InstallProgressEvent>("install-progress", (event) => {
+    handleProgressEvent(event.payload);
+  });
+}
+
 /** Stop tracking and clean up resources. */
 export function stopInstallTracking() {
   if (unlisten) {

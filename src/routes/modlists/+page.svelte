@@ -9,9 +9,10 @@
     downloadWabbajackFile,
     detectWabbajackTools,
     closeBrowserWebview,
+    getPendingWabbajackInstalls,
   } from "$lib/api";
   import { showError, showSuccess, selectedGame } from "$lib/stores";
-  import type { ModlistSummary, ParsedModlist, RequiredTool } from "$lib/types";
+  import type { ModlistSummary, ParsedModlist, RequiredTool, WabbajackInstallStatus } from "$lib/types";
   import { marked } from "marked";
   import DOMPurify from "dompurify";
   import CompatibilityPanel from "$lib/components/CompatibilityPanel.svelte";
@@ -58,6 +59,10 @@
   // Install state
   let installing = $state(false);
   let installStep = $state("");
+
+  // Resume banner state
+  let pendingWjInstall = $state<WabbajackInstallStatus | null>(null);
+  let resumingWj = $state(false);
 
   // Derived unique games from the modlists
   const gameOptions = $derived.by(() => {
@@ -158,6 +163,19 @@
       showError(`Failed to load modlists: ${e}`);
     } finally {
       loading = false;
+    }
+
+    // Check for interrupted Wabbajack installs
+    try {
+      const pending = await getPendingWabbajackInstalls();
+      const resumable = pending.find(
+        (p) => p.status !== "completed" && p.status !== "cancelled"
+      );
+      if (resumable) {
+        pendingWjInstall = resumable;
+      }
+    } catch {
+      // Silently ignore — resume banner is non-critical
     }
   });
 
@@ -416,9 +434,30 @@
       safeOpenUrl(href);
     }
   }
+
+  function handleDismissWjInstall() {
+    pendingWjInstall = null;
+  }
 </script>
 
 <div class="modlists-page">
+  {#if pendingWjInstall}
+    <div class="resume-banner">
+      <div class="resume-info">
+        <span class="resume-icon">&#9888;</span>
+        <div class="resume-text">
+          <span class="resume-title">Interrupted Installation</span>
+          <span class="resume-detail">
+            "{pendingWjInstall.modlist_name}" &mdash; {pendingWjInstall.completed_archives}/{pendingWjInstall.total_archives} archives downloaded
+          </span>
+        </div>
+      </div>
+      <div class="resume-actions">
+        <button class="btn-ghost" onclick={handleDismissWjInstall}>Dismiss</button>
+      </div>
+    </div>
+  {/if}
+
   {#if selectedModlist}
     <!-- Detail View -->
     <div class="detail-view">
@@ -1815,5 +1854,52 @@
     font-weight: 700;
     width: 14px;
     text-align: center;
+  }
+
+  /* ---- Resume Banner ---- */
+
+  .resume-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-4);
+    padding: var(--space-3) var(--space-4);
+    background: rgba(255, 159, 10, 0.1);
+    border: 1px solid rgba(255, 159, 10, 0.3);
+    border-radius: var(--radius-md);
+    margin-bottom: var(--space-4);
+  }
+
+  .resume-info {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+  }
+
+  .resume-icon {
+    font-size: 20px;
+  }
+
+  .resume-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .resume-title {
+    font-weight: 600;
+    color: var(--text-primary);
+    font-size: 13px;
+  }
+
+  .resume-detail {
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+
+  .resume-actions {
+    display: flex;
+    gap: var(--space-2);
+    flex-shrink: 0;
   }
 </style>

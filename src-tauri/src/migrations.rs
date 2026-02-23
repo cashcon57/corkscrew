@@ -19,7 +19,7 @@ pub enum MigrationError {
 pub type Result<T> = std::result::Result<T, MigrationError>;
 
 /// The current target schema version. Bump this when adding a new migration.
-const TARGET_VERSION: u32 = 10;
+const TARGET_VERSION: u32 = 11;
 
 /// Get the current schema version (0 if no version table exists).
 pub fn current_version(conn: &Connection) -> Result<u32> {
@@ -94,6 +94,11 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     if version == 9 {
         migrate_v9_to_v10(conn)?;
         version = 10;
+    }
+
+    if version == 10 {
+        migrate_v10_to_v11(conn)?;
+        version = 11;
     }
 
     let _ = version; // suppress unused warning when TARGET_VERSION == current
@@ -647,6 +652,43 @@ fn migrate_v9_to_v10(conn: &Connection) -> Result<()> {
     tx.execute("UPDATE schema_version SET version = 10", [])?;
     tx.commit()?;
     log::info!("Migration 9 → 10 complete (wabbajack install pipeline tables)");
+    Ok(())
+}
+
+/// Migration 10 → 11: Collection install checkpoints.
+///
+/// Creates a table to track in-progress collection installations so they can
+/// be resumed after interruption. Each row stores the full manifest JSON and
+/// per-mod completion status as a JSON object.
+fn migrate_v10_to_v11(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS collection_install_checkpoints (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            collection_name TEXT    NOT NULL,
+            game_id         TEXT    NOT NULL,
+            bottle_name     TEXT    NOT NULL,
+            manifest_json   TEXT    NOT NULL,
+            status          TEXT    NOT NULL DEFAULT 'in_progress',
+            total_mods      INTEGER NOT NULL DEFAULT 0,
+            completed_mods  INTEGER NOT NULL DEFAULT 0,
+            failed_mods     INTEGER NOT NULL DEFAULT 0,
+            skipped_mods    INTEGER NOT NULL DEFAULT 0,
+            mod_statuses    TEXT    NOT NULL DEFAULT '{}',
+            error_message   TEXT,
+            created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+            updated_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(collection_name, game_id, bottle_name)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_checkpoint_game_bottle
+            ON collection_install_checkpoints (game_id, bottle_name, status);",
+    )?;
+
+    tx.execute("UPDATE schema_version SET version = 11", [])?;
+    tx.commit()?;
+    log::info!("Migration 10 → 11 complete (collection install checkpoints)");
     Ok(())
 }
 

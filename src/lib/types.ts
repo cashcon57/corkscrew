@@ -1038,3 +1038,33 @@ export type InstallProgressEvent =
   | { kind: "downloadModFailed"; mod_index: number; mod_name: string; error: string }
   | { kind: "allDownloadsCompleted"; downloaded: number; cached: number; failed: number; skipped: number }
   | { kind: "installPhaseStarted"; total_mods: number };
+
+// Collection Install Checkpoint (for resume)
+export interface CollectionInstallCheckpoint {
+  id: number;
+  collection_name: string;
+  game_id: string;
+  bottle_name: string;
+  status: string;
+  total_mods: number;
+  completed_mods: number;
+  failed_mods: number;
+  skipped_mods: number;
+  mod_statuses: string;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// Wabbajack Install Status (for resume)
+export interface WabbajackInstallStatus {
+  install_id: number;
+  modlist_name: string;
+  modlist_version: string;
+  status: string;
+  total_archives: number;
+  completed_archives: number;
+  total_directives: number;
+  completed_directives: number;
+  error_message: string | null;
+}

@@ -1335,6 +1335,33 @@ export async function getOptimalDownloadThreads(): Promise<number> {
   return invoke("get_optimal_download_threads");
 }
 
+// Collection Install Resume
+export async function getIncompleteCollectionInstalls(
+  gameId: string,
+  bottleName: string,
+): Promise<import("./types").CollectionInstallCheckpoint[]> {
+  return invoke("get_incomplete_collection_installs", { gameId, bottleName });
+}
+
+export async function resumeCollectionInstall(
+  checkpointId: number,
+): Promise<Record<string, unknown>> {
+  return invoke("resume_collection_install_cmd", { checkpointId });
+}
+
+export async function abandonCollectionInstall(
+  checkpointId: number,
+): Promise<void> {
+  return invoke("abandon_collection_install", { checkpointId });
+}
+
+// Wabbajack Install Resume
+export async function getPendingWabbajackInstalls(): Promise<
+  import("./types").WabbajackInstallStatus[]
+> {
+  return invoke("get_pending_wabbajack_installs");
+}
+
 // Embedded Browser Webview
 export async function createBrowserWebview(
   url: string,

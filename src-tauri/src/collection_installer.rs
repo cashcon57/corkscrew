@@ -375,6 +375,42 @@ async fn download_direct_archive(
 /// This orchestrates the full pipeline in two phases:
 /// Phase 1: Concurrent downloads (nexus + direct mods only, guarded by semaphore)
 /// Phase 2: Sequential install (extract, stage, deploy each mod in order)
+/// Resume a previously interrupted collection install from its checkpoint.
+pub async fn resume_collection_install(
+    app: &AppHandle,
+    db: &Arc<ModDatabase>,
+    queue: &Arc<DownloadQueue>,
+    checkpoint_id: i64,
+) -> Result<CollectionInstallResult, String> {
+    let checkpoint = db
+        .get_active_checkpoint_by_id(checkpoint_id)
+        .map_err(|e| format!("Failed to load checkpoint: {}", e))?
+        .ok_or_else(|| "Checkpoint not found or already completed".to_string())?;
+
+    let manifest: CollectionManifest = serde_json::from_str(&checkpoint.manifest_json)
+        .map_err(|e| format!("Failed to parse saved manifest: {}", e))?;
+
+    let string_statuses: HashMap<String, String> =
+        serde_json::from_str(&checkpoint.mod_statuses).unwrap_or_default();
+
+    // Convert string keys to usize
+    let completed: HashMap<usize, String> = string_statuses
+        .into_iter()
+        .filter_map(|(k, v)| k.parse::<usize>().ok().map(|idx| (idx, v)))
+        .collect();
+
+    install_collection(
+        app,
+        db,
+        queue,
+        &manifest,
+        &checkpoint.game_id,
+        &checkpoint.bottle_name,
+        Some((checkpoint_id, completed)),
+    )
+    .await
+}
+
 pub async fn install_collection(
     app: &AppHandle,
     db: &Arc<ModDatabase>,
@@ -382,6 +418,7 @@ pub async fn install_collection(
     manifest: &CollectionManifest,
     game_id: &str,
     bottle_name: &str,
+    resume_checkpoint: Option<(i64, HashMap<usize, String>)>,
 ) -> Result<CollectionInstallResult, String> {
     // Resolve game and paths
     let bottle = bottles::find_bottle_by_name(bottle_name)
@@ -438,6 +475,36 @@ pub async fn install_collection(
 
     // Load existing mods for already-installed detection
     let existing_mods = db.list_mods(game_id, bottle_name).unwrap_or_default();
+
+    // ---------------------------------------------------------------
+    // Checkpoint: create or resume
+    // ---------------------------------------------------------------
+    let (checkpoint_id, completed_statuses) = match resume_checkpoint {
+        Some((id, statuses)) => {
+            log::info!(
+                "Resuming collection install from checkpoint {} ({}/{} completed)",
+                id,
+                statuses.values().filter(|s| matches!(s.as_str(), "installed" | "already_installed" | "skipped" | "user_action")).count(),
+                total_mods,
+            );
+            (id, statuses)
+        }
+        None => {
+            let manifest_json = serde_json::to_string(manifest)
+                .map_err(|e| format!("Failed to serialize manifest: {}", e))?;
+            let id = db
+                .create_collection_checkpoint(
+                    &manifest.name,
+                    game_id,
+                    bottle_name,
+                    &manifest_json,
+                    total_mods,
+                )
+                .map_err(|e| format!("Failed to create checkpoint: {}", e))?;
+            log::info!("Created collection install checkpoint {}", id);
+            (id, HashMap::new())
+        }
+    };
 
     // ---------------------------------------------------------------
     // Phase 1: Concurrent Downloads
@@ -655,6 +722,38 @@ pub async fn install_collection(
         let mod_entry = &manifest.mods[mod_idx];
         let mod_name = &mod_entry.name;
 
+        // Check if this mod was already completed in a previous run (resume)
+        if let Some(prev_status) = completed_statuses.get(&i) {
+            match prev_status.as_str() {
+                "installed" | "already_installed" | "skipped" | "user_action" => {
+                    let _ = app.emit(
+                        INSTALL_PROGRESS_EVENT,
+                        InstallProgress::ModCompleted {
+                            mod_index: i,
+                            mod_name: mod_name.clone(),
+                            mod_id: 0,
+                        },
+                    );
+                    match prev_status.as_str() {
+                        "installed" | "already_installed" => already_installed += 1,
+                        "skipped" | "user_action" => skipped += 1,
+                        _ => {}
+                    }
+                    details.push(ModInstallDetail {
+                        name: mod_name.clone(),
+                        status: prev_status.clone(),
+                        error: None,
+                        url: None,
+                        instructions: None,
+                    });
+                    continue;
+                }
+                _ => {
+                    // "failed" or "pending" — retry this mod
+                }
+            }
+        }
+
         // Emit: mod started
         let _ = app.emit(
             INSTALL_PROGRESS_EVENT,
@@ -686,6 +785,7 @@ pub async fn install_collection(
                 },
             );
             already_installed += 1;
+            let _ = db.update_checkpoint_mod_status(checkpoint_id, i, "already_installed");
             details.push(ModInstallDetail {
                 name: mod_name.clone(),
                 status: "already_installed".to_string(),
@@ -731,6 +831,7 @@ pub async fn install_collection(
                     },
                 );
                 installed += 1;
+                let _ = db.update_checkpoint_mod_status(checkpoint_id, i, "installed");
                 details.push(ModInstallDetail {
                     name: mod_name.clone(),
                     status: "installed".to_string(),
@@ -755,6 +856,7 @@ pub async fn install_collection(
                     },
                 );
                 skipped += 1;
+                let _ = db.update_checkpoint_mod_status(checkpoint_id, i, "user_action");
                 details.push(ModInstallDetail {
                     name: mod_name.clone(),
                     status: "user_action".to_string(),
@@ -773,6 +875,7 @@ pub async fn install_collection(
                     },
                 );
                 failed += 1;
+                let _ = db.update_checkpoint_mod_status(checkpoint_id, i, "failed");
                 details.push(ModInstallDetail {
                     name: mod_name.clone(),
                     status: "failed".to_string(),
@@ -860,6 +963,9 @@ pub async fn install_collection(
         );
         log::info!("Auto-created profile '{}' for collection", profile_name);
     }
+
+    // Mark checkpoint as completed
+    let _ = db.complete_checkpoint(checkpoint_id);
 
     // Emit collection completed summary
     let _ = app.emit(
