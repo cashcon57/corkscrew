@@ -1065,7 +1065,7 @@ impl ModDatabase {
     }
 
     /// Batch-check which (nexus_mod_id, nexus_file_id) pairs exist in the download registry.
-    /// Returns the subset of input pairs that have a matching downloaded file.
+    /// Returns the subset of input pairs that have a matching downloaded file on disk.
     pub fn batch_check_cached_files(
         &self,
         pairs: &[(i64, i64)],
@@ -1076,21 +1076,37 @@ impl ModDatabase {
 
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
-        // Build a single query with OR conditions (batched for large sets)
-        // For efficiency, load all cached (mod_id, file_id) pairs into a HashSet
+        // Load all cached (mod_id, file_id, archive_path) tuples
         let mut cached: std::collections::HashSet<(i64, i64)> = std::collections::HashSet::new();
+        let mut stale_ids: Vec<i64> = Vec::new();
 
         let mut stmt = conn.prepare(
-            "SELECT DISTINCT nexus_mod_id, nexus_file_id
+            "SELECT id, nexus_mod_id, nexus_file_id, archive_path
              FROM download_registry
              WHERE nexus_mod_id IS NOT NULL AND nexus_file_id IS NOT NULL",
         )?;
         let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+            ))
         })?;
         for row in rows {
-            if let Ok(pair) = row {
-                cached.insert(pair);
+            if let Ok((id, mod_id, file_id, path)) = row {
+                if std::path::Path::new(&path).exists() {
+                    cached.insert((mod_id, file_id));
+                } else {
+                    stale_ids.push(id);
+                }
+            }
+        }
+
+        // Clean up stale entries whose files no longer exist on disk
+        if !stale_ids.is_empty() {
+            for id in &stale_ids {
+                let _ = conn.execute("DELETE FROM download_registry WHERE id = ?1", params![id]);
             }
         }
 
@@ -1113,6 +1129,18 @@ impl ModDatabase {
             [],
         )?;
         Ok(deleted)
+    }
+
+    /// Delete a specific download_registry entry by ID.
+    pub fn delete_download_record(&self, id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute("DELETE FROM download_registry WHERE id = ?1", params![id])?;
+        // Also clean up any collection refs pointing to this download
+        conn.execute(
+            "DELETE FROM download_collection_refs WHERE download_id = ?1",
+            params![id],
+        )?;
+        Ok(())
     }
 
     // -- Notes & tags --------------------------------------------------------

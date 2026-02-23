@@ -663,9 +663,11 @@ pub async fn get_revision_mods(
                 .get("optional")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            let file_id = mf.get("fileId").and_then(|v| v.as_i64());
+            let outer_file_id = mf.get("fileId").and_then(|v| v.as_i64());
 
             if let Some(file) = mf.get("file") {
+                // Use outer modFiles.fileId, falling back to nested file.fileId
+                let file_id = outer_file_id.or_else(|| file.get("fileId").and_then(|v| v.as_i64()));
                 let file_size = file
                     .get("sizeInBytes")
                     .and_then(|v| v.as_u64())

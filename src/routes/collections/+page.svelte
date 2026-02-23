@@ -354,6 +354,7 @@
   let selectedCollection = $state<CollectionInfo | null>(null);
   let selectedMods = $state<CollectionMod[]>([]);
   let loadingDetail = $state(false);
+  let detailCacheInfo = $state<{ cached: number; total: number; nexusTotal: number } | null>(null);
   let installing = $state(false);
   let installResult = $state<{ installed: number; already_installed: number; skipped: number; failed: number; details: { name: string; status: string; error: string | null; url: string | null; instructions: string | null }[] } | null>(null);
   let renderedDescription = $state("");
@@ -915,25 +916,35 @@
     }
   }
 
-  /** Fetch mod lists for visible collections and compute cache percentages. */
+  /** Fetch mod lists for visible collections and compute cache percentages.
+   *  Uses limited concurrency (3 at a time) to avoid NexusMods rate limiting. */
   async function computeCachePercentages(cols: CollectionInfo[]) {
     if (cols.length === 0) return;
     loadingCache = true;
     try {
-      // Fetch mod lists for all visible collections in parallel
-      const modLists = await Promise.allSettled(
-        cols.map(c => getCollectionMods(c.slug, c.latest_revision))
-      );
+      // Fetch mod lists with limited concurrency to avoid API rate limits
+      const CONCURRENCY = 3;
+      const modLists: (CollectionMod[] | null)[] = new Array(cols.length).fill(null);
+
+      for (let i = 0; i < cols.length; i += CONCURRENCY) {
+        const batch = cols.slice(i, i + CONCURRENCY);
+        const results = await Promise.allSettled(
+          batch.map(c => getCollectionMods(c.slug, c.latest_revision))
+        );
+        for (let j = 0; j < results.length; j++) {
+          const r = results[j];
+          modLists[i + j] = r.status === "fulfilled" ? r.value : null;
+        }
+      }
 
       // Build a global set of (mod_id, file_id) pairs + per-collection index
       const allPairs: [number, number][] = [];
       const collectionPairMap = new Map<string, [number, number][]>();
 
       for (let i = 0; i < cols.length; i++) {
-        const result = modLists[i];
-        if (result.status !== "fulfilled") continue;
+        const mods = modLists[i];
+        if (!mods) continue;
 
-        const mods = result.value;
         const pairs: [number, number][] = [];
         for (const mod of mods) {
           if (mod.nexus_mod_id != null && mod.nexus_file_id != null) {
@@ -977,6 +988,7 @@
   async function viewCollectionDetail(collection: CollectionInfo) {
     loadingDetail = true;
     renderedDescription = "";
+    detailCacheInfo = null;
     try {
       const [detail, mods] = await Promise.all([
         getCollection(collection.slug, collection.game_domain),
@@ -990,10 +1002,35 @@
         const html = await marked.parse(detail.description);
         renderedDescription = DOMPurify.sanitize(html);
       }
+
+      // Compute cache percentage for this collection
+      computeDetailCacheInfo(mods);
     } catch (e: unknown) {
       showError(`Failed to load collection details: ${e}`);
     } finally {
       loadingDetail = false;
+    }
+  }
+
+  /** Compute cache info for the collection detail view. */
+  async function computeDetailCacheInfo(mods: CollectionMod[]) {
+    try {
+      const pairs: [number, number][] = [];
+      for (const mod of mods) {
+        if (mod.nexus_mod_id != null && mod.nexus_file_id != null) {
+          pairs.push([mod.nexus_mod_id, mod.nexus_file_id]);
+        }
+      }
+      if (pairs.length === 0) {
+        detailCacheInfo = { cached: 0, total: 0, nexusTotal: 0 };
+        return;
+      }
+      const cachedPairs = await checkCachedFiles(pairs);
+      const cachedSet = new Set(cachedPairs.map(p => `${p[0]}:${p[1]}`));
+      const cached = pairs.filter(p => cachedSet.has(`${p[0]}:${p[1]}`)).length;
+      detailCacheInfo = { cached, total: mods.length, nexusTotal: pairs.length };
+    } catch (e) {
+      console.warn("[cache] Failed to compute detail cache info:", e);
     }
   }
 
@@ -1767,6 +1804,15 @@
               <span class="detail-stat-value">Rev. {selectedCollection.latest_revision}</span>
               <span class="detail-stat-label">Latest</span>
             </div>
+            {#if detailCacheInfo && detailCacheInfo.nexusTotal > 0}
+              {@const pct = Math.round((detailCacheInfo.cached / detailCacheInfo.nexusTotal) * 100)}
+              <div class="detail-stat">
+                <span class="detail-stat-value detail-cache-value" class:cache-full={pct === 100} class:cache-high={pct >= 90 && pct < 100}>
+                  {pct}%
+                </span>
+                <span class="detail-stat-label">Cached ({detailCacheInfo.cached}/{detailCacheInfo.nexusTotal})</span>
+              </div>
+            {/if}
           </div>
           {#if !installing && !installResult}
             <button
@@ -3801,6 +3847,13 @@
     color: var(--accent, #d98f40);
     background: rgba(217, 143, 64, 0.1);
     border-color: rgba(217, 143, 64, 0.25);
+  }
+
+  .detail-cache-value.cache-full {
+    color: var(--green, #30d158);
+  }
+  .detail-cache-value.cache-high {
+    color: var(--accent, #d98f40);
   }
 
   .card-actions {

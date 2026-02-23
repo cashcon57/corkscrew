@@ -1756,6 +1756,8 @@ async fn delete_collection_cmd(
                         }
                     } else {
                         downloads_removed += 1;
+                        // Also remove the download_registry entry since the file is gone
+                        let _ = db.delete_download_record(dl.id);
                     }
                 }
 
@@ -1795,10 +1797,10 @@ async fn delete_collection_cmd(
             }
         }
 
-        // Clean orphaned download_registry rows
-        if let Err(e) = db.cleanup_orphaned_downloads() {
-            errors.push(format!("Failed to clean orphaned downloads: {}", e));
-        }
+        // Note: We intentionally do NOT call cleanup_orphaned_downloads() here.
+        // Download registry entries should persist as a cache record even after
+        // mods are uninstalled, so the cache % feature works correctly.
+        // Entries are only deleted when the actual archive file is also removed.
 
         // Clean plugin rules for removed mods' plugins
         if !plugin_names.is_empty() {
