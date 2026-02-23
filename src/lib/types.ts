@@ -405,6 +405,7 @@ export interface NexusModInfo {
   mod_id: number;
   name: string;
   summary: string;
+  description: string | null;
   author: string;
   category_id: number;
   version: string;

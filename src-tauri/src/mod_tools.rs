@@ -180,12 +180,6 @@ pub const TOOL_SIGNATURES: &[ToolSignature] = &[
         nexus_mod_ids: &[],
         name_patterns: &["nif optimizer", "nifoptimizer"],
     },
-    ToolSignature {
-        tool_id: "loot",
-        tool_name: "LOOT",
-        nexus_mod_ids: &[],
-        name_patterns: &["loot"],
-    },
 ];
 
 /// A tool detected as required by a collection or wabbajack modlist.
@@ -204,6 +198,9 @@ pub struct RequiredTool {
 // Tool Requirement Detection
 // ---------------------------------------------------------------------------
 
+/// Tools that are integrated into Corkscrew and should never appear as required.
+const INTEGRATED_TOOLS: &[&str] = &["loot"];
+
 /// Detect tool requirements from a NexusMods collection manifest.
 pub fn detect_required_tools_collection(
     manifest: &CollectionManifest,
@@ -218,6 +215,10 @@ pub fn detect_required_tools_collection(
 
         for sig in TOOL_SIGNATURES {
             if matched_ids.contains(sig.tool_id) {
+                continue;
+            }
+            // Skip tools integrated into Corkscrew
+            if INTEGRATED_TOOLS.contains(&sig.tool_id) {
                 continue;
             }
 
@@ -236,6 +237,7 @@ pub fn detect_required_tools_collection(
         }
     }
 
+    suppress_replaced_tools(&mut results, &detected);
     results
 }
 
@@ -255,6 +257,10 @@ pub fn detect_required_tools_wabbajack(
             if matched_ids.contains(sig.tool_id) {
                 continue;
             }
+            // Skip tools integrated into Corkscrew
+            if INTEGRATED_TOOLS.contains(&sig.tool_id) {
+                continue;
+            }
 
             let id_match = archive
                 .nexus_mod_id
@@ -270,7 +276,19 @@ pub fn detect_required_tools_wabbajack(
         }
     }
 
+    suppress_replaced_tools(&mut results, &detected);
     results
+}
+
+/// If Pandora is detected/installable, suppress Nemesis and FNIS from required tools
+/// since Pandora is backwards-compatible with both.
+fn suppress_replaced_tools(results: &mut Vec<RequiredTool>, detected_tools: &[ModTool]) {
+    let pandora_available = results.iter().any(|t| t.tool_id == "pandora")
+        || detected_tools.iter().any(|t| t.id == "pandora" && t.detected_path.is_some());
+
+    if pandora_available {
+        results.retain(|t| t.tool_id != "nemesis" && t.tool_id != "fnis");
+    }
 }
 
 /// Build a RequiredTool from a signature, enriching with builtin tool metadata.
@@ -326,6 +344,25 @@ struct GitHubAsset {
 /// Built-in tool definitions for Skyrim SE modding.
 fn builtin_tools() -> Vec<ModTool> {
     vec![
+        // ---- Frameworks ----
+        ModTool {
+            id: "skse".into(),
+            name: "SKSE64".into(),
+            description: "Skyrim Script Extender — required by most Skyrim mods".into(),
+            exe_names: vec!["skse64_loader.exe".into()],
+            detected_path: None,
+            requires_wine: true,
+            category: "Framework".into(),
+            can_auto_install: true,
+            github_repo: Some("ianpatt/skse64".into()),
+            download_url: None,
+            license: "Proprietary".into(),
+            wine_notes: Some("Works under Wine/Proton".into()),
+            wine_compat: "good".into(),
+            recommended_alternative: None,
+            recommended_ini_edits: vec![],
+            support_url: Some("https://skse.silverlock.org/".into()),
+        },
         // ---- Recommended tools (good Wine compatibility) ----
         ModTool {
             id: "sseedit".into(),
@@ -619,10 +656,32 @@ fn pick_asset<'a>(tool_id: &str, assets: &'a [GitHubAsset]) -> Option<&'a GitHub
             .iter()
             .filter(|(_, n)| n.contains("sse") || n.contains("xedit"))
             .collect(),
-        "loot" => archives
-            .iter()
-            .filter(|(_, n)| n.contains("win") && (n.contains("64") || n.contains("x64")))
-            .collect(),
+        "skse" => {
+            // SKSE releases have archives for different game versions; pick the largest .7z
+            let sevenz: Vec<&(usize, &String)> = archives
+                .iter()
+                .filter(|(_, n)| n.ends_with(".7z"))
+                .collect();
+            if sevenz.is_empty() {
+                archives.iter().collect()
+            } else {
+                // Return the largest archive (most likely the full release, not a delta)
+                return sevenz
+                    .iter()
+                    .max_by_key(|(i, _)| assets[*i].size)
+                    .map(|(i, _)| &assets[*i]);
+            }
+        }
+        "pandora" => {
+            // Pandora releases may include source zips — prefer the release archive
+            archives
+                .iter()
+                .filter(|(_, n)| {
+                    !n.contains("src") && !n.contains("source") && !n.contains("linux")
+                        && (n.contains("pandora") || n.contains("release"))
+                })
+                .collect()
+        }
         "wryebash" => archives
             .iter()
             .filter(|(_, n)| {
@@ -1087,7 +1146,8 @@ mod tests {
     #[test]
     fn test_builtin_tools_not_empty() {
         let tools = builtin_tools();
-        assert!(tools.len() >= 10);
+        assert!(tools.len() >= 11);
+        assert!(tools.iter().any(|t| t.id == "skse"));
         assert!(tools.iter().any(|t| t.id == "sseedit"));
         assert!(tools.iter().any(|t| t.id == "bethini"));
         assert!(tools.iter().any(|t| t.id == "pandora"));
@@ -1420,5 +1480,66 @@ mod tests {
         assert_eq!(tools[0].tool_name, "SSEEdit (xEdit)");
         assert!(tools[0].can_auto_install);
         assert_eq!(tools[0].wine_compat, "good");
+    }
+
+    #[test]
+    fn test_skse_in_builtin_can_auto_install() {
+        let tools = builtin_tools();
+        let skse = tools.iter().find(|t| t.id == "skse").unwrap();
+        assert!(skse.can_auto_install);
+        assert_eq!(skse.github_repo.as_deref(), Some("ianpatt/skse64"));
+    }
+
+    #[test]
+    fn test_integrated_tools_not_detected() {
+        // LOOT should never appear in required tools even if a mod name matches
+        let manifest = mock_collection_manifest(vec![
+            ("LOOT - Load Order Optimization Tool", None),
+            ("SSEEdit", Some(164)),
+        ]);
+        let tools = detect_required_tools_collection(&manifest, Path::new("/nonexistent"));
+        assert!(!tools.iter().any(|t| t.tool_id == "loot"));
+        assert!(tools.iter().any(|t| t.tool_id == "sseedit"));
+    }
+
+    #[test]
+    fn test_pandora_suppresses_nemesis_and_fnis() {
+        let manifest = mock_collection_manifest(vec![
+            ("Pandora Behaviour Engine", None),
+            ("Nemesis Unlimited Behavior Engine", None),
+            ("FNIS", None),
+        ]);
+        let tools = detect_required_tools_collection(&manifest, Path::new("/nonexistent"));
+        assert!(tools.iter().any(|t| t.tool_id == "pandora"));
+        assert!(!tools.iter().any(|t| t.tool_id == "nemesis"));
+        assert!(!tools.iter().any(|t| t.tool_id == "fnis"));
+    }
+
+    #[test]
+    fn test_skse_detected_enriched_from_builtin() {
+        let manifest = mock_collection_manifest(vec![("SKSE64", Some(30379))]);
+        let tools = detect_required_tools_collection(&manifest, Path::new("/nonexistent"));
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].tool_id, "skse");
+        assert!(tools[0].can_auto_install);
+        assert_eq!(tools[0].tool_name, "SKSE64");
+    }
+
+    #[test]
+    fn test_pick_asset_skse_prefers_7z() {
+        let assets = vec![
+            GitHubAsset {
+                name: "skse64_2_02_06.7z".into(),
+                browser_download_url: "https://example.com/skse.7z".into(),
+                size: 5000,
+            },
+            GitHubAsset {
+                name: "Source code (zip)".into(),
+                browser_download_url: "https://example.com/source.zip".into(),
+                size: 10000,
+            },
+        ];
+        let picked = pick_asset("skse", &assets).unwrap();
+        assert!(picked.name.contains("skse64"));
     }
 }

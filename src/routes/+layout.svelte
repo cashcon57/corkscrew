@@ -229,6 +229,24 @@
     document.addEventListener("click", handleClickOutside);
     document.addEventListener("keydown", handleKeydown);
 
+    // Intercept clicks on links inside rendered markdown to open externally
+    // instead of navigating within the SPA (which would cause 404s)
+    document.addEventListener("click", (e: MouseEvent) => {
+      const target = (e.target as HTMLElement)?.closest(".rendered-markdown a");
+      if (!target) return;
+      const href = (target as HTMLAnchorElement).getAttribute("href");
+      if (href && !href.startsWith("#")) {
+        e.preventDefault();
+        e.stopPropagation();
+        try {
+          const parsed = new URL(href, window.location.href);
+          if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+            openUrl(parsed.href);
+          }
+        } catch { /* ignore invalid URLs */ }
+      }
+    }, true); // capture phase to intercept before SvelteKit routing
+
     // Gamepad / controller support
     const gamepad = new GamepadManager((action: GamepadAction) => {
       if (!get(controllerMode)) return;

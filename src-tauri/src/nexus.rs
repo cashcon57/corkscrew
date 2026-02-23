@@ -210,6 +210,7 @@ pub struct NexusModInfo {
     pub mod_id: i64,
     pub name: String,
     pub summary: String,
+    pub description: Option<String>,
     pub author: String,
     pub category_id: i64,
     pub version: String,
@@ -227,6 +228,7 @@ fn parse_nexus_mod(v: &serde_json::Value) -> Option<NexusModInfo> {
         mod_id: v.get("mod_id").and_then(|x| x.as_i64())?,
         name: v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
         summary: v.get("summary").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        description: v.get("description").and_then(|x| x.as_str()).map(|s| s.to_string()),
         author: v.get("author").and_then(|x| x.as_str()).unwrap_or("").to_string(),
         category_id: v.get("category_id").and_then(|x| x.as_i64()).unwrap_or(0),
         version: v.get("version").and_then(|x| x.as_str()).unwrap_or("").to_string(),
@@ -1154,6 +1156,7 @@ pub async fn graphql_search_mods(
                 mod_id: v.get("modId").and_then(|x| x.as_i64())?,
                 name: v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
                 summary: v.get("summary").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                description: None, // GraphQL search doesn't return full description
                 author: v.get("author").and_then(|x| x.as_str()).unwrap_or("").to_string(),
                 category_id: v.get("modCategory")
                     .and_then(|c| c.get("id"))

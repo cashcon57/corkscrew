@@ -653,6 +653,13 @@ export async function browseNexusMods(
   return invoke("browse_nexus_mods_cmd", { gameSlug, category });
 }
 
+export async function getNexusModDetail(
+  gameSlug: string,
+  modId: number,
+): Promise<NexusModInfo> {
+  return invoke("get_nexus_mod_detail", { gameSlug, modId });
+}
+
 // NexusMods Search (GraphQL v2)
 export async function searchNexusMods(
   gameSlug: string,

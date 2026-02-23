@@ -2793,6 +2793,22 @@ async fn browse_nexus_mods_cmd(
 }
 
 #[tauri::command]
+async fn get_nexus_mod_detail(
+    game_slug: String,
+    mod_id: i64,
+) -> Result<nexus::NexusModInfo, String> {
+    let api_key = config::get_config()
+        .ok()
+        .and_then(|c| c.nexus_api_key)
+        .ok_or_else(|| "No NexusMods API key configured".to_string())?;
+    let client = nexus::NexusClient::new(api_key);
+    client
+        .get_mod_info(&game_slug, mod_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn search_nexus_mods_cmd(
     game_slug: String,
     search_text: Option<String>,
@@ -3926,6 +3942,7 @@ pub fn run() {
             fetch_url_text,
             // Collections & Nexus Browse
             browse_nexus_mods_cmd,
+            get_nexus_mod_detail,
             search_nexus_mods_cmd,
             get_game_categories_cmd,
             browse_collections_cmd,

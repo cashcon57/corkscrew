@@ -203,12 +203,15 @@
         // If the content looks like a full HTML page, use it directly (sanitized).
         // Otherwise, treat it as markdown and render it.
         const trimmed = raw.trimStart();
+        let htmlResult: string;
         if (trimmed.startsWith("<!DOCTYPE") || trimmed.startsWith("<html")) {
-          readmeContent = DOMPurify.sanitize(raw);
+          htmlResult = raw;
         } else {
-          const html = await marked.parse(raw);
-          readmeContent = DOMPurify.sanitize(html);
+          htmlResult = await marked.parse(raw);
         }
+        // Rewrite relative image/link URLs to absolute based on the readme source
+        htmlResult = rewriteRelativeUrls(htmlResult, modlist.readme_url);
+        readmeContent = DOMPurify.sanitize(htmlResult);
       } catch (e: unknown) {
         const errMsg = String(e);
         const is404 = errMsg.includes("404");
@@ -376,6 +379,43 @@
       // ignore invalid URLs
     }
   }
+
+  /** Rewrite relative image src and link href URLs to absolute based on a base URL. */
+  function rewriteRelativeUrls(html: string, baseUrl: string): string {
+    try {
+      const base = new URL(baseUrl);
+      // For GitHub wiki URLs, derive the raw content base
+      // e.g. https://raw.githubusercontent.com/.../wiki/Home.md → base is the directory
+      const baseDir = base.href.substring(0, base.href.lastIndexOf("/") + 1);
+
+      // Rewrite src="..." and href="..." that are relative
+      return html.replace(/(src|href)="([^"]+)"/g, (_match, attr, url) => {
+        if (url.startsWith("http://") || url.startsWith("https://") || url.startsWith("data:") || url.startsWith("#") || url.startsWith("mailto:")) {
+          return `${attr}="${url}"`;
+        }
+        try {
+          const absolute = new URL(url, baseDir).href;
+          return `${attr}="${absolute}"`;
+        } catch {
+          return `${attr}="${url}"`;
+        }
+      });
+    } catch {
+      return html;
+    }
+  }
+
+  /** Intercept clicks on links inside rendered markdown/HTML and open them externally. */
+  function handleRenderedLinkClick(e: MouseEvent) {
+    const target = (e.target as HTMLElement)?.closest("a");
+    if (!target) return;
+    const href = target.getAttribute("href");
+    if (href) {
+      e.preventDefault();
+      e.stopPropagation();
+      safeOpenUrl(href);
+    }
+  }
 </script>
 
 <div class="modlists-page">
@@ -472,7 +512,7 @@
               <span>Loading readme...</span>
             </div>
           {:else if readmeContent}
-            <div class="rendered-markdown">
+            <div class="rendered-markdown" onclick={handleRenderedLinkClick}>
               {@html readmeContent}
             </div>
           {:else}

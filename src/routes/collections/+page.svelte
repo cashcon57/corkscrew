@@ -22,6 +22,7 @@
     getInstalledMods,
     detectCollectionTools,
     getModFiles,
+    getNexusModDetail,
     downloadAndInstallNexusMod,
     closeBrowserWebview,
   } from "$lib/api";
@@ -286,6 +287,13 @@
   let browseViewMode = $state<"app" | "website">("app");
   let collectionsViewMode = $state<"app" | "website">("app");
 
+  // Mod detail view state (Browse Nexus tab)
+  let selectedBrowseMod = $state<NexusModInfo | null>(null);
+  let browseModDetail = $state<NexusModInfo | null>(null);
+  let browseModFiles = $state<NexusModFile[]>([]);
+  let loadingModDetail = $state(false);
+  let renderedModDescription = $state("");
+
   // Download & file picker state
   let showFilePicker = $state(false);
   let filePickerMod = $state<NexusModInfo | null>(null);
@@ -466,11 +474,54 @@
     return n.toString();
   }
 
-  function openModPage(mod: NexusModInfo) {
-    const game = $selectedGame;
-    if (!game) return;
+  async function openModDetail(mod: NexusModInfo) {
     const slug = getGameSlug();
-    safeOpenUrl(`https://www.nexusmods.com/${slug}/mods/${mod.mod_id}`);
+    if (!slug) return;
+    selectedBrowseMod = mod;
+    browseModDetail = null;
+    browseModFiles = [];
+    renderedModDescription = "";
+    loadingModDetail = true;
+    try {
+      const [detail, files] = await Promise.all([
+        getNexusModDetail(slug, mod.mod_id),
+        getModFiles(slug, mod.mod_id).catch(() => [] as NexusModFile[]),
+      ]);
+      browseModDetail = detail;
+      // Filter out deleted/archived, sort by category
+      const categoryOrder: Record<string, number> = { main: 0, update: 1, optional: 2, miscellaneous: 3, old_version: 4 };
+      browseModFiles = files
+        .filter((f: NexusModFile) => f.category !== "deleted" && f.category !== "archived")
+        .sort((a: NexusModFile, b: NexusModFile) => (categoryOrder[a.category] ?? 5) - (categoryOrder[b.category] ?? 5));
+      // Render description (HTML from NexusMods API)
+      if (detail.description) {
+        renderedModDescription = DOMPurify.sanitize(detail.description);
+      }
+    } catch (e) {
+      showError(`Failed to load mod details: ${e}`);
+      selectedBrowseMod = null;
+    } finally {
+      loadingModDetail = false;
+    }
+  }
+
+  function backToBrowseModList() {
+    selectedBrowseMod = null;
+    browseModDetail = null;
+    browseModFiles = [];
+    renderedModDescription = "";
+  }
+
+  /** Intercept clicks on links inside rendered markdown/HTML and open them externally. */
+  function handleRenderedLinkClick(e: MouseEvent) {
+    const target = (e.target as HTMLElement)?.closest("a");
+    if (!target) return;
+    const href = target.getAttribute("href");
+    if (href) {
+      e.preventDefault();
+      e.stopPropagation();
+      safeOpenUrl(href);
+    }
   }
 
   function cycleNsfwFilter(current: "hide" | "show" | "only"): "hide" | "show" | "only" {
@@ -1402,7 +1453,7 @@
         {#if renderedDescription}
           <div class="detail-section">
             <h3 class="detail-section-title">Description</h3>
-            <div class="rendered-markdown">
+            <div class="rendered-markdown" onclick={handleRenderedLinkClick}>
               {@html renderedDescription}
             </div>
           </div>
@@ -1731,6 +1782,158 @@
         <p class="premium-gate-hint">Switch to "Website" above to browse within Corkscrew, or upgrade to Premium on NexusMods for full in-app access.</p>
       </div>
     {:else}
+      {#if selectedBrowseMod}
+        <!-- Mod Detail View -->
+        <div class="detail-view">
+          <div class="detail-header">
+            <button class="btn btn-ghost" onclick={backToBrowseModList}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M19 12H5" />
+                <polyline points="12 19 5 12 12 5" />
+              </svg>
+              Back to Browse
+            </button>
+            <button class="btn btn-ghost btn-sm" onclick={() => safeOpenUrl(`https://www.nexusmods.com/${getGameSlug()}/mods/${selectedBrowseMod?.mod_id}`)}>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                <polyline points="15 3 21 3 21 9" />
+                <line x1="10" y1="14" x2="21" y2="3" />
+              </svg>
+              View on NexusMods
+            </button>
+          </div>
+
+          {#if loadingModDetail}
+            <div class="loading-container">
+              <div class="loading-card">
+                <div class="spinner"><div class="spinner-ring"></div></div>
+                <div class="loading-text">
+                  <p class="loading-title">Loading mod details</p>
+                  <p class="loading-detail">{selectedBrowseMod.name}</p>
+                </div>
+              </div>
+            </div>
+          {:else if browseModDetail}
+            <div class="detail-content">
+              {#if browseModDetail.picture_url}
+                <div class="mod-detail-hero" style="background-image: url({browseModDetail.picture_url})"></div>
+              {/if}
+
+              <div class="detail-title-section">
+                <div class="detail-title-row">
+                  <h2 class="detail-name">{browseModDetail.name}</h2>
+                </div>
+                <p class="detail-author">by {browseModDetail.author}</p>
+                {#if browseModDetail.summary}
+                  <p class="detail-summary">{browseModDetail.summary}</p>
+                {/if}
+              </div>
+
+              <!-- Stats Bar -->
+              <div class="detail-stats-bar">
+                <div class="detail-stats-left">
+                  <div class="detail-stat">
+                    <span class="detail-stat-value">{formatDownloads(browseModDetail.endorsement_count)}</span>
+                    <span class="detail-stat-label">Endorsements</span>
+                  </div>
+                  <div class="detail-stat">
+                    <span class="detail-stat-value">{formatDownloads(browseModDetail.unique_downloads)}</span>
+                    <span class="detail-stat-label">Downloads</span>
+                  </div>
+                  <div class="detail-stat">
+                    <span class="detail-stat-value">v{browseModDetail.version}</span>
+                    <span class="detail-stat-label">Version</span>
+                  </div>
+                  {#if browseModDetail.updated_at}
+                    <div class="detail-stat">
+                      <span class="detail-stat-value">{browseModDetail.updated_at}</span>
+                      <span class="detail-stat-label">Updated</span>
+                    </div>
+                  {/if}
+                </div>
+                {#if account?.is_premium && !browseInstalledNexusIds.has(browseModDetail.mod_id)}
+                  <button
+                    class="btn btn-primary stats-install-btn"
+                    onclick={() => { if (browseModDetail) openFilePicker(browseModDetail); }}
+                    disabled={!$selectedGame}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                      <polyline points="7 10 12 15 17 10" />
+                      <line x1="12" y1="15" x2="12" y2="3" />
+                    </svg>
+                    Install
+                  </button>
+                {:else if browseInstalledNexusIds.has(browseModDetail.mod_id)}
+                  <span class="badge badge-success">Installed</span>
+                {/if}
+              </div>
+
+              <!-- Description -->
+              {#if renderedModDescription}
+                <div class="detail-section">
+                  <h3 class="detail-section-title">Description</h3>
+                  <div class="rendered-markdown" onclick={handleRenderedLinkClick}>
+                    {@html renderedModDescription}
+                  </div>
+                </div>
+              {/if}
+
+              <!-- Files Table (premium only) -->
+              {#if account?.is_premium && browseModFiles.length > 0}
+                <div class="detail-section">
+                  <h3 class="detail-section-title">
+                    Files
+                    <span class="title-count">{browseModFiles.length}</span>
+                  </h3>
+                  <div class="mods-table-container">
+                    <div class="mods-table">
+                      <div class="mods-table-header">
+                        <span class="col-name">Name</span>
+                        <span class="col-version">Version</span>
+                        <span class="col-size">Size</span>
+                        <span class="col-category">Category</span>
+                        <span class="col-actions">Actions</span>
+                      </div>
+                      {#each browseModFiles as file}
+                        <div class="mods-table-row">
+                          <span class="col-name" title={file.name}>{file.name}</span>
+                          <span class="col-version">{file.version}</span>
+                          <span class="col-size">{formatFileSize(file.size_kb)}</span>
+                          <span class="col-category"><span class="tag">{file.category}</span></span>
+                          <span class="col-actions">
+                            <button
+                              class="btn btn-accent btn-sm"
+                              onclick={() => {
+                                if (browseModDetail) {
+                                  filePickerMod = browseModDetail;
+                                  handleDownloadFile(file);
+                                }
+                              }}
+                              disabled={downloadingFile === file.file_id}
+                            >
+                              {#if downloadingFile === file.file_id}
+                                <div class="spinner-sm-ring"></div>
+                              {:else}
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                                  <polyline points="7 10 12 15 17 10" />
+                                  <line x1="12" y1="15" x2="12" y2="3" />
+                                </svg>
+                                Install
+                              {/if}
+                            </button>
+                          </span>
+                        </div>
+                      {/each}
+                    </div>
+                  </div>
+                </div>
+              {/if}
+            </div>
+          {/if}
+        </div>
+      {:else}
       <div class="filters-bar">
         <div class="search-wrapper">
           <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1869,7 +2072,7 @@
       {:else}
         <div class="mod-browse-grid">
           {#each browseMods as mod}
-            <div class="mod-browse-card" onclick={() => openModPage(mod)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === "Enter") openModPage(mod); }}>
+            <div class="mod-browse-card" onclick={() => openModDetail(mod)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === "Enter") openModDetail(mod); }}>
               {#if browseInstalledNexusIds.has(mod.mod_id)}
                 <div class="browse-installed-badge">Installed</div>
               {/if}
@@ -1960,7 +2163,8 @@
           </div>
         {/if}
 
-        <p class="browse-mods-hint">Click a mod to view it on NexusMods. Use the Install button to download and install directly.</p>
+        <p class="browse-mods-hint">Click a mod to view details. Use the Install button to download and install directly.</p>
+      {/if}
       {/if}
     {/if}
 
@@ -3015,6 +3219,32 @@
   .detail-header {
     display: flex;
     align-items: center;
+    gap: var(--space-3);
+  }
+
+  .mod-detail-hero {
+    width: 100%;
+    height: 280px;
+    background-size: cover;
+    background-position: center;
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--border-primary);
+  }
+
+  .detail-summary {
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.5;
+    margin-top: var(--space-2);
+  }
+
+  .badge-success {
+    background: var(--color-green, #30d158);
+    color: #000;
+    padding: 4px 12px;
+    border-radius: var(--radius);
+    font-size: 12px;
+    font-weight: 600;
   }
 
   .detail-content {
