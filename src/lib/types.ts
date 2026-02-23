@@ -304,6 +304,7 @@ export interface CleanOptions {
   remove_loose_files: boolean;
   remove_archives: boolean;
   remove_enb: boolean;
+  remove_saves: boolean;
   orphans_only: boolean;
   dry_run: boolean;
   exclude_patterns: string[];

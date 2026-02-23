@@ -61,6 +61,7 @@
   let scanning = $state(false);
   let cleaning = $state(false);
   let cleanResult = $state<CleanResult | null>(null);
+  let cleanRemoveSaves = $state(false);
 
   // Steam integration (Linux only)
   let steamStatus = $state<SteamStatus | null>(null);
@@ -270,6 +271,7 @@
         remove_loose_files: true,
         remove_archives: true,
         remove_enb: false,
+        remove_saves: cleanRemoveSaves,
         orphans_only: orphansOnly,
         dry_run: false,
         exclude_patterns: [],
@@ -725,6 +727,15 @@
               </div>
 
               {#if cleanReport.non_stock_files.length > 0}
+                <div class="clean-options-row">
+                  {#if cleanReport.save_files.length > 0}
+                    <label class="clean-option-label">
+                      <input type="checkbox" bind:checked={cleanRemoveSaves} />
+                      Remove saves ({cleanReport.save_files.length} files)
+                    </label>
+                  {/if}
+                  <span class="clean-option-note">SKSE files are always preserved</span>
+                </div>
                 <div class="clean-actions">
                   <button
                     class="btn-secondary"
@@ -2604,6 +2615,24 @@
     color: var(--green, #30d158);
     font-size: 13px;
     margin: 0;
+  }
+  .clean-options-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4, 16px);
+    margin-bottom: var(--space-2, 8px);
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+  .clean-option-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+  }
+  .clean-option-note {
+    font-size: 11px;
+    color: var(--text-tertiary);
   }
   .clean-result {
     font-size: 13px;

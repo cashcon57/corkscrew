@@ -384,6 +384,7 @@
     remove_loose_files: true,
     remove_archives: true,
     remove_enb: false,
+    remove_saves: false,
     orphans_only: false,
     dry_run: false,
     exclude_patterns: [],

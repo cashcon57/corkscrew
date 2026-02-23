@@ -1,3 +1,4 @@
+pub mod baselines;
 pub mod bottle_config;
 pub mod bottles;
 pub mod cleaner;

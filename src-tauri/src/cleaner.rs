@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use walkdir::WalkDir;
 
+use crate::baselines;
 use crate::database::ModDatabase;
 
 // ---------------------------------------------------------------------------
@@ -92,6 +93,8 @@ pub struct CleanOptions {
     pub remove_archives: bool,
     /// Remove ENB files (d3d11.dll, enbseries/, etc.).
     pub remove_enb: bool,
+    /// Remove save files (.ess, .skse cosaves).
+    pub remove_saves: bool,
     /// Only remove unmanaged/orphaned files (skip files tracked in manifest).
     pub orphans_only: bool,
     /// Preview what would be removed without actually deleting.
@@ -106,6 +109,7 @@ impl Default for CleanOptions {
             remove_loose_files: true,
             remove_archives: true,
             remove_enb: false,
+            remove_saves: false,
             orphans_only: false,
             dry_run: false,
             exclude_patterns: Vec::new(),
@@ -154,6 +158,15 @@ const SAVE_PATTERNS: &[&str] = &[
     "saves/",   // Save directory
 ];
 
+/// SKSE-related paths that should always be preserved during cleanup.
+/// These live inside the game's Data directory.
+const SKSE_PATTERNS: &[&str] = &[
+    "skse/",            // SKSE plugins, configs, logs
+    "skse64_loader.exe",
+    "skse64_1_6_",      // SKSE DLLs (version-specific prefix)
+    "skse64_steam_loader.dll",
+];
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -184,12 +197,27 @@ pub fn scan_game_directory(
         .filter_map(|r| r.ok())
         .collect();
 
-    if snapshot_paths.is_empty() {
-        return Err(CleanerError::NoSnapshot(
-            game_id.to_string(),
-            bottle_name.to_string(),
-        ));
-    }
+    // Fall back to built-in baseline if no user-created snapshot exists
+    let using_builtin = snapshot_paths.is_empty();
+    let snapshot_paths = if using_builtin {
+        match baselines::get_builtin_baseline(game_id) {
+            Some(baseline) => {
+                info!(
+                    "No snapshot for {}/{}; using built-in baseline ({} stock files)",
+                    game_id, bottle_name, baseline.len()
+                );
+                baseline
+            }
+            None => {
+                return Err(CleanerError::NoSnapshot(
+                    game_id.to_string(),
+                    bottle_name.to_string(),
+                ));
+            }
+        }
+    } else {
+        snapshot_paths
+    };
 
     // Load deployment manifest paths into a HashSet
     let mut manifest_stmt = conn.prepare(
@@ -228,16 +256,26 @@ pub fn scan_game_directory(
             continue;
         }
 
-        // Check if it's a save file
-        if is_save_file(&rel_str) {
-            save_files.push(rel_str.clone());
+        // When using built-in baseline, also check stock patterns
+        // (catches CC content not in the explicit list, video files, etc.)
+        if using_builtin && baselines::is_stock_pattern(game_id, &rel_str) {
             continue;
+        }
+
+        // Skip SKSE files — always preserved
+        if is_skse_file(&rel_str) {
+            continue;
+        }
+
+        let is_save = is_save_file(&rel_str);
+        if is_save {
+            save_files.push(rel_str.clone());
         }
 
         let file_size = fs::metadata(abs_path).map(|m| m.len()).unwrap_or(0);
         let is_managed = managed_paths.contains(&rel_str);
         let is_enb = is_enb_file(&rel_str);
-        let category = categorize_file(&rel_str);
+        let category = if is_save { "save".to_string() } else { categorize_file(&rel_str) };
 
         if is_enb {
             enb_files.push(rel_str.clone());
@@ -302,6 +340,7 @@ pub fn clean_game_directory(
         // Check category filters
         let dominated_by_category = match file.category.as_str() {
             "enb" => !options.remove_enb,
+            "save" => !options.remove_saves,
             "bsa" | "ba2" => !options.remove_archives,
             _ => !options.remove_loose_files,
         };
@@ -432,6 +471,17 @@ fn categorize_file(rel_path: &str) -> String {
 fn is_enb_file(rel_path: &str) -> bool {
     let lower = rel_path.to_lowercase();
     for pattern in ENB_PATTERNS {
+        if lower.starts_with(pattern) || lower.contains(&format!("/{}", pattern)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Check if a file is SKSE-related (always preserved during cleanup).
+fn is_skse_file(rel_path: &str) -> bool {
+    let lower = rel_path.to_lowercase();
+    for pattern in SKSE_PATTERNS {
         if lower.starts_with(pattern) || lower.contains(&format!("/{}", pattern)) {
             return true;
         }
@@ -583,7 +633,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_excludes_save_files() {
+    fn scan_reports_save_files() {
         let (db, tmp) = test_db();
         let data_dir = tmp.path().join("data");
         fs::create_dir_all(&data_dir).unwrap();
@@ -600,7 +650,10 @@ mod tests {
 
         let report = scan_game_directory(&db, "skyrimse", "Gaming", &data_dir).unwrap();
         assert_eq!(report.save_files.len(), 2);
-        assert_eq!(report.non_stock_files.len(), 1); // Only mod.esp
+        // Saves are now included in non_stock_files (category "save") for opt-in removal
+        assert_eq!(report.non_stock_files.len(), 3); // mod.esp + 2 saves
+        let save_count = report.non_stock_files.iter().filter(|f| f.category == "save").count();
+        assert_eq!(save_count, 2);
     }
 
     #[test]
@@ -656,20 +709,20 @@ mod tests {
     fn clean_respects_exclude_patterns() {
         let (db, tmp) = test_db();
         let data_dir = tmp.path().join("data");
-        fs::create_dir_all(data_dir.join("SKSE/Plugins")).unwrap();
+        fs::create_dir_all(data_dir.join("MyMod/Config")).unwrap();
 
         fs::write(data_dir.join("Skyrim.esm"), b"master").unwrap();
         integrity::create_game_snapshot(&db, "skyrimse", "Gaming", &data_dir).unwrap();
 
         fs::write(data_dir.join("mod.esp"), b"mod").unwrap();
         fs::write(
-            data_dir.join("SKSE/Plugins/important.dll"),
+            data_dir.join("MyMod/Config/important.ini"),
             b"keep this",
         )
         .unwrap();
 
         let options = CleanOptions {
-            exclude_patterns: vec!["SKSE/Plugins/*".to_string()],
+            exclude_patterns: vec!["MyMod/Config/*".to_string()],
             ..Default::default()
         };
 
@@ -677,8 +730,29 @@ mod tests {
             clean_game_directory(&db, "skyrimse", "Gaming", &data_dir, &options).unwrap();
 
         assert_eq!(result.removed_files.len(), 1); // Only mod.esp
-        assert_eq!(result.skipped_files.len(), 1); // SKSE plugin
-        assert!(data_dir.join("SKSE/Plugins/important.dll").exists());
+        assert_eq!(result.skipped_files.len(), 1); // Excluded config
+        assert!(data_dir.join("MyMod/Config/important.ini").exists());
+    }
+
+    #[test]
+    fn clean_preserves_skse_files() {
+        let (db, tmp) = test_db();
+        let data_dir = tmp.path().join("data");
+        fs::create_dir_all(data_dir.join("SKSE/Plugins")).unwrap();
+
+        fs::write(data_dir.join("Skyrim.esm"), b"master").unwrap();
+        integrity::create_game_snapshot(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+
+        fs::write(data_dir.join("mod.esp"), b"mod").unwrap();
+        fs::write(data_dir.join("SKSE/Plugins/test.dll"), b"skse plugin").unwrap();
+
+        let options = CleanOptions::default();
+        let result =
+            clean_game_directory(&db, "skyrimse", "Gaming", &data_dir, &options).unwrap();
+
+        // mod.esp removed, SKSE file preserved (never appears in report)
+        assert_eq!(result.removed_files.len(), 1);
+        assert!(data_dir.join("SKSE/Plugins/test.dll").exists());
     }
 
     #[test]
@@ -706,10 +780,28 @@ mod tests {
         let (db, _tmp) = test_db();
         let data_dir = PathBuf::from("/nonexistent");
 
-        let result = scan_game_directory(&db, "skyrimse", "Gaming", &data_dir);
+        // Use an unknown game ID so there's no built-in baseline to fall back on
+        let result = scan_game_directory(&db, "unknowngame", "Gaming", &data_dir);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("No baseline snapshot"));
+    }
+
+    #[test]
+    fn skyrim_uses_builtin_baseline_when_no_snapshot() {
+        let (db, tmp) = test_db();
+        let data_dir = tmp.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+
+        // Stock file — should NOT appear in report
+        fs::write(data_dir.join("Skyrim.esm"), b"master").unwrap();
+        // Non-stock file — should appear
+        fs::write(data_dir.join("mod.esp"), b"mod").unwrap();
+
+        // No snapshot created — should fall back to built-in baseline
+        let report = scan_game_directory(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+        assert_eq!(report.non_stock_files.len(), 1);
+        assert_eq!(report.non_stock_files[0].relative_path, "mod.esp");
     }
 
     #[test]
