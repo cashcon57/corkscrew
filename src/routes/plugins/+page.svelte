@@ -192,6 +192,18 @@
 
   const enabledCount = $derived(plugins.filter((p) => p.enabled).length);
 
+  // Keyboard shortcuts
+  function handlePluginKeydown(e: KeyboardEvent) {
+    const isCmd = e.metaKey || e.ctrlKey;
+    const target = e.target as HTMLElement;
+    if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") return;
+    if (isCmd && e.key === "f") {
+      e.preventDefault();
+      const input = document.querySelector<HTMLInputElement>(".plugin-search-input");
+      if (input) input.focus();
+    }
+  }
+
   // Search/filter
   let pluginSearch = $state("");
   let filteredPlugins = $derived(
@@ -200,6 +212,8 @@
       : plugins
   );
 </script>
+
+<svelte:window onkeydown={handlePluginKeydown} />
 
 <div class="plugins-page">
   <!-- Page header -->

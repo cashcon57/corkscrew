@@ -278,7 +278,7 @@
   let searchQuery = $state("");
   let gameFilter = $state("all");
   let nsfwFilter = $state<"hide" | "show" | "only">("hide");
-  let sortField = $state<"endorsements" | "downloads" | "name" | "rating" | "created" | "updated" | "mods">("endorsements");
+  let sortField = $state<"endorsements" | "name" | "rating" | "created" | "updated">("endorsements");
   let sortDirection = $state<"asc" | "desc">("desc");
   let collectionsTotalCount = $state(0);
   let collectionsOffset = $state(0);
@@ -2043,8 +2043,7 @@
         {/if}
         <div class="filter-group">
           <select class="filter-select" bind:value={browseModsSort} onchange={() => loadBrowseMods()}>
-            <option value="endorsements">Sort: Endorsements</option>
-            <option value="downloads">Sort: Downloads</option>
+            <option value="endorsements">Sort: Most Popular</option>
             <option value="name">Sort: Name</option>
             <option value="updated">Sort: Updated</option>
             <option value="createdAt">Sort: Recently Added</option>
@@ -2371,13 +2370,11 @@
         </button>
         <div class="sort-group">
           <select class="filter-select" bind:value={sortField} onchange={reloadWithSort}>
-            <option value="endorsements">Sort: Endorsements</option>
-            <option value="downloads">Sort: Downloads</option>
+            <option value="endorsements">Sort: Most Popular</option>
             <option value="name">Sort: Name</option>
             <option value="rating">Sort: Rating</option>
             <option value="created">Sort: Newest</option>
             <option value="updated">Sort: Updated</option>
-            <option value="mods">Sort: Mod Count</option>
           </select>
           <button
             class="sort-direction-btn"

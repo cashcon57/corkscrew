@@ -454,13 +454,14 @@ pub async fn browse_collections(
     min_endorsements: Option<i64>,
 ) -> Result<CollectionSearchResult, CollectionsError> {
     // Map friendly sort names to GraphQL field names
+    // Note: NexusMods removed "totalDownloads" from CollectionsSearchSort;
+    // "downloads" now falls back to endorsements as the best popularity proxy
     let gql_sort_key = match sort_field {
         "name" => "name",
-        "downloads" => "totalDownloads",
+        "downloads" => "endorsements",
         "rating" => "recentRating",
         "created" => "createdAt",
         "updated" => "updatedAt",
-        "mods" => "latestPublishedRevision.modCount",
         _ => "endorsements",
     };
     let gql_direction = if sort_direction == "asc" {

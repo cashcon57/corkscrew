@@ -1438,6 +1438,20 @@
       detailMod = mod;
       return;
     }
+    if (isCmd && e.key === "a") {
+      e.preventDefault();
+      if (selectAll) {
+        selectedModIds = new Set();
+      } else {
+        selectedModIds = new Set(filteredMods.map(m => m.id));
+      }
+      return;
+    }
+    if ((e.key === "Delete" || e.key === "Backspace") && selectedModIds.size > 0) {
+      e.preventDefault();
+      batchUninstall();
+      return;
+    }
   }
 
   function scrollFocusedIntoView() {
