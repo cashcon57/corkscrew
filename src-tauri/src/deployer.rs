@@ -97,6 +97,10 @@ pub fn test_hardlink_support(staging_dir: &Path, data_dir: &Path) -> bool {
 
 /// Deploy a single mod's files from staging to data_dir.
 /// Higher-priority mods win file conflicts.
+///
+/// Uses parallel file I/O via rayon for maximum throughput on multi-core
+/// systems. Conflict resolution uses bulk-loaded in-memory lookups, and
+/// deployment entries are batch-inserted in a single transaction.
 pub fn deploy_mod(
     db: &ModDatabase,
     game_id: &str,
@@ -106,12 +110,13 @@ pub fn deploy_mod(
     data_dir: &Path,
     files: &[String],
 ) -> Result<DeployResult> {
+    use rayon::prelude::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
     if !staging_path.exists() {
         return Err(DeployerError::StagingNotFound(staging_path.to_path_buf()));
     }
 
-    // Check if staging and data_dir are on the same filesystem.
-    // Hardlinks only work within a single filesystem (same device).
     let can_hardlink = same_filesystem(staging_path, data_dir);
     if !can_hardlink {
         debug!(
@@ -130,103 +135,123 @@ pub fn deploy_mod(
         .ok_or_else(|| DeployerError::Database(format!("Mod {} not found", mod_id)))?;
     let my_priority = mod_info.install_priority;
 
-    let mut deployed_count = 0;
-    let mut skipped_count = 0;
-    let mut fallback_used = false;
-
-    for rel_path in files {
-        let src = staging_path.join(rel_path);
-        let dst = data_dir.join(rel_path);
-
-        if !src.exists() {
-            warn!("Staging file missing, skipping: {}", src.display());
-            continue;
-        }
-
-        let existing = db
-            .get_deployed_file(game_id, bottle_name, rel_path)
-            .map_err(|e| DeployerError::Database(e.to_string()))?;
-
-        if let Some(entry) = &existing {
-            if entry.mod_id == mod_id {
-                continue;
-            }
-
-            let other_mod = db
-                .get_mod(entry.mod_id)
-                .map_err(|e| DeployerError::Database(e.to_string()))?;
-
-            if let Some(other) = other_mod {
-                if other.install_priority > my_priority {
-                    debug!(
-                        "Skipping {} (owned by higher-priority mod '{}')",
-                        rel_path, other.name
-                    );
-                    skipped_count += 1;
-                    continue;
-                }
-            }
-
-            if dst.exists() {
-                fs::remove_file(&dst)?;
-            }
-        }
-
-        if let Some(parent) = dst.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        // Prevent symlink-following attacks
-        if dst.exists() && fs::symlink_metadata(&dst)?.file_type().is_symlink() {
-            warn!("Skipping deployment to symlink target: {}", dst.display());
-            skipped_count += 1;
-            continue;
-        }
-
-        let method = if can_hardlink {
-            match fs::hard_link(&src, &dst) {
-                Ok(_) => "hardlink",
-                Err(e) => {
-                    warn!(
-                        "Hardlink failed for {} → {}: {} (falling back to copy)",
-                        src.display(),
-                        dst.display(),
-                        e
-                    );
-                    fs::copy(&src, &dst)?;
-                    fallback_used = true;
-                    "copy"
-                }
-            }
-        } else {
-            fs::copy(&src, &dst)?;
-            fallback_used = true;
-            "copy"
-        };
-
-        db.add_deployment_entry(
-            game_id,
-            bottle_name,
-            mod_id,
-            rel_path,
-            &staging_path.to_string_lossy(),
-            method,
-            None, // SHA-256 computed at staging time, not deployment
-        )
+    // Batch-load existing deployment manifest + mod priorities into memory
+    // to avoid per-file database round-trips during conflict resolution.
+    let manifest = db
+        .get_deployment_manifest(game_id, bottle_name)
+        .map_err(|e| DeployerError::Database(e.to_string()))?;
+    let deployed_map: std::collections::HashMap<&str, i64> = manifest
+        .iter()
+        .map(|e| (e.relative_path.as_str(), e.mod_id))
+        .collect();
+    let priorities = db
+        .get_all_mod_priorities()
         .map_err(|e| DeployerError::Database(e.to_string()))?;
 
-        deployed_count += 1;
+    let deployed_count = AtomicUsize::new(0);
+    let skipped_count = AtomicUsize::new(0);
+    let fallback_used = AtomicBool::new(false);
+    let staging_str = staging_path.to_string_lossy().to_string();
+
+    // Phase 1: Parallel file I/O — resolve conflicts, then hardlink or copy.
+    // Collect successful deployments for batch database insert.
+    let results: Vec<Option<(String, &str)>> = files
+        .par_iter()
+        .map(|rel_path| {
+            let src = staging_path.join(rel_path);
+            let dst = data_dir.join(rel_path);
+
+            if !src.exists() {
+                return None;
+            }
+
+            // Conflict resolution via in-memory lookup
+            if let Some(&owner_mod_id) = deployed_map.get(rel_path.as_str()) {
+                if owner_mod_id == mod_id {
+                    return None; // already deployed by us
+                }
+                let owner_priority = priorities.get(&owner_mod_id).copied().unwrap_or(0);
+                if owner_priority > my_priority as i64 {
+                    skipped_count.fetch_add(1, Ordering::Relaxed);
+                    return None;
+                }
+                // We win — remove existing file
+                if dst.exists() {
+                    let _ = fs::remove_file(&dst);
+                }
+            }
+
+            if let Some(parent) = dst.parent() {
+                let _ = fs::create_dir_all(parent); // idempotent, safe for parallel calls
+            }
+
+            // Prevent symlink-following attacks
+            if dst.exists() {
+                if let Ok(meta) = fs::symlink_metadata(&dst) {
+                    if meta.file_type().is_symlink() {
+                        warn!("Skipping deployment to symlink target: {}", dst.display());
+                        skipped_count.fetch_add(1, Ordering::Relaxed);
+                        return None;
+                    }
+                }
+            }
+
+            let method = if can_hardlink {
+                match fs::hard_link(&src, &dst) {
+                    Ok(_) => "hardlink",
+                    Err(e) => {
+                        warn!(
+                            "Hardlink failed for {} → {}: {} (falling back to copy)",
+                            src.display(), dst.display(), e
+                        );
+                        if fs::copy(&src, &dst).is_err() {
+                            return None;
+                        }
+                        fallback_used.store(true, Ordering::Relaxed);
+                        "copy"
+                    }
+                }
+            } else {
+                if fs::copy(&src, &dst).is_err() {
+                    return None;
+                }
+                fallback_used.store(true, Ordering::Relaxed);
+                "copy"
+            };
+
+            deployed_count.fetch_add(1, Ordering::Relaxed);
+            Some((rel_path.clone(), method))
+        })
+        .collect();
+
+    // Phase 2: Batch-insert all deployment entries in a single transaction.
+    let batch: Vec<(&str, &str, i64, &str, &str, &str)> = results
+        .iter()
+        .filter_map(|opt| {
+            opt.as_ref().map(|(rel_path, method)| {
+                (game_id, bottle_name, mod_id, rel_path.as_str(), staging_str.as_str(), *method)
+            })
+        })
+        .collect();
+
+    if !batch.is_empty() {
+        db.batch_add_deployment_entries(&batch)
+            .map_err(|e| DeployerError::Database(e.to_string()))?;
     }
+
+    let final_deployed = deployed_count.load(Ordering::Relaxed);
+    let final_skipped = skipped_count.load(Ordering::Relaxed);
+    let final_fallback = fallback_used.load(Ordering::Relaxed);
 
     info!(
         "Deployed mod {} ({} files, {} skipped, hardlink fallback: {})",
-        mod_id, deployed_count, skipped_count, fallback_used
+        mod_id, final_deployed, final_skipped, final_fallback
     );
 
     Ok(DeployResult {
-        deployed_count,
-        skipped_count,
-        fallback_used,
+        deployed_count: final_deployed,
+        skipped_count: final_skipped,
+        fallback_used: final_fallback,
     })
 }
 

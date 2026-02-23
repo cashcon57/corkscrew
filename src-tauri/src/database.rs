@@ -327,6 +327,17 @@ impl ModDatabase {
         }
     }
 
+    /// Get install_priority for all mods, keyed by mod id.
+    pub fn get_all_mod_priorities(&self) -> Result<std::collections::HashMap<i64, i64>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare("SELECT id, install_priority FROM installed_mods")?;
+        let map = stmt
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(map)
+    }
+
     /// List every mod installed for a given game + bottle combination.
     pub fn list_mods(&self, game_id: &str, bottle_name: &str) -> Result<Vec<InstalledMod>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
@@ -532,6 +543,35 @@ impl ModDatabase {
             params![game_id, bottle_name, mod_id, relative_path, staging_path, deploy_method, sha256, deployed_at],
         )?;
         Ok(conn.last_insert_rowid())
+    }
+
+    /// Batch-insert deployment entries in a single transaction for maximum throughput.
+    pub fn batch_add_deployment_entries(
+        &self,
+        entries: &[(
+            &str,  // game_id
+            &str,  // bottle_name
+            i64,   // mod_id
+            &str,  // relative_path
+            &str,  // staging_path
+            &str,  // deploy_method
+        )],
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let deployed_at = chrono::Utc::now().to_rfc3339();
+        let tx = conn.unchecked_transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT OR REPLACE INTO deployment_manifest
+                    (game_id, bottle_name, mod_id, relative_path, staging_path, deploy_method, sha256, deployed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7)",
+            )?;
+            for (game_id, bottle_name, mod_id, rel_path, staging_path, method) in entries {
+                stmt.execute(params![game_id, bottle_name, mod_id, rel_path, staging_path, method, deployed_at])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// Remove all deployment manifest entries for a mod.

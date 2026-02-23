@@ -49,6 +49,7 @@ quick-xml = { version = "0.36", features = ["serialize"] }
 # File system utilities
 walkdir = "2"
 dirs = "6"
+rayon = "1"
 
 # Error handling
 thiserror = "2"
