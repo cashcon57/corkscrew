@@ -5,8 +5,8 @@
 #   1. Bumps version in tauri.conf.json, package.json, Cargo.toml
 #   2. Builds macOS Apple Silicon + Intel with signing
 #   3. Commits version bump, tags, pushes
-#   4. Creates draft GitHub release with macOS artifacts
-#   5. CI triggers on tag push → builds Linux, generates latest.json, publishes
+#   4. Publishes GitHub release with macOS artifacts (auto-updater works immediately)
+#   5. CI triggers on tag push → builds Linux, adds Linux artifacts + updates latest.json
 #
 # Usage: ./scripts/release.sh <version>
 #   e.g.: ./scripts/release.sh 0.10.0
@@ -185,27 +185,26 @@ ${CHANGELOG}
 echo "$RELEASE_NOTES"
 echo ""
 
-# --- Create draft release ---
+# --- Create release (published immediately) ---
 echo ""
-echo "=== Creating draft release $TAG ==="
+echo "=== Creating release $TAG ==="
 gh release create "$TAG" \
   --repo "$REPO" \
-  --draft \
   --title "$TAG" \
   --notes "$RELEASE_NOTES" \
   "$STAGE"/*
 
 echo ""
 echo "========================================="
-echo "  Release $TAG draft created"
+echo "  Release $TAG published"
 echo "========================================="
 echo ""
-echo "  macOS artifacts + latest.json uploaded to draft release."
-echo "  macOS users can update immediately."
+echo "  macOS artifacts + latest.json uploaded."
+echo "  macOS auto-updater will detect this release immediately."
 echo ""
 echo "  CI is now building Linux — it will add Linux artifacts"
-echo "  and merge Linux platforms into latest.json."
+echo "  and update latest.json with Linux platforms when done."
 echo ""
-echo "  Draft:   https://github.com/$REPO/releases/tag/$TAG"
+echo "  Release: https://github.com/$REPO/releases/tag/$TAG"
 echo "  CI:      https://github.com/$REPO/actions"
 echo ""

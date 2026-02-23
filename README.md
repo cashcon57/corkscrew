@@ -26,7 +26,7 @@ Corkscrew installs, manages, and organizes mods for Windows games running throug
 
 It works by reading and writing directly to your Wine bottle's filesystem, the same way the game itself sees it. Your bottles, your mods, no middleman.
 
-> **v1.6** — Full Wabbajack install pipeline (download, patch, deploy), embedded NexusMods/Wabbajack web views, premium-gated API browsing, direct mod download & install, and 80+ supported games.
+> **v1.7** — In-app mod detail pages, SKSE/tool detection fixes, Pandora→Nemesis/FNIS suppression, README rendering fixes, full Wabbajack install pipeline, and 80+ supported games.
 
 ---
 
@@ -186,13 +186,14 @@ Corkscrew includes an in-app auto-updater. When a new version is published on Gi
 - **NXM protocol handling** — Registered as an `nxm://` protocol handler. Users click "Download with Mod Manager" on the Nexus Mods website, and Corkscrew receives and processes the NXM link.
 - **Strict download compliance** — Corkscrew **never automates downloads for free NexusMods users**. Free users are always directed to the Nexus Mods website to click "Slow Download" manually. Only premium users get API-initiated downloads. This is enforced at the API layer in `nexus.rs::get_download_links()`.
 - **Browse Nexus Mods** — Premium users can search and filter NexusMods mods with advanced filters (category, author, update period, min downloads/endorsements), multiple sort options, and NexusMods-style filter pills. Free users browse via an embedded NexusMods web view within the app.
+- **In-app mod detail pages** — Click any mod in the Browse grid to view its full detail page with hero image, description (sanitized HTML), stats, and file list — without leaving the app. "View on NexusMods" link for the full website experience.
 - **Direct mod download & install** — Premium users can download and install mods directly from the Browse page: pick a file from the mod's files list (grouped by category), download with real-time progress, and auto-deploy in one step.
 - **Embedded web views** — Toggle between in-app API browsing and an embedded NexusMods/Wabbajack website view. Powered by Tauri v2 multi-webview (native child webview, not an iframe). Available on Browse Nexus, Collections, and Wabbajack Gallery pages.
 - **Collections browser** — Browse NexusMods Collections via the GraphQL v2 API with search, sorting, advanced filtering, and detailed mod/revision views.
 - **Collection installation** — Premium users can install entire NexusMods Collections with one click. The orchestrator resolves install order, downloads mods via the NexusMods API, handles FOMOD selections from the collection manifest, deploys files, and applies the collection's plugin load order. Plugin load order sync works for all games with plugin support (Skyrim SE, Fallout 4, etc.), not just Skyrim SE. Free users see a list of mods with links to download manually from the Nexus website.
 - **Update checking** — Check installed mods against Nexus for available updates.
 - **Collection diff** — Compare your locally installed collection against the author's latest revision to see added, removed, and updated mods.
-- **Tool requirement detection** — Before installing a Collection or Wabbajack modlist, Corkscrew scans for required modding tools (SKSE, Nemesis, BodySlide, etc.) and prompts you to install missing tools before proceeding.
+- **Tool requirement detection** — Before installing a Collection or Wabbajack modlist, Corkscrew scans for required modding tools (SKSE, Nemesis, BodySlide, etc.) and prompts you to install missing tools before proceeding. Integrated tools (LOOT) are hidden since they're built into Corkscrew. Pandora automatically suppresses Nemesis/FNIS requirements since it's backwards-compatible with both.
 - **Rate limit compliance** — All API calls respect NexusMods rate limits with graceful error handling (skip on failure, no aggressive retries).
 
 ### Plugin Load Order
@@ -226,7 +227,7 @@ Corkscrew includes an in-app auto-updater. When a new version is published on Gi
 
 ### Game Launching & Tools
 - **Game launching** — Play your modded game straight from Corkscrew, through whatever Wine layer the bottle uses.
-- **SKSE auto-install** — Auto-detect your Skyrim version and install the correct SKSE build from GitHub with one click. Game-version-aware: picks the right SKSE release for SE (1.5.97), AE (1.6.x), or latest AE builds.
+- **SKSE auto-install** — Auto-detect your Skyrim version and install the correct SKSE build from GitHub with one click. Game-version-aware: picks the right SKSE release for SE (1.5.97), AE (1.6.x), or latest AE builds. Correctly detected when already installed.
 - **SKSE launching** — Launch through SKSE with one click after installation. Compatibility checks against your game version.
 - **Skyrim SE downgrade** — Detect your Skyrim version via SHA-256 hash and create a "Stock Game" copy to lock v1.5.97 and prevent Steam auto-updates (same approach pioneered by Wabbajack).
 - **Display scaling fix** — Automatically fix Skyrim SE display scaling issues in CrossOver on macOS by detecting your screen resolution and forcing exclusive fullscreen mode.
@@ -359,25 +360,35 @@ Key workflows tested end-to-end:
 
 - **Linux testing is limited** — The app builds for Linux and handles Linux paths throughout, but primary testing has been on macOS. Community feedback on SteamOS/Proton setups is especially welcome.
 - **Enhanced game support** — 80+ games are detected and support basic mod deployment. Full-featured support (plugin load order, LOOT sorting, SKSE, plugins.txt) currently exists for Skyrim SE and Fallout 4. Other Bethesda games are next in line.
-- **Wabbajack installation** — The full Wabbajack install pipeline is implemented with real downloads (NexusMods, HTTP, CDN, MediaFire, ModDB), directive processing (BSDiff patching, inline files, merged patches), and deployment. BSA/BA2 packing and DDS texture transformation are staged but not yet fully implemented (files are copied as-is). Some edge cases with MEGA and Google Drive may need manual intervention.
+- **Collections installation** — Works well for most public NexusMods collections (10–150 mods). Install order resolution, FOMOD replay, plugin sync, and profile snapshots are all functional. Binary patch application from collection manifests is not yet implemented. Collection updates require full re-download (no delta updates).
+- **Wabbajack installation** — The full Wabbajack install pipeline is implemented with real downloads (NexusMods, HTTP, MediaFire, ModDB), directive processing (BSDiff patching, inline files), and deployment. **Not yet implemented**: BSA/BA2 packing (CreateBSA), DDS texture transformation (TransformedTexture), merged patches (MergedPatch), Google Drive downloads, Wabbajack CDN downloads, and game file source extraction. Complex modlists using these features will partially fail. Install resume after interruption is stubbed but not yet functional.
+- **FOMOD conditionals** — The FOMOD installer handles group selection, type badges, and file mapping. Conditional visibility, option dependencies, and mutually-exclusive groups are not yet supported — the installer uses defaults for these cases.
 - **NexusMods SSO** — The SSO/OAuth2 module (with PKCE) is fully implemented and ready to use. Currently awaiting NexusMods approval of the "Corkscrew" application slug. In the meantime, API key authentication works.
 - **macOS code signing** — The app is not signed with an Apple Developer certificate. Users need to bypass Gatekeeper on first launch (see [Installation](#installation)).
 
 ### Roadmap
 
 **In progress:**
-- Enhanced game plugins for more Bethesda titles (Oblivion, Fallout 3, Fallout NV, Starfield, Morrowind) with full load order support
 - BSA/BA2 archive packing for Wabbajack CreateBSA directives
 - DDS texture transformation for Wabbajack TransformedTexture directives
+- MergedPatch directive processing for Wabbajack
+- Google Drive + Wabbajack CDN download sources
+- Collection binary patch application
+- FOMOD conditional visibility and option dependencies
+- Wabbajack install resume/recovery after interruption
 
 **Near-term:**
+- Enhanced game plugins for more Bethesda titles (Oblivion, Fallout 3, Fallout NV, Starfield, Morrowind)
 - NexusMods SSO/OAuth authentication (pending NM app approval)
-- Collection update installation from diff view
+- Collection delta updates (download only changed mods)
 - Per-game tool configuration for non-Bethesda games
+- File conflict resolution UI (manual override of priority-based resolution)
 
 **Medium-term:**
 - Same-volume staging for reliable hardlink deployment
 - Enhanced dependency visualization with tree view
+- Install simulation / dry-run preview
+- Download bandwidth throttling
 - Resizable table columns with persistent widths
 
 **Long-term:**
@@ -404,7 +415,7 @@ Key workflows tested end-to-end:
 ```
 src/                          Svelte frontend
 ├── lib/
-│   ├── api.ts                Tauri IPC bindings (~164 typed invoke wrappers)
+│   ├── api.ts                Tauri IPC bindings (~171 typed invoke wrappers)
 │   ├── types.ts              Shared TypeScript interfaces (~118 types)
 │   ├── stores.ts             Svelte stores (game selection, mods, toasts, notifications)
 │   ├── theme.ts              Theme detection, persistence, and vibrancy
@@ -447,8 +458,8 @@ src/                          Svelte frontend
 │   └── settings/+page.svelte Config, game tools, auth, INI, diagnostics
 └── app.css                   Design system (tokens, themes, vibrancy, animations)
 
-src-tauri/src/                Rust backend (~48 modules, 561 tests)
-├── lib.rs              Tauri command handlers (~165 IPC commands)
+src-tauri/src/                Rust backend (~48 modules, 566 tests)
+├── lib.rs              Tauri command handlers (~171 IPC commands)
 ├── bottles.rs          Bottle detection (9 sources, macOS + Linux)
 ├── bottle_config.rs    Wine bottle settings (MSync, MetalFX, env vars)
 ├── games.rs            Game detection framework + plugin registry
@@ -535,7 +546,7 @@ cargo tauri dev    # Development mode with hot-reload
 
 ```bash
 # Run tests
-cd src-tauri && cargo test           # 561 Rust tests
+cd src-tauri && cargo test           # 566 Rust tests
 npx svelte-check --threshold error   # Frontend type checking
 ```
 

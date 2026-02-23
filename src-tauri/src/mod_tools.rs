@@ -65,11 +65,15 @@ pub struct ModTool {
     pub detected_path: Option<String>,
     pub requires_wine: bool,
     pub category: String,
-    /// Whether this tool can be auto-installed from GitHub.
+    /// Whether this tool can be auto-installed (from GitHub or NexusMods).
     pub can_auto_install: bool,
     /// GitHub "owner/repo" for tools that support auto-install.
     pub github_repo: Option<String>,
-    /// Direct download URL for tools not on GitHub.
+    /// NexusMods mod ID for tools distributed via Nexus (premium auto-download).
+    pub nexus_mod_id: Option<i64>,
+    /// NexusMods game domain slug (e.g. "skyrimspecialedition") for Nexus downloads.
+    pub nexus_game_slug: Option<String>,
+    /// Direct download URL for tools not on GitHub or Nexus.
     pub download_url: Option<String>,
     /// Software license identifier.
     pub license: String,
@@ -355,6 +359,8 @@ fn builtin_tools() -> Vec<ModTool> {
             category: "Framework".into(),
             can_auto_install: true,
             github_repo: Some("ianpatt/skse64".into()),
+            nexus_mod_id: None,
+            nexus_game_slug: None,
             download_url: None,
             license: "Proprietary".into(),
             wine_notes: Some("Works under Wine/Proton".into()),
@@ -378,6 +384,8 @@ fn builtin_tools() -> Vec<ModTool> {
             category: "Cleaning".into(),
             can_auto_install: true,
             github_repo: Some("TES5Edit/TES5Edit".into()),
+            nexus_mod_id: None,
+            nexus_game_slug: None,
             download_url: None,
             license: "MPL-2.0".into(),
             wine_notes: Some("Works well under Wine/Proton".into()),
@@ -400,6 +408,8 @@ fn builtin_tools() -> Vec<ModTool> {
             category: "Animation".into(),
             can_auto_install: true,
             github_repo: Some("Monitor221hz/Pandora-Behaviour-Engine-Plus".into()),
+            nexus_mod_id: None,
+            nexus_game_slug: None,
             download_url: None,
             license: "MIT".into(),
             wine_notes: Some("Works under Wine/Proton; backwards-compatible with FNIS and Nemesis animation mods".into()),
@@ -417,8 +427,10 @@ fn builtin_tools() -> Vec<ModTool> {
             requires_wine: true,
             category: "Body".into(),
             can_auto_install: true,
-            github_repo: Some("ousnius/BodySlide-and-Outfit-Studio".into()),
-            download_url: None,
+            github_repo: None,
+            nexus_mod_id: Some(201),
+            nexus_game_slug: Some("skyrimspecialedition".into()),
+            download_url: Some("https://www.nexusmods.com/skyrimspecialedition/mods/201".into()),
             license: "GPL-3.0".into(),
             wine_notes: Some("Works under Wine with some setup".into()),
             wine_compat: "good".into(),
@@ -435,8 +447,10 @@ fn builtin_tools() -> Vec<ModTool> {
             requires_wine: true,
             category: "Optimization".into(),
             can_auto_install: true,
-            github_repo: Some("Guekka/Cathedral-Assets-Optimizer".into()),
-            download_url: None,
+            github_repo: None,
+            nexus_mod_id: Some(23316),
+            nexus_game_slug: Some("skyrimspecialedition".into()),
+            download_url: Some("https://www.nexusmods.com/skyrimspecialedition/mods/23316".into()),
             license: "MPL-2.0".into(),
             wine_notes: Some("Generally works under Wine".into()),
             wine_compat: "good".into(),
@@ -453,8 +467,10 @@ fn builtin_tools() -> Vec<ModTool> {
             requires_wine: true,
             category: "Optimization".into(),
             can_auto_install: true,
-            github_repo: Some("ousnius/SSE-NIF-Optimizer".into()),
-            download_url: None,
+            github_repo: None,
+            nexus_mod_id: Some(4089),
+            nexus_game_slug: Some("skyrimspecialedition".into()),
+            download_url: Some("https://www.nexusmods.com/skyrimspecialedition/mods/4089".into()),
             license: "GPL-3.0".into(),
             wine_notes: None,
             wine_compat: "good".into(),
@@ -472,6 +488,8 @@ fn builtin_tools() -> Vec<ModTool> {
             category: "Patching".into(),
             can_auto_install: true,
             github_repo: Some("wrye-bash/wrye-bash".into()),
+            nexus_mod_id: None,
+            nexus_game_slug: None,
             download_url: None,
             license: "GPL-3.0".into(),
             wine_notes: Some("Native Linux support since v312; also works via Wine".into()),
@@ -491,6 +509,8 @@ fn builtin_tools() -> Vec<ModTool> {
             category: "INI".into(),
             can_auto_install: false,
             github_repo: None,
+            nexus_mod_id: None,
+            nexus_game_slug: None,
             download_url: Some("https://www.nexusmods.com/site/mods/631".into()),
             license: "CC BY-NC-SA 4.0".into(),
             wine_notes: Some("Python-based; may work under Wine. Corkscrew's built-in INI editor provides similar functionality natively.".into()),
@@ -509,6 +529,8 @@ fn builtin_tools() -> Vec<ModTool> {
             category: "LOD".into(),
             can_auto_install: false,
             github_repo: None,
+            nexus_mod_id: None,
+            nexus_game_slug: None,
             download_url: Some("https://www.nexusmods.com/skyrimspecialedition/mods/68518".into()),
             license: "Proprietary".into(),
             wine_notes: Some("Texconv issues under Wine; limited functionality on Linux".into()),
@@ -528,6 +550,8 @@ fn builtin_tools() -> Vec<ModTool> {
             category: "Animation".into(),
             can_auto_install: false,
             github_repo: None,
+            nexus_mod_id: None,
+            nexus_game_slug: None,
             download_url: Some("https://www.nexusmods.com/skyrimspecialedition/mods/60033".into()),
             license: "GPL-3.0".into(),
             wine_notes: Some("Poor Wine compatibility. Use Pandora instead — it is backwards-compatible with Nemesis animation mods.".into()),
@@ -546,6 +570,8 @@ fn builtin_tools() -> Vec<ModTool> {
             category: "Animation".into(),
             can_auto_install: false,
             github_repo: None,
+            nexus_mod_id: None,
+            nexus_game_slug: None,
             download_url: Some("https://www.nexusmods.com/skyrimspecialedition/mods/3038".into()),
             license: "Proprietary".into(),
             wine_notes: Some(
@@ -713,7 +739,11 @@ fn pick_asset<'a>(tool_id: &str, assets: &'a [GitHubAsset]) -> Option<&'a GitHub
         .map(|(i, _)| &assets[*i])
 }
 
-/// Download and install a tool from GitHub releases into the game's Tools directory.
+/// Download and install a tool from GitHub releases or NexusMods into the game's
+/// Tools directory.
+///
+/// Tries GitHub first (if `github_repo` is set), then falls back to NexusMods
+/// (if `nexus_mod_id` is set and user has a Nexus API key with premium).
 ///
 /// Returns the path to the installed tool's executable.
 pub async fn install_tool(tool_id: &str, game_data_dir: &Path) -> Result<String> {
@@ -723,25 +753,69 @@ pub async fn install_tool(tool_id: &str, game_data_dir: &Path) -> Result<String>
         return Err(ToolError::NoAutoInstall(tool_id.to_string()));
     }
 
-    let github_repo = tool_def
-        .github_repo
-        .as_ref()
-        .ok_or_else(|| ToolError::NoAutoInstall(tool_id.to_string()))?;
+    let client = reqwest::Client::builder()
+        .user_agent(format!("Corkscrew/{}", env!("CARGO_PKG_VERSION")))
+        .build()?;
 
+    // Try GitHub first, then NexusMods
+    let (archive_bytes, archive_name) = if let Some(github_repo) = &tool_def.github_repo {
+        install_tool_from_github(tool_id, github_repo, &client).await?
+    } else if let (Some(mod_id), Some(game_slug)) =
+        (&tool_def.nexus_mod_id, &tool_def.nexus_game_slug)
+    {
+        install_tool_from_nexus(tool_id, *mod_id, game_slug, &client).await?
+    } else {
+        return Err(ToolError::NoAutoInstall(tool_id.to_string()));
+    };
+
+    // Prepare target directory
+    let tools_dir = tools_install_dir(game_data_dir)?;
+    let tool_dir = tools_dir.join(&tool_def.id);
+    if tool_dir.exists() {
+        fs::remove_dir_all(&tool_dir)?;
+    }
+    fs::create_dir_all(&tool_dir)?;
+
+    // Extract archive
+    let name_lower = archive_name.to_lowercase();
+    if name_lower.ends_with(".zip") {
+        extract_zip(&archive_bytes, &tool_dir)?;
+    } else if name_lower.ends_with(".7z") {
+        extract_7z(&archive_bytes, &tool_dir)?;
+    } else {
+        return Err(ToolError::Other(format!(
+            "Unsupported archive format: {}",
+            archive_name
+        )));
+    }
+
+    // Flatten single-directory archives (if archive contains just one folder)
+    flatten_single_dir(&tool_dir)?;
+
+    // Find the executable in the extracted files
+    let exe_path = find_tool_exe(&tool_def, &tool_dir).ok_or(ToolError::ExeNotFound)?;
+
+    info!("Tool '{}' installed to: {}", tool_id, exe_path.display());
+
+    Ok(exe_path.to_string_lossy().to_string())
+}
+
+/// Download tool archive from GitHub releases.
+/// Returns (bytes, filename).
+async fn install_tool_from_github(
+    tool_id: &str,
+    github_repo: &str,
+    client: &reqwest::Client,
+) -> Result<(Vec<u8>, String)> {
     info!(
         "Installing mod tool '{}' from GitHub: {}",
         tool_id, github_repo
     );
 
-    // 1. Fetch latest release from GitHub API
     let api_url = format!(
         "https://api.github.com/repos/{}/releases/latest",
         github_repo
     );
-
-    let client = reqwest::Client::builder()
-        .user_agent(format!("Corkscrew/{}", env!("CARGO_PKG_VERSION")))
-        .build()?;
 
     let release: GitHubRelease = client
         .get(&api_url)
@@ -758,51 +832,125 @@ pub async fn install_tool(tool_id: &str, game_data_dir: &Path) -> Result<String>
         release.assets.len()
     );
 
-    // 2. Pick the best asset
     let asset = pick_asset(tool_id, &release.assets)
         .ok_or_else(|| ToolError::GitHub("No suitable archive found in release".into()))?;
 
     info!("Downloading asset: {} ({} bytes)", asset.name, asset.size);
 
-    // 3. Download the archive to a temp file
     let bytes = client
         .get(&asset.browser_download_url)
         .send()
         .await?
         .error_for_status()?
         .bytes()
-        .await?;
+        .await?
+        .to_vec();
 
-    // 4. Prepare target directory
-    let tools_dir = tools_install_dir(game_data_dir)?;
-    let tool_dir = tools_dir.join(&tool_def.id);
-    if tool_dir.exists() {
-        fs::remove_dir_all(&tool_dir)?;
+    Ok((bytes, asset.name.clone()))
+}
+
+/// Download tool archive from NexusMods (requires premium API key).
+/// Returns (bytes, filename).
+async fn install_tool_from_nexus(
+    tool_id: &str,
+    mod_id: i64,
+    game_slug: &str,
+    client: &reqwest::Client,
+) -> Result<(Vec<u8>, String)> {
+    info!(
+        "Installing mod tool '{}' from NexusMods: {}/mods/{}",
+        tool_id, game_slug, mod_id
+    );
+
+    // Get Nexus API key from config
+    let api_key = crate::config::get_config()
+        .ok()
+        .and_then(|c| c.nexus_api_key)
+        .ok_or_else(|| {
+            ToolError::Other(
+                "NexusMods API key required to auto-install this tool. \
+                 Set your API key in Settings → Authentication."
+                    .into(),
+            )
+        })?;
+
+    let nexus = crate::nexus::NexusClient::new(api_key);
+
+    // Check premium status — NexusMods compliance: free users cannot automate downloads
+    if !nexus.is_premium().await {
+        return Err(ToolError::Other(
+            "NexusMods Premium required to auto-install this tool. \
+             Free users can download it manually from the NexusMods website."
+                .into(),
+        ));
     }
-    fs::create_dir_all(&tool_dir)?;
 
-    // 5. Extract archive
-    let asset_lower = asset.name.to_lowercase();
-    if asset_lower.ends_with(".zip") {
-        extract_zip(&bytes, &tool_dir)?;
-    } else if asset_lower.ends_with(".7z") {
-        extract_7z(&bytes, &tool_dir)?;
-    } else {
-        return Err(ToolError::Other(format!(
-            "Unsupported archive format: {}",
-            asset.name
-        )));
-    }
+    // Get the mod's files list and pick the latest main file
+    let files = nexus
+        .get_mod_files(game_slug, mod_id)
+        .await
+        .map_err(|e| ToolError::Other(format!("Failed to fetch mod files: {}", e)))?;
 
-    // 6. Flatten single-directory archives (if archive contains just one folder)
-    flatten_single_dir(&tool_dir)?;
+    // Find the latest main file (category_id 1 = MAIN, category_id 4 = OLD_VERSION)
+    let main_file = files
+        .iter()
+        .filter(|f| {
+            f.get("category_id")
+                .and_then(|v| v.as_i64())
+                .map(|c| c == 1) // MAIN category
+                .unwrap_or(false)
+        })
+        .max_by_key(|f| {
+            f.get("uploaded_timestamp")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0)
+        })
+        .ok_or_else(|| ToolError::Other("No main file found on NexusMods page".into()))?;
 
-    // 7. Find the executable in the extracted files
-    let exe_path = find_tool_exe(&tool_def, &tool_dir).ok_or(ToolError::ExeNotFound)?;
+    let file_id = main_file
+        .get("file_id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| ToolError::Other("Missing file_id in NexusMods response".into()))?;
 
-    info!("Tool '{}' installed to: {}", tool_id, exe_path.display());
+    let file_name = main_file
+        .get("file_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("download.zip")
+        .to_string();
 
-    Ok(exe_path.to_string_lossy().to_string())
+    info!(
+        "Found NexusMods file: {} (id: {})",
+        file_name, file_id
+    );
+
+    // Get download links (premium-only automated download)
+    let links = nexus
+        .get_download_links(game_slug, mod_id, file_id, None, None)
+        .await
+        .map_err(|e| ToolError::Other(format!("Failed to get download links: {}", e)))?;
+
+    let download_url = links
+        .first()
+        .map(|l| l.uri.clone())
+        .ok_or_else(|| ToolError::Other("No download links returned".into()))?;
+
+    // Download the file
+    let bytes = client
+        .get(&download_url)
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?
+        .to_vec();
+
+    info!(
+        "Downloaded {} ({} bytes) from NexusMods",
+        file_name,
+        bytes.len()
+    );
+
+    Ok((bytes, file_name))
 }
 
 /// Extract a ZIP archive from bytes into the target directory.
@@ -1193,12 +1341,14 @@ mod tests {
     }
 
     #[test]
-    fn test_auto_install_tools_have_github_repo() {
+    fn test_auto_install_tools_have_install_source() {
         for tool in builtin_tools() {
             if tool.can_auto_install {
+                let has_source = tool.github_repo.is_some()
+                    || (tool.nexus_mod_id.is_some() && tool.nexus_game_slug.is_some());
                 assert!(
-                    tool.github_repo.is_some(),
-                    "Tool '{}' can auto-install but has no github_repo",
+                    has_source,
+                    "Tool '{}' can auto-install but has no github_repo or nexus_mod_id",
                     tool.id
                 );
             }
