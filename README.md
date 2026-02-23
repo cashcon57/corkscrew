@@ -26,7 +26,7 @@ Corkscrew installs, manages, and organizes mods for Windows games running throug
 
 It works by reading and writing directly to your Wine bottle's filesystem, the same way the game itself sees it. Your bottles, your mods, no middleman.
 
-> **v1.7** — In-app mod detail pages, SKSE/tool detection fixes, Pandora→Nemesis/FNIS suppression, README rendering fixes, full Wabbajack install pipeline, and 80+ supported games.
+> **v1.11** — Collection install progress with activity feed and stall detection, plugin search/filter, keyboard shortcuts (Cmd+A select all, Delete to uninstall, Cmd+F search), batch operation loading states, ARIA accessibility improvements, and NexusMods GraphQL API compatibility fixes.
 
 ---
 
@@ -176,10 +176,12 @@ Corkscrew includes an in-app auto-updater. When a new version is published on Gi
 - **Category chips** — Color-coded pills next to mod names showing their auto-detected content category.
 - **Search highlighting** — Search terms are highlighted in mod names as you type.
 - **Right-click context menu** — Right-click any mod row for quick access to Toggle, Edit Tags, Edit Notes, Reinstall, Check for Update, Open on Nexus, and Uninstall.
-- **Batch selection** — Select multiple mods with checkboxes for bulk Enable All, Disable All, or Uninstall via a floating action bar.
-- **Keyboard navigation** — Full keyboard support: arrow keys to navigate rows, Space to toggle, Enter for details, Ctrl/Cmd+F to search, Ctrl/Cmd+A to select all, Ctrl/Cmd+D to deploy.
+- **Batch selection** — Select multiple mods with checkboxes for bulk Enable All, Disable All, or Uninstall via a floating action bar. Bulk operations show loading states with disabled buttons during execution.
+- **Keyboard navigation** — Full keyboard support: arrow keys to navigate rows, Space to toggle, Enter for details, Ctrl/Cmd+F to search, Ctrl/Cmd+A to select all, Ctrl/Cmd+D to deploy, Delete/Backspace for batch uninstall.
 - **Deploy progress** — The Deploy button shows a real-time progress bar with mod-by-mod status during deployment.
+- **Deployment health sidebar** — Live stats showing enabled/deployed mod counts, file conflicts, and deploy method (hardlinks vs copies). Updates automatically after every mod state change.
 - **Persistent notification log** — All success/error/warning notifications are logged to a persistent database. Click the bell icon in the sidebar to review past notifications with timestamps.
+- **ARIA accessibility** — Toggle switches use `role="switch"` with `aria-pressed` and descriptive `aria-label` attributes. Drag handles include accessible labels.
 
 ### Nexus Mods Integration
 - **API key authentication** — Connect your Nexus Mods account via API key to access premium features. SSO/OAuth module is implemented and ready for use once NexusMods approves the application.
@@ -191,6 +193,9 @@ Corkscrew includes an in-app auto-updater. When a new version is published on Gi
 - **Embedded web views** — Toggle between in-app API browsing and an embedded NexusMods/Wabbajack website view. Powered by Tauri v2 multi-webview (native child webview, not an iframe). Available on Browse Nexus, Collections, and Wabbajack Gallery pages.
 - **Collections browser** — Browse NexusMods Collections via the GraphQL v2 API with search, sorting, advanced filtering, and detailed mod/revision views.
 - **Collection installation** — Premium users can install entire NexusMods Collections with one click. The orchestrator resolves install order, downloads mods via the NexusMods API, handles FOMOD selections from the collection manifest, deploys files, and applies the collection's plugin load order. Plugin load order sync works for all games with plugin support (Skyrim SE, Fallout 4, etc.), not just Skyrim SE. Free users see a list of mods with links to download manually from the Nexus website.
+- **Install progress dashboard** — Real-time collection install progress with phase indicators (downloading → staging → installing → complete), per-mod status tracking, download speed, activity feed with recently-completed items, summary chips (done/failed/skipped/pending counts), stall detection (warns after 30s of zero speed), and auto-expanding mod log on first failure.
+- **Failed install handling** — Dedicated failure panel with error summary, "Installed with errors" state, and post-completion navigation buttons (View Mods, Load Order, Back to Collections).
+- **Resume interrupted installs** — If a collection install is interrupted, a resume banner with mini progress bar appears on the collections page.
 - **Update checking** — Check installed mods against Nexus for available updates.
 - **Collection diff** — Compare your locally installed collection against the author's latest revision to see added, removed, and updated mods.
 - **Tool requirement detection** — Before installing a Collection or Wabbajack modlist, Corkscrew scans for required modding tools (SKSE, Nemesis, BodySlide, etc.) and prompts you to install missing tools before proceeding. Integrated tools (LOOT) are hidden since they're built into Corkscrew. Pandora automatically suppresses Nemesis/FNIS requirements since it's backwards-compatible with both.
@@ -200,6 +205,7 @@ Corkscrew includes an in-app auto-updater. When a new version is published on Gi
 - **LOOT-powered sorting** — Automatic plugin sorting using [libloot](https://github.com/loot/libloot) (the same engine behind LOOT), with masterlist fetching from GitHub.
 - **Manual drag-and-drop reorder** — Fine-tune your load order after LOOT sorts.
 - **Plugin enable/disable** — Toggle individual plugins without touching the mod.
+- **Plugin search/filter** — Search plugins by filename with Cmd/Ctrl+F. Drag-and-drop is disabled during search to prevent accidental reordering.
 - **Plugin warnings** — LOOT messages (info, warnings, errors) displayed inline per plugin.
 - **Custom plugin rules** — Define LoadAfter, LoadBefore, and Group rules for per-plugin ordering beyond what LOOT provides.
 
@@ -317,7 +323,7 @@ Adding a new game with enhanced support is a matter of writing a small plugin �
 
 ### Keyboard Shortcuts
 
-These shortcuts are available on the Mods page:
+**Mods page:**
 
 | Shortcut | Action |
 |----------|--------|
@@ -330,6 +336,12 @@ These shortcuts are available on the Mods page:
 | `Escape` | Clear selection / close panels |
 | `Delete` / `Backspace` | Uninstall selected mods |
 | Right-click | Open context menu on mod row |
+
+**Plugins page:**
+
+| Shortcut | Action |
+|----------|--------|
+| `Ctrl/Cmd + F` | Focus plugin search input |
 
 ---
 
