@@ -1798,6 +1798,41 @@ impl ModDatabase {
         Ok(result)
     }
 
+    /// Get all in-progress checkpoints (across all games/bottles).
+    /// Used at app startup to detect interrupted installs.
+    pub fn get_all_active_checkpoints(&self) -> Result<Vec<CollectionInstallCheckpoint>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT id, collection_name, game_id, bottle_name, manifest_json,
+                    status, total_mods, completed_mods, failed_mods, skipped_mods,
+                    mod_statuses, error_message, created_at, updated_at
+             FROM collection_install_checkpoints
+             WHERE status = 'in_progress'
+             ORDER BY updated_at DESC",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(CollectionInstallCheckpoint {
+                    id: row.get(0)?,
+                    collection_name: row.get(1)?,
+                    game_id: row.get(2)?,
+                    bottle_name: row.get(3)?,
+                    manifest_json: row.get(4)?,
+                    status: row.get(5)?,
+                    total_mods: row.get(6)?,
+                    completed_mods: row.get(7)?,
+                    failed_mods: row.get(8)?,
+                    skipped_mods: row.get(9)?,
+                    mod_statuses: row.get(10)?,
+                    error_message: row.get(11)?,
+                    created_at: row.get(12)?,
+                    updated_at: row.get(13)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// Mark a checkpoint as completed.
     pub fn complete_checkpoint(&self, checkpoint_id: i64) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());

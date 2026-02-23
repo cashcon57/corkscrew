@@ -9,7 +9,9 @@
   import { getVersion } from "@tauri-apps/api/app";
   import { check } from "@tauri-apps/plugin-updater";
   import { relaunch } from "@tauri-apps/plugin-process";
-  import { downloadFromNexus, getAllGames, getDownloadQueue, retryDownload, cancelDownload, clearFinishedDownloads, onDownloadQueueUpdate, listProfiles, listInstalledCollections, getConfig, launchGame } from "$lib/api";
+  import { downloadFromNexus, getAllGames, getDownloadQueue, retryDownload, cancelDownload, clearFinishedDownloads, onDownloadQueueUpdate, listProfiles, listInstalledCollections, getConfig, launchGame, getAllInterruptedInstalls, resumeCollectionInstall, abandonCollectionInstall, getPendingWabbajackInstalls } from "$lib/api";
+  import { resumeInstallTracking } from "$lib/installService";
+  import type { CollectionInstallCheckpoint, WabbajackInstallStatus } from "$lib/types";
   import { get } from "svelte/store";
   import type { DetectedGame, QueueItem } from "$lib/types";
   import NotificationLog from "$lib/components/mods/NotificationLog.svelte";
@@ -98,6 +100,11 @@
   // Keyboard shortcuts modal
   let showShortcuts = $state(false);
 
+  // Interrupted install resume state
+  let interruptedInstall = $state<CollectionInstallCheckpoint | null>(null);
+  let interruptedWj = $state<WabbajackInstallStatus | null>(null);
+  let resumingInstall = $state(false);
+
   // Friendly error message mapping for download errors
   function friendlyError(raw: string): string {
     const lower = raw.toLowerCase();
@@ -161,6 +168,9 @@
 
     // Check for app updates on startup
     checkForUpdates();
+
+    // Check for interrupted installs from previous session
+    checkInterruptedInstalls();
 
     // Subscribe to download queue updates
     getDownloadQueue().then(items => queueItems = items).catch(() => {});
@@ -304,6 +314,50 @@
       if (queueUnlisten) queueUnlisten();
     };
   });
+
+  async function checkInterruptedInstalls() {
+    try {
+      const checkpoints = await getAllInterruptedInstalls();
+      if (checkpoints.length > 0) {
+        interruptedInstall = checkpoints[0];
+        return;
+      }
+    } catch { /* no checkpoint table yet */ }
+
+    try {
+      const pending = await getPendingWabbajackInstalls();
+      if (pending.length > 0) {
+        interruptedWj = pending[0];
+      }
+    } catch { /* no wj table yet */ }
+  }
+
+  async function handleResumeInterrupted() {
+    if (!interruptedInstall) return;
+    resumingInstall = true;
+    try {
+      const cp = interruptedInstall;
+      const modStatuses: Record<string, string> = cp.mod_statuses ? JSON.parse(cp.mod_statuses) : {};
+      await resumeInstallTracking(cp.collection_name, cp.total_mods, cp.completed_mods, modStatuses);
+      interruptedInstall = null;
+      resumeCollectionInstall(cp.id).catch((e: unknown) => wrappedShowError(`Resume failed: ${e}`));
+      navigate("collections");
+    } catch (e) {
+      wrappedShowError(`Failed to resume install: ${e}`);
+    } finally {
+      resumingInstall = false;
+    }
+  }
+
+  async function handleDismissInterrupted() {
+    if (interruptedInstall) {
+      try { await abandonCollectionInstall(interruptedInstall.id); } catch {}
+      interruptedInstall = null;
+    }
+    if (interruptedWj) {
+      interruptedWj = null;
+    }
+  }
 
   async function loadDetectedGames() {
     try {
@@ -777,6 +831,34 @@
               </button>
             {/if}
           {/if}
+        </div>
+      {/if}
+
+      {#if interruptedInstall || interruptedWj}
+        <div class="resume-banner" role="alert">
+          <div class="resume-banner-icon">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+              <line x1="12" y1="9" x2="12" y2="13" />
+              <line x1="12" y1="17" x2="12.01" y2="17" />
+            </svg>
+          </div>
+          <div class="resume-banner-text">
+            <strong>Interrupted Installation</strong>
+            {#if interruptedInstall}
+              "{interruptedInstall.collection_name}" &mdash; {interruptedInstall.completed_mods}/{interruptedInstall.total_mods} mods completed
+            {:else if interruptedWj}
+              "{interruptedWj.modlist_name}" &mdash; interrupted
+            {/if}
+          </div>
+          <div class="resume-banner-actions">
+            {#if interruptedInstall}
+              <button class="btn btn-accent btn-sm" onclick={handleResumeInterrupted} disabled={resumingInstall}>
+                {resumingInstall ? "Resuming..." : "Resume"}
+              </button>
+            {/if}
+            <button class="btn btn-ghost btn-sm" onclick={handleDismissInterrupted}>Dismiss</button>
+          </div>
         </div>
       {/if}
 
@@ -1313,6 +1395,36 @@
 
   .update-notes-toggle:hover {
     text-decoration: underline;
+  }
+
+  /* --- Resume banner --- */
+
+  .resume-banner {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3, 12px);
+    padding: 10px 16px;
+    margin-bottom: var(--space-3, 12px);
+    background: rgba(255, 170, 0, 0.08);
+    border: 1px solid rgba(255, 170, 0, 0.25);
+    border-radius: var(--radius-md, 8px);
+    font-size: 13px;
+  }
+
+  .resume-banner-icon {
+    color: #ffaa00;
+    flex-shrink: 0;
+  }
+
+  .resume-banner-text {
+    flex: 1;
+    color: var(--text-primary);
+  }
+
+  .resume-banner-actions {
+    display: flex;
+    gap: var(--space-2, 8px);
+    flex-shrink: 0;
   }
 
   /* --- Content column --- */

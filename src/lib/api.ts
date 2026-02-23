@@ -1343,6 +1343,12 @@ export async function getIncompleteCollectionInstalls(
   return invoke("get_incomplete_collection_installs", { gameId, bottleName });
 }
 
+export async function getAllInterruptedInstalls(): Promise<
+  import("./types").CollectionInstallCheckpoint[]
+> {
+  return invoke("get_all_interrupted_installs");
+}
+
 export async function resumeCollectionInstall(
   checkpointId: number,
 ): Promise<Record<string, unknown>> {

@@ -3066,6 +3066,16 @@ async fn get_incomplete_collection_installs(
 }
 
 #[tauri::command]
+async fn get_all_interrupted_installs(
+    state: State<'_, AppState>,
+) -> Result<Vec<database::CollectionInstallCheckpoint>, String> {
+    state
+        .db
+        .get_all_active_checkpoints()
+        .map_err(|e| format!("Failed to query interrupted installs: {}", e))
+}
+
+#[tauri::command]
 async fn resume_collection_install_cmd(
     app: AppHandle,
     checkpoint_id: i64,
@@ -4131,6 +4141,7 @@ pub fn run() {
             parse_collection_bundle_cmd,
             install_collection_cmd,
             get_incomplete_collection_installs,
+            get_all_interrupted_installs,
             resume_collection_install_cmd,
             abandon_collection_install,
             get_pending_wabbajack_installs,
