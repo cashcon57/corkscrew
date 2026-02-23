@@ -400,6 +400,7 @@ fn builtin_tools() -> Vec<ModTool> {
             description: "Animation engine — replaces FNIS and Nemesis with better Wine support"
                 .into(),
             exe_names: vec![
+                "Pandora Behaviour Engine+.exe".into(),
                 "Pandora Behaviour Engine.exe".into(),
                 "Pandora.exe".into(),
             ],
@@ -699,13 +700,29 @@ fn pick_asset<'a>(tool_id: &str, assets: &'a [GitHubAsset]) -> Option<&'a GitHub
             }
         }
         "pandora" => {
-            // Pandora releases may include source zips — prefer the release archive
-            archives
+            // Pandora has multiple variants: self-contained (no suffix) and _net (needs .NET).
+            // Prefer the self-contained one (largest, no _net/_arm64/_x86 suffix) for Wine compat.
+            let self_contained: Vec<&(usize, &String)> = archives
                 .iter()
                 .filter(|(_, n)| {
-                    !n.contains("src") && !n.contains("source") && !n.contains("linux")
-                        && (n.contains("pandora") || n.contains("release"))
+                    n.contains("pandora")
+                        && !n.contains("_net")
+                        && !n.contains("arm64")
+                        && !n.contains("x86")
+                        && !n.contains("src")
+                        && !n.contains("source")
                 })
+                .collect();
+            if !self_contained.is_empty() {
+                return self_contained
+                    .iter()
+                    .max_by_key(|(i, _)| assets[*i].size)
+                    .map(|(i, _)| &assets[*i]);
+            }
+            // Fallback: any pandora archive
+            archives
+                .iter()
+                .filter(|(_, n)| n.contains("pandora") && !n.contains("src"))
                 .collect()
         }
         "wryebash" => archives
