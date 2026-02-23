@@ -893,7 +893,7 @@
     try {
       const result = await fixSkyrimDisplay(game.bottle_name);
       if (result.fixed) {
-        showSuccess(`Display fixed: ${result.applied.width}x${result.applied.height} borderless windowed (was ${result.previous.width}x${result.previous.height})`);
+        showSuccess(`Display fixed: ${result.applied.width}x${result.applied.height} fullscreen (was ${result.previous.width}x${result.previous.height})`);
       } else {
         showSuccess(`Display settings already correct: ${result.applied.width}x${result.applied.height}`);
       }

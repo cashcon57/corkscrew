@@ -339,11 +339,10 @@ pub fn read_display_settings(prefs_path: &Path) -> Result<DisplaySettings, Strin
     })
 }
 
-/// Apply display fix: set resolution to Mac's native resolution in borderless
-/// windowed mode. Exclusive fullscreen (`bFull Screen=1`) causes Wine/CrossOver
-/// to open a Windows-style fullscreen window on macOS. Borderless windowed
-/// (`bFull Screen=0`, `bBorderless=1`) renders at full resolution while playing
-/// nicely with macOS window management.
+/// Apply display fix: set resolution to Mac's native resolution in exclusive
+/// fullscreen mode. This maps to a macOS native fullscreen Space that the user
+/// can 3-finger-swipe away from. Borderless windowed stays on the current
+/// desktop and doesn't get its own Space.
 pub fn fix_display_settings(
     prefs_path: &Path,
     width: u32,
@@ -355,8 +354,8 @@ pub fn fix_display_settings(
     let mut updated = content.clone();
     updated = set_ini_display_value(&updated, "iSize W", &width.to_string());
     updated = set_ini_display_value(&updated, "iSize H", &height.to_string());
-    updated = set_ini_display_value(&updated, "bFull Screen", "0");
-    updated = set_ini_display_value(&updated, "bBorderless", "1");
+    updated = set_ini_display_value(&updated, "bFull Screen", "1");
+    updated = set_ini_display_value(&updated, "bBorderless", "0");
 
     // Write via temp file + rename for atomicity
     let temp_path = prefs_path.with_extension("ini.tmp");
@@ -366,8 +365,8 @@ pub fn fix_display_settings(
     Ok(DisplaySettings {
         width,
         height,
-        fullscreen: false,
-        borderless: true,
+        fullscreen: true,
+        borderless: false,
     })
 }
 
@@ -383,8 +382,8 @@ pub fn auto_fix_display(bottle: &Bottle) -> Result<DisplayFixResult, String> {
     // Check if fix is even needed
     if previous.width == screen_w
         && previous.height == screen_h
-        && !previous.fullscreen
-        && previous.borderless
+        && previous.fullscreen
+        && !previous.borderless
     {
         return Ok(DisplayFixResult {
             fixed: false,
@@ -486,17 +485,17 @@ fMusicVolume=0.5
         let mut content = SAMPLE_INI.to_string();
         content = set_ini_display_value(&content, "iSize W", "2560");
         content = set_ini_display_value(&content, "iSize H", "1440");
-        content = set_ini_display_value(&content, "bFull Screen", "0");
-        content = set_ini_display_value(&content, "bBorderless", "1");
+        content = set_ini_display_value(&content, "bFull Screen", "1");
+        content = set_ini_display_value(&content, "bBorderless", "0");
 
         assert!(content.contains("iSize W=2560"));
         assert!(content.contains("iSize H=1440"));
-        assert!(content.contains("bFull Screen=0"));
-        assert!(content.contains("bBorderless=1"));
+        assert!(content.contains("bFull Screen=1"));
+        assert!(content.contains("bBorderless=0"));
         // Original values should be gone
         assert!(!content.contains("iSize W=1280"));
         assert!(!content.contains("iSize H=720"));
-        assert!(!content.contains("bBorderless=0"));
+        assert!(!content.contains("bFull Screen=0"));
     }
 
     #[test]
