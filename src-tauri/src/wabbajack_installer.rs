@@ -1,16 +1,19 @@
 // ---------------------------------------------------------------------------
-// Wabbajack Install Orchestrator — Phase 3
+// Wabbajack Install Orchestrator
 //
 // Coordinates the full Wabbajack modlist installation pipeline:
 //   Pending → PreFlight → Downloading → Extracting → Processing → Deploying → Completed
 //
-// Stubbed subsystems (WjDownloader, DirectiveProcessor) are marked with TODO
-// comments and will be implemented in subsequent phases.
+// Uses WjDownloader for archive downloads (Phase 4), DirectiveProcessor for
+// file production/patching (Phase 5), and deployer for game directory
+// deployment with atomic rollback (Phase 6).
 // ---------------------------------------------------------------------------
 
 use crate::database::ModDatabase;
 use crate::nexus;
 use crate::oauth;
+use crate::wabbajack_downloader::WjDownloader;
+use crate::wabbajack_directives::DirectiveProcessor;
 use crate::wabbajack_types::*;
 
 use serde::Serialize;
@@ -506,124 +509,29 @@ pub async fn install_wabbajack_modlist(
         },
     );
 
-    // TODO: Phase 4 — Create WjDownloader and call download_all_archives()
-    //
-    // The download phase will:
-    //   let downloader = WjDownloader::new(app, db, download_dir, &cancel_token);
-    //   let download_results = downloader.download_all_archives(&modlist.archives).await?;
-    //
-    // For each archive, the downloader will:
-    //   1. Check if already cached (by xxhash in download_registry)
-    //   2. Determine download strategy based on WjArchiveState variant:
-    //      - Nexus: Use nexus API (premium) or open browser (free)
-    //      - Http/WabbajackCDN: Direct HTTP download
-    //      - Manual: Emit UserActionRequired event, wait for user
-    //      - GoogleDrive/Mega/etc.: Open browser link
-    //   3. Verify downloaded file hash matches archive.hash
-    //   4. Update wabbajack_archive_status in DB
-    //   5. Emit progress events
-    //
-    // For now, we build a map of archive hash → download path from cached archives.
-    let mut archive_download_paths: HashMap<String, PathBuf> = HashMap::new();
-
-    for (idx, archive) in modlist.archives.iter().enumerate() {
-        if is_cancelled(&cancel_token) {
-            mark_cancelled(db, install_id);
-            emit_progress(app, &WjInstallProgressEvent::InstallCancelled);
-            return Err(WjInstallError::Cancelled);
+    // Get Nexus API key and premium status for the downloader
+    let (nexus_api_key, is_premium) = match oauth::get_auth_method() {
+        oauth::AuthMethod::ApiKey(key) => {
+            let client = nexus::NexusClient::new(key.clone());
+            let premium = client.is_premium().await;
+            (Some(key), premium)
         }
-
-        let hash_str = &archive.hash.0;
-        let archive_name = if archive.name.is_empty() {
-            format!("archive_{}", idx)
-        } else {
-            archive.name.clone()
-        };
-
-        // Check for cached download
-        if !hash_str.is_empty() {
-            if let Ok(Some(cached_path)) = db.find_download_by_xxhash(hash_str) {
-                let path = PathBuf::from(&cached_path);
-                if path.exists() {
-                    archive_download_paths.insert(hash_str.clone(), path);
-                    emit_progress(
-                        app,
-                        &WjInstallProgressEvent::DownloadSkipped {
-                            name: archive_name.clone(),
-                            reason: "Already cached".to_string(),
-                        },
-                    );
-
-                    db.upsert_wj_archive_status(
-                        install_id,
-                        hash_str,
-                        &archive_name,
-                        archive.state.source_type_name(),
-                        "verified",
-                        Some(&cached_path),
-                        None,
-                    )
-                    .map_err(|e| WjInstallError::Database(e.to_string()))?;
-
-                    continue;
-                }
-            }
+        oauth::AuthMethod::OAuth(tokens) => {
+            let premium = oauth::parse_user_info(&tokens.access_token)
+                .map(|u| u.is_premium)
+                .unwrap_or(false);
+            // OAuth doesn't provide an API key for NexusMods REST API;
+            // NexusMods downloads will require manual action.
+            (None, premium)
         }
+        oauth::AuthMethod::None => (None, false),
+    };
 
-        // Also check if the file exists in the download directory by name
-        let download_path = download_dir.join(&archive_name);
-        if download_path.exists() {
-            archive_download_paths.insert(hash_str.clone(), download_path.clone());
-            emit_progress(
-                app,
-                &WjInstallProgressEvent::DownloadSkipped {
-                    name: archive_name.clone(),
-                    reason: "Found in download directory".to_string(),
-                },
-            );
-
-            db.upsert_wj_archive_status(
-                install_id,
-                hash_str,
-                &archive_name,
-                archive.state.source_type_name(),
-                "downloaded",
-                Some(&download_path.to_string_lossy()),
-                None,
-            )
-            .map_err(|e| WjInstallError::Database(e.to_string()))?;
-
-            continue;
-        }
-
-        // TODO: Phase 4 — Actually download the archive here
-        // For now, mark as failed/skipped and add a warning
-        let skip_reason = format!(
-            "Download not yet implemented for {} source '{}'",
-            archive.state.source_type_name(),
-            archive_name
-        );
-        warnings.push(skip_reason.clone());
-
-        emit_progress(
-            app,
-            &WjInstallProgressEvent::DownloadSkipped {
-                name: archive_name.clone(),
-                reason: skip_reason,
-            },
-        );
-
-        db.upsert_wj_archive_status(
-            install_id,
-            hash_str,
-            &archive_name,
-            archive.state.source_type_name(),
-            "skipped",
-            None,
-            Some("Download not yet implemented"),
-        )
-        .map_err(|e| WjInstallError::Database(e.to_string()))?;
-    }
+    let downloader = WjDownloader::new(nexus_api_key, is_premium, download_dir.to_path_buf());
+    let archive_download_paths = downloader
+        .download_all_archives(app, db, install_id, &modlist.archives, 8, &cancel_token)
+        .await
+        .map_err(|e| WjInstallError::Download(e.to_string()))?;
 
     db.update_wj_install_archive_progress(install_id, archive_download_paths.len() as i64)
         .map_err(|e| WjInstallError::Database(e.to_string()))?;
@@ -716,65 +624,62 @@ pub async fn install_wabbajack_modlist(
         },
     );
 
-    // TODO: Phase 5 — Create DirectiveProcessor and call process_all()
-    //
-    // The directive processor will:
-    //   let processor = DirectiveProcessor::new(
-    //       app, db, install_dir, &extracted_dirs, &cancel_token,
-    //   );
-    //   let processed_files = processor.process_all(&modlist.directives).await?;
-    //
-    // For each directive type:
-    //   - FromArchive: Copy file from extracted archive to staging
-    //   - PatchedFromArchive: Apply binary patch (from .wabbajack patches/ entry)
-    //   - InlineFile: Write embedded data from .wabbajack inline/ entry
-    //   - RemappedInlineFile: Write + remap paths in embedded data
-    //   - CreateBSA: Pack files into a BSA/BA2 archive
-    //   - TransformedTexture: Resize/convert texture from archive
-    //   - MergedPatch: Apply multi-source merge patch
-    //   - IgnoredDirectly: Skip (no action needed)
-    //
-    // Each processed file is staged in install_dir with the correct relative path.
+    // Determine game data directory for directive path substitution
+    let game_dir = {
+        let bottles = crate::bottles::detect_bottles();
+        let bottle = bottles.iter().find(|b| b.name == bottle_name);
+        bottle
+            .and_then(|b| {
+                crate::games::with_plugin(game_id, |plugin| {
+                    plugin.detect(b).map(|g| g.data_dir)
+                })
+                .flatten()
+            })
+            .unwrap_or_else(|| install_dir.join("Data"))
+    };
 
-    let mut processed_count = 0usize;
-    for (idx, directive) in modlist.directives.iter().enumerate() {
-        if is_cancelled(&cancel_token) {
-            mark_cancelled(db, install_id);
-            emit_progress(app, &WjInstallProgressEvent::InstallCancelled);
-            return Err(WjInstallError::Cancelled);
-        }
+    let processor = DirectiveProcessor::new(
+        wabbajack_path.to_path_buf(),
+        extracted_dirs.clone(),
+        install_dir.to_path_buf(),
+        game_dir.clone(),
+    );
 
-        if idx % 100 == 0 {
-            emit_progress(
-                app,
-                &WjInstallProgressEvent::DirectiveProgress {
-                    current: idx,
-                    total: total_directives,
-                    directive_type: directive.kind_name().to_string(),
-                },
-            );
-        }
-
-        match directive {
-            WjDirective::IgnoredDirectly { reason, .. } => {
-                log::debug!("Skipping ignored directive: {}", reason);
-                processed_count += 1;
+    let app_clone = app.clone();
+    let directive_result = processor
+        .process_all(&modlist.directives, &|current, total| {
+            if current % 100 == 0 || current == total {
+                emit_progress(
+                    &app_clone,
+                    &WjInstallProgressEvent::DirectiveProgress {
+                        current,
+                        total,
+                        directive_type: "processing".to_string(),
+                    },
+                );
             }
-            _ => {
-                // TODO: Phase 5 — Process each directive type
-                // For now, just count them as "processed" (no-op)
-                processed_count += 1;
-            }
-        }
+        })
+        .map_err(|e| WjInstallError::Directive(e.to_string()))?;
 
-        // Update DB progress periodically
-        if idx % 500 == 0 {
-            let _ = db.update_wj_install_directive_progress(install_id, processed_count as i64);
-        }
+    let processed_count = directive_result.total_processed;
+
+    // Merge directive warnings and errors
+    for w in &directive_result.warnings {
+        warnings.push(format!("Directive: {}", w));
+    }
+    for e in &directive_result.errors {
+        warnings.push(format!("Directive error: {}", e));
     }
 
     db.update_wj_install_directive_progress(install_id, processed_count as i64)
         .map_err(|e| WjInstallError::Database(e.to_string()))?;
+
+    log::info!(
+        "Directive processing complete: {} processed, {} skipped, {} errors",
+        directive_result.total_processed,
+        directive_result.total_skipped,
+        directive_result.errors.len(),
+    );
 
     // Check cancellation
     if is_cancelled(&cancel_token) {
@@ -789,28 +694,73 @@ pub async fn install_wabbajack_modlist(
     db.update_wj_install_status(install_id, "deploying", None)
         .map_err(|e| WjInstallError::Database(e.to_string()))?;
 
-    // TODO: Phase 6 — Use crate::deployer to deploy processed files
-    //
-    // The deployment step will:
-    //   1. Collect all processed/staged files from install_dir
-    //   2. Use deployer::deploy_mod() or similar to hardlink/copy files
-    //      into the game's data directory
-    //   3. Register deployed files in the database
-    //   4. Emit DeployStarted / DeployProgress events
-    //
-    // For now, emit stub events:
-    let files_deployed = 0usize;
+    // Collect all files produced by directive processing for deployment
+    let mut deploy_files: Vec<String> = Vec::new();
+    for entry in walkdir::WalkDir::new(install_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+    {
+        if let Ok(rel) = entry.path().strip_prefix(install_dir) {
+            let rel_str = rel.to_string_lossy().to_string();
+            // Skip temp extraction dirs and hidden files
+            if !rel_str.starts_with(".wj_") && !rel_str.starts_with('.') {
+                deploy_files.push(rel_str);
+            }
+        }
+    }
+
     emit_progress(
         app,
-        &WjInstallProgressEvent::DeployStarted { total: 0 },
-    );
-    emit_progress(
-        app,
-        &WjInstallProgressEvent::DeployProgress {
-            current: 0,
-            total: 0,
+        &WjInstallProgressEvent::DeployStarted {
+            total: deploy_files.len(),
         },
     );
+
+    let files_deployed = if deploy_files.is_empty() {
+        0usize
+    } else {
+        // Create a mod record for the modlist output
+        let mod_id = db
+            .add_mod(
+                game_id,
+                bottle_name,
+                None, // no nexus_mod_id
+                &modlist.name,
+                &modlist.version,
+                &format!("{}.wabbajack", modlist.name),
+                &deploy_files,
+            )
+            .map_err(|e| WjInstallError::Database(e.to_string()))?;
+
+        let deploy_result = crate::deployer::deploy_mod_atomic(
+            db,
+            game_id,
+            bottle_name,
+            mod_id,
+            install_dir,
+            &game_dir,
+            &deploy_files,
+        )
+        .map_err(|e| WjInstallError::Deployment(e.to_string()))?;
+
+        emit_progress(
+            app,
+            &WjInstallProgressEvent::DeployProgress {
+                current: deploy_result.deployed_count,
+                total: deploy_files.len(),
+            },
+        );
+
+        log::info!(
+            "Deployed {} files ({} skipped, fallback: {})",
+            deploy_result.deployed_count,
+            deploy_result.skipped_count,
+            deploy_result.fallback_used,
+        );
+
+        deploy_result.deployed_count
+    };
 
     // -----------------------------------------------------------------------
     // Step 8: Mark completed in DB

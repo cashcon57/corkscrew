@@ -239,13 +239,21 @@ pub async fn install_collection(
         }
     }
 
-    // Apply plugin load order from manifest
-    if !manifest.plugins.is_empty() && game_id == "skyrimse" {
-        apply_collection_plugin_order(&manifest.plugins, game, &bottle);
+    // Apply plugin load order from manifest (works for any game with plugin support)
+    if !manifest.plugins.is_empty() {
+        let has_plugin_support = games::with_plugin(game_id, |plugin| {
+            plugin.get_plugins_file(Path::new(&game.game_path), &bottle)
+        })
+        .flatten()
+        .is_some();
+
+        if has_plugin_support {
+            apply_collection_plugin_order(&manifest.plugins, game, &bottle);
+        }
     }
 
-    // Sync plugins if Skyrim SE
-    if game_id == "skyrimse" {
+    // Sync plugins for games that support them
+    {
         let game_path = Path::new(&game.game_path);
         let plugins_file = games::with_plugin(game_id, |plugin| {
             plugin.get_plugins_file(game_path, &bottle)
@@ -286,19 +294,17 @@ pub async fn install_collection(
     // Auto-create a profile snapshot for the installed collection
     let profile_name = format!("{} (auto)", manifest.name);
     if let Ok(profile_id) = profiles::create_profile(db, game_id, bottle_name, &profile_name) {
-        // Try to find plugins file for snapshot (Skyrim SE only)
-        let plugins_file = if game_id == "skyrimse" {
-            let bottle = bottles::detect_bottles()
+        // Try to find plugins file for snapshot (any game with plugin support)
+        let plugins_file = {
+            let snapshot_bottle = bottles::detect_bottles()
                 .into_iter()
                 .find(|b| b.name == bottle_name);
-            bottle.and_then(|b| {
+            snapshot_bottle.and_then(|b| {
                 games::with_plugin(game_id, |plugin| {
                     plugin.get_plugins_file(Path::new(&game.game_path), &b)
                 })
                 .flatten()
             })
-        } else {
-            None
         };
         let _ = profiles::snapshot_current_state(
             db,

@@ -230,6 +230,31 @@ pub fn deploy_mod(
     })
 }
 
+/// Deploy a mod atomically: if deployment fails partway through, roll back
+/// any partially deployed files so the game directory is not left in a
+/// broken state.
+pub fn deploy_mod_atomic(
+    db: &ModDatabase,
+    game_id: &str,
+    bottle_name: &str,
+    mod_id: i64,
+    staging_path: &Path,
+    data_dir: &Path,
+    files: &[String],
+) -> Result<DeployResult> {
+    match deploy_mod(db, game_id, bottle_name, mod_id, staging_path, data_dir, files) {
+        Ok(result) => Ok(result),
+        Err(e) => {
+            warn!(
+                "deploy_mod failed for mod {}, rolling back partially deployed files: {}",
+                mod_id, e
+            );
+            let _ = undeploy_mod(db, game_id, bottle_name, mod_id, data_dir);
+            Err(e)
+        }
+    }
+}
+
 /// Undeploy a single mod: remove all its deployed files from data_dir.
 ///
 /// If a lower-priority mod also has a file at the same path, that mod's file

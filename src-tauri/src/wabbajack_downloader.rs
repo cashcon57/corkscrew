@@ -265,21 +265,26 @@ impl WjDownloader {
             .text()
             .await?;
 
-        let document = scraper::Html::parse_document(&page_html);
-        let selector = scraper::Selector::parse("a#downloadButton, a.input.popsok")
-            .map_err(|_| WjDownloadError::Other("Failed to parse CSS selector".into()))?;
+        // Extract the real download URL from the MediaFire page.
+        // Scope the HTML parsing so the non-Send `scraper::Html` is dropped
+        // before we hit the next `.await`.
+        let real_url = {
+            let document = scraper::Html::parse_document(&page_html);
+            let selector = scraper::Selector::parse("a#downloadButton, a.input.popsok")
+                .map_err(|_| WjDownloadError::Other("Failed to parse CSS selector".into()))?;
 
-        let real_url = document
-            .select(&selector)
-            .next()
-            .and_then(|el| el.value().attr("href"))
-            .ok_or_else(|| {
-                WjDownloadError::Other(
-                    "Could not find download link on MediaFire page".into(),
-                )
-            })?;
+            document
+                .select(&selector)
+                .next()
+                .and_then(|el| el.value().attr("href").map(|s| s.to_owned()))
+                .ok_or_else(|| {
+                    WjDownloadError::Other(
+                        "Could not find download link on MediaFire page".into(),
+                    )
+                })?
+        };
 
-        self.stream_download(app, archive_name, real_url, &HeaderMap::new())
+        self.stream_download(app, archive_name, &real_url, &HeaderMap::new())
             .await
     }
 
