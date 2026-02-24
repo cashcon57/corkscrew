@@ -12,9 +12,10 @@
 //! - **Linux (Wayland)**: Uses wlr-randr or xdpyinfo via XWayland.
 //! - **SteamOS/Steam Deck**: Detects Gamescope resolution or defaults to 1280x800.
 //!
-//! The fix applies two changes:
+//! The fix applies three changes:
 //! 1. **SkyrimPrefs.ini**: Set detected resolution + `bFull Screen=1`
 //! 2. **Wine registry**: Remove virtual desktop settings that force windowed mode
+//! 3. **Wine registry**: Configure mouse capture for proper fullscreen input
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -724,11 +725,108 @@ fn remove_registry_key(content: &str, section_header: &str, key_name: &str) -> S
 // Full pipeline
 // ---------------------------------------------------------------------------
 
+/// Configure Wine registry keys for proper mouse capture in fullscreen.
+///
+/// Without these settings, Wine on macOS shows the OS cursor alongside the
+/// game cursor and maps mouse coordinates incorrectly (offset from the actual
+/// position). This sets:
+/// - `CaptureDisplaysForFullscreen=Y` in `[Software\\Wine\\Mac Driver]` — tells
+///   Wine to take exclusive control of the display in fullscreen, hiding the OS cursor
+/// - `MouseWarpOverride=enable` in `[Software\\Wine\\DirectInput]` — forces Wine
+///   to properly warp the mouse pointer so game and OS coordinates match
+pub fn fix_mouse_capture(bottle: &Bottle) -> Result<(), String> {
+    let user_reg = bottle.path.join("user.reg");
+    let mut content = if user_reg.exists() {
+        fs::read_to_string(&user_reg)
+            .map_err(|e| format!("Failed to read user.reg: {}", e))?
+    } else {
+        String::new()
+    };
+
+    // --- CaptureDisplaysForFullscreen in [Software\\Wine\\Mac Driver] ---
+    let mac_section = "[Software\\\\Wine\\\\Mac Driver]";
+    let capture_key = "\"CaptureDisplaysForFullscreen\"";
+    let capture_entry = "\"CaptureDisplaysForFullscreen\"=\"Y\"";
+
+    if content.contains(mac_section) {
+        if content.contains(capture_key) {
+            // Replace existing value
+            let mut replaced = false;
+            content = content
+                .lines()
+                .map(|line| {
+                    if !replaced && line.trim().starts_with(capture_key) {
+                        replaced = true;
+                        capture_entry.to_string()
+                    } else {
+                        line.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+        } else {
+            // Add after section header
+            if let Some(pos) = content.find(mac_section) {
+                let after = pos + mac_section.len();
+                if let Some(nl) = content[after..].find('\n') {
+                    let insert = after + nl + 1;
+                    content.insert_str(insert, &format!("{}\n", capture_entry));
+                }
+            }
+        }
+    } else {
+        content.push_str(&format!("\n{}\n{}\n", mac_section, capture_entry));
+    }
+
+    // --- MouseWarpOverride in [Software\\Wine\\DirectInput] ---
+    let di_section = "[Software\\\\Wine\\\\DirectInput]";
+    let warp_key = "\"MouseWarpOverride\"";
+    let warp_entry = "\"MouseWarpOverride\"=\"enable\"";
+
+    if content.contains(di_section) {
+        if content.contains(warp_key) {
+            let mut replaced = false;
+            content = content
+                .lines()
+                .map(|line| {
+                    if !replaced && line.trim().starts_with(warp_key) {
+                        replaced = true;
+                        warp_entry.to_string()
+                    } else {
+                        line.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+        } else {
+            if let Some(pos) = content.find(di_section) {
+                let after = pos + di_section.len();
+                if let Some(nl) = content[after..].find('\n') {
+                    let insert = after + nl + 1;
+                    content.insert_str(insert, &format!("{}\n", warp_entry));
+                }
+            }
+        }
+    } else {
+        content.push_str(&format!("\n{}\n{}\n", di_section, warp_entry));
+    }
+
+    // Atomic write
+    let tmp = user_reg.with_extension("reg.tmp");
+    fs::write(&tmp, &content)
+        .map_err(|e| format!("Failed to write temp registry file: {}", e))?;
+    fs::rename(&tmp, &user_reg)
+        .map_err(|e| format!("Failed to rename temp registry file: {}", e))?;
+
+    Ok(())
+}
+
 /// Full pipeline: detect resolution, find prefs, fix INI + Wine registry.
 ///
 /// 1. Detects correct resolution for the platform and bottle's Retina setting
 /// 2. Sets SkyrimPrefs.ini to detected resolution in exclusive fullscreen
 /// 3. Removes Wine virtual desktop to allow true fullscreen
+/// 4. Configures mouse capture for proper fullscreen input
 pub fn auto_fix_display(bottle: &Bottle) -> Result<DisplayFixResult, String> {
     let (screen_w, screen_h) = detect_screen_resolution(bottle)?;
 
@@ -737,9 +835,13 @@ pub fn auto_fix_display(bottle: &Bottle) -> Result<DisplayFixResult, String> {
 
     let previous = read_display_settings(&prefs_path)?;
 
-    // Always attempt Wine registry fix (virtual desktop may be the only issue)
+    // Always attempt Wine registry fixes
     if let Err(e) = disable_wine_virtual_desktop(bottle) {
         warn!("Could not disable Wine virtual desktop: {}", e);
+    }
+
+    if let Err(e) = fix_mouse_capture(bottle) {
+        warn!("Could not configure mouse capture: {}", e);
     }
 
     // Check if INI fix is needed
