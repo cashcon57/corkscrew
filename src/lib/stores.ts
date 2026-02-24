@@ -167,6 +167,21 @@ function createPersistedBool(key: string, fallback: boolean) {
 export const sidebarCollapsed = createPersistedBool("corkscrew:sidebar-collapsed", false);
 export const controllerMode = createPersistedBool("corkscrew:controller-mode", false);
 
+// Pending NXM install (download complete, awaiting user confirmation)
+export interface PendingNxmInstall {
+  archivePath: string;
+  modName: string;
+  modVersion: string;
+  gameId: string;
+  bottleName: string;
+  nexusModId?: number;
+  nxmUrl: string;
+}
+export const pendingNxmInstall = writable<PendingNxmInstall | null>(null);
+
+// Counter that increments when an NXM install completes — mods page watches this to reload
+export const nxmInstallComplete = writable<number>(0);
+
 // Notification log (persistent — backed by SQLite)
 export const notificationCount = writable<number>(0);
 export const showNotificationLog = writable<boolean>(false);

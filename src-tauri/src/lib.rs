@@ -178,6 +178,7 @@ fn install_mod_cmd(
     mod_version: Option<String>,
     source_type: Option<String>,
     source_url: Option<String>,
+    nexus_mod_id: Option<i64>,
     state: State<AppState>,
 ) -> Result<InstalledMod, String> {
     use progress::{InstallProgress, INSTALL_PROGRESS_EVENT};
@@ -225,7 +226,7 @@ fn install_mod_cmd(
         .add_mod(
             &game_id,
             &bottle_name,
-            None,
+            nexus_mod_id,
             &name,
             &version,
             &archive_path,

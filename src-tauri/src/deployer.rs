@@ -567,7 +567,10 @@ fn restore_next_winner(
     candidates.sort_by(|a, b| b.install_priority.cmp(&a.install_priority));
 
     if let Some(winner) = candidates.first() {
-        let staging_path = PathBuf::from(winner.staging_path.as_ref().unwrap());
+        let Some(staging_ref) = winner.staging_path.as_ref() else {
+            return Ok(());
+        };
+        let staging_path = PathBuf::from(staging_ref);
         let src = staging_path.join(rel_path);
         let dst = data_dir.join(rel_path);
 

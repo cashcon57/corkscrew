@@ -122,7 +122,8 @@ export async function installMod(
   modName?: string,
   modVersion?: string,
   sourceType?: string,
-  sourceUrl?: string
+  sourceUrl?: string,
+  nexusModId?: number
 ): Promise<InstalledMod> {
   return invoke("install_mod_cmd", {
     archivePath,
@@ -132,6 +133,7 @@ export async function installMod(
     modVersion: modVersion ?? "",
     sourceType: sourceType ?? null,
     sourceUrl: sourceUrl ?? null,
+    nexusModId: nexusModId ?? null,
   });
 }
 

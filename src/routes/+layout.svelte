@@ -2,14 +2,14 @@
   import { onMount, onDestroy } from "svelte";
   import "../app.css";
   import { goto } from "$app/navigation";
-  import { currentPage, errorMessage, successMessage, selectedGame, selectedBottle, showError, showSuccess, appVersion, collectionInstallStatus, collectionUninstallStatus, updateReady as updateReadyStore, updateVersion as updateVersionStore, updateNotes as updateNotesStore, updateChecking as updateCheckingStore, updateError as updateErrorStore, setUpdateCheckFn, notificationCount, showNotificationLog, activeProfile, profileList, activeCollection, collectionList, sidebarCollapsed, controllerMode } from "$lib/stores";
+  import { currentPage, errorMessage, successMessage, selectedGame, selectedBottle, showError, showSuccess, appVersion, collectionInstallStatus, collectionUninstallStatus, updateReady as updateReadyStore, updateVersion as updateVersionStore, updateNotes as updateNotesStore, updateChecking as updateCheckingStore, updateError as updateErrorStore, setUpdateCheckFn, notificationCount, showNotificationLog, activeProfile, profileList, activeCollection, collectionList, sidebarCollapsed, controllerMode, pendingNxmInstall, nxmInstallComplete } from "$lib/stores";
   import { initTheme } from "$lib/theme";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
   import { getVersion } from "@tauri-apps/api/app";
   import { check } from "@tauri-apps/plugin-updater";
   import { relaunch } from "@tauri-apps/plugin-process";
-  import { downloadFromNexus, getAllGames, getDownloadQueue, retryDownload, cancelDownload, clearFinishedDownloads, onDownloadQueueUpdate, listProfiles, listInstalledCollections, getConfig, setConfigValue, launchGame, getAllInterruptedInstalls, resumeCollectionInstall, abandonCollectionInstall, getCheckpointModNames, getPendingWabbajackInstalls, checkSkyrimVersion, getPinnedGameVersion, pinGameVersion, checkSteamStatus, addToSteam } from "$lib/api";
+  import { downloadFromNexus, installMod, getAllGames, getDownloadQueue, retryDownload, cancelDownload, clearFinishedDownloads, onDownloadQueueUpdate, listProfiles, listInstalledCollections, getConfig, setConfigValue, launchGame, getAllInterruptedInstalls, resumeCollectionInstall, abandonCollectionInstall, getCheckpointModNames, getPendingWabbajackInstalls, checkSkyrimVersion, getPinnedGameVersion, pinGameVersion, checkSteamStatus, addToSteam } from "$lib/api";
   import { resumeInstallTracking } from "$lib/installService";
   import type { CollectionInstallCheckpoint, WabbajackInstallStatus } from "$lib/types";
   import { get } from "svelte/store";
@@ -525,6 +525,9 @@
     }
   }
 
+  // NXM install state
+  let nxmInstalling = $state(false);
+
   async function handleNxmLink(nxmUrl: string) {
     // Extract game slug from nxm://skyrimspecialedition/mods/...
     const slugMatch = nxmUrl.match(/^nxm:\/\/([^/]+)\//);
@@ -533,6 +536,10 @@
       return;
     }
     const nxmSlug = slugMatch[1].toLowerCase();
+
+    // Extract mod ID from URL for source tracking
+    const modIdMatch = nxmUrl.match(/\/mods\/(\d+)\//);
+    const nexusModId = modIdMatch ? parseInt(modIdMatch[1]) : undefined;
 
     // Find a detected game matching this NXM slug
     let game = get(selectedGame);
@@ -563,16 +570,60 @@
       return;
     }
 
-    // Navigate to mods page so user sees progress
+    // Navigate to mods page
     currentPage.set("mods");
     showSuccess("Downloading mod from NexusMods...");
 
     try {
-      await downloadFromNexus(nxmUrl, game.game_id, bottle, true);
-      showSuccess("Mod installed from NexusMods link!");
+      // Download only — don't auto-install
+      const result = await downloadFromNexus(nxmUrl, game.game_id, bottle, false);
+      const downloadInfo = result as unknown as { downloaded: string; mod_name: string; mod_version: string };
+
+      // Show confirmation toast — user must click Install or Cancel
+      pendingNxmInstall.set({
+        archivePath: downloadInfo.downloaded,
+        modName: downloadInfo.mod_name,
+        modVersion: downloadInfo.mod_version,
+        gameId: game.game_id,
+        bottleName: bottle,
+        nexusModId,
+        nxmUrl,
+      });
+      // Clear the downloading toast
+      successMessage.set(null);
     } catch (err: unknown) {
       showError(`NXM download failed: ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
+
+  async function confirmNxmInstall() {
+    const pending = get(pendingNxmInstall);
+    if (!pending) return;
+    nxmInstalling = true;
+    try {
+      await installMod(
+        pending.archivePath,
+        pending.gameId,
+        pending.bottleName,
+        pending.modName,
+        pending.modVersion,
+        "nexus",
+        pending.nexusModId ? `https://www.nexusmods.com/mods/${pending.nexusModId}` : undefined,
+        pending.nexusModId,
+      );
+      showSuccess(`Installed "${pending.modName}" successfully!`);
+      pendingNxmInstall.set(null);
+      // Signal mods page to reload
+      nxmInstallComplete.update(n => n + 1);
+    } catch (err: unknown) {
+      showError(`Install failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      nxmInstalling = false;
+    }
+  }
+
+  function cancelNxmInstall() {
+    pendingNxmInstall.set(null);
   }
 
   async function checkForUpdates() {
@@ -961,6 +1012,31 @@
               <line x1="8" y1="2" x2="2" y2="8" />
             </svg>
           </button>
+        </div>
+      {/if}
+
+      {#if $pendingNxmInstall}
+        <div class="toast toast-nxm" role="alertdialog">
+          <svg class="toast-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7 10 12 15 17 10" />
+            <line x1="12" y1="15" x2="12" y2="3" />
+          </svg>
+          <span class="toast-text">
+            <strong>{$pendingNxmInstall.modName}</strong>
+            {#if $pendingNxmInstall.modVersion}
+              <span class="toast-version">v{$pendingNxmInstall.modVersion}</span>
+            {/if}
+            downloaded. Install this mod?
+          </span>
+          <div class="toast-actions">
+            <button class="toast-action-btn toast-install-btn" onclick={confirmNxmInstall} disabled={nxmInstalling}>
+              {nxmInstalling ? "Installing..." : "Install"}
+            </button>
+            <button class="toast-action-btn toast-cancel-btn" onclick={cancelNxmInstall} disabled={nxmInstalling}>
+              Cancel
+            </button>
+          </div>
         </div>
       {/if}
 
@@ -1861,6 +1937,69 @@
 
   .toast-dismiss:hover {
     opacity: 1;
+  }
+
+  .toast-nxm {
+    background: rgba(10, 132, 255, 0.18);
+    border: 1px solid rgba(10, 132, 255, 0.3);
+    color: var(--text-primary);
+    max-width: 480px;
+    flex-wrap: wrap;
+  }
+
+  .toast-nxm .toast-text {
+    color: var(--text-primary);
+    line-height: 1.4;
+  }
+
+  .toast-nxm .toast-text strong {
+    color: var(--accent);
+  }
+
+  .toast-version {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-left: 2px;
+  }
+
+  .toast-actions {
+    display: flex;
+    gap: var(--space-2);
+    flex-shrink: 0;
+  }
+
+  .toast-action-btn {
+    padding: 4px 12px;
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all var(--duration-fast) var(--ease);
+  }
+
+  .toast-action-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .toast-install-btn {
+    background: var(--system-accent);
+    color: var(--system-accent-on);
+  }
+
+  .toast-install-btn:hover:not(:disabled) {
+    background: var(--system-accent-hover);
+  }
+
+  .toast-cancel-btn {
+    background: transparent;
+    color: var(--text-secondary);
+    border: 1px solid var(--separator);
+  }
+
+  .toast-cancel-btn:hover:not(:disabled) {
+    background: var(--surface-hover);
+    color: var(--text-primary);
   }
 
   @keyframes toastIn {

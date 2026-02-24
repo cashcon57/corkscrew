@@ -59,6 +59,7 @@
     skseStatus,
     activeCollection,
     collectionList,
+    nxmInstallComplete,
   } from "$lib/stores";
   import type { InstalledMod, DetectedGame, SkseStatus, DowngradeStatus, FileConflict, ModUpdateInfo, FomodInstaller } from "$lib/types";
   import GameIcon from "$lib/components/GameIcon.svelte";
@@ -578,6 +579,15 @@
   $effect(() => {
     if (searchRestored && activeGame) {
       sessionStorage.setItem(searchStorageKey(activeGame), searchQuery);
+    }
+  });
+
+  // Reload mods when an NXM install completes (triggered from layout)
+  $effect(() => {
+    const _count = $nxmInstallComplete;
+    if (_count > 0 && activeGame) {
+      loadMods(activeGame);
+      refreshHealth(activeGame);
     }
   });
 

@@ -9,7 +9,7 @@
     showError,
   } from "$lib/stores";
   import type { Bottle, DetectedGame, BottleSettingDef } from "$lib/types";
-  import { openUrl } from "@tauri-apps/plugin-opener";
+  import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 
   let loadingState = $state<"idle" | "loading" | "done">("idle");
   const isMac = typeof navigator !== "undefined" && navigator.platform?.startsWith("Mac");
@@ -393,9 +393,23 @@
                     {game.bottle_name}
                   </span>
                 </div>
-                <p class="card-path" title={game.game_path}>
-                  {truncatePath(game.game_path)}
-                </p>
+                <div class="card-path-row">
+                  <p class="card-path" title={game.game_path}>
+                    {truncatePath(game.game_path)}
+                  </p>
+                  <!-- svelte-ignore a11y_click_events_have_key_events -->
+                  <span
+                    class="open-folder-btn"
+                    role="button"
+                    tabindex="-1"
+                    title="Open game folder"
+                    onclick={(e) => { e.stopPropagation(); revealItemInDir(game.game_path); }}
+                  >
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                    </svg>
+                  </span>
+                </div>
                 <span class="card-action-label">Manage Mods</span>
               </button>
             {/each}
@@ -869,6 +883,12 @@
     flex-shrink: 0;
   }
 
+  .card-path-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
   .card-path {
     font-size: 11px;
     color: var(--text-tertiary);
@@ -878,6 +898,26 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     letter-spacing: 0;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .open-folder-btn {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: var(--radius-sm);
+    color: var(--text-quaternary);
+    cursor: pointer;
+    transition: color var(--duration) var(--ease), background var(--duration) var(--ease);
+  }
+
+  .open-folder-btn:hover {
+    color: var(--accent);
+    background: rgba(255, 255, 255, 0.06);
   }
 
   .card-action-label {
