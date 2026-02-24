@@ -934,22 +934,21 @@
           {/if}
         </button>
 
+        <!-- Notification Bell -->
+        <button
+          class="queue-btn"
+          onclick={(e) => { e.stopPropagation(); showNotificationLog.update(v => !v); }}
+          title="Notification Log"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+            <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+          </svg>
+          {#if $notificationCount > 0}
+            <span class="queue-badge queue-badge-active">{$notificationCount}</span>
+          {/if}
+        </button>
       </div>
-
-      <!-- Notification Bell -->
-      <button
-        class="queue-btn"
-        onclick={(e) => { e.stopPropagation(); showNotificationLog.update(v => !v); }}
-        title="Notification Log"
-      >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
-          <path d="M13.73 21a2 2 0 0 1-3.46 0" />
-        </svg>
-        {#if $notificationCount > 0}
-          <span class="queue-badge queue-badge-active">{$notificationCount}</span>
-        {/if}
-      </button>
 
       {#if !$sidebarCollapsed}
         {#if updateReady}
@@ -1535,6 +1534,8 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    flex-wrap: wrap;
+    gap: var(--space-1);
     flex-shrink: 0;
   }
 
@@ -2012,6 +2013,9 @@
      ============================ */
   .queue-section {
     position: relative;
+    display: flex;
+    align-items: center;
+    gap: 2px;
   }
 
   .queue-btn {
