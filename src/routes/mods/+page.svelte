@@ -47,6 +47,9 @@
     endorseMod,
     abstainMod,
     getUserEndorsements,
+    getConfig,
+    setConfigValue,
+    requestCursorClampPermission,
   } from "$lib/api";
   import type { InstallProgressEvent, DeploymentHealth, ConflictSuggestion, ResolutionResult, DeployProgress, ModTool, UserEndorsement } from "$lib/types";
   import {
@@ -73,6 +76,12 @@
   import SkeletonRows from "$lib/components/SkeletonRows.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import ConflictMap from "$lib/components/ConflictMap.svelte";
+
+  // Game launch fixes opt-out (display fix + cursor clamp)
+  let disableGameFixes = $state(false);
+
+  // Accessibility permission explanation dialog (shown once)
+  let showAccessibilityExplainer = $state(false);
 
   let installing = $state(false);
   let installStep = $state("");
@@ -254,6 +263,12 @@
       }
     }
     document.addEventListener("click", closeOverflow);
+
+    // Load game fixes preference from config
+    getConfig().then(cfg => {
+      disableGameFixes = cfg.disable_game_fixes === "true";
+    }).catch(() => {});
+
     return () => document.removeEventListener("click", closeOverflow);
   });
 
@@ -889,7 +904,7 @@
       if (result.success) {
         showSuccess(`Launched ${game.display_name}${useSkse ? " via SKSE" : ""}`);
         if (result.warning) {
-          showError(result.warning);
+          showAccessibilityExplainer = true;
         }
       }
     } catch (e: unknown) {
@@ -897,6 +912,22 @@
     } finally {
       launching = false;
     }
+  }
+
+  async function toggleGameFixes() {
+    disableGameFixes = !disableGameFixes;
+    try {
+      await setConfigValue("disable_game_fixes", disableGameFixes ? "true" : "false");
+    } catch { /* best-effort */ }
+  }
+
+  function handleAccessibilityConfirm() {
+    showAccessibilityExplainer = false;
+    requestCursorClampPermission();
+  }
+
+  function handleAccessibilityDismiss() {
+    showAccessibilityExplainer = false;
   }
 
   async function handleFixDisplay() {
@@ -1779,6 +1810,11 @@
             {/if}
             Fix Display
           </button>
+          <!-- svelte-ignore a11y_label_has_associated_control -->
+          <label class="game-fixes-toggle" title="When enabled, Corkscrew skips automatic display resolution fix and cursor hiding on launch">
+            <input type="checkbox" checked={disableGameFixes} onchange={toggleGameFixes} />
+            Disable launch fixes (Not Recommended)
+          </label>
         {/if}
         <button class="btn btn-ghost" onclick={() => { pickedGame = null; selectedGame.set(null); }}>
           Change Game
@@ -3116,7 +3152,75 @@
   />
 {/if}
 
+{#if showAccessibilityExplainer}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="accessibility-overlay" role="dialog" aria-label="Accessibility Permission">
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="accessibility-card" onclick={(e) => e.stopPropagation()}>
+      <h3 style="margin: 0 0 var(--space-3); font-size: 16px;">Why Corkscrew Needs Accessibility Permission</h3>
+      <p style="margin: 0 0 var(--space-3); color: var(--text-primary); line-height: 1.6;">
+        When Skyrim runs fullscreen through Wine, macOS can cause your system cursor to appear over
+        the game when you move your mouse toward the bottom of the screen. This is a known macOS
+        behavior that interferes with gameplay.
+      </p>
+      <p style="margin: 0 0 var(--space-3); color: var(--text-primary); line-height: 1.6;">
+        To fix this, Corkscrew needs <strong>Accessibility</strong> permission to keep the cursor
+        inside the game window while playing. This permission is <strong>only used while the game is
+        running</strong> and is automatically deactivated when the game closes or Corkscrew quits.
+      </p>
+      <p style="margin: 0 0 var(--space-4); color: var(--text-secondary); font-size: 13px; line-height: 1.5;">
+        Corkscrew does not read keystrokes, monitor other apps, or use this permission for anything
+        other than preventing the cursor from escaping the game window.
+      </p>
+      <div style="display: flex; gap: var(--space-2); justify-content: flex-end;">
+        <button class="btn btn-ghost" onclick={handleAccessibilityDismiss}>
+          Not Now
+        </button>
+        <button class="btn btn-primary" onclick={handleAccessibilityConfirm}>
+          Open System Settings
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
 <style>
+  .accessibility-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(4px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
+
+  .accessibility-card {
+    background: var(--bg-secondary, #1e1e1e);
+    border: 1px solid var(--border, #333);
+    border-radius: 12px;
+    padding: var(--space-4);
+    max-width: 520px;
+    width: 90%;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  }
+
+  .game-fixes-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .game-fixes-toggle input[type="checkbox"] {
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+
   /* ============================
      FOMOD Wizard Overlay
      ============================ */

@@ -976,8 +976,14 @@ fn launch_game_cmd(
         use_skse
     );
 
+    // Check if user has disabled automatic game launch fixes
+    let fixes_disabled = config::get_config_value("disable_game_fixes")
+        .unwrap_or(None)
+        .map(|v| v == "true")
+        .unwrap_or(false);
+
     // Auto-apply display fix for Skyrim SE before launching to ensure fullscreen
-    if game_id == "skyrimse" {
+    if game_id == "skyrimse" && !fixes_disabled {
         match display_fix::auto_fix_display(&bottle) {
             Ok(result) => {
                 if result.fixed {
@@ -1002,30 +1008,24 @@ fn launch_game_cmd(
 
     // Activate cursor edge clamping on macOS to prevent Dock trigger zone
     // from making the system cursor visible during fullscreen gameplay.
-    // Only for Skyrim SE where we also apply display fixes.
-    if game_id == "skyrimse" {
+    if game_id == "skyrimse" && !fixes_disabled {
         if let Some(pid) = result.pid {
-            match display_fix::detect_screen_resolution(&bottle) {
-                Ok((_w, h)) => {
-                    match cursor_clamp::activate(h, pid) {
-                        Ok(()) => log::info!("Cursor clamp activated for pid {}", pid),
-                        Err(e) => {
-                            log::warn!("Cursor clamp not available: {}", e);
-                            // Request permission (opens System Settings) and warn the user
-                            if !cursor_clamp::has_permission() {
-                                cursor_clamp::request_permission();
-                                result.warning = Some(
-                                    "Corkscrew needs Accessibility permission to prevent the \
-                                     macOS cursor from appearing during fullscreen gameplay. \
-                                     Please grant access in the System Settings window that just opened, \
-                                     then relaunch the game."
-                                        .into(),
-                                );
-                            }
+            if !cursor_clamp::has_permission() {
+                // Don't request permission here — the frontend shows an
+                // explanation dialog first, then opens System Settings.
+                result.warning = Some(
+                    "Cursor fix requires Accessibility permission. Grant it in System Settings \u{2192} Privacy & Security \u{2192} Accessibility, then relaunch.".to_string()
+                );
+            } else {
+                match display_fix::detect_screen_resolution(&bottle) {
+                    Ok((_w, h)) => {
+                        match cursor_clamp::activate(h, pid) {
+                            Ok(()) => log::info!("Cursor clamp activated for pid {}", pid),
+                            Err(e) => log::warn!("Cursor clamp not available: {}", e),
                         }
                     }
+                    Err(e) => log::warn!("Could not detect screen height for cursor clamp: {}", e),
                 }
-                Err(e) => log::warn!("Could not detect screen height for cursor clamp: {}", e),
             }
         }
     }
