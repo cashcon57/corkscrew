@@ -3,7 +3,7 @@
 //! When running Skyrim SE through a compatibility layer, the game often
 //! renders windowed or at the wrong resolution due to incorrect display
 //! settings in SkyrimPrefs.ini. This module detects the correct screen
-//! resolution for the platform and configures exclusive fullscreen mode.
+//! resolution for the platform and configures borderless fullscreen mode.
 //!
 //! Platform support:
 //! - **macOS**: Detects Retina vs non-Retina via system_profiler, respects
@@ -13,9 +13,10 @@
 //! - **SteamOS/Steam Deck**: Detects Gamescope resolution or defaults to 1280x800.
 //!
 //! The fix applies three changes:
-//! 1. **SkyrimPrefs.ini**: Set detected resolution + `bFull Screen=1`
+//! 1. **SkyrimPrefs.ini**: Set detected resolution + `bBorderless=1` (avoids
+//!    display-mode toggling that causes cursor flash-in on loading screens)
 //! 2. **Wine registry**: Remove virtual desktop settings that force windowed mode
-//! 3. **Wine registry**: Configure mouse capture for proper fullscreen input
+//! 3. **Wine registry**: Configure display capture + mouse warping for proper input
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -554,8 +555,13 @@ pub fn read_display_settings(prefs_path: &Path) -> Result<DisplaySettings, Strin
 }
 
 /// Apply display fix: set resolution to the detected screen resolution in
-/// exclusive fullscreen mode. On macOS this maps to a native fullscreen
-/// Space that the user can 3-finger-swipe away from.
+/// borderless fullscreen mode.
+///
+/// Uses `bBorderless=1` instead of `bFull Screen=1` because exclusive
+/// fullscreen through Wine causes display-mode toggling on loading screens
+/// and menus, which makes Wine briefly release CGDisplayCapture — causing
+/// the macOS cursor to flash back in. Borderless fullscreen creates a
+/// screen-sized window with no mode switches, so cursor capture is stable.
 pub fn fix_display_settings(
     prefs_path: &Path,
     width: u32,
@@ -567,8 +573,8 @@ pub fn fix_display_settings(
     let mut updated = content.clone();
     updated = set_ini_display_value(&updated, "iSize W", &width.to_string());
     updated = set_ini_display_value(&updated, "iSize H", &height.to_string());
-    updated = set_ini_display_value(&updated, "bFull Screen", "1");
-    updated = set_ini_display_value(&updated, "bBorderless", "0");
+    updated = set_ini_display_value(&updated, "bFull Screen", "0");
+    updated = set_ini_display_value(&updated, "bBorderless", "1");
 
     // Write via temp file + rename for atomicity
     let temp_path = prefs_path.with_extension("ini.tmp");
@@ -578,8 +584,8 @@ pub fn fix_display_settings(
     Ok(DisplaySettings {
         width,
         height,
-        fullscreen: true,
-        borderless: false,
+        fullscreen: false,
+        borderless: true,
     })
 }
 
@@ -824,9 +830,9 @@ pub fn fix_mouse_capture(bottle: &Bottle) -> Result<(), String> {
 /// Full pipeline: detect resolution, find prefs, fix INI + Wine registry.
 ///
 /// 1. Detects correct resolution for the platform and bottle's Retina setting
-/// 2. Sets SkyrimPrefs.ini to detected resolution in exclusive fullscreen
+/// 2. Sets SkyrimPrefs.ini to detected resolution in borderless fullscreen
 /// 3. Removes Wine virtual desktop to allow true fullscreen
-/// 4. Configures mouse capture for proper fullscreen input
+/// 4. Configures mouse capture and display capture for proper input
 pub fn auto_fix_display(bottle: &Bottle) -> Result<DisplayFixResult, String> {
     let (screen_w, screen_h) = detect_screen_resolution(bottle)?;
 
@@ -844,11 +850,11 @@ pub fn auto_fix_display(bottle: &Bottle) -> Result<DisplayFixResult, String> {
         warn!("Could not configure mouse capture: {}", e);
     }
 
-    // Check if INI fix is needed
+    // Check if INI fix is needed (target is borderless fullscreen)
     let ini_already_correct = previous.width == screen_w
         && previous.height == screen_h
-        && previous.fullscreen
-        && !previous.borderless;
+        && !previous.fullscreen
+        && previous.borderless;
 
     let applied = if ini_already_correct {
         previous.clone()
