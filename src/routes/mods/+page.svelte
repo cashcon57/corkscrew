@@ -888,6 +888,9 @@
       const result = await launchGame(game.game_id, game.bottle_name, useSkse);
       if (result.success) {
         showSuccess(`Launched ${game.display_name}${useSkse ? " via SKSE" : ""}`);
+        if (result.warning) {
+          showError(result.warning);
+        }
       }
     } catch (e: unknown) {
       showError(`Failed to launch: ${e}`);

@@ -74,6 +74,7 @@ export interface LaunchResult {
   bottle_name: string;
   pid: number | null;
   success: boolean;
+  warning: string | null;
 }
 
 export interface SkseStatus {

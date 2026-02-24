@@ -60,6 +60,8 @@ pub struct LaunchResult {
     pub pid: Option<u32>,
     /// Whether the process was successfully spawned.
     pub success: bool,
+    /// Optional warning message (e.g., missing permissions for cursor clamp).
+    pub warning: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -432,6 +434,7 @@ pub fn launch_game(
                 bottle_name: bottle.name.clone(),
                 pid: Some(pid),
                 success: true,
+                warning: None,
             })
         }
         Err(e) => {
@@ -565,6 +568,7 @@ mod tests {
             bottle_name: "Gaming".to_string(),
             pid: Some(12345),
             success: true,
+            warning: None,
         };
 
         let json = serde_json::to_string(&result).unwrap();

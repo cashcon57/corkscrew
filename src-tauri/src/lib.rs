@@ -997,7 +997,7 @@ fn launch_game_cmd(
         }
     }
 
-    let result = launcher::launch_game(&bottle, &exe_path, Some(&game_path))
+    let mut result = launcher::launch_game(&bottle, &exe_path, Some(&game_path))
         .map_err(|e| format!("Launch failed ({}): {}", bottle.source, e))?;
 
     // Activate cursor edge clamping on macOS to prevent Dock trigger zone
@@ -1009,7 +1009,20 @@ fn launch_game_cmd(
                 Ok((_w, h)) => {
                     match cursor_clamp::activate(h, pid) {
                         Ok(()) => log::info!("Cursor clamp activated for pid {}", pid),
-                        Err(e) => log::warn!("Cursor clamp not available: {}", e),
+                        Err(e) => {
+                            log::warn!("Cursor clamp not available: {}", e);
+                            // Request permission (opens System Settings) and warn the user
+                            if !cursor_clamp::has_permission() {
+                                cursor_clamp::request_permission();
+                                result.warning = Some(
+                                    "Corkscrew needs Accessibility permission to prevent the \
+                                     macOS cursor from appearing during fullscreen gameplay. \
+                                     Please grant access in the System Settings window that just opened, \
+                                     then relaunch the game."
+                                        .into(),
+                                );
+                            }
+                        }
                     }
                 }
                 Err(e) => log::warn!("Could not detect screen height for cursor clamp: {}", e),

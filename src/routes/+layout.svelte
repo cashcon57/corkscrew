@@ -515,6 +515,9 @@
       const result = await launchGame($selectedGame.game_id, $selectedGame.bottle_name, useSkse);
       if (result.success) {
         showSuccess(`Launched ${$selectedGame.display_name}`);
+        if (result.warning) {
+          showError(result.warning);
+        }
       } else {
         showError(`Failed to launch ${$selectedGame.display_name}`);
       }
