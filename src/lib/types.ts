@@ -9,6 +9,7 @@ export interface DetectedGame {
   display_name: string;
   nexus_slug: string;
   game_path: string;
+  exe_path: string | null;
   data_dir: string;
   bottle_name: string;
   bottle_path: string;

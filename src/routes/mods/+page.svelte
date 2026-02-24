@@ -903,7 +903,7 @@
     try {
       const result = await fixSkyrimDisplay(game.bottle_name);
       if (result.fixed) {
-        showSuccess(`Display fixed: ${result.applied.width}x${result.applied.height} fullscreen (was ${result.previous.width}x${result.previous.height})`);
+        showSuccess(`Display fixed: ${result.applied.width}x${result.applied.height} fullscreen — game will open in its own Space (swipe to switch)`);
       } else {
         showSuccess(`Display settings already correct: ${result.applied.width}x${result.applied.height}`);
       }
@@ -1763,7 +1763,7 @@
             class="btn btn-ghost"
             onclick={handleFixDisplay}
             disabled={fixingDisplay}
-            title="Fix zoomed-in or improperly scaled display in CrossOver"
+            title="Fix display: native resolution, fullscreen in its own Space (3-finger swipe to switch)"
           >
             {#if fixingDisplay}
               <span class="spinner spinner-sm"></span>

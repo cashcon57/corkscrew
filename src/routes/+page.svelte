@@ -409,6 +409,22 @@
                       <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
                     </svg>
                   </span>
+                  {#if game.exe_path}
+                    <!-- svelte-ignore a11y_click_events_have_key_events -->
+                    <span
+                      class="open-folder-btn"
+                      role="button"
+                      tabindex="-1"
+                      title="Reveal game executable in Finder"
+                      onclick={(e) => { e.stopPropagation(); revealItemInDir(game.exe_path!); }}
+                    >
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="4" y="2" width="16" height="20" rx="2" />
+                        <path d="M9 22v-4h6v4" />
+                        <path d="M8 6h.01M16 6h.01M12 6h.01M8 10h.01M16 10h.01M12 10h.01M8 14h.01M16 14h.01M12 14h.01" />
+                      </svg>
+                    </span>
+                  {/if}
                 </div>
                 <span class="card-action-label">Manage Mods</span>
               </button>

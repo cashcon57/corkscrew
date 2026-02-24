@@ -127,6 +127,7 @@ impl GamePlugin for RegistryGamePlugin {
             return None;
         }
 
+        let exe_path = find_file_case_insensitive(&exe_dir, &exe_filename);
         let data_dir = self.get_data_dir(&game_path);
 
         Some(DetectedGame {
@@ -134,6 +135,7 @@ impl GamePlugin for RegistryGamePlugin {
             display_name: self.entry.name.clone(),
             nexus_slug: self.entry.nexus_domain.clone(),
             game_path,
+            exe_path,
             data_dir,
             bottle_name: bottle.name.clone(),
             bottle_path: bottle.path.clone(),
@@ -233,15 +235,19 @@ fn find_game_path(bottle: &Bottle, entry: &GameEntry) -> Option<PathBuf> {
 
 /// Check if a file exists in a directory (case-insensitive).
 fn has_file_case_insensitive(dir: &Path, filename_lower: &str) -> bool {
+    find_file_case_insensitive(dir, filename_lower).is_some()
+}
+
+fn find_file_case_insensitive(dir: &Path, filename_lower: &str) -> Option<PathBuf> {
     let Ok(entries) = fs::read_dir(dir) else {
-        return false;
+        return None;
     };
     for entry in entries.flatten() {
         if entry.file_name().to_string_lossy().to_lowercase() == filename_lower {
-            return true;
+            return Some(entry.path());
         }
     }
-    false
+    None
 }
 
 /// Find a child whose name matches case-insensitively.

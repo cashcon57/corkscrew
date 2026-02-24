@@ -69,12 +69,14 @@ impl GamePlugin for Fallout4Plugin {
         }
 
         let data_dir = self.get_data_dir(&game_path);
+        let exe_path = find_executable(&game_path);
 
         Some(DetectedGame {
             game_id: self.game_id().to_string(),
             display_name: self.display_name().to_string(),
             nexus_slug: self.nexus_slug().to_string(),
             game_path,
+            exe_path,
             data_dir,
             bottle_name: bottle.name.clone(),
             bottle_path: bottle.path.clone(),
@@ -189,20 +191,30 @@ fn check_gog_paths(bottle: &Bottle) -> Option<PathBuf> {
 
 /// Check whether a directory contains at least one known executable.
 fn has_executable(game_path: &Path) -> bool {
+    find_executable(game_path).is_some()
+}
+
+fn find_executable(game_path: &Path) -> Option<PathBuf> {
     let Ok(entries) = fs::read_dir(game_path) else {
-        return false;
+        return None;
     };
 
     let exe_names_lower: Vec<String> = EXECUTABLES.iter().map(|e| e.to_lowercase()).collect();
+    let mut found: Option<PathBuf> = None;
 
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_lowercase();
-        if exe_names_lower.iter().any(|e| e == &name) {
-            return true;
+        if let Some(idx) = exe_names_lower.iter().position(|e| e == &name) {
+            if idx == 0 {
+                return Some(entry.path());
+            }
+            if found.is_none() {
+                found = Some(entry.path());
+            }
         }
     }
 
-    false
+    found
 }
 
 /// Find a child entry whose name matches `target` case-insensitively.

@@ -373,6 +373,10 @@ fn uninstall_mod(
 
     let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
 
+    // Disable the mod first so restore_next_winner won't re-deploy its files
+    // during undeploy (it checks m.enabled when finding candidates).
+    let _ = db.set_enabled(mod_id, false);
+
     // Remove deployed files from game directory
     let removed = if installed_mod.staging_path.is_some() {
         // Staged mod: undeploy via deployment manifest

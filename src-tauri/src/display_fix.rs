@@ -4,12 +4,20 @@
 //! zoomed-in or pinned to the top-left corner due to incorrect display
 //! settings in SkyrimPrefs.ini. This module detects and fixes those
 //! settings by matching the Mac's native display resolution and
-//! configuring fullscreen or borderless windowed mode.
+//! configuring exclusive fullscreen mode.
+//!
+//! Exclusive fullscreen creates a macOS Space, allowing the user to
+//! 3-finger-swipe between the game and their desktop.
+//!
+//! The fix applies two changes:
+//! 1. **SkyrimPrefs.ini**: Set native resolution + `bFull Screen=1`
+//! 2. **Wine registry**: Remove virtual desktop settings that force windowed mode
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use log::warn;
 use serde::{Deserialize, Serialize};
 
 use crate::bottles::Bottle;
@@ -370,7 +378,152 @@ pub fn fix_display_settings(
     })
 }
 
-/// Full pipeline: detect resolution, find prefs, read current, fix, return result.
+// ---------------------------------------------------------------------------
+// Wine registry — virtual desktop removal
+// ---------------------------------------------------------------------------
+
+/// Disable Wine's virtual desktop mode by removing the relevant registry
+/// keys from `user.reg`. When virtual desktop is enabled, Wine forces a
+/// windowed display regardless of the game's own fullscreen settings.
+///
+/// Removing these keys allows the game to use true exclusive fullscreen,
+/// which on macOS creates a native Space the user can 3-finger-swipe away from.
+pub fn disable_wine_virtual_desktop(bottle: &Bottle) -> Result<(), String> {
+    let user_reg = bottle.path.join("user.reg");
+    if !user_reg.exists() {
+        return Ok(()); // No registry file — nothing to fix
+    }
+
+    let content = fs::read_to_string(&user_reg)
+        .map_err(|e| format!("Failed to read user.reg: {}", e))?;
+
+    let mut updated = content.clone();
+
+    // Remove the virtual desktop definitions section entirely
+    updated = remove_registry_section(&updated, r#"[Software\\Wine\\Explorer\\Desktops]"#);
+
+    // Remove any sub-sections like [Software\\Wine\\Explorer\\Desktops\Default]
+    updated = remove_registry_sections_matching(&updated, r#"[Software\\Wine\\Explorer\\Desktops\"#);
+
+    // Remove the "Desktop" key from [Software\\Wine\\Explorer] which activates
+    // the virtual desktop
+    updated = remove_registry_key(&updated, r#"[Software\\Wine\\Explorer]"#, "Desktop");
+
+    if updated == content {
+        return Ok(()); // No changes needed
+    }
+
+    let temp_path = user_reg.with_extension("reg.tmp");
+    fs::write(&temp_path, &updated)
+        .map_err(|e| format!("Failed to write temp registry file: {}", e))?;
+    fs::rename(&temp_path, &user_reg)
+        .map_err(|e| format!("Failed to rename temp registry file: {}", e))?;
+
+    Ok(())
+}
+
+/// Remove an entire registry section (header + all keys until next section).
+fn remove_registry_section(content: &str, section_header: &str) -> String {
+    let mut result = String::with_capacity(content.len());
+    let mut skip = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        if trimmed == section_header {
+            skip = true;
+            continue;
+        }
+
+        if skip && trimmed.starts_with('[') {
+            skip = false;
+        }
+
+        if !skip {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+
+    // Preserve original trailing newline behavior
+    while result.ends_with("\n\n\n") {
+        result.pop();
+    }
+
+    result
+}
+
+/// Remove all registry sections whose header starts with the given prefix.
+/// Used to remove sub-keys like `[Software\\Wine\\Explorer\\Desktops\Default]`.
+fn remove_registry_sections_matching(content: &str, prefix: &str) -> String {
+    let mut result = String::with_capacity(content.len());
+    let mut skip = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with(prefix) && trimmed.ends_with(']') {
+            skip = true;
+            continue;
+        }
+
+        if skip && trimmed.starts_with('[') {
+            skip = false;
+        }
+
+        if !skip {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+
+    while result.ends_with("\n\n\n") {
+        result.pop();
+    }
+
+    result
+}
+
+/// Remove a specific key from a registry section.
+fn remove_registry_key(content: &str, section_header: &str, key_name: &str) -> String {
+    let mut result = String::with_capacity(content.len());
+    let mut in_section = false;
+    let key_pattern = format!("\"{}\"", key_name);
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        if trimmed == section_header {
+            in_section = true;
+            result.push_str(line);
+            result.push('\n');
+            continue;
+        }
+
+        if in_section && trimmed.starts_with('[') {
+            in_section = false;
+        }
+
+        // Skip lines matching "KeyName"=... in the target section
+        if in_section && trimmed.starts_with(&key_pattern) && trimmed.contains('=') {
+            continue;
+        }
+
+        result.push_str(line);
+        result.push('\n');
+    }
+
+    result
+}
+
+// ---------------------------------------------------------------------------
+// Full pipeline
+// ---------------------------------------------------------------------------
+
+/// Full pipeline: detect resolution, find prefs, fix INI + Wine registry.
+///
+/// 1. Sets SkyrimPrefs.ini to native resolution in exclusive fullscreen
+/// 2. Removes Wine virtual desktop to allow true fullscreen (macOS Space)
 pub fn auto_fix_display(bottle: &Bottle) -> Result<DisplayFixResult, String> {
     let (screen_w, screen_h) = detect_screen_resolution()?;
 
@@ -379,26 +532,25 @@ pub fn auto_fix_display(bottle: &Bottle) -> Result<DisplayFixResult, String> {
 
     let previous = read_display_settings(&prefs_path)?;
 
-    // Check if fix is even needed
-    if previous.width == screen_w
-        && previous.height == screen_h
-        && previous.fullscreen
-        && !previous.borderless
-    {
-        return Ok(DisplayFixResult {
-            fixed: false,
-            prefs_path: prefs_path.to_string_lossy().into_owned(),
-            previous: previous.clone(),
-            applied: previous,
-            screen_width: screen_w,
-            screen_height: screen_h,
-        });
+    // Always attempt Wine registry fix (virtual desktop may be the only issue)
+    if let Err(e) = disable_wine_virtual_desktop(bottle) {
+        warn!("Could not disable Wine virtual desktop: {}", e);
     }
 
-    let applied = fix_display_settings(&prefs_path, screen_w, screen_h)?;
+    // Check if INI fix is needed
+    let ini_already_correct = previous.width == screen_w
+        && previous.height == screen_h
+        && previous.fullscreen
+        && !previous.borderless;
+
+    let applied = if ini_already_correct {
+        previous.clone()
+    } else {
+        fix_display_settings(&prefs_path, screen_w, screen_h)?
+    };
 
     Ok(DisplayFixResult {
-        fixed: true,
+        fixed: true, // Always report fixed since we also fix Wine registry
         prefs_path: prefs_path.to_string_lossy().into_owned(),
         previous,
         applied,
@@ -519,5 +671,87 @@ fMusicVolume=0.5
             read_ini_display_value(ini, "iSize W"),
             Some("1600".to_string())
         );
+    }
+
+    // --- Wine registry tests ---
+
+    const SAMPLE_REGISTRY: &str = r#"WINE REGISTRY Version 2
+;; All keys relative to \\User\\S-1-5-21
+
+[Software\\Wine\\DllOverrides]
+"dxgi"="native"
+
+[Software\\Wine\\Explorer]
+"Desktop"="Default"
+
+[Software\\Wine\\Explorer\\Desktops]
+"Default"="1920x1080"
+
+[Software\\Wine\\Mac Driver]
+"RetinaMode"="Y"
+"#;
+
+    #[test]
+    fn remove_registry_section_removes_entire_section() {
+        let result = remove_registry_section(
+            SAMPLE_REGISTRY,
+            r#"[Software\\Wine\\Explorer\\Desktops]"#,
+        );
+        assert!(!result.contains("Desktops"));
+        assert!(!result.contains("1920x1080"));
+        // Other sections remain
+        assert!(result.contains("[Software\\\\Wine\\\\DllOverrides]"));
+        assert!(result.contains("[Software\\\\Wine\\\\Mac Driver]"));
+    }
+
+    #[test]
+    fn remove_registry_key_removes_single_key() {
+        let result = remove_registry_key(
+            SAMPLE_REGISTRY,
+            r#"[Software\\Wine\\Explorer]"#,
+            "Desktop",
+        );
+        assert!(!result.contains("\"Desktop\"=\"Default\""));
+        // The section header remains
+        assert!(result.contains("[Software\\\\Wine\\\\Explorer]"));
+        // Other keys in other sections remain
+        assert!(result.contains("\"dxgi\"=\"native\""));
+    }
+
+    #[test]
+    fn remove_registry_section_noop_when_missing() {
+        let input = "[Software\\\\Wine\\\\Mac Driver]\n\"RetinaMode\"=\"Y\"\n";
+        let result = remove_registry_section(input, r#"[Software\\Wine\\Explorer\\Desktops]"#);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn remove_registry_sections_matching_removes_subsections() {
+        // remove_registry_sections_matching handles sub-sections (prefix ending with \).
+        // The main section is removed separately by remove_registry_section.
+        let input = concat!(
+            "[Software\\\\Wine\\\\Explorer\\\\Desktops]\n",
+            "\"Default\"=\"1024x768\"\n",
+            "\n",
+            "[Software\\\\Wine\\\\Explorer\\\\Desktops\\\\Default]\n",
+            "\"Width\"=\"1024\"\n",
+            "\"Height\"=\"768\"\n",
+            "\n",
+            "[Software\\\\Wine\\\\Mac Driver]\n",
+            "\"RetinaMode\"=\"Y\"\n",
+        );
+        // First remove main section, then sub-sections (mirrors disable_wine_virtual_desktop)
+        let result = remove_registry_section(
+            input,
+            r#"[Software\\Wine\\Explorer\\Desktops]"#,
+        );
+        let result = remove_registry_sections_matching(
+            &result,
+            r#"[Software\\Wine\\Explorer\\Desktops\"#,
+        );
+        assert!(!result.contains("Desktops"));
+        assert!(!result.contains("1024x768"));
+        assert!(result.contains("Mac Driver"));
+        assert!(result.contains("RetinaMode"));
     }
 }

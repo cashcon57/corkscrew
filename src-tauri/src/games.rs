@@ -67,6 +67,8 @@ pub struct DetectedGame {
     pub nexus_slug: String,
     /// Absolute path to the game installation directory inside the bottle.
     pub game_path: PathBuf,
+    /// Absolute path to the main game executable (e.g. SkyrimSE.exe).
+    pub exe_path: Option<PathBuf>,
     /// Absolute path to the data/mod deployment directory.
     pub data_dir: PathBuf,
     /// Name of the bottle containing this game.
