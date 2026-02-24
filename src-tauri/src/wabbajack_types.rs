@@ -10,7 +10,7 @@ use xxhash_rust::xxh64;
 
 /// Base64-encoded xxHash64 hash (e.g., `"eSIyd+KOG3s="`).
 /// Wabbajack uses standard base64 with padding.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct WjHash(pub String);
 
@@ -40,12 +40,6 @@ impl WjHash {
 impl fmt::Display for WjHash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
-    }
-}
-
-impl Default for WjHash {
-    fn default() -> Self {
-        WjHash(String::new())
     }
 }
 
@@ -522,7 +516,7 @@ impl WjDirective {
 
 /// Wabbajack's ArchiveHashPath: identifies a file by the archive's hash
 /// plus the relative path within the archive.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct ArchiveHashPath {
     #[serde(default, rename = "BaseHash")]
@@ -539,15 +533,6 @@ impl ArchiveHashPath {
             path.push(part);
         }
         path
-    }
-}
-
-impl Default for ArchiveHashPath {
-    fn default() -> Self {
-        ArchiveHashPath {
-            base_hash: WjHash::default(),
-            parts: Vec::new(),
-        }
     }
 }
 
@@ -630,6 +615,7 @@ impl WjInstallStatus {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s {
             "pending" => WjInstallStatus::Pending,

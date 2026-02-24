@@ -49,12 +49,12 @@ impl ConditionBlock {
             "Or" => self
                 .flags
                 .iter()
-                .any(|dep| flags.get(&dep.flag).map_or(false, |v| v == &dep.value)),
+                .any(|dep| flags.get(&dep.flag) == Some(&dep.value)),
             // Default to And
             _ => self
                 .flags
                 .iter()
-                .all(|dep| flags.get(&dep.flag).map_or(false, |v| v == &dep.value)),
+                .all(|dep| flags.get(&dep.flag) == Some(&dep.value)),
         }
     }
 }

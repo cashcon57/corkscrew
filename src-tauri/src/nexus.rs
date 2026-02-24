@@ -1128,6 +1128,7 @@ pub async fn graphql_introspect(api_key: &str) -> Result<String> {
 
 /// Search mods via NexusMods v2 GraphQL API.
 /// Falls back gracefully if the query doesn't exist.
+#[allow(clippy::too_many_arguments)]
 pub async fn graphql_search_mods(
     api_key: &str,
     game_domain: &str,

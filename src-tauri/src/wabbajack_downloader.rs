@@ -346,7 +346,7 @@ impl WjDownloader {
             WjProgressEvent::DownloadProgress {
                 archive_name: archive_name.to_string(),
                 bytes_downloaded: 0,
-                total_bytes: file_node.size() as u64,
+                total_bytes: file_node.size(),
             },
         );
 

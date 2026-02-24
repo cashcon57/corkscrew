@@ -415,7 +415,7 @@ pub fn add_to_steam(steam_info: &SteamInfo, exe_path: &str, icon_path: &str) -> 
         };
 
         // Check if already registered — update if so
-        let existing_idx = entries.iter().position(|e| entry_is_corkscrew(e));
+        let existing_idx = entries.iter().position(entry_is_corkscrew);
         if let Some(idx) = existing_idx {
             let index = entries[idx].index.clone();
             entries[idx] = build_corkscrew_entry(&index, exe_path, icon_path);
@@ -483,7 +483,7 @@ pub fn is_registered_in_steam(steam_info: &SteamInfo) -> bool {
 
         if let Ok(data) = std::fs::read(&shortcuts_path) {
             if let Some(entries) = parse_shortcuts_vdf(&data) {
-                if entries.iter().any(|e| entry_is_corkscrew(e)) {
+                if entries.iter().any(entry_is_corkscrew) {
                     return true;
                 }
             }
@@ -620,7 +620,7 @@ pub fn get_steam_status() -> SteamStatus {
     let steam_info = detect_steam_installation();
     let registered = steam_info
         .as_ref()
-        .map(|info| is_registered_in_steam(info))
+        .map(is_registered_in_steam)
         .unwrap_or(false);
 
     SteamStatus {

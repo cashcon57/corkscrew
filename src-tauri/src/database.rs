@@ -1111,13 +1111,11 @@ impl ModDatabase {
                 row.get::<_, String>(3)?,
             ))
         })?;
-        for row in rows {
-            if let Ok((id, mod_id, file_id, path)) = row {
-                if std::path::Path::new(&path).exists() {
-                    cached.insert((mod_id, file_id));
-                } else {
-                    stale_ids.push(id);
-                }
+        for (id, mod_id, file_id, path) in rows.flatten() {
+            if std::path::Path::new(&path).exists() {
+                cached.insert((mod_id, file_id));
+            } else {
+                stale_ids.push(id);
             }
         }
 
@@ -1681,6 +1679,7 @@ impl ModDatabase {
     }
 
     /// Insert or update archive download status for a Wabbajack install.
+    #[allow(clippy::too_many_arguments)]
     pub fn upsert_wj_archive_status(
         &self,
         install_id: i64,
@@ -1712,6 +1711,7 @@ impl ModDatabase {
     }
 
     /// List all archive statuses for a Wabbajack install.
+    #[allow(clippy::type_complexity)]
     pub fn list_wj_archive_status(
         &self,
         install_id: i64,
@@ -1756,6 +1756,7 @@ impl ModDatabase {
     }
 
     /// Get the install status for a Wabbajack install.
+    #[allow(clippy::type_complexity)]
     pub fn get_wj_install_status(
         &self,
         install_id: i64,
@@ -2066,6 +2067,7 @@ impl ModDatabase {
     }
 
     /// List all pending (incomplete) Wabbajack installs.
+    #[allow(clippy::type_complexity)]
     pub fn list_pending_wj_installs(
         &self,
     ) -> Result<

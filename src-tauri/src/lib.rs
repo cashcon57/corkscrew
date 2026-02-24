@@ -168,6 +168,7 @@ fn get_installed_mods(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn install_mod_cmd(
     app: AppHandle,
     archive_path: String,
@@ -3375,6 +3376,7 @@ async fn get_user_endorsements() -> Result<Vec<nexus::UserEndorsement>, String> 
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn search_nexus_mods_cmd(
     game_slug: String,
     search_text: Option<String>,
@@ -3426,6 +3428,7 @@ async fn get_game_categories_cmd(game_slug: String) -> Result<Vec<NexusCategory>
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn browse_collections_cmd(
     game_domain: String,
     count: u32,

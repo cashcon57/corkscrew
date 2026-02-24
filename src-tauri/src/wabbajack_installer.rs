@@ -225,7 +225,7 @@ fn get_available_disk_space(path: &Path) -> u64 {
     unsafe {
         let mut stat: libc::statvfs = std::mem::zeroed();
         if libc::statvfs(c_path.as_ptr(), &mut stat) == 0 {
-            stat.f_bavail as u64 * stat.f_frsize as u64
+            stat.f_bavail as u64 * stat.f_frsize
         } else {
             0
         }
@@ -399,6 +399,7 @@ pub async fn preflight_check(
 /// Checks the `cancel_token` at the start of each major loop iteration.
 /// If cancelled, updates DB to cancelled, emits InstallCancelled, and
 /// returns `WjInstallError::Cancelled`.
+#[allow(clippy::too_many_arguments)]
 pub async fn install_wabbajack_modlist(
     app: &AppHandle,
     db: &Arc<ModDatabase>,

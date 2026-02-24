@@ -432,6 +432,7 @@ query RevisionMods($slug: String!, $revision: Int, $viewAdultContent: Boolean) {
 // ---------------------------------------------------------------------------
 
 /// Search/browse collections for a game domain.
+#[allow(clippy::too_many_arguments)]
 pub async fn browse_collections(
     api_key: Option<&str>,
     game_domain: &str,
