@@ -72,6 +72,7 @@ export interface AppConfig {
 export interface LaunchResult {
   executable: string;
   bottle_name: string;
+  pid: number | null;
   success: boolean;
 }
 

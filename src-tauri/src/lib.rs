@@ -6,6 +6,7 @@ pub mod collection_installer;
 pub mod collections;
 pub mod config;
 pub mod conflict_resolver;
+pub mod cursor_clamp;
 pub mod crashlog;
 pub mod database;
 pub mod deployer;
@@ -996,8 +997,27 @@ fn launch_game_cmd(
         }
     }
 
-    launcher::launch_game(&bottle, &exe_path, Some(&game_path))
-        .map_err(|e| format!("Launch failed ({}): {}", bottle.source, e))
+    let result = launcher::launch_game(&bottle, &exe_path, Some(&game_path))
+        .map_err(|e| format!("Launch failed ({}): {}", bottle.source, e))?;
+
+    // Activate cursor edge clamping on macOS to prevent Dock trigger zone
+    // from making the system cursor visible during fullscreen gameplay.
+    // Only for Skyrim SE where we also apply display fixes.
+    if game_id == "skyrimse" {
+        if let Some(pid) = result.pid {
+            match display_fix::detect_screen_resolution(&bottle) {
+                Ok((_w, h)) => {
+                    match cursor_clamp::activate(h, pid) {
+                        Ok(()) => log::info!("Cursor clamp activated for pid {}", pid),
+                        Err(e) => log::warn!("Cursor clamp not available: {}", e),
+                    }
+                }
+                Err(e) => log::warn!("Could not detect screen height for cursor clamp: {}", e),
+            }
+        }
+    }
+
+    Ok(result)
 }
 
 #[tauri::command]
@@ -1136,6 +1156,24 @@ async fn install_skse_auto_cmd(game_id: String, bottle_name: String) -> Result<S
 fn fix_skyrim_display(bottle_name: String) -> Result<display_fix::DisplayFixResult, String> {
     let bottle = resolve_bottle(&bottle_name)?;
     display_fix::auto_fix_display(&bottle)
+}
+
+#[tauri::command]
+fn cursor_clamp_status() -> serde_json::Value {
+    serde_json::json!({
+        "active": cursor_clamp::is_active(),
+        "has_permission": cursor_clamp::has_permission(),
+    })
+}
+
+#[tauri::command]
+fn deactivate_cursor_clamp() {
+    cursor_clamp::deactivate();
+}
+
+#[tauri::command]
+fn request_cursor_clamp_permission() -> bool {
+    cursor_clamp::request_permission()
 }
 
 #[tauri::command]
@@ -4622,6 +4660,9 @@ pub fn run() {
             check_skyrim_version,
             check_skse_compatibility_cmd,
             fix_skyrim_display,
+            cursor_clamp_status,
+            deactivate_cursor_clamp,
+            request_cursor_clamp_permission,
             downgrade_skyrim,
             set_vibrancy,
             add_custom_exe,

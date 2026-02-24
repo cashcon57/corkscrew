@@ -56,6 +56,8 @@ pub struct LaunchResult {
     pub executable: String,
     /// Name of the bottle used for the launch.
     pub bottle_name: String,
+    /// PID of the spawned process (for monitoring).
+    pub pid: Option<u32>,
     /// Whether the process was successfully spawned.
     pub success: bool,
 }
@@ -419,14 +421,16 @@ pub fn launch_game(
     // On Unix, we can use spawn() which does not wait.
     match cmd.spawn() {
         Ok(child) => {
+            let pid = child.id();
             info!(
                 "Game process spawned (pid={}): {}",
-                child.id(),
+                pid,
                 resolved_exe.display()
             );
             Ok(LaunchResult {
                 executable: resolved_exe.to_string_lossy().into_owned(),
                 bottle_name: bottle.name.clone(),
+                pid: Some(pid),
                 success: true,
             })
         }
@@ -559,6 +563,7 @@ mod tests {
         let result = LaunchResult {
             executable: "C:\\Games\\SkyrimSE.exe".to_string(),
             bottle_name: "Gaming".to_string(),
+            pid: Some(12345),
             success: true,
         };
 

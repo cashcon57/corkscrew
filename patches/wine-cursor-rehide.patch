@@ -1,0 +1,80 @@
+From: Cash Conway <cashconway@users.noreply.github.com>
+Subject: [PATCH] winemac.drv: Re-hide cursor when macOS unilaterally shows it
+
+macOS can override [NSCursor hide] when the cursor enters certain
+system trigger zones (such as the Dock auto-show region at the bottom
+of the screen). When this happens during exclusive fullscreen via
+CGDisplayCapture, the system cursor becomes visible even though
+Wine's cursorHidden flag is still TRUE.
+
+The driver currently calls [NSCursor hide] exactly once and never
+re-asserts the hidden state. This patch adds two mechanisms to
+detect and correct desynchronized cursor visibility:
+
+1. Add NSTrackingCursorUpdate to the tracking area options so that
+   cursorUpdate: is called whenever macOS changes the cursor. The
+   handler calls updateCursor:TRUE to re-assert the correct state.
+
+2. In updateCursor:, when force is TRUE and the cursor should be
+   hidden, check CGCursorIsVisible() to detect if macOS has
+   unilaterally shown it, and re-hide if needed.
+
+This mirrors the approach used by GLFW to fix the same issue
+(glfw/glfw#2656).
+
+Wine-Bug: https://bugs.winehq.org/show_bug.cgi?id=XXXXX
+Signed-off-by: Cash Conway <cashconway@users.noreply.github.com>
+---
+ dlls/winemac.drv/cocoa_app.m    | 12 ++++++++++++
+ dlls/winemac.drv/cocoa_window.m | 10 +++++++++-
+ 2 files changed, 21 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/winemac.drv/cocoa_app.m b/dlls/winemac.drv/cocoa_app.m
+--- a/dlls/winemac.drv/cocoa_app.m
++++ b/dlls/winemac.drv/cocoa_app.m
+@@ /* updateCursor: method */
+ - (void) updateCursor:(BOOL)force
+ {
+     if (force || lastTargetWindow)
+     {
+         if (clientWantsCursorHidden && !cursorHidden)
+         {
+             [NSCursor hide];
+             cursorHidden = TRUE;
+         }
++        else if (clientWantsCursorHidden && cursorHidden && force)
++        {
++            /* macOS can unilaterally show the cursor when it enters system
++               trigger zones (e.g. the Dock auto-show region at the bottom
++               of the screen). Detect this desynchronization and re-hide. */
++            if (CGCursorIsVisible())
++            {
++                [NSCursor hide];
++            }
++        }
+
+         if (!cursorIsCurrent)
+         {
+
+diff --git a/dlls/winemac.drv/cocoa_window.m b/dlls/winemac.drv/cocoa_window.m
+--- a/dlls/winemac.drv/cocoa_window.m
++++ b/dlls/winemac.drv/cocoa_window.m
+@@ /* NSTrackingArea creation in createWindowWithFeatures: */
+     /* We use tracking areas in addition to setAcceptsMouseMovedEvents:YES
+        because they give us mouse moves in the background. */
+     trackingArea = [[[NSTrackingArea alloc] initWithRect:[contentView bounds]
+                                                  options:(NSTrackingMouseMoved |
+                                                           NSTrackingActiveAlways |
++                                                          NSTrackingCursorUpdate |
+                                                           NSTrackingInVisibleRect)
+                                                    owner:window
+                                                 userInfo:nil] autorelease];
+
+@@ /* Add cursorUpdate: handler to WineWindow */
++- (void)cursorUpdate:(NSEvent *)event
++{
++    /* macOS sends cursorUpdate: when the system changes the cursor,
++       for example when the cursor enters a Dock trigger zone. Force
++       a cursor state refresh to re-assert our hidden/custom cursor. */
++    [[WineApplicationController sharedController] updateCursor:TRUE];
++}
