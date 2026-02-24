@@ -572,6 +572,10 @@ pub fn fix_display_settings(
     updated = set_ini_display_value(&updated, "iSize H", &height.to_string());
     updated = set_ini_display_value(&updated, "bFull Screen", "1");
     updated = set_ini_display_value(&updated, "bBorderless", "0");
+    // Constrain cursor to the game window — prevents the cursor from reaching
+    // the very bottom edge of the screen where macOS triggers Dock auto-show,
+    // which breaks through Wine's display capture and makes the OS cursor visible.
+    updated = set_ini_display_value(&updated, "bConstrainCursor", "1");
 
     // Write via temp file + rename for atomicity
     let temp_path = prefs_path.with_extension("ini.tmp");
