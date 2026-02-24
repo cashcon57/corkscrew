@@ -347,17 +347,30 @@ fn check_retina_mode(bottle: &Bottle) -> DiagnosticCheck {
 
 /// Enable Retina/HiDPI mode in the bottle's Wine registry.
 pub fn fix_retina_mode(bottle: &Bottle) -> std::io::Result<()> {
+    set_retina_mode(bottle, true)
+}
+
+/// Disable Retina/HiDPI mode in the bottle's Wine registry.
+pub fn disable_retina_mode(bottle: &Bottle) -> std::io::Result<()> {
+    set_retina_mode(bottle, false)
+}
+
+/// Set Retina/HiDPI mode to enabled or disabled in the bottle's Wine registry.
+fn set_retina_mode(bottle: &Bottle, enabled: bool) -> std::io::Result<()> {
     let user_reg = bottle.path.join("user.reg");
     let mut content = fs::read_to_string(&user_reg).unwrap_or_default();
 
     let section = "[Software\\\\Wine\\\\Mac Driver]";
-    let entry = "\"RetinaMode\"=\"Y\"";
+    let value = if enabled { "Y" } else { "N" };
+    let entry = format!("\"RetinaMode\"=\"{}\"", value);
 
     if content.contains(section) {
         // Section exists — check if RetinaMode line is there
         if content.contains("\"RetinaMode\"=") {
-            // Replace existing value
-            content = content.replace("\"RetinaMode\"=\"N\"", entry);
+            // Replace existing value (match any current value)
+            content = content
+                .replace("\"RetinaMode\"=\"Y\"", &entry)
+                .replace("\"RetinaMode\"=\"N\"", &entry);
         } else {
             // Add entry after section header
             if let Some(pos) = content.find(section) {

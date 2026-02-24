@@ -71,6 +71,8 @@ pub struct BottleSettings {
     pub metalfx_enabled: bool,
     /// Whether DXMT NVIDIA extensions are enabled.
     pub dxmt_nvext_enabled: bool,
+    /// Whether Wine Retina/HiDPI mode is enabled (macOS only).
+    pub retina_enabled: bool,
     /// All environment variables set on the bottle.
     pub env_vars: HashMap<String, String>,
     /// Whether this bottle has a cxbottle.conf (CrossOver-managed).
@@ -245,10 +247,23 @@ fn conf_path(bottle: &Bottle) -> PathBuf {
     bottle.path.join("cxbottle.conf")
 }
 
+/// Check if Wine's Retina/HiDPI mode is enabled in the bottle's registry.
+///
+/// Reads `user.reg` for `"RetinaMode"="Y"` under `[Software\\Wine\\Mac Driver]`.
+/// Returns false on Linux or if the registry doesn't exist.
+fn read_retina_mode(bottle: &Bottle) -> bool {
+    let user_reg = bottle.path.join("user.reg");
+    let content = fs::read_to_string(&user_reg).unwrap_or_default();
+    content.contains("\"RetinaMode\"=\"Y\"")
+}
+
 /// Read the current settings for a bottle.
 pub fn get_bottle_settings(bottle: &Bottle) -> Result<BottleSettings> {
     let conf_file = conf_path(bottle);
     let has_native = conf_file.exists();
+
+    // Check Retina mode from Wine registry (works for all bottle types)
+    let retina_enabled = read_retina_mode(bottle);
 
     if has_native {
         let conf = parse_cxbottle_conf(&conf_file)?;
@@ -283,6 +298,7 @@ pub fn get_bottle_settings(bottle: &Bottle) -> Result<BottleSettings> {
                 .get("DXMT_ENABLE_NVEXT")
                 .map(|v| v == "1")
                 .unwrap_or(false),
+            retina_enabled,
             env_vars: conf.env_vars,
             has_native_config: true,
         })
@@ -308,6 +324,7 @@ pub fn get_bottle_settings(bottle: &Bottle) -> Result<BottleSettings> {
             msync_enabled: false,
             metalfx_enabled: false,
             dxmt_nvext_enabled: false,
+            retina_enabled,
             env_vars: HashMap::new(),
             has_native_config: false,
         })
@@ -316,6 +333,18 @@ pub fn get_bottle_settings(bottle: &Bottle) -> Result<BottleSettings> {
 
 /// Update a single setting on a bottle's cxbottle.conf.
 pub fn set_bottle_setting(bottle: &Bottle, key: &str, value: &str) -> Result<()> {
+    // Retina mode modifies user.reg, not cxbottle.conf — handle separately
+    if key == "retina_enabled" {
+        if value == "true" || value == "1" {
+            crate::wine_diagnostic::fix_retina_mode(bottle)
+                .map_err(|e| BottleConfigError::Io(e))?;
+        } else {
+            crate::wine_diagnostic::disable_retina_mode(bottle)
+                .map_err(|e| BottleConfigError::Io(e))?;
+        }
+        return Ok(());
+    }
+
     let conf_file = conf_path(bottle);
     if !conf_file.exists() {
         return Err(BottleConfigError::NotFound(conf_file));
@@ -407,6 +436,18 @@ pub fn get_setting_definitions(settings: &BottleSettings) -> Vec<BottleSettingDe
             recommended: None,
         });
     }
+
+    // High Resolution Mode — works for all bottles on macOS (modifies user.reg)
+    #[cfg(target_os = "macos")]
+    defs.push(BottleSettingDef {
+        key: "retina_enabled".to_string(),
+        label: "High Resolution Mode".to_string(),
+        description: "Render at native Retina resolution. Sharper visuals but higher GPU load. Matches CrossOver's High Resolution Mode setting.".to_string(),
+        setting_type: SettingType::Toggle {
+            current: settings.retina_enabled,
+        },
+        recommended: None,
+    });
 
     // Editable settings (only for CrossOver bottles with cxbottle.conf)
     if settings.has_native_config {

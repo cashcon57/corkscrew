@@ -393,10 +393,10 @@ pub async fn preflight_check(
 /// 1. Parse the .wabbajack file
 /// 2. Run pre-flight checks
 /// 3. Create a DB record for this install
-/// 4. Download phase (stubbed — WjDownloader not yet implemented)
+/// 4. Download phase (multi-source: Nexus, HTTP, MediaFire, Mega, Google Drive, WJ CDN)
 /// 5. Extraction phase (extract each archive to temp dirs)
-/// 6. Directive processing phase (stubbed — DirectiveProcessor not yet implemented)
-/// 7. Deploy phase (stubbed — deployer integration not yet implemented)
+/// 6. Directive processing phase (BSDiff, CreateBSA/BA2, DDS transform, MergedPatch, inline)
+/// 7. Deploy phase (hardlink-first with copy fallback)
 /// 8. Update DB record to completed
 /// 9. Return result
 ///

@@ -1,23 +1,26 @@
-//! Skyrim SE display scaling fix for CrossOver/macOS.
+//! Skyrim SE display fix for Wine/CrossOver/Proton on macOS and Linux.
 //!
-//! When running Skyrim SE in CrossOver on macOS, the game often renders
-//! zoomed-in or pinned to the top-left corner due to incorrect display
-//! settings in SkyrimPrefs.ini. This module detects and fixes those
-//! settings by matching the Mac's native display resolution and
-//! configuring exclusive fullscreen mode.
+//! When running Skyrim SE through a compatibility layer, the game often
+//! renders windowed or at the wrong resolution due to incorrect display
+//! settings in SkyrimPrefs.ini. This module detects the correct screen
+//! resolution for the platform and configures exclusive fullscreen mode.
 //!
-//! Exclusive fullscreen creates a macOS Space, allowing the user to
-//! 3-finger-swipe between the game and their desktop.
+//! Platform support:
+//! - **macOS**: Detects Retina vs non-Retina via system_profiler, respects
+//!   Wine's RetinaMode setting to choose physical vs logical resolution.
+//! - **Linux (X11)**: Uses xrandr to detect primary display resolution.
+//! - **Linux (Wayland)**: Uses wlr-randr or xdpyinfo via XWayland.
+//! - **SteamOS/Steam Deck**: Detects Gamescope resolution or defaults to 1280x800.
 //!
 //! The fix applies two changes:
-//! 1. **SkyrimPrefs.ini**: Set native resolution + `bFull Screen=1`
+//! 1. **SkyrimPrefs.ini**: Set detected resolution + `bFull Screen=1`
 //! 2. **Wine registry**: Remove virtual desktop settings that force windowed mode
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use log::warn;
+use log::{debug, warn};
 use serde::{Deserialize, Serialize};
 
 use crate::bottles::Bottle;
@@ -45,11 +48,80 @@ pub struct DisplayFixResult {
 }
 
 // ---------------------------------------------------------------------------
-// macOS screen resolution detection
+// Screen resolution detection (cross-platform)
 // ---------------------------------------------------------------------------
 
-/// Detect the main display resolution on macOS using system_profiler.
-pub fn detect_screen_resolution() -> Result<(u32, u32), String> {
+/// Check whether Wine's Retina/HiDPI mode is enabled in a bottle's registry.
+pub fn is_retina_enabled(bottle: &Bottle) -> bool {
+    let user_reg = bottle.path.join("user.reg");
+    let content = fs::read_to_string(&user_reg).unwrap_or_default();
+    content.contains("\"RetinaMode\"=\"Y\"")
+}
+
+/// Detect the screen resolution appropriate for a given bottle.
+///
+/// On macOS Retina displays, the result depends on whether Wine's
+/// RetinaMode is enabled:
+/// - **Retina ON**: returns physical pixels (e.g., 3456x2234) since Wine
+///   sees the full native resolution.
+/// - **Retina OFF**: returns logical resolution (e.g., 1728x1117) which
+///   is what Wine actually exposes to applications.
+///
+/// On Linux, returns the current display resolution via xrandr (X11),
+/// wlr-randr (Wayland), or Gamescope env vars (SteamOS).
+pub fn detect_screen_resolution(bottle: &Bottle) -> Result<(u32, u32), String> {
+    #[cfg(target_os = "macos")]
+    {
+        detect_macos_resolution(bottle)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = bottle; // Bottle not needed for Linux resolution detection
+        detect_linux_resolution()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = bottle;
+        Err("Screen resolution detection not supported on this platform".into())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// macOS resolution detection
+// ---------------------------------------------------------------------------
+
+/// Detect resolution on macOS, accounting for Retina scaling.
+#[cfg(target_os = "macos")]
+fn detect_macos_resolution(bottle: &Bottle) -> Result<(u32, u32), String> {
+    let retina = is_retina_enabled(bottle);
+    let (logical, physical) = detect_macos_resolutions()?;
+
+    let (w, h) = if retina {
+        debug!(
+            "Retina mode enabled — using physical pixels: {}x{}",
+            physical.0, physical.1
+        );
+        physical
+    } else {
+        debug!(
+            "Retina mode disabled — using logical resolution: {}x{}",
+            logical.0, logical.1
+        );
+        logical
+    };
+
+    Ok((w, h))
+}
+
+/// Query system_profiler for both logical and physical display resolutions.
+///
+/// Returns `(logical, physical)` where:
+/// - `logical` = `_spdisplays_resolution` (what macOS reports to apps, e.g., 1728x1117)
+/// - `physical` = `_spdisplays_pixels` (actual hardware pixels, e.g., 3456x2234)
+///
+/// On non-Retina displays these are the same value.
+#[cfg(target_os = "macos")]
+fn detect_macos_resolutions() -> Result<((u32, u32), (u32, u32)), String> {
     let output = Command::new("system_profiler")
         .args(["SPDisplaysDataType", "-json"])
         .output()
@@ -63,37 +135,27 @@ pub fn detect_screen_resolution() -> Result<(u32, u32), String> {
     let data: serde_json::Value =
         serde_json::from_str(&json_str).map_err(|e| format!("Failed to parse JSON: {}", e))?;
 
-    // Navigate: SPDisplaysDataType[*].spdisplays_ndrvs[*]._spdisplays_resolution
     if let Some(displays) = data.get("SPDisplaysDataType").and_then(|v| v.as_array()) {
         for gpu in displays {
             if let Some(screens) = gpu.get("spdisplays_ndrvs").and_then(|v| v.as_array()) {
                 for screen in screens {
-                    // Check if this is the main display
-                    let is_main = screen.get("_spdisplays_displayID").is_some()
-                        || screen.get("spdisplays_main").and_then(|v| v.as_str())
-                            == Some("spdisplays_yes");
+                    // Parse physical pixels (e.g., "3456 x 2234")
+                    let physical = screen
+                        .get("_spdisplays_pixels")
+                        .and_then(|v| v.as_str())
+                        .and_then(parse_resolution_string);
 
-                    // Try _spdisplays_pixels first (e.g. "2560 x 1440")
-                    if let Some(pixels) = screen.get("_spdisplays_pixels").and_then(|v| v.as_str())
-                    {
-                        if let Some((w, h)) = parse_resolution_string(pixels) {
-                            return Ok((w, h));
-                        }
-                    }
-
-                    // Try _spdisplays_resolution (e.g. "2560 x 1440 @ 60.00Hz")
-                    if let Some(res) = screen
+                    // Parse logical resolution (e.g., "1728 x 1117 @ 120.00Hz")
+                    let logical = screen
                         .get("_spdisplays_resolution")
                         .and_then(|v| v.as_str())
-                    {
-                        if let Some((w, h)) = parse_resolution_string(res) {
-                            return Ok((w, h));
-                        }
-                    }
+                        .and_then(parse_resolution_string);
 
-                    // If this was the main display and we couldn't parse, still continue
-                    if is_main {
-                        continue;
+                    match (logical, physical) {
+                        (Some(l), Some(p)) => return Ok((l, p)),
+                        (Some(l), None) => return Ok((l, l)),
+                        (None, Some(p)) => return Ok((p, p)),
+                        (None, None) => continue,
                     }
                 }
             }
@@ -103,14 +165,13 @@ pub fn detect_screen_resolution() -> Result<(u32, u32), String> {
     // Fallback: try screenresolution tool
     if let Ok(output) = Command::new("screenresolution").arg("get").output() {
         let text = String::from_utf8_lossy(&output.stdout);
-        // Output format: "Display 0: 2560x1440x32@0"
         for line in text.lines() {
             if line.contains("Display 0") || line.contains("Display") {
                 if let Some(res) = line.split_whitespace().last() {
                     let parts: Vec<&str> = res.split('x').collect();
                     if parts.len() >= 2 {
                         if let (Ok(w), Ok(h)) = (parts[0].parse(), parts[1].parse()) {
-                            return Ok((w, h));
+                            return Ok(((w, h), (w, h)));
                         }
                     }
                 }
@@ -118,7 +179,151 @@ pub fn detect_screen_resolution() -> Result<(u32, u32), String> {
         }
     }
 
-    Err("Could not detect screen resolution".into())
+    Err("Could not detect screen resolution on macOS".into())
+}
+
+// ---------------------------------------------------------------------------
+// Linux resolution detection
+// ---------------------------------------------------------------------------
+
+/// Detect resolution on Linux, trying SteamOS/Gamescope first, then
+/// Wayland (wlr-randr), then X11 (xrandr).
+#[cfg(target_os = "linux")]
+fn detect_linux_resolution() -> Result<(u32, u32), String> {
+    // SteamOS / Steam Deck — check Gamescope env vars first
+    if crate::steam_integration::is_steam_deck() {
+        if let Ok(res) = detect_gamescope_resolution() {
+            return Ok(res);
+        }
+        // Known Steam Deck native resolution (landscape orientation)
+        debug!("Steam Deck detected, using default 1280x800");
+        return Ok((1280, 800));
+    }
+
+    // Wayland
+    if std::env::var("WAYLAND_DISPLAY").is_ok() {
+        if let Ok(res) = detect_wayland_resolution() {
+            return Ok(res);
+        }
+        // Wayland fallback: try xrandr via XWayland
+    }
+
+    // X11 (or XWayland fallback)
+    if std::env::var("DISPLAY").is_ok() {
+        if let Ok(res) = detect_x11_resolution() {
+            return Ok(res);
+        }
+    }
+
+    Err("Could not detect screen resolution on Linux. Tried wlr-randr, xrandr.".into())
+}
+
+/// Detect resolution from Gamescope environment variables.
+/// Gamescope sets these when running inside the Steam Deck compositor.
+#[cfg(target_os = "linux")]
+fn detect_gamescope_resolution() -> Result<(u32, u32), String> {
+    // Gamescope exposes resolution via env vars when available
+    if let (Ok(w_str), Ok(h_str)) = (
+        std::env::var("GAMESCOPE_WIDTH"),
+        std::env::var("GAMESCOPE_HEIGHT"),
+    ) {
+        if let (Ok(w), Ok(h)) = (w_str.parse::<u32>(), h_str.parse::<u32>()) {
+            debug!("Gamescope resolution from env: {}x{}", w, h);
+            return Ok((w, h));
+        }
+    }
+    Err("Gamescope env vars not set".into())
+}
+
+/// Detect primary display resolution via xrandr (X11).
+///
+/// Parses output like: `DP-1 connected primary 2560x1440+0+0 ...`
+#[cfg(target_os = "linux")]
+fn detect_x11_resolution() -> Result<(u32, u32), String> {
+    let output = Command::new("xrandr")
+        .arg("--query")
+        .output()
+        .map_err(|e| format!("Failed to run xrandr: {}", e))?;
+
+    if !output.status.success() {
+        return Err("xrandr returned non-zero exit code".into());
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+
+    // First try: look for "connected primary WxH+X+Y"
+    for line in text.lines() {
+        if line.contains(" connected primary ") {
+            if let Some(res) = parse_xrandr_connected_line(line) {
+                debug!("xrandr primary display: {}x{}", res.0, res.1);
+                return Ok(res);
+            }
+        }
+    }
+
+    // Fallback: first "connected" display with a resolution
+    for line in text.lines() {
+        if line.contains(" connected ") {
+            if let Some(res) = parse_xrandr_connected_line(line) {
+                debug!("xrandr first connected display: {}x{}", res.0, res.1);
+                return Ok(res);
+            }
+        }
+    }
+
+    Err("Could not parse xrandr output".into())
+}
+
+/// Parse a resolution from an xrandr "connected" line.
+/// Format: `NAME connected [primary] WIDTHxHEIGHT+X+Y ...`
+#[cfg(target_os = "linux")]
+fn parse_xrandr_connected_line(line: &str) -> Option<(u32, u32)> {
+    for token in line.split_whitespace() {
+        // Match "WxH+X+Y" pattern (e.g., "2560x1440+0+0")
+        if token.contains('x') && token.contains('+') {
+            let res_part = token.split('+').next()?;
+            return parse_resolution_string(res_part);
+        }
+    }
+    None
+}
+
+/// Detect resolution via wlr-randr (Wayland/wlroots compositors).
+///
+/// Parses output like:
+/// ```text
+/// eDP-1 "..." (DP-1)
+///   Enabled: yes
+///   Modes:
+///     2560x1600 px, 60.004005 Hz (preferred, current)
+/// ```
+#[cfg(target_os = "linux")]
+fn detect_wayland_resolution() -> Result<(u32, u32), String> {
+    let output = Command::new("wlr-randr")
+        .output()
+        .map_err(|e| format!("Failed to run wlr-randr: {}", e))?;
+
+    if !output.status.success() {
+        return Err("wlr-randr returned non-zero exit code".into());
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+
+    // Look for the line with "(current)" which indicates the active mode
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.contains("current") {
+            // Format: "2560x1600 px, 60.004005 Hz (preferred, current)"
+            if let Some(res_str) = trimmed.split_whitespace().next() {
+                if let Some(res) = parse_resolution_string(res_str) {
+                    debug!("wlr-randr current mode: {}x{}", res.0, res.1);
+                    return Ok(res);
+                }
+            }
+        }
+    }
+
+    Err("Could not parse wlr-randr output".into())
 }
 
 /// Parse a resolution string like "2560 x 1440" or "2560 x 1440 @ 60Hz".
@@ -347,10 +552,9 @@ pub fn read_display_settings(prefs_path: &Path) -> Result<DisplaySettings, Strin
     })
 }
 
-/// Apply display fix: set resolution to Mac's native resolution in exclusive
-/// fullscreen mode. This maps to a macOS native fullscreen Space that the user
-/// can 3-finger-swipe away from. Borderless windowed stays on the current
-/// desktop and doesn't get its own Space.
+/// Apply display fix: set resolution to the detected screen resolution in
+/// exclusive fullscreen mode. On macOS this maps to a native fullscreen
+/// Space that the user can 3-finger-swipe away from.
 pub fn fix_display_settings(
     prefs_path: &Path,
     width: u32,
@@ -522,10 +726,11 @@ fn remove_registry_key(content: &str, section_header: &str, key_name: &str) -> S
 
 /// Full pipeline: detect resolution, find prefs, fix INI + Wine registry.
 ///
-/// 1. Sets SkyrimPrefs.ini to native resolution in exclusive fullscreen
-/// 2. Removes Wine virtual desktop to allow true fullscreen (macOS Space)
+/// 1. Detects correct resolution for the platform and bottle's Retina setting
+/// 2. Sets SkyrimPrefs.ini to detected resolution in exclusive fullscreen
+/// 3. Removes Wine virtual desktop to allow true fullscreen
 pub fn auto_fix_display(bottle: &Bottle) -> Result<DisplayFixResult, String> {
-    let (screen_w, screen_h) = detect_screen_resolution()?;
+    let (screen_w, screen_h) = detect_screen_resolution(bottle)?;
 
     let prefs_path = find_skyrim_prefs(bottle)
         .ok_or("Could not find SkyrimPrefs.ini in this bottle. Launch Skyrim once first to create the settings file.")?;
@@ -566,6 +771,8 @@ pub fn auto_fix_display(bottle: &Bottle) -> Result<DisplayFixResult, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bottles::Bottle;
+    use std::path::PathBuf;
 
     const SAMPLE_INI: &str = r#"[General]
 sLanguage=ENGLISH
@@ -658,6 +865,58 @@ fMusicVolume=0.5
             Some((2560, 1440))
         );
         assert_eq!(parse_resolution_string("1920x1080"), Some((1920, 1080)));
+        // Formats from xrandr/wlr-randr
+        assert_eq!(parse_resolution_string("2560x1600"), Some((2560, 1600)));
+        assert_eq!(parse_resolution_string("1280x800"), Some((1280, 800)));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parse_xrandr_connected_line_formats() {
+        assert_eq!(
+            parse_xrandr_connected_line("DP-1 connected primary 2560x1440+0+0 (normal left inverted right x axis y axis) 597mm x 336mm"),
+            Some((2560, 1440))
+        );
+        assert_eq!(
+            parse_xrandr_connected_line("eDP-1 connected 1920x1080+0+0 (normal) 344mm x 194mm"),
+            Some((1920, 1080))
+        );
+        assert_eq!(
+            parse_xrandr_connected_line("HDMI-1 connected (normal left inverted right x axis y axis)"),
+            None // No resolution shown = display not active
+        );
+    }
+
+    #[test]
+    fn is_retina_enabled_from_registry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().to_path_buf();
+        std::fs::create_dir_all(bottle_path.join("drive_c")).unwrap();
+
+        let bottle = Bottle {
+            name: "Test".into(),
+            path: bottle_path.clone(),
+            source: "Wine".into(),
+        };
+
+        // No user.reg = not enabled
+        assert!(!is_retina_enabled(&bottle));
+
+        // user.reg without RetinaMode = not enabled
+        std::fs::write(
+            bottle_path.join("user.reg"),
+            "[Software\\\\Wine\\\\Mac Driver]\n\"RetinaMode\"=\"N\"\n",
+        )
+        .unwrap();
+        assert!(!is_retina_enabled(&bottle));
+
+        // user.reg with RetinaMode=Y = enabled
+        std::fs::write(
+            bottle_path.join("user.reg"),
+            "[Software\\\\Wine\\\\Mac Driver]\n\"RetinaMode\"=\"Y\"\n",
+        )
+        .unwrap();
+        assert!(is_retina_enabled(&bottle));
     }
 
     #[test]

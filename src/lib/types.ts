@@ -1156,6 +1156,51 @@ export interface CollectionInstallCheckpoint {
   updated_at: string;
 }
 
+// Wabbajack Install Progress Events (from wj-install-progress channel)
+export interface WjPreflightReport {
+  can_proceed: boolean;
+  issues: { severity: string; message: string }[];
+  total_download_size: number;
+  total_archives: number;
+  total_directives: number;
+  cached_archives: number;
+  disk_space_available: number;
+  disk_space_required: number;
+  nexus_archives: number;
+  is_nexus_premium: boolean;
+  manual_downloads: number;
+}
+
+export interface WjInstallResult {
+  install_id: number;
+  status: string;
+  total_archives: number;
+  total_directives: number;
+  files_deployed: number;
+  elapsed_secs: number;
+  warnings: string[];
+}
+
+export type WjInstallProgressEvent =
+  | { type: "PreFlightStarted" }
+  | { type: "PreFlightCompleted"; report: WjPreflightReport }
+  | { type: "DownloadPhaseStarted"; total: number }
+  | { type: "DownloadStarted"; name: string; index: number; total: number }
+  | { type: "DownloadProgress"; name: string; bytes: number; total_bytes: number }
+  | { type: "DownloadCompleted"; name: string }
+  | { type: "DownloadFailed"; name: string; error: string }
+  | { type: "DownloadSkipped"; name: string; reason: string }
+  | { type: "ExtractionStarted"; total: number }
+  | { type: "ExtractionProgress"; name: string; index: number; total: number }
+  | { type: "DirectivePhaseStarted"; total: number }
+  | { type: "DirectiveProgress"; current: number; total: number; directive_type: string }
+  | { type: "DeployStarted"; total: number }
+  | { type: "DeployProgress"; current: number; total: number }
+  | { type: "InstallCompleted"; result: WjInstallResult }
+  | { type: "InstallFailed"; error: string }
+  | { type: "InstallCancelled" }
+  | { type: "UserActionRequired"; archive_name: string; url: string; prompt: string };
+
 // Wabbajack Install Status (for resume)
 export interface WabbajackInstallStatus {
   install_id: number;

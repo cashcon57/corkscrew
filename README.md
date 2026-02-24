@@ -367,7 +367,7 @@ Key workflows tested end-to-end:
 - Crash log analysis with actionable diagnosis
 - INI file browsing, editing, and preset application
 - Wine bottle diagnostics with automated fixes
-- Wabbajack gallery browsing and local `.wabbajack` file parsing
+- Wabbajack modlist installation with multi-source downloads, directive processing, and checkpoint resume
 - In-app auto-updater with signed releases
 - Mod endorsements via NexusMods API
 - Per-profile game save backup/restore
@@ -378,40 +378,31 @@ Key workflows tested end-to-end:
 
 - **Linux testing is limited** — The app builds for Linux and handles Linux paths throughout, but primary testing has been on macOS. Community feedback on SteamOS/Proton setups is especially welcome.
 - **Enhanced game support** — 80+ games are detected and support basic mod deployment. Full-featured support (plugin load order, LOOT sorting, script extender auto-install, INI presets, crash log analysis, game-specific mod tools) currently exists for Skyrim SE and Fallout 4. Other Bethesda games are next in line.
-- **Collections installation** — Works well for most public NexusMods collections (10–150 mods). Install order resolution, FOMOD replay, plugin sync, and profile snapshots are all functional. Binary patch application from collection manifests is not yet implemented. Collection updates require full re-download (no delta updates).
-- **Wabbajack installation** — The full Wabbajack install pipeline is implemented with real downloads (NexusMods, HTTP, MediaFire, ModDB), directive processing (BSDiff patching, inline files), and deployment. **Not yet implemented**: BSA/BA2 packing (CreateBSA), DDS texture transformation (TransformedTexture), merged patches (MergedPatch), Google Drive downloads, Wabbajack CDN downloads, and game file source extraction. Complex modlists using these features will partially fail. Install resume after interruption is stubbed but not yet functional.
-- **FOMOD conditionals** — The FOMOD installer handles group selection, type badges, and file mapping. Conditional visibility, option dependencies, and mutually-exclusive groups are not yet supported — the installer uses defaults for these cases.
+- **Collections installation** — Works well for most public NexusMods collections (10–150 mods). Install order resolution, FOMOD replay, plugin sync, profile snapshots, binary patch application, and collection delta updates (revision diff) are all functional.
+- **Wabbajack installation** — The full Wabbajack install pipeline is implemented with real downloads (NexusMods, HTTP, MediaFire, ModDB, Google Drive, Wabbajack CDN), directive processing (BSDiff patching, inline files, BSA/BA2 packing, DDS texture transformation, merged patches), and deployment. Checkpoint-based install resume survives interruptions. Game file source extraction is not yet implemented — complex modlists depending on vanilla game files as patch sources will partially fail.
+- **FOMOD conditionals** — The FOMOD installer handles group selection, type badges, file mapping, conditional visibility, flag dependencies, and step filtering based on previous selections.
 - **NexusMods SSO** — The SSO/OAuth2 module (with PKCE) is fully implemented and ready to use. Currently awaiting NexusMods approval of the "Corkscrew" application slug. In the meantime, API key authentication works.
 - **macOS code signing** — Fully signed and notarized with an Apple Developer certificate as of v1.13. No Gatekeeper bypass needed.
 
 ### Roadmap
 
-**In progress:**
-- BSA/BA2 archive packing for Wabbajack CreateBSA directives
-- DDS texture transformation for Wabbajack TransformedTexture directives
-- MergedPatch directive processing for Wabbajack
-- Google Drive + Wabbajack CDN download sources
-- Collection binary patch application
-- FOMOD conditional visibility and option dependencies
-- Wabbajack install resume/recovery after interruption
-
 **Near-term:**
+- Wire up Wabbajack install UI to backend pipeline (backend complete, frontend not yet connected)
 - Enhanced game plugins for more Bethesda titles (Oblivion, Fallout 3, Fallout NV, Starfield, Morrowind)
-- NexusMods SSO/OAuth authentication (pending NM app approval)
-- Collection delta updates (download only changed mods)
+- NexusMods SSO/OAuth authentication (code complete, pending NM app approval)
 - Per-game tool configuration for non-Bethesda games
-- File conflict resolution UI (manual override of priority-based resolution)
+- Wabbajack game file source extraction (vanilla files as patch sources)
 
 **Medium-term:**
-- Same-volume staging for reliable hardlink deployment
-- Enhanced dependency visualization with tree view
-- Install simulation / dry-run preview
+- Same-volume staging with user warning and auto-move option
+- Enhanced dependency visualization with tree view (currently list-based)
+- Install simulation / dry-run preview (currently preflight validation only)
 - Download bandwidth throttling
 - Resizable table columns with persistent widths
 
 **Long-term:**
 - Flatpak distribution
-- Community modlist sharing
+- Community modlist sharing (local export/import exists)
 
 ---
 

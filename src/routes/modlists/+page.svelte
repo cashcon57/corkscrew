@@ -2,17 +2,21 @@
   import { onMount, onDestroy } from "svelte";
   import { open } from "@tauri-apps/plugin-dialog";
   import { openUrl } from "@tauri-apps/plugin-opener";
+  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import {
     getWabbajackModlists,
+    getConfig,
     fetchUrlText,
     parseWabbajackFile,
     downloadWabbajackFile,
     detectWabbajackTools,
+    installWabbajackModlist,
+    cancelWabbajackInstall,
     closeBrowserWebview,
     getPendingWabbajackInstalls,
   } from "$lib/api";
   import { showError, showSuccess, selectedGame } from "$lib/stores";
-  import type { ModlistSummary, ParsedModlist, RequiredTool, WabbajackInstallStatus } from "$lib/types";
+  import type { ModlistSummary, ParsedModlist, RequiredTool, WabbajackInstallStatus, WjInstallProgressEvent } from "$lib/types";
   import { marked } from "marked";
   import DOMPurify from "dompurify";
   import CompatibilityPanel from "$lib/components/CompatibilityPanel.svelte";
@@ -59,6 +63,12 @@
   // Install state
   let installing = $state(false);
   let installStep = $state("");
+  let wjInstallId = $state<number | null>(null);
+  let wjPhase = $state("");
+  let wjCurrent = $state(0);
+  let wjTotal = $state(0);
+  let wjCurrentFile = $state("");
+  let wjUnlisten: UnlistenFn | null = null;
 
   // Resume banner state
   let pendingWjInstall = $state<WabbajackInstallStatus | null>(null);
@@ -154,6 +164,7 @@
 
   onDestroy(() => {
     closeBrowserWebview().catch(() => {});
+    cleanupWjListener();
   });
 
   onMount(async () => {
@@ -322,15 +333,168 @@
     }
   }
 
-  function proceedWithInstall() {
+  async function proceedWithInstall() {
+    const game = $selectedGame;
+    if (!game || !wabbajackFilePath) return;
+
     showToolsPrompt = false;
     pendingTools = [];
-    // The actual archive download + deploy pipeline would go here.
-    // For now, show info about what the install would do.
     installing = true;
-    installStep = "Modlist installation pipeline is in development. Archive download and deployment will be available in a future update.";
-    showSuccess("Tool check complete. Full installation pipeline coming soon.");
-    installing = false;
+    installStep = "Preparing installation...";
+    wjPhase = "";
+    wjCurrent = 0;
+    wjTotal = 0;
+    wjCurrentFile = "";
+
+    // Determine paths
+    let downloadDir: string;
+    try {
+      const config = await getConfig();
+      downloadDir = config.download_dir || `${game.bottle_path}/drive_c/corkscrew_downloads`;
+    } catch {
+      downloadDir = `${game.bottle_path}/drive_c/corkscrew_downloads`;
+    }
+    const installDir = game.data_dir;
+
+    // Subscribe to progress events
+    try {
+      wjUnlisten = await listen<WjInstallProgressEvent>("wj-install-progress", (event) => {
+        const p = event.payload;
+        switch (p.type) {
+          case "PreFlightStarted":
+            wjPhase = "preflight";
+            installStep = "Running preflight checks...";
+            break;
+          case "PreFlightCompleted":
+            if (!p.report.can_proceed) {
+              const issues = p.report.issues.map((i) => i.message).join("; ");
+              installStep = `Preflight issues: ${issues}`;
+            } else {
+              installStep = `Preflight OK — ${p.report.total_archives} archives, ${p.report.cached_archives} cached`;
+            }
+            break;
+          case "DownloadPhaseStarted":
+            wjPhase = "downloading";
+            wjTotal = p.total;
+            wjCurrent = 0;
+            installStep = `Downloading archives (0/${p.total})...`;
+            break;
+          case "DownloadStarted":
+            wjCurrent = p.index + 1;
+            wjCurrentFile = p.name;
+            installStep = `Downloading ${p.name} (${wjCurrent}/${wjTotal})...`;
+            break;
+          case "DownloadProgress":
+            // Update with byte progress for current file
+            if (p.total_bytes > 0) {
+              const pct = Math.round((p.bytes / p.total_bytes) * 100);
+              installStep = `Downloading ${p.name} — ${pct}% (${wjCurrent}/${wjTotal})`;
+            }
+            break;
+          case "DownloadCompleted":
+            installStep = `Downloaded ${p.name} (${wjCurrent}/${wjTotal})`;
+            break;
+          case "DownloadFailed":
+            installStep = `Failed: ${p.name} — ${p.error}`;
+            break;
+          case "DownloadSkipped":
+            installStep = `Skipped ${p.name}: ${p.reason}`;
+            break;
+          case "ExtractionStarted":
+            wjPhase = "extracting";
+            wjTotal = p.total;
+            wjCurrent = 0;
+            installStep = `Extracting archives (0/${p.total})...`;
+            break;
+          case "ExtractionProgress":
+            wjCurrent = p.index + 1;
+            wjCurrentFile = p.name;
+            installStep = `Extracting ${p.name} (${wjCurrent}/${wjTotal})...`;
+            break;
+          case "DirectivePhaseStarted":
+            wjPhase = "directives";
+            wjTotal = p.total;
+            wjCurrent = 0;
+            installStep = `Processing directives (0/${p.total.toLocaleString()})...`;
+            break;
+          case "DirectiveProgress":
+            wjCurrent = p.current;
+            installStep = `Processing ${p.directive_type} (${p.current.toLocaleString()}/${p.total.toLocaleString()})...`;
+            break;
+          case "DeployStarted":
+            wjPhase = "deploying";
+            wjTotal = p.total;
+            wjCurrent = 0;
+            installStep = `Deploying files (0/${p.total.toLocaleString()})...`;
+            break;
+          case "DeployProgress":
+            wjCurrent = p.current;
+            installStep = `Deploying files (${p.current.toLocaleString()}/${p.total.toLocaleString()})...`;
+            break;
+          case "InstallCompleted": {
+            const r = p.result;
+            wjPhase = "done";
+            installing = false;
+            installStep = `Installed ${r.files_deployed.toLocaleString()} files in ${r.elapsed_secs.toFixed(0)}s`;
+            showSuccess(`Modlist installed successfully — ${r.files_deployed.toLocaleString()} files deployed`);
+            cleanupWjListener();
+            break;
+          }
+          case "InstallFailed":
+            wjPhase = "error";
+            installing = false;
+            installStep = `Installation failed: ${p.error}`;
+            showError(`Modlist installation failed: ${p.error}`);
+            cleanupWjListener();
+            break;
+          case "InstallCancelled":
+            wjPhase = "";
+            installing = false;
+            installStep = "Installation cancelled.";
+            cleanupWjListener();
+            break;
+          case "UserActionRequired":
+            installStep = `Manual download required: ${p.archive_name}`;
+            openUrl(p.url);
+            break;
+        }
+      });
+    } catch (e) {
+      showError(`Failed to subscribe to install events: ${e}`);
+      installing = false;
+      return;
+    }
+
+    // Start the install
+    try {
+      wjInstallId = await installWabbajackModlist(
+        wabbajackFilePath, game.game_id, game.bottle_name,
+        installDir, downloadDir,
+      );
+    } catch (e: unknown) {
+      installing = false;
+      installStep = "";
+      showError(`Failed to start installation: ${e}`);
+      cleanupWjListener();
+    }
+  }
+
+  function cleanupWjListener() {
+    if (wjUnlisten) {
+      wjUnlisten();
+      wjUnlisten = null;
+    }
+    wjInstallId = null;
+  }
+
+  async function handleCancelInstall() {
+    if (wjInstallId !== null) {
+      try {
+        await cancelWabbajackInstall(wjInstallId);
+      } catch (e) {
+        showError(`Failed to cancel: ${e}`);
+      }
+    }
   }
 
   function sourceLabel(source: string): string {
@@ -710,22 +874,53 @@
         <div class="detail-install-bar">
           {#if !$selectedGame}
             <p class="install-note">Select a game in the sidebar to begin installation.</p>
+          {:else if installing}
+            <div class="wj-progress-section">
+              <div class="wj-progress-header">
+                <span class="wj-phase-label">
+                  {#if wjPhase === "preflight"}Preflight
+                  {:else if wjPhase === "downloading"}Downloading
+                  {:else if wjPhase === "extracting"}Extracting
+                  {:else if wjPhase === "directives"}Processing
+                  {:else if wjPhase === "deploying"}Deploying
+                  {:else}Starting...
+                  {/if}
+                </span>
+                <button class="btn btn-ghost btn-sm" onclick={handleCancelInstall}>Cancel</button>
+              </div>
+              {#if wjTotal > 0}
+                <div class="wj-progress-bar-track">
+                  <div
+                    class="wj-progress-bar-fill"
+                    style="width: {Math.min(100, (wjCurrent / wjTotal) * 100).toFixed(1)}%"
+                  ></div>
+                </div>
+                <div class="wj-progress-counts">
+                  <span>{wjCurrent.toLocaleString()} / {wjTotal.toLocaleString()}</span>
+                  {#if wjCurrentFile}
+                    <span class="wj-progress-filename" title={wjCurrentFile}>{wjCurrentFile}</span>
+                  {/if}
+                </div>
+              {/if}
+              {#if installStep}
+                <p class="install-note">{installStep}</p>
+              {/if}
+            </div>
           {:else}
             <button
               class="btn btn-primary btn-lg"
               onclick={handleBeginInstall}
-              disabled={installing}
             >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
                 <polyline points="7 10 12 15 17 10" />
                 <line x1="12" y1="15" x2="12" y2="3" />
               </svg>
-              {installing ? "Installing..." : "Begin Install"}
+              Begin Install
             </button>
-          {/if}
-          {#if installStep}
-            <p class="install-note">{installStep}</p>
+            {#if installStep}
+              <p class="install-note">{installStep}</p>
+            {/if}
           {/if}
         </div>
       </div>
@@ -1697,6 +1892,56 @@
     color: var(--text-tertiary);
     flex-basis: 100%;
     margin-top: var(--space-1);
+  }
+
+  .wj-progress-section {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .wj-progress-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .wj-phase-label {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .wj-progress-bar-track {
+    width: 100%;
+    height: 6px;
+    background: var(--bg-tertiary);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+
+  .wj-progress-bar-fill {
+    height: 100%;
+    background: var(--system-accent);
+    border-radius: 3px;
+    transition: width 0.2s ease;
+  }
+
+  .wj-progress-counts {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+
+  .wj-progress-filename {
+    max-width: 300px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-tertiary);
   }
 
   .header-right {

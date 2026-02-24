@@ -619,6 +619,41 @@ export async function downloadWabbajackFile(
   return invoke("download_wabbajack_file", { url, filename });
 }
 
+// Wabbajack Install Pipeline
+export async function installWabbajackModlist(
+  wabbajackPath: string,
+  gameId: string,
+  bottleName: string,
+  installDir: string,
+  downloadDir: string
+): Promise<number> {
+  return invoke("install_wabbajack_modlist_cmd", {
+    wabbajackPath,
+    gameId,
+    bottleName,
+    installDir,
+    downloadDir,
+  });
+}
+
+export async function cancelWabbajackInstall(
+  installId: number
+): Promise<void> {
+  return invoke("cancel_wabbajack_install", { installId });
+}
+
+export async function resumeWabbajackInstall(
+  installId: number
+): Promise<void> {
+  return invoke("resume_wabbajack_install", { installId });
+}
+
+export async function getWabbajackInstallStatus(
+  installId: number
+): Promise<import("./types").WabbajackInstallStatus> {
+  return invoke("get_wabbajack_install_status", { installId });
+}
+
 // Download Archive Management
 export async function listDownloadArchives(): Promise<{
   filename: string;
