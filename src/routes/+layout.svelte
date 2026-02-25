@@ -539,9 +539,6 @@
   async function handleLaunchGame(useSkse: boolean = false) {
     if (!$selectedGame || launching) return;
 
-    // Cursor fix no longer needs Accessibility permission for its primary defense
-    // (Dock suppression). The event tap is a bonus layer. No need to block launch.
-
     doLaunchGame(useSkse);
   }
 

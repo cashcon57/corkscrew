@@ -896,9 +896,6 @@
 
     const useSkse = !!(skse?.installed && skse?.use_skse && game.game_id === "skyrimse");
 
-    // Cursor fix no longer needs Accessibility permission for its primary defense
-    // (Dock suppression). The event tap is a bonus layer. No need to block launch.
-
     doLaunch(useSkse);
   }
 
@@ -909,7 +906,7 @@
     try {
       const result = await launchGame(game.game_id, game.bottle_name, useSkse);
       if (result.success) {
-        showSuccess(`Launched ${game.display_name}${useSkse ? " via SKSE" : ""}`);
+        showSuccess(`Launched ${game.display_name}${useSkse ? " via SKSE" : ""} — Wine cursor fix applied`);
       }
     } catch (e: unknown) {
       showError(`Failed to launch: ${e}`);
@@ -1806,7 +1803,7 @@
             Fix Display
           </button>
           <!-- svelte-ignore a11y_label_has_associated_control -->
-          <label class="game-fixes-toggle" title="When enabled, Corkscrew skips automatic display resolution fix and cursor hiding on launch">
+          <label class="game-fixes-toggle" title="When enabled, Corkscrew skips automatic display and Wine cursor fixes on launch">
             <input type="checkbox" checked={disableGameFixes} onchange={toggleGameFixes} />
             Disable launch fixes (Not Recommended)
           </label>

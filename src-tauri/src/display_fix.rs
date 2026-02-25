@@ -768,15 +768,23 @@ fn set_registry_value(content: &mut String, section: &str, key: &str, value: &st
     }
 }
 
-/// Configure Wine registry keys for proper mouse/input capture in fullscreen.
+/// Configure Wine registry keys to fix the double-cursor bug in fullscreen games.
 ///
-/// Sets these keys in `user.reg`:
+/// This is the standard community fix applied automatically. Sets keys across
+/// three Wine driver sections to ensure the game grabs the mouse exclusively,
+/// preventing the macOS/Linux cursor from escaping or doubling.
+///
+/// Keys set in `user.reg`:
 /// - `[Software\\Wine\\Mac Driver]`
 ///   - `CaptureDisplaysForFullscreen=Y` — exclusive display control, hides OS cursor
+/// - `[Software\\Wine\\X11 Driver]`
+///   - `DXGrab=Y` — DirectX grabs mouse exclusively
+///   - `MouseWarpOverride=force` — forces mouse coordinate alignment
+///   - `UseXVidMode=N` — disables X11 video mode switching (prevents conflicts)
+///   - `UseTakeFocus=N` — disables X11 focus stealing prevention
 /// - `[Software\\Wine\\DirectInput]`
-///   - `MouseWarpOverride=force` — continuously warps the mouse pointer so game
-///     and OS coordinates stay aligned, even across loading screens and menu transitions
-pub fn fix_mouse_capture(bottle: &Bottle) -> Result<(), String> {
+///   - `MouseWarpOverride=force` — input coordinate alignment
+pub fn fix_cursor_grab(bottle: &Bottle) -> Result<CursorFixResult, String> {
     let user_reg = bottle.path.join("user.reg");
     let mut content = if user_reg.exists() {
         fs::read_to_string(&user_reg)
@@ -785,20 +793,43 @@ pub fn fix_mouse_capture(bottle: &Bottle) -> Result<(), String> {
         String::new()
     };
 
+    let original = content.clone();
+
     let mac_section = "[Software\\\\Wine\\\\Mac Driver]";
+    let x11_section = "[Software\\\\Wine\\\\X11 Driver]";
     let di_section = "[Software\\\\Wine\\\\DirectInput]";
 
+    // Mac Driver — exclusive display capture (macOS CrossOver)
     set_registry_value(&mut content, mac_section, "CaptureDisplaysForFullscreen", "Y");
+
+    // X11 Driver — full cursor grab (Linux, or CrossOver X11 mode)
+    set_registry_value(&mut content, x11_section, "DXGrab", "Y");
+    set_registry_value(&mut content, x11_section, "MouseWarpOverride", "force");
+    set_registry_value(&mut content, x11_section, "UseXVidMode", "N");
+    set_registry_value(&mut content, x11_section, "UseTakeFocus", "N");
+
+    // DirectInput — mouse warp for coordinate alignment
     set_registry_value(&mut content, di_section, "MouseWarpOverride", "force");
 
-    // Atomic write
-    let tmp = user_reg.with_extension("reg.tmp");
-    fs::write(&tmp, &content)
-        .map_err(|e| format!("Failed to write temp registry file: {}", e))?;
-    fs::rename(&tmp, &user_reg)
-        .map_err(|e| format!("Failed to rename temp registry file: {}", e))?;
+    let changed = content != original;
 
-    Ok(())
+    // Atomic write (only if something changed)
+    if changed {
+        let tmp = user_reg.with_extension("reg.tmp");
+        fs::write(&tmp, &content)
+            .map_err(|e| format!("Failed to write temp registry file: {}", e))?;
+        fs::rename(&tmp, &user_reg)
+            .map_err(|e| format!("Failed to rename temp registry file: {}", e))?;
+    }
+
+    Ok(CursorFixResult { applied: changed })
+}
+
+/// Result of the Wine registry cursor fix.
+#[derive(Clone, Debug)]
+pub struct CursorFixResult {
+    /// True if registry keys were written (false if already present).
+    pub applied: bool,
 }
 
 /// Full pipeline: detect resolution, find prefs, fix INI + Wine registry.
@@ -820,8 +851,13 @@ pub fn auto_fix_display(bottle: &Bottle) -> Result<DisplayFixResult, String> {
         warn!("Could not disable Wine virtual desktop: {}", e);
     }
 
-    if let Err(e) = fix_mouse_capture(bottle) {
-        warn!("Could not configure mouse capture: {}", e);
+    match fix_cursor_grab(bottle) {
+        Ok(cursor_result) => {
+            if cursor_result.applied {
+                log::info!("Applied Wine cursor fix (DXGrab, MouseWarpOverride, CaptureDisplays)");
+            }
+        }
+        Err(e) => warn!("Could not apply Wine cursor fix: {}", e),
     }
 
     // Check if INI fix is needed (target is exclusive fullscreen)

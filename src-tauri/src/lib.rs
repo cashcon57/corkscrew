@@ -1022,17 +1022,8 @@ fn launch_game_cmd(
     let result = launcher::launch_game(&bottle, &exe_path, Some(&game_path))
         .map_err(|e| format!("Launch failed ({}): {}", bottle.source, e))?;
 
-    // Activate cursor fix on macOS: suppresses Dock trigger zone + hides cursor.
-    // Dock suppression works without any permissions. The event tap (Y-clamp)
-    // is a bonus layer that activates only if Accessibility permission is granted.
-    if game_id == "skyrimse" && !fixes_disabled {
-        if let Some(pid) = result.pid {
-            match cursor_clamp::activate(0, pid, "SkyrimSE") {
-                Ok(()) => log::info!("Cursor fix activated (watching for SkyrimSE process)"),
-                Err(e) => log::warn!("Cursor fix error: {}", e),
-            }
-        }
-    }
+    // Cursor fix is now handled by Wine registry keys (set in auto_fix_display
+    // above via fix_cursor_grab). No runtime Dock/Hot Corner/event tap needed.
 
     Ok(result)
 }
@@ -1175,53 +1166,7 @@ fn fix_skyrim_display(bottle_name: String) -> Result<display_fix::DisplayFixResu
     display_fix::auto_fix_display(&bottle)
 }
 
-#[tauri::command]
-fn cursor_clamp_status() -> serde_json::Value {
-    log::info!("cursor_clamp_status called — checking permission...");
-    let perm = cursor_clamp::has_permission();
-    let active = cursor_clamp::is_active();
-    let is_dev = cfg!(debug_assertions);
-    log::info!("cursor_clamp_status: active={}, has_permission={}, dev={}", active, perm, is_dev);
-    serde_json::json!({
-        "active": active,
-        "has_permission": perm,
-        "dev_mode": is_dev,
-    })
-}
 
-#[tauri::command]
-fn deactivate_cursor_clamp() {
-    cursor_clamp::deactivate();
-}
-
-#[tauri::command]
-fn request_cursor_clamp_permission() -> bool {
-    cursor_clamp::request_permission()
-}
-
-/// Test command: activate cursor clamp for a timed test.
-/// Use from the browser console:
-///   window.__TAURI__.core.invoke("test_cursor_clamp", { durationSecs: 10 })
-#[tauri::command]
-fn test_cursor_clamp(duration_secs: Option<u64>) -> Result<String, String> {
-    let duration = duration_secs.unwrap_or(15);
-    log::info!("test_cursor_clamp: activating for {}s", duration);
-
-    // Use "corkscrew" as the game exe so the watcher finds our own process
-    cursor_clamp::activate(0, 0, "corkscrew")?;
-
-    // Spawn a timer to auto-deactivate
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs(duration));
-        log::info!("test_cursor_clamp: auto-deactivating after {}s", duration);
-        cursor_clamp::deactivate();
-    });
-
-    Ok(format!(
-        "Cursor clamp activated for {}s. Move your mouse to the bottom of the screen to test. Watch console logs.",
-        duration
-    ))
-}
 
 #[tauri::command]
 async fn downgrade_skyrim(
@@ -4755,10 +4700,6 @@ pub fn run() {
             check_skyrim_version,
             check_skse_compatibility_cmd,
             fix_skyrim_display,
-            cursor_clamp_status,
-            deactivate_cursor_clamp,
-            request_cursor_clamp_permission,
-            test_cursor_clamp,
             downgrade_skyrim,
             set_vibrancy,
             add_custom_exe,
@@ -4966,19 +4907,7 @@ pub fn run() {
             remove_from_steam,
             is_steam_deck,
         ])
-        .on_window_event(|_window, event| {
-            // When Corkscrew's window gains focus while cursor fix is active,
-            // check if the game has exited and deactivate immediately.
-            if let tauri::WindowEvent::Focused(true) = event {
-                cursor_clamp::check_and_maybe_deactivate();
-            }
-        })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|_app_handle, event| {
-            if let tauri::RunEvent::Exit = event {
-                // Ensure Dock + cursor are restored when the app exits
-                cursor_clamp::deactivate();
-            }
-        });
+        .run(|_app_handle, _event| {});
 }
