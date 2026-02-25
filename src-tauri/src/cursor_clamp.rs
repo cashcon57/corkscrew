@@ -14,17 +14,19 @@
 //!    away from the bottom edge as a secondary defense.
 //!
 //! Game exit detection:
-//! - The launched Wine PID dies quickly (it's just a launcher). The actual game
-//!   runs under `winewrapper.exe --wait-children` (CrossOver's game host).
-//! - PID watcher: monitors launched PID → when it dies, finds winewrapper.exe
-//!   and monitors that → when winewrapper dies, game has exited → deactivate.
-//! - Window focus handler: instant deactivation when Corkscrew gains focus and
-//!   no game processes are running.
+//! - Wine process PIDs are unreliable (launcher dies instantly, actual game
+//!   runs under wineserver/winewrapper which may be stale or shared).
+//! - Instead, we check for the actual game process by name (`pgrep -if`).
+//!   When `SkyrimSE.exe` (or whatever game_exe was passed) disappears from
+//!   the process list, the game has truly exited → deactivate.
+//! - Process watcher: polls every 3s after a 15s grace period.
+//! - Window focus handler: instant deactivation when Corkscrew gains focus
+//!   and the game process is gone.
 //! - Tauri RunEvent::Exit handler calls deactivate() on app close.
 //! - Recovery: On next app start, detects sentinel autohide-delay=86400.
 
 #[cfg(not(target_os = "macos"))]
-pub fn activate(_screen_height: u32, _game_pid: u32) -> Result<(), String> {
+pub fn activate(_screen_height: u32, _game_pid: u32, _game_exe: &str) -> Result<(), String> {
     Ok(())
 }
 
@@ -68,12 +70,12 @@ mod macos {
     /// Pixels from the bottom screen edge to block (secondary defense).
     const BOTTOM_MARGIN: f64 = 20.0;
 
-    /// How often (seconds) to check if the game process is still alive.
-    const PID_CHECK_INTERVAL: f64 = 3.0;
+    /// How often (seconds) to check if the game process is still running.
+    const POLL_INTERVAL: f64 = 3.0;
 
-    /// Grace period after activation before checking PID (seconds).
-    /// Wine launchers need a moment to start winewrapper.exe.
-    const PID_CHECK_GRACE: f64 = 10.0;
+    /// Grace period after activation before checking (seconds).
+    /// Wine needs time to spawn the actual game executable.
+    const POLL_GRACE: f64 = 15.0;
 
     // -----------------------------------------------------------------------
     // Static state
@@ -81,14 +83,15 @@ mod macos {
 
     static ACTIVE: AtomicBool = AtomicBool::new(false);
     static SCREEN_HEIGHT: AtomicU32 = AtomicU32::new(0);
-    static GAME_PID: AtomicU32 = AtomicU32::new(0);
+    /// The game executable name to check with pgrep (e.g. "SkyrimSE").
+    static GAME_EXE: Mutex<String> = Mutex::new(String::new());
     static CURSOR_HIDDEN: AtomicBool = AtomicBool::new(false);
     static CLAMP_COUNT: AtomicU32 = AtomicU32::new(0);
     static EVENT_COUNT: AtomicU32 = AtomicU32::new(0);
     static EVENT_TAP_REF: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
     static RUN_LOOP_REF: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
     static TAP_THREAD: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
-    static PID_THREAD: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
+    static WATCHER_THREAD: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
     static DOCK_SUPPRESSED: AtomicBool = AtomicBool::new(false);
     static DOCK_ORIGINAL_DELAY: std::sync::atomic::AtomicU64 =
         std::sync::atomic::AtomicU64::new(0);
@@ -310,7 +313,15 @@ mod macos {
     // -----------------------------------------------------------------------
 
     /// Original Hot Corner values, stored as "tl,tr,bl,br" or empty if none.
+    /// Also persisted to CORNER_BACKUP_FILE for crash recovery.
     static CORNER_ORIGINALS: Mutex<String> = Mutex::new(String::new());
+
+    /// File path for persisting hot corner originals across crashes.
+    fn corner_backup_path() -> std::path::PathBuf {
+        dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+            .join(".corkscrew-hot-corners-backup")
+    }
 
     const CORNER_KEYS: [&str; 4] = [
         "wvous-tl-corner",
@@ -363,6 +374,10 @@ mod macos {
         }
 
         CORNERS_SUPPRESSED.store(true, Ordering::SeqCst);
+
+        // Persist originals to disk for crash recovery
+        let _ = std::fs::write(corner_backup_path(), &originals);
+
         // Changes take effect when suppress_dock() does `killall Dock` next.
     }
 
@@ -400,136 +415,102 @@ mod macos {
                     .status();
             }
         }
+        // Remove crash recovery file
+        let _ = std::fs::remove_file(corner_backup_path());
+
         // Dock restart (done by restore_dock) applies corner changes too
     }
 
     // -----------------------------------------------------------------------
     // Game process detection
     //
-    // CrossOver's wine launcher exits quickly. The actual game host is
-    // `winewrapper.exe --wait-children` which stays alive until the game
-    // exits. We monitor the launched PID first, then switch to tracking
-    // winewrapper when the launcher dies.
+    // Wine process PIDs are unreliable: the launcher PID dies instantly,
+    // and the actual game runs under wineserver/winewrapper which may be
+    // stale or shared across sessions. Instead we check for the actual
+    // game executable by name using `pgrep -if <name>`.
     // -----------------------------------------------------------------------
 
-    /// The winewrapper PID currently being tracked (set by PID watcher Phase 2).
-    static TRACKED_WRAPPER_PID: AtomicU32 = AtomicU32::new(0);
+    /// Check if the game process is still running by searching for the
+    /// executable name in the process list (case-insensitive).
+    fn is_game_running() -> bool {
+        let exe = match GAME_EXE.lock() {
+            Ok(s) => s.clone(),
+            Err(e) => e.into_inner().clone(),
+        };
 
-    /// Find the PID of the **newest** `winewrapper.exe --wait-children`
-    /// (CrossOver's game host). Uses `pgrep -n` so we get the most recently
-    /// started instance, not a stale one from a previous session.
-    fn find_wine_wrapper_pid() -> Option<u32> {
-        let output = std::process::Command::new("pgrep")
-            .args(["-n", "-f", "winewrapper.*wait-children"])
-            .output()
-            .ok()?;
-
-        if !output.status.success() {
-            return None;
+        if exe.is_empty() {
+            return false;
         }
 
-        // -n returns only the newest match (single PID)
-        String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .parse::<u32>()
-            .ok()
+        std::process::Command::new("pgrep")
+            .args(["-if", &exe])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
     }
 
     // -----------------------------------------------------------------------
-    // PID watcher
+    // Game exit watcher
     //
-    // Phase 1: Monitor the launched Wine PID. When it dies (quickly), move
-    //          to Phase 2.
-    // Phase 2: Monitor winewrapper.exe --wait-children. When it dies, the
-    //          game has truly exited → deactivate.
+    // Polls `pgrep -if <game_exe>` every POLL_INTERVAL seconds after a
+    // grace period. When the game process disappears for two consecutive
+    // checks, deactivate.
     // -----------------------------------------------------------------------
 
-    fn spawn_pid_watcher(game_pid: u32) {
+    fn spawn_game_watcher() {
         let handle = thread::Builder::new()
-            .name("cursor-pid-watch".into())
-            .spawn(move || {
+            .name("cursor-game-watch".into())
+            .spawn(|| {
                 let start = std::time::Instant::now();
-                let mut tracking_pid = game_pid;
-                let mut switched = false;
+                let exe = match GAME_EXE.lock() {
+                    Ok(s) => s.clone(),
+                    Err(e) => e.into_inner().clone(),
+                };
 
                 info!(
-                    "pid_watcher: started for PID {} (grace={}s, interval={}s)",
-                    game_pid, PID_CHECK_GRACE, PID_CHECK_INTERVAL
+                    "game_watcher: monitoring '{}' (grace={}s, interval={}s)",
+                    exe, POLL_GRACE, POLL_INTERVAL
                 );
 
+                let mut gone_count = 0u32;
+
                 loop {
-                    thread::sleep(std::time::Duration::from_secs_f64(PID_CHECK_INTERVAL));
+                    thread::sleep(std::time::Duration::from_secs_f64(POLL_INTERVAL));
 
                     if !ACTIVE.load(Ordering::SeqCst) {
-                        info!("pid_watcher: ACTIVE=false, exiting");
+                        info!("game_watcher: ACTIVE=false, exiting");
                         return;
                     }
 
-                    // Grace period for Wine to start the game
-                    if start.elapsed().as_secs_f64() < PID_CHECK_GRACE {
+                    // Grace period — let Wine spawn the game executable
+                    if start.elapsed().as_secs_f64() < POLL_GRACE {
                         debug!(
-                            "pid_watcher: grace period ({:.0}s / {}s)",
-                            start.elapsed().as_secs_f64(), PID_CHECK_GRACE
+                            "game_watcher: grace period ({:.0}s / {}s)",
+                            start.elapsed().as_secs_f64(), POLL_GRACE
                         );
                         continue;
                     }
 
-                    let pid_alive =
-                        unsafe { libc::kill(tracking_pid as i32, 0) } == 0;
-
-                    if pid_alive {
+                    if is_game_running() {
+                        gone_count = 0;
                         continue;
                     }
 
-                    // Tracked PID is dead.
+                    gone_count += 1;
 
-                    if !switched {
-                        // Phase 1→2: launcher PID died, find winewrapper
-                        if let Some(wrapper_pid) = find_wine_wrapper_pid() {
-                            info!(
-                                "pid_watcher: launcher PID {} died, now tracking winewrapper PID {}",
-                                tracking_pid, wrapper_pid
-                            );
-                            tracking_pid = wrapper_pid;
-                            TRACKED_WRAPPER_PID.store(wrapper_pid, Ordering::SeqCst);
-                            switched = true;
-                            continue;
-                        }
-
-                        // No winewrapper found — maybe the game uses a different
-                        // Wine setup. Give it a moment before giving up.
+                    if gone_count == 1 {
+                        // First miss — could be transient. Check once more.
                         info!(
-                            "pid_watcher: launcher PID {} died, no winewrapper found — checking again",
-                            tracking_pid
+                            "game_watcher: '{}' not found (check 1/2, {:.0}s elapsed)",
+                            exe, start.elapsed().as_secs_f64()
                         );
-
-                        // Wait one more cycle to be sure
-                        thread::sleep(std::time::Duration::from_secs_f64(PID_CHECK_INTERVAL));
-
-                        if let Some(wrapper_pid) = find_wine_wrapper_pid() {
-                            info!(
-                                "pid_watcher: found winewrapper PID {} on retry",
-                                wrapper_pid
-                            );
-                            tracking_pid = wrapper_pid;
-                            TRACKED_WRAPPER_PID.store(wrapper_pid, Ordering::SeqCst);
-                            switched = true;
-                            continue;
-                        }
-
-                        // Still no winewrapper — game likely exited
-                        info!(
-                            "pid_watcher: PID {} died + no winewrapper — deactivating",
-                            game_pid
-                        );
-                        deactivate();
-                        return;
+                        continue;
                     }
 
-                    // Phase 2: winewrapper died → game has exited
+                    // Two consecutive misses — game has exited.
                     info!(
-                        "pid_watcher: winewrapper PID {} exited after {:.0}s — deactivating",
-                        tracking_pid, start.elapsed().as_secs_f64()
+                        "game_watcher: '{}' gone for 2 checks after {:.0}s — deactivating",
+                        exe, start.elapsed().as_secs_f64()
                     );
                     deactivate();
                     return;
@@ -538,63 +519,75 @@ mod macos {
             .ok();
 
         if let Some(h) = handle {
-            if let Ok(mut t) = PID_THREAD.lock() {
+            if let Ok(mut t) = WATCHER_THREAD.lock() {
                 *t = Some(h);
             }
         }
     }
 
     /// Called on app startup to recover from a previous crash that left the
-    /// Dock suppressed. Checks if autohide-delay is 86400 (our sentinel).
+    /// Dock/Hot Corners suppressed. Checks for our sentinel values.
     pub fn recover_dock_if_needed() {
         let delay = read_dock_autohide_delay();
+        let backup = corner_backup_path();
+        let corners_backup = std::fs::read_to_string(&backup).ok();
+
+        if delay != 86400.0 && corners_backup.is_none() {
+            return;
+        }
+
+        warn!("cursor_clamp: detected leftover suppression from previous crash");
+
+        // Restore Hot Corners from backup file (if present)
+        if let Some(originals) = corners_backup {
+            let values: Vec<i32> = originals
+                .trim()
+                .split(',')
+                .filter_map(|s| s.parse().ok())
+                .collect();
+
+            if values.len() == 4 {
+                info!("cursor_clamp: recovering Hot Corners from backup ({})", originals.trim());
+                for (key, val) in CORNER_KEYS.iter().zip(values.iter()) {
+                    if *val == 0 {
+                        let _ = std::process::Command::new("defaults")
+                            .args(["delete", "com.apple.dock", key])
+                            .status();
+                    } else {
+                        let _ = std::process::Command::new("defaults")
+                            .args(["write", "com.apple.dock", key, "-int", &val.to_string()])
+                            .status();
+                    }
+                }
+            }
+            let _ = std::fs::remove_file(&backup);
+        }
+
+        // Restore Dock
         if delay == 86400.0 {
-            warn!(
-                "cursor_clamp: detected leftover Dock suppression (delay=86400) — restoring"
-            );
             let _ = std::process::Command::new("defaults")
                 .args(["write", "com.apple.dock", "autohide", "-bool", "false"])
                 .status();
             let _ = std::process::Command::new("defaults")
                 .args(["delete", "com.apple.dock", "autohide-delay"])
                 .status();
-            let _ = std::process::Command::new("killall")
-                .arg("Dock")
-                .status();
-            info!("cursor_clamp: recovered Dock from previous crash");
         }
+
+        let _ = std::process::Command::new("killall")
+            .arg("Dock")
+            .status();
+        info!("cursor_clamp: recovered from previous crash");
     }
 
     /// Called when Corkscrew's window gains focus. If the cursor fix is active
-    /// and no game processes are running, deactivate immediately.
+    /// and the game process is gone, deactivate immediately.
     pub fn check_and_maybe_deactivate() {
         if !ACTIVE.load(Ordering::SeqCst) {
             return;
         }
-        let pid = GAME_PID.load(Ordering::SeqCst);
-        if pid == 0 {
-            return;
-        }
 
-        let pid_alive = unsafe { libc::kill(pid as i32, 0) } == 0;
-
-        // Check the specific winewrapper we're tracking (if any), not a fresh
-        // pgrep which could find stale wrappers from other sessions.
-        let wrapper_pid = TRACKED_WRAPPER_PID.load(Ordering::SeqCst);
-        let wrapper_alive = if wrapper_pid > 0 {
-            let ret = unsafe { libc::kill(wrapper_pid as i32, 0) };
-            ret == 0
-        } else {
-            // No wrapper tracked yet — PID watcher hasn't switched to phase 2.
-            // Do a fresh search as fallback.
-            find_wine_wrapper_pid().is_some()
-        };
-
-        if !pid_alive && !wrapper_alive {
-            info!(
-                "check_and_maybe_deactivate: PID {} dead + wrapper {} dead — deactivating on focus",
-                pid, wrapper_pid
-            );
+        if !is_game_running() {
+            info!("check_and_maybe_deactivate: game not running — deactivating on focus");
             deactivate();
         }
     }
@@ -644,11 +637,15 @@ mod macos {
         h
     }
 
-    pub fn activate(_screen_height: u32, game_pid: u32) -> Result<(), String> {
+    pub fn activate(_screen_height: u32, _game_pid: u32, game_exe: &str) -> Result<(), String> {
         if ACTIVE.load(Ordering::SeqCst) {
-            debug!("Cursor clamp already active, updating PID to {}", game_pid);
-            GAME_PID.store(game_pid, Ordering::SeqCst);
+            debug!("Cursor clamp already active");
             return Ok(());
+        }
+
+        // Store the game executable name for process detection
+        if let Ok(mut s) = GAME_EXE.lock() {
+            *s = game_exe.to_string();
         }
 
         // Layer 1: Suppress Hot Corners + Dock (no permissions needed)
@@ -659,10 +656,9 @@ mod macos {
 
         let screen_height = detect_display_height_points();
         SCREEN_HEIGHT.store(screen_height, Ordering::SeqCst);
-        GAME_PID.store(game_pid, Ordering::SeqCst);
         ACTIVE.store(true, Ordering::SeqCst);
 
-        spawn_pid_watcher(game_pid);
+        spawn_game_watcher();
 
         // Layer 2+3: CGDisplayHideCursor + event tap (needs Accessibility)
         if has_permission() {
@@ -716,13 +712,16 @@ mod macos {
             }
         }
 
-        if let Ok(mut t) = PID_THREAD.lock() {
+        if let Ok(mut t) = WATCHER_THREAD.lock() {
             let _ = t.take();
         }
 
         RUN_LOOP_REF.store(ptr::null_mut(), Ordering::SeqCst);
         EVENT_TAP_REF.store(ptr::null_mut(), Ordering::SeqCst);
-        TRACKED_WRAPPER_PID.store(0, Ordering::SeqCst);
+
+        if let Ok(mut s) = GAME_EXE.lock() {
+            s.clear();
+        }
 
         // Restore Hot Corners first, then Dock (Dock restart applies both)
         restore_hot_corners();
@@ -835,12 +834,15 @@ mod macos {
             CGEventTapEnable(tap, true);
 
             let screen_h = SCREEN_HEIGHT.load(Ordering::Relaxed);
-            let pid = GAME_PID.load(Ordering::Relaxed);
+            let exe = match GAME_EXE.lock() {
+                Ok(s) => s.clone(),
+                Err(e) => e.into_inner().clone(),
+            };
             info!(
-                "Event tap active (screen={}pts, max_y={}, pid={})",
+                "Event tap active (screen={}pts, max_y={}, game='{}')",
                 screen_h,
                 screen_h as f64 - BOTTOM_MARGIN,
-                pid,
+                exe,
             );
 
             CFRunLoopRun();

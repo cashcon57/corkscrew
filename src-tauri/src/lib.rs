@@ -1011,8 +1011,8 @@ fn launch_game_cmd(
     // is a bonus layer that activates only if Accessibility permission is granted.
     if game_id == "skyrimse" && !fixes_disabled {
         if let Some(pid) = result.pid {
-            match cursor_clamp::activate(0, pid) {
-                Ok(()) => log::info!("Cursor fix activated for pid {}", pid),
+            match cursor_clamp::activate(0, pid, "SkyrimSE") {
+                Ok(()) => log::info!("Cursor fix activated (watching for SkyrimSE process)"),
                 Err(e) => log::warn!("Cursor fix error: {}", e),
             }
         }
@@ -1183,17 +1183,16 @@ fn request_cursor_clamp_permission() -> bool {
     cursor_clamp::request_permission()
 }
 
-/// Test command: activate cursor clamp using our own PID.
-/// This avoids needing to launch Skyrim — the clamp runs for `duration_secs`
-/// then auto-deactivates. Use from the browser console:
+/// Test command: activate cursor clamp for a timed test.
+/// Use from the browser console:
 ///   window.__TAURI__.core.invoke("test_cursor_clamp", { durationSecs: 10 })
 #[tauri::command]
 fn test_cursor_clamp(duration_secs: Option<u64>) -> Result<String, String> {
     let duration = duration_secs.unwrap_or(15);
-    let our_pid = std::process::id();
-    log::info!("test_cursor_clamp: activating with our PID {} for {}s", our_pid, duration);
+    log::info!("test_cursor_clamp: activating for {}s", duration);
 
-    cursor_clamp::activate(0, our_pid)?;
+    // Use "corkscrew" as the game exe so the watcher finds our own process
+    cursor_clamp::activate(0, 0, "corkscrew")?;
 
     // Spawn a timer to auto-deactivate
     std::thread::spawn(move || {
@@ -1203,8 +1202,8 @@ fn test_cursor_clamp(duration_secs: Option<u64>) -> Result<String, String> {
     });
 
     Ok(format!(
-        "Cursor clamp activated for {}s (pid={}). Move your mouse to the bottom of the screen to test. Watch console logs.",
-        duration, our_pid
+        "Cursor clamp activated for {}s. Move your mouse to the bottom of the screen to test. Watch console logs.",
+        duration
     ))
 }
 
