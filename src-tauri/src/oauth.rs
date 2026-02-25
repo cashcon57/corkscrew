@@ -705,24 +705,33 @@ pub fn parse_user_info(access_token: &str) -> Result<NexusUserInfo, OAuthError> 
 
     let claims: serde_json::Value = serde_json::from_str(&payload_str)?;
 
-    let name = claims
-        .get("name")
+    // NexusMods JWT nests user info under a "user" key.
+    // Fall back to top-level claims for forward compatibility.
+    let user = claims.get("user").unwrap_or(&claims);
+
+    let name = user
+        .get("username")
+        .or_else(|| user.get("name"))
+        .or_else(|| claims.get("name"))
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
 
-    let email = claims
+    let email = user
         .get("email")
+        .or_else(|| claims.get("email"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let avatar = claims
+    let avatar = user
         .get("avatar")
+        .or_else(|| claims.get("avatar"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let membership_roles: Vec<String> = claims
+    let membership_roles: Vec<String> = user
         .get("membership_roles")
+        .or_else(|| claims.get("membership_roles"))
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
@@ -735,8 +744,9 @@ pub fn parse_user_info(access_token: &str) -> Result<NexusUserInfo, OAuthError> 
     let is_premium = membership_roles
         .iter()
         .any(|r: &String| r.eq_ignore_ascii_case("premium") || r.eq_ignore_ascii_case("supporter"))
-        || claims
+        || user
             .get("premium_expiry")
+            .or_else(|| claims.get("premium_expiry"))
             .and_then(|v| v.as_i64())
             .map(|exp| exp > chrono::Utc::now().timestamp())
             .unwrap_or(false);
@@ -898,15 +908,17 @@ mod tests {
 
     #[test]
     fn test_parse_jwt_user_info() {
-        // Build a fake JWT with known claims.
+        // Real NexusMods JWT structure: user info nested under "user" key.
         let header = base64url_encode(b"{\"alg\":\"RS256\",\"typ\":\"JWT\"}");
         let payload_json = serde_json::json!({
-            "name": "TestUser",
-            "email": "test@example.com",
-            "avatar": "https://avatars.nexusmods.com/test.png",
-            "membership_roles": ["premium", "member"],
-            "premium_expiry": 9999999999i64,
-            "sub": "12345"
+            "sub": "12345",
+            "user": {
+                "username": "TestUser",
+                "email": "test@example.com",
+                "avatar": "https://avatars.nexusmods.com/test.png",
+                "membership_roles": ["premium", "member"],
+                "premium_expiry": 9999999999i64
+            }
         });
         let payload = base64url_encode(payload_json.to_string().as_bytes());
         let signature = base64url_encode(b"fake-signature");
@@ -925,11 +937,33 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_jwt_top_level_fallback() {
+        // Verify that top-level claims still work as a fallback.
+        let header = base64url_encode(b"{\"alg\":\"RS256\",\"typ\":\"JWT\"}");
+        let payload_json = serde_json::json!({
+            "name": "FallbackUser",
+            "membership_roles": ["supporter"],
+            "sub": "99999"
+        });
+        let payload = base64url_encode(payload_json.to_string().as_bytes());
+        let signature = base64url_encode(b"fake-signature");
+        let fake_jwt = format!("{}.{}.{}", header, payload, signature);
+
+        let info = parse_user_info(&fake_jwt).expect("should parse JWT");
+
+        assert_eq!(info.name, "FallbackUser");
+        assert!(info.is_premium);
+        assert_eq!(info.membership_roles, vec!["supporter"]);
+    }
+
+    #[test]
     fn test_parse_jwt_minimal() {
         // JWT with minimal claims (no email, avatar, etc.).
         let header = base64url_encode(b"{\"alg\":\"RS256\"}");
         let payload_json = serde_json::json!({
-            "name": "BasicUser",
+            "user": {
+                "username": "BasicUser"
+            },
             "sub": "67890"
         });
         let payload = base64url_encode(payload_json.to_string().as_bytes());

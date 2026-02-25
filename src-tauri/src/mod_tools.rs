@@ -1023,11 +1023,12 @@ pub async fn install_tool(tool_id: &str, game_data_dir: &Path, app: &AppHandle) 
     // --- Phase 3: Verify ---
     emit_progress(app, tool_id, "verifying", "Looking for executable...");
 
-    // Tool-specific post-install: rename xEdit executables for game mode detection
+    // Tool-specific post-install: rename xEdit executables for game mode detection.
+    // The prefix is everything before "Edit" — e.g. "SSE" produces "SSEEdit.exe".
     if tool_id == "sseedit" {
-        rename_xedit_for_game(&tool_dir, "SSEEdit");
+        rename_xedit_for_game(&tool_dir, "SSE");
     } else if tool_id == "fo4edit" {
-        rename_xedit_for_game(&tool_dir, "FO4Edit");
+        rename_xedit_for_game(&tool_dir, "FO4");
     }
 
     let exe_path = find_tool_exe(&tool_def, &tool_dir).ok_or(ToolError::ExeNotFound)?;
