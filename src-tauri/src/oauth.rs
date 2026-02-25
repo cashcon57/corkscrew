@@ -22,7 +22,7 @@ use crate::config;
 
 const NEXUS_AUTH_URL: &str = "https://users.nexusmods.com/oauth/authorize";
 const NEXUS_TOKEN_URL: &str = "https://users.nexusmods.com/oauth/token";
-const OAUTH_SCOPES: &str = "openid public";
+const OAUTH_SCOPES: &str = "public";
 const CALLBACK_PATH: &str = "/callback";
 
 /// Registered OAuth client ID for Corkscrew (public PKCE client).
@@ -551,7 +551,7 @@ pub async fn start_oauth_flow(client_id: &str) -> Result<TokenPair, OAuthError> 
     // 2. Local server
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
-    let redirect_uri = format!("http://localhost:{}{}", port, CALLBACK_PATH);
+    let redirect_uri = format!("http://127.0.0.1:{}{}", port, CALLBACK_PATH);
 
     // 3. Build URL and open browser
     let auth_url = build_auth_url(client_id, &redirect_uri, &state, &pkce.challenge);

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use reqwest::header::{HeaderMap, HeaderValue};
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -320,7 +320,13 @@ async fn graphql_query<T: serde::de::DeserializeOwned>(
     let mut request = client.post(GRAPHQL_ENDPOINT);
 
     if let Some(key) = api_key {
-        request = request.header("apikey", key);
+        // Support both Bearer tokens and legacy API keys
+        if key.contains('.') && key.len() > 100 {
+            // Looks like a JWT/Bearer token (contains dots, is long)
+            request = request.header(AUTHORIZATION, format!("Bearer {}", key));
+        } else {
+            request = request.header("apikey", key);
+        }
     }
 
     let response = request.json(&body).send().await?;

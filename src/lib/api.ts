@@ -703,7 +703,12 @@ export async function startNexusSso(): Promise<string> {
   return invoke("start_nexus_sso");
 }
 
-// OAuth (legacy)
+// OAuth
+export async function startOAuthLogin(): Promise<TokenPair> {
+  return invoke("start_oauth_login");
+}
+
+// OAuth (legacy — accepts explicit client ID)
 export async function startNexusOAuth(
   clientId: string
 ): Promise<TokenPair> {

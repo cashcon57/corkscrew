@@ -1992,19 +1992,18 @@ async fn get_collection_diff_cmd(
         .game_domain
         .unwrap_or_else(|| "skyrimspecialedition".to_string());
 
-    // Load config to get API key
-    let cfg = config::get_config().map_err(|e| e.to_string())?;
-    let api_key = cfg.nexus_api_key.as_deref();
+    // Resolve auth token for collection API calls
+    let token = nexus_api_key_or_token().await.ok().map(|(t, _)| t);
 
     // Get collection info to find latest revision number
-    let info = collections::get_collection(api_key, &slug, &game_domain)
+    let info = collections::get_collection(token.as_deref(), &slug, &game_domain)
         .await
         .map_err(|e| e.to_string())?;
 
     let latest_revision = info.latest_revision;
 
     // Fetch mods from the latest revision
-    let latest_mods = collections::get_revision_mods(api_key, &slug, latest_revision)
+    let latest_mods = collections::get_revision_mods(token.as_deref(), &slug, latest_revision)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -3193,8 +3192,18 @@ async fn start_nexus_sso() -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
-// --- OAuth (legacy) ---
+// --- OAuth ---
 
+/// Start OAuth login flow using the hardcoded Corkscrew client ID.
+/// Opens the user's default browser to NexusMods for authorization.
+#[tauri::command]
+async fn start_oauth_login() -> Result<TokenPair, String> {
+    oauth::start_oauth_flow(oauth::CLIENT_ID)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Legacy command that accepts an explicit client_id (kept for compatibility).
 #[tauri::command]
 async fn start_nexus_oauth(client_id: String) -> Result<TokenPair, String> {
     oauth::start_oauth_flow(&client_id)
@@ -3252,7 +3261,7 @@ fn get_auth_method_cmd() -> Result<serde_json::Value, String> {
 
 #[tauri::command]
 async fn get_nexus_account_status() -> Result<serde_json::Value, String> {
-    let method = oauth::get_auth_method();
+    let method = oauth::get_auth_method_refreshed().await;
     match method {
         oauth::AuthMethod::OAuth(ref tokens) => {
             let user = oauth::parse_user_info(&tokens.access_token).map_err(|e| e.to_string())?;
@@ -3500,14 +3509,14 @@ async fn browse_collections_cmd(
     min_downloads: Option<i64>,
     min_endorsements: Option<i64>,
 ) -> Result<CollectionSearchResult, String> {
-    let api_key = config::get_config().ok().and_then(|c| c.nexus_api_key);
+    let token = nexus_api_key_or_token().await.ok().map(|(t, _)| t);
 
     let sf = sort_field.as_deref().unwrap_or("endorsements");
     let sd = sort_direction.as_deref().unwrap_or("desc");
     let st = search_text.as_deref().filter(|s| !s.is_empty());
 
     collections::browse_collections(
-        api_key.as_deref(),
+        token.as_deref(),
         &game_domain,
         count,
         offset,
@@ -3524,27 +3533,27 @@ async fn browse_collections_cmd(
 
 #[tauri::command]
 async fn get_collection_cmd(slug: String, game_domain: String) -> Result<CollectionInfo, String> {
-    let api_key = config::get_config().ok().and_then(|c| c.nexus_api_key);
+    let token = nexus_api_key_or_token().await.ok().map(|(t, _)| t);
 
-    collections::get_collection(api_key.as_deref(), &slug, &game_domain)
+    collections::get_collection(token.as_deref(), &slug, &game_domain)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn get_collection_revisions(slug: String) -> Result<Vec<CollectionRevision>, String> {
-    let api_key = config::get_config().ok().and_then(|c| c.nexus_api_key);
+    let token = nexus_api_key_or_token().await.ok().map(|(t, _)| t);
 
-    collections::get_revisions(api_key.as_deref(), &slug)
+    collections::get_revisions(token.as_deref(), &slug)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn get_collection_mods(slug: String, revision: u32) -> Result<Vec<CollectionMod>, String> {
-    let api_key = config::get_config().ok().and_then(|c| c.nexus_api_key);
+    let token = nexus_api_key_or_token().await.ok().map(|(t, _)| t);
 
-    collections::get_revision_mods(api_key.as_deref(), &slug, revision)
+    collections::get_revision_mods(token.as_deref(), &slug, revision)
         .await
         .map_err(|e| e.to_string())
 }
@@ -4351,10 +4360,7 @@ async fn get_nexus_mod_files(
     game_slug: String,
     mod_id: i64,
 ) -> Result<Vec<nexus::NexusModFile>, String> {
-    let cfg = config::get_config().map_err(|e| e.to_string())?;
-    let api_key = cfg.nexus_api_key.ok_or("No Nexus API key configured")?;
-
-    let client = nexus::NexusClient::new(api_key);
+    let client = nexus_client().await?;
     let raw_files = client
         .get_mod_files(&game_slug, mod_id)
         .await
@@ -4373,10 +4379,7 @@ async fn download_and_install_nexus_mod(
     bottle_name: String,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
-    let cfg = config::get_config().map_err(|e| e.to_string())?;
-    let api_key = cfg.nexus_api_key.ok_or("No Nexus API key configured")?;
-
-    let client = nexus::NexusClient::new(api_key);
+    let client = nexus_client().await?;
 
     // Enforce premium (backend safety check)
     if !client.is_premium().await {
@@ -4418,7 +4421,8 @@ async fn download_and_install_nexus_mod(
     let link = links.first().ok_or("No download links available")?;
 
     // Download
-    let download_dir = cfg
+    let dl_cfg = config::get_config().map_err(|e| e.to_string())?;
+    let download_dir = dl_cfg
         .download_dir
         .map(PathBuf::from)
         .unwrap_or_else(config::downloads_dir);
@@ -4533,10 +4537,10 @@ async fn download_and_install_nexus_mod(
     }
 
     // Auto-delete archive if setting enabled
-    if cfg
+    if dl_cfg
         .extra
         .get("auto_delete_archives")
-        .and_then(|v| v.as_str())
+        .and_then(|v: &serde_json::Value| v.as_str())
         == Some("true")
     {
         let _ = std::fs::remove_file(&archive_path);
@@ -4753,7 +4757,8 @@ pub fn run() {
             wabbajack_installer::wabbajack_preflight_cmd,
             // Nexus SSO
             start_nexus_sso,
-            // OAuth (legacy)
+            // OAuth
+            start_oauth_login,
             start_nexus_oauth,
             refresh_nexus_tokens,
             save_oauth_tokens,
