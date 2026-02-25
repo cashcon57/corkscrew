@@ -1115,7 +1115,7 @@ async fn install_tool_from_github(
     Ok((bytes, asset.name.clone(), release.tag_name))
 }
 
-/// Download tool archive from NexusMods (requires premium API key).
+/// Download tool archive from NexusMods (requires premium).
 /// Returns (bytes, filename, version_string).
 async fn install_tool_from_nexus(
     tool_id: &str,
@@ -1128,19 +1128,15 @@ async fn install_tool_from_nexus(
         tool_id, game_slug, mod_id
     );
 
-    // Get Nexus API key from config
-    let api_key = crate::config::get_config()
-        .ok()
-        .and_then(|c| c.nexus_api_key)
-        .ok_or_else(|| {
-            ToolError::Other(
-                "NexusMods API key required to auto-install this tool. \
-                 Set your API key in Settings → Authentication."
-                    .into(),
-            )
-        })?;
-
-    let nexus = crate::nexus::NexusClient::new(api_key);
+    // Use unified auth (OAuth or API key)
+    let auth_method = crate::oauth::get_auth_method_refreshed().await;
+    let nexus = crate::nexus::NexusClient::from_auth_method(&auth_method).map_err(|e| {
+        ToolError::Other(format!(
+            "NexusMods sign-in required to auto-install this tool. \
+             Sign in via Settings → Authentication. ({})",
+            e
+        ))
+    })?;
 
     // Check premium status — NexusMods compliance: free users cannot automate downloads
     if !nexus.is_premium().await {
@@ -1479,11 +1475,8 @@ pub async fn check_tool_update(tool_id: &str, game_data_dir: &Path) -> Result<To
 
     // Fallback: NexusMods — check latest file upload timestamp
     if let (Some(mod_id), Some(game_slug)) = (&tool_def.nexus_mod_id, &tool_def.nexus_game_slug) {
-        let api_key = crate::config::get_config()
-            .ok()
-            .and_then(|c| c.nexus_api_key);
-        if let Some(key) = api_key {
-            let nexus = crate::nexus::NexusClient::new(key);
+        let auth_method = crate::oauth::get_auth_method_refreshed().await;
+        if let Ok(nexus) = crate::nexus::NexusClient::from_auth_method(&auth_method) {
             if let Ok(files) = nexus.get_mod_files(game_slug, *mod_id).await {
                 // Find latest file upload timestamp
                 let latest_ts = files
