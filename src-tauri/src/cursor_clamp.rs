@@ -173,8 +173,38 @@ mod macos {
     // -----------------------------------------------------------------------
 
     /// Check if Corkscrew has Accessibility permission.
+    ///
+    /// Uses a test `CGEventTapCreate` instead of `AXIsProcessTrusted()` because
+    /// the latter caches its result at process startup and doesn't reliably
+    /// update when the user toggles the permission in System Settings.
     pub fn has_permission() -> bool {
-        unsafe { AXIsProcessTrusted() }
+        // A no-op callback — we never actually process events from this tap.
+        unsafe extern "C" fn noop_callback(
+            _proxy: *const c_void,
+            _type: u32,
+            event: *mut c_void,
+            _user_info: *mut c_void,
+        ) -> *mut c_void {
+            event
+        }
+
+        let mask: CGEventMask = 1 << K_CG_EVENT_MOUSE_MOVED;
+        let tap = unsafe {
+            CGEventTapCreate(
+                K_CG_SESSION_EVENT_TAP,
+                K_CG_HEAD_INSERT_EVENT_TAP,
+                K_CG_EVENT_TAP_OPTION_DEFAULT,
+                mask,
+                noop_callback,
+                std::ptr::null_mut(),
+            )
+        };
+        if tap.is_null() {
+            return false; // No permission
+        }
+        // Permission granted — clean up the test tap immediately
+        unsafe { CFRelease(tap as *const c_void) };
+        true
     }
 
     /// Request Accessibility permission by opening System Settings.
