@@ -360,6 +360,20 @@ pub fn get_available_skse_builds(game_version: &str) -> SkseAvailableBuilds {
 
     let user_ver = parse_game_version(game_version);
 
+    // If the version string is unparseable (e.g. "1.6.x") but clearly AE,
+    // assume the latest game version so we recommend the newest SKSE for AE.
+    let effective_ver = user_ver.or_else(|| {
+        if edition == "AE" {
+            log::info!(
+                "Game version '{}' unparseable — assuming latest AE for SKSE matching",
+                game_version
+            );
+            Some((1, 6, u32::MAX))
+        } else {
+            None
+        }
+    });
+
     let mut all_builds: Vec<SkseBuild> = Vec::new();
     let mut recommended: Option<SkseBuild> = None;
 
@@ -380,7 +394,7 @@ pub fn get_available_skse_builds(game_version: &str) -> SkseAvailableBuilds {
         // SKSE is forward-compatible within a version range, so we pick the
         // newest SKSE whose target game version <= user's game version.
         let target_ver = parse_game_version(entry.game_version);
-        let compatible = match (user_ver, target_ver) {
+        let compatible = match (effective_ver, target_ver) {
             (Some(u), Some(t)) => t <= u,
             _ => false,
         };
