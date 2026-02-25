@@ -1003,20 +1003,16 @@ fn launch_game_cmd(
         }
     }
 
-    let mut result = launcher::launch_game(&bottle, &exe_path, Some(&game_path))
+    let result = launcher::launch_game(&bottle, &exe_path, Some(&game_path))
         .map_err(|e| format!("Launch failed ({}): {}", bottle.source, e))?;
 
     // Activate cursor edge clamping on macOS to prevent Dock trigger zone
     // from making the system cursor visible during fullscreen gameplay.
+    // The frontend checks permission before launching, so by the time we get
+    // here permission is either granted or the user chose to skip.
     if game_id == "skyrimse" && !fixes_disabled {
         if let Some(pid) = result.pid {
-            if !cursor_clamp::has_permission() {
-                // Don't request permission here — the frontend shows an
-                // explanation dialog first, then opens System Settings.
-                result.warning = Some(
-                    "Cursor fix requires Accessibility permission. Grant it in System Settings \u{2192} Privacy & Security \u{2192} Accessibility, then relaunch.".to_string()
-                );
-            } else {
+            if cursor_clamp::has_permission() {
                 match display_fix::detect_screen_resolution(&bottle) {
                     Ok((_w, h)) => {
                         match cursor_clamp::activate(h, pid) {

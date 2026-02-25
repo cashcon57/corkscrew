@@ -50,6 +50,7 @@
     getConfig,
     setConfigValue,
     requestCursorClampPermission,
+    cursorClampStatus,
   } from "$lib/api";
   import type { InstallProgressEvent, DeploymentHealth, ConflictSuggestion, ResolutionResult, DeployProgress, ModTool, UserEndorsement } from "$lib/types";
   import {
@@ -80,8 +81,10 @@
   // Game launch fixes opt-out (display fix + cursor clamp)
   let disableGameFixes = $state(false);
 
-  // Accessibility permission explanation dialog (shown once)
+  // Accessibility permission dialog (blocks launch until user decides)
   let showAccessibilityExplainer = $state(false);
+  let accessibilityPolling = $state(false);
+  let pendingLaunchSkse = $state(false);
 
   let installing = $state(false);
   let installStep = $state("");
@@ -897,15 +900,34 @@
   async function handlePlay() {
     const game = pickedGame ?? $selectedGame;
     if (!game) return;
+
+    const useSkse = !!(skse?.installed && skse?.use_skse && game.game_id === "skyrimse");
+
+    // For Skyrim SE with fixes enabled, check Accessibility permission before launching
+    if (game.game_id === "skyrimse" && !disableGameFixes) {
+      try {
+        const status = await cursorClampStatus();
+        if (!status.has_permission) {
+          pendingLaunchSkse = useSkse;
+          showAccessibilityExplainer = true;
+          return; // Block launch until user decides
+        }
+      } catch {
+        // Non-macOS or command not available — proceed normally
+      }
+    }
+
+    doLaunch(useSkse);
+  }
+
+  async function doLaunch(useSkse: boolean) {
+    const game = pickedGame ?? $selectedGame;
+    if (!game) return;
     launching = true;
     try {
-      const useSkse = !!(skse?.installed && skse?.use_skse && game.game_id === "skyrimse");
       const result = await launchGame(game.game_id, game.bottle_name, useSkse);
       if (result.success) {
         showSuccess(`Launched ${game.display_name}${useSkse ? " via SKSE" : ""}`);
-        if (result.warning) {
-          showAccessibilityExplainer = true;
-        }
       }
     } catch (e: unknown) {
       showError(`Failed to launch: ${e}`);
@@ -922,12 +944,35 @@
   }
 
   function handleAccessibilityConfirm() {
-    showAccessibilityExplainer = false;
     requestCursorClampPermission();
+    accessibilityPolling = true;
+
+    // Poll for permission grant every 1.5s for up to 2 minutes
+    let attempts = 0;
+    const poll = setInterval(async () => {
+      attempts++;
+      try {
+        const status = await cursorClampStatus();
+        if (status.has_permission) {
+          clearInterval(poll);
+          accessibilityPolling = false;
+          showAccessibilityExplainer = false;
+          showSuccess("Accessibility permission granted — cursor fix is active");
+          doLaunch(pendingLaunchSkse);
+        }
+      } catch { /* ignore */ }
+      if (attempts >= 80) {
+        clearInterval(poll);
+        accessibilityPolling = false;
+      }
+    }, 1500);
   }
 
   function handleAccessibilityDismiss() {
     showAccessibilityExplainer = false;
+    accessibilityPolling = false;
+    // Launch without the cursor fix
+    doLaunch(pendingLaunchSkse);
   }
 
   async function handleFixDisplay() {
@@ -3172,13 +3217,24 @@
         Corkscrew does not read keystrokes, monitor other apps, or use this permission for anything
         other than preventing the cursor from escaping the game window.
       </p>
+      {#if accessibilityPolling}
+        <p style="margin: 0 0 var(--space-4); color: var(--accent); font-size: 13px;">
+          Waiting for permission to be granted in System Settings...
+        </p>
+      {/if}
       <div style="display: flex; gap: var(--space-2); justify-content: flex-end;">
-        <button class="btn btn-ghost" onclick={handleAccessibilityDismiss}>
-          Not Now
+        <button class="btn btn-ghost" onclick={handleAccessibilityDismiss} disabled={accessibilityPolling}>
+          Launch Without Fix
         </button>
-        <button class="btn btn-primary" onclick={handleAccessibilityConfirm}>
-          Open System Settings
-        </button>
+        {#if !accessibilityPolling}
+          <button class="btn btn-primary" onclick={handleAccessibilityConfirm}>
+            Open System Settings
+          </button>
+        {:else}
+          <button class="btn btn-primary" disabled>
+            Waiting...
+          </button>
+        {/if}
       </div>
     </div>
   </div>

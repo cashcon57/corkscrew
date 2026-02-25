@@ -20,7 +20,7 @@
   import TopBar from "$lib/components/topbar/TopBar.svelte";
   import { GamepadManager } from "$lib/gamepad";
   import type { GamepadAction } from "$lib/gamepad";
-  import { getNotificationCount, logNotification } from "$lib/api";
+  import { getNotificationCount, logNotification, cursorClampStatus, requestCursorClampPermission } from "$lib/api";
 
   const navItems = [
     { id: "mods", label: "Mods" },
@@ -96,6 +96,12 @@
 
   // Game launch state
   let launching = $state(false);
+
+  // Accessibility permission dialog (blocks launch until user decides)
+  let showAccessibilityExplainer = $state(false);
+  let accessibilityPolling = $state(false);
+  let pendingLaunchSkse = $state(false);
+  let disableGameFixesLayout = $state(false);
 
   // Keyboard shortcuts modal
   let showShortcuts = $state(false);
@@ -179,11 +185,12 @@
       } catch { /* config not available yet */ }
     }).catch(() => {});
 
-    // Check if first-run wizard should show
+    // Check if first-run wizard should show + load game fixes preference
     getConfig().then(config => {
       if (!config.has_completed_setup) {
         showFirstRunWizard = true;
       }
+      disableGameFixesLayout = config.disable_game_fixes === "true";
     }).catch(() => {});
     getNotificationCount().then(c => notificationCount.set(c)).catch(() => {});
 
@@ -510,14 +517,31 @@
 
   async function handleLaunchGame(useSkse: boolean = false) {
     if (!$selectedGame || launching) return;
+
+    // For Skyrim SE with fixes enabled, check Accessibility permission before launching
+    if ($selectedGame.game_id === "skyrimse" && !disableGameFixesLayout) {
+      try {
+        const status = await cursorClampStatus();
+        if (!status.has_permission) {
+          pendingLaunchSkse = useSkse;
+          showAccessibilityExplainer = true;
+          return; // Block launch until user decides
+        }
+      } catch {
+        // Non-macOS or command not available — proceed normally
+      }
+    }
+
+    doLaunchGame(useSkse);
+  }
+
+  async function doLaunchGame(useSkse: boolean) {
+    if (!$selectedGame || launching) return;
     launching = true;
     try {
       const result = await launchGame($selectedGame.game_id, $selectedGame.bottle_name, useSkse);
       if (result.success) {
         showSuccess(`Launched ${$selectedGame.display_name}`);
-        if (result.warning) {
-          showError(result.warning);
-        }
       } else {
         showError(`Failed to launch ${$selectedGame.display_name}`);
       }
@@ -526,6 +550,36 @@
     } finally {
       launching = false;
     }
+  }
+
+  function handleAccessibilityConfirmLayout() {
+    requestCursorClampPermission();
+    accessibilityPolling = true;
+
+    let attempts = 0;
+    const poll = setInterval(async () => {
+      attempts++;
+      try {
+        const status = await cursorClampStatus();
+        if (status.has_permission) {
+          clearInterval(poll);
+          accessibilityPolling = false;
+          showAccessibilityExplainer = false;
+          showSuccess("Accessibility permission granted — cursor fix is active");
+          doLaunchGame(pendingLaunchSkse);
+        }
+      } catch { /* ignore */ }
+      if (attempts >= 80) {
+        clearInterval(poll);
+        accessibilityPolling = false;
+      }
+    }, 1500);
+  }
+
+  function handleAccessibilityDismissLayout() {
+    showAccessibilityExplainer = false;
+    accessibilityPolling = false;
+    doLaunchGame(pendingLaunchSkse);
   }
 
   // NXM install state
@@ -1319,6 +1373,53 @@
 
 {#if showSpotlight}
   <SpotlightSearch onClose={() => showSpotlight = false} />
+{/if}
+
+{#if showAccessibilityExplainer}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="shortcuts-overlay" role="dialog" aria-label="Accessibility Permission">
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="shortcuts-card" onclick={(e) => e.stopPropagation()} style="max-width: 520px;">
+      <div class="shortcuts-header">
+        <h3>Why Corkscrew Needs Accessibility Permission</h3>
+      </div>
+      <div style="padding: 0 var(--space-4) var(--space-4); line-height: 1.5;">
+        <p style="margin: 0 0 var(--space-3); color: var(--text-primary); line-height: 1.6;">
+          When Skyrim runs fullscreen through Wine, macOS can cause your system cursor to appear over
+          the game when you move your mouse toward the bottom of the screen. This is a known macOS
+          behavior that interferes with gameplay.
+        </p>
+        <p style="margin: 0 0 var(--space-3); color: var(--text-primary); line-height: 1.6;">
+          To fix this, Corkscrew needs <strong>Accessibility</strong> permission to keep the cursor
+          inside the game window while playing. This permission is <strong>only used while the game is
+          running</strong> and is automatically deactivated when the game closes or Corkscrew quits.
+        </p>
+        <p style="margin: 0 0 var(--space-4); color: var(--text-secondary); font-size: 13px; line-height: 1.5;">
+          Corkscrew does not read keystrokes, monitor other apps, or use this permission for anything
+          other than preventing the cursor from escaping the game window.
+        </p>
+        {#if accessibilityPolling}
+          <p style="margin: 0 0 var(--space-4); color: var(--accent); font-size: 13px;">
+            Waiting for permission to be granted in System Settings...
+          </p>
+        {/if}
+        <div style="display: flex; gap: var(--space-2); justify-content: flex-end;">
+          <button class="btn btn-ghost" onclick={handleAccessibilityDismissLayout} disabled={accessibilityPolling}>
+            Launch Without Fix
+          </button>
+          {#if !accessibilityPolling}
+            <button class="btn btn-primary" onclick={handleAccessibilityConfirmLayout}>
+              Open System Settings
+            </button>
+          {:else}
+            <button class="btn btn-primary" disabled>
+              Waiting...
+            </button>
+          {/if}
+        </div>
+      </div>
+    </div>
+  </div>
 {/if}
 
 {#if showShortcuts}
