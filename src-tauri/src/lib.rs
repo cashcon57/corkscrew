@@ -108,6 +108,20 @@ fn resolve_game(
     Ok((bottle, game, data_dir))
 }
 
+/// Create an auto-snapshot before a destructive operation.
+/// Silent on failure — logs a warning but never blocks the operation.
+fn auto_snapshot_before_destructive(
+    db: &ModDatabase,
+    game_id: &str,
+    bottle_name: &str,
+    label: &str,
+) {
+    match rollback::create_snapshot(db, game_id, bottle_name, label, Some("Auto-snapshot before destructive operation")) {
+        Ok(id) => log::info!("Auto-snapshot {} created: {}", id, label),
+        Err(e) => log::warn!("Failed to create auto-snapshot '{}': {}", label, e),
+    }
+}
+
 /// Create a NexusClient from the current auth method (OAuth or API key),
 /// auto-refreshing expired OAuth tokens as needed.
 async fn nexus_client() -> Result<nexus::NexusClient, String> {
@@ -1499,6 +1513,8 @@ fn purge_deployment_cmd(
     let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
     let db = &state.db;
 
+    auto_snapshot_before_destructive(db, &game_id, &bottle_name, "Before purge deployment");
+
     let removed = deployer::purge_deployment(db, &game_id, &bottle_name, &data_dir)
         .map_err(|e| e.to_string())?;
 
@@ -1699,6 +1715,13 @@ async fn delete_collection_cmd(
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
         let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
+
+        auto_snapshot_before_destructive(
+            &db,
+            &game_id,
+            &bottle_name,
+            &format!("Before deleting collection: {}", collection_name),
+        );
 
         // Get mods in this collection
         let collection_mods = db
@@ -1902,6 +1925,281 @@ async fn delete_collection_cmd(
             "mods_removed": mods_removed,
             "downloads_removed": downloads_removed,
             "errors": errors,
+        }))
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
+#[tauri::command]
+async fn uninstall_wabbajack_modlist(
+    app: AppHandle,
+    game_id: String,
+    bottle_name: String,
+    modlist_name: String,
+    delete_downloads: bool,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    // WJ installs use collection_name = "wj:{modlist_name}"
+    let collection_name = format!("wj:{}", modlist_name);
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
+
+        auto_snapshot_before_destructive(
+            &db,
+            &game_id,
+            &bottle_name,
+            &format!("Before uninstalling WJ modlist: {}", modlist_name),
+        );
+
+        // Get mods in this WJ modlist collection
+        let collection_mods = db
+            .list_mods_by_collection(&game_id, &bottle_name, &collection_name)
+            .map_err(|e| e.to_string())?;
+
+        let total_mods = collection_mods.len();
+        let mut mods_removed = 0usize;
+        let mut downloads_removed = 0usize;
+        let mut errors: Vec<String> = Vec::new();
+
+        let _ = app.emit(
+            "uninstall-progress",
+            serde_json::json!({
+                "kind": "uninstallStarted",
+                "collection_name": &collection_name,
+                "total_mods": total_mods,
+            }),
+        );
+
+        let mut plugin_names: Vec<String> = Vec::new();
+
+        for (idx, m) in collection_mods.iter().enumerate() {
+            let _ = app.emit(
+                "uninstall-progress",
+                serde_json::json!({
+                    "kind": "modUninstalling",
+                    "mod_index": idx,
+                    "mod_name": &m.name,
+                    "step": "undeploying",
+                }),
+            );
+
+            // Gather plugin filenames
+            for file in &m.installed_files {
+                let lower = file.to_lowercase();
+                if lower.ends_with(".esp") || lower.ends_with(".esm") || lower.ends_with(".esl") {
+                    if let Some(fname) = Path::new(file).file_name().and_then(|f| f.to_str()) {
+                        plugin_names.push(fname.to_string());
+                    }
+                }
+            }
+
+            // Undeploy
+            if let Err(e) = deployer::undeploy_mod(&db, &game_id, &bottle_name, m.id, &data_dir) {
+                errors.push(format!("Failed to undeploy '{}': {}", m.name, e));
+            }
+
+            // Clean rollback staging
+            if let Err(e) = rollback::cleanup_mod_version_staging(&db, m.id) {
+                errors.push(format!("Failed to clean rollback staging for '{}': {}", m.name, e));
+            }
+
+            // Remove staging
+            if let Some(sp) = &m.staging_path {
+                if let Err(e) = std::fs::remove_dir_all(sp) {
+                    if Path::new(sp).exists() {
+                        errors.push(format!("Failed to remove staging for '{}': {}", m.name, e));
+                    }
+                }
+            }
+
+            // Handle download cleanup
+            let download =
+                if let (Some(nmod_id), Some(nfile_id)) = (m.nexus_mod_id, m.nexus_file_id) {
+                    db.find_download_by_nexus_ids(nmod_id, nfile_id).ok().flatten()
+                } else {
+                    None
+                }
+                .or_else(|| db.find_download_by_name(&m.archive_name).ok().flatten());
+
+            if let Some(dl) = download {
+                let is_unique = db
+                    .is_download_unique_to_collection(dl.id, &collection_name)
+                    .unwrap_or(false);
+
+                if delete_downloads && is_unique {
+                    if let Err(e) = std::fs::remove_file(&dl.archive_path) {
+                        if Path::new(&dl.archive_path).exists() {
+                            errors.push(format!("Failed to delete download for '{}': {}", m.name, e));
+                        }
+                    } else {
+                        downloads_removed += 1;
+                        let _ = db.delete_download_record(dl.id);
+                    }
+                }
+
+                if let Err(e) = db.remove_download_collection_ref(
+                    dl.id, &collection_name, &game_id, &bottle_name,
+                ) {
+                    errors.push(format!("Failed to remove download ref for '{}': {}", m.name, e));
+                }
+            }
+
+            // Remove from DB
+            if let Err(e) = db.remove_mod(m.id) {
+                errors.push(format!("Failed to remove mod '{}' from DB: {}", m.name, e));
+            } else {
+                mods_removed += 1;
+                let _ = app.emit(
+                    "uninstall-progress",
+                    serde_json::json!({
+                        "kind": "modUninstalled",
+                        "mod_index": idx,
+                        "mod_name": &m.name,
+                    }),
+                );
+            }
+        }
+
+        // Clean plugin rules
+        if !plugin_names.is_empty() {
+            if let Err(e) =
+                loot_rules::remove_rules_for_plugins(&db, &game_id, &bottle_name, &plugin_names)
+            {
+                errors.push(format!("Failed to clean plugin rules: {}", e));
+            }
+        }
+
+        // Clean up collection metadata
+        if let Err(e) = db.remove_collection_metadata(&game_id, &bottle_name, &collection_name) {
+            errors.push(format!("Failed to remove collection metadata: {}", e));
+        }
+
+        // Redeploy remaining mods
+        let _ = app.emit("uninstall-progress", serde_json::json!({ "kind": "redeployStarted" }));
+        if let Err(e) = deployer::redeploy_all(&db, &game_id, &bottle_name, &data_dir) {
+            errors.push(format!("Failed to redeploy remaining mods: {}", e));
+        }
+        let _ = app.emit("uninstall-progress", serde_json::json!({ "kind": "redeployCompleted" }));
+
+        if game_id == "skyrimse" {
+            let _ = sync_plugins_for_game(&game, &bottle);
+        }
+
+        let _ = app.emit(
+            "uninstall-progress",
+            serde_json::json!({
+                "kind": "uninstallCompleted",
+                "mods_removed": mods_removed,
+                "downloads_removed": downloads_removed,
+                "errors": &errors,
+            }),
+        );
+
+        Ok(serde_json::json!({
+            "mods_removed": mods_removed,
+            "downloads_removed": downloads_removed,
+            "errors": errors,
+        }))
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
+#[tauri::command]
+async fn restore_mod_snapshot(
+    app: AppHandle,
+    snapshot_id: i64,
+    game_id: String,
+    bottle_name: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
+
+        let result = rollback::restore_snapshot(&db, snapshot_id, &game_id, &bottle_name)?;
+
+        // Redeploy to apply the restored state
+        let _ = app.emit("deploy-progress", serde_json::json!({ "kind": "redeployStarted" }));
+        deployer::redeploy_all(&db, &game_id, &bottle_name, &data_dir)
+            .map_err(|e| format!("Failed to redeploy after snapshot restore: {}", e))?;
+        let _ = app.emit("deploy-progress", serde_json::json!({ "kind": "redeployCompleted" }));
+
+        if game_id == "skyrimse" {
+            let _ = sync_plugins_for_game(&game, &bottle);
+        }
+
+        Ok(serde_json::json!({
+            "mods_enabled": result.mods_enabled,
+            "mods_disabled": result.mods_disabled,
+            "mods_not_found": result.mods_not_found,
+        }))
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
+#[tauri::command]
+async fn return_to_vanilla(
+    game_id: String,
+    bottle_name: String,
+    clean_orphans: bool,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
+
+        // 1. Auto-snapshot
+        auto_snapshot_before_destructive(&db, &game_id, &bottle_name, "Before return to vanilla");
+
+        // 2. Purge deployment
+        let removed = deployer::purge_deployment(&db, &game_id, &bottle_name, &data_dir)
+            .map_err(|e| e.to_string())?;
+        let files_removed = removed.len();
+
+        // 3. Disable all mods
+        let mods_disabled = {
+            let conn = db.conn().map_err(|e| e.to_string())?;
+            conn.execute(
+                "UPDATE installed_mods SET enabled = 0 WHERE game_id = ?1 AND bottle_name = ?2",
+                rusqlite::params![game_id, bottle_name],
+            )
+            .map_err(|e| e.to_string())?
+        };
+
+        // 4. Optionally clean orphans
+        let orphans_cleaned = if clean_orphans {
+            let opts = cleaner::CleanOptions {
+                remove_loose_files: true,
+                remove_archives: true,
+                remove_enb: false,
+                remove_saves: false,
+                orphans_only: true,
+                dry_run: false,
+                exclude_patterns: Vec::new(),
+            };
+            match cleaner::clean_game_directory(&db, &game_id, &bottle_name, &data_dir, &opts) {
+                Ok(result) => result.removed_files.len(),
+                Err(e) => {
+                    log::warn!("Orphan cleanup failed: {}", e);
+                    0
+                }
+            }
+        } else {
+            0
+        };
+
+        if game_id == "skyrimse" {
+            let _ = sync_plugins_for_game(&game, &bottle);
+        }
+
+        Ok(serde_json::json!({
+            "mods_disabled": mods_disabled,
+            "files_removed": files_removed,
+            "orphans_cleaned": orphans_cleaned,
         }))
     })
     .await
@@ -2973,6 +3271,10 @@ fn clean_game_directory(
 ) -> Result<cleaner::CleanResult, String> {
     let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
     let db = &state.db;
+
+    if !options.dry_run {
+        auto_snapshot_before_destructive(db, &game_id, &bottle_name, "Before clean game directory");
+    }
 
     let result = cleaner::clean_game_directory(db, &game_id, &bottle_name, &data_dir, &options)
         .map_err(|e| e.to_string())?;
@@ -4815,6 +5117,7 @@ pub fn run() {
             create_mod_snapshot,
             list_mod_snapshots,
             delete_mod_snapshot,
+            restore_mod_snapshot,
             // Modlist Import/Export
             export_modlist_cmd,
             import_modlist_plan,
@@ -4830,6 +5133,8 @@ pub fn run() {
             set_mod_collection_name_cmd,
             switch_collection_cmd,
             delete_collection_cmd,
+            uninstall_wabbajack_modlist,
+            return_to_vanilla,
             collection_download_size_cmd,
             get_collection_diff_cmd,
             get_deployment_health,

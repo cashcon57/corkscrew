@@ -50,6 +50,14 @@ pub struct ModSnapshotEntry {
     pub priority: i32,
 }
 
+/// Result of restoring a snapshot.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RestoreResult {
+    pub mods_enabled: usize,
+    pub mods_disabled: usize,
+    pub mods_not_found: usize,
+}
+
 // ---------------------------------------------------------------------------
 // Schema
 // ---------------------------------------------------------------------------
@@ -519,6 +527,90 @@ pub fn delete_snapshot(db: &ModDatabase, snapshot_id: i64) -> Result<(), String>
 }
 
 // ---------------------------------------------------------------------------
+// Snapshot restore
+// ---------------------------------------------------------------------------
+
+/// Restore a snapshot by re-applying the saved mod states.
+///
+/// For each entry in the snapshot where the mod still exists in the DB:
+///   - Sets `enabled` to the snapshot value
+///   - Sets `priority` to the snapshot value
+///
+/// Mods that exist now but were NOT in the snapshot are disabled
+/// (conservative — we don't delete them).
+///
+/// The caller must call `deployer::redeploy_all()` afterward to apply
+/// the new enabled/priority state on disk.
+pub fn restore_snapshot(
+    db: &ModDatabase,
+    snapshot_id: i64,
+    game_id: &str,
+    bottle_name: &str,
+) -> Result<RestoreResult, String> {
+    // Load snapshot entries
+    let entries = get_snapshot_states(db, snapshot_id)?;
+    if entries.is_empty() {
+        return Err(format!("Snapshot {} has no entries or does not exist", snapshot_id));
+    }
+
+    // Get current installed mods
+    let current_mods = db
+        .list_mods(game_id, bottle_name)
+        .map_err(|e| format!("Failed to list current mods: {}", e))?;
+
+    let snapshot_mod_ids: std::collections::HashSet<i64> =
+        entries.iter().map(|e| e.mod_id).collect();
+
+    let mut mods_enabled = 0usize;
+    let mut mods_disabled = 0usize;
+    let mut mods_not_found = 0usize;
+
+    // Apply snapshot states
+    for entry in &entries {
+        // Check if this mod still exists
+        let exists = current_mods.iter().any(|m| m.id == entry.mod_id);
+        if !exists {
+            mods_not_found += 1;
+            continue;
+        }
+
+        // Set enabled state
+        if let Err(e) = db.set_enabled(entry.mod_id, entry.enabled) {
+            log::warn!("Failed to set enabled for mod {}: {}", entry.mod_id, e);
+            continue;
+        }
+
+        // Set priority
+        if let Err(e) = db.set_mod_priority(entry.mod_id, entry.priority) {
+            log::warn!("Failed to set priority for mod {}: {}", entry.mod_id, e);
+        }
+
+        if entry.enabled {
+            mods_enabled += 1;
+        } else {
+            mods_disabled += 1;
+        }
+    }
+
+    // Disable mods not in the snapshot (conservative — don't delete)
+    for m in &current_mods {
+        if !snapshot_mod_ids.contains(&m.id) {
+            if let Err(e) = db.set_enabled(m.id, false) {
+                log::warn!("Failed to disable mod {} not in snapshot: {}", m.id, e);
+            } else {
+                mods_disabled += 1;
+            }
+        }
+    }
+
+    Ok(RestoreResult {
+        mods_enabled,
+        mods_disabled,
+        mods_not_found,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -765,6 +857,62 @@ mod tests {
         let fallout_snaps = list_snapshots(&db, "fallout4", "Gaming").unwrap();
         assert_eq!(fallout_snaps.len(), 1);
         assert_eq!(fallout_snaps[0].name, "Fallout Snap");
+    }
+
+    #[test]
+    fn test_restore_snapshot() {
+        let (db, _tmp) = test_db();
+
+        // Insert mods
+        let m1 = insert_test_mod(&db, "Mod A");
+        let m2 = insert_test_mod(&db, "Mod B");
+
+        // Set priorities
+        db.set_mod_priority(m1, 0).unwrap();
+        db.set_mod_priority(m2, 1).unwrap();
+
+        // Create a snapshot with both enabled
+        let snap_id =
+            create_snapshot(&db, "skyrimse", "Gaming", "Good State", None).unwrap();
+
+        // Now disable Mod A and change Mod B priority
+        db.set_enabled(m1, false).unwrap();
+        db.set_mod_priority(m2, 5).unwrap();
+
+        // Add a new mod not in snapshot
+        let m3 = insert_test_mod(&db, "Mod C");
+
+        // Restore snapshot
+        let result = restore_snapshot(&db, snap_id, "skyrimse", "Gaming").unwrap();
+        assert_eq!(result.mods_enabled, 2); // m1 and m2 re-enabled
+        assert_eq!(result.mods_disabled, 1); // m3 disabled (not in snapshot)
+        assert_eq!(result.mods_not_found, 0);
+
+        // Verify m1 is enabled again
+        let mods = db.list_mods("skyrimse", "Gaming").unwrap();
+        let mod_a = mods.iter().find(|m| m.id == m1).unwrap();
+        assert!(mod_a.enabled);
+
+        // Verify m3 is disabled
+        let mod_c = mods.iter().find(|m| m.id == m3).unwrap();
+        assert!(!mod_c.enabled);
+    }
+
+    #[test]
+    fn test_restore_snapshot_with_missing_mods() {
+        let (db, _tmp) = test_db();
+
+        let m1 = insert_test_mod(&db, "Mod A");
+
+        let snap_id =
+            create_snapshot(&db, "skyrimse", "Gaming", "State", None).unwrap();
+
+        // Remove the mod
+        db.remove_mod(m1).unwrap();
+
+        let result = restore_snapshot(&db, snap_id, "skyrimse", "Gaming").unwrap();
+        assert_eq!(result.mods_not_found, 1);
+        assert_eq!(result.mods_enabled, 0);
     }
 
     #[test]

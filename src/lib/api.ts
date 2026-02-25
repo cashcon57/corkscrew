@@ -980,6 +980,33 @@ export async function deleteModSnapshot(
   return invoke("delete_mod_snapshot", { snapshotId });
 }
 
+export async function restoreModSnapshot(
+  snapshotId: number,
+  gameId: string,
+  bottleName: string
+): Promise<{ mods_enabled: number; mods_disabled: number; mods_not_found: number }> {
+  return invoke("restore_mod_snapshot", { snapshotId, gameId, bottleName });
+}
+
+export async function uninstallWabbajackModlist(
+  gameId: string,
+  bottleName: string,
+  modlistName: string,
+  deleteDownloads: boolean
+): Promise<{ mods_removed: number; downloads_removed: number; errors: string[] }> {
+  return invoke("uninstall_wabbajack_modlist", {
+    gameId, bottleName, modlistName, deleteDownloads,
+  });
+}
+
+export async function returnToVanilla(
+  gameId: string,
+  bottleName: string,
+  cleanOrphans: boolean
+): Promise<{ mods_disabled: number; files_removed: number; orphans_cleaned: number }> {
+  return invoke("return_to_vanilla", { gameId, bottleName, cleanOrphans });
+}
+
 // Modlist Export/Import
 export async function exportModlist(
   gameId: string,
