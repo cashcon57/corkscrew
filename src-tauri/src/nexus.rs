@@ -381,6 +381,10 @@ impl RateLimitState {
 pub struct NexusClient {
     client: reqwest::Client,
     rate_limit: RateLimitState,
+    /// When created from OAuth, premium status is known from the JWT claims
+    /// and we don't need to hit the v1 REST API (which doesn't support Bearer
+    /// tokens reliably for /users/validate.json).
+    oauth_premium: Option<bool>,
 }
 
 impl NexusClient {
@@ -421,7 +425,15 @@ impl NexusClient {
         match method {
             crate::oauth::AuthMethod::ApiKey(key) => Ok(Self::new(key.clone())),
             crate::oauth::AuthMethod::OAuth(tokens) => {
-                Ok(Self::with_bearer(&tokens.access_token))
+                let mut client = Self::with_bearer(&tokens.access_token);
+                // Extract premium status from JWT claims so we don't have to
+                // hit /users/validate.json (which doesn't support Bearer tokens).
+                client.oauth_premium = Some(
+                    crate::oauth::parse_user_info(&tokens.access_token)
+                        .map(|u| u.is_premium)
+                        .unwrap_or(false),
+                );
+                Ok(client)
             }
             crate::oauth::AuthMethod::None => Err(NexusError::Auth(
                 "No NexusMods authentication configured. Sign in via Settings.".to_string(),
@@ -449,6 +461,7 @@ impl NexusClient {
         Self {
             client,
             rate_limit: RateLimitState::new(),
+            oauth_premium: None,
         }
     }
 
@@ -555,10 +568,18 @@ impl NexusClient {
         Ok(files)
     }
 
-    /// Check if the current API key belongs to a premium/supporter user.
+    /// Check if the authenticated user has premium/supporter status.
     ///
-    /// Returns `true` for premium or supporter accounts, `false` otherwise.
+    /// When the client was created from OAuth (via `from_auth_method`), the
+    /// premium status is read directly from the JWT claims — no API call needed.
+    /// For API-key clients, falls back to the v1 `/users/validate.json` endpoint.
     pub async fn is_premium(&self) -> bool {
+        // Fast path: OAuth premium status was cached at construction time.
+        if let Some(premium) = self.oauth_premium {
+            return premium;
+        }
+
+        // API-key path: hit the v1 REST endpoint.
         match self.validate_key().await {
             Ok(info) => {
                 let premium = info
