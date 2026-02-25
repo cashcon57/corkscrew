@@ -20,7 +20,7 @@
   import TopBar from "$lib/components/topbar/TopBar.svelte";
   import { GamepadManager } from "$lib/gamepad";
   import type { GamepadAction } from "$lib/gamepad";
-  import { getNotificationCount, logNotification, cursorClampStatus, requestCursorClampPermission } from "$lib/api";
+  import { getNotificationCount, logNotification } from "$lib/api";
 
   const navItems = [
     { id: "mods", label: "Mods" },
@@ -96,11 +96,6 @@
 
   // Game launch state
   let launching = $state(false);
-
-  // Accessibility permission dialog (blocks launch until user decides)
-  let showAccessibilityExplainer = $state(false);
-  let accessibilitySettingsOpened = $state(false);
-  let pendingLaunchSkse = $state(false);
   let disableGameFixesLayout = $state(false);
 
   // Keyboard shortcuts modal
@@ -518,19 +513,8 @@
   async function handleLaunchGame(useSkse: boolean = false) {
     if (!$selectedGame || launching) return;
 
-    // For Skyrim SE with fixes enabled, check Accessibility permission before launching
-    if ($selectedGame.game_id === "skyrimse" && !disableGameFixesLayout) {
-      try {
-        const status = await cursorClampStatus();
-        if (!status.has_permission) {
-          pendingLaunchSkse = useSkse;
-          showAccessibilityExplainer = true;
-          return; // Block launch until user decides
-        }
-      } catch {
-        // Non-macOS or command not available — proceed normally
-      }
-    }
+    // Cursor fix no longer needs Accessibility permission for its primary defense
+    // (Dock suppression). The event tap is a bonus layer. No need to block launch.
 
     doLaunchGame(useSkse);
   }
@@ -550,21 +534,6 @@
     } finally {
       launching = false;
     }
-  }
-
-  function handleAccessibilityOpenSettingsLayout() {
-    requestCursorClampPermission();
-    accessibilitySettingsOpened = true;
-  }
-
-  async function handleAccessibilityRestartLayout() {
-    await relaunch();
-  }
-
-  function handleAccessibilityDismissLayout() {
-    showAccessibilityExplainer = false;
-    accessibilitySettingsOpened = false;
-    doLaunchGame(pendingLaunchSkse);
   }
 
   // NXM install state
@@ -1358,54 +1327,6 @@
 
 {#if showSpotlight}
   <SpotlightSearch onClose={() => showSpotlight = false} />
-{/if}
-
-{#if showAccessibilityExplainer}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="shortcuts-overlay" role="dialog" aria-label="Accessibility Permission">
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="shortcuts-card" onclick={(e) => e.stopPropagation()} style="max-width: 520px;">
-      <div class="shortcuts-header">
-        <h3>Why Corkscrew Needs Accessibility Permission</h3>
-      </div>
-      <div style="padding: 0 var(--space-4) var(--space-4); line-height: 1.5;">
-        <p style="margin: 0 0 var(--space-3); color: var(--text-primary); line-height: 1.6;">
-          When Skyrim runs fullscreen through Wine, macOS can cause your system cursor to appear over
-          the game when you move your mouse toward the bottom of the screen. This is a known macOS
-          behavior that interferes with gameplay.
-        </p>
-        <p style="margin: 0 0 var(--space-3); color: var(--text-primary); line-height: 1.6;">
-          To fix this, Corkscrew needs <strong>Accessibility</strong> permission to keep the cursor
-          inside the game window while playing. This permission is <strong>only used while the game is
-          running</strong> and is automatically deactivated when the game closes or Corkscrew quits.
-        </p>
-        <p style="margin: 0 0 var(--space-4); color: var(--text-secondary); font-size: 13px; line-height: 1.5;">
-          Corkscrew does not read keystrokes, monitor other apps, or use this permission for anything
-          other than preventing the cursor from escaping the game window.
-        </p>
-        {#if accessibilitySettingsOpened}
-          <p style="margin: 0 0 var(--space-4); color: var(--accent); font-size: 13px; line-height: 1.5;">
-            After enabling Corkscrew in Accessibility settings, the app needs to restart for the
-            change to take effect.
-          </p>
-        {/if}
-        <div style="display: flex; gap: var(--space-2); justify-content: flex-end;">
-          <button class="btn btn-ghost" onclick={handleAccessibilityDismissLayout}>
-            Launch Without Fix
-          </button>
-          {#if !accessibilitySettingsOpened}
-            <button class="btn btn-primary" onclick={handleAccessibilityOpenSettingsLayout}>
-              Open System Settings
-            </button>
-          {:else}
-            <button class="btn btn-primary" onclick={handleAccessibilityRestartLayout}>
-              Restart Corkscrew
-            </button>
-          {/if}
-        </div>
-      </div>
-    </div>
-  </div>
 {/if}
 
 {#if showShortcuts}

@@ -207,7 +207,7 @@ export async function launchGame(
 }
 
 // Cursor Clamp (macOS)
-export async function cursorClampStatus(): Promise<{ active: boolean; has_permission: boolean }> {
+export async function cursorClampStatus(): Promise<{ active: boolean; has_permission: boolean; dev_mode?: boolean }> {
   return invoke("cursor_clamp_status");
 }
 
@@ -217,6 +217,11 @@ export async function deactivateCursorClamp(): Promise<void> {
 
 export async function requestCursorClampPermission(): Promise<boolean> {
   return invoke("request_cursor_clamp_permission");
+}
+
+/** Test cursor clamp without launching a game. Activates for durationSecs (default 15). */
+export async function testCursorClamp(durationSecs?: number): Promise<string> {
+  return invoke("test_cursor_clamp", { durationSecs });
 }
 
 // SKSE Management
