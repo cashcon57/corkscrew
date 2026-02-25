@@ -26,7 +26,7 @@ Corkscrew installs, manages, and organizes mods for Windows games running throug
 
 It works by reading and writing directly to your Wine bottle's filesystem, the same way the game itself sees it. Your bottles, your mods, no middleman.
 
-> **v1.13** — Apple Developer code signing and notarization (no more Gatekeeper bypass), mod endorsements, per-profile game save management, pre-install game directory cleanup, DLC detection for collections, SteamOS/Steam Deck integration, download cache % on collections, and updater UX improvements.
+> **v1.16** — Auto-snapshots before destructive operations, snapshot restore, Wabbajack modlist uninstall, return-to-vanilla command, NexusMods OAuth sign-in (browser-based PKCE), and tool install fixes for OAuth users.
 
 ---
 
@@ -156,7 +156,9 @@ Corkscrew includes an in-app auto-updater. When a new version is published on Gi
 - **FOMOD wizard** — Step-by-step interactive installer for mods using the FOMOD XML format, with radio/checkbox groups, option descriptions, and type badges.
 - **FOMOD choice replay** — Save and export FOMOD installer choices as shareable JSON recipes, then replay them on reinstall or share with others.
 - **Mod integrity verification** — SHA-256 hashes are stored per file; verify staging integrity on demand.
-- **Mod version rollback** — Track mod versions and roll back to previous versions with snapshot support.
+- **Mod version rollback** — Track mod versions and roll back to previous versions with snapshot support. Restore snapshots to re-apply saved mod states (enabled/priority) in one click.
+- **Auto-snapshots** — Destructive operations (purge, collection delete, game directory clean) automatically create a snapshot first, so you can always undo.
+- **Return to vanilla** — One-click command to snapshot current state, purge all deployments, disable all mods, and optionally clean orphaned files — returning the game directory to its original state.
 - **Modlist export/import** — Export your mod setup as a portable JSON modlist and import it on another machine or share it with others, with diff comparison between modlists.
 - **Mod dependency tracking** — Define requires/conflicts/patches relationships between mods. The dependency checker surfaces missing requirements and active conflicts before you launch.
 - **Pre-flight installation checks** — Run a comprehensive pre-deployment check covering disk space, staging integrity, bottle health, and file conflicts before deploying.
@@ -179,7 +181,7 @@ Corkscrew includes an in-app auto-updater. When a new version is published on Gi
 - **ARIA accessibility** — Toggle switches use `role="switch"` with `aria-pressed` and descriptive `aria-label` attributes. Drag handles include accessible labels.
 
 ### Nexus Mods Integration
-- **API key authentication** — Connect your Nexus Mods account via API key to access premium features. SSO/OAuth module is implemented and ready for use once NexusMods approves the application.
+- **OAuth sign-in** — Sign in to NexusMods via browser-based OAuth 2.0 + PKCE flow. Tokens auto-refresh and all API commands use unified auth. API key fallback is available in Settings.
 - **NXM protocol handling** — Registered as an `nxm://` protocol handler. Users click "Download with Mod Manager" on the Nexus Mods website, and Corkscrew receives and processes the NXM link.
 - **Strict download compliance** — Corkscrew **never automates downloads for free NexusMods users**. Free users are always directed to the Nexus Mods website to click "Slow Download" manually. Only premium users get API-initiated downloads. This is enforced at the API layer in `nexus.rs::get_download_links()`.
 - **Browse Nexus Mods** — Premium users can search and filter NexusMods mods with advanced filters (category, author, update period, min downloads/endorsements), multiple sort options, and NexusMods-style filter pills. Free users browse via an embedded NexusMods web view within the app.
@@ -223,6 +225,7 @@ Corkscrew includes an in-app auto-updater. When a new version is published on Gi
   - **Directive phase** — Processes all Wabbajack directive types: FromArchive (file extraction), PatchedFromArchive (BSDiff binary patching), InlineFile/RemappedInlineFile (embedded data with path substitution), MergedPatch (multi-source merge patching), CreateBSA (staging for BSA packing), TransformedTexture (texture copy), and IgnoredDirectly.
   - **Deploy phase** — Hardlink-first deployment with atomic rollback on partial failure. Creates a mod record and deploys all processed files to the game's data directory.
   - Pre-flight checks, cancellation support, and real-time progress tracking throughout.
+- **Modlist uninstall** — Uninstall an entire Wabbajack modlist with one command: undeploys all mods, cleans staging, optionally removes downloads, and redeploys remaining mods.
 - **Tool detection** — Scans the modlist for required tools and prompts for installation before proceeding.
 
 ### Crash Log Analysis
@@ -368,6 +371,10 @@ Key workflows tested end-to-end:
 - INI file browsing, editing, and preset application
 - Wine bottle diagnostics with automated fixes
 - Wabbajack modlist installation with multi-source downloads, directive processing, and checkpoint resume
+- Wabbajack modlist uninstall (one-click removal of entire modlist)
+- NexusMods OAuth sign-in (browser-based PKCE, auto-refresh)
+- Auto-snapshot before destructive operations + snapshot restore
+- Return-to-vanilla (one-click game directory restoration)
 - In-app auto-updater with signed releases
 - Mod endorsements via NexusMods API
 - Per-profile game save backup/restore
@@ -381,7 +388,7 @@ Key workflows tested end-to-end:
 - **Collections installation** — Works well for most public NexusMods collections (10–150 mods). Install order resolution, FOMOD replay, plugin sync, profile snapshots, binary patch application, and collection delta updates (revision diff) are all functional.
 - **Wabbajack installation** — The full Wabbajack install pipeline is implemented with real downloads (NexusMods, HTTP, MediaFire, ModDB, Google Drive, Wabbajack CDN), directive processing (BSDiff patching, inline files, BSA/BA2 packing, DDS texture transformation, merged patches), and deployment. Checkpoint-based install resume survives interruptions. Game file source extraction is not yet implemented — complex modlists depending on vanilla game files as patch sources will partially fail.
 - **FOMOD conditionals** — The FOMOD installer handles group selection, type badges, file mapping, conditional visibility, flag dependencies, and step filtering based on previous selections.
-- **NexusMods SSO** — The SSO/OAuth2 module (with PKCE) is fully implemented and ready to use. Currently awaiting NexusMods approval of the "Corkscrew" application slug. In the meantime, API key authentication works.
+- **NexusMods OAuth** — Browser-based OAuth sign-in with PKCE is fully functional. API key fallback is available for users who prefer it.
 - **macOS code signing** — Fully signed and notarized with an Apple Developer certificate as of v1.13. No Gatekeeper bypass needed.
 
 ### Roadmap
@@ -389,7 +396,6 @@ Key workflows tested end-to-end:
 **Near-term:**
 - Wire up Wabbajack install UI to backend pipeline (backend complete, frontend not yet connected)
 - Enhanced game plugins for more Bethesda titles (Oblivion, Fallout 3, Fallout NV, Starfield, Morrowind)
-- NexusMods SSO/OAuth authentication (code complete, pending NM app approval)
 - Per-game tool configuration for non-Bethesda games
 - Wabbajack game file source extraction (vanilla files as patch sources)
 
@@ -466,7 +472,7 @@ src/                          Svelte frontend
 │   └── settings/+page.svelte Config, game tools, auth, INI, diagnostics
 └── app.css                   Design system (tokens, themes, vibrancy, animations)
 
-src-tauri/src/                Rust backend (~50 modules, 595 tests)
+src-tauri/src/                Rust backend (~50 modules, 607 tests)
 ├── lib.rs              Tauri command handlers (~171 IPC commands)
 ├── bottles.rs          Bottle detection (9 sources, macOS + Linux)
 ├── bottle_config.rs    Wine bottle settings (MSync, MetalFX, env vars)
@@ -498,7 +504,7 @@ src-tauri/src/                Rust backend (~50 modules, 595 tests)
 ├── crashlog.rs         Crash log parser + diagnosis engine
 ├── conflict_resolver.rs Automated conflict resolution heuristics
 ├── progress.rs         Install progress event types (Tauri event system)
-├── rollback.rs         Mod version rollback + snapshot management
+├── rollback.rs         Mod version rollback + snapshot management + snapshot restore
 ├── modlist_io.rs       Modlist export/import + diff comparison
 ├── executables.rs      Custom executable management
 ├── config.rs           JSON configuration (dirs crate for platform paths)
@@ -556,7 +562,7 @@ cargo tauri dev    # Development mode with hot-reload
 
 ```bash
 # Run tests
-cd src-tauri && cargo test           # 595 Rust tests
+cd src-tauri && cargo test           # 607 Rust tests
 npx svelte-check --threshold error   # Frontend type checking
 ```
 
