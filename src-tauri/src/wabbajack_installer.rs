@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 // ---------------------------------------------------------------------------
 // Error types
@@ -537,7 +537,12 @@ pub async fn install_wabbajack_modlist(
             cancel_token.clone(),
         )
         .await
-        .map_err(|e| WjInstallError::Download(e.to_string()))?;
+        .map_err(|e| {
+            WjInstallError::Download(format!(
+                "Download phase failed for '{}' ({} archives): {}",
+                modlist.name, total_archives, e
+            ))
+        })?;
 
     db.update_wj_install_archive_progress(install_id, archive_download_paths.len() as i64)
         .map_err(|e| WjInstallError::Database(e.to_string()))?;
@@ -650,20 +655,32 @@ pub async fn install_wabbajack_modlist(
     );
 
     let app_clone = app.clone();
+    let directive_count = modlist.directives.len();
+    let progress_interval = match directive_count {
+        0..=100 => 1,
+        101..=500 => 10,
+        501..=2000 => 25,
+        _ => 50,
+    };
     let directive_result = processor
-        .process_all(&modlist.directives, &|current, total| {
-            if current % 100 == 0 || current == total {
+        .process_all(&modlist.directives, &|current, total, phase| {
+            if current % progress_interval == 0 || current == total {
                 emit_progress(
                     &app_clone,
                     &WjInstallProgressEvent::DirectiveProgress {
                         current,
                         total,
-                        directive_type: "processing".to_string(),
+                        directive_type: phase.to_string(),
                     },
                 );
             }
         })
-        .map_err(|e| WjInstallError::Directive(e.to_string()))?;
+        .map_err(|e| {
+            WjInstallError::Directive(format!(
+                "Directive processing failed for '{}' ({} directives): {}",
+                modlist.name, directive_count, e
+            ))
+        })?;
 
     let processed_count = directive_result.total_processed;
 
@@ -737,7 +754,7 @@ pub async fn install_wabbajack_modlist(
             )
             .map_err(|e| WjInstallError::Database(e.to_string()))?;
 
-        let deploy_result = crate::deployer::deploy_mod_atomic(
+        match crate::deployer::deploy_mod_atomic(
             db,
             game_id,
             bottle_name,
@@ -745,25 +762,41 @@ pub async fn install_wabbajack_modlist(
             install_dir,
             &game_dir,
             &deploy_files,
-        )
-        .map_err(|e| WjInstallError::Deployment(e.to_string()))?;
+        ) {
+            Ok(deploy_result) => {
+                emit_progress(
+                    app,
+                    &WjInstallProgressEvent::DeployProgress {
+                        current: deploy_result.deployed_count,
+                        total: deploy_files.len(),
+                    },
+                );
 
-        emit_progress(
-            app,
-            &WjInstallProgressEvent::DeployProgress {
-                current: deploy_result.deployed_count,
-                total: deploy_files.len(),
-            },
-        );
+                log::info!(
+                    "Deployed {} files ({} skipped, fallback: {})",
+                    deploy_result.deployed_count,
+                    deploy_result.skipped_count,
+                    deploy_result.fallback_used,
+                );
 
-        log::info!(
-            "Deployed {} files ({} skipped, fallback: {})",
-            deploy_result.deployed_count,
-            deploy_result.skipped_count,
-            deploy_result.fallback_used,
-        );
-
-        deploy_result.deployed_count
+                deploy_result.deployed_count
+            }
+            Err(e) => {
+                // Clean up orphaned mod record (deploy_mod_atomic already rolled back files)
+                let _ = db.remove_mod(mod_id);
+                let _ = db.update_wj_install_status(
+                    install_id,
+                    "failed",
+                    Some(&format!("Deployment failed (rolled back): {}", e)),
+                );
+                return Err(WjInstallError::Deployment(format!(
+                    "deploy_mod_atomic for modlist '{}' ({} files): {}",
+                    modlist.name,
+                    deploy_files.len(),
+                    e
+                )));
+            }
+        }
     };
 
     // -----------------------------------------------------------------------
@@ -931,6 +964,11 @@ pub(crate) async fn install_wabbajack_modlist_cmd(
                 );
             }
         }
+
+        // Clean up the cancel token now that the install is finished
+        let st = app_clone.state::<crate::AppState>();
+        st.wj_cancel_tokens.lock().unwrap().remove(&install_id);
+        log::info!("Cleaned up cancel token for wabbajack install {}", install_id);
     });
 
     Ok(install_id)
@@ -982,6 +1020,27 @@ pub(crate) async fn resume_wabbajack_install(
         .map_err(|e| format!("Database error: {}", e))?;
 
     log::info!("Resume requested for wabbajack install {}", install_id);
+    Ok(())
+}
+
+/// Tauri command: Clean up the cancel token for a finished Wabbajack installation.
+///
+/// The backend auto-cleans tokens after install completion, but this command
+/// provides an explicit cleanup path if the frontend detects a stale token.
+#[tauri::command]
+pub(crate) async fn cleanup_wabbajack_install(
+    state: tauri::State<'_, crate::AppState>,
+    install_id: i64,
+) -> Result<(), String> {
+    let removed = state
+        .wj_cancel_tokens
+        .lock()
+        .unwrap()
+        .remove(&install_id)
+        .is_some();
+    if removed {
+        log::info!("Explicitly cleaned up cancel token for install {}", install_id);
+    }
     Ok(())
 }
 

@@ -146,7 +146,7 @@ impl DirectiveProcessor {
     pub fn process_all(
         &self,
         directives: &[WjDirective],
-        progress_callback: &dyn Fn(usize, usize),
+        progress_callback: &dyn Fn(usize, usize, &str),
     ) -> Result<WjDirectiveResult, WjDirectiveError> {
         // Partition directives by processing phase
         let mut phase1: Vec<&WjDirective> = Vec::new(); // File production
@@ -178,7 +178,7 @@ impl DirectiveProcessor {
             self.process_directive(d).ok();
             skipped += 1;
             processed += 1;
-            progress_callback(processed, total);
+            progress_callback(processed, total, "ignored");
         }
 
         // Phase 1: File production
@@ -192,7 +192,7 @@ impl DirectiveProcessor {
                 }
             }
             processed += 1;
-            progress_callback(processed, total);
+            progress_callback(processed, total, "files");
         }
 
         // Phase 2: Merged patches
@@ -206,7 +206,7 @@ impl DirectiveProcessor {
                 }
             }
             processed += 1;
-            progress_callback(processed, total);
+            progress_callback(processed, total, "patches");
         }
 
         // Phase 3: BSA creation
@@ -220,7 +220,7 @@ impl DirectiveProcessor {
                 }
             }
             processed += 1;
-            progress_callback(processed, total);
+            progress_callback(processed, total, "archives");
         }
 
         Ok(WjDirectiveResult {

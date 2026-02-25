@@ -938,6 +938,18 @@
           <span>GitHub</span>
         </button>
         <button
+          class="sidebar-gh-btn sidebar-kofi-btn"
+          onclick={() => openUrl("https://ko-fi.com/cash508287")}
+          title="Support Corkscrew on Ko-fi"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+            <rect x="1" y="6" width="16" height="13" rx="3" stroke="currentColor" stroke-width="2" fill="none" />
+            <path d="M17 9h2.5a3.5 3.5 0 0 1 0 7H17" stroke="currentColor" stroke-width="2" fill="none" />
+            <path d="M9 10c-2.5 0-4 1.5-4 3.5S6.5 17 9 17s4-1.5 4-3.5S11.5 10 9 10z" fill="#FF5E5B" />
+          </svg>
+          <span>Ko-fi</span>
+        </button>
+        <button
           class="sidebar-gh-btn"
           onclick={() => showShortcuts = true}
           title="Keyboard Shortcuts (Cmd+/)"

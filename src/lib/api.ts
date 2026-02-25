@@ -666,6 +666,12 @@ export async function resumeWabbajackInstall(
   return invoke("resume_wabbajack_install", { installId });
 }
 
+export async function cleanupWabbajackInstall(
+  installId: number
+): Promise<void> {
+  return invoke("cleanup_wabbajack_install", { installId });
+}
+
 export async function getWabbajackInstallStatus(
   installId: number
 ): Promise<import("./types").WabbajackInstallStatus> {

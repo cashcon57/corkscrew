@@ -889,7 +889,7 @@ mod tests {
         assert!(url.starts_with(NEXUS_AUTH_URL));
         assert!(url.contains("client_id=my-client-id"));
         assert!(url.contains("response_type=code"));
-        assert!(url.contains("scope=openid%20public"));
+        assert!(url.contains("scope=public"));
         assert!(url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A12345%2Fcallback"));
         assert!(url.contains("state=random-state"));
         assert!(url.contains("code_challenge_method=S256"));

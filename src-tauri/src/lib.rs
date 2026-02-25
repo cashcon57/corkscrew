@@ -4606,6 +4606,66 @@ fn is_steam_deck() -> bool {
     steam_integration::is_steam_deck()
 }
 
+// --- Startup Cleanup ---
+
+/// Mark orphaned Wabbajack installs (left in active state from a crash) as failed
+/// and clean up their extraction temp directories.
+fn cleanup_orphaned_wj_installs(db: &database::ModDatabase) {
+    match db.get_stale_wj_installs() {
+        Ok(stale) => {
+            for (id, install_dir, status) in &stale {
+                log::warn!(
+                    "Found orphaned WJ install {} (status={}) — marking as failed",
+                    id,
+                    status
+                );
+                let _ = db.update_wj_install_status(
+                    *id,
+                    "failed",
+                    Some("Interrupted by application exit"),
+                );
+                // Clean up extraction temp dir if it still exists
+                let temp_dir = std::path::Path::new(install_dir).join(".wj_extraction_temp");
+                if temp_dir.exists() {
+                    log::info!("Removing orphaned extraction temp dir: {:?}", temp_dir);
+                    let _ = std::fs::remove_dir_all(&temp_dir);
+                }
+            }
+            if !stale.is_empty() {
+                log::info!("Cleaned up {} orphaned WJ install(s)", stale.len());
+            }
+        }
+        Err(e) => log::warn!("Failed to query stale WJ installs: {}", e),
+    }
+}
+
+/// Remove any leftover `corkscrew_extract_*` directories from the system temp dir.
+/// These are created by the collection installer and should be cleaned up on
+/// completion, but may be orphaned if the app crashes during extraction.
+fn cleanup_orphaned_temp_dirs() {
+    let temp = std::env::temp_dir();
+    match std::fs::read_dir(&temp) {
+        Ok(entries) => {
+            let mut cleaned = 0u32;
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if name.starts_with("corkscrew_extract_") {
+                        if entry.path().is_dir() {
+                            log::info!("Removing orphaned temp dir: {:?}", entry.path());
+                            let _ = std::fs::remove_dir_all(entry.path());
+                            cleaned += 1;
+                        }
+                    }
+                }
+            }
+            if cleaned > 0 {
+                log::info!("Cleaned up {} orphaned temp dir(s)", cleaned);
+            }
+        }
+        Err(e) => log::warn!("Failed to scan temp dir for orphans: {}", e),
+    }
+}
+
 // --- App Entry Point ---
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -4633,6 +4693,12 @@ pub fn run() {
 
     // Recover Dock if a previous session crashed while cursor fix was active
     cursor_clamp::recover_dock_if_needed();
+
+    // Clean up orphaned Wabbajack installs from previous crash/forced quit
+    cleanup_orphaned_wj_installs(&db);
+
+    // Clean up stale corkscrew_extract_* temp dirs from collection installs
+    cleanup_orphaned_temp_dirs();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -4753,6 +4819,7 @@ pub fn run() {
             wabbajack_installer::install_wabbajack_modlist_cmd,
             wabbajack_installer::cancel_wabbajack_install,
             wabbajack_installer::resume_wabbajack_install,
+            wabbajack_installer::cleanup_wabbajack_install,
             wabbajack_installer::get_wabbajack_install_status,
             wabbajack_installer::wabbajack_preflight_cmd,
             // Nexus SSO

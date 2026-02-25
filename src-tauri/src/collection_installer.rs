@@ -39,9 +39,68 @@ pub struct ModInstallDetail {
 }
 
 /// Result of a download-only operation (no extract/deploy).
+#[derive(Debug)]
 struct DownloadResult {
     archive_path: PathBuf,
     cached: bool,
+}
+
+/// Guard that cleans up tracked temp directories on drop.
+/// Paths that are successfully consumed should be removed via `take()`.
+struct TempDirGuard(Vec<PathBuf>);
+
+impl TempDirGuard {
+    fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    fn track(&mut self, path: PathBuf) {
+        self.0.push(path);
+    }
+
+    /// Remove a path from the guard (it was consumed successfully).
+    fn untrack(&mut self, path: &Path) {
+        self.0.retain(|p| p != path);
+    }
+}
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        for dir in &self.0 {
+            if dir.exists() {
+                log::info!("Cleaning up orphaned temp dir: {:?}", dir);
+                let _ = std::fs::remove_dir_all(dir);
+            }
+        }
+    }
+}
+
+/// Quick-check that an archive file has valid headers before extraction.
+fn validate_archive(path: &Path) -> Result<(), String> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    match ext.as_str() {
+        "zip" | "fomod" => {
+            let file = std::fs::File::open(path)
+                .map_err(|e| format!("Cannot open archive: {}", e))?;
+            let _ = zip::ZipArchive::new(file)
+                .map_err(|e| format!("Invalid ZIP archive: {}", e))?;
+            Ok(())
+        }
+        "7z" => {
+            // Just verify the file is readable and non-empty.
+            let meta = std::fs::metadata(path)
+                .map_err(|e| format!("Cannot read archive: {}", e))?;
+            if meta.len() == 0 {
+                return Err("Archive is empty (0 bytes)".into());
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Map internal game IDs to NexusMods domain slugs.
@@ -58,11 +117,17 @@ fn game_id_to_nexus_slug(game_id: &str) -> &str {
     }
 }
 
+/// Maximum retry attempts for transient collection download failures.
+const COLLECTION_DOWNLOAD_RETRIES: u32 = 3;
+/// Base delay in milliseconds for exponential backoff.
+const COLLECTION_RETRY_BASE_MS: u64 = 2000;
+
 /// Download a mod archive without extracting or deploying it.
 ///
 /// Checks the dedup cache first; if found and the archive still exists on disk,
 /// returns the cached path.  Otherwise performs the actual download and registers
-/// the result in the dedup registry.
+/// the result in the dedup registry.  Retries transient network failures up to
+/// 3 times with exponential backoff.
 #[allow(clippy::too_many_arguments)]
 async fn download_mod_archive(
     app: &AppHandle,
@@ -79,42 +144,84 @@ async fn download_mod_archive(
 ) -> Result<DownloadResult, InstallError> {
     let source_type = mod_entry.source.source_type.as_str();
 
-    match source_type {
-        "nexus" => {
-            download_nexus_archive(
-                app,
-                db,
-                queue,
-                mod_entry,
-                mod_index,
-                game_slug,
-                download_dir,
-                api_key,
-                manifest_name,
-                game_id,
-                bottle_name,
-            )
-            .await
+    let mut last_err = None;
+    for attempt in 0..COLLECTION_DOWNLOAD_RETRIES {
+        if attempt > 0 {
+            let delay = COLLECTION_RETRY_BASE_MS * (1 << (attempt - 1));
+            log::warn!(
+                "Retry {}/{} for '{}' after {}ms",
+                attempt,
+                COLLECTION_DOWNLOAD_RETRIES,
+                mod_entry.name,
+                delay,
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
         }
-        "direct" => {
-            download_direct_archive(
-                app,
-                db,
-                queue,
-                mod_entry,
-                mod_index,
-                download_dir,
-                api_key,
-                manifest_name,
-                game_id,
-                bottle_name,
-            )
-            .await
+
+        let result = match source_type {
+            "nexus" => {
+                download_nexus_archive(
+                    app,
+                    db,
+                    queue,
+                    mod_entry,
+                    mod_index,
+                    game_slug,
+                    download_dir,
+                    api_key,
+                    manifest_name,
+                    game_id,
+                    bottle_name,
+                )
+                .await
+            }
+            "direct" => {
+                download_direct_archive(
+                    app,
+                    db,
+                    queue,
+                    mod_entry,
+                    mod_index,
+                    download_dir,
+                    api_key,
+                    manifest_name,
+                    game_id,
+                    bottle_name,
+                )
+                .await
+            }
+            _ => {
+                return Err(InstallError::Failed(format!(
+                    "Cannot pre-download source type '{}' for '{}'",
+                    source_type, mod_entry.name
+                )));
+            }
+        };
+
+        match result {
+            Ok(dl) => return Ok(dl),
+            Err(ref e) if is_transient_collection_error(e) && attempt + 1 < COLLECTION_DOWNLOAD_RETRIES => {
+                log::warn!("Transient download error for '{}': {:?}", mod_entry.name, e);
+                last_err = Some(result.unwrap_err());
+                continue;
+            }
+            Err(e) => return Err(e),
         }
-        _ => Err(InstallError::Failed(format!(
-            "Cannot pre-download source type '{}' for '{}'",
-            source_type, mod_entry.name
-        ))),
+    }
+
+    Err(last_err.unwrap_or_else(|| InstallError::Failed("max retries exhausted".into())))
+}
+
+/// Returns true for transient errors worth retrying (network/IO failures).
+fn is_transient_collection_error(e: &InstallError) -> bool {
+    match e {
+        InstallError::Failed(msg) => {
+            msg.contains("Download failed:")
+                || msg.contains("Download links failed:")
+                || msg.contains("timed out")
+                || msg.contains("connection")
+        }
+        _ => false,
     }
 }
 
@@ -796,6 +903,7 @@ pub async fn install_collection(
         .collect();
 
     let mut pre_extracted: HashMap<usize, PathBuf> = HashMap::new();
+    let mut temp_guard = TempDirGuard::new();
 
     if !archives_to_extract.is_empty() {
         let _ = app.emit(
@@ -830,6 +938,10 @@ pub async fn install_collection(
                 let temp_dir = std::env::temp_dir().join(format!("corkscrew_extract_{}", idx));
 
                 let result = tokio::task::spawn_blocking(move || {
+                    // Validate archive integrity before extraction.
+                    if let Err(e) = validate_archive(&archive) {
+                        return Err(format!("Archive validation failed: {}", e));
+                    }
                     if temp_dir.exists() {
                         let _ = std::fs::remove_dir_all(&temp_dir);
                     }
@@ -873,6 +985,7 @@ pub async fn install_collection(
         let extract_results = futures::future::join_all(extract_handles).await;
         for join_result in extract_results {
             if let Ok(Some((idx, dir))) = join_result {
+                temp_guard.track(dir.clone());
                 pre_extracted.insert(idx, dir);
             }
         }
@@ -973,6 +1086,9 @@ pub async fn install_collection(
         // Look up pre-downloaded archive and pre-extracted dir for this position
         let pre_dl = pre_downloaded.get(&i).map(|p| p.as_path());
         let pre_ext = pre_extracted.remove(&i);
+        if let Some(ref dir) = pre_ext {
+            temp_guard.untrack(dir);
+        }
 
         let result = install_single_mod(
             app,
@@ -1063,10 +1179,13 @@ pub async fn install_collection(
         }
     }
 
-    // Clean up any remaining pre-extracted temp dirs (for skipped/failed mods)
-    for (_idx, dir) in pre_extracted {
-        let _ = std::fs::remove_dir_all(&dir);
+    // Clean up any remaining pre-extracted temp dirs (for skipped/failed mods).
+    // The TempDirGuard also handles this on drop, but explicit cleanup is clearer.
+    for (_idx, dir) in &pre_extracted {
+        temp_guard.untrack(dir);
+        let _ = std::fs::remove_dir_all(dir);
     }
+    drop(pre_extracted);
 
     // Apply plugin load order from manifest (works for any game with plugin support)
     if !manifest.plugins.is_empty() {
@@ -1169,6 +1288,7 @@ pub async fn install_collection(
     })
 }
 
+#[derive(Debug)]
 enum InstallError {
     UserAction {
         action: String,
@@ -1969,7 +2089,7 @@ async fn stage_and_deploy(
         let files = files_to_deploy.clone();
 
         let deploy_result = tokio::task::spawn_blocking(move || {
-            deployer::deploy_mod(&db_c, &gid, &bn, mod_id, &sp, &dd, &files)
+            deployer::deploy_mod_atomic(&db_c, &gid, &bn, mod_id, &sp, &dd, &files)
         })
         .await
         .map_err(|e| InstallError::Failed(format!("Deploy join error: {}", e)))?;

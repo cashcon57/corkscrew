@@ -12,6 +12,7 @@
     detectWabbajackTools,
     installWabbajackModlist,
     cancelWabbajackInstall,
+    cleanupWabbajackInstall,
     closeBrowserWebview,
     getPendingWabbajackInstalls,
   } from "$lib/api";
@@ -483,6 +484,9 @@
     if (wjUnlisten) {
       wjUnlisten();
       wjUnlisten = null;
+    }
+    if (wjInstallId !== null) {
+      cleanupWabbajackInstall(wjInstallId).catch(() => {});
     }
     wjInstallId = null;
   }

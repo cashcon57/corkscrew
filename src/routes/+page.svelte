@@ -123,16 +123,6 @@
             </div>
           </div>
         {/if}
-        <button
-          class="kofi-btn"
-          onclick={() => openUrl("https://ko-fi.com/cash508287")}
-          title="Support Corkscrew on Ko-fi"
-        >
-          <svg class="kofi-icon" width="16" height="16" viewBox="0 0 24 24" fill="none">
-            <path d="M12 4.5C7 4.5 4 8 4 11c0 3.5 3.5 7.5 8 11 4.5-3.5 8-7.5 8-11 0-3-3-6.5-8-6.5z" fill="#FF5E5B" />
-          </svg>
-          <span>Support</span>
-        </button>
       </div>
     </header>
 
@@ -533,30 +523,6 @@
     gap: var(--space-3);
   }
 
-  .kofi-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 14px;
-    background: rgba(255, 94, 91, 0.1);
-    border: 1px solid rgba(255, 94, 91, 0.2);
-    border-radius: var(--radius);
-    color: #FF5E5B;
-    font-size: 13px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all var(--duration-fast) var(--ease);
-    white-space: nowrap;
-  }
-
-  .kofi-btn:hover {
-    background: rgba(255, 94, 91, 0.18);
-    border-color: rgba(255, 94, 91, 0.35);
-  }
-
-  .kofi-icon {
-    flex-shrink: 0;
-  }
 
   .stat-pill {
     display: flex;

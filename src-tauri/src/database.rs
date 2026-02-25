@@ -2111,6 +2111,29 @@ impl ModDatabase {
             .collect();
         Ok(rows)
     }
+    /// Find Wabbajack installs that were left in an active state (downloading,
+    /// extracting, processing, deploying) — these are orphans from a previous
+    /// crash or forced quit.  Returns (id, install_dir, status).
+    pub fn get_stale_wj_installs(&self) -> Result<Vec<(i64, String, String)>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT id, install_dir, status
+             FROM wabbajack_installs
+             WHERE status IN ('downloading', 'extracting', 'processing', 'deploying')
+             ORDER BY id",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
 }
 
 // ---------------------------------------------------------------------------

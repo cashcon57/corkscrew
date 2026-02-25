@@ -22,6 +22,11 @@ use tokio::sync::Semaphore;
 
 const NEXUS_API_BASE: &str = "https://api.nexusmods.com/v1";
 
+/// Maximum retry attempts for transient download failures.
+const MAX_DOWNLOAD_RETRIES: u32 = 3;
+/// Base delay in milliseconds for exponential backoff between retries.
+const RETRY_BASE_DELAY_MS: u64 = 2000;
+
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
@@ -473,46 +478,93 @@ impl WjDownloader {
     ) -> Result<PathBuf, WjDownloadError> {
         let name = &archive.name;
 
-        let result = match &archive.state {
-            WjArchiveState::Nexus {
-                game,
-                mod_id,
-                file_id,
-            } => {
-                self.download_nexus(app, name, game, *mod_id, *file_id)
-                    .await
+        // Retry loop with exponential backoff for transient failures.
+        let mut last_err = None;
+        let result = 'retry: {
+            for attempt in 0..MAX_DOWNLOAD_RETRIES {
+                if attempt > 0 {
+                    // Check cancel before retrying.
+                    if self
+                        .cancel_token
+                        .as_ref()
+                        .map_or(false, |t| t.load(Ordering::Relaxed))
+                    {
+                        break 'retry Err(last_err.unwrap_or(WjDownloadError::Cancelled));
+                    }
+                    let delay = RETRY_BASE_DELAY_MS * (1 << (attempt - 1));
+                    log::warn!(
+                        "Retry {}/{} for '{}' after {}ms",
+                        attempt,
+                        MAX_DOWNLOAD_RETRIES,
+                        name,
+                        delay,
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                }
+
+                let try_result = match &archive.state {
+                    WjArchiveState::Nexus {
+                        game,
+                        mod_id,
+                        file_id,
+                    } => {
+                        self.download_nexus(app, name, game, *mod_id, *file_id)
+                            .await
+                    }
+                    WjArchiveState::Http { url, headers } => {
+                        self.download_http(app, name, url, headers).await
+                    }
+                    WjArchiveState::GoogleDrive { id } => {
+                        self.download_google_drive(app, name, id).await
+                    }
+                    WjArchiveState::Mega { url } => self.download_mega(app, name, url).await,
+                    WjArchiveState::MediaFire { url } => {
+                        self.download_mediafire(app, name, url).await
+                    }
+                    WjArchiveState::WabbajackCDN { url } => {
+                        self.download_wabbajack_cdn(app, name, url).await
+                    }
+                    WjArchiveState::ModDB { url } => self.download_moddb(app, name, url).await,
+                    WjArchiveState::GameFileSource {
+                        game, game_file, ..
+                    } => {
+                        self.download_game_file_source(app, name, game, game_file)
+                            .await
+                    }
+                    WjArchiveState::Manual { url, prompt } => {
+                        self.download_manual(app, name, url, prompt).await
+                    }
+                    WjArchiveState::LoversLab { url, .. } => {
+                        Err(WjDownloadError::UserActionRequired(
+                            format!("LoversLab downloads require manual action: {url}"),
+                        ))
+                    }
+                    WjArchiveState::VectorPlexus { url, .. } => {
+                        Err(WjDownloadError::UserActionRequired(
+                            format!("VectorPlexus downloads require manual action: {url}"),
+                        ))
+                    }
+                    WjArchiveState::TESAlliance { url, .. } => {
+                        Err(WjDownloadError::UserActionRequired(
+                            format!("TESAlliance downloads require manual action: {url}"),
+                        ))
+                    }
+                    WjArchiveState::Bethesda { .. } => Err(WjDownloadError::Unsupported(
+                        "Bethesda.net downloads are not supported".into(),
+                    )),
+                };
+
+                match try_result {
+                    Ok(path) => break 'retry Ok(path),
+                    Err(ref e) if is_transient_error(e) && attempt + 1 < MAX_DOWNLOAD_RETRIES => {
+                        log::warn!("Transient download error for '{}': {}", name, e);
+                        last_err = Some(try_result.unwrap_err());
+                        continue;
+                    }
+                    Err(_) => break 'retry try_result,
+                }
             }
-            WjArchiveState::Http { url, headers } => {
-                self.download_http(app, name, url, headers).await
-            }
-            WjArchiveState::GoogleDrive { id } => self.download_google_drive(app, name, id).await,
-            WjArchiveState::Mega { url } => self.download_mega(app, name, url).await,
-            WjArchiveState::MediaFire { url } => self.download_mediafire(app, name, url).await,
-            WjArchiveState::WabbajackCDN { url } => {
-                self.download_wabbajack_cdn(app, name, url).await
-            }
-            WjArchiveState::ModDB { url } => self.download_moddb(app, name, url).await,
-            WjArchiveState::GameFileSource {
-                game, game_file, ..
-            } => {
-                self.download_game_file_source(app, name, game, game_file)
-                    .await
-            }
-            WjArchiveState::Manual { url, prompt } => {
-                self.download_manual(app, name, url, prompt).await
-            }
-            WjArchiveState::LoversLab { url, .. } => Err(WjDownloadError::UserActionRequired(
-                format!("LoversLab downloads require manual action: {url}"),
-            )),
-            WjArchiveState::VectorPlexus { url, .. } => Err(WjDownloadError::UserActionRequired(
-                format!("VectorPlexus downloads require manual action: {url}"),
-            )),
-            WjArchiveState::TESAlliance { url, .. } => Err(WjDownloadError::UserActionRequired(
-                format!("TESAlliance downloads require manual action: {url}"),
-            )),
-            WjArchiveState::Bethesda { .. } => Err(WjDownloadError::Unsupported(
-                "Bethesda.net downloads are not supported".into(),
-            )),
+            Err(last_err.unwrap_or(WjDownloadError::Other("max retries exhausted".into())))
         };
 
         // Update archive status in DB.
@@ -608,27 +660,36 @@ impl WjDownloader {
                 // The downloaded file should still be on disk.
                 let dest = self.download_dir.join(sanitize_filename(&archive_name));
                 if dest.exists() {
-                    let _ = app.emit(
-                        "wabbajack-install-progress",
-                        WjProgressEvent::DownloadSkipped {
-                            archive_name: archive_name.clone(),
-                            reason: "resume checkpoint".into(),
-                        },
+                    // Re-verify hash to guard against truncated/corrupt files from prior crash.
+                    if verify_xxhash64(&dest, &archive.hash).is_ok() {
+                        let _ = app.emit(
+                            "wabbajack-install-progress",
+                            WjProgressEvent::DownloadSkipped {
+                                archive_name: archive_name.clone(),
+                                reason: "resume checkpoint".into(),
+                            },
+                        );
+                        let _ = db.upsert_wj_archive_status(
+                            install_id,
+                            &hash_str,
+                            &archive_name,
+                            archive.state.source_type_name(),
+                            "verified",
+                            Some(&dest.to_string_lossy()),
+                            None,
+                        );
+                        results.lock().await.insert(hash_str, dest);
+                        continue;
+                    }
+                    // Hash mismatch — archive was likely truncated. Re-download.
+                    log::warn!(
+                        "Checkpoint archive failed hash check, re-downloading: {}",
+                        archive_name
                     );
-                    let _ = db.upsert_wj_archive_status(
-                        install_id,
-                        &hash_str,
-                        &archive_name,
-                        archive.state.source_type_name(),
-                        "verified",
-                        Some(&dest.to_string_lossy()),
-                        None,
-                    );
-                    results.lock().await.insert(hash_str, dest);
-                    continue;
+                    let _ = tokio::fs::remove_file(&dest).await;
                 }
-                // Checkpoint exists but file is missing -- remove stale checkpoint
-                // and re-download.
+                // Checkpoint exists but file is missing or corrupt — remove stale
+                // checkpoint and re-download.
                 let _ = tokio::fs::remove_file(&checkpoint_file).await;
             }
 
@@ -908,6 +969,15 @@ impl WjDownloader {
         tokio::fs::rename(&partial, &dest).await?;
         Ok(dest)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Retry helpers
+// ---------------------------------------------------------------------------
+
+/// Returns true for transient errors that are worth retrying (network, IO).
+fn is_transient_error(e: &WjDownloadError) -> bool {
+    matches!(e, WjDownloadError::Http(_) | WjDownloadError::Io(_))
 }
 
 // ---------------------------------------------------------------------------

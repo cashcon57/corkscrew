@@ -1532,7 +1532,7 @@
       <div class="card-row about-row">
         <span class="row-label">Links</span>
         <div class="row-value about-links">
-          <button class="btn-link" onclick={() => openUrl("https://github.com/cashconway/Corkscrew")}>GitHub</button>
+          <button class="btn-link" onclick={() => openUrl("https://github.com/cashcon57/corkscrew")}>GitHub</button>
           <button class="btn-link" onclick={() => openUrl("https://ko-fi.com/cash508287")}>Support</button>
         </div>
       </div>
