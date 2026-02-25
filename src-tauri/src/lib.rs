@@ -108,6 +108,26 @@ fn resolve_game(
     Ok((bottle, game, data_dir))
 }
 
+/// Create a NexusClient from the current auth method (OAuth or API key),
+/// auto-refreshing expired OAuth tokens as needed.
+async fn nexus_client() -> Result<nexus::NexusClient, String> {
+    let method = oauth::get_auth_method_refreshed().await;
+    nexus::NexusClient::from_auth_method(&method).map_err(|e| e.to_string())
+}
+
+/// Get the current API key string for functions that need a raw key
+/// (e.g. GraphQL helpers). Prefers OAuth Bearer token, falls back to API key.
+async fn nexus_api_key_or_token() -> Result<(String, bool), String> {
+    let method = oauth::get_auth_method_refreshed().await;
+    match method {
+        oauth::AuthMethod::OAuth(tokens) => Ok((tokens.access_token, true)),
+        oauth::AuthMethod::ApiKey(key) => Ok((key, false)),
+        oauth::AuthMethod::None => {
+            Err("No NexusMods authentication configured. Sign in via Settings.".to_string())
+        }
+    }
+}
+
 // --- Tauri Commands ---
 
 #[tauri::command]
@@ -490,14 +510,9 @@ async fn download_from_nexus(
     auto_install: bool,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
-    let cfg = config::get_config().map_err(|e| e.to_string())?;
-    let api_key = cfg
-        .nexus_api_key
-        .ok_or_else(|| "No Nexus API key configured. Set it in Settings.".to_string())?;
+    let client = nexus_client().await?;
 
     let nxm = nexus::NXMLink::parse(&nxm_url).map_err(|e| e.to_string())?;
-
-    let client = nexus::NexusClient::new(api_key);
 
     // Get mod info
     let mod_info = client
@@ -516,6 +531,7 @@ async fn download_from_nexus(
         .to_string();
 
     // Download
+    let cfg = config::get_config().map_err(|e| e.to_string())?;
     let download_dir = cfg
         .download_dir
         .map(PathBuf::from)
@@ -614,7 +630,7 @@ async fn download_from_nexus(
 /// Used by the frontend to determine download workflows.
 #[tauri::command]
 async fn is_nexus_premium() -> Result<bool, String> {
-    let method = oauth::get_auth_method();
+    let method = oauth::get_auth_method_refreshed().await;
     match method {
         oauth::AuthMethod::ApiKey(key) => {
             let client = nexus::NexusClient::new(key);
@@ -2508,10 +2524,7 @@ async fn check_mod_updates(
     bottle_name: String,
     state: State<'_, AppState>,
 ) -> Result<Vec<ModUpdateInfo>, String> {
-    let cfg = config::get_config().map_err(|e| e.to_string())?;
-    let api_key = cfg
-        .nexus_api_key
-        .ok_or_else(|| "No Nexus API key configured".to_string())?;
+    let client = nexus_client().await?;
 
     let mods = {
         let db = &state.db;
@@ -2543,7 +2556,6 @@ async fn check_mod_updates(
         other => other,
     };
 
-    let client = nexus::NexusClient::new(api_key);
     client
         .check_updates(game_slug, &queries)
         .await
@@ -3377,11 +3389,7 @@ async fn browse_nexus_mods_cmd(
     game_slug: String,
     category: String,
 ) -> Result<Vec<nexus::NexusModInfo>, String> {
-    let api_key = config::get_config()
-        .ok()
-        .and_then(|c| c.nexus_api_key)
-        .ok_or_else(|| "No NexusMods API key configured".to_string())?;
-    let client = nexus::NexusClient::new(api_key);
+    let client = nexus_client().await?;
     client
         .browse_mods(&game_slug, &category)
         .await
@@ -3393,11 +3401,7 @@ async fn get_nexus_mod_detail(
     game_slug: String,
     mod_id: i64,
 ) -> Result<nexus::NexusModInfo, String> {
-    let api_key = config::get_config()
-        .ok()
-        .and_then(|c| c.nexus_api_key)
-        .ok_or_else(|| "No NexusMods API key configured".to_string())?;
-    let client = nexus::NexusClient::new(api_key);
+    let client = nexus_client().await?;
     client
         .get_mod_info(&game_slug, mod_id)
         .await
@@ -3412,11 +3416,7 @@ async fn endorse_mod(
     mod_id: i64,
     version: Option<String>,
 ) -> Result<nexus::EndorseResponse, String> {
-    let api_key = config::get_config()
-        .ok()
-        .and_then(|c| c.nexus_api_key)
-        .ok_or_else(|| "No NexusMods API key configured".to_string())?;
-    let client = nexus::NexusClient::new(api_key);
+    let client = nexus_client().await?;
     client
         .endorse_mod(&game_slug, mod_id, version.as_deref())
         .await
@@ -3425,11 +3425,7 @@ async fn endorse_mod(
 
 #[tauri::command]
 async fn abstain_mod(game_slug: String, mod_id: i64) -> Result<nexus::EndorseResponse, String> {
-    let api_key = config::get_config()
-        .ok()
-        .and_then(|c| c.nexus_api_key)
-        .ok_or_else(|| "No NexusMods API key configured".to_string())?;
-    let client = nexus::NexusClient::new(api_key);
+    let client = nexus_client().await?;
     client
         .abstain_mod(&game_slug, mod_id)
         .await
@@ -3438,11 +3434,7 @@ async fn abstain_mod(game_slug: String, mod_id: i64) -> Result<nexus::EndorseRes
 
 #[tauri::command]
 async fn get_user_endorsements() -> Result<Vec<nexus::UserEndorsement>, String> {
-    let api_key = config::get_config()
-        .ok()
-        .and_then(|c| c.nexus_api_key)
-        .ok_or_else(|| "No NexusMods API key configured".to_string())?;
-    let client = nexus::NexusClient::new(api_key);
+    let client = nexus_client().await?;
     client
         .get_user_endorsements()
         .await
@@ -3465,12 +3457,10 @@ async fn search_nexus_mods_cmd(
     min_downloads: Option<i64>,
     min_endorsements: Option<i64>,
 ) -> Result<NexusSearchResult, String> {
-    let api_key = config::get_config()
-        .ok()
-        .and_then(|c| c.nexus_api_key)
-        .ok_or_else(|| "No NexusMods API key configured".to_string())?;
-    nexus::graphql_search_mods(
-        &api_key,
+    let (token, is_bearer) = nexus_api_key_or_token().await?;
+    nexus::graphql_search_mods_ext(
+        &token,
+        is_bearer,
         &game_slug,
         search_text.as_deref(),
         sort_by.as_deref(),
@@ -3490,11 +3480,7 @@ async fn search_nexus_mods_cmd(
 
 #[tauri::command]
 async fn get_game_categories_cmd(game_slug: String) -> Result<Vec<NexusCategory>, String> {
-    let api_key = config::get_config()
-        .ok()
-        .and_then(|c| c.nexus_api_key)
-        .ok_or_else(|| "No NexusMods API key configured".to_string())?;
-    let client = nexus::NexusClient::new(api_key);
+    let client = nexus_client().await?;
     client
         .get_game_categories(&game_slug)
         .await

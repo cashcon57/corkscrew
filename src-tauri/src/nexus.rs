@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use futures::StreamExt;
-use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, USER_AGENT};
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
@@ -37,6 +37,9 @@ pub enum NexusError {
 
     #[error("Rate limited by NexusMods API (retry after {retry_after}s)")]
     RateLimited { retry_after: u64 },
+
+    #[error("Authentication error: {0}")]
+    Auth(String),
 }
 
 pub type Result<T> = std::result::Result<T, NexusError>;
@@ -398,6 +401,35 @@ impl NexusClient {
             .or_else(|_| HeaderValue::from_bytes(api_key.as_bytes()))
             .expect("API key contains non-ASCII bytes");
         headers.insert("apikey", header_val);
+        Self::build_with_headers(headers)
+    }
+
+    /// Create a new client using an OAuth Bearer access token.
+    pub fn with_bearer(access_token: &str) -> Self {
+        let mut headers = HeaderMap::new();
+        let bearer = format!("Bearer {}", access_token);
+        if let Ok(val) = HeaderValue::from_str(&bearer) {
+            headers.insert(AUTHORIZATION, val);
+        }
+        Self::build_with_headers(headers)
+    }
+
+    /// Create a NexusClient from the current authentication method.
+    ///
+    /// Returns `Err` if no auth is configured.
+    pub fn from_auth_method(method: &crate::oauth::AuthMethod) -> Result<Self> {
+        match method {
+            crate::oauth::AuthMethod::ApiKey(key) => Ok(Self::new(key.clone())),
+            crate::oauth::AuthMethod::OAuth(tokens) => {
+                Ok(Self::with_bearer(&tokens.access_token))
+            }
+            crate::oauth::AuthMethod::None => Err(NexusError::Auth(
+                "No NexusMods authentication configured. Sign in via Settings.".to_string(),
+            )),
+        }
+    }
+
+    fn build_with_headers(mut headers: HeaderMap) -> Self {
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
         let ua = format!("Corkscrew/{}", env!("CARGO_PKG_VERSION"));
         headers.insert(USER_AGENT, HeaderValue::from_str(&ua).unwrap());
@@ -1086,9 +1118,17 @@ pub struct NexusSearchResult {
 }
 
 /// Build default headers for standalone GraphQL requests (outside NexusClient).
-fn nexus_graphql_headers(api_key: &str) -> HeaderMap {
+///
+/// If `is_bearer` is true, the token is sent as `Authorization: Bearer {token}`.
+/// Otherwise it is sent as the legacy `apikey` header.
+pub fn nexus_graphql_headers_ext(token: &str, is_bearer: bool) -> HeaderMap {
     let mut headers = HeaderMap::new();
-    if let Ok(val) = HeaderValue::from_str(api_key) {
+    if is_bearer {
+        let bearer = format!("Bearer {}", token);
+        if let Ok(val) = HeaderValue::from_str(&bearer) {
+            headers.insert(AUTHORIZATION, val);
+        }
+    } else if let Ok(val) = HeaderValue::from_str(token) {
         headers.insert("apikey", val);
     }
     headers.insert("Content-Type", HeaderValue::from_static("application/json"));
@@ -1098,6 +1138,11 @@ fn nexus_graphql_headers(api_key: &str) -> HeaderMap {
     headers.insert("Application-Version", app_version);
     headers.insert("Protocol-Version", HeaderValue::from_static("0.15.5"));
     headers
+}
+
+/// Build default headers for standalone GraphQL requests — legacy API key version.
+fn nexus_graphql_headers(api_key: &str) -> HeaderMap {
+    nexus_graphql_headers_ext(api_key, false)
 }
 
 /// Run an introspection query against the NexusMods v2 GraphQL API.
@@ -1129,6 +1174,29 @@ pub async fn graphql_introspect(api_key: &str) -> Result<String> {
 /// Search mods via NexusMods v2 GraphQL API.
 /// Falls back gracefully if the query doesn't exist.
 #[allow(clippy::too_many_arguments)]
+/// Search mods via GraphQL with explicit auth type.
+#[allow(clippy::too_many_arguments)]
+pub async fn graphql_search_mods_ext(
+    token: &str,
+    is_bearer: bool,
+    game_domain: &str,
+    search_text: Option<&str>,
+    sort_by: Option<&str>,
+    sort_dir: Option<&str>,
+    count: u32,
+    offset: u32,
+    include_adult: bool,
+    category_id: Option<i64>,
+    author: Option<&str>,
+    updated_since: Option<&str>,
+    min_downloads: Option<i64>,
+    min_endorsements: Option<i64>,
+) -> Result<NexusSearchResult> {
+    let headers = nexus_graphql_headers_ext(token, is_bearer);
+    graphql_search_mods_with_headers(headers, game_domain, search_text, sort_by, sort_dir, count, offset, include_adult, category_id, author, updated_since, min_downloads, min_endorsements).await
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn graphql_search_mods(
     api_key: &str,
     game_domain: &str,
@@ -1145,6 +1213,25 @@ pub async fn graphql_search_mods(
     min_endorsements: Option<i64>,
 ) -> Result<NexusSearchResult> {
     let headers = nexus_graphql_headers(api_key);
+    graphql_search_mods_with_headers(headers, game_domain, search_text, sort_by, sort_dir, count, offset, include_adult, category_id, author, updated_since, min_downloads, min_endorsements).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn graphql_search_mods_with_headers(
+    headers: HeaderMap,
+    game_domain: &str,
+    search_text: Option<&str>,
+    sort_by: Option<&str>,
+    sort_dir: Option<&str>,
+    count: u32,
+    offset: u32,
+    include_adult: bool,
+    category_id: Option<i64>,
+    author: Option<&str>,
+    updated_since: Option<&str>,
+    min_downloads: Option<i64>,
+    min_endorsements: Option<i64>,
+) -> Result<NexusSearchResult> {
     let client = reqwest::Client::builder()
         .user_agent(format!("Corkscrew/{}", env!("CARGO_PKG_VERSION")))
         .default_headers(headers)

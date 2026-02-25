@@ -135,6 +135,32 @@
   let multiVersionChangelog = $state<Array<{ version: string; body: string; date: string }>>([]);
   let changelogLoading = $state(false);
   let changelogExpanded = $state(false);
+  let manualCheckDone = $state(false);
+
+  // Sidebar update button state machine
+  const sidebarUpdateState = $derived.by(() => {
+    if (updateReady) return "ready" as const;
+    if (updateAvailable && updateDownloading) return "downloading" as const;
+    if (updateAvailable) return "available" as const;
+    if (manualCheckDone && !$updateCheckingStore) return "up-to-date" as const;
+    return "idle" as const;
+  });
+
+  async function handleSidebarUpdateClick() {
+    if ($updateCheckingStore) return;
+    if (sidebarUpdateState === "ready") { handleRelaunch(); return; }
+    if (sidebarUpdateState === "available") { handleStartUpdate(); return; }
+    if (sidebarUpdateState === "downloading") return;
+
+    // Idle or up-to-date → run check
+    manualCheckDone = false;
+    await checkForUpdates();
+    if (!updateAvailable) {
+      manualCheckDone = true;
+      // Auto-clear "up to date" after 4s
+      setTimeout(() => { manualCheckDone = false; }, 4000);
+    }
+  }
 
   // Queue popover positioning (fixed to escape sidebar overflow:hidden)
   let queueBtnEl = $state<HTMLElement | null>(null);
@@ -962,22 +988,71 @@
       </div>
 
       {#if !$sidebarCollapsed}
-        {#if updateReady}
-          <button class="update-btn update-ready" onclick={handleRelaunch} title="Restart to apply update">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="23 4 23 10 17 10" />
-              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
-            </svg>
-            Restart for v{updateVersion}
+        <div class="version-update-row">
+          <!-- Update check / status button -->
+          <button
+            class="update-check-btn"
+            class:checking={$updateCheckingStore}
+            class:up-to-date={sidebarUpdateState === "up-to-date"}
+            class:update-avail={sidebarUpdateState === "available" || sidebarUpdateState === "downloading"}
+            class:ready={sidebarUpdateState === "ready"}
+            onclick={handleSidebarUpdateClick}
+            title={sidebarUpdateState === "ready"
+              ? `Restart for v${updateVersion}`
+              : sidebarUpdateState === "available"
+                ? `Update to v${updateVersion}`
+                : sidebarUpdateState === "downloading"
+                  ? "Downloading update..."
+                  : sidebarUpdateState === "up-to-date"
+                    ? "Up to date"
+                    : "Check for updates"}
+          >
+            <!-- Rainbow ripple background -->
+            {#if $updateCheckingStore}
+              <span class="ripple-ring"></span>
+            {/if}
+            {#if sidebarUpdateState === "up-to-date"}
+              <svg class="update-icon check-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="20 6 9 17 4 12" />
+              </svg>
+            {:else if sidebarUpdateState === "ready"}
+              <svg class="update-icon restart-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="23 4 23 10 17 10" />
+                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+              </svg>
+            {:else if sidebarUpdateState === "downloading"}
+              <span class="spinner-update"></span>
+            {:else if sidebarUpdateState === "available"}
+              <svg class="update-icon arrow-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="7 10 12 15 17 10" />
+                <line x1="12" y1="15" x2="12" y2="3" />
+              </svg>
+            {:else}
+              <svg class="update-icon refresh-icon" class:spin={$updateCheckingStore} width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="23 4 23 10 17 10" />
+                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+              </svg>
+            {/if}
           </button>
-        {:else if updateAvailable && updateDownloading}
-          <span class="update-btn update-downloading">
-            <span class="spinner spinner-sm"></span>
-            Updating...
-          </span>
-        {:else}
+
           <span class="sidebar-version">v{$appVersion}</span>
-        {/if}
+
+          <!-- Status pill -->
+          {#if sidebarUpdateState === "ready"}
+            <button class="update-pill ready" onclick={handleRelaunch}>
+              Restart
+            </button>
+          {:else if sidebarUpdateState === "available"}
+            <button class="update-pill available" onclick={handleStartUpdate}>
+              v{updateVersion}
+            </button>
+          {:else if sidebarUpdateState === "downloading"}
+            <span class="update-pill downloading">
+              Updating...
+            </span>
+          {/if}
+        </div>
       {/if}
     </div>
   </nav>
@@ -1611,6 +1686,15 @@
     color: var(--text-secondary);
   }
 
+  /* --- Version + Update Row --- */
+
+  .version-update-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 24px;
+  }
+
   .sidebar-version {
     font-size: 10px;
     color: var(--text-quaternary);
@@ -1618,31 +1702,171 @@
     letter-spacing: 0.02em;
   }
 
-  .update-btn {
+  /* --- Update check button (refresh icon) --- */
+
+  .update-check-btn {
+    position: relative;
     display: flex;
     align-items: center;
-    gap: 4px;
-    font-size: 10px;
-    font-weight: 600;
-    padding: 3px 8px;
-    border-radius: var(--radius-sm);
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    border: none;
+    background: transparent;
+    color: var(--text-quaternary);
     cursor: pointer;
+    overflow: hidden;
+    transition: color 0.2s ease, background 0.2s ease;
+    flex-shrink: 0;
   }
 
-  .update-ready {
-    background: var(--accent-subtle);
-    color: var(--accent);
-    transition: background var(--duration-fast) var(--ease);
+  .update-check-btn:hover {
+    background: var(--surface-hover);
+    color: var(--text-secondary);
   }
 
-  .update-ready:hover {
-    background: var(--accent);
-    color: white;
-  }
-
-  .update-downloading {
+  .update-check-btn.checking {
     color: var(--text-tertiary);
     cursor: default;
+  }
+
+  .update-check-btn.up-to-date {
+    color: #34c759;
+  }
+
+  .update-check-btn.update-avail {
+    color: var(--accent, #da8e35);
+    animation: pulse-glow 2s ease-in-out infinite;
+  }
+
+  .update-check-btn.ready {
+    color: #34c759;
+    animation: pulse-glow-green 1.5s ease-in-out infinite;
+  }
+
+  @keyframes pulse-glow {
+    0%, 100% { background: transparent; }
+    50% { background: rgba(218, 142, 53, 0.1); }
+  }
+
+  @keyframes pulse-glow-green {
+    0%, 100% { background: transparent; }
+    50% { background: rgba(52, 199, 89, 0.1); }
+  }
+
+  /* --- Rainbow ripple (shown during check) --- */
+
+  .ripple-ring {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    pointer-events: none;
+  }
+
+  .ripple-ring::before,
+  .ripple-ring::after {
+    content: "";
+    position: absolute;
+    inset: -2px;
+    border-radius: 50%;
+    border: 2px solid transparent;
+    animation: rainbow-spin 1.2s linear infinite;
+    border-top-color: #ff6b6b;
+    border-right-color: #ffd93d;
+    border-bottom-color: #6bcb77;
+    border-left-color: #4d96ff;
+    opacity: 0.7;
+  }
+
+  .ripple-ring::after {
+    inset: -6px;
+    animation-duration: 1.8s;
+    animation-direction: reverse;
+    opacity: 0.3;
+    border-top-color: #c084fc;
+    border-right-color: #60a5fa;
+    border-bottom-color: #34d399;
+    border-left-color: #fbbf24;
+  }
+
+  @keyframes rainbow-spin {
+    to { transform: rotate(360deg); }
+  }
+
+  /* --- Icon animations --- */
+
+  .update-icon {
+    position: relative;
+    z-index: 1;
+    flex-shrink: 0;
+  }
+
+  .update-icon.spin {
+    animation: spin-refresh 1s linear infinite;
+  }
+
+  .check-icon {
+    animation: check-pop 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  }
+
+  @keyframes spin-refresh {
+    to { transform: rotate(360deg); }
+  }
+
+  @keyframes check-pop {
+    0% { transform: scale(0); opacity: 0; }
+    60% { transform: scale(1.2); }
+    100% { transform: scale(1); opacity: 1; }
+  }
+
+  .spinner-update {
+    width: 12px;
+    height: 12px;
+    border: 2px solid rgba(218, 142, 53, 0.2);
+    border-top-color: var(--accent, #da8e35);
+    border-radius: 50%;
+    animation: spin-refresh 0.8s linear infinite;
+    position: relative;
+    z-index: 1;
+  }
+
+  /* --- Status pills --- */
+
+  .update-pill {
+    font-size: 9px;
+    font-weight: 700;
+    padding: 2px 7px;
+    border-radius: 100px;
+    letter-spacing: 0.02em;
+    border: none;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: filter 0.15s ease;
+  }
+
+  .update-pill:hover {
+    filter: brightness(1.15);
+  }
+
+  .update-pill.available {
+    background: rgba(218, 142, 53, 0.15);
+    color: #da8e35;
+  }
+
+  .update-pill.ready {
+    background: rgba(52, 199, 89, 0.15);
+    color: #34c759;
+  }
+
+  .update-pill.downloading {
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--text-tertiary);
+    cursor: default;
+  }
+
+  .update-pill.downloading:hover {
+    filter: none;
   }
 
   /* --- Update banner --- */

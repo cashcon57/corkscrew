@@ -25,8 +25,14 @@ const NEXUS_TOKEN_URL: &str = "https://users.nexusmods.com/oauth/token";
 const OAUTH_SCOPES: &str = "openid public";
 const CALLBACK_PATH: &str = "/callback";
 
+/// Registered OAuth client ID for Corkscrew (public PKCE client).
+pub const CLIENT_ID: &str = "corkscrew";
+
 /// How long (in seconds) to wait for the browser callback before timing out.
 const CALLBACK_TIMEOUT_SECS: u64 = 300;
+
+/// Refresh tokens this many seconds before they actually expire.
+const REFRESH_MARGIN_SECS: i64 = 60;
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -753,6 +759,45 @@ pub fn parse_user_info(access_token: &str) -> Result<NexusUserInfo, OAuthError> 
 pub fn get_auth_method() -> AuthMethod {
     // Check for saved OAuth tokens first.
     if let Ok(Some(tokens)) = load_tokens() {
+        return AuthMethod::OAuth(tokens);
+    }
+
+    // Fall back to legacy API key from config.
+    if let Ok(Some(api_key)) = config::get_config_value("nexus_api_key") {
+        if !api_key.is_empty() {
+            return AuthMethod::ApiKey(api_key);
+        }
+    }
+
+    AuthMethod::None
+}
+
+/// Get the current auth method, auto-refreshing expired OAuth tokens.
+///
+/// If OAuth tokens are stored but expired (or about to expire), this will
+/// attempt a refresh before returning. Falls through to API key / None on failure.
+pub async fn get_auth_method_refreshed() -> AuthMethod {
+    if let Ok(Some(tokens)) = load_tokens() {
+        let now = chrono::Utc::now().timestamp();
+        if tokens.expires_at > now + REFRESH_MARGIN_SECS {
+            // Token is still valid.
+            return AuthMethod::OAuth(tokens);
+        }
+
+        // Token expired or about to expire — try refreshing.
+        if !tokens.refresh_token.is_empty() {
+            match refresh_tokens(CLIENT_ID, &tokens.refresh_token).await {
+                Ok(new_tokens) => return AuthMethod::OAuth(new_tokens),
+                Err(e) => {
+                    eprintln!("[oauth] token refresh failed: {e}");
+                    // Fall through — the access token might still work briefly,
+                    // or we fall back to API key.
+                }
+            }
+        }
+
+        // Return the (possibly expired) tokens anyway — the server will 401 and
+        // the caller can handle it.
         return AuthMethod::OAuth(tokens);
     }
 
