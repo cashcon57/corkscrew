@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from "svelte";
   import { open } from "@tauri-apps/plugin-dialog";
   import { openUrl } from "@tauri-apps/plugin-opener";
+  import { relaunch } from "@tauri-apps/plugin-process";
   import ModVersionHistory from "$lib/components/ModVersionHistory.svelte";
   import ModlistImportWizard from "$lib/components/ModlistImportWizard.svelte";
   import FomodWizard from "$lib/components/FomodWizard.svelte";
@@ -83,7 +84,7 @@
 
   // Accessibility permission dialog (blocks launch until user decides)
   let showAccessibilityExplainer = $state(false);
-  let accessibilityPolling = $state(false);
+  let accessibilitySettingsOpened = $state(false);
   let pendingLaunchSkse = $state(false);
 
   let installing = $state(false);
@@ -943,35 +944,18 @@
     } catch { /* best-effort */ }
   }
 
-  function handleAccessibilityConfirm() {
+  function handleAccessibilityOpenSettings() {
     requestCursorClampPermission();
-    accessibilityPolling = true;
+    accessibilitySettingsOpened = true;
+  }
 
-    // Poll for permission grant every 1.5s for up to 2 minutes
-    let attempts = 0;
-    const poll = setInterval(async () => {
-      attempts++;
-      try {
-        const status = await cursorClampStatus();
-        if (status.has_permission) {
-          clearInterval(poll);
-          accessibilityPolling = false;
-          showAccessibilityExplainer = false;
-          showSuccess("Accessibility permission granted — cursor fix is active");
-          doLaunch(pendingLaunchSkse);
-        }
-      } catch { /* ignore */ }
-      if (attempts >= 80) {
-        clearInterval(poll);
-        accessibilityPolling = false;
-      }
-    }, 1500);
+  async function handleAccessibilityRestart() {
+    await relaunch();
   }
 
   function handleAccessibilityDismiss() {
     showAccessibilityExplainer = false;
-    accessibilityPolling = false;
-    // Launch without the cursor fix
+    accessibilitySettingsOpened = false;
     doLaunch(pendingLaunchSkse);
   }
 
@@ -3217,22 +3201,23 @@
         Corkscrew does not read keystrokes, monitor other apps, or use this permission for anything
         other than preventing the cursor from escaping the game window.
       </p>
-      {#if accessibilityPolling}
-        <p style="margin: 0 0 var(--space-4); color: var(--accent); font-size: 13px;">
-          Waiting for permission to be granted in System Settings...
+      {#if accessibilitySettingsOpened}
+        <p style="margin: 0 0 var(--space-4); color: var(--accent); font-size: 13px; line-height: 1.5;">
+          After enabling Corkscrew in Accessibility settings, the app needs to restart for the
+          change to take effect.
         </p>
       {/if}
       <div style="display: flex; gap: var(--space-2); justify-content: flex-end;">
-        <button class="btn btn-ghost" onclick={handleAccessibilityDismiss} disabled={accessibilityPolling}>
+        <button class="btn btn-ghost" onclick={handleAccessibilityDismiss}>
           Launch Without Fix
         </button>
-        {#if !accessibilityPolling}
-          <button class="btn btn-primary" onclick={handleAccessibilityConfirm}>
+        {#if !accessibilitySettingsOpened}
+          <button class="btn btn-primary" onclick={handleAccessibilityOpenSettings}>
             Open System Settings
           </button>
         {:else}
-          <button class="btn btn-primary" disabled>
-            Waiting...
+          <button class="btn btn-primary" onclick={handleAccessibilityRestart}>
+            Restart Corkscrew
           </button>
         {/if}
       </div>

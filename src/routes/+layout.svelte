@@ -99,7 +99,7 @@
 
   // Accessibility permission dialog (blocks launch until user decides)
   let showAccessibilityExplainer = $state(false);
-  let accessibilityPolling = $state(false);
+  let accessibilitySettingsOpened = $state(false);
   let pendingLaunchSkse = $state(false);
   let disableGameFixesLayout = $state(false);
 
@@ -552,33 +552,18 @@
     }
   }
 
-  function handleAccessibilityConfirmLayout() {
+  function handleAccessibilityOpenSettingsLayout() {
     requestCursorClampPermission();
-    accessibilityPolling = true;
+    accessibilitySettingsOpened = true;
+  }
 
-    let attempts = 0;
-    const poll = setInterval(async () => {
-      attempts++;
-      try {
-        const status = await cursorClampStatus();
-        if (status.has_permission) {
-          clearInterval(poll);
-          accessibilityPolling = false;
-          showAccessibilityExplainer = false;
-          showSuccess("Accessibility permission granted — cursor fix is active");
-          doLaunchGame(pendingLaunchSkse);
-        }
-      } catch { /* ignore */ }
-      if (attempts >= 80) {
-        clearInterval(poll);
-        accessibilityPolling = false;
-      }
-    }, 1500);
+  async function handleAccessibilityRestartLayout() {
+    await relaunch();
   }
 
   function handleAccessibilityDismissLayout() {
     showAccessibilityExplainer = false;
-    accessibilityPolling = false;
+    accessibilitySettingsOpened = false;
     doLaunchGame(pendingLaunchSkse);
   }
 
@@ -1398,22 +1383,23 @@
           Corkscrew does not read keystrokes, monitor other apps, or use this permission for anything
           other than preventing the cursor from escaping the game window.
         </p>
-        {#if accessibilityPolling}
-          <p style="margin: 0 0 var(--space-4); color: var(--accent); font-size: 13px;">
-            Waiting for permission to be granted in System Settings...
+        {#if accessibilitySettingsOpened}
+          <p style="margin: 0 0 var(--space-4); color: var(--accent); font-size: 13px; line-height: 1.5;">
+            After enabling Corkscrew in Accessibility settings, the app needs to restart for the
+            change to take effect.
           </p>
         {/if}
         <div style="display: flex; gap: var(--space-2); justify-content: flex-end;">
-          <button class="btn btn-ghost" onclick={handleAccessibilityDismissLayout} disabled={accessibilityPolling}>
+          <button class="btn btn-ghost" onclick={handleAccessibilityDismissLayout}>
             Launch Without Fix
           </button>
-          {#if !accessibilityPolling}
-            <button class="btn btn-primary" onclick={handleAccessibilityConfirmLayout}>
+          {#if !accessibilitySettingsOpened}
+            <button class="btn btn-primary" onclick={handleAccessibilityOpenSettingsLayout}>
               Open System Settings
             </button>
           {:else}
-            <button class="btn btn-primary" disabled>
-              Waiting...
+            <button class="btn btn-primary" onclick={handleAccessibilityRestartLayout}>
+              Restart Corkscrew
             </button>
           {/if}
         </div>
