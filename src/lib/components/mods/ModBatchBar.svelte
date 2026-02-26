@@ -37,10 +37,14 @@
     align-items: center;
     gap: var(--space-3);
     padding: var(--space-2) var(--space-4);
-    background: var(--bg-primary);
-    border: 1px solid var(--separator);
+    background: color-mix(in srgb, var(--bg-primary) 70%, transparent);
+    backdrop-filter: blur(32px) saturate(1.4);
+    -webkit-backdrop-filter: blur(32px) saturate(1.4);
+    border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: var(--radius-lg);
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    box-shadow: var(--glass-refraction),
+                var(--glass-edge-shadow),
+                0 8px 32px rgba(0, 0, 0, 0.4);
     z-index: 100;
     animation: batchSlideUp 0.15s var(--ease-out);
   }

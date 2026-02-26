@@ -1071,6 +1071,7 @@
   </nav>
 
   <div class="content-column">
+    <main class="content">
     <TopBar
       {detectedGames}
       onPickGame={pickGame}
@@ -1078,8 +1079,6 @@
       onNavigate={navigate}
       {launching}
     />
-
-    <main class="content">
       {#if $errorMessage}
         <div class="toast toast-error" role="alert">
           <svg class="toast-icon" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -1461,13 +1460,16 @@
   .sidebar {
     width: 220px;
     min-width: 220px;
-    background: var(--bg-grouped);
+    background: color-mix(in srgb, var(--bg-grouped) 75%, transparent);
+    backdrop-filter: blur(24px) saturate(1.3);
+    -webkit-backdrop-filter: blur(24px) saturate(1.3);
     border-radius: 14px;
     display: flex;
     flex-direction: column;
     overflow: hidden;
     position: relative;
     transition: width 0.2s var(--ease), min-width 0.2s var(--ease);
+    border: 0.5px solid rgba(255, 255, 255, 0.06);
   }
 
   .sidebar.collapsed {
@@ -2127,13 +2129,13 @@
   .content {
     flex: 1;
     overflow-y: auto;
-    padding: var(--space-3) var(--space-6) var(--space-6);
+    padding: 0 var(--space-6) var(--space-6);
     position: relative;
   }
 
   @media (max-width: 800px) {
     .content {
-      padding: var(--space-2) var(--space-3) var(--space-3);
+      padding: 0 var(--space-3) var(--space-3);
     }
   }
 
@@ -2329,10 +2331,12 @@
     position: fixed;
     width: 300px;
     max-height: 400px;
-    background: var(--bg-elevated);
-    border: 1px solid var(--separator-opaque);
+    background: color-mix(in srgb, var(--bg-elevated) 72%, transparent);
+    border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: var(--radius);
-    box-shadow: var(--shadow-lg);
+    box-shadow: var(--glass-refraction),
+                var(--glass-edge-shadow),
+                var(--shadow-lg);
     z-index: 200;
     display: flex;
     flex-direction: column;
@@ -2473,21 +2477,25 @@
     bottom: 16px;
     left: 16px;
     width: 220px;
-    background: var(--bg-secondary);
-    border: 1px solid var(--border);
+    background: color-mix(in srgb, var(--bg-secondary) 70%, transparent);
+    backdrop-filter: blur(32px) saturate(1.4);
+    -webkit-backdrop-filter: blur(32px) saturate(1.4);
+    border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: var(--radius-md);
     padding: 10px 12px;
     z-index: 300;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+    box-shadow: var(--glass-refraction),
+                0 4px 16px rgba(0, 0, 0, 0.3);
     cursor: pointer;
     transition: background var(--duration-fast) var(--ease), box-shadow var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease);
     text-align: left;
   }
 
   .global-status-bar:hover {
-    background: var(--bg-elevated, var(--bg-secondary));
-    border-color: var(--accent-subtle, var(--border));
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+    background: color-mix(in srgb, var(--bg-elevated, var(--bg-secondary)) 80%, transparent);
+    border-color: var(--accent-subtle, rgba(255, 255, 255, 0.12));
+    box-shadow: var(--glass-refraction),
+                0 4px 20px rgba(0, 0, 0, 0.4);
   }
 
   .status-bar-content {
@@ -2637,13 +2645,17 @@
   }
 
   .shortcuts-card {
-    background: var(--bg-secondary);
-    border: 1px solid var(--separator-opaque);
+    background: color-mix(in srgb, var(--bg-secondary) 75%, transparent);
+    backdrop-filter: blur(40px) saturate(1.5);
+    -webkit-backdrop-filter: blur(40px) saturate(1.5);
+    border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: var(--radius);
     padding: var(--space-6);
     max-width: 380px;
     width: 90vw;
-    box-shadow: var(--shadow-lg);
+    box-shadow: var(--glass-refraction),
+                var(--glass-edge-shadow),
+                var(--shadow-lg);
     animation: shortcutsSlideUp 200ms var(--ease-out);
   }
 

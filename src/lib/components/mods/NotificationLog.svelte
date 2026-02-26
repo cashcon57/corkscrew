@@ -111,9 +111,12 @@
     right: 0;
     width: 360px;
     height: 100vh;
-    background: var(--bg-primary);
-    border-left: 1px solid var(--separator);
-    box-shadow: -4px 0 24px rgba(0, 0, 0, 0.3);
+    background: color-mix(in srgb, var(--bg-primary) 75%, transparent);
+    backdrop-filter: blur(32px) saturate(1.4);
+    -webkit-backdrop-filter: blur(32px) saturate(1.4);
+    border-left: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: var(--glass-refraction),
+                -4px 0 24px rgba(0, 0, 0, 0.3);
     z-index: 150;
     display: flex;
     flex-direction: column;

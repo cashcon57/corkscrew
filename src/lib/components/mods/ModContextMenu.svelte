@@ -73,10 +73,14 @@
     position: fixed;
     z-index: 200;
     min-width: 180px;
-    background: var(--bg-primary);
-    border: 1px solid var(--separator);
+    background: color-mix(in srgb, var(--bg-primary) 72%, transparent);
+    backdrop-filter: blur(32px) saturate(1.4);
+    -webkit-backdrop-filter: blur(32px) saturate(1.4);
+    border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: var(--radius-md);
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    box-shadow: var(--glass-refraction),
+                var(--glass-edge-shadow),
+                0 8px 32px rgba(0, 0, 0, 0.4);
     padding: var(--space-1) 0;
     animation: contextFadeIn 0.1s var(--ease-out);
   }

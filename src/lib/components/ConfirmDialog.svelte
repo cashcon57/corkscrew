@@ -75,14 +75,18 @@
   }
 
   .confirm-card {
-    background: var(--bg-secondary);
-    border: 1px solid var(--separator-opaque);
+    background: color-mix(in srgb, var(--bg-secondary) 75%, transparent);
+    backdrop-filter: blur(40px) saturate(1.5);
+    -webkit-backdrop-filter: blur(40px) saturate(1.5);
+    border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: var(--radius);
     padding: var(--space-6);
     max-width: 420px;
     width: 90vw;
     animation: slideUp 200ms var(--ease-out);
-    box-shadow: var(--shadow-lg);
+    box-shadow: var(--glass-refraction),
+                var(--glass-edge-shadow),
+                var(--shadow-lg);
   }
 
   .confirm-title {

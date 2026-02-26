@@ -152,10 +152,14 @@
   .spotlight-card {
     width: 520px;
     max-height: 440px;
-    background: var(--bg-base);
-    border: 1px solid var(--separator);
+    background: color-mix(in srgb, var(--bg-base) 72%, transparent);
+    backdrop-filter: blur(40px) saturate(1.5);
+    -webkit-backdrop-filter: blur(40px) saturate(1.5);
+    border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: var(--radius-lg);
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+    box-shadow: var(--glass-refraction),
+                var(--glass-edge-shadow),
+                0 20px 60px rgba(0, 0, 0, 0.5);
     overflow: hidden;
     animation: spotlight-in 0.15s var(--ease);
   }

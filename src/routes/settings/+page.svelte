@@ -2401,8 +2401,10 @@
   }
 
   .dialog {
-    background: var(--bg-elevated);
-    border: 1px solid var(--separator-opaque);
+    background: color-mix(in srgb, var(--bg-elevated) 75%, transparent);
+    backdrop-filter: blur(40px) saturate(1.5);
+    -webkit-backdrop-filter: blur(40px) saturate(1.5);
+    border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: var(--radius-xl);
     box-shadow: var(--glass-refraction), var(--glass-edge-shadow), var(--shadow-lg);
     width: 520px;

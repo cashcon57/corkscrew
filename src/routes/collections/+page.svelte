@@ -5001,12 +5001,16 @@
   /* ---- Delete Confirmation Modal ---- */
 
   .modal-dialog {
-    background: var(--bg-grouped);
-    border: 1px solid var(--separator);
+    background: color-mix(in srgb, var(--bg-grouped) 75%, transparent);
+    backdrop-filter: blur(40px) saturate(1.5);
+    -webkit-backdrop-filter: blur(40px) saturate(1.5);
+    border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: var(--radius-lg, 12px);
     width: min(440px, 90vw);
     padding: var(--space-6);
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    box-shadow: var(--glass-refraction),
+                var(--glass-edge-shadow),
+                0 8px 32px rgba(0, 0, 0, 0.4);
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -5891,14 +5895,18 @@
   }
 
   .file-picker-modal {
-    background: var(--bg-grouped);
-    border: 1px solid var(--separator);
+    background: color-mix(in srgb, var(--bg-grouped) 75%, transparent);
+    backdrop-filter: blur(40px) saturate(1.5);
+    -webkit-backdrop-filter: blur(40px) saturate(1.5);
+    border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: var(--radius-lg, 12px);
     width: min(560px, 90vw);
     max-height: 70vh;
     display: flex;
     flex-direction: column;
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    box-shadow: var(--glass-refraction),
+                var(--glass-edge-shadow),
+                0 8px 32px rgba(0, 0, 0, 0.4);
   }
 
   .file-picker-header {
