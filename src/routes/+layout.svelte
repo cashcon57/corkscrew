@@ -431,7 +431,7 @@
           wrappedShowSuccess("Added Corkscrew to your Steam library");
           controllerMode.set(true); // Auto-enable controller mode on Deck
         } catch (e) {
-          console.warn("[steam] Auto-registration failed:", e);
+          // Silent — Steam auto-registration is best-effort
         }
       } else {
         // Regular Linux — show a one-time prompt
@@ -689,7 +689,7 @@
         fetchMultiVersionChangelog();
       }
     } catch (e) {
-      console.warn("[updater] Check failed:", e);
+      // Update check failed — error stored for UI display
       updateErrorStore.set(String(e));
     } finally {
       updateCheckingStore.set(false);
@@ -721,7 +721,7 @@
 
       multiVersionChangelog = changelog;
     } catch (e) {
-      console.warn("[updater] Failed to fetch changelog:", e);
+      // Changelog fetch failed — non-critical, silently continue
     } finally {
       changelogLoading = false;
     }
@@ -759,7 +759,7 @@
       updateReadyStore.set(true);
     } catch (e) {
       updateDownloading = false;
-      console.warn("[updater] Download failed:", e);
+      updateErrorStore.set(String(e));
     }
   }
 

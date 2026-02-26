@@ -1588,7 +1588,7 @@ fn check_deployment_health(
         && staging_empty == 0
         && no_staging_path == 0
         && deployed_missing == 0
-        && manifest.len() > 0;
+        && !manifest.is_empty();
 
     Ok(serde_json::json!({
         "healthy": healthy,
@@ -5009,12 +5009,10 @@ fn cleanup_orphaned_temp_dirs() {
             let mut cleaned = 0u32;
             for entry in entries.flatten() {
                 if let Some(name) = entry.file_name().to_str() {
-                    if name.starts_with("corkscrew_extract_") {
-                        if entry.path().is_dir() {
-                            log::info!("Removing orphaned temp dir: {:?}", entry.path());
-                            let _ = std::fs::remove_dir_all(entry.path());
-                            cleaned += 1;
-                        }
+                    if name.starts_with("corkscrew_extract_") && entry.path().is_dir() {
+                        log::info!("Removing orphaned temp dir: {:?}", entry.path());
+                        let _ = std::fs::remove_dir_all(entry.path());
+                        cleaned += 1;
                     }
                 }
             }

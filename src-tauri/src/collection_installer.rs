@@ -1393,7 +1393,7 @@ pub async fn install_collection(
 
     // Clean up any remaining pre-extracted temp dirs (for skipped/failed mods).
     // The TempDirGuard also handles this on drop, but explicit cleanup is clearer.
-    for (_idx, dir) in &pre_extracted {
+    for dir in pre_extracted.values() {
         temp_guard.untrack(dir);
         let _ = std::fs::remove_dir_all(dir);
     }

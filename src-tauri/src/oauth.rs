@@ -393,9 +393,7 @@ fn wait_for_callback(
 ) -> Result<CallbackResult, OAuthError> {
     listener.set_nonblocking(false)?;
 
-    // Set a timeout so we don't block forever.
     let timeout = std::time::Duration::from_secs(CALLBACK_TIMEOUT_SECS);
-    listener.set_nonblocking(false).ok();
 
     // Use a blocking accept with a manual timeout via SO_RCVTIMEO equivalent.
     // TcpListener doesn't have set_timeout directly, so we use
@@ -452,11 +450,15 @@ fn wait_for_callback(
                         .cloned()
                         .unwrap_or_else(|| error.clone());
 
-                    // Send error page
+                    let safe_desc = description
+                        .replace('&', "&amp;")
+                        .replace('<', "&lt;")
+                        .replace('>', "&gt;")
+                        .replace('"', "&quot;");
                     let body = format!(
                         "<html><body><h1>Authorization Failed</h1><p>{}</p>\
                          <p>You can close this tab.</p></body></html>",
-                        description
+                        safe_desc
                     );
                     let response = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -668,17 +670,31 @@ pub fn save_tokens(tokens: &TokenPair) -> Result<(), OAuthError> {
 
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
+        }
     }
 
     let json = serde_json::to_string_pretty(tokens)?;
-    fs::write(&path, format!("{json}\n"))?;
 
-    // Set restrictive permissions on Unix (owner read/write only).
+    // Create file with restrictive permissions atomically (no TOCTOU window).
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = fs::Permissions::from_mode(0o600);
-        fs::set_permissions(&path, perms)?;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)?;
+        file.write_all(format!("{json}\n").as_bytes())?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(&path, format!("{json}\n"))?;
     }
 
     Ok(())

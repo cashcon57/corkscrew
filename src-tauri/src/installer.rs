@@ -231,12 +231,19 @@ fn extract_rar(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
             .map_err(|e| InstallerError::Rar(e.to_string()))?,
     );
 
+    let canonical_dest = dest_dir
+        .canonicalize()
+        .unwrap_or_else(|_| dest_dir.to_path_buf());
+
     while let Some(Some(header)) = cursor.take() {
         let entry = header.entry();
-        let out_path = dest_dir.join(&entry.filename);
 
-        // Path traversal check
-        if !out_path.starts_with(dest_dir) {
+        // Reject entries with ".." components (path traversal)
+        if entry
+            .filename
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
             warn!(
                 "Skipping RAR entry with path traversal: {}",
                 entry.filename.display()
@@ -251,6 +258,8 @@ fn extract_rar(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
             continue;
         }
 
+        let out_path = dest_dir.join(&entry.filename);
+
         if entry.is_file() {
             if let Some(parent) = out_path.parent() {
                 fs::create_dir_all(parent)?;
@@ -258,7 +267,17 @@ fn extract_rar(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
             let result = header
                 .extract_to(&out_path)
                 .map_err(|e| InstallerError::Rar(e.to_string()))?;
-            extracted.push(out_path);
+            // Post-extraction canonicalization check (catches symlink escapes)
+            if let Ok(canonical) = out_path.canonicalize() {
+                if canonical.starts_with(&canonical_dest) {
+                    extracted.push(out_path);
+                } else {
+                    warn!("Removing RAR entry outside destination: {}", canonical.display());
+                    let _ = fs::remove_file(&out_path);
+                }
+            } else {
+                extracted.push(out_path);
+            }
             cursor = Some(
                 result
                     .read_header()

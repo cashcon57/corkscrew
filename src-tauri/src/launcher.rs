@@ -178,15 +178,15 @@ fn resolve_wine_binary(bottle: &Bottle) -> Result<WineCommand> {
                 bottle_source: source.to_string(),
                 tried: CROSSOVER_WINE.to_string(),
             })?;
-            // CrossOver uses --bottle <name> to target a specific bottle.
-            // The bottle name is the directory name under CrossOver/Bottles/.
-            // Validate bottle name: allow alphanumeric, spaces, and common punctuation
-            // (CrossOver supports names like "Skyrim: Anniversary Edition").
-            // Reject path separators, null bytes, and shell metacharacters.
-            let dangerous = ['/', '\\', '\0', '`', '$', '|', ';', '&', '<', '>', '\n', '\r'];
+            // Validate bottle name with a whitelist of safe characters.
+            // CrossOver bottle names are directory names (e.g. "Skyrim: Anniversary Edition").
             if bottle.name.is_empty()
+                || bottle.name.len() > 255
                 || bottle.name.starts_with('-')
-                || bottle.name.chars().any(|c| dangerous.contains(&c))
+                || !bottle.name.chars().all(|c| {
+                    c.is_alphanumeric()
+                        || " :-_().,'!+#@".contains(c)
+                })
             {
                 return Err(LauncherError::Other(format!(
                     "Invalid bottle name: {}",

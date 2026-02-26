@@ -39,7 +39,7 @@
       await createBrowserWebview(url, b.x, b.y, b.width, b.height);
       webviewActive = true;
     } catch (e) {
-      console.error("Failed to create webview:", e);
+      // Webview creation failed — falls back to non-webview UI
     }
   }
 

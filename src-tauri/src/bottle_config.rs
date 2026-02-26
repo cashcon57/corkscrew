@@ -337,10 +337,10 @@ pub fn set_bottle_setting(bottle: &Bottle, key: &str, value: &str) -> Result<()>
     if key == "retina_enabled" {
         if value == "true" || value == "1" {
             crate::wine_diagnostic::fix_retina_mode(bottle)
-                .map_err(|e| BottleConfigError::Io(e))?;
+                .map_err(BottleConfigError::Io)?;
         } else {
             crate::wine_diagnostic::disable_retina_mode(bottle)
-                .map_err(|e| BottleConfigError::Io(e))?;
+                .map_err(BottleConfigError::Io)?;
         }
         return Ok(());
     }

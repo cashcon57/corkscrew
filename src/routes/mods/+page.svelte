@@ -1664,11 +1664,14 @@
     contextMenuMod = null;
   }
 
-  // Search highlighting
+  function escapeHtml(s: string): string {
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+
   function highlightMatch(text: string, query: string): string {
-    if (!query) return text;
+    if (!query) return escapeHtml(text);
     const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    return text.replace(new RegExp(`(${escaped})`, "gi"), "<mark>$1</mark>");
+    return escapeHtml(text).replace(new RegExp(`(${escaped})`, "gi"), "<mark>$1</mark>");
   }
 
   // Category colors keyed by new descriptive names

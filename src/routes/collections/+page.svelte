@@ -1024,7 +1024,7 @@
 
       cacheData = newCacheData;
     } catch (e) {
-      console.warn("[cache] Failed to compute cache percentages:", e);
+      // Cache computation failed — non-critical
     } finally {
       loadingCache = false;
     }
@@ -1086,7 +1086,7 @@
       const cached = pairs.filter(p => cachedSet.has(`${p[0]}:${p[1]}`)).length;
       detailCacheInfo = { cached, total: mods.length, nexusTotal: pairs.length };
     } catch (e) {
-      console.warn("[cache] Failed to compute detail cache info:", e);
+      // Cache detail computation failed — non-critical
     }
   }
 
