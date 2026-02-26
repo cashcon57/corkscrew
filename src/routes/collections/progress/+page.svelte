@@ -25,6 +25,8 @@
   let overallProgress = $derived(status?.overallProgress ?? 0);
   let downloadSpeed = $derived(status?.downloadSpeed ?? 0);
   let downloadEta = $derived(status?.downloadEta ?? "");
+  let stagingSpeed = $derived(status?.stagingSpeed ?? 0);
+  let installSpeed = $derived(status?.installSpeed ?? 0);
 
   let logEntries = $derived(status?.logEntries ?? []);
   let collectionDescription = $derived(status?.collectionDescription ?? "");
@@ -582,6 +584,9 @@
             {#if stagingCount > 0}
               <span class="cache-badge">{stagingCount} extracting</span>
             {/if}
+            {#if stagingSpeed > 0 && phase === "staging"}
+              <span class="speed-badge">{formatBytes(stagingSpeed)}/s</span>
+            {/if}
           </div>
           <div class="progress-track">
             <div class="progress-fill" class:progress-active={phase === "staging"} style="width: {stagingPercent}%"></div>
@@ -618,6 +623,9 @@
             <span class="phase-count">{modsDone} / {mods.length}</span>
             {#if phase === "staging"}
               <span class="cache-badge">waiting for extraction</span>
+            {/if}
+            {#if installSpeed > 0 && phase === "installing"}
+              <span class="speed-badge">{formatBytes(installSpeed)}/s</span>
             {/if}
           </div>
           <div class="progress-track">
