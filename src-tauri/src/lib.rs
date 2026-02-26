@@ -33,6 +33,7 @@ pub mod modlist_io;
 pub mod nexus;
 pub mod nexus_sso;
 pub mod oauth;
+pub mod platform;
 pub mod plugins;
 pub mod preflight;
 pub mod profiles;

@@ -10,17 +10,17 @@
 //! - Conflict resolution (multiple mods can coexist in staging)
 
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use log::{debug, info};
 use rayon::prelude::*;
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 use walkdir::WalkDir;
 
 use crate::config;
 use crate::installer;
+use crate::platform;
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -151,6 +151,10 @@ pub fn stage_mod(
     let data_root = installer::find_data_root(&temp_dir);
     debug!("Data root for staging: {}", data_root.display());
 
+    // Detect the optimal copy method once for the entire batch.
+    let copy_method = platform::detect_copy_method(&data_root, &staging_dir);
+    debug!("Staging copy method: {:?}", copy_method);
+
     // Collect all file entries first, then process in parallel
     let entries: Vec<_> = WalkDir::new(&data_root)
         .into_iter()
@@ -172,7 +176,7 @@ pub fn stage_mod(
                 let _ = fs::create_dir_all(parent);
             }
 
-            let (hash, file_size) = copy_and_hash(abs_src, &dest_path)?;
+            let (hash, file_size) = copy_and_hash(abs_src, &dest_path, copy_method)?;
             let rel_str = relative.to_string_lossy().replace('\\', "/");
             Ok((rel_str, hash, file_size))
         })
@@ -225,6 +229,10 @@ pub fn stage_mod_from_extracted(
         data_root.display()
     );
 
+    // Detect the optimal copy method once for the entire batch.
+    let copy_method = platform::detect_copy_method(&data_root, &staging_dir);
+    debug!("Pre-extracted staging copy method: {:?}", copy_method);
+
     // Collect all file entries first, then process in parallel
     let entries: Vec<_> = WalkDir::new(&data_root)
         .into_iter()
@@ -246,7 +254,7 @@ pub fn stage_mod_from_extracted(
                 let _ = fs::create_dir_all(parent); // idempotent, safe for parallel
             }
 
-            let (hash, file_size) = copy_and_hash(abs_src, &dest_path)?;
+            let (hash, file_size) = copy_and_hash(abs_src, &dest_path, copy_method)?;
             let rel_str = relative.to_string_lossy().replace('\\', "/");
             Ok((rel_str, hash, file_size))
         })
@@ -338,37 +346,24 @@ pub fn list_staging_files(staging_path: &Path) -> Result<Vec<String>> {
 // ---------------------------------------------------------------------------
 
 /// Compute the SHA-256 hash of a file, returning the hex string.
+///
+/// Uses memory-mapped I/O for files larger than 1 MiB, falling back to
+/// buffered 128 KiB reads for smaller files.
 pub fn compute_sha256(path: &Path) -> Result<String> {
-    let mut file = fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    io::copy(&mut file, &mut hasher)?;
-    let result = hasher.finalize();
-    Ok(format!("{:x}", result))
+    platform::fast_hash(path).map_err(StagingError::Io)
 }
 
-/// Copy a file and compute its SHA-256 hash in a single pass.
-/// Reads the source once, writing to both the destination and the hasher
-/// simultaneously — 2x faster than copy + hash separately.
-fn copy_and_hash(src: &Path, dst: &Path) -> Result<(String, u64)> {
-    let mut reader = fs::File::open(src)?;
-    let mut writer = fs::File::create(dst)?;
-    let mut hasher = Sha256::new();
-
-    let mut buf = vec![0u8; 128 * 1024]; // 128KB buffer
-    let mut total: u64 = 0;
-
-    loop {
-        let n = reader.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        writer.write_all(&buf[..n])?;
-        hasher.update(&buf[..n]);
-        total += n as u64;
-    }
-
-    let hash = format!("{:x}", hasher.finalize());
-    Ok((hash, total))
+/// Copy a file and compute its SHA-256 hash.
+///
+/// Uses platform-optimized copy (clonefile on macOS APFS, reflink on Linux
+/// Btrfs/XFS) when available, falling back to a single-pass buffered
+/// copy+hash for standard filesystems.
+fn copy_and_hash(
+    src: &Path,
+    dst: &Path,
+    copy_method: platform::FsCopyMethod,
+) -> Result<(String, u64)> {
+    platform::fast_copy_and_hash(src, dst, copy_method).map_err(StagingError::Io)
 }
 
 /// RAII guard that removes a temporary directory when dropped.

@@ -12,11 +12,11 @@ use std::path::Path;
 use log::info;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 use walkdir::WalkDir;
 
 use crate::database::ModDatabase;
+use crate::platform;
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -242,11 +242,7 @@ pub fn has_snapshot(db: &ModDatabase, game_id: &str, bottle_name: &str) -> Resul
 // ---------------------------------------------------------------------------
 
 fn compute_sha256(path: &Path) -> Result<String> {
-    let mut file = fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    io::copy(&mut file, &mut hasher)?;
-    let result = hasher.finalize();
-    Ok(format!("{:x}", result))
+    platform::fast_hash(path).map_err(IntegrityError::Io)
 }
 
 // ---------------------------------------------------------------------------

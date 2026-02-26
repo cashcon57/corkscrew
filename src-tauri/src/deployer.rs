@@ -18,6 +18,7 @@ use log::{debug, info, warn};
 use thiserror::Error;
 
 use crate::database::ModDatabase;
+use crate::platform;
 
 // ---------------------------------------------------------------------------
 // Filesystem helpers
@@ -118,11 +119,13 @@ pub fn deploy_mod(
     }
 
     let can_hardlink = same_filesystem(staging_path, data_dir);
+    let copy_method = platform::detect_copy_method(staging_path, data_dir);
     if !can_hardlink {
         debug!(
-            "Staging ({}) and data_dir ({}) are on different filesystems — will use copy",
+            "Staging ({}) and data_dir ({}) are on different filesystems — will use copy ({:?})",
             staging_path.display(),
-            data_dir.display()
+            data_dir.display(),
+            copy_method
         );
         let deploy_size = crate::disk_budget::dir_size(staging_path);
         crate::disk_budget::check_space_guard(data_dir, deploy_size)
@@ -215,7 +218,7 @@ pub fn deploy_mod(
                             dst.display(),
                             e
                         );
-                        if let Err(copy_err) = fs::copy(&src, &dst) {
+                        if let Err(copy_err) = platform::fast_copy(&src, &dst, copy_method) {
                             warn!(
                                 "Copy also failed for {} → {}: {}",
                                 src.display(),
@@ -229,7 +232,7 @@ pub fn deploy_mod(
                     }
                 }
             } else {
-                if let Err(copy_err) = fs::copy(&src, &dst) {
+                if let Err(copy_err) = platform::fast_copy(&src, &dst, copy_method) {
                     warn!(
                         "Copy failed for {} → {}: {}",
                         src.display(),
@@ -647,17 +650,18 @@ fn restore_next_winner(
             }
 
             let can_hardlink = same_filesystem(&staging_path, data_dir);
+            let copy_method = platform::detect_copy_method(&staging_path, data_dir);
             let method = if can_hardlink {
                 match fs::hard_link(&src, &dst) {
                     Ok(_) => "hardlink",
                     Err(e) => {
                         warn!("Hardlink failed in restore_next_winner: {}", e);
-                        fs::copy(&src, &dst)?;
+                        platform::fast_copy(&src, &dst, copy_method)?;
                         "copy"
                     }
                 }
             } else {
-                fs::copy(&src, &dst)?;
+                platform::fast_copy(&src, &dst, copy_method)?;
                 "copy"
             };
 
