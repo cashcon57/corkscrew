@@ -1904,6 +1904,7 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
+    animation: glass-fade-in var(--duration) var(--ease-out);
   }
 
   .wj-progress-header {
@@ -1931,6 +1932,23 @@
     background: var(--system-accent);
     border-radius: 3px;
     transition: width 0.2s ease;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .wj-progress-bar-fill::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      rgba(255, 255, 255, 0.3) 45%,
+      rgba(255, 255, 255, 0.4) 50%,
+      rgba(255, 255, 255, 0.3) 55%,
+      transparent 100%
+    );
+    animation: glass-progress-shimmer 2s var(--ease) infinite;
   }
 
   .wj-progress-counts {

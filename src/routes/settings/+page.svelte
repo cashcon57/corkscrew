@@ -53,8 +53,17 @@
 
   // Settings tabs
   let settingsTab = $state<"general" | "game" | "system">("general");
+  let prevTab = $state<"general" | "game" | "system">("general");
+  let tabAnimKey = $state(0);
   let showLimitedTools = $state(false);
   let showNotRecommendedTools = $state(false);
+
+  function switchTab(tab: "general" | "game" | "system") {
+    if (tab === settingsTab) return;
+    prevTab = settingsTab;
+    settingsTab = tab;
+    tabAnimKey++;
+  }
 
   // Game directory cleaner
   let cleanReport = $state<CleanReport | null>(null);
@@ -661,21 +670,23 @@
   <h1 class="page-title">Settings</h1>
 
   <div class="settings-tab-bar">
-    <button class="settings-tab" class:tab-active={settingsTab === "general"} onclick={() => settingsTab = "general"}>
+    <button class="settings-tab" class:tab-active={settingsTab === "general"} onclick={() => switchTab("general")}>
       General
     </button>
     {#if game}
-      <button class="settings-tab" class:tab-active={settingsTab === "game"} onclick={() => settingsTab = "game"}>
+      <button class="settings-tab" class:tab-active={settingsTab === "game"} onclick={() => switchTab("game")}>
         Game
       </button>
     {/if}
-    <button class="settings-tab" class:tab-active={settingsTab === "system"} onclick={() => settingsTab = "system"}>
+    <button class="settings-tab" class:tab-active={settingsTab === "system"} onclick={() => switchTab("system")}>
       System
     </button>
   </div>
 
   <!-- ============ GENERAL TAB ============ -->
   {#if settingsTab === "general"}
+  {#key tabAnimKey}
+  <div class="tab-content-animated">
 
   <!-- Appearance -->
   <div class="section">
@@ -728,9 +739,13 @@
     </div>
   </div>
 
+  </div>
+  {/key}
   {/if}
   <!-- ============ GAME TAB ============ -->
   {#if settingsTab === "game"}
+  {#key tabAnimKey}
+  <div class="tab-content-animated">
 
   {#if isSkyrim}
     <!-- Game Tools -->
@@ -1387,9 +1402,13 @@
     </div>
   {/if}
 
+  </div>
+  {/key}
   {/if}
   <!-- ============ GENERAL TAB (continued) ============ -->
   {#if settingsTab === "general"}
+  {#key tabAnimKey}
+  <div class="tab-content-animated">
 
   <!-- Nexus Mods Account -->
   <SettingsAuthSection />
@@ -1429,9 +1448,13 @@
     </div>
   </div>
 
+  </div>
+  {/key}
   {/if}
   <!-- ============ SYSTEM TAB ============ -->
   {#if settingsTab === "system"}
+  {#key tabAnimKey}
+  <div class="tab-content-animated">
 
   <!-- Downloads -->
   <div class="section">
@@ -1726,9 +1749,13 @@
     </div>
   {/if}
 
+  </div>
+  {/key}
   {/if}
   <!-- ============ GENERAL TAB (About) ============ -->
   {#if settingsTab === "general"}
+  {#key tabAnimKey}
+  <div class="tab-content-animated">
 
   <!-- About -->
   <div class="section">
@@ -1804,6 +1831,8 @@
     </div>
   </div>
 
+  </div>
+  {/key}
   {/if}
 </div>
 
@@ -1853,8 +1882,15 @@
 
   .settings-tab.tab-active {
     color: var(--text-primary);
-    background: var(--bg-elevated);
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+    background: var(--surface-glass-active);
+    backdrop-filter: var(--glass-blur-light);
+    box-shadow: var(--glass-refraction),
+                0 1px 4px rgba(0, 0, 0, 0.15),
+                inset 0 1px 0 0 rgba(255, 255, 255, 0.12);
+  }
+
+  .tab-content-animated {
+    animation: glass-fade-in var(--duration) var(--ease-out);
   }
 
   /* --- Sections --- */

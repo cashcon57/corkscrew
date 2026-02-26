@@ -551,6 +551,81 @@ button:focus-visible,
   }
 }
 
+/* --- Liquid Glass Animations --- */
+
+/* Glass shimmer — sweeps a specular highlight across a surface */
+@keyframes glass-shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+/* Glass content fade — crossfade for tab/panel content switching */
+@keyframes glass-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.99);
+    filter: blur(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0);
+  }
+}
+
+/* Glass slide up — entrance for banners, toasts, completion panels */
+@keyframes glass-slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+    filter: blur(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+
+/* Glass glow pulse — pulsing glow for active/ready states */
+@keyframes glass-glow-pulse {
+  0%, 100% { box-shadow: 0 0 8px rgba(52, 199, 89, 0.3), var(--glass-refraction); }
+  50% { box-shadow: 0 0 20px rgba(52, 199, 89, 0.5), 0 0 40px rgba(52, 199, 89, 0.15), var(--glass-refraction); }
+}
+
+/* Glass checkmark draw — stroke-dashoffset animation for SVG checkmarks */
+@keyframes glass-checkmark-draw {
+  from { stroke-dashoffset: 40; }
+  to { stroke-dashoffset: 0; }
+}
+
+/* Glass scale pop — satisfying pop-in for success states */
+@keyframes glass-scale-pop {
+  0% { transform: scale(0.5); opacity: 0; }
+  60% { transform: scale(1.08); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+/* Glass progress shimmer — overlay highlight sweeping across progress bars */
+@keyframes glass-progress-shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(250%); }
+}
+
+/* Glass banner entrance — slide down + fade for update/notification banners */
+@keyframes glass-banner-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+    backdrop-filter: blur(0);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    backdrop-filter: var(--glass-blur-light);
+  }
+}
+
 /* --- Accessibility: Reduced Motion --- */
 
 @media (prefers-reduced-motion: reduce) {

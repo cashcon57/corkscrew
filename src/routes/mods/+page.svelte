@@ -2052,8 +2052,8 @@
           onclick={() => revealItemInDir(activeGame!.game_path)}
           title="Open game directory in Finder"
         >
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M2 4h3l2-2h5a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V4z" />
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
           </svg>
         </button>
       {/if}
@@ -3817,10 +3817,11 @@
     justify-content: center;
     flex: 1;
     padding: var(--space-12) var(--space-6);
-    background: var(--surface);
-    border: 1px dashed var(--separator-opaque);
+    background: var(--surface-glass);
+    border: 1px solid var(--separator);
     border-radius: var(--radius-lg);
     box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
+    backdrop-filter: var(--glass-blur-light);
     text-align: center;
     gap: var(--space-3);
   }

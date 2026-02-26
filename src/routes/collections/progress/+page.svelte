@@ -1252,6 +1252,23 @@
     border-radius: 4px;
     transition: width 300ms ease;
     min-width: 0;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .progress-fill::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      rgba(255, 255, 255, 0.25) 45%,
+      rgba(255, 255, 255, 0.35) 50%,
+      rgba(255, 255, 255, 0.25) 55%,
+      transparent 100%
+    );
+    animation: glass-progress-shimmer 2s var(--ease) infinite;
   }
 
   .progress-active {
@@ -1400,14 +1417,22 @@
     text-align: center;
     gap: var(--space-4);
     padding: var(--space-10) var(--space-6);
-    background: var(--surface);
+    background: var(--surface-glass);
     border: 1px solid var(--separator);
     border-radius: var(--radius);
     margin-bottom: var(--space-4);
+    backdrop-filter: var(--glass-blur-light);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
+    animation: glass-slide-up 500ms var(--ease-out);
   }
 
   .completion-icon {
     margin-bottom: var(--space-1);
+    animation: glass-scale-pop 600ms var(--ease-spring);
+  }
+
+  .completion-icon :global(svg) {
+    filter: drop-shadow(0 0 12px rgba(34, 197, 94, 0.4));
   }
 
   .completion-title {
@@ -1416,6 +1441,7 @@
     color: var(--text-primary);
     letter-spacing: -0.02em;
     margin: 0;
+    animation: glass-fade-in 400ms var(--ease-out) 200ms both;
   }
 
   .completion-stats {
@@ -1424,6 +1450,7 @@
     gap: var(--space-3);
     flex-wrap: wrap;
     justify-content: center;
+    animation: glass-fade-in 400ms var(--ease-out) 350ms both;
   }
 
   .stat-chip {

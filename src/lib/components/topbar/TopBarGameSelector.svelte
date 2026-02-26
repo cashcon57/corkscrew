@@ -113,9 +113,9 @@
   .topbar-selector {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 5px 10px;
-    border-radius: var(--radius);
+    gap: 6px;
+    padding: 4px 8px;
+    border-radius: 100px;
     font-size: 13px;
     color: var(--text-primary);
     background: none;
@@ -127,7 +127,7 @@
   }
 
   .topbar-selector:hover {
-    background: var(--surface-hover);
+    background: rgba(255, 255, 255, 0.06);
   }
 
   .topbar-selector-label {
@@ -184,15 +184,17 @@
     min-width: 240px;
     max-width: 320px;
     background: var(--bg-elevated);
-    border: 1px solid var(--separator);
-    border-radius: var(--radius);
+    backdrop-filter: var(--glass-blur);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: var(--radius-lg);
     padding: 4px;
     z-index: 100;
     box-shadow:
-      0 4px 24px rgba(0, 0, 0, 0.3),
-      0 1px 4px rgba(0, 0, 0, 0.15),
-      inset 0 1px 0 0 var(--surface);
-    animation: dropdownIn 0.15s ease-out;
+      var(--glass-refraction),
+      var(--glass-edge-shadow),
+      0 8px 32px rgba(0, 0, 0, 0.3),
+      0 1px 4px rgba(0, 0, 0, 0.15);
+    animation: dropdownIn 0.2s var(--ease-out);
     max-height: 320px;
     overflow-y: auto;
   }

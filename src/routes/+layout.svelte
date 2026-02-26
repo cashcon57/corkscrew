@@ -23,9 +23,9 @@
   import { getNotificationCount, logNotification } from "$lib/api";
 
   const navItems = [
+    { id: "discover", label: "Discover" },
     { id: "mods", label: "Mods" },
     { id: "plugins", label: "Load Order" },
-    { id: "discover", label: "Discover" },
     { id: "profiles", label: "Profiles" },
     { id: "logs", label: "Crash Logs" },
     { id: "settings", label: "Settings" },
@@ -852,41 +852,45 @@
             title={item.label}
           >
             <span class="nav-icon">
-              {#if item.id === "mods"}
+              {#if item.id === "discover"}
+                <!-- Compass — exploration/discovery -->
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                  <rect x="3" y="1.5" width="10" height="13" rx="1.5" />
-                  <line x1="5.5" y1="4.5" x2="10.5" y2="4.5" />
-                  <line x1="5.5" y1="7" x2="10.5" y2="7" />
-                  <line x1="5.5" y1="9.5" x2="8.5" y2="9.5" />
+                  <circle cx="8" cy="8" r="6.5" />
+                  <path d="M5.5 5.5l2 4.5 4.5 2-2-4.5z" />
+                </svg>
+              {:else if item.id === "mods"}
+                <!-- Cube/package — mod archives -->
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M8 1.5L2.5 4.5v7l5.5 3 5.5-3v-7L8 1.5z" />
+                  <path d="M2.5 4.5L8 7.5l5.5-3" />
+                  <line x1="8" y1="7.5" x2="8" y2="14.5" />
                 </svg>
               {:else if item.id === "plugins"}
+                <!-- Stacked layers — load order -->
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
                   <rect x="2.5" y="2" width="11" height="3" rx="1" />
                   <rect x="2.5" y="6.5" width="11" height="3" rx="1" />
                   <rect x="2.5" y="11" width="11" height="3" rx="1" />
                 </svg>
-              {:else if item.id === "discover"}
+              {:else if item.id === "profiles"}
+                <!-- Person — user profiles -->
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                  <circle cx="8" cy="8" r="6.5" />
-                  <path d="M5.5 5.5l2 4.5 4.5 2-2-4.5z" />
+                  <circle cx="8" cy="5" r="2.5" />
+                  <path d="M3 14c0-2.8 2.2-5 5-5s5 2.2 5 5" />
                 </svg>
               {:else if item.id === "logs"}
+                <!-- Document with warning — crash log analysis -->
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M8 1.5L1.5 5v6L8 14.5 14.5 11V5L8 1.5z" />
-                  <circle cx="8" cy="7.5" r="1.5" />
-                  <path d="M8 9v2.5" />
-                </svg>
-              {:else if item.id === "profiles"}
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                  <rect x="2" y="2" width="12" height="4" rx="1" />
-                  <rect x="2" y="10" width="12" height="4" rx="1" />
-                  <line x1="5" y1="4" x2="5" y2="4" />
-                  <line x1="5" y1="12" x2="5" y2="12" />
+                  <path d="M4 1.5h5l3 3v10H4V1.5z" />
+                  <path d="M9 1.5v3h3" />
+                  <line x1="8" y1="7.5" x2="8" y2="10.5" />
+                  <circle cx="8" cy="12" r="0.5" fill="currentColor" stroke="none" />
                 </svg>
               {:else if item.id === "settings"}
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                  <circle cx="8" cy="8" r="2.5" />
-                  <path d="M8 1.5v2M8 12.5v2M2.7 4.5l1.7 1M11.6 10.5l1.7 1M1.5 8h2M12.5 8h2M2.7 11.5l1.7-1M11.6 5.5l1.7-1" />
+                <!-- Gear — settings -->
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+                  <circle cx="12" cy="12" r="3" />
                 </svg>
               {:else}
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -1146,7 +1150,7 @@
             </div>
             <div class="update-banner-actions">
               {#if updateReady}
-                <button class="btn btn-accent btn-sm" onclick={handleRelaunch}>Restart to Update</button>
+                <button class="btn btn-accent btn-sm update-ready-btn" onclick={handleRelaunch}>Restart to Update</button>
               {:else if updateDownloading}
                 <span class="update-banner-downloading"><span class="spinner spinner-sm"></span> Downloading...</span>
               {:else}
@@ -1866,6 +1870,7 @@
   .update-pill.ready {
     background: rgba(52, 199, 89, 0.15);
     color: #34c759;
+    animation: glass-glow-pulse 2s ease-in-out infinite;
   }
 
   .update-pill.downloading {
@@ -1881,11 +1886,14 @@
   /* --- Update banner --- */
 
   .update-banner {
-    background: var(--bg-elevated, rgba(255, 255, 255, 0.04));
+    background: var(--surface-glass, rgba(255, 255, 255, 0.04));
     border: 1px solid var(--accent-subtle, rgba(217, 143, 64, 0.2));
     border-radius: var(--radius-md, 8px);
     margin: var(--space-3, 12px) var(--space-4, 16px) var(--space-4, 16px);
     padding: var(--space-3, 12px) var(--space-4, 16px);
+    backdrop-filter: var(--glass-blur-light);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
+    animation: glass-banner-enter 350ms var(--ease-out);
   }
 
   .update-banner-header {
@@ -1921,6 +1929,10 @@
     gap: 6px;
     font-size: 12px;
     color: var(--text-tertiary);
+  }
+
+  .update-ready-btn {
+    animation: glass-scale-pop 400ms var(--ease-spring);
   }
 
   .update-banner-dismiss {
