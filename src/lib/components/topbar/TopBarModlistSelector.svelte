@@ -22,6 +22,19 @@
   let confirmDeleteName = $state<string | null>(null);
   let deleting = $state(false);
 
+  let isModified = $derived(
+    $activeCollection != null &&
+    ($activeCollection.enabled_count !== $activeCollection.mod_count ||
+     ($activeCollection.original_mod_count != null &&
+      $activeCollection.mod_count !== $activeCollection.original_mod_count))
+  );
+
+  let displayLabel = $derived(
+    $activeCollection
+      ? `${$activeCollection.name}${isModified ? " (modified)" : ""}`
+      : "User"
+  );
+
   async function handleSwitch(name: string) {
     const game = get(selectedGame);
     if (!game || switching) return;
@@ -68,13 +81,13 @@
   <button
     class="topbar-selector"
     onclick={(e) => { e.stopPropagation(); onToggle(); }}
-    title={$activeCollection?.name ?? "No Modlist"}
+    title={displayLabel}
   >
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.5">
       <path d="M2 4h12M2 8h12M2 12h8" />
     </svg>
-    <span class="topbar-selector-label" class:placeholder={!$activeCollection}>
-      {$activeCollection?.name ?? "No Modlist"}
+    <span class="topbar-selector-label">
+      {displayLabel}
     </span>
     <svg class="topbar-chevron" class:open={isOpen} width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
       <path d="M3 4l2 2 2-2" />
@@ -83,6 +96,21 @@
 
   {#if isOpen}
     <div class="topbar-dropdown" onclick={(e) => e.stopPropagation()}>
+      <button
+        class="dropdown-item"
+        class:active={!$activeCollection}
+        onclick={() => { activeCollection.set(null); onClose(); }}
+      >
+        <div class="dropdown-item-text">
+          <span class="dropdown-item-name">User</span>
+          <span class="dropdown-item-sub">Manual mod management</span>
+        </div>
+        {#if !$activeCollection}
+          <svg class="active-check" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="20 6 9 17 4 12" />
+          </svg>
+        {/if}
+      </button>
       {#if $collectionList.length > 0}
         {#each $collectionList as col}
           <div class="dropdown-item-row">
@@ -118,8 +146,6 @@
             </button>
           </div>
         {/each}
-      {:else}
-        <div class="dropdown-empty">No modlists installed</div>
       {/if}
       <div class="dropdown-footer">
         <button class="dropdown-action" onclick={() => { onNavigate("discover"); onClose(); }}>

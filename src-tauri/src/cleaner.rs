@@ -95,6 +95,8 @@ pub struct CleanOptions {
     pub remove_enb: bool,
     /// Remove save files (.ess, .skse cosaves).
     pub remove_saves: bool,
+    /// Remove SKSE files (skse64_loader, DLLs, SKSE/Plugins/).
+    pub remove_skse: bool,
     /// Only remove unmanaged/orphaned files (skip files tracked in manifest).
     pub orphans_only: bool,
     /// Preview what would be removed without actually deleting.
@@ -110,6 +112,7 @@ impl Default for CleanOptions {
             remove_archives: true,
             remove_enb: false,
             remove_saves: false,
+            remove_skse: false,
             orphans_only: false,
             dry_run: false,
             exclude_patterns: Vec::new(),
@@ -330,6 +333,7 @@ pub fn clean_game_directory(
         let dominated_by_category = match file.category.as_str() {
             "enb" => !options.remove_enb,
             "save" => !options.remove_saves,
+            "skse" => !options.remove_skse,
             "bsa" | "ba2" => !options.remove_archives,
             _ => !options.remove_loose_files,
         };

@@ -530,6 +530,10 @@
       if (current && !collections.find(c => c.name === current.name)) {
         activeCollection.set(null);
       }
+      // Auto-select if exactly one collection is installed and none is active
+      if (!get(activeCollection) && collections.length === 1) {
+        activeCollection.set(collections[0]);
+      }
     } catch {
       collectionList.set([]);
       activeCollection.set(null);

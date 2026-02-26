@@ -361,6 +361,7 @@ export interface CleanOptions {
   remove_archives: boolean;
   remove_enb: boolean;
   remove_saves: boolean;
+  remove_skse: boolean;
   orphans_only: boolean;
   dry_run: boolean;
   exclude_patterns: string[];
@@ -854,6 +855,7 @@ export interface CollectionSummary {
   image_url: string | null;
   game_domain: string | null;
   installed_revision: number | null;
+  original_mod_count: number | null;
 }
 
 export interface CollectionDiff {

@@ -1368,6 +1368,21 @@ pub async fn install_collection(
         });
 
         if is_already {
+            // Tag the existing mod with this collection name so delete-collection
+            // can find and remove it later (handles mods from previous cancelled installs
+            // that may not have been tagged).
+            if let Some(existing) = current_mods.iter().find(|m| {
+                if let Some(nexus_id) = mod_entry.source.mod_id {
+                    if m.nexus_mod_id == Some(nexus_id) { return true; }
+                }
+                if let Some(file_id) = mod_entry.source.file_id {
+                    if m.nexus_file_id == Some(file_id) { return true; }
+                }
+                m.name.eq_ignore_ascii_case(mod_name)
+            }) {
+                let _ = db.set_collection_name(existing.id, &manifest.name);
+            }
+
             let _ = app.emit(
                 INSTALL_PROGRESS_EVENT,
                 InstallProgress::ModCompleted {

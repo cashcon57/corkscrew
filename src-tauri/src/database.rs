@@ -106,6 +106,7 @@ pub struct CollectionSummary {
     pub image_url: Option<String>,
     pub game_domain: Option<String>,
     pub installed_revision: Option<u32>,
+    pub original_mod_count: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------

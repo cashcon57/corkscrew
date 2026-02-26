@@ -100,14 +100,14 @@
   <button
     class="topbar-selector"
     onclick={(e) => { e.stopPropagation(); onToggle(); }}
-    title={$activeProfile?.name ?? "No Profile"}
+    title={$activeProfile?.name ?? "default"}
   >
     <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.5">
       <rect x="2" y="2" width="12" height="4" rx="1" />
       <rect x="2" y="10" width="12" height="4" rx="1" />
     </svg>
     <span class="topbar-selector-label" class:placeholder={!$activeProfile}>
-      {$activeProfile?.name ?? "No Profile"}
+      {$activeProfile?.name ?? "default"}
     </span>
     <svg class="topbar-chevron" class:open={isOpen} width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
       <path d="M3 4l2 2 2-2" />
@@ -149,7 +149,7 @@
           </div>
         {/each}
       {:else}
-        <div class="dropdown-empty">No profiles</div>
+        <div class="dropdown-empty">Using default profile</div>
       {/if}
 
       <div class="dropdown-footer">

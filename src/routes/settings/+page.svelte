@@ -388,6 +388,7 @@
         remove_archives: true,
         remove_enb: false,
         remove_saves: cleanRemoveSaves,
+        remove_skse: false,
         orphans_only: orphansOnly,
         dry_run: false,
         exclude_patterns: [],
@@ -1009,7 +1010,7 @@
           <div style="display: flex; align-items: center; justify-content: space-between;">
             <div>
               <span class="row-label">Clean Game Directory</span>
-              <p class="row-description">Scan for and remove non-stock files from the game's Data folder. Use this to restore a clean install.</p>
+              <p class="row-description">Scan for and remove non-stock mod files from the game's Data folder. Tools (xEdit, Pandora, etc.) and SKSE are preserved — uninstall those separately below.</p>
             </div>
             <div style="display: flex; gap: 8px; align-items: center;">
               <button
@@ -1098,7 +1099,7 @@
                       Remove saves ({cleanReport.save_files.length} files)
                     </label>
                   {/if}
-                  <span class="clean-option-note">SKSE can be reinstalled after cleaning</span>
+                  <span class="clean-option-note">Tools and SKSE are not affected — manage them in Modding Tools below</span>
                 </div>
                 <div class="clean-actions">
                   <button

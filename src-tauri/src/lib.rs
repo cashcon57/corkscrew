@@ -1860,6 +1860,7 @@ fn list_installed_collections_cmd(
                 image_url: meta.and_then(|m| m.image_url.clone()),
                 game_domain: meta.and_then(|m| m.game_domain.clone()),
                 installed_revision: meta.and_then(|m| m.installed_revision),
+                original_mod_count: meta.and_then(|m| m.total_mods),
             }
         })
         .collect())
@@ -2413,6 +2414,7 @@ async fn return_to_vanilla(
                 remove_archives: true,
                 remove_enb: false,
                 remove_saves: false,
+                remove_skse: false,
                 orphans_only: true,
                 dry_run: false,
                 exclude_patterns: Vec::new(),

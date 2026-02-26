@@ -280,16 +280,10 @@
             remove_archives: true,
             remove_enb: false,
             remove_saves: false,
+            remove_skse: false,
             orphans_only: false,
             dry_run: false,
-            exclude_patterns: [
-              "skse64_*.dll",
-              "skse64_loader.exe",
-              "SKSE/**",
-              "Data/SKSE/**",
-              "skse_*.dll",
-              "skse_loader.exe",
-            ],
+            exclude_patterns: [],
           });
           collectionUninstallStatus.update((s) => {
             if (!s) return s;
@@ -451,6 +445,7 @@
     remove_archives: true,
     remove_enb: false,
     remove_saves: false,
+    remove_skse: false,
     orphans_only: false,
     dry_run: false,
     exclude_patterns: [],
