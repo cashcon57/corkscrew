@@ -686,6 +686,43 @@ pub async fn install_collection(
         oauth::AuthMethod::None => false,
     };
 
+    // Download collection bundle to get real FOMOD choices, patches, and mod rules
+    let manifest = if let (Some(slug), Some(revision)) = (&manifest.slug, manifest.revision) {
+        let _ = app.emit(
+            INSTALL_PROGRESS_EVENT,
+            InstallProgress::Initializing {
+                message: "Downloading collection manifest...".to_string(),
+            },
+        );
+
+        let token = match &auth_method {
+            oauth::AuthMethod::ApiKey(key) => Some(key.clone()),
+            oauth::AuthMethod::OAuth(tokens) => Some(tokens.access_token.clone()),
+            oauth::AuthMethod::None => None,
+        };
+
+        match collections::fetch_collection_bundle(token.as_deref(), slug, revision).await {
+            Ok(bundle) => {
+                log::info!(
+                    "Downloaded collection bundle for {}/rev{}: {} mods with choices",
+                    slug,
+                    revision,
+                    bundle.mods.iter().filter(|m| m.choices.is_some()).count()
+                );
+                merge_bundle_into_manifest(manifest, &bundle)
+            }
+            Err(e) => {
+                log::warn!(
+                    "Failed to download collection bundle: {} — FOMOD choices will require manual selection",
+                    e
+                );
+                manifest.clone()
+            }
+        }
+    } else {
+        manifest.clone()
+    };
+    let manifest = &manifest;
 
     // Resolve install order (topological sort respecting mod rules)
     let _ = app.emit(
@@ -2503,12 +2540,51 @@ async fn stage_and_deploy(
 }
 
 /// Parse FOMOD choices from a collection manifest's JSON value into the
-/// HashMap format expected by `get_files_for_selections`.
+/// HashMap<GroupName, Vec<OptionName>> format expected by `get_files_for_selections`.
+///
+/// NexusMods collection.json uses the format:
+/// ```json
+/// { "type": "fomod", "options": [
+///   { "name": "StepName", "groups": [
+///     { "name": "GroupName", "choices": [
+///       { "name": "OptionName", "idx": 2 }
+///     ]}
+///   ]}
+/// ]}
+/// ```
 fn parse_fomod_choices(
     choices: &serde_json::Value,
-) -> Option<std::collections::HashMap<String, Vec<String>>> {
+) -> Option<HashMap<String, Vec<String>>> {
     let obj = choices.as_object()?;
-    let mut result = std::collections::HashMap::new();
+
+    // Check for NexusMods nested format: { "type": "fomod", "options": [...] }
+    if obj.get("type").and_then(|v| v.as_str()) == Some("fomod") {
+        let options = obj.get("options")?.as_array()?;
+        let mut result = HashMap::new();
+
+        for step in options {
+            let groups = step.get("groups").and_then(|v| v.as_array())?;
+            for group in groups {
+                let group_name = group.get("name").and_then(|v| v.as_str())?;
+                let group_choices = group.get("choices").and_then(|v| v.as_array())?;
+                let selected: Vec<String> = group_choices
+                    .iter()
+                    .filter_map(|c| c.get("name").and_then(|v| v.as_str()).map(String::from))
+                    .collect();
+                if !selected.is_empty() {
+                    result.insert(group_name.to_string(), selected);
+                }
+            }
+        }
+
+        if result.is_empty() {
+            return None;
+        }
+        return Some(result);
+    }
+
+    // Fallback: flat format { "GroupName": ["Option1", "Option2"] }
+    let mut result = HashMap::new();
     for (key, value) in obj {
         if let Some(arr) = value.as_array() {
             let selections: Vec<String> = arr
@@ -2518,7 +2594,79 @@ fn parse_fomod_choices(
             result.insert(key.clone(), selections);
         }
     }
-    Some(result)
+    if result.is_empty() { None } else { Some(result) }
+}
+
+/// Merge FOMOD choices, patches, rules, and plugins from the downloaded
+/// collection bundle into the frontend-built manifest.
+fn merge_bundle_into_manifest(
+    frontend: &collections::CollectionManifest,
+    bundle: &collections::CollectionManifest,
+) -> collections::CollectionManifest {
+    let mut merged = frontend.clone();
+
+    // Build lookup by (mod_id, file_id) from bundle manifest
+    let mut bundle_lookup: HashMap<(i64, i64), &CollectionModEntry> = HashMap::new();
+    for entry in &bundle.mods {
+        if let (Some(mod_id), Some(file_id)) = (entry.source.mod_id, entry.source.file_id) {
+            bundle_lookup.insert((mod_id, file_id), entry);
+        }
+    }
+
+    // Also build a name-based fallback lookup
+    let mut bundle_name_lookup: HashMap<String, &CollectionModEntry> = HashMap::new();
+    for entry in &bundle.mods {
+        bundle_name_lookup.insert(entry.name.to_lowercase(), entry);
+    }
+
+    let mut merged_count = 0usize;
+    for mod_entry in &mut merged.mods {
+        // Try (mod_id, file_id) match first, then name fallback
+        let bundle_entry = if let (Some(mod_id), Some(file_id)) =
+            (mod_entry.source.mod_id, mod_entry.source.file_id)
+        {
+            bundle_lookup.get(&(mod_id, file_id)).copied()
+        } else {
+            None
+        }
+        .or_else(|| bundle_name_lookup.get(&mod_entry.name.to_lowercase()).copied());
+
+        if let Some(be) = bundle_entry {
+            if mod_entry.choices.is_none() {
+                mod_entry.choices = be.choices.clone();
+            }
+            if mod_entry.patches.is_none() {
+                mod_entry.patches = be.patches.clone();
+            }
+            if mod_entry.phase.is_none() {
+                mod_entry.phase = be.phase;
+            }
+            if mod_entry.file_overrides.is_empty() {
+                mod_entry.file_overrides = be.file_overrides.clone();
+            }
+            if mod_entry.choices.is_some() || mod_entry.patches.is_some() {
+                merged_count += 1;
+            }
+        }
+    }
+
+    // Copy mod rules and plugins from bundle if frontend didn't provide them
+    if merged.mod_rules.is_empty() {
+        merged.mod_rules = bundle.mod_rules.clone();
+    }
+    if merged.plugins.is_empty() {
+        merged.plugins = bundle.plugins.clone();
+    }
+
+    log::info!(
+        "Merged bundle data into {} mods ({} with choices/patches), {} rules, {} plugins",
+        merged.mods.len(),
+        merged_count,
+        merged.mod_rules.len(),
+        merged.plugins.len()
+    );
+
+    merged
 }
 
 /// Check if a path component is safe (no traversal or absolute paths).
@@ -2715,13 +2863,48 @@ mod tests {
     #[test]
     fn test_parse_fomod_choices_empty() {
         let json = serde_json::json!({});
-        let result = parse_fomod_choices(&json).unwrap();
-        assert!(result.is_empty());
+        // Empty choices → None (no selections configured)
+        assert!(parse_fomod_choices(&json).is_none());
     }
 
     #[test]
     fn test_parse_fomod_choices_non_object() {
         let json = serde_json::json!("not an object");
         assert!(parse_fomod_choices(&json).is_none());
+    }
+
+    #[test]
+    fn test_parse_fomod_choices_nexus_format() {
+        let json = serde_json::json!({
+            "type": "fomod",
+            "options": [
+                {
+                    "name": "Texture Resolution",
+                    "groups": [
+                        {
+                            "name": "Resolution",
+                            "choices": [
+                                { "name": "4K", "idx": 0 },
+                                { "name": "Parallax", "idx": 2 }
+                            ]
+                        }
+                    ]
+                },
+                {
+                    "name": "Patches",
+                    "groups": [
+                        {
+                            "name": "Compatibility",
+                            "choices": [
+                                { "name": "USSEP Patch", "idx": 1 }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        });
+        let result = parse_fomod_choices(&json).unwrap();
+        assert_eq!(result["Resolution"], vec!["4K", "Parallax"]);
+        assert_eq!(result["Compatibility"], vec!["USSEP Patch"]);
     }
 }

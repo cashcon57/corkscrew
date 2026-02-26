@@ -228,6 +228,13 @@ export async function installSkseFromArchive(
   return invoke("install_skse_from_archive_cmd", { gameId, bottleName, archivePath });
 }
 
+export async function uninstallSkse(
+  gameId: string,
+  bottleName: string
+): Promise<SkseStatus> {
+  return invoke("uninstall_skse_cmd", { gameId, bottleName });
+}
+
 export async function setSksePreference(
   gameId: string,
   bottleName: string,

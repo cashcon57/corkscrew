@@ -506,7 +506,10 @@ function handleProgressEvent(e: InstallProgressEvent) {
         break;
 
       case "collectionCompleted":
-        next.phase = "complete";
+        // Don't override "failed" (cancelled) with "complete"
+        if (next.phase !== "failed") {
+          next.phase = "complete";
+        }
         next.result = {
           installed: e.installed,
           skipped: e.skipped,

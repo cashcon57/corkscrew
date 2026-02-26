@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
-  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, checkModToolUpdate, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads, checkSteamStatus, addToSteam, removeFromSteam, scanGameDirectory, cleanGameDirectory, checkSkyrimVersion, downgradeSkyrim, checkDeploymentHealth, redeployAllMods, getVerificationLevel, setVerificationLevel } from "$lib/api";
+  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, uninstallSkse, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, checkModToolUpdate, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads, checkSteamStatus, addToSteam, removeFromSteam, scanGameDirectory, cleanGameDirectory, checkSkyrimVersion, downgradeSkyrim, checkDeploymentHealth, redeployAllMods, getVerificationLevel, setVerificationLevel } from "$lib/api";
   import type { CleanReport, CleanResult, DowngradeStatus, DeploymentHealth, VerificationLevel } from "$lib/types";
   import type { SteamStatus } from "$lib/types";
   import { config, showError, showSuccess, selectedGame, skseStatus, currentPage, appVersion, updateReady, updateVersion, updateNotes, updateChecking, updateError, triggerUpdateCheck, controllerMode } from "$lib/stores";
@@ -30,6 +30,7 @@
   let autoDeleteArchives = $state(false);
   let savingAutoDelete = $state(false);
   let installingSkse = $state(false);
+  let uninstallingSkse = $state(false);
   let showComparisonDialog = $state(false);
 
   // Download concurrency
@@ -421,6 +422,20 @@
     }
   }
 
+  async function handleUninstallSkse() {
+    if (!game) return;
+    try {
+      uninstallingSkse = true;
+      const status = await uninstallSkse(game.game_id, game.bottle_name);
+      skseStatus.set(status);
+      showSuccess("SKSE uninstalled");
+    } catch (e: unknown) {
+      showError(`Failed to uninstall SKSE: ${e}`);
+    } finally {
+      uninstallingSkse = false;
+    }
+  }
+
   async function handleInstallTool(toolId: string) {
     if (!game) return;
     installingTool = toolId;
@@ -790,6 +805,15 @@
           <div class="tool-action">
             {#if skse?.installed}
               <span class="badge badge-green">Installed</span>
+              <button
+                class="btn-ghost btn-sm"
+                onclick={handleUninstallSkse}
+                disabled={uninstallingSkse}
+                type="button"
+                title="Remove SKSE files from the game directory"
+              >
+                {uninstallingSkse ? "Removing..." : "Uninstall"}
+              </button>
             {:else}
               <button
                 class="btn-secondary"

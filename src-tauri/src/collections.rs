@@ -503,6 +503,14 @@ query RevisionMods($slug: String!, $revision: Int, $viewAdultContent: Boolean) {
 }
 "#;
 
+const GET_BUNDLE_DOWNLOAD_LINK_QUERY: &str = r#"
+query RevisionDownloadLink($slug: String!, $revision: Int!, $viewAdultContent: Boolean) {
+    collectionRevision(slug: $slug, revision: $revision, viewAdultContent: $viewAdultContent) {
+        downloadLink
+    }
+}
+"#;
+
 // ---------------------------------------------------------------------------
 // Public API functions
 // ---------------------------------------------------------------------------
@@ -874,6 +882,80 @@ pub fn parse_collection_bundle(bundle_path: &Path) -> Result<CollectionManifest,
 pub fn parse_collection_json(json_str: &str) -> Result<CollectionManifest, CollectionsError> {
     let manifest: CollectionManifest = serde_json::from_str(json_str)?;
     Ok(manifest)
+}
+
+/// Fetch the collection bundle (7z) from NexusMods, extract collection.json,
+/// and return the parsed manifest with real FOMOD choices, patches, and rules.
+pub async fn fetch_collection_bundle(
+    api_key: Option<&str>,
+    slug: &str,
+    revision: u32,
+) -> Result<CollectionManifest, CollectionsError> {
+    // Step 1: Get the download link via GraphQL
+    let variables = serde_json::json!({
+        "slug": slug,
+        "revision": revision as i64,
+        "viewAdultContent": true,
+    });
+
+    let data: serde_json::Value =
+        graphql_query(api_key, GET_BUNDLE_DOWNLOAD_LINK_QUERY, variables).await?;
+
+    let download_path = data
+        .get("collectionRevision")
+        .and_then(|v| v.get("downloadLink"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| CollectionsError::GraphQL("No downloadLink in response".into()))?;
+
+    // Step 2: Construct full URL and download the bundle
+    let download_url = if download_path.starts_with("http") {
+        download_path.to_string()
+    } else {
+        format!("https://api.nexusmods.com{}", download_path)
+    };
+
+    let mut headers = HeaderMap::new();
+    headers.insert("Application-Name", HeaderValue::from_static("Corkscrew"));
+    let app_version = HeaderValue::from_str(env!("CARGO_PKG_VERSION"))
+        .unwrap_or_else(|_| HeaderValue::from_static("0.0.0"));
+    headers.insert("Application-Version", app_version);
+
+    let client = reqwest::Client::builder()
+        .user_agent(format!("Corkscrew/{}", env!("CARGO_PKG_VERSION")))
+        .default_headers(headers)
+        .timeout(std::time::Duration::from_secs(120))
+        .build()?;
+
+    let mut request = client.get(&download_url);
+    if let Some(key) = api_key {
+        if key.contains('.') && key.len() > 100 {
+            request = request.header(AUTHORIZATION, format!("Bearer {}", key));
+        } else {
+            request = request.header("apikey", key);
+        }
+    }
+
+    let response = request.send().await?;
+    if !response.status().is_success() {
+        return Err(CollectionsError::GraphQL(format!(
+            "Bundle download failed: HTTP {}",
+            response.status()
+        )));
+    }
+
+    let bytes = response.bytes().await?;
+
+    // Step 3: Write to temp file and parse
+    let temp_path = std::env::temp_dir().join(format!(
+        "corkscrew_bundle_{}_{}.7z",
+        slug.replace('/', "_"),
+        revision
+    ));
+    std::fs::write(&temp_path, &bytes)?;
+
+    let result = parse_collection_bundle(&temp_path);
+    let _ = std::fs::remove_file(&temp_path);
+    result
 }
 
 /// Apply mod rules to determine installation order.

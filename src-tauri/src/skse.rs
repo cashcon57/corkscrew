@@ -255,6 +255,60 @@ fn detect_skse_version(game_path: &Path) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
+// Uninstall
+// ---------------------------------------------------------------------------
+
+/// Remove SKSE files from the game directory.
+///
+/// Removes:
+/// - `skse64_loader.exe`
+/// - All `skse64_*.dll` files in the game root
+/// - `Data/SKSE/` directory (SKSE scripts and plugins)
+/// - `Data/Scripts/SKSE/` if it exists
+pub fn uninstall_skse(game_path: &Path) -> Result<SkseStatus> {
+    info!("Uninstalling SKSE from {}", game_path.display());
+
+    let mut removed = 0u32;
+
+    // Remove SKSE executables and DLLs from game root
+    if let Ok(entries) = fs::read_dir(game_path) {
+        for entry in entries.flatten() {
+            if !entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_lowercase();
+            if name == "skse64_loader.exe"
+                || (name.starts_with("skse64_") && name.ends_with(".dll"))
+            {
+                if let Err(e) = fs::remove_file(entry.path()) {
+                    warn!("Failed to remove {}: {}", entry.path().display(), e);
+                } else {
+                    info!("Removed {}", entry.path().display());
+                    removed += 1;
+                }
+            }
+        }
+    }
+
+    // Remove Data/SKSE/ directory (SKSE plugins and scripts)
+    let data_skse = game_path.join("Data").join("SKSE");
+    if data_skse.exists() {
+        match fs::remove_dir_all(&data_skse) {
+            Ok(()) => {
+                info!("Removed {}", data_skse.display());
+                removed += 1;
+            }
+            Err(e) => warn!("Failed to remove {}: {}", data_skse.display(), e),
+        }
+    }
+
+    info!("SKSE uninstall complete: {} items removed", removed);
+
+    // Return updated status
+    Ok(detect_skse(game_path))
+}
+
+// ---------------------------------------------------------------------------
 // Install from local archive
 // ---------------------------------------------------------------------------
 

@@ -154,7 +154,6 @@ const ENB_PATTERNS: &[&str] = &[
 const SAVE_PATTERNS: &[&str] = &[
     ".ess",   // Skyrim saves
     ".skse",  // SKSE co-saves
-    ".bak",   // Save backups
     "saves/", // Save directory
 ];
 

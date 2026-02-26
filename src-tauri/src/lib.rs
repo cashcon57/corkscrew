@@ -1102,6 +1102,26 @@ fn install_skse_from_archive_cmd(
 }
 
 #[tauri::command]
+fn uninstall_skse_cmd(game_id: String, bottle_name: String) -> Result<SkseStatus, String> {
+    if game_id != "skyrimse" {
+        return Err("SKSE is only available for Skyrim Special Edition".to_string());
+    }
+
+    let (_, game, _) = resolve_game(&game_id, &bottle_name)?;
+    let game_path = PathBuf::from(&game.game_path);
+
+    let mut status = skse::uninstall_skse(&game_path).map_err(|e| e.to_string())?;
+
+    // Disable SKSE preference after uninstall
+    if !status.installed {
+        let _ = skse::set_skse_preference(&game_id, &bottle_name, false);
+        status.use_skse = false;
+    }
+
+    Ok(status)
+}
+
+#[tauri::command]
 fn set_skse_preference_cmd(
     game_id: String,
     bottle_name: String,
@@ -5255,6 +5275,7 @@ pub fn run() {
             get_skse_builds,
             install_skse_auto_cmd,
             install_skse_from_archive_cmd,
+            uninstall_skse_cmd,
             set_skse_preference_cmd,
             check_skyrim_version,
             check_skse_compatibility_cmd,
