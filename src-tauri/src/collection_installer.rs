@@ -1192,6 +1192,7 @@ pub async fn install_collection(
                     },
                 );
 
+                let extract_start = std::time::Instant::now();
                 let temp_dir = std::env::temp_dir().join(format!("corkscrew_extract_{}", idx));
 
                 // Timeout extraction at 30 minutes to prevent indefinite hangs
@@ -1221,6 +1222,7 @@ pub async fn install_collection(
 
                 match result {
                     Ok(Ok(Ok(dir))) => {
+                        let extract_duration_ms = extract_start.elapsed().as_millis() as u64;
                         let extracted_size: u64 = walkdir::WalkDir::new(&dir)
                             .into_iter()
                             .filter_map(|e| e.ok())
@@ -1233,6 +1235,7 @@ pub async fn install_collection(
                                 mod_index: idx,
                                 mod_name: name,
                                 extracted_size,
+                                duration_ms: extract_duration_ms,
                             },
                         );
                         map_c.lock().unwrap_or_else(|e| e.into_inner()).insert(idx, dir);
@@ -1323,6 +1326,8 @@ pub async fn install_collection(
                             mod_index: i,
                             mod_name: mod_name.clone(),
                             mod_id: 0,
+                            deployed_size: 0,
+                            duration_ms: 0,
                         },
                     );
                     match prev_status.as_str() {
@@ -1394,6 +1399,8 @@ pub async fn install_collection(
                     mod_index: i,
                     mod_name: mod_name.clone(),
                     mod_id: 0,
+                    deployed_size: 0,
+                    duration_ms: 0,
                 },
             );
             already_installed += 1;
@@ -1434,6 +1441,7 @@ pub async fn install_collection(
             temp_guard.untrack(dir);
         }
 
+        let install_start = std::time::Instant::now();
         let result = install_single_mod(
             app,
             db,
@@ -1454,7 +1462,8 @@ pub async fn install_collection(
         .await;
 
         match result {
-            Ok(mod_id) => {
+            Ok((mod_id, deployed_size)) => {
+                let install_duration_ms = install_start.elapsed().as_millis() as u64;
                 // Tag this mod with the collection name
                 let _ = db.set_collection_name(mod_id, &manifest.name);
 
@@ -1464,6 +1473,8 @@ pub async fn install_collection(
                         mod_index: i,
                         mod_name: mod_name.clone(),
                         mod_id,
+                        deployed_size,
+                        duration_ms: install_duration_ms,
                     },
                 );
                 installed += 1;
@@ -1700,7 +1711,7 @@ async fn install_single_mod(
     manifest_name: &str,
     pre_downloaded: Option<&Path>,
     pre_extracted: Option<PathBuf>,
-) -> Result<i64, InstallError> {
+) -> Result<(i64, u64), InstallError> {
     let source_type = mod_entry.source.source_type.as_str();
 
     match source_type {
@@ -1789,7 +1800,7 @@ async fn install_nexus_mod(
     manifest_name: &str,
     pre_downloaded: Option<&Path>,
     pre_extracted: Option<PathBuf>,
-) -> Result<i64, InstallError> {
+) -> Result<(i64, u64), InstallError> {
     let nexus_mod_id = mod_entry
         .source
         .mod_id
@@ -1830,7 +1841,7 @@ async fn install_nexus_mod(
             },
         );
 
-        let mod_id = stage_and_deploy(
+        let (mod_id, deployed_size) = stage_and_deploy(
             app,
             db,
             archive,
@@ -1851,7 +1862,7 @@ async fn install_nexus_mod(
                 game_slug, nexus_mod_id
             ),
         );
-        return Ok(mod_id);
+        return Ok((mod_id, deployed_size));
     }
 
     // Fallback: no pre-downloaded archive — download now (shouldn't normally
@@ -1888,7 +1899,7 @@ async fn install_nexus_mod(
                     },
                 );
 
-                let mod_id = stage_and_deploy(
+                let (mod_id, deployed_size) = stage_and_deploy(
                     app,
                     db,
                     path,
@@ -1918,7 +1929,7 @@ async fn install_nexus_mod(
                     bottle_name,
                 );
 
-                return Ok(mod_id);
+                return Ok((mod_id, deployed_size));
             } else {
                 log::warn!(
                     "Cached download for '{}' has wrong file size, will re-download",
@@ -2028,7 +2039,7 @@ async fn install_nexus_mod(
     }
 
     // Stage and deploy the downloaded archive
-    let mod_id = stage_and_deploy(
+    let (mod_id, deployed_size) = stage_and_deploy(
         app,
         db,
         &archive_path,
@@ -2051,7 +2062,7 @@ async fn install_nexus_mod(
         ),
     );
 
-    Ok(mod_id)
+    Ok((mod_id, deployed_size))
 }
 
 /// Install a mod from a direct download URL.
@@ -2072,7 +2083,7 @@ async fn install_direct_mod(
     manifest_name: &str,
     pre_downloaded: Option<&Path>,
     pre_extracted: Option<PathBuf>,
-) -> Result<i64, InstallError> {
+) -> Result<(i64, u64), InstallError> {
     // If we already have a pre-downloaded archive from Phase 1, skip straight
     // to staging + deployment.
     if let Some(archive) = pre_downloaded {
@@ -2088,7 +2099,7 @@ async fn install_direct_mod(
             },
         );
 
-        let mod_id = stage_and_deploy(
+        let (mod_id, deployed_size) = stage_and_deploy(
             app,
             db,
             archive,
@@ -2104,7 +2115,7 @@ async fn install_direct_mod(
         if let Some(ref source_url) = mod_entry.source.url {
             let _ = db.set_source_url(mod_id, source_url);
         }
-        return Ok(mod_id);
+        return Ok((mod_id, deployed_size));
     }
 
     // Fallback: no pre-downloaded archive — download now.
@@ -2151,7 +2162,7 @@ async fn install_direct_mod(
                         },
                     );
 
-                    let mod_id = stage_and_deploy(
+                    let (mod_id, deployed_size) = stage_and_deploy(
                         app,
                         db,
                         path,
@@ -2168,7 +2179,7 @@ async fn install_direct_mod(
                         let _ = db.set_source_url(mod_id, source_url);
                     }
 
-                    return Ok(mod_id);
+                    return Ok((mod_id, deployed_size));
                 } else {
                     log::warn!(
                         "Cached download for '{}' has wrong file size, will re-download",
@@ -2262,7 +2273,7 @@ async fn install_direct_mod(
         let _ = db.add_download_collection_ref(dl_id, manifest_name, game_id, bottle_name);
     }
 
-    let mod_id = stage_and_deploy(
+    let (mod_id, deployed_size) = stage_and_deploy(
         app,
         db,
         &archive_path,
@@ -2279,7 +2290,7 @@ async fn install_direct_mod(
         let _ = db.set_source_url(mod_id, source_url);
     }
 
-    Ok(mod_id)
+    Ok((mod_id, deployed_size))
 }
 
 /// Common staging and deployment pipeline for an already-downloaded archive.
@@ -2299,7 +2310,7 @@ async fn stage_and_deploy(
     bottle_name: &str,
     data_dir: &Path,
     pre_extracted: Option<PathBuf>,
-) -> Result<i64, InstallError> {
+) -> Result<(i64, u64), InstallError> {
     let mod_name = &mod_entry.name;
 
     // Step: extract
@@ -2597,7 +2608,16 @@ async fn stage_and_deploy(
         let _ = db.set_enabled(mod_id, false);
     }
 
-    Ok(mod_id)
+    // Calculate deployed size from staging files
+    let deployed_size: u64 = files_to_deploy
+        .iter()
+        .map(|f| {
+            let path = staging_result.staging_path.join(f);
+            path.metadata().map(|m| m.len()).unwrap_or(0)
+        })
+        .sum();
+
+    Ok((mod_id, deployed_size))
 }
 
 /// Parse FOMOD choices from a collection manifest's JSON value into the
@@ -2724,10 +2744,15 @@ fn merge_bundle_into_manifest(
         merged.plugins = bundle.plugins.clone();
     }
 
+    let bundle_choices_count = bundle.mods.iter().filter(|m| m.choices.is_some()).count();
+    let merged_choices_count = merged.mods.iter().filter(|m| m.choices.is_some()).count();
     log::info!(
-        "Merged bundle data into {} mods ({} with choices/patches), {} rules, {} plugins",
+        "Bundle merge: {} frontend mods, {} bundle mods ({} with choices), {} matched ({} now have choices), {} rules, {} plugins",
         merged.mods.len(),
+        bundle.mods.len(),
+        bundle_choices_count,
         merged_count,
+        merged_choices_count,
         merged.mod_rules.len(),
         merged.plugins.len()
     );

@@ -379,17 +379,27 @@ function handleProgressEvent(e: InstallProgressEvent) {
         }
         break;
 
-      case "stagingModCompleted":
+      case "stagingModCompleted": {
+        // Calculate per-mod extraction speed
+        let perModExtractSpeed: number | undefined;
+        if (e.extracted_size && e.duration_ms && e.duration_ms > 0) {
+          perModExtractSpeed = e.extracted_size / (e.duration_ms / 1000);
+        }
         if (next.modDetails[e.mod_index]) {
           next.modDetails = [...next.modDetails];
-          next.modDetails[e.mod_index] = { ...next.modDetails[e.mod_index], status: "staged" };
+          next.modDetails[e.mod_index] = {
+            ...next.modDetails[e.mod_index],
+            status: "staged",
+            extractionSpeed: perModExtractSpeed,
+          };
         }
-        // Track extraction throughput
+        // Track global extraction throughput
         if (e.extracted_size) {
           stagingSizeAccumulator += e.extracted_size;
           next.stagingSpeed = calculateStagingSpeed(stagingSizeAccumulator);
         }
         break;
+      }
 
       case "stagingModFailed":
         if (next.modDetails[e.mod_index]) {
@@ -446,10 +456,24 @@ function handleProgressEvent(e: InstallProgressEvent) {
         }
         break;
 
-      case "modCompleted":
+      case "modCompleted": {
+        // Calculate per-mod install speed
+        let perModInstallSpeed: number | undefined;
+        if (e.deployed_size && e.duration_ms && e.duration_ms > 0) {
+          perModInstallSpeed = e.deployed_size / (e.duration_ms / 1000);
+        }
         if (next.modDetails[e.mod_index]) {
           next.modDetails = [...next.modDetails];
-          next.modDetails[e.mod_index] = { ...next.modDetails[e.mod_index], status: "done" };
+          next.modDetails[e.mod_index] = {
+            ...next.modDetails[e.mod_index],
+            status: "done",
+            installSpeed: perModInstallSpeed,
+          };
+        }
+        // Track global install throughput
+        if (e.deployed_size) {
+          installSizeAccumulator += e.deployed_size;
+          next.installSpeed = calculateInstallSpeed(installSizeAccumulator);
         }
         // Also advance install counter (in case modStarted was missed)
         {
@@ -460,6 +484,7 @@ function handleProgressEvent(e: InstallProgressEvent) {
           }
         }
         break;
+      }
 
       case "modFailed":
         if (next.modDetails[e.mod_index]) {

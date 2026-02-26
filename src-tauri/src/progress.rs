@@ -24,6 +24,8 @@ pub enum InstallProgress {
         mod_index: usize,
         mod_name: String,
         mod_id: i64,
+        deployed_size: u64,
+        duration_ms: u64,
     },
     ModFailed {
         mod_index: usize,
@@ -87,6 +89,7 @@ pub enum InstallProgress {
         mod_index: usize,
         mod_name: String,
         extracted_size: u64,
+        duration_ms: u64,
     },
     StagingModFailed {
         mod_index: usize,

@@ -393,6 +393,8 @@ fn install_mod_cmd(
             mod_index: 0,
             mod_name: name,
             mod_id,
+            deployed_size: 0,
+            duration_ms: 0,
         },
     );
 

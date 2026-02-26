@@ -885,10 +885,78 @@ pub fn parse_collection_bundle(bundle_path: &Path) -> Result<CollectionManifest,
     parse_collection_json(&json_str)
 }
 
+/// NexusMods bundle format wraps collection metadata in an `info` object.
+/// This struct mirrors the official Vortex `ICollection` interface.
+#[derive(Debug, Deserialize)]
+struct NexusBundleFormat {
+    #[serde(default)]
+    info: Option<NexusBundleInfo>,
+    #[serde(default)]
+    mods: Vec<CollectionModEntry>,
+    #[serde(default, rename = "modRules")]
+    mod_rules: Vec<CollectionModRule>,
+    #[serde(default)]
+    plugins: Vec<CollectionPlugin>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NexusBundleInfo {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    author: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default, alias = "domainName")]
+    game_domain: String,
+    #[serde(default, rename = "installInstructions")]
+    install_instructions: Option<String>,
+}
+
 /// Parse a raw collection.json string.
+///
+/// Handles two formats:
+/// 1. Corkscrew flat format: `{ "name": "...", "mods": [...] }` (from frontend)
+/// 2. NexusMods bundle format: `{ "info": { "name": "..." }, "mods": [...] }` (from Vortex)
 pub fn parse_collection_json(json_str: &str) -> Result<CollectionManifest, CollectionsError> {
-    let manifest: CollectionManifest = serde_json::from_str(json_str)?;
-    Ok(manifest)
+    // Try our flat format first (used by frontend manifests)
+    if let Ok(manifest) = serde_json::from_str::<CollectionManifest>(json_str) {
+        return Ok(manifest);
+    }
+
+    // Try NexusMods bundle format (info wrapper)
+    let bundle: NexusBundleFormat = serde_json::from_str(json_str).map_err(|e| {
+        CollectionsError::Archive(format!("Failed to parse collection.json: {}", e))
+    })?;
+
+    let info = bundle.info.unwrap_or(NexusBundleInfo {
+        name: String::new(),
+        author: String::new(),
+        description: String::new(),
+        game_domain: String::new(),
+        install_instructions: None,
+    });
+
+    log::info!(
+        "Parsed NexusMods bundle format: name='{}', {} mods, {} with choices",
+        info.name,
+        bundle.mods.len(),
+        bundle.mods.iter().filter(|m| m.choices.is_some()).count()
+    );
+
+    Ok(CollectionManifest {
+        name: info.name,
+        author: info.author,
+        description: info.description,
+        game_domain: info.game_domain,
+        mods: bundle.mods,
+        mod_rules: bundle.mod_rules,
+        plugins: bundle.plugins,
+        install_instructions: info.install_instructions,
+        slug: None,
+        image_url: None,
+        revision: None,
+    })
 }
 
 /// Fetch the collection bundle (7z) from NexusMods, extract collection.json,
@@ -1424,6 +1492,87 @@ mod tests {
             ebt.instructions.as_deref(),
             Some("Choose 'Lite' preset during FOMOD")
         );
+    }
+
+    #[test]
+    fn test_parse_nexus_bundle_format() {
+        // This is the actual format NexusMods/Vortex uses in collection bundles
+        let json = r#"{
+            "info": {
+                "name": "Immersive & Pure",
+                "author": "TestAuthor",
+                "description": "A collection",
+                "domainName": "skyrimspecialedition"
+            },
+            "mods": [
+                {
+                    "name": "Spell Perk Item Distributor",
+                    "version": "6.6.1",
+                    "optional": false,
+                    "domainName": "skyrimspecialedition",
+                    "source": {
+                        "type": "nexus",
+                        "modId": 36869,
+                        "fileId": 412345,
+                        "md5": "abc123",
+                        "fileSize": 1048576,
+                        "updatePolicy": "prefer"
+                    },
+                    "choices": {
+                        "type": "fomod",
+                        "options": [
+                            {
+                                "name": "Main",
+                                "groups": [
+                                    {
+                                        "name": "DLL",
+                                        "type": "SelectExactlyOne",
+                                        "choices": [
+                                            { "name": "SSE v1.6.629+ (\"Anniversary Edition\")", "idx": 0 }
+                                        ]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                },
+                {
+                    "name": "SkyUI",
+                    "version": "5.2",
+                    "optional": false,
+                    "domainName": "skyrimspecialedition",
+                    "source": {
+                        "type": "nexus",
+                        "modId": 12604,
+                        "fileId": 35407
+                    }
+                }
+            ],
+            "modRules": [
+                {
+                    "source": { "logicalFileName": "skyui" },
+                    "type": "requires",
+                    "reference": { "logicalFileName": "spid" }
+                }
+            ],
+            "plugins": []
+        }"#;
+
+        let manifest = parse_collection_json(json).unwrap();
+        assert_eq!(manifest.name, "Immersive & Pure");
+        assert_eq!(manifest.author, "TestAuthor");
+        assert_eq!(manifest.game_domain, "skyrimspecialedition");
+        assert_eq!(manifest.mods.len(), 2);
+        assert_eq!(manifest.mod_rules.len(), 1);
+
+        let spid = &manifest.mods[0];
+        assert_eq!(spid.name, "Spell Perk Item Distributor");
+        assert_eq!(spid.source.mod_id, Some(36869));
+        assert!(spid.choices.is_some(), "FOMOD choices should be present");
+
+        // Verify the choices have the expected structure
+        let choices = spid.choices.as_ref().unwrap();
+        assert_eq!(choices.get("type").and_then(|v| v.as_str()), Some("fomod"));
     }
 
     #[test]

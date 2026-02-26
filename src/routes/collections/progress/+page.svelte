@@ -792,9 +792,6 @@
                   {/if}
                 {:else if mod.status === "extracting"}
                   extracting...
-                  {#if stagingSpeed > 0}
-                    <span class="speed-inline">{formatBytes(stagingSpeed)}/s</span>
-                  {/if}
                 {:else if mod.status === "deploying"}
                   deploying files...
                 {:else if mod.status === "installing"}
@@ -836,6 +833,11 @@
               <span class="activity-name activity-name-faded" title={recent.name}>{recent.name}</span>
               <span class="activity-status activity-status-done">
                 {recent.status === "done" ? "completed" : recent.status === "failed" ? "failed" : recent.status}
+                {#if recent.status === "staged" && mods[recent.index]?.extractionSpeed}
+                  <span class="speed-inline">{formatBytes(mods[recent.index].extractionSpeed!)}/s</span>
+                {:else if recent.status === "done" && mods[recent.index]?.installSpeed}
+                  <span class="speed-inline">{formatBytes(mods[recent.index].installSpeed!)}/s</span>
+                {/if}
               </span>
             </div>
           {/each}

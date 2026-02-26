@@ -60,6 +60,8 @@ export interface ModProgressDetail {
   downloadBytes?: number;
   downloadTotal?: number;
   stepDetail?: string;
+  extractionSpeed?: number;
+  installSpeed?: number;
   fomodData?: {
     correlationId: string;
     installer: FomodInstaller;

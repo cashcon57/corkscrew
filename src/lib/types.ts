@@ -1161,7 +1161,7 @@ export type InstallProgressEvent =
   | { kind: "modStarted"; mod_index: number; total_mods: number; mod_name: string }
   | { kind: "stepChanged"; mod_index: number; step: string; detail: string | null }
   | { kind: "downloadProgress"; mod_index: number; downloaded: number; total: number }
-  | { kind: "modCompleted"; mod_index: number; mod_name: string; mod_id: number }
+  | { kind: "modCompleted"; mod_index: number; mod_name: string; mod_id: number; deployed_size: number; duration_ms: number }
   | { kind: "modFailed"; mod_index: number; mod_name: string; error: string }
   | { kind: "collectionCompleted"; installed: number; skipped: number; failed: number }
   | { kind: "userActionRequired"; mod_index: number; mod_name: string; action: string; url: string | null; instructions: string | null }
@@ -1174,7 +1174,7 @@ export type InstallProgressEvent =
   | { kind: "installPhaseStarted"; total_mods: number }
   | { kind: "stagingPhaseStarted"; total_mods: number; max_concurrent: number }
   | { kind: "stagingModStarted"; mod_index: number; mod_name: string }
-  | { kind: "stagingModCompleted"; mod_index: number; mod_name: string; extracted_size?: number }
+  | { kind: "stagingModCompleted"; mod_index: number; mod_name: string; extracted_size?: number; duration_ms?: number }
   | { kind: "stagingModFailed"; mod_index: number; mod_name: string; error: string }
   | { kind: "fomodRequired"; mod_index: number; mod_name: string; correlation_id: string; installer: FomodInstaller }
   | { kind: "initializing"; message: string };
