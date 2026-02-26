@@ -350,6 +350,15 @@ pub fn clean_game_directory(
             removed_files.push(file.relative_path.clone());
             bytes_freed += file.size;
         } else if abs_path.exists() {
+            // Make writable before deleting — some mod files are read-only
+            if let Ok(metadata) = fs::metadata(&abs_path) {
+                let perms = metadata.permissions();
+                if perms.readonly() {
+                    let mut writable = perms;
+                    writable.set_readonly(false);
+                    let _ = fs::set_permissions(&abs_path, writable);
+                }
+            }
             match fs::remove_file(&abs_path) {
                 Ok(()) => {
                     removed_files.push(file.relative_path.clone());

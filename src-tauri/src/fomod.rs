@@ -162,7 +162,8 @@ fn read_text_content(reader: &mut Reader<&[u8]>, buf: &mut Vec<u8>) -> String {
 fn get_attr(tag: &quick_xml::events::BytesStart<'_>, name: &str) -> Option<String> {
     for attr in tag.attributes().flatten() {
         if attr.key.as_ref() == name.as_bytes() {
-            return String::from_utf8(attr.value.to_vec()).ok();
+            // Use unescape_value to decode XML entities (&quot;, &amp;, etc.)
+            return attr.unescape_value().ok().map(|s| s.into_owned());
         }
     }
     None

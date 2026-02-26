@@ -1,10 +1,11 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
   import { untrack } from "svelte";
-  import { collectionInstallStatus } from "$lib/stores";
+  import { collectionInstallStatus, selectedGame, showError, showSuccess } from "$lib/stores";
   import type { PendingFomod } from "$lib/stores";
   import { dismissInstall } from "$lib/installService";
-  import { cancelCollectionInstall, submitFomodChoices } from "$lib/api";
+  import { cancelCollectionInstall, submitFomodChoices, deleteCollection } from "$lib/api";
+  import { get } from "svelte/store";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { marked } from "marked";
   import DOMPurify from "dompurify";
@@ -232,6 +233,9 @@
   }
 
   let showCancelConfirm = $state(false);
+  let cancelDeleteCollection = $state(false);
+  let cancelDeleteDownloads = $state(false);
+  let cancelInProgress = $state(false);
 
   function handleCancel() {
     dismissInstall();
@@ -241,12 +245,41 @@
   }
 
   async function handleCancelInstall() {
-    showCancelConfirm = false;
+    const shouldDelete = cancelDeleteCollection;
+    const deleteDownloads = cancelDeleteDownloads;
+    const colName = status?.collectionName ?? "";
+    cancelInProgress = true;
+
     // Signal the backend to stop the install loop
     try {
       await cancelCollectionInstall();
     } catch { /* best effort */ }
+
+    if (shouldDelete && colName) {
+      const game = get(selectedGame);
+      if (game) {
+        try {
+          const result = await deleteCollection(
+            game.game_id,
+            game.bottle_name,
+            colName,
+            deleteDownloads,
+          );
+          showSuccess(
+            `Cancelled and deleted "${colName}" — ${result.mods_removed} mods removed` +
+            (result.downloads_removed > 0 ? `, ${result.downloads_removed} downloads removed` : ""),
+          );
+        } catch (e) {
+          showError(`Failed to delete collection: ${e}`);
+        }
+      }
+    }
+
     // Update the UI to reflect cancellation
+    showCancelConfirm = false;
+    cancelInProgress = false;
+    cancelDeleteCollection = false;
+    cancelDeleteDownloads = false;
     collectionInstallStatus.update(s => s ? { ...s, phase: "failed" as const } : s);
   }
 
@@ -306,7 +339,7 @@
           {status.elapsed}
         </span>
         {#if phase !== "complete" && phase !== "failed"}
-          <button class="btn btn-ghost cancel-install-btn" onclick={() => showCancelConfirm = true}>
+          <button class="btn btn-ghost cancel-install-btn" onclick={() => { cancelDeleteCollection = false; cancelDeleteDownloads = false; showCancelConfirm = true; }}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <circle cx="12" cy="12" r="10" />
               <line x1="15" y1="9" x2="9" y2="15" />
@@ -949,7 +982,7 @@
     <!-- Cancel Button (during active install) -->
     {#if phase === "downloading" || phase === "installing" || phase === "staging"}
       <div class="footer-actions">
-        <button class="btn btn-ghost-danger" onclick={() => showCancelConfirm = true}>
+        <button class="btn btn-ghost-danger" onclick={() => { cancelDeleteCollection = false; cancelDeleteDownloads = false; showCancelConfirm = true; }}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="10" />
             <line x1="15" y1="9" x2="9" y2="15" />
@@ -984,7 +1017,7 @@
 
 <!-- Cancel Confirmation Modal -->
 {#if showCancelConfirm}
-  <div class="modal-overlay" onclick={() => showCancelConfirm = false} role="dialog" aria-modal="true">
+  <div class="modal-overlay" onclick={() => { if (!cancelInProgress) showCancelConfirm = false; }} role="dialog" aria-modal="true">
     <div class="modal-panel cancel-modal" onclick={(e) => e.stopPropagation()}>
       <div class="cancel-modal-icon">
         <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -995,15 +1028,45 @@
       </div>
       <h3 class="cancel-modal-title">Cancel Installation?</h3>
       <p class="cancel-modal-desc">
-        Mods already installed will be kept. Downloaded archives are preserved and can be reused.
-        The install can be resumed later from the checkpoint.
+        {#if cancelDeleteCollection}
+          All installed mods from this collection will be uninstalled and cleaned up.
+        {:else}
+          Mods already installed will be kept. The install can be resumed later from the checkpoint.
+        {/if}
       </p>
+      <div class="cancel-modal-options">
+        <label class="cancel-option">
+          <input type="checkbox" bind:checked={cancelDeleteCollection} disabled={cancelInProgress} />
+          <span class="cancel-option-text">
+            <span class="cancel-option-label">Delete collection and uninstall all mods</span>
+            <span class="cancel-option-hint">Remove everything installed so far</span>
+          </span>
+        </label>
+        {#if cancelDeleteCollection}
+          <label class="cancel-option cancel-option-nested">
+            <input type="checkbox" bind:checked={cancelDeleteDownloads} disabled={cancelInProgress} />
+            <span class="cancel-option-text">
+              <span class="cancel-option-label">Also delete downloaded archives</span>
+              <span class="cancel-option-hint">Free disk space — archives can be re-downloaded later</span>
+            </span>
+          </label>
+        {/if}
+      </div>
       <div class="cancel-modal-actions">
-        <button class="btn btn-primary" onclick={() => showCancelConfirm = false}>
+        <button class="btn btn-primary" onclick={() => showCancelConfirm = false} disabled={cancelInProgress}>
           Continue Installing
         </button>
-        <button class="btn btn-ghost-danger" onclick={handleCancelInstall}>
-          Cancel Install
+        <button
+          class="btn {cancelDeleteCollection ? 'btn-danger' : 'btn-ghost-danger'}"
+          onclick={handleCancelInstall}
+          disabled={cancelInProgress}
+        >
+          {#if cancelInProgress}
+            <span class="spinner spinner-xs"></span>
+            {cancelDeleteCollection ? "Deleting..." : "Cancelling..."}
+          {:else}
+            {cancelDeleteCollection ? "Cancel & Delete" : "Cancel Install"}
+          {/if}
         </button>
       </div>
     </div>
@@ -2367,6 +2430,55 @@
     color: var(--text-secondary);
     line-height: 1.5;
     margin: 0;
+  }
+
+  .cancel-modal-options {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    width: 100%;
+    text-align: left;
+  }
+
+  .cancel-option {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: background 0.1s ease;
+  }
+
+  .cancel-option:hover {
+    background: var(--surface-hover);
+  }
+
+  .cancel-option-nested {
+    margin-left: var(--space-6);
+  }
+
+  .cancel-option input[type="checkbox"] {
+    margin-top: 2px;
+    flex-shrink: 0;
+    accent-color: var(--accent);
+  }
+
+  .cancel-option-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .cancel-option-label {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-primary);
+  }
+
+  .cancel-option-hint {
+    font-size: 11px;
+    color: var(--text-tertiary);
   }
 
   .cancel-modal-actions {

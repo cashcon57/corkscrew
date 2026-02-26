@@ -2172,6 +2172,22 @@ impl ModDatabase {
         Ok(())
     }
 
+    /// Delete all checkpoints for a given collection (used when collection is deleted).
+    pub fn delete_collection_checkpoints(
+        &self,
+        collection_name: &str,
+        game_id: &str,
+        bottle_name: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "DELETE FROM collection_install_checkpoints
+             WHERE collection_name = ?1 AND game_id = ?2 AND bottle_name = ?3",
+            params![collection_name, game_id, bottle_name],
+        )?;
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Pinned game versions
     // -----------------------------------------------------------------------

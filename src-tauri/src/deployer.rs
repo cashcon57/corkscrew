@@ -377,6 +377,15 @@ pub fn undeploy_mod(
         let file_path = data_dir.join(rel_path);
 
         if file_path.exists() {
+            // Make writable before deleting — some mod files are read-only
+            if let Ok(metadata) = fs::metadata(&file_path) {
+                let perms = metadata.permissions();
+                if perms.readonly() {
+                    let mut writable = perms;
+                    writable.set_readonly(false);
+                    let _ = fs::set_permissions(&file_path, writable);
+                }
+            }
             match fs::remove_file(&file_path) {
                 Ok(()) => {
                     actually_removed.push(rel_path.clone());

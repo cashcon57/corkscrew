@@ -2127,6 +2127,39 @@ async fn delete_collection_cmd(
             errors.push(format!("Failed to remove collection metadata: {}", e));
         }
 
+        // Clean up install checkpoint so "Resume Install" prompt doesn't appear
+        if let Err(e) =
+            db.delete_collection_checkpoints(&collection_name, &game_id, &bottle_name)
+        {
+            errors.push(format!("Failed to remove install checkpoint: {}", e));
+        }
+
+        // Clean up orphaned files left behind by partial installs
+        let clean_opts = cleaner::CleanOptions {
+            remove_loose_files: true,
+            remove_archives: true,
+            remove_enb: false,
+            remove_saves: false,
+            remove_skse: false,
+            orphans_only: true,
+            dry_run: false,
+            exclude_patterns: Vec::new(),
+        };
+        match cleaner::clean_game_directory(&db, &game_id, &bottle_name, &data_dir, &clean_opts) {
+            Ok(result) => {
+                if !result.removed_files.is_empty() {
+                    log::info!(
+                        "Cleaned {} orphaned files after deleting collection '{}'",
+                        result.removed_files.len(),
+                        collection_name,
+                    );
+                }
+            }
+            Err(e) => {
+                errors.push(format!("Orphan cleanup failed: {}", e));
+            }
+        }
+
         // Emit: redeploy phase
         let _ = app.emit(
             "uninstall-progress",
