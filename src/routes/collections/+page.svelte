@@ -382,7 +382,9 @@
   let collectionsAuthorFilter = $state("");
   let collectionsMinDownloads = $state<number | null>(null);
   let collectionsMinEndorsements = $state<number | null>(null);
-  let collectionsMaxSize = $state<number | null>(null);
+  let collectionsMinSize = $state<number>(0);
+  let collectionsMaxSize = $state<number>(500 * 1024 * 1024 * 1024); // 500 GB default max
+  let sizeFilterActive = $state(false);
   let showCollectionsAdvancedFilters = $state(false);
   let collectionsAuthorTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -395,7 +397,7 @@
     (collectionsAuthorFilter.trim() ? 1 : 0) +
     (collectionsMinDownloads !== null ? 1 : 0) +
     (collectionsMinEndorsements !== null ? 1 : 0) +
-    (collectionsMaxSize !== null ? 1 : 0) +
+    (sizeFilterActive ? 1 : 0) +
     (cacheFilter !== "all" ? 1 : 0)
   );
 
@@ -403,7 +405,9 @@
     collectionsAuthorFilter = "";
     collectionsMinDownloads = null;
     collectionsMinEndorsements = null;
-    collectionsMaxSize = null;
+    collectionsMinSize = 0;
+    collectionsMaxSize = 500 * 1024 * 1024 * 1024;
+    sizeFilterActive = false;
     cacheFilter = "all";
     reloadWithSort();
   }
@@ -833,9 +837,12 @@
       });
     }
 
-    // Size filter
-    if (collectionsMaxSize !== null) {
-      result = result.filter(c => c.download_size != null && c.download_size <= collectionsMaxSize!);
+    // Size filter (dual-handle range slider)
+    if (sizeFilterActive) {
+      result = result.filter(c => {
+        if (c.download_size == null) return false;
+        return c.download_size >= collectionsMinSize && c.download_size <= collectionsMaxSize;
+      });
     }
 
     filtered = result;
@@ -1373,6 +1380,28 @@
     selectedCollection = null;
     selectedMods = [];
     renderedDescription = "";
+  }
+
+  // Logarithmic slider mapping: 0-100 slider → 0 to 500 GB
+  // slider=0 maps to 0 bytes; slider=1..100 maps logarithmically from 100 MB to 500 GB
+  const SIZE_LOG_FLOOR = 100 * 1024 * 1024;            // 100 MB
+  const SIZE_LOG_CEIL = 500 * 1024 * 1024 * 1024;      // 500 GB
+  const SIZE_LN_FLOOR = Math.log(SIZE_LOG_FLOOR);
+  const SIZE_LN_CEIL = Math.log(SIZE_LOG_CEIL);
+
+  function sizeToSlider(bytes: number): number {
+    if (bytes <= 0) return 0;
+    if (bytes >= SIZE_LOG_CEIL) return 100;
+    if (bytes <= SIZE_LOG_FLOOR) return (bytes / SIZE_LOG_FLOOR) * 1; // 0-1% for sub-100 MB
+    return 1 + ((Math.log(bytes) - SIZE_LN_FLOOR) / (SIZE_LN_CEIL - SIZE_LN_FLOOR)) * 99;
+  }
+
+  function sliderToSize(pct: number): number {
+    if (pct <= 0) return 0;
+    if (pct >= 100) return SIZE_LOG_CEIL;
+    if (pct <= 1) return Math.round((pct / 1) * SIZE_LOG_FLOOR);
+    const logVal = SIZE_LN_FLOOR + ((pct - 1) / 99) * (SIZE_LN_CEIL - SIZE_LN_FLOOR);
+    return Math.round(Math.exp(logVal));
   }
 
   function formatSize(bytes: number): string {
@@ -2782,14 +2811,58 @@
             </div>
           </div>
 
-          <div class="filter-section">
-            <label class="filter-label">Max Install Size</label>
-            <div class="filter-pills">
-              <button class="filter-pill" class:active={collectionsMaxSize === null} onclick={() => { collectionsMaxSize = null; }}>Any</button>
-              <button class="filter-pill" class:active={collectionsMaxSize === 5 * 1024 * 1024 * 1024} onclick={() => { collectionsMaxSize = 5 * 1024 * 1024 * 1024; }}>{"< 5 GB"}</button>
-              <button class="filter-pill" class:active={collectionsMaxSize === 10 * 1024 * 1024 * 1024} onclick={() => { collectionsMaxSize = 10 * 1024 * 1024 * 1024; }}>{"< 10 GB"}</button>
-              <button class="filter-pill" class:active={collectionsMaxSize === 20 * 1024 * 1024 * 1024} onclick={() => { collectionsMaxSize = 20 * 1024 * 1024 * 1024; }}>{"< 20 GB"}</button>
-              <button class="filter-pill" class:active={collectionsMaxSize === 50 * 1024 * 1024 * 1024} onclick={() => { collectionsMaxSize = 50 * 1024 * 1024 * 1024; }}>{"< 50 GB"}</button>
+          <div class="filter-section size-range-filter">
+            <label class="filter-label">Install Size Range</label>
+            <div class="size-range-labels">
+              <span class="size-range-value">{formatSize(collectionsMinSize)}</span>
+              <span class="size-range-dash">—</span>
+              <span class="size-range-value">{formatSize(collectionsMaxSize)}</span>
+            </div>
+            <div class="size-range-slider">
+              <div class="range-track">
+                <div
+                  class="range-fill"
+                  style="left: {(sizeToSlider(collectionsMinSize) / 100) * 100}%; right: {100 - (sizeToSlider(collectionsMaxSize) / 100) * 100}%"
+                ></div>
+              </div>
+              <input
+                type="range"
+                class="range-input range-min"
+                min="0"
+                max="100"
+                step="0.5"
+                value={sizeToSlider(collectionsMinSize)}
+                oninput={(e) => {
+                  const val = parseFloat(e.currentTarget.value);
+                  const maxSlider = sizeToSlider(collectionsMaxSize);
+                  if (val < maxSlider) {
+                    collectionsMinSize = sliderToSize(val);
+                    sizeFilterActive = true;
+                  }
+                }}
+              />
+              <input
+                type="range"
+                class="range-input range-max"
+                min="0"
+                max="100"
+                step="0.5"
+                value={sizeToSlider(collectionsMaxSize)}
+                oninput={(e) => {
+                  const val = parseFloat(e.currentTarget.value);
+                  const minSlider = sizeToSlider(collectionsMinSize);
+                  if (val > minSlider) {
+                    collectionsMaxSize = sliderToSize(val);
+                    sizeFilterActive = true;
+                  }
+                }}
+              />
+            </div>
+            <div class="size-range-presets">
+              <button class="filter-pill" class:active={!sizeFilterActive} onclick={() => { collectionsMinSize = 0; collectionsMaxSize = 500 * 1024 * 1024 * 1024; sizeFilterActive = false; }}>Any</button>
+              <button class="filter-pill" onclick={() => { collectionsMinSize = 0; collectionsMaxSize = 10 * 1024 * 1024 * 1024; sizeFilterActive = true; }}>{"< 10 GB"}</button>
+              <button class="filter-pill" onclick={() => { collectionsMinSize = 0; collectionsMaxSize = 50 * 1024 * 1024 * 1024; sizeFilterActive = true; }}>{"< 50 GB"}</button>
+              <button class="filter-pill" onclick={() => { collectionsMinSize = 50 * 1024 * 1024 * 1024; collectionsMaxSize = 500 * 1024 * 1024 * 1024; sizeFilterActive = true; }}>50+ GB</button>
             </div>
           </div>
         </div>
@@ -2821,10 +2894,10 @@
               <button onclick={() => { cacheFilter = "all"; }}>&times;</button>
             </span>
           {/if}
-          {#if collectionsMaxSize !== null}
+          {#if sizeFilterActive}
             <span class="filter-chip">
-              Max size: {"<"} {formatSize(collectionsMaxSize)}
-              <button onclick={() => { collectionsMaxSize = null; }}>&times;</button>
+              Size: {formatSize(collectionsMinSize)} — {formatSize(collectionsMaxSize)}
+              <button onclick={() => { collectionsMinSize = 0; collectionsMaxSize = 500 * 1024 * 1024 * 1024; sizeFilterActive = false; }}>&times;</button>
             </span>
           {/if}
           <button class="filter-chip filter-chip-clear" onclick={clearAllCollectionsFilters}>
@@ -5548,6 +5621,104 @@
     border-color: var(--system-accent);
     color: var(--system-accent);
     font-weight: 500;
+  }
+
+  /* Dual-handle range slider */
+  .size-range-filter {
+    min-width: 260px;
+  }
+
+  .size-range-labels {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-primary);
+  }
+
+  .size-range-value {
+    background: var(--bg-tertiary);
+    padding: 2px 8px;
+    border-radius: var(--radius-sm);
+    font-variant-numeric: tabular-nums;
+    font-size: 11px;
+  }
+
+  .size-range-dash {
+    color: var(--text-tertiary);
+  }
+
+  .size-range-slider {
+    position: relative;
+    height: 28px;
+    display: flex;
+    align-items: center;
+  }
+
+  .range-track {
+    position: absolute;
+    width: 100%;
+    height: 4px;
+    background: var(--bg-tertiary);
+    border-radius: 2px;
+  }
+
+  .range-fill {
+    position: absolute;
+    height: 100%;
+    background: var(--system-accent);
+    border-radius: 2px;
+  }
+
+  .range-input {
+    position: absolute;
+    width: 100%;
+    height: 4px;
+    appearance: none;
+    -webkit-appearance: none;
+    background: transparent;
+    pointer-events: none;
+    margin: 0;
+  }
+
+  .range-input::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    height: 16px;
+    width: 16px;
+    border-radius: 50%;
+    background: var(--system-accent);
+    border: 2px solid var(--surface);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+    cursor: pointer;
+    pointer-events: all;
+    position: relative;
+    z-index: 1;
+  }
+
+  .range-input::-moz-range-thumb {
+    height: 16px;
+    width: 16px;
+    border-radius: 50%;
+    background: var(--system-accent);
+    border: 2px solid var(--surface);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+    cursor: pointer;
+    pointer-events: all;
+  }
+
+  .range-input::-webkit-slider-thumb:hover {
+    transform: scale(1.15);
+  }
+
+  .range-input::-moz-range-thumb:hover {
+    transform: scale(1.15);
+  }
+
+  .size-range-presets {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
   }
 
   .active-filters {

@@ -1243,9 +1243,9 @@ export type WjInstallProgressEvent =
   | { type: "ExtractionArchiveCompleted"; name: string; index: number }
   | { type: "ExtractionArchiveFailed"; name: string; error: string }
   | { type: "DirectivePhaseStarted"; total: number; total_bytes: number }
-  | { type: "DirectiveProgress"; current: number; total: number; directive_type: string; bytes_processed: number; total_bytes: number }
-  | { type: "DeployStarted"; total: number; total_bytes: number }
-  | { type: "DeployProgress"; current: number; total: number; bytes_deployed: number; total_bytes: number }
+  | { type: "DirectiveProgress"; current: number; total: number; directive_type: string; bytes_processed: number; total_bytes: number; current_file: string }
+  | { type: "DeployStarted"; total: number; total_bytes: number; modlist_name: string }
+  | { type: "DeployProgress"; current: number; total: number; bytes_deployed: number; total_bytes: number; modlist_name: string }
   | { type: "InstallCompleted"; result: WjInstallResult }
   | { type: "InstallFailed"; error: string }
   | { type: "InstallCancelled" }

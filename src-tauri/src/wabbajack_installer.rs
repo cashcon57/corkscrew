@@ -148,16 +148,19 @@ pub enum WjInstallProgressEvent {
         directive_type: String,
         bytes_processed: u64,
         total_bytes: u64,
+        current_file: String,
     },
     DeployStarted {
         total: usize,
         total_bytes: u64,
+        modlist_name: String,
     },
     DeployProgress {
         current: usize,
         total: usize,
         bytes_deployed: u64,
         total_bytes: u64,
+        modlist_name: String,
     },
     InstallCompleted {
         result: WjInstallResult,
@@ -795,7 +798,7 @@ pub async fn install_wabbajack_modlist(
         _ => 50,
     };
     let directive_result = processor
-        .process_all(&modlist.directives, &|current, total, phase, bytes_processed, total_bytes| {
+        .process_all(&modlist.directives, &|current, total, phase, bytes_processed, total_bytes, current_file| {
             if current % progress_interval == 0 || current == total {
                 emit_progress(
                     &app_clone,
@@ -805,6 +808,7 @@ pub async fn install_wabbajack_modlist(
                         directive_type: phase.to_string(),
                         bytes_processed,
                         total_bytes,
+                        current_file: current_file.to_string(),
                     },
                 );
             }
@@ -875,6 +879,7 @@ pub async fn install_wabbajack_modlist(
         &WjInstallProgressEvent::DeployStarted {
             total: deploy_files.len(),
             total_bytes: total_deploy_bytes,
+            modlist_name: modlist.name.clone(),
         },
     );
 
@@ -911,6 +916,7 @@ pub async fn install_wabbajack_modlist(
                         total: deploy_files.len(),
                         bytes_deployed: total_deploy_bytes,
                         total_bytes: total_deploy_bytes,
+                        modlist_name: modlist.name.clone(),
                     },
                 );
 

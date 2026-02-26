@@ -484,6 +484,7 @@
             break;
           case "DirectiveProgress":
             wjCurrent = p.current;
+            wjCurrentFile = p.current_file ?? "";
             if (p.total_bytes > 0 && p.bytes_processed > 0) {
               wjBytesCompleted = p.bytes_processed;
               wjTotalBytes = p.total_bytes;
@@ -500,8 +501,9 @@
             wjCurrent = 0;
             wjTotalBytes = p.total_bytes ?? 0;
             wjBytesCompleted = 0;
+            wjCurrentFile = p.modlist_name ?? "";
             wjSpeedTracker.reset();
-            installStep = `Deploying files (0/${p.total.toLocaleString()})...`;
+            installStep = `Deploying ${p.modlist_name ? `"${p.modlist_name}" ` : ""}files (0/${p.total.toLocaleString()})...`;
             break;
           case "DeployProgress":
             wjCurrent = p.current;
