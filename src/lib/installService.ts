@@ -117,7 +117,7 @@ function computeOverallProgress(s: CollectionInstallStatus): number {
   if (s.phase === "complete") return 100;
   if (s.phase === "downloading") return Math.round(dlProgress * DL_WEIGHT * 100);
   if (s.phase === "staging") return Math.round((DL_WEIGHT + stagingProgress * STAGING_WEIGHT) * 100);
-  if (s.phase === "installing") return Math.round((DL_WEIGHT + STAGING_WEIGHT + instProgress * INSTALL_WEIGHT) * 100);
+  if (s.phase === "installing") return Math.round((DL_WEIGHT + stagingProgress * STAGING_WEIGHT + instProgress * INSTALL_WEIGHT) * 100);
   return 0;
 }
 

@@ -6,8 +6,9 @@ use std::sync::Arc;
 use once_cell::sync::Lazy;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
+use std::collections::HashSet;
 use tokio::sync::oneshot;
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 
 /// Global cancellation flag for collection installs.
 static INSTALL_CANCELLED: AtomicBool = AtomicBool::new(false);
@@ -1119,8 +1120,19 @@ pub async fn install_collection(
         })
         .collect();
 
-    let mut pre_extracted: HashMap<usize, PathBuf> = HashMap::new();
+    // Shared state for streaming extraction → install overlap.
+    // Extraction tasks insert results here as they complete; the install
+    // loop reads from it, waiting only for the specific mod it needs next.
+    let extracted_map: Arc<std::sync::Mutex<HashMap<usize, PathBuf>>> =
+        Arc::new(std::sync::Mutex::new(HashMap::new()));
+    let extraction_done: Arc<std::sync::Mutex<HashSet<usize>>> =
+        Arc::new(std::sync::Mutex::new(HashSet::new()));
+    let extraction_notify = Arc::new(Notify::new());
     let mut temp_guard = TempDirGuard::new();
+    let needs_extraction: HashSet<usize> = archives_to_extract
+        .iter()
+        .map(|(idx, _, _)| *idx)
+        .collect();
 
     if !archives_to_extract.is_empty() {
         let total_staging_bytes: u64 = archives_to_extract
@@ -1138,12 +1150,16 @@ pub async fn install_collection(
         );
 
         let extract_sem = Arc::new(Semaphore::new(max_extract));
-        let mut extract_handles = Vec::with_capacity(archives_to_extract.len());
 
         for (install_idx, archive_path, mod_name) in &archives_to_extract {
             // Check cancellation before spawning each extraction task
             if is_cancelled() {
                 log::info!("Collection install cancelled during extraction phase");
+                // Mark remaining as done so install loop doesn't hang
+                for (idx, _, _) in &archives_to_extract {
+                    extraction_done.lock().unwrap_or_else(|e| e.into_inner()).insert(*idx);
+                }
+                extraction_notify.notify_waiters();
                 break;
             }
 
@@ -1153,13 +1169,18 @@ pub async fn install_collection(
             let app_c = app.clone();
             let name = mod_name.clone();
             let arc_size = manifest.mods.get(idx).and_then(|m| m.source.file_size).unwrap_or(0);
+            let map_c = extracted_map.clone();
+            let done_c = extraction_done.clone();
+            let notify_c = extraction_notify.clone();
 
-            let handle = tokio::spawn(async move {
+            tokio::spawn(async move {
                 let _permit = sem.acquire().await.expect("semaphore closed");
 
                 // Check cancellation after acquiring permit
                 if is_cancelled() {
-                    return None;
+                    done_c.lock().unwrap_or_else(|e| e.into_inner()).insert(idx);
+                    notify_c.notify_waiters();
+                    return;
                 }
 
                 let _ = app_c.emit(
@@ -1177,11 +1198,9 @@ pub async fn install_collection(
                 let result = tokio::time::timeout(
                     std::time::Duration::from_secs(1800),
                     tokio::task::spawn_blocking(move || {
-                        // Check cancellation inside blocking task
                         if is_cancelled() {
                             return Err("Cancelled".to_string());
                         }
-                        // Validate archive integrity before extraction.
                         if let Err(e) = validate_archive(&archive) {
                             return Err(format!("Archive validation failed: {}", e));
                         }
@@ -1216,7 +1235,7 @@ pub async fn install_collection(
                                 extracted_size,
                             },
                         );
-                        Some((idx, dir))
+                        map_c.lock().unwrap_or_else(|e| e.into_inner()).insert(idx, dir);
                     }
                     Ok(Ok(Err(e))) => {
                         log::warn!("Pre-extraction failed for mod {}: {}", idx, e);
@@ -1228,7 +1247,6 @@ pub async fn install_collection(
                                 error: e,
                             },
                         );
-                        None
                     }
                     Ok(Err(e)) => {
                         log::warn!("Extraction task panicked for mod {}: {}", idx, e);
@@ -1240,7 +1258,6 @@ pub async fn install_collection(
                                 error: format!("Task panicked: {}", e),
                             },
                         );
-                        None
                     }
                     Err(_) => {
                         log::warn!("Extraction timed out for mod {} after 30 minutes", idx);
@@ -1252,33 +1269,21 @@ pub async fn install_collection(
                                 error: "Extraction timed out after 30 minutes".to_string(),
                             },
                         );
-                        None
                     }
                 }
+
+                // Always mark as done (success or failure) and wake install loop
+                done_c.lock().unwrap_or_else(|e| e.into_inner()).insert(idx);
+                notify_c.notify_waiters();
             });
-
-            extract_handles.push(handle);
         }
-
-        // Collect extraction results
-        let extract_results = futures::future::join_all(extract_handles).await;
-        for join_result in extract_results {
-            if let Ok(Some((idx, dir))) = join_result {
-                temp_guard.track(dir.clone());
-                pre_extracted.insert(idx, dir);
-            }
-        }
-
-        log::info!(
-            "Pre-extracted {}/{} archives concurrently",
-            pre_extracted.len(),
-            archives_to_extract.len()
-        );
     }
 
     // ---------------------------------------------------------------
-    // Phase 2: Sequential Install
+    // Phase 2: Sequential Install (overlaps with ongoing extractions)
     // ---------------------------------------------------------------
+    // Install starts immediately — the loop waits only for each
+    // individual mod's extraction, not all of them.
     let _ = app.emit(
         INSTALL_PROGRESS_EVENT,
         InstallProgress::InstallPhaseStarted { total_mods },
@@ -1403,9 +1408,28 @@ pub async fn install_collection(
             continue;
         }
 
-        // Look up pre-downloaded archive and pre-extracted dir for this position
+        // Look up pre-downloaded archive for this position
         let pre_dl = pre_downloaded.get(&i).map(|p| p.as_path());
-        let pre_ext = pre_extracted.remove(&i);
+
+        // Wait for this mod's extraction if it's in the extraction pipeline.
+        // This blocks only until THIS mod is ready, not all of them.
+        let pre_ext = if needs_extraction.contains(&i) {
+            loop {
+                // Check if extraction is done (success or failure)
+                if extraction_done.lock().unwrap_or_else(|e| e.into_inner()).contains(&i) {
+                    // Take the extracted dir if extraction succeeded
+                    let dir = extracted_map.lock().unwrap_or_else(|e| e.into_inner()).remove(&i);
+                    if let Some(ref d) = dir {
+                        temp_guard.track(d.clone());
+                    }
+                    break dir;
+                }
+                // Not done yet — wait for notification, then check again
+                extraction_notify.notified().await;
+            }
+        } else {
+            None
+        };
         if let Some(ref dir) = pre_ext {
             temp_guard.untrack(dir);
         }
@@ -1501,11 +1525,13 @@ pub async fn install_collection(
 
     // Clean up any remaining pre-extracted temp dirs (for skipped/failed mods).
     // The TempDirGuard also handles this on drop, but explicit cleanup is clearer.
-    for dir in pre_extracted.values() {
-        temp_guard.untrack(dir);
-        let _ = std::fs::remove_dir_all(dir);
+    {
+        let remaining = extracted_map.lock().unwrap_or_else(|e| e.into_inner());
+        for dir in remaining.values() {
+            temp_guard.untrack(dir);
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
-    drop(pre_extracted);
 
     // Apply plugin load order from manifest (works for any game with plugin support)
     if !manifest.plugins.is_empty() {
