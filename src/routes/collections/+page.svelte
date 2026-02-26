@@ -3157,20 +3157,14 @@
       </div>
 
       <div class="optional-picker-body">
-        <!-- Required mods section -->
+        <!-- Required mods section (collapsed summary) -->
         <div class="optional-section">
           <div class="optional-section-header">
-            <span class="optional-section-label">Required</span>
+            <span class="optional-section-label">
+              <svg class="optional-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--green, #22c55e)" stroke-width="2.5" stroke-linecap="round"><path d="M20 6L9 17l-5-5" /></svg>
+              {optionalPickerManifest.mods.filter((m: { optional: boolean }) => !m.optional).length} required mods will be installed
+            </span>
           </div>
-          {#each optionalPickerManifest.mods as mod, i}
-            {#if !mod.optional}
-              <div class="optional-mod-row">
-                <svg class="optional-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--green, #22c55e)" stroke-width="2.5" stroke-linecap="round"><path d="M20 6L9 17l-5-5" /></svg>
-                <span class="optional-mod-name">{mod.name}</span>
-                <span class="optional-mod-version">{mod.version || ""}</span>
-              </div>
-            {/if}
-          {/each}
         </div>
 
         <!-- Optional mods section -->
