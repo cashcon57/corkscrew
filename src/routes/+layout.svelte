@@ -930,6 +930,79 @@
       </div>
     {/if}
 
+    <!-- Install/uninstall status — docked above footer -->
+    {#if $collectionInstallStatus?.active}
+      <div class="sidebar-status-bar">
+        <button class="sidebar-status-btn" onclick={() => goto('/collections/progress')}>
+          {#if $collectionInstallStatus.phase === "complete"}
+            <svg class="status-check" width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="var(--green, #30d158)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="3 7 6 10 11 4" />
+            </svg>
+          {:else}
+            <div class="status-spinner status-spinner-sm"></div>
+          {/if}
+          <div class="status-text">
+            <span class="status-collection">{$collectionInstallStatus.collectionName}</span>
+            <span class="status-detail">
+              {#if $collectionInstallStatus.phase === "downloading"}
+                Downloading {$collectionInstallStatus.downloadProgress.completed}/{$collectionInstallStatus.downloadProgress.total}
+                {#if $collectionInstallStatus.downloadSpeed > 0}
+                  &mdash; {formatBytes($collectionInstallStatus.downloadSpeed)}/s
+                {/if}
+              {:else if $collectionInstallStatus.phase === "staging"}
+                Extracting {$collectionInstallStatus.modDetails?.filter(m => m.status === "extracting").length ?? 0} mods...
+              {:else if $collectionInstallStatus.phase === "installing"}
+                Installing {$collectionInstallStatus.installProgress.current}/{$collectionInstallStatus.installProgress.total}
+              {:else if $collectionInstallStatus.phase === "complete"}
+                {$collectionInstallStatus.result?.installed ?? 0} installed{#if ($collectionInstallStatus.result?.failed ?? 0) > 0}, {$collectionInstallStatus.result?.failed} failed{/if}
+              {:else}
+                {$collectionInstallStatus.current}/{$collectionInstallStatus.total}
+              {/if}
+            </span>
+          </div>
+          {#if $collectionInstallStatus.phase !== "complete"}
+            <span class="status-percent">{$collectionInstallStatus.overallProgress}%</span>
+          {/if}
+          <svg class="status-chevron" width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="4.5 2.5 8 6 4.5 9.5" />
+          </svg>
+        </button>
+        <div class="status-progress-track">
+          <div class="status-progress-fill" class:status-progress-complete={$collectionInstallStatus.phase === "complete"}
+            style="width: {$collectionInstallStatus.overallProgress}%">
+          </div>
+        </div>
+      </div>
+    {/if}
+
+    {#if $collectionUninstallStatus?.active && $collectionUninstallStatus.phase !== "complete"}
+      <div class="sidebar-status-bar sidebar-status-bar-uninstall">
+        <div class="sidebar-status-btn" style="cursor: default;">
+          <div class="status-spinner status-spinner-sm status-spinner-red"></div>
+          <div class="status-text">
+            <span class="status-collection">{$collectionUninstallStatus.collectionName}</span>
+            <span class="status-detail">
+              {#if $collectionUninstallStatus.phase === "removing"}
+                Removing {$collectionUninstallStatus.currentMod}/{$collectionUninstallStatus.totalMods}
+              {:else if $collectionUninstallStatus.phase === "redeploying"}
+                Redeploying...
+              {/if}
+            </span>
+          </div>
+          {#if $collectionUninstallStatus.totalMods > 0 && $collectionUninstallStatus.phase === "removing"}
+            <span class="status-percent">{Math.round(($collectionUninstallStatus.currentMod / $collectionUninstallStatus.totalMods) * 100)}%</span>
+          {/if}
+        </div>
+        {#if $collectionUninstallStatus.totalMods > 0}
+          <div class="status-progress-track">
+            <div class="status-progress-fill status-progress-fill-red"
+              style="width: {$collectionUninstallStatus.phase === "redeploying" ? 100 : ($collectionUninstallStatus.currentMod / $collectionUninstallStatus.totalMods) * 100}%">
+            </div>
+          </div>
+        {/if}
+      </div>
+    {/if}
+
     <div class="sidebar-footer">
       <!-- Collapse toggle -->
       <button
@@ -1288,86 +1361,6 @@
     </main>
   </div>
 
-  {#if $collectionInstallStatus?.active}
-    <button class="global-status-bar" onclick={() => goto('/collections/progress')}>
-      <div class="status-bar-content">
-        {#if $collectionInstallStatus.phase === "complete"}
-          <svg class="status-check" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="var(--green, #30d158)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="3 7 6 10 11 4" />
-          </svg>
-        {:else}
-          <div class="status-spinner"></div>
-        {/if}
-        <div class="status-text">
-          <span class="status-collection">{$collectionInstallStatus.collectionName}</span>
-          <span class="status-detail">
-            {#if $collectionInstallStatus.phase === "downloading"}
-              Downloading {$collectionInstallStatus.downloadProgress.completed}/{$collectionInstallStatus.downloadProgress.total}
-              {#if $collectionInstallStatus.downloadSpeed > 0}
-                &mdash; {formatBytes($collectionInstallStatus.downloadSpeed)}/s
-              {/if}
-              {#if $collectionInstallStatus.downloadEta}
-                &mdash; {$collectionInstallStatus.downloadEta}
-              {/if}
-            {:else if $collectionInstallStatus.phase === "staging"}
-              Extracting {$collectionInstallStatus.modDetails?.filter(m => m.status === "extracting").length ?? 0} mods...
-            {:else if $collectionInstallStatus.phase === "installing"}
-              Installing {$collectionInstallStatus.installProgress.current}/{$collectionInstallStatus.installProgress.total}
-              {#if $collectionInstallStatus.installProgress.currentMod}
-                &mdash; {$collectionInstallStatus.installProgress.currentMod}
-              {/if}
-            {:else if $collectionInstallStatus.phase === "complete"}
-              {$collectionInstallStatus.result?.installed ?? 0} installed{#if ($collectionInstallStatus.result?.failed ?? 0) > 0}, {$collectionInstallStatus.result?.failed} failed{/if}
-            {:else}
-              {$collectionInstallStatus.current}/{$collectionInstallStatus.total}
-            {/if}
-          </span>
-        </div>
-        {#if $collectionInstallStatus.phase !== "complete"}
-          <span class="status-percent">{$collectionInstallStatus.overallProgress}%</span>
-        {/if}
-        <svg class="status-chevron" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-          <polyline points="4.5 2.5 8 6 4.5 9.5" />
-        </svg>
-      </div>
-      <div class="status-progress-track">
-        <div class="status-progress-fill" class:status-progress-complete={$collectionInstallStatus.phase === "complete"}
-          style="width: {$collectionInstallStatus.overallProgress}%">
-        </div>
-      </div>
-    </button>
-  {/if}
-
-  {#if $collectionUninstallStatus?.active && $collectionUninstallStatus.phase !== "complete"}
-    <div class="global-status-bar global-status-bar-uninstall">
-      <div class="status-bar-content">
-        <div class="status-spinner status-spinner-red"></div>
-        <div class="status-text">
-          <span class="status-collection">{$collectionUninstallStatus.collectionName}</span>
-          <span class="status-detail">
-            {#if $collectionUninstallStatus.phase === "removing"}
-              Removing {$collectionUninstallStatus.currentMod}/{$collectionUninstallStatus.totalMods}
-              {#if $collectionUninstallStatus.currentModName}
-                &mdash; {$collectionUninstallStatus.currentModName}
-              {/if}
-            {:else if $collectionUninstallStatus.phase === "redeploying"}
-              Redeploying remaining mods...
-            {/if}
-          </span>
-        </div>
-        {#if $collectionUninstallStatus.totalMods > 0 && $collectionUninstallStatus.phase === "removing"}
-          <span class="status-percent">{Math.round(($collectionUninstallStatus.currentMod / $collectionUninstallStatus.totalMods) * 100)}%</span>
-        {/if}
-      </div>
-      {#if $collectionUninstallStatus.totalMods > 0}
-        <div class="status-progress-track">
-          <div class="status-progress-fill status-progress-fill-red"
-            style="width: {$collectionUninstallStatus.phase === "redeploying" ? 100 : ($collectionUninstallStatus.currentMod / $collectionUninstallStatus.totalMods) * 100}%">
-          </div>
-        </div>
-      {/if}
-    </div>
-  {/if}
 
   <!-- Download queue popover — rendered at app-shell level to escape sidebar overflow:hidden -->
   {#if showQueue}
@@ -2488,38 +2481,38 @@
     color: var(--text-primary);
   }
 
-  /* ---- Global collection install status bar ---- */
-  .global-status-bar {
-    position: fixed;
-    bottom: 16px;
-    left: 16px;
-    width: 220px;
-    background: color-mix(in srgb, var(--bg-secondary) 70%, transparent);
-    backdrop-filter: blur(32px) saturate(1.4);
-    -webkit-backdrop-filter: blur(32px) saturate(1.4);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: var(--radius-md);
-    padding: 10px 12px;
-    z-index: 300;
-    box-shadow: var(--glass-refraction),
-                0 4px 16px rgba(0, 0, 0, 0.3);
-    cursor: pointer;
-    transition: background var(--duration-fast) var(--ease), box-shadow var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease);
-    text-align: left;
+  /* ---- Sidebar-docked install/uninstall status bar ---- */
+  .sidebar-status-bar {
+    padding: 8px var(--space-3);
+    border-top: 1px solid var(--separator);
+    flex-shrink: 0;
   }
 
-  .global-status-bar:hover {
-    background: color-mix(in srgb, var(--bg-elevated, var(--bg-secondary)) 80%, transparent);
-    border-color: var(--accent-subtle, rgba(255, 255, 255, 0.12));
-    box-shadow: var(--glass-refraction),
-                0 4px 20px rgba(0, 0, 0, 0.4);
+  .sidebar-status-bar-uninstall {
+    border-top-color: rgba(239, 68, 68, 0.3);
   }
 
-  .status-bar-content {
+  .sidebar-status-btn {
     display: flex;
     align-items: center;
-    gap: 8px;
-    margin-bottom: 8px;
+    gap: 6px;
+    width: 100%;
+    padding: 0;
+    margin-bottom: 6px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    text-align: left;
+    color: inherit;
+  }
+
+  .sidebar-status-btn:hover .status-chevron {
+    color: var(--text-secondary);
+    transform: translateX(2px);
+  }
+
+  .sidebar-status-btn:hover .status-collection {
+    color: var(--accent);
   }
 
   .status-spinner {
@@ -2530,6 +2523,12 @@
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
     flex-shrink: 0;
+  }
+
+  .status-spinner-sm {
+    width: 12px;
+    height: 12px;
+    border-width: 1.5px;
   }
 
   .status-check {
@@ -2543,7 +2542,7 @@
   .status-text {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 1px;
     min-width: 0;
     overflow: hidden;
     flex: 1;
@@ -2556,6 +2555,7 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    transition: color var(--duration-fast) var(--ease);
   }
 
   .status-detail {
@@ -2567,7 +2567,7 @@
   }
 
   .status-percent {
-    font-size: 11px;
+    font-size: 10px;
     font-weight: 700;
     font-family: var(--font-mono);
     color: var(--system-accent);
@@ -2577,12 +2577,7 @@
   .status-chevron {
     flex-shrink: 0;
     color: var(--text-tertiary);
-    transition: transform var(--duration-fast) var(--ease);
-  }
-
-  .global-status-bar:hover .status-chevron {
-    color: var(--text-secondary);
-    transform: translateX(2px);
+    transition: transform var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease);
   }
 
   .status-progress-track {
@@ -2603,18 +2598,25 @@
     background: var(--green, #30d158);
   }
 
-  .global-status-bar-uninstall {
-    cursor: default;
-    bottom: 16px;
-    border-color: rgba(239, 68, 68, 0.3);
-  }
-
   .status-spinner-red {
     border-top-color: #ef4444;
   }
 
   .status-progress-fill-red {
     background: #ef4444;
+  }
+
+  .sidebar.collapsed .sidebar-status-bar {
+    padding: 6px var(--space-1);
+  }
+
+  .sidebar.collapsed .sidebar-status-btn .status-text,
+  .sidebar.collapsed .sidebar-status-btn .status-chevron {
+    display: none;
+  }
+
+  .sidebar.collapsed .sidebar-status-btn {
+    justify-content: center;
   }
 
   /* Controller mode: larger touch targets for Steam Deck */

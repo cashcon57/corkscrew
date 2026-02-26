@@ -2406,38 +2406,48 @@ async fn stage_and_deploy(
                     }
                 }
             } else {
-                // No manifest choices — ask user interactively via FOMOD wizard
-                log::info!(
-                    "FOMOD wizard required for '{}' — no choices in manifest",
-                    mod_name
-                );
-                let (correlation_id, rx) = create_fomod_request();
+                // No manifest choices — check saved recipe first, then ask user
+                if let Ok(Some(recipe)) = crate::fomod_recipes::get_recipe(db, mod_id) {
+                    log::info!(
+                        "FOMOD auto-applying saved recipe ({} selections) for '{}'",
+                        recipe.selections.len(),
+                        mod_name
+                    );
+                    recipe.selections
+                } else {
+                    log::info!(
+                        "FOMOD wizard required for '{}' — no choices in manifest, no saved recipe",
+                        mod_name
+                    );
+                    let (correlation_id, rx) = create_fomod_request();
 
-                let _ = app.emit(
-                    INSTALL_PROGRESS_EVENT,
-                    InstallProgress::FomodRequired {
-                        mod_index,
-                        mod_name: mod_name.to_string(),
-                        correlation_id: correlation_id.clone(),
-                        installer: serde_json::to_value(&fomod_installer).unwrap_or_default(),
-                    },
-                );
+                    let _ = app.emit(
+                        INSTALL_PROGRESS_EVENT,
+                        InstallProgress::FomodRequired {
+                            mod_index,
+                            mod_name: mod_name.to_string(),
+                            correlation_id: correlation_id.clone(),
+                            installer: serde_json::to_value(&fomod_installer).unwrap_or_default(),
+                        },
+                    );
 
-                match tokio::time::timeout(std::time::Duration::from_secs(600), rx).await {
-                    Ok(Ok(user_selections)) => {
-                        // Save as recipe for future reuse
-                        let _ = crate::fomod_recipes::save_recipe(
-                            db, mod_id, mod_name, None, &user_selections,
-                        );
-                        user_selections
-                    }
-                    _ => {
-                        log::warn!(
-                            "FOMOD selection timed out or dropped for '{}', using defaults",
-                            mod_name
-                        );
-                        FOMOD_PENDING.lock().unwrap().remove(&correlation_id);
-                        fomod::get_default_selections(&fomod_installer)
+                    // 30s timeout: if user doesn't respond (e.g. not on progress page),
+                    // fall back to defaults rather than blocking the entire install pipeline.
+                    match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
+                        Ok(Ok(user_selections)) => {
+                            let _ = crate::fomod_recipes::save_recipe(
+                                db, mod_id, mod_name, None, &user_selections,
+                            );
+                            user_selections
+                        }
+                        _ => {
+                            log::warn!(
+                                "FOMOD selection timed out (30s) or dropped for '{}', using defaults",
+                                mod_name
+                            );
+                            FOMOD_PENDING.lock().unwrap().remove(&correlation_id);
+                            fomod::get_default_selections(&fomod_installer)
+                        }
                     }
                 }
             };
