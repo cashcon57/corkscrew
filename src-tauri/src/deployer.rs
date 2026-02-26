@@ -687,6 +687,508 @@ fn restore_next_winner(
 }
 
 // ---------------------------------------------------------------------------
+// Incremental Deployment
+// ---------------------------------------------------------------------------
+
+/// A file that should exist in the deployed state, computed from all enabled
+/// mods in priority order.
+#[derive(Debug, Clone)]
+struct DesiredFile {
+    relative_path: String,
+    mod_id: i64,
+    staging_path: PathBuf,
+    sha256: Option<String>,
+}
+
+/// The computed diff between the desired deployment state and the current one.
+#[derive(Debug)]
+struct DeploymentDiff {
+    to_add: Vec<DesiredFile>,
+    to_remove: Vec<crate::database::DeploymentEntry>,
+    to_update: Vec<(crate::database::DeploymentEntry, DesiredFile)>,
+    unchanged: usize,
+}
+
+/// Result of an incremental deployment operation.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct IncrementalDeployResult {
+    pub files_added: usize,
+    pub files_removed: usize,
+    pub files_updated: usize,
+    pub files_unchanged: usize,
+    pub fallback_used: bool,
+    pub verification_failures: Vec<String>,
+}
+
+/// Compute the desired deployment state by walking all enabled mods in priority
+/// order (ascending — highest priority last, so it overwrites lower-priority
+/// files at the same path).
+fn compute_desired_state(
+    db: &ModDatabase,
+    game_id: &str,
+    bottle_name: &str,
+) -> Result<std::collections::HashMap<String, DesiredFile>> {
+    let mods = db
+        .list_mods(game_id, bottle_name)
+        .map_err(|e| DeployerError::Database(e.to_string()))?;
+
+    let mut enabled_mods: Vec<_> = mods.into_iter().filter(|m| m.enabled).collect();
+    enabled_mods.sort_by_key(|m| m.install_priority);
+
+    // Bulk-load file hashes for all enabled mods
+    let mod_ids: Vec<i64> = enabled_mods.iter().map(|m| m.id).collect();
+    let hash_map = db
+        .get_file_hashes_for_mods(&mod_ids)
+        .map_err(|e| DeployerError::Database(e.to_string()))?;
+
+    let mut desired: std::collections::HashMap<String, DesiredFile> =
+        std::collections::HashMap::new();
+
+    for m in &enabled_mods {
+        let Some(ref staging_path_str) = m.staging_path else {
+            continue; // Legacy mod without staging — skip
+        };
+        let staging_path = PathBuf::from(staging_path_str);
+        if !staging_path.exists() {
+            warn!(
+                "Incremental deploy: staging directory not found for mod '{}' ({}), skipping",
+                m.name,
+                staging_path.display()
+            );
+            continue;
+        }
+
+        let files = crate::staging::list_staging_files(&staging_path)
+            .map_err(|e| DeployerError::Other(e.to_string()))?;
+
+        for rel_path in files {
+            let sha256 = hash_map
+                .get(&(m.id, rel_path.clone()))
+                .cloned();
+
+            // Last writer wins (highest priority, since sorted ascending)
+            desired.insert(
+                rel_path.clone(),
+                DesiredFile {
+                    relative_path: rel_path,
+                    mod_id: m.id,
+                    staging_path: staging_path.clone(),
+                    sha256,
+                },
+            );
+        }
+    }
+
+    Ok(desired)
+}
+
+/// Compare the desired state against the current deployment manifest to
+/// produce a diff of what needs to change.
+fn compute_diff(
+    desired: &std::collections::HashMap<String, DesiredFile>,
+    current: &std::collections::HashMap<String, crate::database::DeploymentEntry>,
+) -> DeploymentDiff {
+    let mut to_add = Vec::new();
+    let mut to_remove = Vec::new();
+    let mut to_update = Vec::new();
+    let mut unchanged: usize = 0;
+
+    // Files in desired but not in current → add
+    // Files in both but different mod_id → update
+    for (path, desired_file) in desired {
+        match current.get(path) {
+            None => {
+                to_add.push(desired_file.clone());
+            }
+            Some(current_entry) => {
+                if current_entry.mod_id != desired_file.mod_id {
+                    to_update.push((current_entry.clone(), desired_file.clone()));
+                } else {
+                    unchanged += 1;
+                }
+            }
+        }
+    }
+
+    // Files in current but not in desired → remove
+    for (path, entry) in current {
+        // Skip legacy direct-installed files
+        if entry.deploy_method == "direct" {
+            continue;
+        }
+        if !desired.contains_key(path) {
+            to_remove.push(entry.clone());
+        }
+    }
+
+    DeploymentDiff {
+        to_add,
+        to_remove,
+        to_update,
+        unchanged,
+    }
+}
+
+/// Deploy a single file from staging to the game directory using hardlink-first
+/// strategy. Returns the deploy method used ("hardlink" or "copy"), or None on
+/// failure.
+fn deploy_single_file(
+    src: &Path,
+    dst: &Path,
+    can_hardlink: bool,
+) -> Option<&'static str> {
+    if let Some(parent) = dst.parent() {
+        if let Err(e) = fs::create_dir_all(parent) {
+            warn!(
+                "Failed to create parent directory {}: {}",
+                parent.display(),
+                e
+            );
+            return None;
+        }
+    }
+
+    // Remove existing file at destination if present
+    if dst.exists() {
+        if let Ok(meta) = fs::symlink_metadata(dst) {
+            if meta.file_type().is_symlink() {
+                warn!("Skipping deployment to symlink target: {}", dst.display());
+                return None;
+            }
+        }
+        if let Err(e) = fs::remove_file(dst) {
+            warn!("Failed to remove existing file {}: {}", dst.display(), e);
+            return None;
+        }
+    }
+
+    if can_hardlink {
+        match fs::hard_link(src, dst) {
+            Ok(_) => Some("hardlink"),
+            Err(e) => {
+                warn!(
+                    "Hardlink failed for {} → {}: {} (falling back to copy)",
+                    src.display(),
+                    dst.display(),
+                    e
+                );
+                match fs::copy(src, dst) {
+                    Ok(_) => Some("copy"),
+                    Err(copy_err) => {
+                        warn!(
+                            "Copy also failed for {} → {}: {}",
+                            src.display(),
+                            dst.display(),
+                            copy_err
+                        );
+                        None
+                    }
+                }
+            }
+        }
+    } else {
+        match fs::copy(src, dst) {
+            Ok(_) => Some("copy"),
+            Err(e) => {
+                warn!(
+                    "Copy failed for {} → {}: {}",
+                    src.display(),
+                    dst.display(),
+                    e
+                );
+                None
+            }
+        }
+    }
+}
+
+/// Perform an incremental deployment: compute the diff between current and
+/// desired state, then apply only the changes.
+///
+/// Falls back to a full redeploy if more than 80% of total files would change
+/// (incremental not worth it in that case).
+#[allow(clippy::type_complexity)]
+pub fn deploy_incremental(
+    db: &ModDatabase,
+    game_id: &str,
+    bottle_name: &str,
+    data_dir: &Path,
+) -> Result<IncrementalDeployResult> {
+    use rayon::prelude::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    info!("Starting incremental deployment for {}/{}", game_id, bottle_name);
+
+    // Step 1: Compute desired state
+    let desired = compute_desired_state(db, game_id, bottle_name)?;
+
+    // Step 2: Load current deployment manifest as a HashMap
+    let current = db
+        .get_deployment_manifest_map(game_id, bottle_name)
+        .map_err(|e| DeployerError::Database(e.to_string()))?;
+
+    // Step 3: Compute diff
+    let diff = compute_diff(&desired, &current);
+
+    let total_changes = diff.to_add.len() + diff.to_remove.len() + diff.to_update.len();
+    let total_files = total_changes + diff.unchanged;
+
+    info!(
+        "Incremental diff: {} to add, {} to remove, {} to update, {} unchanged (total: {})",
+        diff.to_add.len(),
+        diff.to_remove.len(),
+        diff.to_update.len(),
+        diff.unchanged,
+        total_files
+    );
+
+    // Step 4: If changes exceed 80% of total, fall back to full redeploy
+    if total_files > 0 && total_changes * 100 / total_files.max(1) > 80 {
+        info!(
+            "Incremental diff covers {}% of files — falling back to full redeploy",
+            total_changes * 100 / total_files.max(1)
+        );
+
+        let full_result = redeploy_all(db, game_id, bottle_name, data_dir)?;
+        return Ok(IncrementalDeployResult {
+            files_added: full_result.deployed_count,
+            files_removed: 0,
+            files_updated: 0,
+            files_unchanged: 0,
+            fallback_used: true,
+            verification_failures: Vec::new(),
+        });
+    }
+
+    // If there's nothing to do, return immediately
+    if total_changes == 0 {
+        info!("Incremental deployment: nothing to do — deployment is up to date");
+        return Ok(IncrementalDeployResult {
+            files_added: 0,
+            files_removed: 0,
+            files_updated: 0,
+            files_unchanged: diff.unchanged,
+            fallback_used: false,
+            verification_failures: Vec::new(),
+        });
+    }
+
+    // Determine staging root for filesystem check
+    let staging_root = crate::staging::staging_base_dir(game_id, bottle_name);
+    let can_hardlink = same_filesystem(&staging_root, data_dir);
+
+    if !can_hardlink {
+        // Estimate space needed for additions/updates only
+        let add_update_count = diff.to_add.len() + diff.to_update.len();
+        // Rough estimate: 1MB per file on average
+        let estimated_bytes = (add_update_count as u64) * 1_048_576;
+        if let Err(e) = crate::disk_budget::check_space_guard(data_dir, estimated_bytes) {
+            return Err(DeployerError::Other(e));
+        }
+    }
+
+    let removed_count = AtomicUsize::new(0);
+    let added_count = AtomicUsize::new(0);
+    let updated_count = AtomicUsize::new(0);
+    let any_fallback = AtomicBool::new(!can_hardlink);
+    let verification_failures: std::sync::Mutex<Vec<String>> =
+        std::sync::Mutex::new(Vec::new());
+
+    // Step 5a: Remove files that should no longer be deployed
+    let remove_paths: Vec<&str> = diff
+        .to_remove
+        .par_iter()
+        .filter_map(|entry| {
+            let file_path = data_dir.join(&entry.relative_path);
+            if file_path.exists() {
+                match fs::remove_file(&file_path) {
+                    Ok(()) => {
+                        prune_empty_dirs(&file_path, data_dir);
+                        removed_count.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(e) => {
+                        warn!("Failed to remove {}: {}", file_path.display(), e);
+                        verification_failures
+                            .lock()
+                            .unwrap()
+                            .push(format!("remove failed: {}: {}", entry.relative_path, e));
+                    }
+                }
+            } else {
+                removed_count.fetch_add(1, Ordering::Relaxed);
+            }
+            Some(entry.relative_path.as_str())
+        })
+        .collect();
+
+    // Remove stale manifest entries
+    if !remove_paths.is_empty() {
+        db.batch_remove_deployment_entries(game_id, bottle_name, &remove_paths)
+            .map_err(|e| DeployerError::Database(e.to_string()))?;
+    }
+
+    // Step 5b: Update files where the owning mod changed
+    let update_owned: Vec<(i64, String, String, Option<String>)> = diff
+        .to_update
+        .par_iter()
+        .filter_map(|(old_entry, new_desired)| {
+            let dst = data_dir.join(&new_desired.relative_path);
+            let src = new_desired
+                .staging_path
+                .join(&new_desired.relative_path);
+
+            if !src.exists() {
+                warn!(
+                    "Incremental update: source not found: {}",
+                    src.display()
+                );
+                return None;
+            }
+
+            match deploy_single_file(&src, &dst, can_hardlink) {
+                Some(method) => {
+                    updated_count.fetch_add(1, Ordering::Relaxed);
+                    if method == "copy" {
+                        any_fallback.store(true, Ordering::Relaxed);
+                    }
+                    Some((
+                        new_desired.mod_id,
+                        new_desired.relative_path.clone(),
+                        new_desired.staging_path.to_string_lossy().to_string(),
+                        new_desired.sha256.clone(),
+                    ))
+                }
+                None => {
+                    verification_failures
+                        .lock()
+                        .unwrap()
+                        .push(format!(
+                            "update failed: {} (mod {} -> mod {})",
+                            new_desired.relative_path, old_entry.mod_id, new_desired.mod_id
+                        ));
+                    None
+                }
+            }
+        })
+        .collect();
+
+    let update_entries: Vec<(&str, &str, i64, &str, &str, &str, Option<&str>)> =
+        update_owned
+            .iter()
+            .map(|(mod_id, rel_path, staging_path, sha256)| {
+                (
+                    game_id,
+                    bottle_name,
+                    *mod_id,
+                    rel_path.as_str(),
+                    staging_path.as_str(),
+                    if can_hardlink { "hardlink" } else { "copy" },
+                    sha256.as_deref(),
+                )
+            })
+            .collect();
+
+    if !update_entries.is_empty() {
+        db.batch_add_deployment_entries_with_hashes(&update_entries)
+            .map_err(|e| DeployerError::Database(e.to_string()))?;
+    }
+
+    // Step 5c: Add new files
+    let add_results: Vec<Option<(i64, String, String, Option<String>)>> = diff
+        .to_add
+        .par_iter()
+        .map(|desired_file| {
+            let dst = data_dir.join(&desired_file.relative_path);
+            let src = desired_file
+                .staging_path
+                .join(&desired_file.relative_path);
+
+            if !src.exists() {
+                warn!(
+                    "Incremental add: source not found: {}",
+                    src.display()
+                );
+                return None;
+            }
+
+            match deploy_single_file(&src, &dst, can_hardlink) {
+                Some(method) => {
+                    added_count.fetch_add(1, Ordering::Relaxed);
+                    if method == "copy" {
+                        any_fallback.store(true, Ordering::Relaxed);
+                    }
+                    Some((
+                        desired_file.mod_id,
+                        desired_file.relative_path.clone(),
+                        desired_file.staging_path.to_string_lossy().to_string(),
+                        desired_file.sha256.clone(),
+                    ))
+                }
+                None => {
+                    verification_failures
+                        .lock()
+                        .unwrap()
+                        .push(format!(
+                            "add failed: {}",
+                            desired_file.relative_path
+                        ));
+                    None
+                }
+            }
+        })
+        .collect();
+
+    // Batch-insert new manifest entries
+    let add_entries: Vec<(&str, &str, i64, &str, &str, &str, Option<&str>)> = add_results
+        .iter()
+        .filter_map(|opt| {
+            opt.as_ref().map(|(mod_id, rel_path, staging_path, sha256)| {
+                (
+                    game_id,
+                    bottle_name,
+                    *mod_id,
+                    rel_path.as_str(),
+                    staging_path.as_str(),
+                    if can_hardlink { "hardlink" } else { "copy" },
+                    sha256.as_deref(),
+                )
+            })
+        })
+        .collect();
+
+    if !add_entries.is_empty() {
+        db.batch_add_deployment_entries_with_hashes(&add_entries)
+            .map_err(|e| DeployerError::Database(e.to_string()))?;
+    }
+
+    let final_added = added_count.load(Ordering::Relaxed);
+    let final_removed = removed_count.load(Ordering::Relaxed);
+    let final_updated = updated_count.load(Ordering::Relaxed);
+    let final_fallback = any_fallback.load(Ordering::Relaxed);
+    let final_failures = verification_failures.into_inner().unwrap();
+
+    info!(
+        "Incremental deployment complete for {}/{}: {} added, {} removed, {} updated, {} unchanged, {} failures",
+        game_id,
+        bottle_name,
+        final_added,
+        final_removed,
+        final_updated,
+        diff.unchanged,
+        final_failures.len()
+    );
+
+    Ok(IncrementalDeployResult {
+        files_added: final_added,
+        files_removed: final_removed,
+        files_updated: final_updated,
+        files_unchanged: diff.unchanged,
+        fallback_used: final_fallback,
+        verification_failures: final_failures,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

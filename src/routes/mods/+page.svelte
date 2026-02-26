@@ -25,6 +25,7 @@
     fixSkyrimDisplay,
     onInstallProgress,
     redeployAllMods,
+    deployIncremental,
     purgeDeployment,
     getDeploymentHealth,
     setModNotes,
@@ -51,7 +52,7 @@
     getConfig,
     setConfigValue,
   } from "$lib/api";
-  import type { InstallProgressEvent, DeploymentHealth, ConflictSuggestion, ResolutionResult, DeployProgress, ModTool, UserEndorsement, IdenticalContentStats } from "$lib/types";
+  import type { InstallProgressEvent, DeploymentHealth, IncrementalDeployResult, ConflictSuggestion, ResolutionResult, DeployProgress, ModTool, UserEndorsement, IdenticalContentStats } from "$lib/types";
   import {
     selectedGame,
     installedMods,
@@ -1421,23 +1422,47 @@
     if (!game) return;
     deploying = true;
     deployProgress = 0;
-    deployProgressText = "Starting...";
+    deployProgressText = "Computing diff...";
     try {
-      deployUnlisten = await onDeployProgress((p: DeployProgress) => {
-        // Use file-level progress for smoother bar (falls back to mod-level if unavailable)
-        if (p.total_files > 0) {
-          deployProgress = Math.round((p.files_deployed / p.total_files) * 100);
-          deployProgressText = `${p.mod_name} (${p.files_deployed}/${p.total_files} files)`;
-        } else {
-          deployProgress = p.total > 0 ? Math.round((p.current / p.total) * 100) : 0;
-          deployProgressText = `${p.current}/${p.total} ${p.mod_name}`;
-        }
-      });
-      const result = await redeployAllMods(game.game_id, game.bottle_name);
-      showSuccess(`Deployed ${result.deployed_count} files${result.fallback_used ? " (copy fallback used)" : ""}`);
+      // Try incremental deployment first (much faster for small changes)
+      const incrResult = await deployIncremental(game.game_id, game.bottle_name);
+      const totalChanged = incrResult.files_added + incrResult.files_removed + incrResult.files_updated;
+      if (incrResult.fallback_used) {
+        // Incremental fell back to full redeploy internally
+        showSuccess(`Deployed ${incrResult.files_added} files (full redeploy)${incrResult.fallback_used ? " (copy fallback used)" : ""}`);
+      } else if (totalChanged === 0) {
+        showSuccess("Deployment is already up to date");
+      } else {
+        const parts: string[] = [];
+        if (incrResult.files_added > 0) parts.push(`${incrResult.files_added} added`);
+        if (incrResult.files_updated > 0) parts.push(`${incrResult.files_updated} updated`);
+        if (incrResult.files_removed > 0) parts.push(`${incrResult.files_removed} removed`);
+        parts.push(`${incrResult.files_unchanged} unchanged`);
+        showSuccess(`Incremental deploy: ${parts.join(", ")}`);
+      }
+      if (incrResult.verification_failures.length > 0) {
+        showError(`${incrResult.verification_failures.length} file(s) failed to deploy`);
+      }
       await refreshHealth(game);
-    } catch (e: unknown) {
-      showError(`Deploy failed: ${e}`);
+    } catch {
+      // Incremental failed — fall back to full redeploy
+      deployProgressText = "Falling back to full deploy...";
+      try {
+        deployUnlisten = await onDeployProgress((p: DeployProgress) => {
+          if (p.total_files > 0) {
+            deployProgress = Math.round((p.files_deployed / p.total_files) * 100);
+            deployProgressText = `${p.mod_name} (${p.files_deployed}/${p.total_files} files)`;
+          } else {
+            deployProgress = p.total > 0 ? Math.round((p.current / p.total) * 100) : 0;
+            deployProgressText = `${p.current}/${p.total} ${p.mod_name}`;
+          }
+        });
+        const result = await redeployAllMods(game.game_id, game.bottle_name);
+        showSuccess(`Deployed ${result.deployed_count} files (full redeploy)${result.fallback_used ? " (copy fallback used)" : ""}`);
+        await refreshHealth(game);
+      } catch (e2: unknown) {
+        showError(`Deploy failed: ${e2}`);
+      }
     } finally {
       deploying = false;
       deployProgress = 0;

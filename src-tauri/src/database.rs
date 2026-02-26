@@ -737,6 +737,91 @@ impl ModDatabase {
         Ok(result)
     }
 
+    // -- Incremental deployment helpers --------------------------------------
+
+    /// Return the deployment manifest as a HashMap keyed by relative_path
+    /// for efficient diff computation during incremental deployment.
+    pub fn get_deployment_manifest_map(
+        &self,
+        game_id: &str,
+        bottle_name: &str,
+    ) -> Result<HashMap<String, DeploymentEntry>> {
+        let entries = self.get_deployment_manifest(game_id, bottle_name)?;
+        let map = entries
+            .into_iter()
+            .map(|e| (e.relative_path.clone(), e))
+            .collect();
+        Ok(map)
+    }
+
+    /// Batch-insert deployment entries WITH sha256 values in a single transaction.
+    ///
+    /// Used by incremental deployment to record new/updated entries with their
+    /// hash values from the file_hashes table.
+    ///
+    /// Tuple fields: (game_id, bottle_name, mod_id, relative_path, staging_path, deploy_method, sha256)
+    #[allow(clippy::type_complexity)]
+    pub fn batch_add_deployment_entries_with_hashes(
+        &self,
+        entries: &[(
+            &str,         // game_id
+            &str,         // bottle_name
+            i64,          // mod_id
+            &str,         // relative_path
+            &str,         // staging_path
+            &str,         // deploy_method
+            Option<&str>, // sha256
+        )],
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let deployed_at = chrono::Utc::now().to_rfc3339();
+        let tx = conn.unchecked_transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT OR REPLACE INTO deployment_manifest
+                    (game_id, bottle_name, mod_id, relative_path, staging_path, deploy_method, sha256, deployed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            )?;
+            for (game_id, bottle_name, mod_id, rel_path, staging_path, method, sha256) in entries {
+                stmt.execute(params![
+                    game_id,
+                    bottle_name,
+                    mod_id,
+                    rel_path,
+                    staging_path,
+                    method,
+                    sha256,
+                    deployed_at
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Batch-remove deployment manifest entries by relative paths for a specific
+    /// game/bottle in a single transaction.
+    pub fn batch_remove_deployment_entries(
+        &self,
+        game_id: &str,
+        bottle_name: &str,
+        paths: &[&str],
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.unchecked_transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "DELETE FROM deployment_manifest
+                 WHERE game_id = ?1 AND bottle_name = ?2 AND relative_path = ?3",
+            )?;
+            for path in paths {
+                stmt.execute(params![game_id, bottle_name, path])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Batch-fetch file hashes for multiple mods in a single query.
     /// Returns a map of `(mod_id, relative_path) -> sha256`.
     pub fn get_file_hashes_bulk(
@@ -773,6 +858,14 @@ impl ModDatabase {
             result.insert((mod_id, path), sha256);
         }
         Ok(result)
+    }
+
+    /// Alias for `get_file_hashes_bulk` — used by incremental deployment.
+    pub fn get_file_hashes_for_mods(
+        &self,
+        mod_ids: &[i64],
+    ) -> Result<HashMap<(i64, String), String>> {
+        self.get_file_hashes_bulk(mod_ids)
     }
 
     // -- Mod field updates --------------------------------------------------

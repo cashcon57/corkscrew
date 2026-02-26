@@ -80,6 +80,7 @@ import type {
   UserEndorsement,
   ProfileSaveInfo,
   DlcStatus,
+  IncrementalDeployResult,
 } from "./types";
 
 // Bottles
@@ -387,6 +388,13 @@ export async function redeployAllMods(
   bottleName: string
 ): Promise<DeployResult> {
   return invoke("redeploy_all_mods", { gameId, bottleName });
+}
+
+export async function deployIncremental(
+  gameId: string,
+  bottleName: string
+): Promise<IncrementalDeployResult> {
+  return invoke("deploy_incremental_cmd", { gameId, bottleName });
 }
 
 export async function checkDeploymentHealth(

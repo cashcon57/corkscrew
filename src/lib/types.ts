@@ -168,6 +168,15 @@ export interface DeployResult {
   fallback_used: boolean;
 }
 
+export interface IncrementalDeployResult {
+  files_added: number;
+  files_removed: number;
+  files_updated: number;
+  files_unchanged: number;
+  fallback_used: boolean;
+  verification_failures: string[];
+}
+
 export interface DeploymentHealth {
   // Common
   total_mods: number;
