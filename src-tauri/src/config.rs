@@ -39,6 +39,24 @@ pub enum ConfigError {
 pub type Result<T> = std::result::Result<T, ConfigError>;
 
 // ---------------------------------------------------------------------------
+// VerificationLevel
+// ---------------------------------------------------------------------------
+
+/// Controls how thoroughly deployment health checks verify file integrity.
+///
+/// - **Fast**: File existence only (fastest, good for rapid mod development).
+/// - **Balanced**: Existence + spot-check 10% of files by SHA-256 hash (default).
+/// - **Paranoid**: Full SHA-256 verification of every deployed file (slowest).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub enum VerificationLevel {
+    Paranoid,
+    #[default]
+    #[serde(alias = "balanced")]
+    Balanced,
+    Fast,
+}
+
+// ---------------------------------------------------------------------------
 // AppConfig
 // ---------------------------------------------------------------------------
 
@@ -68,6 +86,10 @@ pub struct AppConfig {
     /// Whether controller/gamepad mode is enabled (larger UI targets for Steam Deck).
     #[serde(default)]
     pub controller_mode: bool,
+
+    /// Verification level for deployment health checks.
+    #[serde(default)]
+    pub verification_level: VerificationLevel,
 
     /// Catch-all for any additional settings that may be added in the future.
     /// Flattened so extra keys sit at the top level of the JSON object.
@@ -231,6 +253,13 @@ pub fn set_config_value(key: &str, value: &str) -> Result<()> {
         "controller_mode" => {
             config.controller_mode = value == "true";
         }
+        "verification_level" => {
+            config.verification_level = match value {
+                "Fast" => VerificationLevel::Fast,
+                "Paranoid" => VerificationLevel::Paranoid,
+                _ => VerificationLevel::Balanced,
+            };
+        }
         _ => {
             config
                 .extra
@@ -257,6 +286,11 @@ pub fn get_config_value(key: &str) -> Result<Option<String>> {
         "staging_dir" => config.staging_dir,
         "has_completed_setup" => Some(config.has_completed_setup.to_string()),
         "controller_mode" => Some(config.controller_mode.to_string()),
+        "verification_level" => Some(match config.verification_level {
+            VerificationLevel::Fast => "Fast".to_string(),
+            VerificationLevel::Balanced => "Balanced".to_string(),
+            VerificationLevel::Paranoid => "Paranoid".to_string(),
+        }),
         _ => config.extra.get(key).map(|v| match v {
             serde_json::Value::String(s) => s.clone(),
             other => other.to_string(),
@@ -295,6 +329,7 @@ mod tests {
             staging_dir: None,
             has_completed_setup: false,
             controller_mode: false,
+            verification_level: VerificationLevel::default(),
             extra: HashMap::new(),
         };
         config
@@ -328,5 +363,43 @@ mod tests {
     fn downloads_dir_ends_with_expected_segments() {
         let p = downloads_dir();
         assert!(p.ends_with("corkscrew/downloads"));
+    }
+
+    // Workstream 5: Verification level serde tests
+
+    #[test]
+    fn verification_level_defaults_to_balanced() {
+        let level = VerificationLevel::default();
+        assert_eq!(level, VerificationLevel::Balanced);
+    }
+
+    #[test]
+    fn verification_level_round_trips_through_json() {
+        for level in [
+            VerificationLevel::Fast,
+            VerificationLevel::Balanced,
+            VerificationLevel::Paranoid,
+        ] {
+            let json = serde_json::to_string(&level).unwrap();
+            let restored: VerificationLevel = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored, level);
+        }
+    }
+
+    #[test]
+    fn config_without_verification_level_defaults_to_balanced() {
+        // Simulate old config JSON that doesn't have verification_level
+        let json = r#"{"nexus_api_key": null, "download_dir": null}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.verification_level, VerificationLevel::Balanced);
+    }
+
+    #[test]
+    fn config_with_paranoid_level_round_trips() {
+        let mut config = AppConfig::default();
+        config.verification_level = VerificationLevel::Paranoid;
+        let json = serde_json::to_string(&config).unwrap();
+        let restored: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.verification_level, VerificationLevel::Paranoid);
     }
 }

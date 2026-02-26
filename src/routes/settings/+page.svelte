@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
-  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, checkModToolUpdate, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads, checkSteamStatus, addToSteam, removeFromSteam, scanGameDirectory, cleanGameDirectory, checkSkyrimVersion, downgradeSkyrim, checkDeploymentHealth, redeployAllMods } from "$lib/api";
-  import type { CleanReport, CleanResult, DowngradeStatus, DeploymentHealth } from "$lib/types";
+  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, checkModToolUpdate, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads, checkSteamStatus, addToSteam, removeFromSteam, scanGameDirectory, cleanGameDirectory, checkSkyrimVersion, downgradeSkyrim, checkDeploymentHealth, redeployAllMods, getVerificationLevel, setVerificationLevel } from "$lib/api";
+  import type { CleanReport, CleanResult, DowngradeStatus, DeploymentHealth, VerificationLevel } from "$lib/types";
   import type { SteamStatus } from "$lib/types";
   import { config, showError, showSuccess, selectedGame, skseStatus, currentPage, appVersion, updateReady, updateVersion, updateNotes, updateChecking, updateError, triggerUpdateCheck, controllerMode } from "$lib/stores";
   import type { AppConfig, ModTool, PlatformInfo, ToolInstallProgress, ToolUpdateInfo } from "$lib/types";
@@ -98,6 +98,8 @@
   let checkingHealth = $state(false);
   let redeploying = $state(false);
   let confirmRedeploy = $state(false);
+  let verificationLevel = $state<VerificationLevel>("Balanced");
+  let savingVerificationLevel = $state(false);
 
   const game = $derived($selectedGame);
   const skse = $derived($skseStatus);
@@ -266,6 +268,14 @@
       } catch { /* ignore */ }
     }
 
+    // Load verification level
+    try {
+      const level = await getVerificationLevel();
+      if (level === "Fast" || level === "Balanced" || level === "Paranoid") {
+        verificationLevel = level;
+      }
+    } catch { /* ignore */ }
+
     // Check deployment health
     if (game) {
       try {
@@ -298,6 +308,19 @@
       showError(`Failed to check version: ${e}`);
     } finally {
       checkingDowngrade = false;
+    }
+  }
+
+  async function handleVerificationLevelChange(value: string) {
+    if (value !== "Fast" && value !== "Balanced" && value !== "Paranoid") return;
+    savingVerificationLevel = true;
+    try {
+      await setVerificationLevel(value);
+      verificationLevel = value as VerificationLevel;
+    } catch (e: unknown) {
+      showError(`Failed to save verification level: ${e}`);
+    } finally {
+      savingVerificationLevel = false;
     }
   }
 
@@ -847,6 +870,26 @@
     <div class="section">
       <h2 class="section-title">Deployment Health</h2>
       <div class="section-card">
+        <div class="card-row">
+          <div class="toggle-info">
+            <span class="row-label">Verification Level</span>
+            <span class="toggle-description">
+              Controls how thoroughly the health check verifies deployed files.
+            </span>
+          </div>
+          <div class="row-control">
+            <select
+              class="settings-select"
+              value={verificationLevel}
+              onchange={(e) => handleVerificationLevelChange(e.currentTarget.value)}
+              disabled={savingVerificationLevel}
+            >
+              <option value="Fast">Fast — existence only (fastest)</option>
+              <option value="Balanced">Balanced — existence + spot-check hashes (recommended)</option>
+              <option value="Paranoid">Paranoid — full hash verification (slowest)</option>
+            </select>
+          </div>
+        </div>
         <div class="card-row" style="flex-direction: column; align-items: stretch; gap: 12px;">
           <div style="display: flex; align-items: center; justify-content: space-between;">
             <div>
@@ -900,7 +943,24 @@
                 <span class="health-label">Files missing</span>
                 <span class="health-value" class:health-bad={(deployHealth.deployed_files_missing ?? 0) > 0}>{deployHealth.deployed_files_missing ?? 0}</span>
               </div>
+              {#if deployHealth.verification_level && deployHealth.verification_level !== "Fast"}
+                <div class="health-stat">
+                  <span class="health-label">Hash checked</span>
+                  <span class="health-value">{deployHealth.hash_checked ?? 0}</span>
+                </div>
+                <div class="health-stat">
+                  <span class="health-label">Hash mismatches</span>
+                  <span class="health-value" class:health-bad={(deployHealth.hash_mismatches ?? 0) > 0}>{deployHealth.hash_mismatches ?? 0}</span>
+                </div>
+                <div class="health-stat">
+                  <span class="health-label">No hash record</span>
+                  <span class="health-value" style="color: var(--text-secondary);">{deployHealth.hash_skipped_no_record ?? 0}</span>
+                </div>
+              {/if}
             </div>
+            {#if (deployHealth.hash_mismatches ?? 0) > 0}
+              <p class="health-warning">{deployHealth.hash_mismatches} file(s) failed hash verification. Contents have been modified since deployment. Try redeploying.</p>
+            {/if}
             {#if deployHealth.needs_reinstall}
               <p class="health-warning">Staging directories are missing. Reinstalling affected mods or the collection is required.</p>
             {:else if deployHealth.needs_redeploy}

@@ -1569,6 +1569,10 @@ fn deploy_incremental_cmd(
 }
 
 /// Check deployment health: verify mods have staging dirs and deployed files.
+/// Verification depth is controlled by the `verification_level` config setting:
+/// - Fast: file existence only
+/// - Balanced: existence + spot-check 10% of files by SHA-256
+/// - Paranoid: existence + full SHA-256 verification of every file
 #[tauri::command]
 fn check_deployment_health(
     game_id: String,
@@ -1577,6 +1581,11 @@ fn check_deployment_health(
 ) -> Result<serde_json::Value, String> {
     let (_bottle, _game, data_dir) = resolve_game(&game_id, &bottle_name)?;
     let db = &state.db;
+
+    // Read verification level from config
+    let verification_level = config::get_config()
+        .map(|c| c.verification_level)
+        .unwrap_or_default();
 
     let mods = db.list_mods(&game_id, &bottle_name).map_err(|e| e.to_string())?;
     let manifest = db
@@ -1636,7 +1645,7 @@ fn check_deployment_health(
         }
     }
 
-    // Check deployment manifest vs data dir
+    // Check deployment manifest vs data dir (existence check — all modes)
     let mut deployed_ok = 0usize;
     let mut deployed_missing = 0usize;
     for entry in &manifest {
@@ -1648,11 +1657,28 @@ fn check_deployment_health(
         }
     }
 
+    // Hash verification (Balanced/Paranoid modes only)
+    let verification = deployer::verify_deployment(
+        &verification_level,
+        db,
+        &game_id,
+        &bottle_name,
+        &data_dir,
+    )
+    .map_err(|e| e.to_string())?;
+
     let healthy = staging_missing == 0
         && staging_empty == 0
         && no_staging_path == 0
         && deployed_missing == 0
+        && verification.hash_mismatches == 0
         && !manifest.is_empty();
+
+    let level_str = match verification_level {
+        config::VerificationLevel::Fast => "Fast",
+        config::VerificationLevel::Balanced => "Balanced",
+        config::VerificationLevel::Paranoid => "Paranoid",
+    };
 
     Ok(serde_json::json!({
         "healthy": healthy,
@@ -1668,7 +1694,30 @@ fn check_deployment_health(
         "problem_mods": missing_mods,
         "needs_reinstall": staging_missing > 0 || staging_empty > 0,
         "needs_redeploy": staging_ok > 0 && manifest.is_empty(),
+        "verification_level": level_str,
+        "hash_checked": verification.hash_checked,
+        "hash_mismatches": verification.hash_mismatches,
+        "hash_skipped_no_record": verification.hash_skipped_no_record,
+        "mismatched_files": verification.mismatched_files,
     }))
+}
+
+/// Get the current verification level from config.
+#[tauri::command]
+fn get_verification_level() -> Result<String, String> {
+    let cfg = config::get_config().map_err(|e| e.to_string())?;
+    let level = match cfg.verification_level {
+        config::VerificationLevel::Fast => "Fast",
+        config::VerificationLevel::Balanced => "Balanced",
+        config::VerificationLevel::Paranoid => "Paranoid",
+    };
+    Ok(level.to_string())
+}
+
+/// Set the verification level in config.
+#[tauri::command]
+fn set_verification_level(level: String) -> Result<(), String> {
+    config::set_config_value("verification_level", &level).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -5218,6 +5267,8 @@ pub fn run() {
             redeploy_all_mods,
             deploy_incremental_cmd,
             check_deployment_health,
+            get_verification_level,
+            set_verification_level,
             purge_deployment_cmd,
             verify_mod_integrity,
             sort_plugins_loot,

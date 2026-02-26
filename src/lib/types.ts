@@ -177,6 +177,8 @@ export interface IncrementalDeployResult {
   verification_failures: string[];
 }
 
+export type VerificationLevel = "Fast" | "Balanced" | "Paranoid";
+
 export interface DeploymentHealth {
   // Common
   total_mods: number;
@@ -193,6 +195,12 @@ export interface DeploymentHealth {
   problem_mods?: { id: number; name: string; issue: string }[];
   needs_reinstall?: boolean;
   needs_redeploy?: boolean;
+  // Verification results (Balanced/Paranoid modes)
+  verification_level?: VerificationLevel;
+  hash_checked?: number;
+  hash_mismatches?: number;
+  hash_skipped_no_record?: number;
+  mismatched_files?: string[];
   // From get_deployment_health (sidebar deploy status)
   total_deployed?: number;
   total_enabled?: number;

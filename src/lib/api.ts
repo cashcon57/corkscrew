@@ -404,6 +404,14 @@ export async function checkDeploymentHealth(
   return invoke("check_deployment_health", { gameId, bottleName });
 }
 
+export async function getVerificationLevel(): Promise<string> {
+  return invoke("get_verification_level");
+}
+
+export async function setVerificationLevel(level: string): Promise<void> {
+  return invoke("set_verification_level", { level });
+}
+
 export async function purgeDeployment(
   gameId: string,
   bottleName: string

@@ -2441,4 +2441,102 @@ mod tests {
         let _db = ModDatabase::new(&nested).unwrap();
         assert!(nested.exists());
     }
+
+    // -----------------------------------------------------------------------
+    // Workstream 1/3: Incremental deployment + conflict DB helpers
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_get_deployment_manifest_map() {
+        let (db, _tmp) = test_db();
+        let mod_id = db.add_mod("skyrimse", "Gaming", None, "Mod", "1.0", "m.zip", &[]).unwrap();
+
+        db.add_deployment_entry("skyrimse", "Gaming", mod_id, "test.esp", "/staging/test.esp", "hardlink", None).unwrap();
+        db.add_deployment_entry("skyrimse", "Gaming", mod_id, "meshes/a.nif", "/staging/meshes/a.nif", "copy", None).unwrap();
+
+        let map = db.get_deployment_manifest_map("skyrimse", "Gaming").unwrap();
+        assert_eq!(map.len(), 2);
+        assert!(map.contains_key("test.esp"));
+        assert!(map.contains_key("meshes/a.nif"));
+        assert_eq!(map["test.esp"].mod_id, mod_id);
+    }
+
+    #[test]
+    fn test_batch_add_deployment_entries_with_hashes() {
+        let (db, _tmp) = test_db();
+        let mod_id = db.add_mod("skyrimse", "Gaming", None, "Mod", "1.0", "m.zip", &[]).unwrap();
+
+        let entries = vec![
+            ("skyrimse", "Gaming", mod_id, "file1.esp", "/staging/file1.esp", "hardlink", Some("abc123")),
+            ("skyrimse", "Gaming", mod_id, "file2.esp", "/staging/file2.esp", "copy", None),
+        ];
+        let entries_ref: Vec<(&str, &str, i64, &str, &str, &str, Option<&str>)> = entries
+            .iter()
+            .map(|(a, b, c, d, e, f, g)| (*a, *b, *c, *d, *e, *f, g.as_deref()))
+            .collect();
+        db.batch_add_deployment_entries_with_hashes(&entries_ref).unwrap();
+
+        let manifest = db.get_deployment_manifest("skyrimse", "Gaming").unwrap();
+        assert_eq!(manifest.len(), 2);
+
+        let file1 = manifest.iter().find(|e| e.relative_path == "file1.esp").unwrap();
+        assert_eq!(file1.sha256.as_deref(), Some("abc123"));
+
+        let file2 = manifest.iter().find(|e| e.relative_path == "file2.esp").unwrap();
+        assert!(file2.sha256.is_none());
+    }
+
+    #[test]
+    fn test_batch_remove_deployment_entries() {
+        let (db, _tmp) = test_db();
+        let mod_id = db.add_mod("skyrimse", "Gaming", None, "Mod", "1.0", "m.zip", &[]).unwrap();
+
+        db.add_deployment_entry("skyrimse", "Gaming", mod_id, "a.esp", "/s/a.esp", "hardlink", None).unwrap();
+        db.add_deployment_entry("skyrimse", "Gaming", mod_id, "b.esp", "/s/b.esp", "hardlink", None).unwrap();
+        db.add_deployment_entry("skyrimse", "Gaming", mod_id, "c.esp", "/s/c.esp", "hardlink", None).unwrap();
+
+        db.batch_remove_deployment_entries("skyrimse", "Gaming", &["a.esp", "c.esp"]).unwrap();
+
+        let manifest = db.get_deployment_manifest("skyrimse", "Gaming").unwrap();
+        assert_eq!(manifest.len(), 1);
+        assert_eq!(manifest[0].relative_path, "b.esp");
+    }
+
+    #[test]
+    fn test_get_file_hashes_bulk() {
+        let (db, _tmp) = test_db();
+        let mod1 = db.add_mod("skyrimse", "Gaming", None, "Mod1", "1.0", "m1.zip", &[]).unwrap();
+        let mod2 = db.add_mod("skyrimse", "Gaming", None, "Mod2", "1.0", "m2.zip", &[]).unwrap();
+
+        db.store_file_hashes(mod1, &[("textures/sky.dds".into(), "hash_a".into(), 1024)]).unwrap();
+        db.store_file_hashes(mod2, &[
+            ("textures/sky.dds".into(), "hash_b".into(), 2048),
+            ("meshes/tree.nif".into(), "hash_c".into(), 512),
+        ]).unwrap();
+
+        let hashes = db.get_file_hashes_bulk(&[mod1, mod2]).unwrap();
+        assert_eq!(hashes.len(), 3);
+        assert_eq!(hashes[&(mod1, "textures/sky.dds".to_string())], "hash_a");
+        assert_eq!(hashes[&(mod2, "textures/sky.dds".to_string())], "hash_b");
+        assert_eq!(hashes[&(mod2, "meshes/tree.nif".to_string())], "hash_c");
+    }
+
+    #[test]
+    fn test_get_file_hashes_bulk_empty() {
+        let (db, _tmp) = test_db();
+        let hashes = db.get_file_hashes_bulk(&[]).unwrap();
+        assert!(hashes.is_empty());
+    }
+
+    #[test]
+    fn test_get_file_hashes_for_mods_aliases_bulk() {
+        let (db, _tmp) = test_db();
+        let mod1 = db.add_mod("skyrimse", "Gaming", None, "Mod1", "1.0", "m1.zip", &[]).unwrap();
+        db.store_file_hashes(mod1, &[("test.esp".into(), "hash_x".into(), 100)]).unwrap();
+
+        // Both methods should return the same result
+        let bulk = db.get_file_hashes_bulk(&[mod1]).unwrap();
+        let for_mods = db.get_file_hashes_for_mods(&[mod1]).unwrap();
+        assert_eq!(bulk, for_mods);
+    }
 }

@@ -881,4 +881,22 @@ mod tests {
             .unwrap();
         assert_eq!(priority, 0);
     }
+
+    #[test]
+    fn v13_creates_deployment_manifest_index() {
+        let conn = memory_db();
+        migrate(&conn).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 13);
+
+        // Verify the compound index exists
+        let index_exists: bool = conn
+            .prepare(
+                "SELECT COUNT(*) > 0 FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_manifest_game_bottle_mod'",
+            )
+            .unwrap()
+            .query_row([], |row| row.get(0))
+            .unwrap();
+        assert!(index_exists, "v13 compound index should exist");
+    }
 }

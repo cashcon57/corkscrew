@@ -1189,6 +1189,117 @@ pub fn deploy_incremental(
 }
 
 // ---------------------------------------------------------------------------
+// Deployment verification
+// ---------------------------------------------------------------------------
+
+/// Result of post-deploy hash verification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerificationResult {
+    /// Total files checked by hash.
+    pub hash_checked: usize,
+    /// Files whose hash did not match the deployment manifest.
+    pub hash_mismatches: usize,
+    /// Files skipped because the manifest has no stored SHA-256.
+    pub hash_skipped_no_record: usize,
+    /// Relative paths of files that failed hash verification.
+    pub mismatched_files: Vec<String>,
+}
+
+use serde::{Deserialize, Serialize};
+use crate::config::VerificationLevel;
+
+/// Verify deployed files against the deployment manifest's SHA-256 hashes.
+///
+/// - **Fast**: no-op (returns immediately with zeroed result).
+/// - **Balanced**: spot-checks ~10% of files (every 10th file) by SHA-256 hash.
+/// - **Paranoid**: verifies every deployed file by SHA-256 hash.
+///
+/// Files whose manifest entry has no SHA-256 stored (NULL) are skipped gracefully.
+pub fn verify_deployment(
+    level: &VerificationLevel,
+    db: &ModDatabase,
+    game_id: &str,
+    bottle_name: &str,
+    deploy_root: &Path,
+) -> Result<VerificationResult> {
+    if *level == VerificationLevel::Fast {
+        return Ok(VerificationResult {
+            hash_checked: 0,
+            hash_mismatches: 0,
+            hash_skipped_no_record: 0,
+            mismatched_files: Vec::new(),
+        });
+    }
+
+    let manifest = db
+        .get_deployment_manifest(game_id, bottle_name)
+        .map_err(|e| DeployerError::Other(e.to_string()))?;
+
+    let mut hash_checked: usize = 0;
+    let mut hash_mismatches: usize = 0;
+    let mut hash_skipped_no_record: usize = 0;
+    let mut mismatched_files: Vec<String> = Vec::new();
+
+    let is_balanced = *level == VerificationLevel::Balanced;
+
+    for (idx, entry) in manifest.iter().enumerate() {
+        // Balanced mode: spot-check every 10th file (~10%)
+        if is_balanced && idx % 10 != 0 {
+            continue;
+        }
+
+        let expected_hash = match &entry.sha256 {
+            Some(h) if !h.is_empty() => h,
+            _ => {
+                hash_skipped_no_record += 1;
+                continue;
+            }
+        };
+
+        let file_path = deploy_root.join(&entry.relative_path);
+        if !file_path.exists() {
+            // Missing files are already counted by the existence check;
+            // don't double-count as a hash mismatch.
+            continue;
+        }
+
+        match platform::fast_hash(&file_path) {
+            Ok(actual_hash) => {
+                hash_checked += 1;
+                if actual_hash != *expected_hash {
+                    hash_mismatches += 1;
+                    if mismatched_files.len() < 50 {
+                        mismatched_files.push(entry.relative_path.clone());
+                    }
+                    debug!(
+                        "Hash mismatch: {} (expected {}, got {})",
+                        entry.relative_path, expected_hash, actual_hash
+                    );
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to hash {}: {} — skipping",
+                    entry.relative_path, e
+                );
+            }
+        }
+    }
+
+    info!(
+        "Verification ({:?}): checked={}, mismatches={}, skipped_no_record={}",
+        level, hash_checked, hash_mismatches, hash_skipped_no_record
+    );
+
+    Ok(VerificationResult {
+        hash_checked,
+        hash_mismatches,
+        hash_skipped_no_record,
+        mismatched_files,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1347,5 +1458,306 @@ mod tests {
         let fake = PathBuf::from("/nonexistent/corkscrew_test_xyz");
 
         assert!(!same_filesystem(&real, &fake));
+    }
+
+    // -----------------------------------------------------------------------
+    // Workstream 1: Incremental Deployment Engine
+    // -----------------------------------------------------------------------
+
+    /// Helper: add a mod, set staging_path, create staging files, and optionally
+    /// add file hashes for realistic incremental deploy testing.
+    fn add_test_mod(
+        db: &ModDatabase,
+        staging_root: &Path,
+        name: &str,
+        priority: i32,
+        files: &[(&str, &[u8])],
+    ) -> (i64, PathBuf) {
+        let file_names: Vec<String> = files.iter().map(|(f, _)| f.to_string()).collect();
+        let mod_id = db
+            .add_mod("skyrimse", "Gaming", None, name, "1.0", &format!("{name}.zip"), &file_names)
+            .unwrap();
+        db.set_mod_priority(mod_id, priority).unwrap();
+
+        let staging = staging_root.join(format!("skyrimse/Gaming/{mod_id}_{name}"));
+        fs::create_dir_all(&staging).unwrap();
+        db.set_staging_path(mod_id, staging.to_str().unwrap()).unwrap();
+
+        for (rel_path, content) in files {
+            let full = staging.join(rel_path);
+            if let Some(parent) = full.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            fs::write(&full, content).unwrap();
+
+            // Also add file hash for realistic testing
+            let hash = crate::platform::fast_hash(&full).unwrap();
+            let _ = db.store_file_hashes(mod_id, &[(rel_path.to_string(), hash, content.len() as u64)]);
+        }
+
+        (mod_id, staging)
+    }
+
+    #[test]
+    fn incremental_deploy_from_empty_uses_fallback() {
+        let (db, _tmp, _, data_dir) = setup();
+        let staging_root = _tmp.path().join("staging_root");
+        fs::create_dir_all(&staging_root).unwrap();
+
+        add_test_mod(&db, &staging_root, "ModA", 0, &[
+            ("textures/sky.dds", b"sky texture data"),
+            ("meshes/tree.nif", b"tree mesh data"),
+        ]);
+
+        // From empty → 100% new files → triggers >80% fallback to full redeploy
+        let result = deploy_incremental(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+        assert!(result.fallback_used, "Initial deploy from empty should use fallback");
+        assert!(data_dir.join("textures/sky.dds").exists());
+        assert!(data_dir.join("meshes/tree.nif").exists());
+    }
+
+    #[test]
+    fn incremental_deploy_adds_new_mod_incrementally() {
+        let (db, _tmp, _, data_dir) = setup();
+        let staging_root = _tmp.path().join("staging_root");
+        fs::create_dir_all(&staging_root).unwrap();
+
+        // Deploy first mod (uses fallback since it's from empty)
+        add_test_mod(&db, &staging_root, "ModA", 0, &[
+            ("textures/sky.dds", b"sky texture data"),
+            ("meshes/tree.nif", b"tree mesh data"),
+            ("sounds/fx.wav", b"sound data"),
+            ("data.esp", b"esp data"),
+            ("extra1.bsa", b"bsa data"),
+        ]);
+        let r1 = deploy_incremental(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+        assert!(r1.fallback_used); // First deploy is full
+
+        // Now add a small second mod — should be incremental (1 new file < 80%)
+        add_test_mod(&db, &staging_root, "ModB", 10, &[
+            ("new_plugin.esp", b"new esp data"),
+        ]);
+
+        let r2 = deploy_incremental(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+        // fallback_used tracks copy-vs-hardlink (expected true in test env), not full-vs-incremental
+        // File counts prove incremental behavior:
+        assert_eq!(r2.files_added, 1);
+        assert!(r2.files_unchanged >= 5);
+        assert_eq!(r2.files_removed, 0);
+        assert_eq!(r2.files_updated, 0);
+        assert!(data_dir.join("new_plugin.esp").exists());
+    }
+
+    #[test]
+    fn incremental_deploy_removes_files_from_disabled_mod() {
+        let (db, _tmp, _, data_dir) = setup();
+        let staging_root = _tmp.path().join("staging_root");
+        fs::create_dir_all(&staging_root).unwrap();
+
+        // First, deploy multiple mods so disabling one is < 80% change
+        add_test_mod(&db, &staging_root, "BaseA", 0, &[
+            ("base1.esp", b"base1"),
+            ("base2.esp", b"base2"),
+            ("base3.esp", b"base3"),
+            ("base4.esp", b"base4"),
+        ]);
+        let (mod_b, _) = add_test_mod(&db, &staging_root, "SmallMod", 5, &[
+            ("small.esp", b"esp data"),
+        ]);
+
+        // Initial deploy (fallback)
+        deploy_incremental(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+        assert!(data_dir.join("small.esp").exists());
+
+        // Disable the small mod — only 1 removal out of 5 files (~20% change)
+        db.set_enabled(mod_b, false).unwrap();
+
+        let r2 = deploy_incremental(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+        // File counts prove incremental behavior (1 removal out of 5 total):
+        assert_eq!(r2.files_removed, 1);
+        assert_eq!(r2.files_added, 0);
+        assert!(r2.files_unchanged >= 4);
+        assert!(!data_dir.join("small.esp").exists());
+        // Base files should still exist
+        assert!(data_dir.join("base1.esp").exists());
+    }
+
+    #[test]
+    fn incremental_deploy_updates_when_priority_changes() {
+        let (db, _tmp, _, data_dir) = setup();
+        let staging_root = _tmp.path().join("staging_root");
+        fs::create_dir_all(&staging_root).unwrap();
+
+        // Create several unique files first to avoid >80% threshold
+        let (mod_a, _) = add_test_mod(&db, &staging_root, "ModA", 0, &[
+            ("shared.esp", b"content from A"),
+            ("unique_a1.txt", b"unique a1"),
+            ("unique_a2.txt", b"unique a2"),
+        ]);
+        let (_mod_b, _) = add_test_mod(&db, &staging_root, "ModB", 10, &[
+            ("shared.esp", b"content from B"),
+            ("unique_b1.txt", b"unique b1"),
+            ("unique_b2.txt", b"unique b2"),
+        ]);
+
+        // Initial deploy — ModB wins shared.esp (higher priority), fallback
+        deploy_incremental(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+        let content = fs::read_to_string(data_dir.join("shared.esp")).unwrap();
+        assert_eq!(content, "content from B");
+
+        // Swap priorities — ModA now higher
+        db.set_mod_priority(mod_a, 20).unwrap();
+
+        // Incremental redeploy — should update shared.esp (1 of 5 files = 20%)
+        let r2 = deploy_incremental(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+        // File counts prove incremental behavior (1 update out of 5 total):
+        assert_eq!(r2.files_updated, 1);
+        assert_eq!(r2.files_added, 0);
+        assert_eq!(r2.files_removed, 0);
+        assert!(r2.files_unchanged >= 4);
+        let content = fs::read_to_string(data_dir.join("shared.esp")).unwrap();
+        assert_eq!(content, "content from A");
+    }
+
+    #[test]
+    fn incremental_deploy_no_changes_returns_all_unchanged() {
+        let (db, _tmp, _, data_dir) = setup();
+        let staging_root = _tmp.path().join("staging_root");
+        fs::create_dir_all(&staging_root).unwrap();
+
+        add_test_mod(&db, &staging_root, "ModA", 0, &[
+            ("test.esp", b"data"),
+        ]);
+
+        // Deploy once (fallback since from empty)
+        deploy_incremental(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+
+        // Deploy again — nothing changed
+        let r2 = deploy_incremental(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+        assert_eq!(r2.files_unchanged, 1);
+        assert_eq!(r2.files_added, 0);
+        assert_eq!(r2.files_removed, 0);
+        assert_eq!(r2.files_updated, 0);
+        assert!(!r2.fallback_used);
+    }
+
+    #[test]
+    fn incremental_deploy_empty_state() {
+        let (db, _tmp, _, data_dir) = setup();
+
+        // No mods — should be a no-op
+        let result = deploy_incremental(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+        assert_eq!(result.files_added, 0);
+        assert_eq!(result.files_unchanged, 0);
+        assert!(!result.fallback_used);
+    }
+
+    // -----------------------------------------------------------------------
+    // Workstream 5: Configurable Verification Levels
+    // -----------------------------------------------------------------------
+
+    /// Helper: deploy mods using full redeploy + manually record hashes in manifest
+    fn deploy_with_hashes(db: &ModDatabase, staging_root: &Path, data_dir: &Path,
+                          mods: &[(&str, i32, &[(&str, &[u8])])]) {
+        for (name, priority, files) in mods {
+            add_test_mod(db, staging_root, name, *priority, files);
+        }
+        // Use full redeploy to establish baseline
+        redeploy_all(db, "skyrimse", "Gaming", data_dir).unwrap();
+
+        // Manually update manifest entries with hashes
+        let manifest = db.get_deployment_manifest("skyrimse", "Gaming").unwrap();
+        for entry in &manifest {
+            let file_path = data_dir.join(&entry.relative_path);
+            if file_path.exists() {
+                let hash = crate::platform::fast_hash(&file_path).unwrap();
+                let entries = vec![(
+                    "skyrimse", "Gaming", entry.mod_id, entry.relative_path.as_str(),
+                    entry.staging_path.as_str(), entry.deploy_method.as_str(), Some(hash.as_str()),
+                )];
+                db.batch_add_deployment_entries_with_hashes(&entries).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn verify_deployment_fast_is_noop() {
+        let (db, _tmp, _, data_dir) = setup();
+        let result = verify_deployment(
+            &crate::config::VerificationLevel::Fast,
+            &db, "skyrimse", "Gaming", &data_dir,
+        ).unwrap();
+        assert_eq!(result.hash_checked, 0);
+        assert_eq!(result.hash_mismatches, 0);
+    }
+
+    #[test]
+    fn verify_deployment_paranoid_detects_tamper() {
+        let (db, _tmp, _, data_dir) = setup();
+        let staging_root = _tmp.path().join("staging_root");
+        fs::create_dir_all(&staging_root).unwrap();
+
+        deploy_with_hashes(&db, &staging_root, &data_dir, &[
+            ("ModA", 0, &[("test.esp", b"original content")]),
+        ]);
+        assert!(data_dir.join("test.esp").exists());
+
+        // Tamper with it
+        fs::write(data_dir.join("test.esp"), b"tampered content").unwrap();
+
+        // Paranoid verification should detect the mismatch
+        let result = verify_deployment(
+            &crate::config::VerificationLevel::Paranoid,
+            &db, "skyrimse", "Gaming", &data_dir,
+        ).unwrap();
+        assert_eq!(result.hash_checked, 1);
+        assert_eq!(result.hash_mismatches, 1);
+        assert!(result.mismatched_files.contains(&"test.esp".to_string()));
+    }
+
+    #[test]
+    fn verify_deployment_paranoid_passes_on_clean() {
+        let (db, _tmp, _, data_dir) = setup();
+        let staging_root = _tmp.path().join("staging_root");
+        fs::create_dir_all(&staging_root).unwrap();
+
+        deploy_with_hashes(&db, &staging_root, &data_dir, &[
+            ("ModA", 0, &[("test.esp", b"original content")]),
+        ]);
+
+        let result = verify_deployment(
+            &crate::config::VerificationLevel::Paranoid,
+            &db, "skyrimse", "Gaming", &data_dir,
+        ).unwrap();
+        assert_eq!(result.hash_checked, 1);
+        assert_eq!(result.hash_mismatches, 0);
+    }
+
+    #[test]
+    fn verify_deployment_balanced_spotchecks() {
+        let (db, _tmp, _, data_dir) = setup();
+        let staging_root = _tmp.path().join("staging_root");
+        fs::create_dir_all(&staging_root).unwrap();
+
+        // Create 20 files — Balanced mode should check ~2 (every 10th: idx 0 and 10)
+        let files: Vec<(&str, &[u8])> = (0..20)
+            .map(|i| {
+                let name: &str = Box::leak(format!("file_{i:02}.esp").into_boxed_str());
+                (name, b"data" as &[u8])
+            })
+            .collect();
+
+        deploy_with_hashes(&db, &staging_root, &data_dir, &[
+            ("BigMod", 0, &files),
+        ]);
+
+        let result = verify_deployment(
+            &crate::config::VerificationLevel::Balanced,
+            &db, "skyrimse", "Gaming", &data_dir,
+        ).unwrap();
+        // Should check only ~10% (every 10th file)
+        assert!(result.hash_checked <= 5, "Balanced should spot-check ~10%, got {}", result.hash_checked);
+        assert!(result.hash_checked >= 1, "Balanced should check at least 1 file");
+        assert_eq!(result.hash_mismatches, 0);
     }
 }
