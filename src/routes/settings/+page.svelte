@@ -11,7 +11,7 @@
   import IniManagerPanel from "$lib/components/IniManagerPanel.svelte";
   import WineDiagnosticsPanel from "$lib/components/WineDiagnosticsPanel.svelte";
   import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
-  import { openUrl } from "@tauri-apps/plugin-opener";
+  import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
   import { relaunch } from "@tauri-apps/plugin-process";
 
   let manualCheckDone = $state(false);
@@ -62,6 +62,7 @@
   let cleaning = $state(false);
   let cleanResult = $state<CleanResult | null>(null);
   let cleanRemoveSaves = $state(false);
+  let showCleanFileList = $state(false);
 
   // Steam integration (Linux only)
   let steamStatus = $state<SteamStatus | null>(null);
@@ -892,14 +893,27 @@
               <span class="row-label">Clean Game Directory</span>
               <p class="row-description">Scan for and remove non-stock files from the game's Data folder. Use this to restore a clean install.</p>
             </div>
-            <button
-              class="btn-secondary"
-              onclick={handleScanGameDir}
-              disabled={scanning}
-              type="button"
-            >
-              {scanning ? "Scanning..." : "Scan for Non-Stock Files"}
-            </button>
+            <div style="display: flex; gap: 8px; align-items: center;">
+              <button
+                class="btn-secondary"
+                onclick={() => { if (game) revealItemInDir(game.data_dir); }}
+                type="button"
+                title="Open game Data directory in Finder"
+              >
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: -2px; margin-right: 2px;">
+                  <path d="M2 4h3l2-2h5a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V4z" />
+                </svg>
+                Open Directory
+              </button>
+              <button
+                class="btn-secondary"
+                onclick={handleScanGameDir}
+                disabled={scanning}
+                type="button"
+              >
+                {scanning ? "Scanning..." : "Scan for Non-Stock Files"}
+              </button>
+            </div>
           </div>
 
           {#if cleanReport}
@@ -917,6 +931,48 @@
               </div>
 
               {#if cleanReport.non_stock_files.length > 0}
+                <button
+                  class="btn-link-sm"
+                  onclick={() => showCleanFileList = !showCleanFileList}
+                  type="button"
+                >
+                  {showCleanFileList ? "Hide" : "Show"} {cleanReport.non_stock_files.length} Files
+                  <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" style="transition: transform 0.15s ease; transform: rotate({showCleanFileList ? 180 : 0}deg);">
+                    <path d="M2 3.5L5 7L8 3.5H2z" />
+                  </svg>
+                </button>
+
+                {#if showCleanFileList}
+                  <div class="clean-file-list">
+                    <table class="clean-file-table">
+                      <thead>
+                        <tr>
+                          <th>File</th>
+                          <th>Category</th>
+                          <th>Size</th>
+                          <th>Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {#each cleanReport.non_stock_files as f}
+                          <tr>
+                            <td class="clean-file-path" title={f.relative_path}>{f.relative_path}</td>
+                            <td><span class="clean-category-badge">{f.category}</span></td>
+                            <td class="clean-file-size">{formatBytes(f.size)}</td>
+                            <td>
+                              {#if f.is_managed}
+                                <span class="clean-managed-badge">Managed</span>
+                              {:else}
+                                <span class="clean-orphaned-badge">Orphaned</span>
+                              {/if}
+                            </td>
+                          </tr>
+                        {/each}
+                      </tbody>
+                    </table>
+                  </div>
+                {/if}
+
                 <div class="clean-options-row">
                   {#if cleanReport.save_files.length > 0}
                     <label class="clean-option-label">
@@ -1308,7 +1364,7 @@
   {#if game}
     <div class="section">
       <h2 class="section-title">Wine Diagnostics</h2>
-      <WineDiagnosticsPanel gameId={game.game_id} bottleName={game.bottle_name} />
+      <WineDiagnosticsPanel gameId={game.game_id} bottleName={game.bottle_name} gamePath={game.game_path} />
     </div>
   {/if}
 
@@ -2833,6 +2889,91 @@
   }
   .clean-skipped {
     color: var(--text-tertiary);
+  }
+  .btn-link-sm {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--system-accent);
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    margin-bottom: var(--space-2, 8px);
+  }
+  .btn-link-sm:hover {
+    text-decoration: underline;
+  }
+  .clean-file-list {
+    max-height: 300px;
+    overflow-y: auto;
+    border: 1px solid var(--separator);
+    border-radius: var(--radius-sm, 6px);
+    margin-bottom: var(--space-3, 12px);
+  }
+  .clean-file-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+  .clean-file-table thead {
+    position: sticky;
+    top: 0;
+    background: var(--bg-secondary, rgba(0, 0, 0, 0.15));
+    z-index: 1;
+  }
+  .clean-file-table th {
+    text-align: left;
+    font-weight: 600;
+    color: var(--text-secondary);
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--separator);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  .clean-file-table td {
+    padding: 5px 10px;
+    border-bottom: 1px solid var(--separator);
+    color: var(--text-secondary);
+  }
+  .clean-file-table tbody tr:hover {
+    background: var(--surface-hover);
+  }
+  .clean-file-path {
+    max-width: 360px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--font-mono, monospace);
+    font-size: 11px;
+  }
+  .clean-file-size {
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+  }
+  .clean-category-badge {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    background: var(--surface, rgba(255, 255, 255, 0.06));
+    text-transform: capitalize;
+  }
+  .clean-managed-badge {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--green, #30d158);
+  }
+  .clean-orphaned-badge {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--yellow, #ffd60a);
   }
   .row-description {
     font-size: 12px;

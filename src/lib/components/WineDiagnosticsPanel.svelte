@@ -1,13 +1,15 @@
 <script lang="ts">
   import { runWineDiagnostics, fixWineAppdata } from "$lib/api";
+  import { revealItemInDir } from "@tauri-apps/plugin-opener";
   import type { DiagnosticResult, DiagnosticCheck, CheckStatus } from "$lib/types";
 
   interface Props {
     gameId: string;
     bottleName: string;
+    gamePath?: string;
   }
 
-  let { gameId, bottleName }: Props = $props();
+  let { gameId, bottleName, gamePath }: Props = $props();
   let result = $state<DiagnosticResult | null>(null);
   let loading = $state(false);
   let fixing = $state(false);
@@ -164,6 +166,19 @@
         Run Diagnostics
       {/if}
     </button>
+    {#if gamePath}
+      <button
+        class="btn btn-secondary btn-sm"
+        onclick={() => revealItemInDir(gamePath!)}
+        type="button"
+        title="Open game directory in Finder"
+      >
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M2 4h3l2-2h5a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V4z" />
+        </svg>
+        Open Game Directory
+      </button>
+    {/if}
   </div>
 
   <!-- Content -->

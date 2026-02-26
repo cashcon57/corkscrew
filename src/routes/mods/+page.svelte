@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { open } from "@tauri-apps/plugin-dialog";
-  import { openUrl } from "@tauri-apps/plugin-opener";
+  import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
   import ModVersionHistory from "$lib/components/ModVersionHistory.svelte";
   import ModlistImportWizard from "$lib/components/ModlistImportWizard.svelte";
   import FomodWizard from "$lib/components/FomodWizard.svelte";
@@ -93,6 +93,7 @@
   let showSksePrompt = $state(false);
   let installingSkse = $state(false);
   let showSkseMenu = $state(false);
+  let showSkseInstallPrompt = $state(false);
   let downgradeStatus = $state<DowngradeStatus | null>(null);
   let downgrading = $state(false);
   let showDowngradeBanner = $state(false);
@@ -894,9 +895,15 @@
     const game = pickedGame ?? $selectedGame;
     if (!game) return;
 
-    const useSkse = !!(skse?.installed && skse?.use_skse && game.game_id === "skyrimse");
+    const wantsSkse = !!(skse?.use_skse && game.game_id === "skyrimse");
 
-    doLaunch(useSkse);
+    if (wantsSkse && !skse?.installed) {
+      // SKSE preference is on but not installed — prompt to install
+      showSkseInstallPrompt = true;
+      return;
+    }
+
+    doLaunch(wantsSkse);
   }
 
   async function doLaunch(useSkse: boolean) {
@@ -983,6 +990,49 @@
       showSuccess("SKSE auto-installed successfully");
     } catch (e: unknown) {
       showError(`SKSE auto-install failed: ${e}`);
+    } finally {
+      installingSkse = false;
+    }
+  }
+
+  async function handleInstallSkseAndLaunch() {
+    const game = pickedGame ?? $selectedGame;
+    if (!game) return;
+    try {
+      installingSkse = true;
+      showSkseInstallPrompt = false;
+      skse = await installSkseAuto(game.game_id, game.bottle_name);
+      skseStatus.set(skse);
+      showSksePrompt = false;
+      showSuccess("SKSE installed — launching game");
+      doLaunch(true);
+    } catch (e: unknown) {
+      showError(`SKSE auto-install failed: ${e}`);
+    } finally {
+      installingSkse = false;
+    }
+  }
+
+  async function handleInstallSkseArchiveAndLaunch() {
+    const game = pickedGame ?? $selectedGame;
+    if (!game) return;
+    try {
+      const selected = await open({
+        title: "Select SKSE Archive (.7z or .zip)",
+        filters: [{ name: "Archives", extensions: ["7z", "zip"] }],
+      });
+      if (!selected) return;
+
+      const archivePath = typeof selected === "string" ? selected : (selected as any).path;
+      installingSkse = true;
+      showSkseInstallPrompt = false;
+      skse = await installSkseFromArchive(game.game_id, game.bottle_name, archivePath);
+      skseStatus.set(skse);
+      showSksePrompt = false;
+      showSuccess("SKSE installed — launching game");
+      doLaunch(true);
+    } catch (e: unknown) {
+      showError(`SKSE installation failed: ${e}`);
     } finally {
       installingSkse = false;
     }
@@ -1961,23 +2011,37 @@
         </div>
       {/if}
 
+      {#if activeGame}
+        <button
+          class="btn btn-icon-sm"
+          onclick={() => revealItemInDir(activeGame!.game_path)}
+          title="Open game directory in Finder"
+        >
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M2 4h3l2-2h5a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V4z" />
+          </svg>
+        </button>
+      {/if}
       <div class="play-button-group">
-        <button class="btn btn-play" onclick={handlePlay} disabled={launching}>
+        <button class="btn btn-play" onclick={handlePlay} disabled={launching || installingSkse}>
           {#if launching}
             <span class="spinner spinner-play"></span>
             Launching...
+          {:else if installingSkse}
+            <span class="spinner spinner-play"></span>
+            Installing SKSE...
           {:else}
             <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
               <path d="M3 1.5v11l9-5.5L3 1.5z" />
             </svg>
-            Play{#if skse?.installed && skse?.use_skse} (SKSE){/if}
+            Play{#if skse?.use_skse && activeGame?.game_id === "skyrimse"} (SKSE){/if}
           {/if}
         </button>
-        {#if activeGame?.game_id === "skyrimse" && skse?.installed}
+        {#if activeGame?.game_id === "skyrimse"}
           <button
             class="btn btn-play-dropdown"
-            onclick={(e) => { e.stopPropagation(); showSkseMenu = !showSkseMenu; showToolsMenu = false; }}
-            aria-label="SKSE options"
+            onclick={(e) => { e.stopPropagation(); showSkseMenu = !showSkseMenu; showToolsMenu = false; showSkseInstallPrompt = false; }}
+            aria-label="Launch options"
           >
             <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
               <path d="M2 3.5L5 7L8 3.5H2z" />
@@ -1996,10 +2060,45 @@
               </span>
               Launch via SKSE
             </button>
+            <button class="dropdown-item" onclick={() => { showSkseMenu = false; doLaunch(false); }}>
+              <span class="dropdown-check"></span>
+              Launch Game Directly
+            </button>
             <div class="dropdown-divider"></div>
             <div class="dropdown-info">
-              SKSE {skse?.version ?? ""}
+              {#if skse?.installed}
+                SKSE {skse.version ?? ""} installed
+              {:else}
+                SKSE not installed
+              {/if}
             </div>
+          </div>
+        {/if}
+        {#if showSkseInstallPrompt}
+          <div class="skse-dropdown skse-install-prompt">
+            <div class="dropdown-info" style="font-weight: 600; color: var(--text-primary);">SKSE is not installed</div>
+            <div class="dropdown-divider"></div>
+            <button class="dropdown-item" onclick={handleInstallSkseAndLaunch} disabled={installingSkse}>
+              <span class="dropdown-check">
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M6 2v8M2 6l4 4 4-4" />
+                </svg>
+              </span>
+              {installingSkse ? "Installing..." : "Auto Install SKSE"}
+            </button>
+            <button class="dropdown-item" onclick={handleInstallSkseArchiveAndLaunch} disabled={installingSkse}>
+              <span class="dropdown-check">
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="2" y="2" width="8" height="8" rx="1" />
+                </svg>
+              </span>
+              Install from Archive
+            </button>
+            <div class="dropdown-divider"></div>
+            <button class="dropdown-item dropdown-item-muted" onclick={() => { showSkseInstallPrompt = false; doLaunch(false); }}>
+              <span class="dropdown-check"></span>
+              Launch Without SKSE
+            </button>
           </div>
         {/if}
       </div>
@@ -4203,6 +4302,26 @@
   }
 
   /* --- Play Button --- */
+
+  .btn-icon-sm {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    background: var(--surface-hover);
+    color: var(--text-secondary);
+    border: none;
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: background var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease);
+    flex-shrink: 0;
+  }
+
+  .btn-icon-sm:hover {
+    background: var(--surface-active);
+    color: var(--text-primary);
+  }
 
   .play-button-group {
     display: flex;
