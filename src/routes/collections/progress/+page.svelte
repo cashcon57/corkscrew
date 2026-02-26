@@ -600,15 +600,22 @@
           {#if extractingMods.length > 0}
             <div class="extracting-list">
               {#each extractingMods as mod (mod.index)}
-                <div class="extracting-item">
-                  <svg class="icon-spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--system-accent)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                    <circle cx="12" cy="12" r="3" />
-                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-                  </svg>
-                  <span class="extracting-name" title={mod.name}>{mod.name}</span>
-                  {#if mod.stepDetail}
-                    <span class="extracting-detail">{mod.stepDetail}</span>
-                  {/if}
+                <div class="extracting-item-wrap">
+                  <div class="extracting-item">
+                    <svg class="icon-spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--system-accent)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                      <circle cx="12" cy="12" r="3" />
+                      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                    </svg>
+                    <span class="extracting-name" title={mod.name}>{mod.name}</span>
+                    {#if mod.stepDetail}
+                      <span class="extracting-detail">{mod.stepDetail}</span>
+                    {:else if stagingSpeed > 0}
+                      <span class="extracting-detail">{formatBytes(stagingSpeed)}/s</span>
+                    {/if}
+                  </div>
+                  <div class="extracting-bar">
+                    <div class="extracting-bar-fill"></div>
+                  </div>
                 </div>
               {/each}
             </div>
@@ -752,6 +759,18 @@
               <span class="activity-status">
                 {#if mod.status === "downloading" && mod.downloadBytes && mod.downloadTotal}
                   {formatBytes(mod.downloadBytes)} / {formatBytes(mod.downloadTotal)}
+                  {#if downloadSpeed > 0}
+                    <span class="speed-inline">{formatBytes(downloadSpeed)}/s</span>
+                  {/if}
+                {:else if mod.status === "extracting"}
+                  extracting...
+                  {#if stagingSpeed > 0}
+                    <span class="speed-inline">{formatBytes(stagingSpeed)}/s</span>
+                  {/if}
+                {:else if mod.status === "deploying"}
+                  deploying files...
+                {:else if mod.status === "installing"}
+                  installing...
                 {:else if mod.stepDetail}
                   {mod.stepDetail}
                 {:else}
@@ -761,6 +780,10 @@
               {#if mod.status === "downloading" && mod.downloadTotal && mod.downloadTotal > 0}
                 <div class="activity-bar">
                   <div class="activity-bar-fill" style="width: {Math.min(100, Math.round(((mod.downloadBytes ?? 0) / mod.downloadTotal) * 100))}%"></div>
+                </div>
+              {:else if mod.status === "extracting" || mod.status === "installing" || mod.status === "deploying"}
+                <div class="activity-bar">
+                  <div class="activity-bar-fill activity-bar-indeterminate"></div>
                 </div>
               {/if}
             </div>
@@ -1439,13 +1462,35 @@
     gap: var(--space-1);
   }
 
+  .extracting-item-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 3px var(--space-2);
+    border-radius: var(--radius-sm);
+  }
+
   .extracting-item {
     display: flex;
     align-items: center;
     gap: var(--space-2);
-    padding: 3px var(--space-2);
-    border-radius: var(--radius-sm);
     font-size: 12px;
+  }
+
+  .extracting-bar {
+    height: 2px;
+    background: var(--bg-tertiary);
+    border-radius: 2px;
+    overflow: hidden;
+    margin-left: 20px;
+  }
+
+  .extracting-bar-fill {
+    height: 100%;
+    width: 40%;
+    background: var(--system-accent);
+    border-radius: 2px;
+    animation: indeterminate 1.5s ease-in-out infinite;
   }
 
   .extracting-name {
@@ -1973,6 +2018,11 @@
     transition: width 300ms ease;
   }
 
+  .activity-bar-indeterminate {
+    width: 40%;
+    animation: indeterminate 1.5s ease-in-out infinite;
+  }
+
   .activity-item-recent {
     background: transparent;
     border-color: transparent;
@@ -2005,6 +2055,26 @@
   @keyframes bounce {
     0%, 100% { transform: translateY(0); }
     50% { transform: translateY(2px); }
+  }
+
+  @keyframes indeterminate {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(350%); }
+  }
+
+  @keyframes pulse-glow {
+    0%, 100% { border-color: color-mix(in srgb, var(--system-accent) 15%, transparent); }
+    50% { border-color: color-mix(in srgb, var(--system-accent) 35%, transparent); }
+  }
+
+  .activity-item:not(.activity-item-recent) {
+    animation: pulse-glow 2s ease-in-out infinite;
+  }
+
+  .speed-inline {
+    color: var(--system-accent);
+    font-weight: 600;
+    margin-left: 4px;
   }
 
   /* ---- Footer ---- */

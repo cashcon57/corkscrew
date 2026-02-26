@@ -3,9 +3,14 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use log::{debug, info, warn};
+use rayon::prelude::*;
 use thiserror::Error;
 use walkdir::WalkDir;
 use zip::ZipArchive;
+
+/// I/O buffer size for archive extraction (256 KiB).
+/// Rust's default io::copy uses 8 KiB — 32x more syscalls per file.
+const EXTRACT_BUF_SIZE: usize = 256 * 1024;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -118,19 +123,24 @@ pub fn extract_archive(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathB
     }
 }
 
-/// Extract a `.zip` archive using the `zip` crate.
+/// Extract a `.zip` archive using the `zip` crate with parallel file extraction.
 ///
-/// Uses sequential per-file extraction. Parallelism is provided at the
-/// collection level (multiple archives extract concurrently via tokio
-/// semaphore in collection_installer), so per-archive rayon would cause
-/// thread pool contention and deadlocks.
+/// Uses a two-pass approach:
+/// 1. Sequential scan: read central directory, collect file entries, create directories
+/// 2. Parallel extraction via rayon: each thread opens its own ZipArchive handle
+///    and extracts assigned entries independently (ZIP supports random access)
+///
+/// Rayon's work-stealing pool automatically balances: when many archives extract
+/// concurrently each gets ~1 thread; when only the last few remain, they get all cores.
 fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
-    let file = fs::File::open(archive_path)?;
+    let file = io::BufReader::with_capacity(EXTRACT_BUF_SIZE, fs::File::open(archive_path)?);
     let mut archive = ZipArchive::new(file)?;
-    let mut extracted = Vec::new();
+
+    // Pass 1: collect file entries and create all directories up front
+    let mut file_entries: Vec<(usize, PathBuf)> = Vec::new();
 
     for i in 0..archive.len() {
-        let mut entry = archive.by_index(i)?;
+        let entry = archive.by_index(i)?;
         let relative = match entry.enclosed_name() {
             Some(p) => p.to_path_buf(),
             None => {
@@ -138,7 +148,6 @@ fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
                 continue;
             }
         };
-        // Guard against path traversal: reject any entry containing ".." components.
         if relative
             .components()
             .any(|c| matches!(c, std::path::Component::ParentDir))
@@ -157,9 +166,38 @@ fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
             if let Some(parent) = out_path.parent() {
                 let _ = fs::create_dir_all(parent);
             }
-            let mut out_file = fs::File::create(&out_path)?;
-            io::copy(&mut entry, &mut out_file)?;
-            extracted.push(out_path);
+            file_entries.push((i, out_path));
+        }
+    }
+
+    // Drop the first archive handle before parallel extraction
+    drop(archive);
+
+    // Pass 2: parallel extraction — each rayon thread opens its own ZipArchive
+    let archive_path_owned = archive_path.to_path_buf();
+    let results: Vec<std::result::Result<PathBuf, String>> = file_entries
+        .par_iter()
+        .map(|(idx, out_path)| {
+            let f = io::BufReader::with_capacity(
+                EXTRACT_BUF_SIZE,
+                fs::File::open(&archive_path_owned).map_err(|e| e.to_string())?,
+            );
+            let mut arch = ZipArchive::new(f).map_err(|e| e.to_string())?;
+            let mut entry = arch.by_index(*idx).map_err(|e| e.to_string())?;
+            let mut out_file = io::BufWriter::with_capacity(
+                EXTRACT_BUF_SIZE,
+                fs::File::create(out_path).map_err(|e| e.to_string())?,
+            );
+            io::copy(&mut entry, &mut out_file).map_err(|e| e.to_string())?;
+            Ok(out_path.clone())
+        })
+        .collect();
+
+    let mut extracted = Vec::with_capacity(results.len());
+    for r in results {
+        match r {
+            Ok(p) => extracted.push(p),
+            Err(e) => warn!("Failed to extract ZIP entry: {}", e),
         }
     }
 
@@ -305,32 +343,34 @@ fn extract_rar(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
 
 /// Extract a `.tar.gz` / `.tgz` archive.
 fn extract_tar_gz(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
-    let file = fs::File::open(archive_path)?;
+    let file = io::BufReader::with_capacity(EXTRACT_BUF_SIZE, fs::File::open(archive_path)?);
     let decoder = flate2::read::GzDecoder::new(file);
     extract_tar(decoder, archive_path, dest_dir)
 }
 
 /// Extract a `.tar.xz` / `.txz` archive.
 fn extract_tar_xz(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
-    let file = fs::File::open(archive_path)?;
+    let file = io::BufReader::with_capacity(EXTRACT_BUF_SIZE, fs::File::open(archive_path)?);
     let decoder = xz2::read::XzDecoder::new(file);
     extract_tar(decoder, archive_path, dest_dir)
 }
 
 /// Extract a `.tar.bz2` / `.tbz2` archive.
 fn extract_tar_bz2(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
-    let file = fs::File::open(archive_path)?;
+    let file = io::BufReader::with_capacity(EXTRACT_BUF_SIZE, fs::File::open(archive_path)?);
     let decoder = bzip2::read::BzDecoder::new(file);
     extract_tar(decoder, archive_path, dest_dir)
 }
 
 /// Shared tar extraction logic for any decompressed reader.
+/// TAR is a stream format so parallelism isn't possible, but buffered I/O helps.
 fn extract_tar<R: io::Read>(
     reader: R,
     archive_path: &Path,
     dest_dir: &Path,
 ) -> Result<Vec<PathBuf>> {
-    let mut archive = tar::Archive::new(reader);
+    let buffered = io::BufReader::with_capacity(EXTRACT_BUF_SIZE, reader);
+    let mut archive = tar::Archive::new(buffered);
     let mut extracted = Vec::new();
 
     for entry_result in archive
@@ -366,7 +406,10 @@ fn extract_tar<R: io::Read>(
             if let Some(parent) = out_path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            let mut out_file = fs::File::create(&out_path)?;
+            let mut out_file = io::BufWriter::with_capacity(
+                EXTRACT_BUF_SIZE,
+                fs::File::create(&out_path)?,
+            );
             io::copy(&mut entry, &mut out_file)?;
             extracted.push(out_path);
         }

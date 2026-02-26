@@ -1188,7 +1188,7 @@
       optionalPickerManifest = manifest;
       const choices = new Map<number, OptionalModChoice>();
       manifest.mods.forEach((m: { optional: boolean }, i: number) => {
-        if (m.optional) choices.set(i, "install");
+        if (m.optional) choices.set(i, "install_disabled");
       });
       optionalChoices = choices;
       showOptionalPicker = true;
@@ -3190,6 +3190,11 @@
               }}>All</button>
               <button class="btn btn-ghost btn-xs" onclick={() => {
                 const c = new Map(optionalChoices);
+                optionalPickerManifest?.mods.forEach((m: { optional: boolean }, i: number) => { if (m.optional) c.set(i, "install_disabled"); });
+                optionalChoices = c;
+              }}>All (Disabled)</button>
+              <button class="btn btn-ghost btn-xs" onclick={() => {
+                const c = new Map(optionalChoices);
                 optionalPickerManifest?.mods.forEach((m: { optional: boolean }, i: number) => { if (m.optional) c.set(i, "skip"); });
                 optionalChoices = c;
               }}>None</button>
@@ -3202,7 +3207,7 @@
                 <span class="optional-mod-version">{mod.version || ""}</span>
                 <select
                   class="optional-mod-select"
-                  value={optionalChoices.get(i) ?? "install"}
+                  value={optionalChoices.get(i) ?? "install_disabled"}
                   onchange={(e) => {
                     const c = new Map(optionalChoices);
                     c.set(i, (e.currentTarget as HTMLSelectElement).value as OptionalModChoice);
