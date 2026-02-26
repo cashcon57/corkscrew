@@ -84,6 +84,9 @@ tungstenite = { version = "0.24", features = ["native-tls"] }
 # System info (disk space)
 libc = "0.2"
 
+# LRU cache (FOMOD parsing)
+lru = "0.12"
+
 # Wabbajack install pipeline
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 base64 = "0.22"
