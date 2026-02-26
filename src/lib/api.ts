@@ -893,6 +893,10 @@ export async function installCollection(
   return invoke("install_collection_cmd", { manifest, gameId, bottleName });
 }
 
+export async function cancelCollectionInstall(): Promise<void> {
+  return invoke("cancel_collection_install_cmd");
+}
+
 // Plugin Load Order Rules
 export async function addPluginRule(
   gameId: string,

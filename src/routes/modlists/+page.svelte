@@ -20,6 +20,7 @@
   import type { ModlistSummary, ParsedModlist, RequiredTool, WabbajackInstallStatus, WjInstallProgressEvent } from "$lib/types";
   import { marked } from "marked";
   import DOMPurify from "dompurify";
+  import { bbcodeToHtml } from "$lib/bbcode";
   import CompatibilityPanel from "$lib/components/CompatibilityPanel.svelte";
   import RequiredToolsPrompt from "$lib/components/RequiredToolsPrompt.svelte";
   import WabbajackLogo from "$lib/components/WabbajackLogo.svelte";
@@ -692,8 +693,8 @@
         {#if selectedModlist.description}
           <div class="detail-section">
             <h3 class="detail-section-title">Description</h3>
-            <div class="detail-description">
-              <p>{selectedModlist.description}</p>
+            <div class="detail-description rendered-markdown">
+              {@html DOMPurify.sanitize(bbcodeToHtml(selectedModlist.description))}
             </div>
           </div>
         {/if}
@@ -801,7 +802,7 @@
         {#if parsedModlist.description}
           <div class="detail-section">
             <h3 class="detail-section-title">Description</h3>
-            <div class="detail-description"><p>{parsedModlist.description}</p></div>
+            <div class="detail-description rendered-markdown">{@html DOMPurify.sanitize(bbcodeToHtml(parsedModlist.description))}</div>
           </div>
         {/if}
 

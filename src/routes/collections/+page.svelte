@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from "svelte";
+  import { onMount, onDestroy, untrack } from "svelte";
   import { goto } from "$app/navigation";
   import { selectedGame, showError, showSuccess, collectionInstallStatus, collectionUninstallStatus } from "$lib/stores";
   import type { CollectionUninstallStatus } from "$lib/stores";
@@ -44,6 +44,7 @@
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { marked } from "marked";
   import DOMPurify from "dompurify";
+  import { bbcodeToHtml } from "$lib/bbcode";
   import CompatibilityPanel from "$lib/components/CompatibilityPanel.svelte";
   import RequiredToolsPrompt from "$lib/components/RequiredToolsPrompt.svelte";
   import NexusLogo from "$lib/components/NexusLogo.svelte";
@@ -278,11 +279,20 @@
     }
   });
 
+  let browseInitializedForGame = $state<string | null>(null);
   $effect(() => {
-    if (activeTab === "browse_mods" && $selectedGame && account?.connected) {
-      loadBrowseMods();
-      loadBrowseCategories();
-      loadBrowseInstalledIds();
+    const game = $selectedGame;
+    const tab = activeTab;
+    const connected = untrack(() => account?.connected);
+    if (tab === "browse_mods" && game && connected) {
+      // Only reload when the game actually changes, not on every account update
+      const gameKey = `${game.game_id}:${game.bottle_name}`;
+      if (untrack(() => browseInitializedForGame) !== gameKey) {
+        browseInitializedForGame = gameKey;
+        loadBrowseMods();
+        loadBrowseCategories();
+        loadBrowseInstalledIds();
+      }
     }
   });
 
@@ -632,9 +642,9 @@
       browseModFiles = files
         .filter((f: NexusModFile) => f.category !== "deleted" && f.category !== "archived")
         .sort((a: NexusModFile, b: NexusModFile) => (categoryOrder[a.category] ?? 5) - (categoryOrder[b.category] ?? 5));
-      // Render description (HTML from NexusMods API)
+      // Render description (NexusMods returns BBCode)
       if (detail.description) {
-        renderedModDescription = DOMPurify.sanitize(detail.description);
+        renderedModDescription = DOMPurify.sanitize(bbcodeToHtml(detail.description));
       }
     } catch (e) {
       showError(`Failed to load mod details: ${e}`);
@@ -1258,27 +1268,27 @@
     // Navigate to the progress page
     goto('/collections/progress');
 
-    try {
-      const result = await installCollection(
-        manifest,
-        $selectedGame.game_id,
-        $selectedGame.bottle_name
-      );
+    // Fire-and-forget: don't await the Tauri command since we've navigated away.
+    // The progress page tracks status via Tauri events in the install service.
+    // Errors update the store directly so the progress page can display them.
+    const collectionName = selectedCollection.name;
+    const gameId = $selectedGame.game_id;
+    const bottleName = $selectedGame.bottle_name;
 
-      installResult = result;
-
-      // Toast is minimal — details shown on the progress page
-      if (result.failed === 0 && result.skipped === 0) {
-        showSuccess(`Collection "${selectedCollection.name}" installed successfully`);
-      }
-    } catch (e: unknown) {
-      showError(`Collection install failed: ${e}`);
-      // Update the store to reflect failure
-      collectionInstallStatus.update(s => s ? { ...s, phase: "failed" as const } : s);
-      stopInstallTracking();
-    } finally {
-      installing = false;
-    }
+    installCollection(manifest, gameId, bottleName)
+      .then((result) => {
+        installResult = result;
+        if (result.failed === 0 && result.skipped === 0) {
+          showSuccess(`Collection "${collectionName}" installed successfully`);
+        }
+      })
+      .catch((e: unknown) => {
+        showError(`Collection install failed: ${e}`);
+        collectionInstallStatus.update(s => s ? { ...s, phase: "failed" as const } : s);
+      })
+      .finally(() => {
+        installing = false;
+      });
   }
 
   function backToBrowse() {

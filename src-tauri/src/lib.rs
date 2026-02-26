@@ -3837,6 +3837,12 @@ async fn install_collection_cmd(
     }))
 }
 
+#[tauri::command]
+async fn cancel_collection_install_cmd() -> Result<(), String> {
+    collection_installer::cancel_install();
+    Ok(())
+}
+
 // --- Collection Install Resume ---
 
 #[tauri::command]
@@ -4612,7 +4618,7 @@ async fn get_nexus_mod_files(
         .await
         .map_err(|e| e.to_string())?;
 
-    Ok(nexus::parse_mod_files(&raw_files))
+    Ok(nexus::parse_mod_files(&raw_files, mod_id))
 }
 
 #[tauri::command]
@@ -5095,6 +5101,7 @@ pub fn run() {
             get_collection_mods,
             parse_collection_bundle_cmd,
             install_collection_cmd,
+            cancel_collection_install_cmd,
             get_incomplete_collection_installs,
             get_all_interrupted_installs,
             get_checkpoint_mod_names,

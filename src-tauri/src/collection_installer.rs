@@ -1,10 +1,24 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Semaphore;
+
+/// Global cancellation flag for collection installs.
+static INSTALL_CANCELLED: AtomicBool = AtomicBool::new(false);
+
+/// Request cancellation of the currently running collection install.
+pub fn cancel_install() {
+    INSTALL_CANCELLED.store(true, Ordering::SeqCst);
+}
+
+/// Check if install has been cancelled.
+fn is_cancelled() -> bool {
+    INSTALL_CANCELLED.load(Ordering::SeqCst)
+}
 
 use crate::bottles;
 use crate::collections::{self, CollectionManifest, CollectionModEntry};
@@ -214,9 +228,14 @@ async fn download_mod_archive(
 }
 
 /// Returns true for transient errors worth retrying (network/IO failures).
+/// Permanent errors (404, 403) are NOT retried.
 fn is_transient_collection_error(e: &InstallError) -> bool {
     match e {
         InstallError::Failed(msg) => {
+            // Never retry permanent HTTP errors (404 Not Found, 403 Forbidden, etc.)
+            if msg.contains("(404)") || msg.contains("(403)") || msg.contains("No Mod Found") {
+                return false;
+            }
             msg.contains("Download failed:")
                 || msg.contains("Download links failed:")
                 || msg.contains("timed out")
@@ -526,6 +545,9 @@ pub async fn install_collection(
     bottle_name: &str,
     resume_checkpoint: Option<(i64, HashMap<usize, String>)>,
 ) -> Result<CollectionInstallResult, String> {
+    // Reset cancellation flag at the start of each install
+    INSTALL_CANCELLED.store(false, Ordering::SeqCst);
+
     // Emit initialization progress so the UI shows something immediately
     let _ = app.emit(
         INSTALL_PROGRESS_EVENT,
@@ -710,16 +732,20 @@ pub async fn install_collection(
             continue;
         }
 
-        // Skip already-installed mods
-        let is_already = if let Some(nexus_id) = entry.source.mod_id {
-            existing_mods
-                .iter()
-                .any(|m| m.nexus_mod_id == Some(nexus_id))
-        } else {
-            existing_mods
-                .iter()
-                .any(|m| m.name.eq_ignore_ascii_case(&entry.name))
-        };
+        // Skip already-installed mods (check by nexus mod ID, file ID, or name)
+        let is_already = existing_mods.iter().any(|m| {
+            if let Some(nexus_id) = entry.source.mod_id {
+                if m.nexus_mod_id == Some(nexus_id) {
+                    return true;
+                }
+            }
+            if let Some(file_id) = entry.source.file_id {
+                if m.nexus_file_id == Some(file_id) {
+                    return true;
+                }
+            }
+            m.name.eq_ignore_ascii_case(&entry.name)
+        });
         if is_already {
             continue;
         }
@@ -741,6 +767,12 @@ pub async fn install_collection(
     let mut handles = Vec::with_capacity(total_downloads);
 
     for &(order_pos, mod_idx) in &downloadable {
+        // Check cancellation before spawning each download task
+        if is_cancelled() {
+            log::info!("Collection install cancelled during download phase");
+            break;
+        }
+
         let entry = manifest.mods[mod_idx].clone();
         let mod_name = entry.name.clone();
 
@@ -766,6 +798,11 @@ pub async fn install_collection(
 
         let handle = tokio::spawn(async move {
             let _permit = sem_c.acquire().await.expect("semaphore closed");
+
+            // Check cancellation after acquiring permit
+            if is_cancelled() {
+                return (order_pos, Err(InstallError::Failed("Cancelled".to_string())));
+            }
 
             let _ = app_h.emit(
                 INSTALL_PROGRESS_EVENT,
@@ -869,6 +906,26 @@ pub async fn install_collection(
         },
     );
 
+    // Check for cancellation before extraction phase
+    if is_cancelled() {
+        log::info!("Collection install cancelled before extraction phase");
+        let _ = app.emit(
+            INSTALL_PROGRESS_EVENT,
+            InstallProgress::CollectionCompleted {
+                installed: 0,
+                skipped: total_mods,
+                failed: 0,
+            },
+        );
+        return Ok(CollectionInstallResult {
+            installed: 0,
+            already_installed: 0,
+            skipped: total_mods,
+            failed: 0,
+            details,
+        });
+    }
+
     // ---------------------------------------------------------------
     // Phase 1.5: Concurrent Extraction
     // ---------------------------------------------------------------
@@ -881,7 +938,8 @@ pub async fn install_collection(
         .unwrap_or(4)
         .clamp(4, 16);
 
-    // Collect archives that need extraction
+    // Collect archives that need extraction — query DB live to avoid duplicates
+    let current_mods_for_extract = db.list_mods(game_id, bottle_name).unwrap_or_default();
     let archives_to_extract: Vec<(usize, PathBuf, String)> = install_order
         .iter()
         .enumerate()
@@ -890,15 +948,19 @@ pub async fn install_collection(
                 return None;
             }
             let entry = &manifest.mods[mod_idx];
-            let is_already = if let Some(nexus_id) = entry.source.mod_id {
-                existing_mods
-                    .iter()
-                    .any(|m| m.nexus_mod_id == Some(nexus_id))
-            } else {
-                existing_mods
-                    .iter()
-                    .any(|m| m.name.eq_ignore_ascii_case(&entry.name))
-            };
+            let is_already = current_mods_for_extract.iter().any(|m| {
+                if let Some(nexus_id) = entry.source.mod_id {
+                    if m.nexus_mod_id == Some(nexus_id) {
+                        return true;
+                    }
+                }
+                if let Some(file_id) = entry.source.file_id {
+                    if m.nexus_file_id == Some(file_id) {
+                        return true;
+                    }
+                }
+                m.name.eq_ignore_ascii_case(&entry.name)
+            });
             if is_already {
                 return None;
             }
@@ -924,6 +986,12 @@ pub async fn install_collection(
         let mut extract_handles = Vec::with_capacity(archives_to_extract.len());
 
         for (install_idx, archive_path, mod_name) in &archives_to_extract {
+            // Check cancellation before spawning each extraction task
+            if is_cancelled() {
+                log::info!("Collection install cancelled during extraction phase");
+                break;
+            }
+
             let sem = extract_sem.clone();
             let archive = archive_path.clone();
             let idx = *install_idx;
@@ -932,6 +1000,11 @@ pub async fn install_collection(
 
             let handle = tokio::spawn(async move {
                 let _permit = sem.acquire().await.expect("semaphore closed");
+
+                // Check cancellation after acquiring permit
+                if is_cancelled() {
+                    return None;
+                }
 
                 let _ = app_c.emit(
                     INSTALL_PROGRESS_EVENT,
@@ -943,27 +1016,35 @@ pub async fn install_collection(
 
                 let temp_dir = std::env::temp_dir().join(format!("corkscrew_extract_{}", idx));
 
-                let result = tokio::task::spawn_blocking(move || {
-                    // Validate archive integrity before extraction.
-                    if let Err(e) = validate_archive(&archive) {
-                        return Err(format!("Archive validation failed: {}", e));
-                    }
-                    if temp_dir.exists() {
-                        let _ = std::fs::remove_dir_all(&temp_dir);
-                    }
-                    let _ = std::fs::create_dir_all(&temp_dir);
-                    match crate::installer::extract_archive(&archive, &temp_dir) {
-                        Ok(_) => Ok(temp_dir),
-                        Err(e) => {
-                            let _ = std::fs::remove_dir_all(&temp_dir);
-                            Err(e.to_string())
+                // Timeout extraction at 10 minutes to prevent indefinite hangs
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(600),
+                    tokio::task::spawn_blocking(move || {
+                        // Check cancellation inside blocking task
+                        if is_cancelled() {
+                            return Err("Cancelled".to_string());
                         }
-                    }
-                })
+                        // Validate archive integrity before extraction.
+                        if let Err(e) = validate_archive(&archive) {
+                            return Err(format!("Archive validation failed: {}", e));
+                        }
+                        if temp_dir.exists() {
+                            let _ = std::fs::remove_dir_all(&temp_dir);
+                        }
+                        let _ = std::fs::create_dir_all(&temp_dir);
+                        match crate::installer::extract_archive(&archive, &temp_dir) {
+                            Ok(_) => Ok(temp_dir),
+                            Err(e) => {
+                                let _ = std::fs::remove_dir_all(&temp_dir);
+                                Err(e.to_string())
+                            }
+                        }
+                    }),
+                )
                 .await;
 
                 match result {
-                    Ok(Ok(dir)) => {
+                    Ok(Ok(Ok(dir))) => {
                         let _ = app_c.emit(
                             INSTALL_PROGRESS_EVENT,
                             InstallProgress::StagingModCompleted {
@@ -973,12 +1054,40 @@ pub async fn install_collection(
                         );
                         Some((idx, dir))
                     }
-                    Ok(Err(e)) => {
+                    Ok(Ok(Err(e))) => {
                         log::warn!("Pre-extraction failed for mod {}: {}", idx, e);
+                        let _ = app_c.emit(
+                            INSTALL_PROGRESS_EVENT,
+                            InstallProgress::StagingModFailed {
+                                mod_index: idx,
+                                mod_name: name,
+                                error: e,
+                            },
+                        );
                         None
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         log::warn!("Extraction task panicked for mod {}: {}", idx, e);
+                        let _ = app_c.emit(
+                            INSTALL_PROGRESS_EVENT,
+                            InstallProgress::StagingModFailed {
+                                mod_index: idx,
+                                mod_name: name,
+                                error: format!("Task panicked: {}", e),
+                            },
+                        );
+                        None
+                    }
+                    Err(_) => {
+                        log::warn!("Extraction timed out for mod {} after 10 minutes", idx);
+                        let _ = app_c.emit(
+                            INSTALL_PROGRESS_EVENT,
+                            InstallProgress::StagingModFailed {
+                                mod_index: idx,
+                                mod_name: name,
+                                error: "Extraction timed out after 10 minutes".to_string(),
+                            },
+                        );
                         None
                     }
                 }
@@ -1012,6 +1121,26 @@ pub async fn install_collection(
     );
 
     for (i, &mod_idx) in install_order.iter().enumerate() {
+        // Check for cancellation at the top of each iteration
+        if is_cancelled() {
+            log::info!("Collection install cancelled by user at mod {}/{}", i, total_mods);
+            let _ = app.emit(
+                INSTALL_PROGRESS_EVENT,
+                InstallProgress::CollectionCompleted {
+                    installed,
+                    skipped: skipped + (total_mods - i - installed - already_installed - failed),
+                    failed,
+                },
+            );
+            return Ok(CollectionInstallResult {
+                installed,
+                already_installed,
+                skipped: skipped + (total_mods - i - installed - already_installed - failed),
+                failed,
+                details,
+            });
+        }
+
         let mod_entry = &manifest.mods[mod_idx];
         let mod_name = &mod_entry.name;
 
@@ -1057,16 +1186,22 @@ pub async fn install_collection(
             },
         );
 
-        // Check if this mod is already installed (by Nexus mod ID or name match)
-        let is_already = if let Some(nexus_id) = mod_entry.source.mod_id {
-            existing_mods
-                .iter()
-                .any(|m| m.nexus_mod_id == Some(nexus_id))
-        } else {
-            existing_mods
-                .iter()
-                .any(|m| m.name.eq_ignore_ascii_case(mod_name))
-        };
+        // Check if this mod is already installed — query DB live to catch mods
+        // installed earlier in this same run (existing_mods is a stale snapshot)
+        let current_mods = db.list_mods(game_id, bottle_name).unwrap_or_default();
+        let is_already = current_mods.iter().any(|m| {
+            if let Some(nexus_id) = mod_entry.source.mod_id {
+                if m.nexus_mod_id == Some(nexus_id) {
+                    return true;
+                }
+            }
+            if let Some(file_id) = mod_entry.source.file_id {
+                if m.nexus_file_id == Some(file_id) {
+                    return true;
+                }
+            }
+            m.name.eq_ignore_ascii_case(mod_name)
+        });
 
         if is_already {
             let _ = app.emit(

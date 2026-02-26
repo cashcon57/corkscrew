@@ -62,7 +62,11 @@ pub struct NexusModFile {
 }
 
 /// Parse raw JSON file entries from the NexusMods API into typed structs.
-pub fn parse_mod_files(files: &[serde_json::Value]) -> Vec<NexusModFile> {
+///
+/// The `default_mod_id` is used when individual file entries don't include
+/// a `mod_id` field (the v1 /files.json endpoint omits it since the mod_id
+/// is already in the URL).
+pub fn parse_mod_files(files: &[serde_json::Value], default_mod_id: i64) -> Vec<NexusModFile> {
     fn category_name(id: i64) -> &'static str {
         match id {
             1 => "main",
@@ -80,7 +84,7 @@ pub fn parse_mod_files(files: &[serde_json::Value]) -> Vec<NexusModFile> {
         .iter()
         .filter_map(|f| {
             Some(NexusModFile {
-                mod_id: f.get("mod_id")?.as_i64()?,
+                mod_id: f.get("mod_id").and_then(|v| v.as_i64()).unwrap_or(default_mod_id),
                 file_id: f.get("file_id")?.as_i64()?,
                 name: f.get("name")?.as_str().unwrap_or("").to_string(),
                 version: f.get("version")?.as_str().unwrap_or("").to_string(),

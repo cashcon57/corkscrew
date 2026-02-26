@@ -1128,6 +1128,7 @@ export type InstallProgressEvent =
   | { kind: "stagingPhaseStarted"; total_mods: number; max_concurrent: number }
   | { kind: "stagingModStarted"; mod_index: number; mod_name: string }
   | { kind: "stagingModCompleted"; mod_index: number; mod_name: string }
+  | { kind: "stagingModFailed"; mod_index: number; mod_name: string; error: string }
   | { kind: "initializing"; message: string };
 
 // Collection Uninstall Progress Events

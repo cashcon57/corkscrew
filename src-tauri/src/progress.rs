@@ -85,6 +85,11 @@ pub enum InstallProgress {
         mod_index: usize,
         mod_name: String,
     },
+    StagingModFailed {
+        mod_index: usize,
+        mod_name: String,
+        error: String,
+    },
     Initializing {
         message: String,
     },

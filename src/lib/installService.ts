@@ -27,9 +27,9 @@ const THROTTLE_MS = 50; // max ~20 UI updates per second for non-critical events
 const IMMEDIATE_EVENTS = new Set([
   "downloadPhaseStarted", "allDownloadsCompleted",
   "stagingPhaseStarted", "installPhaseStarted",
-  "modCompleted", "modFailed", "collectionCompleted",
+  "modStarted", "modCompleted", "modFailed", "collectionCompleted",
   "userActionRequired", "downloadModStarted", "downloadModCompleted", "downloadModFailed",
-  "stagingModStarted", "stagingModCompleted", "initializing",
+  "stagingModStarted", "stagingModCompleted", "stagingModFailed", "initializing",
 ]);
 
 function calculateSpeed(currentBytes: number): number {
@@ -190,6 +190,7 @@ function logMessageForEvent(e: InstallProgressEvent): { message: string; level: 
     case "stagingPhaseStarted": return { message: `Extraction phase started (${e.total_mods} archives, ${e.max_concurrent} threads)`, level: "info" };
     case "stagingModStarted": return { message: `Extracting: ${e.mod_name}`, level: "info" };
     case "stagingModCompleted": return { message: `Extracted: ${e.mod_name}`, level: "info" };
+    case "stagingModFailed": return { message: `Extraction failed: ${e.mod_name} — ${e.error}`, level: "error" };
     case "installPhaseStarted": return { message: `Install phase started (${e.total_mods} mods)`, level: "info" };
     case "modStarted": return { message: `Installing ${e.mod_index + 1}/${e.total_mods}: ${e.mod_name}`, level: "info" };
     case "modCompleted": return { message: `Installed: ${e.mod_name}`, level: "info" };
@@ -340,6 +341,13 @@ function handleProgressEvent(e: InstallProgressEvent) {
         }
         break;
 
+      case "stagingModFailed":
+        if (next.modDetails[e.mod_index]) {
+          next.modDetails = [...next.modDetails];
+          next.modDetails[e.mod_index] = { ...next.modDetails[e.mod_index], status: "failed", error: e.error };
+        }
+        break;
+
       // ---- Install Phase ----
       case "installPhaseStarted":
         next.phase = "installing";
@@ -366,7 +374,7 @@ function handleProgressEvent(e: InstallProgressEvent) {
 
         if (next.modDetails[e.mod_index]) {
           next.modDetails = [...next.modDetails];
-          next.modDetails[e.mod_index] = { ...next.modDetails[e.mod_index], name: e.mod_name, status: "extracting" };
+          next.modDetails[e.mod_index] = { ...next.modDetails[e.mod_index], name: e.mod_name, status: "installing" };
         }
         break;
 
@@ -378,7 +386,9 @@ function handleProgressEvent(e: InstallProgressEvent) {
         };
         next.step = e.step;
         if (next.modDetails[e.mod_index]) {
-          const stepStatus = e.step === "deploying" ? "deploying" as const : "extracting" as const;
+          const stepStatus = e.step === "deploying" ? "deploying" as const
+            : e.step === "extracting" ? "extracting" as const
+            : "installing" as const;
           next.modDetails = [...next.modDetails];
           next.modDetails[e.mod_index] = { ...next.modDetails[e.mod_index], status: stepStatus, stepDetail: e.detail ?? undefined };
         }
@@ -388,6 +398,14 @@ function handleProgressEvent(e: InstallProgressEvent) {
         if (next.modDetails[e.mod_index]) {
           next.modDetails = [...next.modDetails];
           next.modDetails[e.mod_index] = { ...next.modDetails[e.mod_index], status: "done" };
+        }
+        // Also advance install counter (in case modStarted was missed)
+        {
+          const doneCount = next.modDetails.filter(m => m.status === "done" || m.status === "failed" || m.status === "skipped" || m.status === "user_action").length;
+          if (doneCount > next.installProgress.current) {
+            next.installProgress = { ...next.installProgress, current: doneCount };
+            next.current = doneCount;
+          }
         }
         break;
 
