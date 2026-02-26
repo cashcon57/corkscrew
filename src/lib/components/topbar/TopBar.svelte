@@ -87,36 +87,11 @@
     position: sticky;
     top: 0;
     z-index: 10;
-    /* Extend glass edge-to-edge within .content padding */
+    /* Extend edge-to-edge within .content padding */
     margin: 0 calc(-1 * var(--space-6));
     padding: 0 calc(var(--space-6) + 4px);
-    /* Liquid glass toolbar */
-    background: color-mix(in srgb, var(--bg-base) 60%, transparent);
-    backdrop-filter: blur(28px) saturate(1.4);
-    -webkit-backdrop-filter: blur(28px) saturate(1.4);
-    border-bottom: 0.5px solid rgba(255, 255, 255, 0.06);
-  }
-
-  /* Fade gradient below toolbar — content dissolves into glass */
-  .top-bar::after {
-    content: "";
-    position: absolute;
-    left: 0;
-    right: 0;
-    top: 100%;
-    height: 16px;
-    background: linear-gradient(
-      to bottom,
-      color-mix(in srgb, var(--bg-base) 40%, transparent),
-      transparent
-    );
-    pointer-events: none;
-    z-index: 9;
-  }
-
-  :global([data-theme="light"]) .top-bar {
-    background: color-mix(in srgb, var(--bg-base) 70%, transparent);
-    border-bottom-color: rgba(0, 0, 0, 0.08);
+    /* Transparent — glass lives on the pill only */
+    background: transparent;
   }
 
   @media (max-width: 800px) {

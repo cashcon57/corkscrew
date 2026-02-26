@@ -688,7 +688,9 @@ pub async fn get_revisions(
                     .map(String::from),
                 changelog: None,
                 mod_count: mod_files,
-                download_size: rev.get("totalSize").and_then(|v| v.as_u64()).unwrap_or(0),
+                download_size: rev.get("totalSize")
+                    .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok())))
+                    .unwrap_or(0),
             }
         })
         .collect();
@@ -1125,7 +1127,7 @@ fn parse_collection_node(node: &serde_json::Value) -> CollectionInfo {
 
     let download_size = latest_pub_rev
         .and_then(|r| r.get("totalSize"))
-        .and_then(|v| v.as_u64())
+        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok())))
         .filter(|&s| s > 0);
 
     let updated_at = node
