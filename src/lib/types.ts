@@ -1171,7 +1171,7 @@ export type InstallProgressEvent =
   | { kind: "installPhaseStarted"; total_mods: number }
   | { kind: "stagingPhaseStarted"; total_mods: number; max_concurrent: number }
   | { kind: "stagingModStarted"; mod_index: number; mod_name: string }
-  | { kind: "stagingModCompleted"; mod_index: number; mod_name: string }
+  | { kind: "stagingModCompleted"; mod_index: number; mod_name: string; extracted_size?: number }
   | { kind: "stagingModFailed"; mod_index: number; mod_name: string; error: string }
   | { kind: "initializing"; message: string };
 

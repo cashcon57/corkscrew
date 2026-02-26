@@ -365,19 +365,24 @@
   let searchQuery = $state("");
   let gameFilter = $state("all");
   let nsfwFilter = $state<"hide" | "show" | "only">("hide");
-  let sortField = $state<"endorsements" | "name" | "rating" | "created" | "updated">("endorsements");
+  let sortField = $state<"endorsements" | "name" | "rating" | "created" | "updated" | "size">("endorsements");
   let sortDirection = $state<"asc" | "desc">("desc");
   let collectionsTotalCount = $state(0);
   let collectionsOffset = $state(0);
-  const COLLECTIONS_PAGE_SIZE = 20;
+  let collectionsPerPage = $state(
+    typeof localStorage !== 'undefined'
+      ? parseInt(localStorage.getItem('corkscrew-collections-per-page') || '20', 10)
+      : 20
+  );
   let collectionsSearchTimer: ReturnType<typeof setTimeout> | null = null;
-  const collectionsTotalPages = $derived(Math.max(1, Math.ceil(collectionsTotalCount / COLLECTIONS_PAGE_SIZE)));
-  const collectionsCurrentPage = $derived(Math.floor(collectionsOffset / COLLECTIONS_PAGE_SIZE) + 1);
+  const collectionsTotalPages = $derived(Math.max(1, Math.ceil(collectionsTotalCount / collectionsPerPage)));
+  const collectionsCurrentPage = $derived(Math.floor(collectionsOffset / collectionsPerPage) + 1);
 
   // Advanced collections filters
   let collectionsAuthorFilter = $state("");
   let collectionsMinDownloads = $state<number | null>(null);
   let collectionsMinEndorsements = $state<number | null>(null);
+  let collectionsMaxSize = $state<number | null>(null);
   let showCollectionsAdvancedFilters = $state(false);
   let collectionsAuthorTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -390,6 +395,7 @@
     (collectionsAuthorFilter.trim() ? 1 : 0) +
     (collectionsMinDownloads !== null ? 1 : 0) +
     (collectionsMinEndorsements !== null ? 1 : 0) +
+    (collectionsMaxSize !== null ? 1 : 0) +
     (cacheFilter !== "all" ? 1 : 0)
   );
 
@@ -397,6 +403,7 @@
     collectionsAuthorFilter = "";
     collectionsMinDownloads = null;
     collectionsMinEndorsements = null;
+    collectionsMaxSize = null;
     cacheFilter = "all";
     reloadWithSort();
   }
@@ -826,6 +833,11 @@
       });
     }
 
+    // Size filter
+    if (collectionsMaxSize !== null) {
+      result = result.filter(c => c.download_size != null && c.download_size <= collectionsMaxSize!);
+    }
+
     filtered = result;
   });
 
@@ -954,17 +966,28 @@
     if (resetOffset) collectionsOffset = 0;
     try {
       const searchText = searchQuery.trim() || undefined;
+      // "size" is client-side only — use "endorsements" as server sort to get consistent results
+      const serverSort = sortField === "size" ? "endorsements" : sortField;
       const result: CollectionSearchResult = await browseCollections(
-        gameDomain, COLLECTIONS_PAGE_SIZE, collectionsOffset,
-        sortField, sortDirection, searchText,
+        gameDomain, collectionsPerPage, collectionsOffset,
+        serverSort, sortDirection, searchText,
         collectionsAuthorFilter.trim() || undefined,
         collectionsMinDownloads || undefined,
         collectionsMinEndorsements || undefined,
       );
-      collections = result.collections;
+      // Apply client-side size sort if needed
+      if (sortField === "size") {
+        collections = [...result.collections].sort((a, b) => {
+          const aSize = a.download_size ?? 0;
+          const bSize = b.download_size ?? 0;
+          return sortDirection === "asc" ? aSize - bSize : bSize - aSize;
+        });
+      } else {
+        collections = result.collections;
+      }
       collectionsTotalCount = result.total_count;
       // Compute download cache percentages in background
-      computeCachePercentages(result.collections);
+      computeCachePercentages(sortField === "size" ? collections : result.collections);
     } catch (e: unknown) {
       showError(`Failed to load collections: ${e}`);
     } finally {
@@ -1036,7 +1059,17 @@
   }
 
   function collectionsGoToPage(page: number) {
-    collectionsOffset = (page - 1) * COLLECTIONS_PAGE_SIZE;
+    collectionsOffset = (page - 1) * collectionsPerPage;
+    const gd = gameFilter !== "all" ? gameFilter : "skyrimspecialedition";
+    loadCollections(gd, false);
+  }
+
+  function setCollectionsPerPage(n: number) {
+    collectionsPerPage = n;
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem('corkscrew-collections-per-page', String(n));
+    }
+    collectionsOffset = 0;
     const gd = gameFilter !== "all" ? gameFilter : "skyrimspecialedition";
     loadCollections(gd, false);
   }
@@ -2691,6 +2724,7 @@
             <option value="rating">Sort: Rating</option>
             <option value="created">Sort: Newest</option>
             <option value="updated">Sort: Updated</option>
+            <option value="size">Sort: Size</option>
           </select>
           <button
             class="sort-direction-btn"
@@ -2747,6 +2781,17 @@
               <button class="filter-pill" class:active={cacheFilter === "100"} onclick={() => { cacheFilter = "100"; }}>100% Cached</button>
             </div>
           </div>
+
+          <div class="filter-section">
+            <label class="filter-label">Max Install Size</label>
+            <div class="filter-pills">
+              <button class="filter-pill" class:active={collectionsMaxSize === null} onclick={() => { collectionsMaxSize = null; }}>Any</button>
+              <button class="filter-pill" class:active={collectionsMaxSize === 5 * 1024 * 1024 * 1024} onclick={() => { collectionsMaxSize = 5 * 1024 * 1024 * 1024; }}>{"< 5 GB"}</button>
+              <button class="filter-pill" class:active={collectionsMaxSize === 10 * 1024 * 1024 * 1024} onclick={() => { collectionsMaxSize = 10 * 1024 * 1024 * 1024; }}>{"< 10 GB"}</button>
+              <button class="filter-pill" class:active={collectionsMaxSize === 20 * 1024 * 1024 * 1024} onclick={() => { collectionsMaxSize = 20 * 1024 * 1024 * 1024; }}>{"< 20 GB"}</button>
+              <button class="filter-pill" class:active={collectionsMaxSize === 50 * 1024 * 1024 * 1024} onclick={() => { collectionsMaxSize = 50 * 1024 * 1024 * 1024; }}>{"< 50 GB"}</button>
+            </div>
+          </div>
         </div>
       {/if}
 
@@ -2774,6 +2819,12 @@
             <span class="filter-chip">
               Cache: {cacheFilter === "100" ? "100%" : "90%+"}
               <button onclick={() => { cacheFilter = "all"; }}>&times;</button>
+            </span>
+          {/if}
+          {#if collectionsMaxSize !== null}
+            <span class="filter-chip">
+              Max size: {"<"} {formatSize(collectionsMaxSize)}
+              <button onclick={() => { collectionsMaxSize = null; }}>&times;</button>
             </span>
           {/if}
           <button class="filter-chip filter-chip-clear" onclick={clearAllCollectionsFilters}>
@@ -2825,6 +2876,21 @@
                 <div class="card-top">
                   <span class="game-badge">{gameDomainDisplay(collection.game_domain)}</span>
                   <span class="revision-badge">Rev {collection.latest_revision}</span>
+                  {#if collection.download_size}
+                    <span class="size-badge" class:size-small={collection.download_size < 5 * 1024 * 1024 * 1024}
+                      class:size-medium={collection.download_size >= 5 * 1024 * 1024 * 1024 && collection.download_size < 20 * 1024 * 1024 * 1024}
+                      class:size-large={collection.download_size >= 20 * 1024 * 1024 * 1024 && collection.download_size < 50 * 1024 * 1024 * 1024}
+                      class:size-huge={collection.download_size >= 50 * 1024 * 1024 * 1024}>
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                        <polyline points="7 10 12 15 17 10" />
+                        <line x1="12" y1="15" x2="12" y2="3" />
+                      </svg>
+                      {formatSize(collection.download_size)}
+                    </span>
+                  {:else}
+                    <span class="size-badge size-unknown">Size unknown</span>
+                  {/if}
                 </div>
 
                 <h3 class="card-title">{collection.name}</h3>
@@ -2867,14 +2933,6 @@
                     </svg>
                     <span class="stat-num">{formatNumber(collection.endorsements)}</span>
                   </div>
-                  {#if collection.download_size}
-                    <div class="stat-item">
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
-                      </svg>
-                      <span class="stat-num">{formatSize(collection.download_size)}</span>
-                    </div>
-                  {/if}
                 </div>
 
                 {#if cacheData.has(collection.slug)}
@@ -2909,7 +2967,17 @@
           {/each}
         </div>
 
-        <!-- Pagination -->
+        <!-- Per-page selector + Pagination -->
+        <div class="per-page-selector">
+          <span class="per-page-label">Per page:</span>
+          {#each [12, 20, 40, 60] as n}
+            <button
+              class="per-page-btn"
+              class:active={collectionsPerPage === n}
+              onclick={() => setCollectionsPerPage(n)}
+            >{n}</button>
+          {/each}
+        </div>
         {#if collectionsTotalPages > 1}
           <div class="pagination-bar">
             <button
@@ -3827,6 +3895,42 @@
     background: var(--surface-hover);
     padding: 1px var(--space-2);
     border-radius: var(--radius-sm);
+  }
+
+  .size-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .size-small {
+    background: color-mix(in srgb, #34C759 15%, transparent);
+    color: #34C759;
+  }
+
+  .size-medium {
+    background: color-mix(in srgb, #FFD60A 15%, transparent);
+    color: #FFD60A;
+  }
+
+  .size-large {
+    background: color-mix(in srgb, #FF9F0A 15%, transparent);
+    color: #FF9F0A;
+  }
+
+  .size-huge {
+    background: color-mix(in srgb, #FF3B30 15%, transparent);
+    color: #FF3B30;
+  }
+
+  .size-unknown {
+    background: color-mix(in srgb, var(--text-tertiary) 10%, transparent);
+    color: var(--text-tertiary);
   }
 
   .card-title {
@@ -5256,6 +5360,40 @@
     justify-content: center;
     gap: var(--space-1);
     padding: var(--space-4) 0 var(--space-2);
+  }
+
+  .per-page-selector {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    margin-bottom: var(--space-3);
+  }
+
+  .per-page-label {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-right: var(--space-1);
+  }
+
+  .per-page-btn {
+    font-size: 11px;
+    padding: 3px 8px;
+    border-radius: 4px;
+    border: 1px solid var(--border-primary, rgba(255,255,255,0.08));
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .per-page-btn:hover {
+    background: var(--surface-hover);
+  }
+
+  .per-page-btn.active {
+    background: var(--system-accent, #007AFF);
+    color: white;
+    border-color: var(--system-accent, #007AFF);
   }
 
   .pagination-bar {

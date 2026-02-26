@@ -18,6 +18,14 @@ let speedSamples: { time: number; bytes: number }[] = [];
 const SPEED_WINDOW_MS = 5000;
 let cumulativeDownloaded = 0;
 
+// Staging (extraction) speed tracking
+let stagingSpeedSamples: { time: number; bytes: number }[] = [];
+let stagingSizeAccumulator = 0;
+
+// Install (deploy) speed tracking
+let installSpeedSamples: { time: number; bytes: number }[] = [];
+let installSizeAccumulator = 0;
+
 // Event throttling — batch rapid events to avoid overwhelming the UI
 let pendingEvent: InstallProgressEvent | null = null;
 let throttleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -39,6 +47,30 @@ function calculateSpeed(currentBytes: number): number {
   speedSamples = speedSamples.filter((s) => now - s.time <= SPEED_WINDOW_MS);
   if (speedSamples.length < 2) return 0;
   const oldest = speedSamples[0];
+  const elapsed = (now - oldest.time) / 1000;
+  if (elapsed <= 0) return 0;
+  return (currentBytes - oldest.bytes) / elapsed;
+}
+
+function calculateStagingSpeed(currentBytes: number): number {
+  const now = Date.now();
+  stagingSizeAccumulator = currentBytes;
+  stagingSpeedSamples.push({ time: now, bytes: currentBytes });
+  stagingSpeedSamples = stagingSpeedSamples.filter((s) => now - s.time <= SPEED_WINDOW_MS);
+  if (stagingSpeedSamples.length < 2) return 0;
+  const oldest = stagingSpeedSamples[0];
+  const elapsed = (now - oldest.time) / 1000;
+  if (elapsed <= 0) return 0;
+  return (currentBytes - oldest.bytes) / elapsed;
+}
+
+function calculateInstallSpeed(currentBytes: number): number {
+  const now = Date.now();
+  installSizeAccumulator = currentBytes;
+  installSpeedSamples.push({ time: now, bytes: currentBytes });
+  installSpeedSamples = installSpeedSamples.filter((s) => now - s.time <= SPEED_WINDOW_MS);
+  if (installSpeedSamples.length < 2) return 0;
+  const oldest = installSpeedSamples[0];
   const elapsed = (now - oldest.time) / 1000;
   if (elapsed <= 0) return 0;
   return (currentBytes - oldest.bytes) / elapsed;
@@ -133,6 +165,8 @@ export async function startInstallTracking(
     overallProgress: 0,
     downloadSpeed: 0,
     downloadEta: "",
+    stagingSpeed: 0,
+    installSpeed: 0,
     logEntries: [{ timestamp: Date.now(), message: `Starting installation of '${collectionName}' (${totalMods} mods)`, level: "info" as const }],
     collectionDescription: description,
     // Legacy compat
@@ -325,6 +359,8 @@ function handleProgressEvent(e: InstallProgressEvent) {
       case "stagingPhaseStarted":
         next.phase = "staging";
         next.step = "extracting";
+        stagingSpeedSamples = [];
+        stagingSizeAccumulator = 0;
         break;
 
       case "stagingModStarted":
@@ -338,6 +374,11 @@ function handleProgressEvent(e: InstallProgressEvent) {
         if (next.modDetails[e.mod_index]) {
           next.modDetails = [...next.modDetails];
           next.modDetails[e.mod_index] = { ...next.modDetails[e.mod_index], status: "staged" };
+        }
+        // Track extraction throughput
+        if (e.extracted_size) {
+          stagingSizeAccumulator += e.extracted_size;
+          next.stagingSpeed = calculateStagingSpeed(stagingSizeAccumulator);
         }
         break;
 
@@ -356,6 +397,8 @@ function handleProgressEvent(e: InstallProgressEvent) {
           total: e.total_mods,
           current: 0,
         };
+        installSpeedSamples = [];
+        installSizeAccumulator = 0;
         break;
 
       case "modStarted":
@@ -507,6 +550,8 @@ export async function resumeInstallTracking(
     overallProgress: totalMods > 0 ? Math.round((completedMods / totalMods) * 100) : 0,
     downloadSpeed: 0,
     downloadEta: "",
+    stagingSpeed: 0,
+    installSpeed: 0,
     logEntries: [{ timestamp: Date.now(), message: `Resuming installation of '${collectionName}' (${completedMods}/${totalMods} completed)`, level: "info" as const }],
     currentMod: "",
     step: "resuming",
@@ -559,6 +604,10 @@ export function stopInstallTracking() {
   }
   speedSamples = [];
   cumulativeDownloaded = 0;
+  stagingSpeedSamples = [];
+  stagingSizeAccumulator = 0;
+  installSpeedSamples = [];
+  installSizeAccumulator = 0;
   pendingEvent = null;
   if (throttleTimer) { clearTimeout(throttleTimer); throttleTimer = null; }
 }

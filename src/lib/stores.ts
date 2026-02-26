@@ -104,6 +104,8 @@ export interface CollectionInstallStatus {
   overallProgress: number;
   downloadSpeed: number;
   downloadEta: string;
+  stagingSpeed: number;   // bytes/sec during extraction phase
+  installSpeed: number;   // bytes/sec during install/deploy phase
   // Verbose log entries
   logEntries: LogEntry[];
   // Legacy compat fields
