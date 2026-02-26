@@ -31,6 +31,32 @@ pub enum ConflictStatus {
     Suggested,
     /// No heuristic applies — needs manual resolution.
     Manual,
+    /// All mods provide identical file content (same SHA-256) — no real conflict.
+    IdenticalContent,
+}
+
+/// Result of checking whether conflicting files have identical content.
+#[derive(Debug, Clone)]
+pub enum IdenticalCheck {
+    /// Every mod provides the exact same file (all SHA-256 hashes match).
+    AllIdentical,
+    /// Some mods share the same file but not all — only unique versions matter.
+    SomeIdentical(Vec<i64>), // mod_ids of unique versions
+    /// Every mod has a different file.
+    AllDifferent,
+    /// No hashes available for comparison — fall through to existing heuristics.
+    NoHashes,
+}
+
+/// Statistics about identical-content auto-resolutions.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct IdenticalContentStats {
+    /// Number of conflicts where ALL mods provide the exact same file.
+    pub fully_identical: usize,
+    /// Number of conflicts where SOME (but not all) mods share the same file.
+    pub partially_identical: usize,
+    /// Total number of individual file paths auto-resolved as identical.
+    pub identical_files_total: usize,
 }
 
 /// A conflict with an attached resolution suggestion.
@@ -62,19 +88,68 @@ pub struct ResolutionResult {
     pub auto_suggested: usize,
     pub manual_needed: usize,
     pub priorities_changed: usize,
+    pub identical_content: usize,
 }
 
 // ---------------------------------------------------------------------------
 // Analysis
 // ---------------------------------------------------------------------------
 
-/// Analyze all file conflicts and suggest winners using collection authorship,
-/// LOOT load order, and patch heuristics.
+/// Check whether all mods in a conflict provide identical file content.
+///
+/// Uses the pre-fetched hash map `(mod_id, relative_path) → sha256` to avoid
+/// per-conflict DB calls.
+fn check_identical_content(
+    relative_path: &str,
+    mod_ids: &[i64],
+    hash_map: &HashMap<(i64, String), String>,
+) -> IdenticalCheck {
+    let hashes: Vec<(i64, &str)> = mod_ids
+        .iter()
+        .filter_map(|&mid| {
+            hash_map
+                .get(&(mid, relative_path.to_string()))
+                .map(|h| (mid, h.as_str()))
+        })
+        .collect();
+
+    if hashes.is_empty() {
+        return IdenticalCheck::NoHashes;
+    }
+
+    // Need hashes for all participating mods to make a definitive call
+    if hashes.len() < mod_ids.len() {
+        return IdenticalCheck::NoHashes;
+    }
+
+    let unique_hashes: HashSet<&str> = hashes.iter().map(|(_, h)| *h).collect();
+
+    if unique_hashes.len() == 1 {
+        IdenticalCheck::AllIdentical
+    } else if unique_hashes.len() < hashes.len() {
+        // Some mods share the same hash — collect one representative per unique hash
+        let mut seen: HashMap<&str, i64> = HashMap::new();
+        for &(mid, hash) in &hashes {
+            seen.entry(hash).or_insert(mid);
+        }
+        IdenticalCheck::SomeIdentical(seen.into_values().collect())
+    } else {
+        IdenticalCheck::AllDifferent
+    }
+}
+
+/// Analyze all file conflicts and suggest winners using checksum comparison,
+/// collection authorship, LOOT load order, and patch heuristics.
+///
+/// When `file_hashes` is provided (non-empty), conflicts where all mods supply
+/// the exact same file are auto-resolved as `IdenticalContent`, removing them
+/// from the list of issues the user must review.
 pub fn analyze_conflicts(
     conflicts: &[FileConflict],
     mods: &[InstalledMod],
     loot_order: Option<&[String]>,
-) -> Vec<ConflictSuggestion> {
+    file_hashes: &HashMap<(i64, String), String>,
+) -> (Vec<ConflictSuggestion>, IdenticalContentStats) {
     let mod_map: HashMap<i64, &InstalledMod> = mods.iter().map(|m| (m.id, m)).collect();
 
     let loot_positions: HashMap<String, usize> = loot_order
@@ -88,6 +163,7 @@ pub fn analyze_conflicts(
         .unwrap_or_default();
 
     let mut suggestions = Vec::new();
+    let mut stats = IdenticalContentStats::default();
 
     for conflict in conflicts {
         let briefs: Vec<ConflictModBrief> = conflict
@@ -105,6 +181,44 @@ pub fn analyze_conflicts(
                 }
             })
             .collect();
+
+        // --- Checksum-based auto-resolution (highest priority) ---
+        let mod_ids: Vec<i64> = conflict.mods.iter().map(|m| m.mod_id).collect();
+        let identical = check_identical_content(
+            &conflict.relative_path,
+            &mod_ids,
+            file_hashes,
+        );
+
+        match identical {
+            IdenticalCheck::AllIdentical => {
+                stats.fully_identical += 1;
+                stats.identical_files_total += 1;
+                let winner_name = mod_map
+                    .get(&conflict.winner_mod_id)
+                    .map(|m| m.name.clone())
+                    .unwrap_or_default();
+                suggestions.push(ConflictSuggestion {
+                    relative_path: conflict.relative_path.clone(),
+                    current_winner_id: conflict.winner_mod_id,
+                    suggested_winner_id: conflict.winner_mod_id,
+                    suggested_winner_name: winner_name,
+                    status: ConflictStatus::IdenticalContent,
+                    reason: "All mods provide identical files (same SHA-256). No real conflict."
+                        .to_string(),
+                    mods: briefs,
+                });
+                continue;
+            }
+            IdenticalCheck::SomeIdentical(_unique_ids) => {
+                stats.partially_identical += 1;
+                stats.identical_files_total += 1;
+                // Fall through to existing heuristics — some files differ
+            }
+            IdenticalCheck::AllDifferent | IdenticalCheck::NoHashes => {
+                // Fall through to existing heuristics
+            }
+        }
 
         let (status, winner_id, reason) =
             suggest_winner(&briefs, &mod_map, &loot_positions, conflict.winner_mod_id);
@@ -125,7 +239,7 @@ pub fn analyze_conflicts(
         });
     }
 
-    suggestions
+    (suggestions, stats)
 }
 
 /// Determine the suggested winner for a single conflict.
@@ -309,6 +423,7 @@ pub fn apply_suggestions(
     let mut author_resolved = 0;
     let mut auto_suggested = 0;
     let mut manual_needed = 0;
+    let mut identical_content = 0;
 
     let mut needed_priority_bumps: HashMap<i64, i32> = HashMap::new();
 
@@ -341,6 +456,10 @@ pub fn apply_suggestions(
             ConflictStatus::Manual => {
                 manual_needed += 1;
             }
+            ConflictStatus::IdenticalContent => {
+                identical_content += 1;
+                // No priority change needed — files are the same regardless of winner.
+            }
         }
     }
 
@@ -356,6 +475,7 @@ pub fn apply_suggestions(
         auto_suggested,
         manual_needed,
         priorities_changed,
+        identical_content,
     })
 }
 
@@ -408,6 +528,10 @@ mod tests {
         }
     }
 
+    fn empty_hashes() -> HashMap<(i64, String), String> {
+        HashMap::new()
+    }
+
     #[test]
     fn same_collection_is_author_resolved() {
         let mods = vec![
@@ -419,7 +543,7 @@ mod tests {
             vec![(1, "Base Textures", 1), (2, "Better Textures", 2)],
         )];
 
-        let results = analyze_conflicts(&conflicts, &mods, None);
+        let (results, _stats) = analyze_conflicts(&conflicts, &mods, None, &empty_hashes());
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].status, ConflictStatus::AuthorResolved);
     }
@@ -435,7 +559,7 @@ mod tests {
             vec![(1, "SMIM", 2), (2, "SMIM Compatibility Patch", 1)],
         )];
 
-        let results = analyze_conflicts(&conflicts, &mods, None);
+        let (results, _stats) = analyze_conflicts(&conflicts, &mods, None, &empty_hashes());
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].status, ConflictStatus::Suggested);
         assert_eq!(results[0].suggested_winner_id, 2);
@@ -457,7 +581,7 @@ mod tests {
             vec![(1, "Mod A", 1), (2, "Mod B", 2)],
         )];
 
-        let results = analyze_conflicts(&conflicts, &mods, Some(&loot_order));
+        let (results, _stats) = analyze_conflicts(&conflicts, &mods, Some(&loot_order), &empty_hashes());
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].status, ConflictStatus::Suggested);
         assert_eq!(results[0].suggested_winner_id, 1); // A loads later in LOOT
@@ -474,7 +598,7 @@ mod tests {
             vec![(1, "Collection Mod", 1), (2, "My Custom Mod", 2)],
         )];
 
-        let results = analyze_conflicts(&conflicts, &mods, None);
+        let (results, _stats) = analyze_conflicts(&conflicts, &mods, None, &empty_hashes());
         assert_eq!(results.len(), 1);
         // Patch heuristic doesn't apply, LOOT not available, but collection
         // mod should win over standalone.
@@ -493,9 +617,116 @@ mod tests {
             vec![(1, "Mod Alpha", 1), (2, "Mod Beta", 2)],
         )];
 
-        let results = analyze_conflicts(&conflicts, &mods, None);
+        let (results, _stats) = analyze_conflicts(&conflicts, &mods, None, &empty_hashes());
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].status, ConflictStatus::Manual);
+    }
+
+    #[test]
+    fn identical_content_auto_resolves() {
+        let mods = vec![
+            make_mod(1, "Mod Alpha", 1, None),
+            make_mod(2, "Mod Beta", 2, None),
+        ];
+        let conflicts = vec![make_conflict(
+            "textures/shared.dds",
+            vec![(1, "Mod Alpha", 1), (2, "Mod Beta", 2)],
+        )];
+
+        // Both mods have the exact same SHA-256 for this file
+        let mut hashes = HashMap::new();
+        let hash = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
+        hashes.insert((1, "textures/shared.dds".to_string()), hash.to_string());
+        hashes.insert((2, "textures/shared.dds".to_string()), hash.to_string());
+
+        let (results, stats) = analyze_conflicts(&conflicts, &mods, None, &hashes);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, ConflictStatus::IdenticalContent);
+        assert!(results[0].reason.contains("identical"));
+        assert_eq!(stats.fully_identical, 1);
+        assert_eq!(stats.identical_files_total, 1);
+        assert_eq!(stats.partially_identical, 0);
+    }
+
+    #[test]
+    fn different_hashes_fall_through() {
+        let mods = vec![
+            make_mod(1, "Mod Alpha", 1, None),
+            make_mod(2, "Mod Beta", 2, None),
+        ];
+        let conflicts = vec![make_conflict(
+            "textures/shared.dds",
+            vec![(1, "Mod Alpha", 1), (2, "Mod Beta", 2)],
+        )];
+
+        let mut hashes = HashMap::new();
+        hashes.insert(
+            (1, "textures/shared.dds".to_string()),
+            "aaaa".to_string(),
+        );
+        hashes.insert(
+            (2, "textures/shared.dds".to_string()),
+            "bbbb".to_string(),
+        );
+
+        let (results, stats) = analyze_conflicts(&conflicts, &mods, None, &hashes);
+        assert_eq!(results.len(), 1);
+        // Different hashes → falls through to Manual (no other heuristic matches)
+        assert_eq!(results[0].status, ConflictStatus::Manual);
+        assert_eq!(stats.fully_identical, 0);
+        assert_eq!(stats.identical_files_total, 0);
+    }
+
+    #[test]
+    fn partial_hashes_fall_through() {
+        let mods = vec![
+            make_mod(1, "Mod Alpha", 1, None),
+            make_mod(2, "Mod Beta", 2, None),
+        ];
+        let conflicts = vec![make_conflict(
+            "textures/shared.dds",
+            vec![(1, "Mod Alpha", 1), (2, "Mod Beta", 2)],
+        )];
+
+        // Only one mod has a hash — can't compare
+        let mut hashes = HashMap::new();
+        hashes.insert(
+            (1, "textures/shared.dds".to_string()),
+            "aaaa".to_string(),
+        );
+
+        let (results, stats) = analyze_conflicts(&conflicts, &mods, None, &hashes);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, ConflictStatus::Manual);
+        assert_eq!(stats.fully_identical, 0);
+    }
+
+    #[test]
+    fn some_identical_three_mods() {
+        let mods = vec![
+            make_mod(1, "Mod A", 1, None),
+            make_mod(2, "Mod B", 2, None),
+            make_mod(3, "Mod C", 3, None),
+        ];
+        let conflicts = vec![make_conflict(
+            "textures/shared.dds",
+            vec![(1, "Mod A", 1), (2, "Mod B", 2), (3, "Mod C", 3)],
+        )];
+
+        // Mods 1 and 2 share a hash, mod 3 is different
+        let mut hashes = HashMap::new();
+        let same_hash = "aaaa";
+        hashes.insert((1, "textures/shared.dds".to_string()), same_hash.to_string());
+        hashes.insert((2, "textures/shared.dds".to_string()), same_hash.to_string());
+        hashes.insert((3, "textures/shared.dds".to_string()), "bbbb".to_string());
+
+        let (results, stats) = analyze_conflicts(&conflicts, &mods, None, &hashes);
+        assert_eq!(results.len(), 1);
+        // SomeIdentical → falls through to existing heuristics (Manual in this case)
+        assert_eq!(results[0].status, ConflictStatus::Manual);
+        assert_eq!(stats.partially_identical, 1);
+        assert_eq!(stats.identical_files_total, 1);
+        assert_eq!(stats.fully_identical, 0);
     }
 
     #[test]

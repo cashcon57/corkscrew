@@ -1318,12 +1318,18 @@ fn get_conflicts(
         .map_err(|e| e.to_string())
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct AnalyzeConflictsResponse {
+    suggestions: Vec<conflict_resolver::ConflictSuggestion>,
+    identical_stats: conflict_resolver::IdenticalContentStats,
+}
+
 #[tauri::command]
 fn analyze_conflicts_cmd(
     game_id: String,
     bottle_name: String,
     state: State<AppState>,
-) -> Result<Vec<conflict_resolver::ConflictSuggestion>, String> {
+) -> Result<AnalyzeConflictsResponse, String> {
     let db = &state.db;
     let conflicts = db
         .find_all_conflicts(&game_id, &bottle_name)
@@ -1341,9 +1347,24 @@ fn analyze_conflicts_cmd(
         Some(loot_names.as_slice())
     };
 
-    Ok(conflict_resolver::analyze_conflicts(
-        &conflicts, &mods, loot_ref,
-    ))
+    // Batch-fetch file hashes for checksum-based conflict auto-resolution.
+    let mod_ids: Vec<i64> = conflicts
+        .iter()
+        .flat_map(|c| c.mods.iter().map(|m| m.mod_id))
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    let file_hashes = db
+        .get_file_hashes_bulk(&mod_ids)
+        .unwrap_or_default();
+
+    let (suggestions, identical_stats) = conflict_resolver::analyze_conflicts(
+        &conflicts, &mods, loot_ref, &file_hashes,
+    );
+    Ok(AnalyzeConflictsResponse {
+        suggestions,
+        identical_stats,
+    })
 }
 
 #[tauri::command]
@@ -1368,13 +1389,26 @@ fn resolve_all_conflicts_cmd(
         Some(loot_names.as_slice())
     };
 
-    let suggestions = conflict_resolver::analyze_conflicts(&conflicts, &mods, loot_ref);
+    // Batch-fetch file hashes for checksum-based conflict auto-resolution.
+    let mod_ids: Vec<i64> = conflicts
+        .iter()
+        .flat_map(|c| c.mods.iter().map(|m| m.mod_id))
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    let file_hashes = db
+        .get_file_hashes_bulk(&mod_ids)
+        .unwrap_or_default();
+
+    let (suggestions, _identical_stats) =
+        conflict_resolver::analyze_conflicts(&conflicts, &mods, loot_ref, &file_hashes);
     let result = conflict_resolver::apply_suggestions(db, &game_id, &bottle_name, &suggestions)?;
 
     // Record conflict rules for resolved conflicts so they disappear from the list.
     for suggestion in &suggestions {
         match suggestion.status {
-            conflict_resolver::ConflictStatus::AuthorResolved => {
+            conflict_resolver::ConflictStatus::AuthorResolved
+            | conflict_resolver::ConflictStatus::IdenticalContent => {
                 let winner = suggestion.current_winner_id;
                 for m in &suggestion.mods {
                     if m.mod_id != winner {

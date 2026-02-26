@@ -192,7 +192,7 @@ export interface DeploymentHealth {
   is_deployed?: boolean;
 }
 
-export type ConflictStatus = "AuthorResolved" | "Suggested" | "Manual";
+export type ConflictStatus = "AuthorResolved" | "Suggested" | "Manual" | "IdenticalContent";
 
 export interface ConflictSuggestion {
   relative_path: string;
@@ -217,6 +217,18 @@ export interface ResolutionResult {
   auto_suggested: number;
   manual_needed: number;
   priorities_changed: number;
+  identical_content: number;
+}
+
+export interface IdenticalContentStats {
+  fully_identical: number;
+  partially_identical: number;
+  identical_files_total: number;
+}
+
+export interface AnalyzeConflictsResponse {
+  suggestions: ConflictSuggestion[];
+  identical_stats: IdenticalContentStats;
 }
 
 export interface FomodInstaller {

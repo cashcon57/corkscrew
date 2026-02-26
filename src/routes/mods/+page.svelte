@@ -51,7 +51,7 @@
     getConfig,
     setConfigValue,
   } from "$lib/api";
-  import type { InstallProgressEvent, DeploymentHealth, ConflictSuggestion, ResolutionResult, DeployProgress, ModTool, UserEndorsement } from "$lib/types";
+  import type { InstallProgressEvent, DeploymentHealth, ConflictSuggestion, ResolutionResult, DeployProgress, ModTool, UserEndorsement, IdenticalContentStats } from "$lib/types";
   import {
     selectedGame,
     installedMods,
@@ -184,6 +184,7 @@
   let analyzingConflicts = $state(false);
   let resolvingAll = $state(false);
   let resolutionResult = $state<ResolutionResult | null>(null);
+  let identicalStats = $state<IdenticalContentStats | null>(null);
 
   // Selected mod for dependency panel
   let selectedModId = $state<number | undefined>(undefined);
@@ -1541,8 +1542,11 @@
     if (!game) return;
     analyzingConflicts = true;
     resolutionResult = null;
+    identicalStats = null;
     try {
-      suggestions = await analyzeConflicts(game.game_id, game.bottle_name);
+      const response = await analyzeConflicts(game.game_id, game.bottle_name);
+      suggestions = response.suggestions;
+      identicalStats = response.identical_stats;
     } catch (e: unknown) {
       showError(`Conflict analysis failed: ${e}`);
     } finally {
@@ -1555,13 +1559,17 @@
     if (!game) return;
     resolvingAll = true;
     resolutionResult = null;
+    identicalStats = null;
     try {
       resolutionResult = await resolveAllConflicts(game.game_id, game.bottle_name);
       await loadMods(game);
       await refreshHealth(game);
       // Re-analyze to show updated state
-      suggestions = await analyzeConflicts(game.game_id, game.bottle_name);
-      showSuccess(`Resolved ${resolutionResult.author_resolved + resolutionResult.auto_suggested} conflicts automatically`);
+      const response = await analyzeConflicts(game.game_id, game.bottle_name);
+      suggestions = response.suggestions;
+      identicalStats = response.identical_stats;
+      const autoCount = resolutionResult.author_resolved + resolutionResult.auto_suggested + resolutionResult.identical_content;
+      showSuccess(`Resolved ${autoCount} conflicts automatically`);
     } catch (e: unknown) {
       showError(`Magic resolver failed: ${e}`);
     } finally {
@@ -2245,7 +2253,7 @@
                     Analyze
                   {/if}
                 </button>
-                <button class="btn btn-ghost btn-sm" onclick={() => { showConflictPanel = false; suggestions = []; resolutionResult = null; }}>
+                <button class="btn btn-ghost btn-sm" onclick={() => { showConflictPanel = false; suggestions = []; resolutionResult = null; identicalStats = null; }}>
                   <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
                     <line x1="3" y1="3" x2="11" y2="11" />
                     <line x1="11" y1="3" x2="3" y2="11" />
@@ -2264,6 +2272,9 @@
                 <span>
                   {resolutionResult.author_resolved} author-resolved,
                   {resolutionResult.auto_suggested} auto-fixed,
+                  {#if resolutionResult.identical_content > 0}
+                    {resolutionResult.identical_content} identical files,
+                  {/if}
                   {resolutionResult.manual_needed} need review
                   {#if resolutionResult.priorities_changed > 0}
                     &mdash; {resolutionResult.priorities_changed} priorities adjusted
@@ -2272,15 +2283,30 @@
               </div>
             {/if}
 
+            <!-- Identical content auto-resolution banner -->
+            {#if identicalStats && identicalStats.identical_files_total > 0}
+              <div class="identical-banner">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                  <circle cx="8.5" cy="7" r="4" />
+                  <polyline points="17 11 19 13 23 9" />
+                </svg>
+                <span>
+                  {identicalStats.fully_identical} conflict{identicalStats.fully_identical === 1 ? "" : "s"} auto-resolved (identical files across mods){#if identicalStats.partially_identical > 0}, {identicalStats.partially_identical} partially identical{/if}
+                </span>
+              </div>
+            {/if}
+
             <!-- Smart suggestions view -->
             {#if suggestions.length > 0}
               <div class="conflict-list">
                 {#each suggestions as s (s.relative_path)}
-                  <div class="conflict-item" class:conflict-resolved={s.status === "AuthorResolved"} class:conflict-suggested={s.status === "Suggested"}>
+                  <div class="conflict-item" class:conflict-resolved={s.status === "AuthorResolved"} class:conflict-suggested={s.status === "Suggested"} class:conflict-identical={s.status === "IdenticalContent"}>
                     <div class="conflict-path">
-                      <span class="conflict-status-badge" class:status-author={s.status === "AuthorResolved"} class:status-suggested={s.status === "Suggested"} class:status-manual={s.status === "Manual"}>
+                      <span class="conflict-status-badge" class:status-author={s.status === "AuthorResolved"} class:status-suggested={s.status === "Suggested"} class:status-manual={s.status === "Manual"} class:status-identical={s.status === "IdenticalContent"}>
                         {#if s.status === "AuthorResolved"}OK
                         {:else if s.status === "Suggested"}Auto
+                        {:else if s.status === "IdenticalContent"}Same
                         {:else}Manual{/if}
                       </span>
                       <span class="conflict-filepath">{s.relative_path}</span>
@@ -2292,7 +2318,7 @@
                           <span class="conflict-mod-name">
                             {mod.mod_name}
                             {#if mod.mod_id === s.suggested_winner_id}
-                              <span class="winner-badge">{s.status === "AuthorResolved" ? "Author" : s.status === "Suggested" ? "Suggested" : "Winner"}</span>
+                              <span class="winner-badge">{s.status === "AuthorResolved" ? "Author" : s.status === "Suggested" ? "Suggested" : s.status === "IdenticalContent" ? "Identical" : "Winner"}</span>
                             {/if}
                           </span>
                           <span class="conflict-mod-priority">Priority {mod.priority}</span>
@@ -5123,8 +5149,30 @@
     color: var(--yellow);
   }
 
+  .status-identical {
+    background: color-mix(in srgb, var(--text-tertiary) 15%, transparent);
+    color: var(--text-tertiary);
+  }
+
   .conflict-resolved {
     opacity: 0.6;
+  }
+
+  .conflict-identical {
+    opacity: 0.45;
+  }
+
+  .identical-banner {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-4);
+    background: color-mix(in srgb, var(--text-tertiary) 8%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, var(--text-tertiary) 20%, transparent);
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 500;
+    flex-shrink: 0;
   }
 
   .conflict-reason {
