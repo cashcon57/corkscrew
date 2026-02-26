@@ -1127,8 +1127,10 @@
       const report = await scanGameDirectory($selectedGame.game_id, $selectedGame.bottle_name);
       cleanScanning = false;
 
-      if (report.non_stock_files.length === 0) {
-        // Game directory is already clean
+      // Only prompt cleanup if there are unmanaged (orphaned) non-stock files.
+      // Files deployed by Corkscrew (is_managed) are fine — don't nag the user about those.
+      const orphanedFiles = report.non_stock_files.filter((f: { is_managed: boolean }) => !f.is_managed);
+      if (orphanedFiles.length === 0) {
         await proceedWithInstall(manifest);
         return;
       }
@@ -1209,7 +1211,8 @@
         cleanScanning = true;
         const report = await scanGameDirectory($selectedGame.game_id, $selectedGame.bottle_name);
         cleanScanning = false;
-        if (report.non_stock_files.length === 0) {
+        const orphanedFiles = report.non_stock_files.filter((f: { is_managed: boolean }) => !f.is_managed);
+        if (orphanedFiles.length === 0) {
           await proceedWithInstall(manifest);
           return;
         }

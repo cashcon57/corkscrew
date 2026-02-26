@@ -15,6 +15,7 @@ use crate::download_queue::{DownloadQueue, DOWNLOAD_QUEUE_EVENT};
 use crate::fomod;
 use crate::games;
 use crate::nexus::NexusClient;
+use crate::oauth;
 use crate::plugins;
 use crate::profiles;
 use crate::progress::{InstallProgress, INSTALL_PROGRESS_EVENT};
@@ -137,7 +138,7 @@ async fn download_mod_archive(
     mod_index: usize,
     game_slug: &str,
     download_dir: &Path,
-    api_key: &Option<String>,
+    auth_method: &oauth::AuthMethod,
     manifest_name: &str,
     game_id: &str,
     bottle_name: &str,
@@ -168,7 +169,7 @@ async fn download_mod_archive(
                     mod_index,
                     game_slug,
                     download_dir,
-                    api_key,
+                    auth_method,
                     manifest_name,
                     game_id,
                     bottle_name,
@@ -183,7 +184,7 @@ async fn download_mod_archive(
                     mod_entry,
                     mod_index,
                     download_dir,
-                    api_key,
+                    auth_method,
                     manifest_name,
                     game_id,
                     bottle_name,
@@ -236,7 +237,7 @@ async fn download_nexus_archive(
     mod_index: usize,
     game_slug: &str,
     download_dir: &Path,
-    api_key: &Option<String>,
+    auth_method: &oauth::AuthMethod,
     manifest_name: &str,
     game_id: &str,
     bottle_name: &str,
@@ -268,10 +269,8 @@ async fn download_nexus_archive(
         }
     }
 
-    let key = api_key
-        .as_ref()
-        .ok_or_else(|| InstallError::Failed("No API key configured".to_string()))?;
-    let client = NexusClient::new(key.clone());
+    let client = NexusClient::from_auth_method(auth_method)
+        .map_err(|e| InstallError::Failed(format!("No NexusMods auth configured: {}", e)))?;
 
     // Get download links
     let links = client
@@ -367,7 +366,7 @@ async fn download_direct_archive(
     mod_entry: &CollectionModEntry,
     mod_index: usize,
     download_dir: &Path,
-    api_key: &Option<String>,
+    auth_method: &oauth::AuthMethod,
     manifest_name: &str,
     game_id: &str,
     bottle_name: &str,
@@ -414,9 +413,9 @@ async fn download_direct_archive(
     queue.set_downloading(queue_id);
     let _ = app.emit(DOWNLOAD_QUEUE_EVENT, queue.get_all());
 
-    // Download
-    let dummy_key = api_key.as_deref().unwrap_or("").to_string();
-    let client = NexusClient::new(dummy_key);
+    // Download — for direct URLs we just need a client with proper headers
+    let client = NexusClient::from_auth_method(auth_method)
+        .unwrap_or_else(|_| NexusClient::new(String::new()));
 
     let app_clone = app.clone();
     let last_emit = std::sync::Mutex::new(std::time::Instant::now());
@@ -557,21 +556,28 @@ pub async fn install_collection(
             .map_err(|e| format!("Failed to create download dir: {}", e))?;
     }
 
-    // Check premium status once upfront
+    // Check premium status once upfront — supports both OAuth and API key auth
     let _ = app.emit(
         INSTALL_PROGRESS_EVENT,
         InstallProgress::Initializing {
             message: "Checking NexusMods account status...".to_string(),
         },
     );
-    let api_key = config::get_config().ok().and_then(|c| c.nexus_api_key);
+    let auth_method = oauth::get_auth_method_refreshed().await;
 
-    let is_premium = if let Some(ref key) = api_key {
-        let client = NexusClient::new(key.clone());
-        client.is_premium().await
-    } else {
-        false
+    let is_premium = match &auth_method {
+        oauth::AuthMethod::ApiKey(key) => {
+            let client = NexusClient::new(key.clone());
+            client.is_premium().await
+        }
+        oauth::AuthMethod::OAuth(tokens) => {
+            oauth::parse_user_info(&tokens.access_token)
+                .map(|u| u.is_premium)
+                .unwrap_or(false)
+        }
+        oauth::AuthMethod::None => false,
     };
+
 
     // Resolve install order (topological sort respecting mod rules)
     let _ = app.emit(
@@ -753,7 +759,7 @@ pub async fn install_collection(
         let sem_c = Arc::clone(&semaphore);
         let game_slug_c = game_slug.to_string();
         let download_dir_c = download_dir.clone();
-        let api_key_c = api_key.clone();
+        let auth_method_c = auth_method.clone();
         let manifest_name_c = manifest.name.clone();
         let game_id_c = game_id.to_string();
         let bottle_name_c = bottle_name.to_string();
@@ -777,7 +783,7 @@ pub async fn install_collection(
                 order_pos,
                 &game_slug_c,
                 &download_dir_c,
-                &api_key_c,
+                &auth_method_c,
                 &manifest_name_c,
                 &game_id_c,
                 &bottle_name_c,
@@ -1101,7 +1107,7 @@ pub async fn install_collection(
             game_slug,
             &data_dir,
             &download_dir,
-            &api_key,
+            &auth_method,
             is_premium,
             &manifest.name,
             pre_dl,
@@ -1314,7 +1320,7 @@ async fn install_single_mod(
     game_slug: &str,
     data_dir: &Path,
     download_dir: &Path,
-    api_key: &Option<String>,
+    auth_method: &oauth::AuthMethod,
     is_premium: bool,
     manifest_name: &str,
     pre_downloaded: Option<&Path>,
@@ -1335,7 +1341,7 @@ async fn install_single_mod(
                 game_slug,
                 data_dir,
                 download_dir,
-                api_key,
+                auth_method,
                 is_premium,
                 manifest_name,
                 pre_downloaded,
@@ -1354,7 +1360,7 @@ async fn install_single_mod(
                 bottle_name,
                 data_dir,
                 download_dir,
-                api_key,
+                auth_method,
                 manifest_name,
                 pre_downloaded,
                 pre_extracted,
@@ -1403,7 +1409,7 @@ async fn install_nexus_mod(
     game_slug: &str,
     data_dir: &Path,
     download_dir: &Path,
-    api_key: &Option<String>,
+    auth_method: &oauth::AuthMethod,
     is_premium: bool,
     manifest_name: &str,
     pre_downloaded: Option<&Path>,
@@ -1525,11 +1531,8 @@ async fn install_nexus_mod(
         }
     }
 
-    let key = api_key
-        .as_ref()
-        .ok_or_else(|| InstallError::Failed("No API key configured".to_string()))?;
-
-    let client = NexusClient::new(key.clone());
+    let client = NexusClient::from_auth_method(auth_method)
+        .map_err(|e| InstallError::Failed(format!("No NexusMods auth configured: {}", e)))?;
 
     // Step: get download links
     let _ = app.emit(
@@ -1663,7 +1666,7 @@ async fn install_direct_mod(
     bottle_name: &str,
     data_dir: &Path,
     download_dir: &Path,
-    api_key: &Option<String>,
+    auth_method: &oauth::AuthMethod,
     manifest_name: &str,
     pre_downloaded: Option<&Path>,
     pre_extracted: Option<PathBuf>,
@@ -1778,8 +1781,8 @@ async fn install_direct_mod(
     let _ = app.emit(DOWNLOAD_QUEUE_EVENT, queue.get_all());
 
     // Use NexusClient for HTTP downloads (it has a proper user-agent)
-    let dummy_key = api_key.as_deref().unwrap_or("").to_string();
-    let client = NexusClient::new(dummy_key);
+    let client = NexusClient::from_auth_method(auth_method)
+        .unwrap_or_else(|_| NexusClient::new(String::new()));
 
     let app_clone = app.clone();
     let last_emit = std::sync::Mutex::new(std::time::Instant::now());

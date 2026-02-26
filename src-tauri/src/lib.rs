@@ -3106,13 +3106,12 @@ fn get_fomod_files(
 // --- DLC Detection ---
 
 /// Expected DLC files for Skyrim SE (ESMs + BSAs).
+/// DLC detection checks ESM files only — BSA archives may be absent in some
+/// Steam/Wine installations but the DLC is still fully functional.
 const SKYRIM_SE_DLC_FILES: &[(&str, &str)] = &[
     ("Dawnguard.esm", "Dawnguard"),
-    ("Dawnguard.bsa", "Dawnguard"),
     ("HearthFires.esm", "Hearthfire"),
-    ("HearthFires.bsa", "Hearthfire"),
     ("Dragonborn.esm", "Dragonborn"),
-    ("Dragonborn.bsa", "Dragonborn"),
 ];
 
 /// Expected DLC files for Fallout 4.

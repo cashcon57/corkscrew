@@ -222,10 +222,19 @@
     return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
   }
 
+  let showCancelConfirm = $state(false);
+
   function handleCancel() {
     dismissInstall();
     goto("/collections").catch(() => {
-      // Fallback if SvelteKit routing fails
+      window.location.href = "/collections";
+    });
+  }
+
+  function handleCancelInstall() {
+    showCancelConfirm = false;
+    dismissInstall();
+    goto("/collections").catch(() => {
       window.location.href = "/collections";
     });
   }
@@ -285,6 +294,16 @@
           </svg>
           {status.elapsed}
         </span>
+        {#if phase !== "complete" && phase !== "failed"}
+          <button class="btn btn-ghost cancel-install-btn" onclick={() => showCancelConfirm = true}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10" />
+              <line x1="15" y1="9" x2="9" y2="15" />
+              <line x1="9" y1="9" x2="15" y2="15" />
+            </svg>
+            Cancel
+          </button>
+        {/if}
       </div>
     </header>
 
@@ -840,7 +859,7 @@
     <!-- Cancel Button (during active install) -->
     {#if phase === "downloading" || phase === "installing" || phase === "staging"}
       <div class="footer-actions">
-        <button class="btn btn-ghost-danger" onclick={handleCancel}>
+        <button class="btn btn-ghost-danger" onclick={() => showCancelConfirm = true}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="10" />
             <line x1="15" y1="9" x2="9" y2="15" />
@@ -850,6 +869,34 @@
         </button>
       </div>
     {/if}
+  </div>
+{/if}
+
+<!-- Cancel Confirmation Modal -->
+{#if showCancelConfirm}
+  <div class="modal-overlay" onclick={() => showCancelConfirm = false} role="dialog" aria-modal="true">
+    <div class="modal-panel cancel-modal" onclick={(e) => e.stopPropagation()}>
+      <div class="cancel-modal-icon">
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+          <line x1="12" y1="9" x2="12" y2="13" />
+          <line x1="12" y1="17" x2="12.01" y2="17" />
+        </svg>
+      </div>
+      <h3 class="cancel-modal-title">Cancel Installation?</h3>
+      <p class="cancel-modal-desc">
+        Mods already installed will be kept. Downloaded archives are preserved and can be reused.
+        The install can be resumed later from the checkpoint.
+      </p>
+      <div class="cancel-modal-actions">
+        <button class="btn btn-primary" onclick={() => showCancelConfirm = false}>
+          Continue Installing
+        </button>
+        <button class="btn btn-ghost-danger" onclick={handleCancelInstall}>
+          Cancel Install
+        </button>
+      </div>
+    </div>
   </div>
 {/if}
 
@@ -2079,5 +2126,70 @@
   .description-content::-webkit-scrollbar-thumb {
     background: var(--scrollbar-thumb);
     border-radius: 3px;
+  }
+
+  /* ---- Cancel Install Button (header) ---- */
+
+  .cancel-install-btn {
+    color: var(--red);
+    font-size: 12px;
+    padding: var(--space-1) var(--space-3);
+    gap: var(--space-1);
+  }
+
+  .cancel-install-btn:hover {
+    background: rgba(255, 59, 48, 0.08);
+  }
+
+  /* ---- Cancel Confirmation Modal ---- */
+
+  .modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    backdrop-filter: blur(4px);
+  }
+
+  .cancel-modal {
+    background: var(--bg-secondary);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius-lg);
+    padding: var(--space-6);
+    max-width: 420px;
+    width: 90%;
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-3);
+  }
+
+  .cancel-modal-icon {
+    margin-bottom: var(--space-1);
+  }
+
+  .cancel-modal-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .cancel-modal-desc {
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+    margin: 0;
+  }
+
+  .cancel-modal-actions {
+    display: flex;
+    gap: var(--space-3);
+    margin-top: var(--space-2);
+    width: 100%;
+    justify-content: center;
   }
 </style>
