@@ -62,6 +62,7 @@ import type {
   FomodRecipe,
   ConflictSuggestion,
   ResolutionResult,
+  AnalyzeConflictsResponse,
   NotificationEntry,
   DeployProgress,
   RequiredTool,
@@ -334,7 +335,7 @@ export async function getConflicts(
 export async function analyzeConflicts(
   gameId: string,
   bottleName: string
-): Promise<ConflictSuggestion[]> {
+): Promise<AnalyzeConflictsResponse> {
   return invoke("analyze_conflicts_cmd", { gameId, bottleName });
 }
 

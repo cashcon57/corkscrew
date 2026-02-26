@@ -737,6 +737,44 @@ impl ModDatabase {
         Ok(result)
     }
 
+    /// Batch-fetch file hashes for multiple mods in a single query.
+    /// Returns a map of `(mod_id, relative_path) -> sha256`.
+    pub fn get_file_hashes_bulk(
+        &self,
+        mod_ids: &[i64],
+    ) -> Result<HashMap<(i64, String), String>> {
+        if mod_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Build dynamic IN clause with positional params
+        let placeholders: Vec<String> = (1..=mod_ids.len()).map(|i| format!("?{}", i)).collect();
+        let sql = format!(
+            "SELECT mod_id, relative_path, sha256 FROM file_hashes WHERE mod_id IN ({})",
+            placeholders.join(", ")
+        );
+
+        let mut stmt = conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> =
+            mod_ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+
+        let rows = stmt.query_map(params.as_slice(), |row| {
+            let mod_id: i64 = row.get(0)?;
+            let path: String = row.get(1)?;
+            let sha256: String = row.get(2)?;
+            Ok((mod_id, path, sha256))
+        })?;
+
+        let mut result = HashMap::new();
+        for row in rows {
+            let (mod_id, path, sha256) = row?;
+            result.insert((mod_id, path), sha256);
+        }
+        Ok(result)
+    }
+
     // -- Mod field updates --------------------------------------------------
 
     /// Update the installed_files JSON for a mod.
