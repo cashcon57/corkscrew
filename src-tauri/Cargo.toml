@@ -1,6 +1,6 @@
 [package]
 name = "corkscrew"
-version = "1.16.4"
+version = "1.16.5"
 description = "A mod manager for CrossOver/Wine games on macOS and Linux"
 authors = ["cashconway"]
 edition = "2021"
@@ -20,6 +20,7 @@ tauri-plugin-dialog = "2"
 tauri-plugin-deep-link = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+tauri-plugin-liquid-glass = "0.1"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

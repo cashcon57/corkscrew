@@ -1476,8 +1476,8 @@
       0 0 0 0.5px var(--surface-subtle),
       0 1px 4px rgba(0, 0, 0, 0.12),
       0 4px 16px rgba(0, 0, 0, 0.08);
-    backdrop-filter: blur(20px) saturate(1.2);
-    -webkit-backdrop-filter: blur(20px) saturate(1.2);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
   }
 
   :global([data-theme="light"]) .sidebar {
@@ -1497,8 +1497,8 @@
   }
 
   :global(html.vibrancy-active:not([data-theme="light"])) .sidebar {
-    backdrop-filter: blur(24px);
-    -webkit-backdrop-filter: blur(24px);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
     border-color: var(--separator);
   }
 
@@ -2106,8 +2106,8 @@
   }
 
   :global(html.vibrancy-active:not([data-theme="light"])) .content-column {
-    backdrop-filter: blur(16px) saturate(1.1);
-    -webkit-backdrop-filter: blur(16px) saturate(1.1);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
   }
 
   /* --- Content area --- */
@@ -2138,10 +2138,10 @@
     align-items: center;
     gap: var(--space-2);
     z-index: 1000;
-    box-shadow: var(--glass-edge-shadow), var(--shadow-lg);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow), var(--shadow-lg);
     animation: toastIn var(--duration-slow) var(--ease-out);
-    backdrop-filter: blur(24px) saturate(1.3);
-    -webkit-backdrop-filter: blur(24px) saturate(1.3);
+    backdrop-filter: var(--glass-blur-heavy);
+    -webkit-backdrop-filter: var(--glass-blur-heavy);
     max-width: 400px;
   }
 
@@ -2326,6 +2326,8 @@
     flex-direction: column;
     overflow: hidden;
     animation: dropdownIn var(--duration-fast) var(--ease-out);
+    backdrop-filter: var(--glass-blur-heavy);
+    -webkit-backdrop-filter: var(--glass-blur-heavy);
   }
 
   .queue-popover-header {
@@ -2618,7 +2620,7 @@
     align-items: center;
     justify-content: center;
     z-index: 1000;
-    backdrop-filter: blur(4px);
+    backdrop-filter: var(--glass-blur-light);
     animation: shortcutsFadeIn 150ms ease-out;
   }
 

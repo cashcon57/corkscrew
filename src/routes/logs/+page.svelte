@@ -584,7 +584,7 @@
     padding: var(--space-12) var(--space-8);
     background: var(--surface);
     border-radius: var(--radius-lg);
-    box-shadow: var(--glass-edge-shadow);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
     text-align: center;
   }
 
@@ -746,7 +746,7 @@
     padding: var(--space-4) var(--space-5);
     background: var(--surface);
     border-radius: var(--radius-lg);
-    box-shadow: var(--glass-edge-shadow);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
   }
 
   .detail-header-top {
@@ -798,7 +798,7 @@
     padding: var(--space-3) var(--space-4);
     background: var(--surface);
     border-radius: var(--radius);
-    box-shadow: var(--glass-edge-shadow);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
   }
 
   .diagnosis-header {
@@ -848,7 +848,7 @@
     background: var(--surface);
     border: 1px solid var(--separator);
     border-radius: var(--radius);
-    box-shadow: var(--glass-edge-shadow);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
     text-align: left;
     cursor: pointer;
     transition: all var(--duration-fast) var(--ease);
@@ -933,7 +933,7 @@
     background: var(--surface);
     border-radius: var(--radius);
     overflow: hidden;
-    box-shadow: var(--glass-edge-shadow);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
   }
 
   .sysinfo-row {

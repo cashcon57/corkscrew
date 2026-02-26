@@ -27,7 +27,12 @@ pub enum LauncherError {
     #[error("Bottle does not exist: {0}")]
     BottleNotFound(String),
 
-    #[error("Wine binary not found for source '{bottle_source}': tried {tried}")]
+    #[error("Wine is required but was not found.\n\n\
+        Looked for: {tried}\n\n\
+        To install Wine:\n\
+        \u{2022} macOS: Install CrossOver or run 'brew install --cask wine-stable'\n\
+        \u{2022} Linux: Install via your package manager (e.g. 'sudo apt install wine' or 'sudo dnf install wine')\n\
+        \u{2022} Steam Deck: Wine is bundled with Proton \u{2014} ensure Steam is installed")]
     WineNotFound {
         bottle_source: String,
         tried: String,
@@ -175,12 +180,13 @@ fn resolve_wine_binary(bottle: &Bottle) -> Result<WineCommand> {
             })?;
             // CrossOver uses --bottle <name> to target a specific bottle.
             // The bottle name is the directory name under CrossOver/Bottles/.
-            // Validate bottle name to prevent argument injection
-            if bottle.name.starts_with('-')
-                || !bottle
-                    .name
-                    .chars()
-                    .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.' || c == ' ')
+            // Validate bottle name: allow alphanumeric, spaces, and common punctuation
+            // (CrossOver supports names like "Skyrim: Anniversary Edition").
+            // Reject path separators, null bytes, and shell metacharacters.
+            let dangerous = ['/', '\\', '\0', '`', '$', '|', ';', '&', '<', '>', '\n', '\r'];
+            if bottle.name.is_empty()
+                || bottle.name.starts_with('-')
+                || bottle.name.chars().any(|c| dangerous.contains(&c))
             {
                 return Err(LauncherError::Other(format!(
                     "Invalid bottle name: {}",
@@ -279,17 +285,21 @@ fn find_system_wine() -> Option<PathBuf> {
     }
 
     // Common fallback locations on Linux.
-    let fallbacks = [
-        "/usr/bin/wine",
-        "/usr/local/bin/wine",
-        "/opt/wine-stable/bin/wine",
-        "/opt/wine-staging/bin/wine",
+    let mut fallbacks: Vec<PathBuf> = vec![
+        PathBuf::from("/usr/bin/wine"),
+        PathBuf::from("/usr/local/bin/wine"),
+        PathBuf::from("/opt/wine-stable/bin/wine"),
+        PathBuf::from("/opt/wine-staging/bin/wine"),
     ];
 
+    // User-compiled Wine (e.g. from source or wine-builds).
+    if let Some(home) = dirs::home_dir() {
+        fallbacks.push(home.join(".local/bin/wine"));
+    }
+
     for fb in &fallbacks {
-        let p = PathBuf::from(fb);
-        if p.exists() {
-            return Some(p);
+        if fb.exists() {
+            return Some(fb.clone());
         }
     }
 
@@ -309,7 +319,10 @@ fn find_proton_wine(bottle: &Bottle) -> Option<PathBuf> {
     // for Proton installations under steamapps/common/.
     let bottle_path = &bottle.path;
 
-    // Navigate up to find `steamapps`
+    // Collect candidate steamapps/common directories to search.
+    let mut common_dirs: Vec<PathBuf> = Vec::new();
+
+    // Navigate up from the bottle path to find `steamapps`.
     let mut ancestor = bottle_path.parent();
     while let Some(dir) = ancestor {
         if dir
@@ -317,28 +330,40 @@ fn find_proton_wine(bottle: &Bottle) -> Option<PathBuf> {
             .map(|n| n.to_string_lossy().to_lowercase() == "steamapps")
             .unwrap_or(false)
         {
-            // Found the steamapps directory; look for Proton under common/
-            let common = dir.join("common");
-            if common.is_dir() {
-                if let Ok(entries) = fs::read_dir(&common) {
-                    for entry in entries.flatten() {
-                        let name = entry.file_name().to_string_lossy().to_lowercase();
-                        if name.starts_with("proton") {
-                            let proton_dir = entry.path();
-                            // Check both dist/bin/wine and files/bin/wine
-                            for sub in &["dist/bin/wine", "files/bin/wine"] {
-                                let wine = proton_dir.join(sub);
-                                if wine.exists() {
-                                    return Some(wine);
-                                }
-                            }
+            common_dirs.push(dir.join("common"));
+            break;
+        }
+        ancestor = dir.parent();
+    }
+
+    // Also check Flatpak Steam Proton path.
+    if let Some(home) = dirs::home_dir() {
+        let flatpak_common = home
+            .join(".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common");
+        if flatpak_common.is_dir() && !common_dirs.contains(&flatpak_common) {
+            common_dirs.push(flatpak_common);
+        }
+    }
+
+    for common in &common_dirs {
+        if !common.is_dir() {
+            continue;
+        }
+        if let Ok(entries) = fs::read_dir(common) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_lowercase();
+                if name.starts_with("proton") {
+                    let proton_dir = entry.path();
+                    // Check both dist/bin/wine and files/bin/wine
+                    for sub in &["dist/bin/wine", "files/bin/wine"] {
+                        let wine = proton_dir.join(sub);
+                        if wine.exists() {
+                            return Some(wine);
                         }
                     }
                 }
             }
-            break;
         }
-        ancestor = dir.parent();
     }
 
     None

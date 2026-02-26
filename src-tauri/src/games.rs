@@ -228,7 +228,7 @@ mod tests {
     fn duplicate_registration_ignored() {
         register_plugin(Box::new(TestPlugin));
         register_plugin(Box::new(TestPlugin));
-        let plugins = registry().lock().unwrap();
+        let plugins = registry().lock().unwrap_or_else(|e| e.into_inner());
         let count = plugins.iter().filter(|p| p.game_id() == "testgame").count();
         assert_eq!(count, 1);
     }

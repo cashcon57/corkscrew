@@ -76,6 +76,8 @@
   let deletingCollection = $state<string | null>(null);
   let confirmDeleteCollection = $state<string | null>(null);
   let deleteKeepDownloads = $state(false);
+  let deleteCleanGameDir = $state(false);
+  let deleteHasSnapshot = $state(false);
   let deleteDownloadSize = $state<number | null>(null);
   let deleteDownloadSizeLoading = $state(false);
   let collectionDiffs = $state<Record<string, CollectionDiff | "loading" | "error">>({});
@@ -180,11 +182,18 @@
     const game = $selectedGame;
     if (!game) return;
     confirmDeleteCollection = name;
-    deleteKeepDownloads = false;
+    deleteKeepDownloads = true;
+    deleteCleanGameDir = false;
+    deleteHasSnapshot = false;
     deleteDownloadSize = null;
     deleteDownloadSizeLoading = true;
     try {
-      deleteDownloadSize = await getCollectionDownloadSize(game.game_id, game.bottle_name, name);
+      const [size, snap] = await Promise.all([
+        getCollectionDownloadSize(game.game_id, game.bottle_name, name).catch(() => null),
+        hasGameSnapshot(game.game_id, game.bottle_name).catch(() => false),
+      ]);
+      deleteDownloadSize = size;
+      deleteHasSnapshot = snap;
     } catch {
       deleteDownloadSize = null;
     } finally {
@@ -195,6 +204,7 @@
   async function handleDeleteCollection(name: string) {
     const game = $selectedGame;
     if (!game) return;
+    const shouldCleanGameDir = deleteCleanGameDir;
     deletingCollection = name;
     confirmDeleteCollection = null;
 
@@ -257,6 +267,41 @@
 
     try {
       await deleteCollection(game.game_id, game.bottle_name, name, !deleteKeepDownloads);
+
+      // After successful uninstall, optionally clean non-stock files (preserving SKSE)
+      if (shouldCleanGameDir) {
+        collectionUninstallStatus.update((s) => {
+          if (!s) return s;
+          return { ...s, currentStep: "Cleaning non-stock files from game directory...", phase: "redeploying" };
+        });
+        try {
+          const cleanResult = await cleanGameDirectory(game.game_id, game.bottle_name, {
+            remove_loose_files: true,
+            remove_archives: true,
+            remove_enb: false,
+            remove_saves: false,
+            orphans_only: false,
+            dry_run: false,
+            exclude_patterns: [
+              "skse64_*.dll",
+              "skse64_loader.exe",
+              "SKSE/**",
+              "Data/SKSE/**",
+              "skse_*.dll",
+              "skse_loader.exe",
+            ],
+          });
+          collectionUninstallStatus.update((s) => {
+            if (!s) return s;
+            return { ...s, currentStep: `Cleaned ${cleanResult.removed_files.length} non-stock files` };
+          });
+        } catch (cleanErr: unknown) {
+          collectionUninstallStatus.update((s) => {
+            if (!s) return s;
+            return { ...s, errors: [...s.errors, `Game dir cleanup: ${cleanErr}`] };
+          });
+        }
+      }
     } catch (e: unknown) {
       showError(`Failed to delete: ${e}`);
       collectionUninstallStatus.set(null);
@@ -3256,6 +3301,23 @@
         {/if}
       </div>
 
+      {#if deleteHasSnapshot}
+        <div class="modal-option">
+          <label class="modal-checkbox-label">
+            <input type="checkbox" bind:checked={deleteCleanGameDir} />
+            <span class="modal-checkbox-text">
+              Clean non-stock files from game directory
+              <span class="modal-size-note">preserves SKSE</span>
+            </span>
+          </label>
+          {#if deleteCleanGameDir}
+            <p class="modal-option-hint modal-option-hint-warn">Removes leftover loose files (meshes, textures, scripts, plugins) that aren't part of the original game. SKSE files are preserved.</p>
+          {:else}
+            <p class="modal-option-hint">Leave the game directory as-is after uninstalling the collection.</p>
+          {/if}
+        </div>
+      {/if}
+
       <div class="modal-actions">
         <button
           class="btn btn-danger"
@@ -3696,7 +3758,7 @@
     border: 1px solid var(--separator);
     border-radius: var(--radius-lg);
     overflow: hidden;
-    box-shadow: var(--glass-edge-shadow);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
     transition: border-color var(--duration-fast) var(--ease),
                 box-shadow var(--duration-fast) var(--ease);
     animation: cardFadeIn var(--duration-slow) var(--ease) both;
@@ -3706,7 +3768,7 @@
 
   .collection-card:hover {
     border-color: var(--separator);
-    box-shadow: var(--glass-edge-shadow), var(--shadow-sm);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow), var(--shadow-sm);
   }
 
   @keyframes cardFadeIn {
@@ -3964,7 +4026,7 @@
     border: 1px dashed var(--separator);
     border-radius: var(--radius-lg);
     background: var(--surface-subtle);
-    box-shadow: var(--glass-edge-shadow);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
   }
 
   .empty-icon {
@@ -4176,7 +4238,7 @@
     background: var(--surface);
     border-radius: var(--radius-lg);
     overflow: hidden;
-    box-shadow: var(--glass-edge-shadow);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
   }
 
   .mods-table {
@@ -5184,7 +5246,7 @@
     letter-spacing: 0.03em;
     background: color-mix(in srgb, var(--green) 20%, transparent);
     color: var(--green);
-    backdrop-filter: blur(4px);
+    backdrop-filter: var(--glass-blur-light);
     z-index: 1;
   }
 
@@ -5516,7 +5578,7 @@
     align-items: center;
     justify-content: center;
     z-index: 1000;
-    backdrop-filter: blur(4px);
+    backdrop-filter: var(--glass-blur-light);
   }
 
   .file-picker-modal {
@@ -5714,7 +5776,7 @@
     inset: 0;
     z-index: 1000;
     background: rgba(0, 0, 0, 0.6);
-    backdrop-filter: blur(4px);
+    backdrop-filter: var(--glass-blur-light);
     display: flex;
     align-items: center;
     justify-content: center;

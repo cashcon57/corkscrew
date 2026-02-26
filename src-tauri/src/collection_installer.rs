@@ -25,6 +25,7 @@ use crate::collections::{self, CollectionManifest, CollectionModEntry};
 use crate::config;
 use crate::database::{self, ModDatabase};
 use crate::deployer;
+use crate::disk_budget;
 use crate::download_queue::{DownloadQueue, DOWNLOAD_QUEUE_EVENT};
 use crate::fomod;
 use crate::games;
@@ -273,18 +274,42 @@ async fn download_nexus_archive(
     if let Ok(Some(existing)) = db.find_download_by_nexus_ids(nexus_mod_id, nexus_file_id) {
         let path = PathBuf::from(&existing.archive_path);
         if path.exists() {
+            // Verify file size matches the registered size to catch truncated/corrupt files.
+            let size_ok = if existing.file_size > 0 {
+                std::fs::metadata(&path)
+                    .map(|m| m.len() as i64 == existing.file_size)
+                    .unwrap_or(false)
+            } else {
+                true // No size recorded, trust the file exists
+            };
+            if size_ok {
+                log::info!(
+                    "Reusing cached download for '{}' (nexus {}:{})",
+                    mod_entry.name,
+                    nexus_mod_id,
+                    nexus_file_id
+                );
+                let _ = db.add_download_collection_ref(
+                    existing.id,
+                    manifest_name,
+                    game_id,
+                    bottle_name,
+                );
+                return Ok(DownloadResult {
+                    archive_path: path,
+                    cached: true,
+                });
+            } else {
+                log::warn!(
+                    "Cached download for '{}' has wrong file size, will re-download",
+                    mod_entry.name
+                );
+            }
+        } else {
             log::info!(
-                "Reusing cached download for '{}' (nexus {}:{})",
-                mod_entry.name,
-                nexus_mod_id,
-                nexus_file_id
+                "Cached file missing from disk for '{}', will re-download",
+                mod_entry.name
             );
-            let _ =
-                db.add_download_collection_ref(existing.id, manifest_name, game_id, bottle_name);
-            return Ok(DownloadResult {
-                archive_path: path,
-                cached: true,
-            });
         }
     }
 
@@ -407,15 +432,35 @@ async fn download_direct_archive(
         if let Ok(Some(existing)) = db.find_download_by_name(url_filename) {
             let path = PathBuf::from(&existing.archive_path);
             if path.exists() {
+                // Verify file size matches the registered size.
+                let size_ok = if existing.file_size > 0 {
+                    std::fs::metadata(&path)
+                        .map(|m| m.len() as i64 == existing.file_size)
+                        .unwrap_or(false)
+                } else {
+                    true
+                };
+                if size_ok {
+                    log::info!(
+                        "Reusing cached download for '{}' ({})",
+                        mod_entry.name,
+                        url_filename
+                    );
+                    return Ok(DownloadResult {
+                        archive_path: path,
+                        cached: true,
+                    });
+                } else {
+                    log::warn!(
+                        "Cached download for '{}' has wrong file size, will re-download",
+                        mod_entry.name
+                    );
+                }
+            } else {
                 log::info!(
-                    "Reusing cached download for '{}' ({})",
-                    mod_entry.name,
-                    url_filename
+                    "Cached file missing from disk for '{}', will re-download",
+                    mod_entry.name
                 );
-                return Ok(DownloadResult {
-                    archive_path: path,
-                    cached: true,
-                });
             }
         }
     }
@@ -751,6 +796,32 @@ pub async fn install_collection(
         }
 
         downloadable.push((i, mod_idx));
+    }
+
+    // ---------------------------------------------------------------
+    // Disk space pre-check before downloading
+    // ---------------------------------------------------------------
+    // Sum expected download sizes from the archive specs. file_size is
+    // optional per-entry, so we only check when we have *some* data.
+    let estimated_download_bytes: u64 = downloadable
+        .iter()
+        .filter_map(|&(_, mod_idx)| manifest.mods[mod_idx].source.file_size)
+        .sum();
+
+    if estimated_download_bytes > 0 {
+        // Archives need to be downloaded AND extracted (~3x expansion).
+        // Use the same heuristic as disk_budget::estimate_install_impact.
+        let estimated_total = estimated_download_bytes * 4; // archive + ~3x extracted
+
+        if let Err(space_err) = disk_budget::check_space_guard(&download_dir, estimated_total) {
+            let available = disk_budget::available_space(&download_dir);
+            return Err(format!(
+                "Not enough disk space: need ~{} (downloads + extraction), have {}. {}",
+                disk_budget::format_bytes(estimated_total),
+                disk_budget::format_bytes(available),
+                space_err,
+            ));
+        }
     }
 
     let total_downloads = downloadable.len();
@@ -1656,48 +1727,75 @@ async fn install_nexus_mod(
     if let Ok(Some(existing)) = db.find_download_by_nexus_ids(nexus_mod_id, nexus_file_id) {
         let path = std::path::Path::new(&existing.archive_path);
         if path.exists() {
-            log::info!(
-                "Reusing cached download for '{}' (nexus {}:{})",
-                mod_entry.name,
-                nexus_mod_id,
-                nexus_file_id
-            );
-            let _ = app.emit(
-                INSTALL_PROGRESS_EVENT,
-                InstallProgress::StepChanged {
+            // Verify file size matches the registered size.
+            let size_ok = if existing.file_size > 0 {
+                std::fs::metadata(path)
+                    .map(|m| m.len() as i64 == existing.file_size)
+                    .unwrap_or(false)
+            } else {
+                true
+            };
+            if size_ok {
+                log::info!(
+                    "Reusing cached download for '{}' (nexus {}:{})",
+                    mod_entry.name,
+                    nexus_mod_id,
+                    nexus_file_id
+                );
+                let _ = app.emit(
+                    INSTALL_PROGRESS_EVENT,
+                    InstallProgress::StepChanged {
+                        mod_index,
+                        step: "cached".to_string(),
+                        detail: Some(format!(
+                            "Reusing cached download for '{}'",
+                            mod_entry.name
+                        )),
+                    },
+                );
+
+                let mod_id = stage_and_deploy(
+                    app,
+                    db,
+                    path,
+                    mod_entry,
                     mod_index,
-                    step: "cached".to_string(),
-                    detail: Some(format!("Reusing cached download for '{}'", mod_entry.name)),
-                },
+                    game_id,
+                    bottle_name,
+                    data_dir,
+                    None,
+                )
+                .await?;
+
+                let _ = db.set_nexus_ids(mod_id, nexus_mod_id, Some(nexus_file_id));
+                let _ = db.set_source_url(
+                    mod_id,
+                    &format!(
+                        "https://www.nexusmods.com/{}/mods/{}",
+                        game_slug, nexus_mod_id
+                    ),
+                );
+
+                // Add collection ref for the reused download
+                let _ = db.add_download_collection_ref(
+                    existing.id,
+                    manifest_name,
+                    game_id,
+                    bottle_name,
+                );
+
+                return Ok(mod_id);
+            } else {
+                log::warn!(
+                    "Cached download for '{}' has wrong file size, will re-download",
+                    mod_entry.name
+                );
+            }
+        } else {
+            log::info!(
+                "Cached file missing from disk for '{}', will re-download",
+                mod_entry.name
             );
-
-            let mod_id = stage_and_deploy(
-                app,
-                db,
-                path,
-                mod_entry,
-                mod_index,
-                game_id,
-                bottle_name,
-                data_dir,
-                None,
-            )
-            .await?;
-
-            let _ = db.set_nexus_ids(mod_id, nexus_mod_id, Some(nexus_file_id));
-            let _ = db.set_source_url(
-                mod_id,
-                &format!(
-                    "https://www.nexusmods.com/{}/mods/{}",
-                    game_slug, nexus_mod_id
-                ),
-            );
-
-            // Add collection ref for the reused download
-            let _ =
-                db.add_download_collection_ref(existing.id, manifest_name, game_id, bottle_name);
-
-            return Ok(mod_id);
         }
     }
 
@@ -1893,38 +1991,61 @@ async fn install_direct_mod(
         if let Ok(Some(existing)) = db.find_download_by_name(url_filename) {
             let path = std::path::Path::new(&existing.archive_path);
             if path.exists() {
-                log::info!(
-                    "Reusing cached download for '{}' ({})",
-                    mod_entry.name,
-                    url_filename
-                );
-                let _ = app.emit(
-                    INSTALL_PROGRESS_EVENT,
-                    InstallProgress::StepChanged {
+                // Verify file size matches the registered size.
+                let size_ok = if existing.file_size > 0 {
+                    std::fs::metadata(path)
+                        .map(|m| m.len() as i64 == existing.file_size)
+                        .unwrap_or(false)
+                } else {
+                    true
+                };
+                if size_ok {
+                    log::info!(
+                        "Reusing cached download for '{}' ({})",
+                        mod_entry.name,
+                        url_filename
+                    );
+                    let _ = app.emit(
+                        INSTALL_PROGRESS_EVENT,
+                        InstallProgress::StepChanged {
+                            mod_index,
+                            step: "cached".to_string(),
+                            detail: Some(format!(
+                                "Reusing cached download for '{}'",
+                                mod_entry.name
+                            )),
+                        },
+                    );
+
+                    let mod_id = stage_and_deploy(
+                        app,
+                        db,
+                        path,
+                        mod_entry,
                         mod_index,
-                        step: "cached".to_string(),
-                        detail: Some(format!("Reusing cached download for '{}'", mod_entry.name)),
-                    },
-                );
+                        game_id,
+                        bottle_name,
+                        data_dir,
+                        None,
+                    )
+                    .await?;
 
-                let mod_id = stage_and_deploy(
-                    app,
-                    db,
-                    path,
-                    mod_entry,
-                    mod_index,
-                    game_id,
-                    bottle_name,
-                    data_dir,
-                    None,
-                )
-                .await?;
+                    if let Some(ref source_url) = mod_entry.source.url {
+                        let _ = db.set_source_url(mod_id, source_url);
+                    }
 
-                if let Some(ref source_url) = mod_entry.source.url {
-                    let _ = db.set_source_url(mod_id, source_url);
+                    return Ok(mod_id);
+                } else {
+                    log::warn!(
+                        "Cached download for '{}' has wrong file size, will re-download",
+                        mod_entry.name
+                    );
                 }
-
-                return Ok(mod_id);
+            } else {
+                log::info!(
+                    "Cached file missing from disk for '{}', will re-download",
+                    mod_entry.name
+                );
             }
         }
     }

@@ -355,12 +355,19 @@ impl WjDownloader {
             },
         );
 
-        mega_client
-            .download_node(file_node, async_writer)
-            .await
-            .map_err(|e| WjDownloadError::Other(format!("MEGA download failed: {e}")))?;
+        if let Err(e) = mega_client.download_node(file_node, async_writer).await {
+            // Clean up partial file on download failure.
+            let _ = tokio::fs::remove_file(&partial).await;
+            return Err(WjDownloadError::Other(format!(
+                "MEGA download failed: {e}"
+            )));
+        }
 
-        tokio::fs::rename(&partial, &dest).await?;
+        // Rename .partial -> final name, cleaning up on failure.
+        if let Err(e) = tokio::fs::rename(&partial, &dest).await {
+            let _ = tokio::fs::remove_file(&partial).await;
+            return Err(WjDownloadError::Io(e));
+        }
         Ok(dest)
     }
 
@@ -765,6 +772,9 @@ impl WjDownloader {
                         }
                         Err(e) => {
                             all_succeeded = false;
+                            // Remove the corrupted/mismatched file so retries
+                            // don't keep reusing a bad download.
+                            let _ = tokio::fs::remove_file(&path).await;
                             let _ = app.emit(
                                 "wabbajack-install-progress",
                                 WjProgressEvent::DownloadFailed {
@@ -778,7 +788,7 @@ impl WjDownloader {
                                 &archive_name,
                                 archive.state.source_type_name(),
                                 "failed",
-                                Some(&path.to_string_lossy()),
+                                None,
                                 Some(&e.to_string()),
                             );
                         }
@@ -976,8 +986,49 @@ impl WjDownloader {
 // ---------------------------------------------------------------------------
 
 /// Returns true for transient errors that are worth retrying (network, IO).
+/// Permanent HTTP status codes (401, 403, 404, 410) are NOT retried.
 fn is_transient_error(e: &WjDownloadError) -> bool {
-    matches!(e, WjDownloadError::Http(_) | WjDownloadError::Io(_))
+    match e {
+        WjDownloadError::Http(req_err) => {
+            // Check if the reqwest error wraps a known-permanent status code.
+            if let Some(status) = req_err.status() {
+                let code = status.as_u16();
+                // Permanent client errors — retrying won't help.
+                if matches!(code, 401 | 403 | 404 | 410 | 451) {
+                    return false;
+                }
+                // Transient server errors + rate limiting.
+                if matches!(code, 408 | 429 | 500 | 502 | 503 | 504) {
+                    return true;
+                }
+                // Other 4xx are usually permanent.
+                if (400..500).contains(&code) {
+                    return false;
+                }
+            }
+            // Network-level errors (timeout, connect, etc.) are transient.
+            req_err.is_timeout() || req_err.is_connect() || req_err.is_request()
+        }
+        WjDownloadError::Io(_) => true,
+        WjDownloadError::Other(msg) => {
+            // Classify HTTP status codes embedded in "HTTP NNN:" error strings
+            // (from stream_download's manual status check).
+            if msg.starts_with("HTTP ") {
+                let code_str = msg.trim_start_matches("HTTP ").split(':').next().unwrap_or("");
+                if let Ok(code) = code_str.parse::<u16>() {
+                    return !matches!(code, 401 | 403 | 404 | 410 | 451)
+                        && (matches!(code, 408 | 429 | 500 | 502 | 503 | 504)
+                            || code >= 500);
+                }
+            }
+            // MEGA / other generic errors — treat as transient if network-related.
+            msg.contains("timed out")
+                || msg.contains("timeout")
+                || msg.contains("connection")
+                || msg.contains("network")
+        }
+        _ => false,
+    }
 }
 
 // ---------------------------------------------------------------------------

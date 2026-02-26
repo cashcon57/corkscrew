@@ -292,7 +292,60 @@ pub struct CollectionSearchResult {
 // Internal GraphQL helper
 // ---------------------------------------------------------------------------
 
+/// Determine if a `CollectionsError` is transient and worth retrying.
+fn is_transient_error(err: &CollectionsError) -> bool {
+    match err {
+        // Network-level errors (connection reset, DNS, timeout, etc.)
+        CollectionsError::Http(_) => true,
+        // HTTP 5xx errors are returned as GraphQL("HTTP 5xx: ...")
+        CollectionsError::GraphQL(msg) => msg.starts_with("HTTP 5"),
+        _ => false,
+    }
+}
+
+/// Execute a GraphQL query with retry logic for transient errors.
+///
+/// Retries up to 2 times with 1s/2s backoff on network errors and 5xx responses.
+/// GraphQL-level errors (validation, auth, etc.) are NOT retried.
 async fn graphql_query<T: serde::de::DeserializeOwned>(
+    api_key: Option<&str>,
+    query: &str,
+    variables: serde_json::Value,
+) -> Result<T, CollectionsError> {
+    let backoffs = [
+        std::time::Duration::from_secs(1),
+        std::time::Duration::from_secs(2),
+    ];
+
+    let mut last_err = None;
+
+    // Initial attempt + up to 2 retries
+    for attempt in 0..=backoffs.len() {
+        match graphql_query_once(api_key, query, variables.clone()).await {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                if attempt < backoffs.len() && is_transient_error(&e) {
+                    eprintln!(
+                        "[collections] GraphQL request failed (attempt {}), retrying in {}s: {}",
+                        attempt + 1,
+                        backoffs[attempt].as_secs(),
+                        e,
+                    );
+                    tokio::time::sleep(backoffs[attempt]).await;
+                    last_err = Some(e);
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
+
+    // Should not reach here, but return last error if we do
+    Err(last_err.unwrap_or_else(|| CollectionsError::GraphQL("retry exhausted".into())))
+}
+
+/// Execute a single GraphQL query (no retries).
+async fn graphql_query_once<T: serde::de::DeserializeOwned>(
     api_key: Option<&str>,
     query: &str,
     variables: serde_json::Value,
@@ -342,7 +395,9 @@ async fn graphql_query<T: serde::de::DeserializeOwned>(
 
     let json: serde_json::Value = response.json().await?;
 
-    // Check for GraphQL-level errors
+    // Check for GraphQL-level errors.
+    // GraphQL responses can include BOTH `errors` and partial `data`.
+    // We treat any errors as fatal to avoid using partial/corrupt data.
     if let Some(errors) = json.get("errors") {
         if let Some(arr) = errors.as_array() {
             if !arr.is_empty() {
@@ -351,8 +406,21 @@ async fn graphql_query<T: serde::de::DeserializeOwned>(
                     .filter_map(|e| e.get("message").and_then(|m| m.as_str()))
                     .map(String::from)
                     .collect();
+                let has_partial_data = json.get("data").is_some_and(|d| !d.is_null());
+                if has_partial_data {
+                    eprintln!(
+                        "[collections] GraphQL returned partial data with errors, rejecting: {}",
+                        messages.join("; ")
+                    );
+                }
                 return Err(CollectionsError::GraphQL(messages.join("; ")));
             }
+        } else if !errors.is_null() {
+            // errors field exists but is not an array — unexpected format
+            return Err(CollectionsError::GraphQL(format!(
+                "Unexpected errors format: {}",
+                errors
+            )));
         }
     }
 

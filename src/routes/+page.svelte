@@ -532,7 +532,7 @@
     border: 1px solid var(--separator);
     border-radius: var(--radius);
     padding: var(--space-2) var(--space-4);
-    box-shadow: var(--glass-edge-shadow);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
   }
 
   .stat-value {
@@ -677,7 +677,7 @@
     position: absolute;
     inset: 0;
     border-radius: inherit;
-    box-shadow: var(--glass-edge-shadow);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
     pointer-events: none;
     z-index: 1;
   }
@@ -982,7 +982,7 @@
     border-radius: var(--radius-lg);
     padding: var(--space-5);
     animation: settingsSlideIn 0.2s var(--ease-out);
-    box-shadow: var(--glass-edge-shadow);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
   }
 
   @keyframes settingsSlideIn {

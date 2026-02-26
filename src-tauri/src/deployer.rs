@@ -368,6 +368,7 @@ pub fn undeploy_mod(
 
     let mut actually_removed = Vec::new();
     let mut errors = Vec::new();
+    let mut restore_failures = Vec::new();
 
     for rel_path in &manifest_paths {
         let file_path = data_dir.join(rel_path);
@@ -388,21 +389,36 @@ pub fn undeploy_mod(
             actually_removed.push(rel_path.clone());
         }
 
-        // Restore next-priority mod's version of this file if applicable
+        // Restore next-priority mod's version of this file if applicable.
+        // This runs BEFORE manifest deletion so that on failure, the manifest
+        // still tracks the file until cleanup completes.
         if let Err(e) = restore_next_winner(db, game_id, bottle_name, rel_path, data_dir) {
             warn!("Failed to restore winner for {}: {}", rel_path, e);
+            restore_failures.push(rel_path.clone());
         }
     }
 
-    // Now delete manifest entries — all files have been handled
+    // Delete manifest entries after all file operations are complete.
+    // Even if some restorations failed, we still clean the manifest to avoid
+    // stale entries — but log a warning about potential orphans.
+    if !restore_failures.is_empty() {
+        warn!(
+            "Mod {} undeploy: {} file(s) could not be restored from lower-priority mods, \
+             potential orphans: {:?}",
+            mod_id,
+            restore_failures.len(),
+            restore_failures,
+        );
+    }
     let _ = db.remove_deployment_entries_for_mod(mod_id);
 
     info!(
-        "Undeployed mod {} ({}/{} files removed, {} errors)",
+        "Undeployed mod {} ({}/{} files removed, {} errors, {} restore failures)",
         mod_id,
         actually_removed.len(),
         manifest_paths.len(),
         errors.len(),
+        restore_failures.len(),
     );
 
     if !errors.is_empty() {

@@ -356,7 +356,7 @@
     background: var(--surface);
     border: 1px solid var(--separator);
     border-radius: var(--radius-lg);
-    box-shadow: var(--glass-edge-shadow);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
     transition: border-color var(--duration-fast) var(--ease);
   }
 
@@ -496,7 +496,7 @@
     border: 1px dashed var(--separator);
     border-radius: var(--radius-lg);
     background: var(--surface-subtle);
-    box-shadow: var(--glass-edge-shadow);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
   }
 
   .empty-title {

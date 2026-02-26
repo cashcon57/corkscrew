@@ -4961,6 +4961,11 @@ fn is_steam_deck() -> bool {
     steam_integration::is_steam_deck()
 }
 
+#[tauri::command]
+fn steam_deck_warnings() -> Vec<String> {
+    steam_integration::steam_deck_warnings()
+}
+
 // --- Startup Cleanup ---
 
 /// Mark orphaned Wabbajack installs (left in active state from a crash) as failed
@@ -5061,6 +5066,7 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_liquid_glass::init())
         .manage({
             let queue = download_queue::DownloadQueue::new();
             // Restore persisted queue items from database
@@ -5321,6 +5327,7 @@ pub fn run() {
             add_to_steam,
             remove_from_steam,
             is_steam_deck,
+            steam_deck_warnings,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

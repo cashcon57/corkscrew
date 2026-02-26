@@ -1501,7 +1501,7 @@
     border: 1px solid var(--separator);
     border-radius: var(--radius-lg);
     overflow: hidden;
-    box-shadow: var(--glass-edge-shadow);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
     transition: border-color var(--duration-fast) var(--ease),
                 box-shadow var(--duration-fast) var(--ease);
     animation: cardFadeIn var(--duration-slow) var(--ease) both;
@@ -1719,7 +1719,7 @@
     border: 1px dashed var(--separator);
     border-radius: var(--radius-lg);
     background: var(--surface-subtle);
-    box-shadow: var(--glass-edge-shadow);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
   }
 
   .empty-title {
@@ -1800,7 +1800,7 @@
     border: 1px solid var(--separator);
     border-radius: var(--radius-lg);
     margin-bottom: var(--space-6);
-    box-shadow: var(--glass-edge-shadow);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
   }
 
   .detail-stat {

@@ -169,19 +169,27 @@ export interface DeployResult {
 }
 
 export interface DeploymentHealth {
-  healthy: boolean;
+  // Common
   total_mods: number;
-  enabled_mods: number;
-  staging_ok: number;
-  staging_missing: number;
-  staging_empty: number;
-  no_staging_path: number;
-  manifest_entries: number;
-  deployed_files_ok: number;
-  deployed_files_missing: number;
-  problem_mods: { id: number; name: string; issue: string }[];
-  needs_reinstall: boolean;
-  needs_redeploy: boolean;
+  // From check_deployment_health (settings health check)
+  healthy?: boolean;
+  enabled_mods?: number;
+  staging_ok?: number;
+  staging_missing?: number;
+  staging_empty?: number;
+  no_staging_path?: number;
+  manifest_entries?: number;
+  deployed_files_ok?: number;
+  deployed_files_missing?: number;
+  problem_mods?: { id: number; name: string; issue: string }[];
+  needs_reinstall?: boolean;
+  needs_redeploy?: boolean;
+  // From get_deployment_health (sidebar deploy status)
+  total_deployed?: number;
+  total_enabled?: number;
+  conflict_count?: number;
+  deploy_method?: string;
+  is_deployed?: boolean;
 }
 
 export type ConflictStatus = "AuthorResolved" | "Suggested" | "Manual";
@@ -866,15 +874,6 @@ export interface ModTool {
   recommended_alternative: string | null;
   recommended_ini_edits: IniEdit[];
   support_url: string | null;
-}
-
-export interface DeploymentHealth {
-  total_deployed: number;
-  total_enabled: number;
-  total_mods: number;
-  conflict_count: number;
-  deploy_method: string;
-  is_deployed: boolean;
 }
 
 export interface DownloadRecord {

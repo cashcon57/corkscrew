@@ -88,6 +88,7 @@
   let deployHealth = $state<DeploymentHealth | null>(null);
   let checkingHealth = $state(false);
   let redeploying = $state(false);
+  let confirmRedeploy = $state(false);
 
   const game = $derived($selectedGame);
   const skse = $derived($skseStatus);
@@ -305,6 +306,11 @@
 
   async function handleRedeploy() {
     if (!game) return;
+    if (!confirmRedeploy) {
+      confirmRedeploy = true;
+      return;
+    }
+    confirmRedeploy = false;
     redeploying = true;
     try {
       const result = await redeployAllMods(game.game_id, game.bottle_name);
@@ -496,6 +502,7 @@
     savingDownloadDir = true;
     try {
       await setConfigValue("download_dir", downloadDir);
+      config.set(await getConfig());
       downloadsStats = await getDownloadsStats();
       showSuccess("Download directory saved");
     } catch (e: unknown) {
@@ -510,6 +517,7 @@
     try {
       autoDeleteArchives = !autoDeleteArchives;
       await setConfigValue("auto_delete_archives", autoDeleteArchives ? "true" : "false");
+      config.set(await getConfig());
       showSuccess(autoDeleteArchives ? "Archives will be deleted after install" : "Archives will be kept after install");
     } catch (e: unknown) {
       autoDeleteArchives = !autoDeleteArchives; // revert
@@ -524,6 +532,7 @@
     try {
       downloadThreads = value;
       await setConfigValue("download_threads", value);
+      config.set(await getConfig());
       showSuccess(`Download threads set to ${value === "auto" ? `auto (${optimalThreads})` : value}`);
     } catch (e: unknown) {
       showError(`Failed to save setting: ${e}`);
@@ -687,7 +696,7 @@
           onclick={() => {
             const next = !$controllerMode;
             controllerMode.set(next);
-            setConfigValue("controller_mode", String(next)).catch(() => {});
+            setConfigValue("controller_mode", String(next)).then(() => getConfig()).then(cfg => config.set(cfg)).catch(() => {});
           }}
           type="button"
           role="switch"
@@ -707,7 +716,7 @@
           onclick={() => {
             const current = $config?.profile_saves_enabled === "true";
             const next = !current;
-            setConfigValue("profile_saves_enabled", String(next)).catch(() => {});
+            setConfigValue("profile_saves_enabled", String(next)).then(() => getConfig()).then(cfg => config.set(cfg)).catch(() => {});
           }}
           type="button"
           role="switch"
@@ -833,10 +842,20 @@
               <button class="btn-secondary" onclick={handleCheckHealth} disabled={checkingHealth} type="button">
                 {checkingHealth ? "Checking..." : "Check Health"}
               </button>
-              {#if deployHealth && (deployHealth.needs_redeploy || deployHealth.deployed_files_missing > 0)}
-                <button class="btn-primary" onclick={handleRedeploy} disabled={redeploying} type="button">
-                  {redeploying ? "Redeploying..." : "Redeploy All Mods"}
-                </button>
+              {#if deployHealth && (deployHealth.needs_redeploy || (deployHealth.deployed_files_missing ?? 0) > 0)}
+                {#if confirmRedeploy}
+                  <span style="font-size: 12px; color: var(--text-secondary);">Are you sure? This may take several minutes.</span>
+                  <button class="btn-primary" onclick={handleRedeploy} disabled={redeploying} type="button">
+                    {redeploying ? "Redeploying..." : "Yes, Redeploy"}
+                  </button>
+                  <button class="btn-secondary" onclick={() => confirmRedeploy = false} type="button">
+                    Cancel
+                  </button>
+                {:else}
+                  <button class="btn-primary" onclick={handleRedeploy} disabled={redeploying} type="button">
+                    {redeploying ? "Redeploying..." : "Redeploy All Mods"}
+                  </button>
+                {/if}
               {/if}
             </div>
           </div>
@@ -848,30 +867,30 @@
               </div>
               <div class="health-stat">
                 <span class="health-label">Staging OK</span>
-                <span class="health-value" class:health-good={deployHealth.staging_ok > 0}>{deployHealth.staging_ok}</span>
+                <span class="health-value" class:health-good={(deployHealth.staging_ok ?? 0) > 0}>{deployHealth.staging_ok ?? 0}</span>
               </div>
               <div class="health-stat">
                 <span class="health-label">Staging missing</span>
-                <span class="health-value" class:health-bad={deployHealth.staging_missing > 0}>{deployHealth.staging_missing}</span>
+                <span class="health-value" class:health-bad={(deployHealth.staging_missing ?? 0) > 0}>{deployHealth.staging_missing ?? 0}</span>
               </div>
               <div class="health-stat">
                 <span class="health-label">Deployed files</span>
-                <span class="health-value" class:health-good={deployHealth.manifest_entries > 0}>{deployHealth.manifest_entries}</span>
+                <span class="health-value" class:health-good={(deployHealth.manifest_entries ?? 0) > 0}>{deployHealth.manifest_entries ?? 0}</span>
               </div>
               <div class="health-stat">
                 <span class="health-label">Files OK</span>
-                <span class="health-value" class:health-good={deployHealth.deployed_files_ok > 0}>{deployHealth.deployed_files_ok}</span>
+                <span class="health-value" class:health-good={(deployHealth.deployed_files_ok ?? 0) > 0}>{deployHealth.deployed_files_ok ?? 0}</span>
               </div>
               <div class="health-stat">
                 <span class="health-label">Files missing</span>
-                <span class="health-value" class:health-bad={deployHealth.deployed_files_missing > 0}>{deployHealth.deployed_files_missing}</span>
+                <span class="health-value" class:health-bad={(deployHealth.deployed_files_missing ?? 0) > 0}>{deployHealth.deployed_files_missing ?? 0}</span>
               </div>
             </div>
             {#if deployHealth.needs_reinstall}
               <p class="health-warning">Staging directories are missing. Reinstalling affected mods or the collection is required.</p>
             {:else if deployHealth.needs_redeploy}
               <p class="health-warning">Mods have staging but no deployed files. Click "Redeploy All Mods" to fix.</p>
-            {:else if !deployHealth.healthy && deployHealth.deployed_files_missing > 0}
+            {:else if !deployHealth.healthy && (deployHealth.deployed_files_missing ?? 0) > 0}
               <p class="health-warning">Some deployed files are missing from the game directory. Try redeploying.</p>
             {:else if deployHealth.healthy}
               <p class="health-ok">All mods are properly deployed.</p>
@@ -1812,7 +1831,7 @@
     background: var(--bg-grouped-secondary);
     border-radius: var(--radius-lg);
     margin-bottom: var(--space-6);
-    box-shadow: var(--glass-edge-shadow);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
   }
 
   .settings-tab {
@@ -1865,7 +1884,7 @@
     background: var(--bg-grouped-secondary);
     border-radius: var(--radius-lg);
     overflow: hidden;
-    box-shadow: var(--glass-edge-shadow);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
   }
 
   /* --- Card rows --- */
@@ -2276,8 +2295,8 @@
     position: fixed;
     inset: 0;
     background: rgba(0, 0, 0, 0.5);
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: var(--glass-blur-light);
+    -webkit-backdrop-filter: var(--glass-blur-light);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -2289,7 +2308,7 @@
     background: var(--bg-elevated);
     border: 1px solid var(--separator-opaque);
     border-radius: var(--radius-xl);
-    box-shadow: var(--glass-edge-shadow), var(--shadow-lg);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow), var(--shadow-lg);
     width: 520px;
     max-width: calc(100vw - var(--space-8));
     max-height: calc(100vh - var(--space-12));
@@ -2348,12 +2367,12 @@
     border-radius: var(--radius-lg);
     background: var(--surface);
     border: 1px solid var(--separator);
-    box-shadow: var(--glass-edge-shadow);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
   }
 
   .comparison-item.recommended {
     border-color: var(--system-accent);
-    box-shadow: var(--glass-edge-shadow), 0 0 0 1px rgba(0, 122, 255, 0.1);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow), 0 0 0 1px rgba(0, 122, 255, 0.1);
   }
 
   .comparison-header {

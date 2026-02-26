@@ -326,7 +326,7 @@ impl RateLimitState {
     /// Record the time of a request and enforce minimum spacing (1 second).
     async fn throttle(&self) {
         let wait = {
-            let last = self.last_request.lock().unwrap();
+            let last = self.last_request.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(prev) = *last {
                 let elapsed = prev.elapsed();
                 let min_interval = std::time::Duration::from_secs(1);
@@ -345,7 +345,7 @@ impl RateLimitState {
         }
 
         // Update last request time after any wait
-        let mut last_guard = self.last_request.lock().unwrap();
+        let mut last_guard = self.last_request.lock().unwrap_or_else(|e| e.into_inner());
         *last_guard = Some(Instant::now());
     }
 
@@ -459,6 +459,7 @@ impl NexusClient {
 
         let client = reqwest::Client::builder()
             .default_headers(headers)
+            .timeout(std::time::Duration::from_secs(30))
             .build()
             .expect("failed to build reqwest client");
 

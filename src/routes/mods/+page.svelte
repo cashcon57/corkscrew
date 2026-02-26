@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
+  import { get } from "svelte/store";
   import { open } from "@tauri-apps/plugin-dialog";
   import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
   import ModVersionHistory from "$lib/components/ModVersionHistory.svelte";
@@ -62,6 +63,7 @@
     activeCollection,
     collectionList,
     nxmInstallComplete,
+    collectionInstallStatus,
   } from "$lib/stores";
   import type { InstalledMod, DetectedGame, SkseStatus, DowngradeStatus, FileConflict, ModUpdateInfo, FomodInstaller } from "$lib/types";
   import GameIcon from "$lib/components/GameIcon.svelte";
@@ -690,6 +692,11 @@
   };
 
   async function handleInstall() {
+    const installStatus = get(collectionInstallStatus);
+    if (installStatus?.active) {
+      showError('Cannot modify mods while a collection is being installed');
+      return;
+    }
     const game = pickedGame ?? $selectedGame;
     if (!game) return;
 
@@ -825,6 +832,11 @@
   }
 
   async function handleUninstall(modId: number) {
+    const installStatus = get(collectionInstallStatus);
+    if (installStatus?.active) {
+      showError('Cannot modify mods while a collection is being installed');
+      return;
+    }
     const game = pickedGame ?? $selectedGame;
     if (!game) return;
 
@@ -840,6 +852,11 @@
   }
 
   async function handleToggle(mod: InstalledMod) {
+    const installStatus = get(collectionInstallStatus);
+    if (installStatus?.active) {
+      showError('Cannot modify mods while a collection is being installed');
+      return;
+    }
     const game = pickedGame ?? $selectedGame;
     if (!game) return;
     togglingMod = mod.id;
@@ -1242,6 +1259,13 @@
   async function handleRowDrop(e: DragEvent, dropIndex: number) {
     e.preventDefault();
     e.stopPropagation();
+    const installStatus = get(collectionInstallStatus);
+    if (installStatus?.active) {
+      showError('Cannot modify mods while a collection is being installed');
+      dragRowIndex = null;
+      dragOverIndex = null;
+      return;
+    }
     if (dragRowIndex === null || dragRowIndex === dropIndex) {
       dragRowIndex = null;
       dragOverIndex = null;
@@ -1342,7 +1366,9 @@
   async function handleFomodComplete(selections: Record<string, string[]>) {
     const game = pickedGame ?? $selectedGame;
     if (!game || !fomodTargetMod || !fomodInstaller) return;
+    if (deploying) return;
     showFomodWizard = false;
+    deploying = true;
     try {
       // Get the files for the new selections
       const files = await getFomodFiles(fomodInstaller, selections);
@@ -1356,6 +1382,7 @@
     } catch (e: unknown) {
       showError(`Failed to apply FOMOD configuration: ${e}`);
     } finally {
+      deploying = false;
       fomodInstaller = null;
       fomodTargetMod = null;
     }
@@ -1384,6 +1411,11 @@
 
   // --- Deploy / Purge / Health ---
   async function handleDeploy() {
+    const installStatus = get(collectionInstallStatus);
+    if (installStatus?.active) {
+      showError('Cannot modify mods while a collection is being installed');
+      return;
+    }
     const game = pickedGame ?? $selectedGame;
     if (!game) return;
     deploying = true;
@@ -1480,7 +1512,9 @@
   async function handleMakeWinner(conflict: FileConflict, modId: number) {
     const game = pickedGame ?? $selectedGame;
     if (!game) return;
+    if (deploying) return;
     makingWinner = modId;
+    deploying = true;
     try {
       // Find current winner's priority and set this mod 1 higher
       const winner = conflict.mods.find(m => m.mod_id === conflict.winner_mod_id);
@@ -1497,6 +1531,7 @@
     } catch (e: unknown) {
       showError(`Failed to set winner: ${e}`);
     } finally {
+      deploying = false;
       makingWinner = null;
     }
   }
@@ -3043,14 +3078,14 @@
                 <span class="sidebar-stat-label">Files</span>
               </div>
               <div class="sidebar-stat">
-                <span class="sidebar-stat-value" class:health-warning={deployHealth.conflict_count > 0}>{deployHealth.conflict_count}</span>
+                <span class="sidebar-stat-value" class:health-warning={(deployHealth.conflict_count ?? 0) > 0}>{deployHealth.conflict_count ?? 0}</span>
                 <span class="sidebar-stat-label">Conflicts</span>
               </div>
             </div>
             {#if deployHealth.deploy_method && deployHealth.deploy_method !== "none"}
               <span class="sidebar-detail">{deployHealth.deploy_method === "hardlink" ? "Hardlinks (0 extra disk)" : "File copies"}</span>
             {/if}
-            {#if deployHealth.conflict_count > 0}
+            {#if (deployHealth.conflict_count ?? 0) > 0}
               <button class="sidebar-link" onclick={() => showConflictPanel = !showConflictPanel}>
                 Resolve conflicts
               </button>
@@ -3232,12 +3267,18 @@
     onClose={() => showBisect = false}
     onComplete={async (culprit) => {
       showBisect = false;
+      if (deploying) return;
       const g = pickedGame ?? $selectedGame;
       if (g) {
-        await toggleMod(culprit.id, g.game_id, g.bottle_name, false);
-        await redeployAllMods(g.game_id, g.bottle_name);
-        loadMods(g);
-        showSuccess(`Disabled "${culprit.name}" — the likely culprit.`);
+        deploying = true;
+        try {
+          await toggleMod(culprit.id, g.game_id, g.bottle_name, false);
+          await redeployAllMods(g.game_id, g.bottle_name);
+          loadMods(g);
+          showSuccess(`Disabled "${culprit.name}" — the likely culprit.`);
+        } finally {
+          deploying = false;
+        }
       }
     }}
   />
@@ -3267,8 +3308,8 @@
     position: fixed;
     inset: 0;
     background: rgba(0, 0, 0, 0.5);
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: var(--glass-blur-light);
+    -webkit-backdrop-filter: var(--glass-blur-light);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -3490,7 +3531,7 @@
     background: var(--surface);
     border: 1px solid var(--separator);
     border-radius: var(--radius);
-    box-shadow: var(--glass-edge-shadow);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
     text-align: left;
     transition:
       background var(--duration) var(--ease),
@@ -3501,7 +3542,7 @@
   .game-card:hover {
     background: var(--surface-hover);
     border-color: var(--accent-muted);
-    box-shadow: var(--glass-edge-shadow), var(--shadow-sm);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow), var(--shadow-sm);
   }
 
   .game-card:active {
@@ -3550,7 +3591,7 @@
     background: var(--surface);
     border: 1px solid var(--separator);
     border-radius: var(--radius);
-    box-shadow: var(--glass-edge-shadow);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
     flex-shrink: 0;
   }
 
@@ -3779,7 +3820,7 @@
     background: var(--surface);
     border: 1px dashed var(--separator-opaque);
     border-radius: var(--radius-lg);
-    box-shadow: var(--glass-edge-shadow);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
     text-align: center;
     gap: var(--space-3);
   }
@@ -3828,7 +3869,7 @@
     overflow: hidden;
     border-radius: var(--radius-lg);
     background: var(--bg-primary);
-    box-shadow: var(--glass-edge-shadow);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
     min-height: 200px;
   }
 
@@ -4541,7 +4582,7 @@
     align-items: center;
     justify-content: center;
     background: color-mix(in srgb, var(--bg-base) 85%, transparent);
-    backdrop-filter: blur(8px);
+    backdrop-filter: var(--glass-blur-light);
     border-radius: var(--radius-lg);
   }
 
@@ -5201,7 +5242,7 @@
     flex-shrink: 0;
     border-radius: var(--radius-lg);
     background: var(--bg-primary);
-    box-shadow: var(--glass-edge-shadow);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -5758,7 +5799,7 @@
     align-items: center;
     justify-content: center;
     z-index: 200;
-    backdrop-filter: blur(4px);
+    backdrop-filter: var(--glass-blur-light);
     animation: fadeIn 0.15s ease-out;
   }
 

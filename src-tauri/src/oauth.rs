@@ -344,6 +344,31 @@ struct CallbackResult {
     state: String,
 }
 
+/// Decode a percent-encoded (URL-encoded) string.
+///
+/// Handles both standard percent-encoding (%XX) and form-encoding (+ as space).
+/// This is a proper implementation that avoids the double-decode bug where
+/// `%2B` -> `+` -> space when using chained `.replace()` calls.
+fn percent_decode(input: &str) -> String {
+    // First replace + with space (form encoding), then decode %XX sequences
+    let input = input.replace('+', " ");
+    let mut result = Vec::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(byte) = u8::from_str_radix(&input[i + 1..i + 3], 16) {
+                result.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        result.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&result).into_owned()
+}
+
 /// Parse query parameters from a URL path string (e.g. "/callback?code=xxx&state=yyy").
 fn parse_query_params(path: &str) -> HashMap<String, String> {
     let mut params = HashMap::new();
@@ -352,14 +377,7 @@ fn parse_query_params(path: &str) -> HashMap<String, String> {
         for pair in query.split('&') {
             let mut parts = pair.splitn(2, '=');
             if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
-                // Minimal percent-decoding for the values we care about.
-                let decoded = value
-                    .replace("%20", " ")
-                    .replace("%2F", "/")
-                    .replace("%3D", "=")
-                    .replace("%2B", "+")
-                    .replace('+', " ");
-                params.insert(key.to_string(), decoded);
+                params.insert(key.to_string(), percent_decode(value));
             }
         }
     }
@@ -566,7 +584,9 @@ pub async fn start_oauth_flow(client_id: &str) -> Result<TokenPair, OAuthError> 
     .map_err(|_| OAuthError::Cancelled)??;
 
     // 5. Exchange code for tokens
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
     let mut params = HashMap::new();
     params.insert("grant_type", "authorization_code");
     params.insert("code", &callback.code);
@@ -604,7 +624,9 @@ pub async fn start_oauth_flow(client_id: &str) -> Result<TokenPair, OAuthError> 
 
 /// Refresh an expired access token using the refresh token.
 pub async fn refresh_tokens(client_id: &str, refresh_token: &str) -> Result<TokenPair, OAuthError> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
     let mut params = HashMap::new();
     params.insert("grant_type", "refresh_token");
     params.insert("refresh_token", refresh_token);
@@ -799,16 +821,23 @@ pub async fn get_auth_method_refreshed() -> AuthMethod {
             match refresh_tokens(CLIENT_ID, &tokens.refresh_token).await {
                 Ok(new_tokens) => return AuthMethod::OAuth(new_tokens),
                 Err(e) => {
-                    eprintln!("[oauth] token refresh failed: {e}");
-                    // Fall through — the access token might still work briefly,
-                    // or we fall back to API key.
+                    eprintln!("[oauth] token refresh failed, clearing stale tokens: {e}");
+                    // Clear stale tokens to force re-auth instead of silently
+                    // using an expired token that will 401 on every request.
+                    if let Err(clear_err) = clear_tokens() {
+                        eprintln!("[oauth] failed to clear stale tokens: {clear_err}");
+                    }
+                    return AuthMethod::None;
                 }
             }
         }
 
-        // Return the (possibly expired) tokens anyway — the server will 401 and
-        // the caller can handle it.
-        return AuthMethod::OAuth(tokens);
+        // Refresh token is empty and access token is expired — clear and force re-auth.
+        eprintln!("[oauth] access token expired and no refresh token available, clearing stale tokens");
+        if let Err(clear_err) = clear_tokens() {
+            eprintln!("[oauth] failed to clear stale tokens: {clear_err}");
+        }
+        return AuthMethod::None;
     }
 
     // Fall back to legacy API key from config.
@@ -1078,6 +1107,33 @@ mod tests {
         assert_eq!(params.get("code").unwrap(), "abc123");
         assert_eq!(params.get("state").unwrap(), "xyz789");
         assert_eq!(params.get("extra").unwrap(), "hello world");
+    }
+
+    #[test]
+    fn test_parse_query_params_percent_2b() {
+        // %2B should decode to literal '+', NOT to space.
+        // This was a bug where chained .replace() decoded %2B -> + -> space.
+        let params = parse_query_params("/callback?code=abc%2B123&state=xyz");
+        assert_eq!(params.get("code").unwrap(), "abc+123");
+    }
+
+    #[test]
+    fn test_parse_query_params_plus_as_space() {
+        // In form encoding, bare '+' is space.
+        let params = parse_query_params("/callback?code=abc+123&state=xyz");
+        assert_eq!(params.get("code").unwrap(), "abc 123");
+    }
+
+    #[test]
+    fn test_percent_decode_all_sequences() {
+        assert_eq!(percent_decode("hello%20world"), "hello world");
+        assert_eq!(percent_decode("a%2Fb%3Dc"), "a/b=c");
+        assert_eq!(percent_decode("%2B"), "+");
+        assert_eq!(percent_decode("no+encoding+here"), "no encoding here");
+        assert_eq!(percent_decode("plain"), "plain");
+        assert_eq!(percent_decode("%"), "%"); // incomplete sequence preserved
+        assert_eq!(percent_decode("%2"), "%2"); // incomplete sequence preserved
+        assert_eq!(percent_decode("%ZZ"), "%ZZ"); // invalid hex preserved
     }
 
     #[test]

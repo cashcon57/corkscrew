@@ -244,7 +244,7 @@
     border: 1px solid var(--separator);
     border-radius: var(--radius-lg);
     overflow: hidden;
-    box-shadow: var(--glass-edge-shadow);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
   }
 
   .compat-title {

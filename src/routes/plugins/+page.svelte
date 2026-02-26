@@ -484,7 +484,7 @@
     background: var(--surface);
     border-radius: var(--radius-lg);
     padding: var(--space-5);
-    box-shadow: var(--glass-edge-shadow);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
   }
 
   /* ---- Page layout ---- */
@@ -705,7 +705,7 @@
     background: var(--surface);
     border-radius: var(--radius-lg);
     overflow: hidden;
-    box-shadow: var(--glass-edge-shadow);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
   }
 
   /* ---- List header ---- */
@@ -995,7 +995,7 @@
     padding: var(--space-12) var(--space-8);
     background: var(--surface);
     border-radius: var(--radius-lg);
-    box-shadow: var(--glass-edge-shadow);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
     text-align: center;
   }
 

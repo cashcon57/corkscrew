@@ -133,8 +133,22 @@ fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
         let mut entry = archive.by_index(i)?;
         let relative = match entry.enclosed_name() {
             Some(p) => p.to_path_buf(),
-            None => continue,
+            None => {
+                warn!("Skipping ZIP entry with unsafe path");
+                continue;
+            }
         };
+        // Guard against path traversal: reject any entry containing ".." components.
+        if relative
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            warn!(
+                "Skipping ZIP path traversal attempt: {}",
+                relative.display()
+            );
+            continue;
+        }
         let out_path = dest_dir.join(&relative);
 
         if entry.is_dir() {

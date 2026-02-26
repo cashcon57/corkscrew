@@ -32,6 +32,11 @@ pub struct SteamStatus {
 // Detection
 // ---------------------------------------------------------------------------
 
+/// Detect whether the application is running inside a Flatpak sandbox.
+pub fn is_flatpak() -> bool {
+    std::env::var("FLATPAK_ID").is_ok() || std::path::Path::new("/.flatpak-info").exists()
+}
+
 /// Detect a Steam installation on this system.
 #[cfg(target_os = "linux")]
 pub fn detect_steam_installation() -> Option<SteamInfo> {
@@ -57,6 +62,10 @@ pub fn detect_steam_installation() -> Option<SteamInfo> {
                         }
                     }
                 }
+            }
+
+            if is_flatpak() {
+                log::warn!("Running under Flatpak \u{2014} Steam paths may require portal permissions");
             }
 
             return Some(SteamInfo {
@@ -98,6 +107,32 @@ pub fn is_steam_deck() -> bool {
 #[cfg(not(target_os = "linux"))]
 pub fn is_steam_deck() -> bool {
     false
+}
+
+/// Return platform warnings relevant to Steam Deck / SteamOS.
+///
+/// Checks for read-only filesystems and provides guidance on where to store
+/// downloads and staging directories.
+pub fn steam_deck_warnings() -> Vec<String> {
+    let mut warnings = Vec::new();
+    if !is_steam_deck() {
+        return warnings;
+    }
+    // Check if home directory is writable
+    let home = dirs::home_dir().unwrap_or_default();
+    if !home.exists()
+        || std::fs::metadata(&home)
+            .map(|m| m.permissions().readonly())
+            .unwrap_or(true)
+    {
+        warnings.push(
+            "Home directory may be read-only on SteamOS. Check filesystem permissions.".into(),
+        );
+    }
+    // General guidance for Steam Deck users
+    warnings
+        .push("Steam Deck detected: ensure download and staging directories are under /home/deck/".into());
+    warnings
 }
 
 // ---------------------------------------------------------------------------

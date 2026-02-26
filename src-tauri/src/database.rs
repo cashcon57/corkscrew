@@ -301,18 +301,27 @@ impl ModDatabase {
 
     /// Delete a mod by id. Returns `Ok(Some(mod))` with the removed record,
     /// or `Ok(None)` if no mod with that id exists.
+    ///
+    /// All related rows (installed_mods, profile_mods, conflict_rules) are
+    /// deleted inside a single transaction to prevent inconsistent state if
+    /// the app crashes mid-operation.
     pub fn remove_mod(&self, mod_id: i64) -> Result<Option<InstalledMod>> {
         let existing = self.get_mod(mod_id)?;
         if existing.is_some() {
             let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-            conn.execute("DELETE FROM installed_mods WHERE id = ?1", params![mod_id])?;
-            // Clean up profile_mods references (no FK constraint on mod_id)
-            let _ = conn.execute(
+            let tx = conn.unchecked_transaction()?;
+            tx.execute("DELETE FROM installed_mods WHERE id = ?1", params![mod_id])?;
+            // Clean up profile_mods references (table may not exist if profiles not initialized)
+            let _ = tx.execute(
                 "DELETE FROM profile_mods WHERE mod_id = ?1",
                 params![mod_id],
             );
-            drop(conn);
-            let _ = self.clear_conflict_rules_for_mod(mod_id);
+            // Clean up conflict rules involving this mod
+            let _ = tx.execute(
+                "DELETE FROM conflict_rules WHERE winner_mod_id = ?1 OR loser_mod_id = ?1",
+                params![mod_id],
+            );
+            tx.commit()?;
         }
         Ok(existing)
     }
@@ -1148,14 +1157,19 @@ impl ModDatabase {
     }
 
     /// Delete a specific download_registry entry by ID.
+    ///
+    /// Both the registry row and its collection refs are deleted in a single
+    /// transaction to prevent orphaned refs on partial failure.
     pub fn delete_download_record(&self, id: i64) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        conn.execute("DELETE FROM download_registry WHERE id = ?1", params![id])?;
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM download_registry WHERE id = ?1", params![id])?;
         // Also clean up any collection refs pointing to this download
-        conn.execute(
+        tx.execute(
             "DELETE FROM download_collection_refs WHERE download_id = ?1",
             params![id],
         )?;
+        tx.commit()?;
         Ok(())
     }
 

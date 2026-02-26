@@ -315,6 +315,9 @@ pub fn get_plugin_states(db: &ModDatabase, profile_id: i64) -> Result<Vec<Profil
 // ---------------------------------------------------------------------------
 
 /// Set which profile is active for a game/bottle (deactivates all others).
+///
+/// Both updates run inside a transaction so that a crash between them cannot
+/// leave every profile inactive.
 pub fn set_active_profile(
     db: &ModDatabase,
     game_id: &str,
@@ -322,24 +325,27 @@ pub fn set_active_profile(
     profile_id: i64,
 ) -> Result<()> {
     let conn = db.conn().map_err(|e| ProfileError::Other(e.to_string()))?;
+    let tx = conn.unchecked_transaction()?;
 
     // Deactivate all profiles for this game/bottle
-    conn.execute(
+    tx.execute(
         "UPDATE profiles SET is_active = 0
          WHERE game_id = ?1 AND bottle_name = ?2",
         params![game_id, bottle_name],
     )?;
 
     // Activate the target
-    let rows = conn.execute(
+    let rows = tx.execute(
         "UPDATE profiles SET is_active = 1 WHERE id = ?1",
         params![profile_id],
     )?;
 
     if rows == 0 {
+        // Roll back the deactivation — tx drops without commit
         return Err(ProfileError::NotFound(profile_id));
     }
 
+    tx.commit()?;
     Ok(())
 }
 
