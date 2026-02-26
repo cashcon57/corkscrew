@@ -826,11 +826,8 @@
   $effect(() => {
     let result = collections;
 
-    if (nsfwFilter === "hide") {
-      result = result.filter(c => !c.adult_content);
-    } else if (nsfwFilter === "only") {
-      result = result.filter(c => c.adult_content);
-    }
+    // NSFW filter is applied server-side via the adultContent GraphQL filter.
+    // No client-side NSFW filtering needed.
 
     // Cache filter
     if (cacheFilter !== "all") {
@@ -981,12 +978,15 @@
       const searchText = searchQuery.trim() || undefined;
       // "size" is client-side only — use "endorsements" as server sort to get consistent results
       const serverSort = sortField === "size" ? "endorsements" : sortField;
+      // Pass NSFW filter server-side so pagination reflects the correct count
+      const adultContentFilter = nsfwFilter === "hide" ? false : nsfwFilter === "only" ? true : null;
       const result: CollectionSearchResult = await browseCollections(
         gameDomain, collectionsPerPage, collectionsOffset,
         serverSort, sortDirection, searchText,
         collectionsAuthorFilter.trim() || undefined,
         collectionsMinDownloads || undefined,
         collectionsMinEndorsements || undefined,
+        adultContentFilter,
       );
       // Apply client-side size sort if needed
       if (sortField === "size") {
@@ -2786,7 +2786,7 @@
           class="nsfw-cycle-btn"
           class:nsfw-show={nsfwFilter === "show"}
           class:nsfw-only={nsfwFilter === "only"}
-          onclick={() => { nsfwFilter = cycleNsfwFilter(nsfwFilter); }}
+          onclick={() => { nsfwFilter = cycleNsfwFilter(nsfwFilter); const gd = gameFilter !== "all" ? gameFilter : "skyrimspecialedition"; loadCollections(gd); }}
           title={nsfwFilter === "hide" ? "NSFW hidden" : nsfwFilter === "show" ? "NSFW included" : "NSFW only"}
         >
           <span class="nsfw-indicator">{nsfwIcon(nsfwFilter)}</span>

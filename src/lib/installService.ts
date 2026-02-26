@@ -18,13 +18,17 @@ let speedSamples: { time: number; bytes: number }[] = [];
 const SPEED_WINDOW_MS = 5000;
 let cumulativeDownloaded = 0;
 
-// Staging (extraction) speed tracking
+// Staging (extraction) speed tracking — uses wider window since updates only come on mod completion
 let stagingSpeedSamples: { time: number; bytes: number }[] = [];
 let stagingSizeAccumulator = 0;
+let lastStagingSpeed = 0;
+const STAGING_SPEED_WINDOW_MS = 30000;
 
 // Install (deploy) speed tracking
 let installSpeedSamples: { time: number; bytes: number }[] = [];
 let installSizeAccumulator = 0;
+let lastInstallSpeed = 0;
+const INSTALL_SPEED_WINDOW_MS = 30000;
 
 // Event throttling — batch rapid events to avoid overwhelming the UI
 let pendingEvent: InstallProgressEvent | null = null;
@@ -57,24 +61,26 @@ function calculateStagingSpeed(currentBytes: number): number {
   const now = Date.now();
   stagingSizeAccumulator = currentBytes;
   stagingSpeedSamples.push({ time: now, bytes: currentBytes });
-  stagingSpeedSamples = stagingSpeedSamples.filter((s) => now - s.time <= SPEED_WINDOW_MS);
-  if (stagingSpeedSamples.length < 2) return 0;
+  stagingSpeedSamples = stagingSpeedSamples.filter((s) => now - s.time <= STAGING_SPEED_WINDOW_MS);
+  if (stagingSpeedSamples.length < 2) { return lastStagingSpeed; }
   const oldest = stagingSpeedSamples[0];
   const elapsed = (now - oldest.time) / 1000;
-  if (elapsed <= 0) return 0;
-  return (currentBytes - oldest.bytes) / elapsed;
+  if (elapsed <= 0) { return lastStagingSpeed; }
+  lastStagingSpeed = (currentBytes - oldest.bytes) / elapsed;
+  return lastStagingSpeed;
 }
 
 function calculateInstallSpeed(currentBytes: number): number {
   const now = Date.now();
   installSizeAccumulator = currentBytes;
   installSpeedSamples.push({ time: now, bytes: currentBytes });
-  installSpeedSamples = installSpeedSamples.filter((s) => now - s.time <= SPEED_WINDOW_MS);
-  if (installSpeedSamples.length < 2) return 0;
+  installSpeedSamples = installSpeedSamples.filter((s) => now - s.time <= INSTALL_SPEED_WINDOW_MS);
+  if (installSpeedSamples.length < 2) { return lastInstallSpeed; }
   const oldest = installSpeedSamples[0];
   const elapsed = (now - oldest.time) / 1000;
-  if (elapsed <= 0) return 0;
-  return (currentBytes - oldest.bytes) / elapsed;
+  if (elapsed <= 0) { return lastInstallSpeed; }
+  lastInstallSpeed = (currentBytes - oldest.bytes) / elapsed;
+  return lastInstallSpeed;
 }
 
 function formatEta(remainingBytes: number, speed: number): string {
@@ -636,8 +642,10 @@ export function stopInstallTracking() {
   cumulativeDownloaded = 0;
   stagingSpeedSamples = [];
   stagingSizeAccumulator = 0;
+  lastStagingSpeed = 0;
   installSpeedSamples = [];
   installSizeAccumulator = 0;
+  lastInstallSpeed = 0;
   pendingEvent = null;
   if (throttleTimer) { clearTimeout(throttleTimer); throttleTimer = null; }
 }

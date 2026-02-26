@@ -4012,6 +4012,7 @@ async fn browse_collections_cmd(
     author: Option<String>,
     min_downloads: Option<i64>,
     min_endorsements: Option<i64>,
+    adult_content: Option<bool>,
 ) -> Result<CollectionSearchResult, String> {
     let token = nexus_api_key_or_token().await.ok().map(|(t, _)| t);
 
@@ -4030,6 +4031,7 @@ async fn browse_collections_cmd(
         author.as_deref(),
         min_downloads,
         min_endorsements,
+        adult_content,
     )
     .await
     .map_err(|e| e.to_string())

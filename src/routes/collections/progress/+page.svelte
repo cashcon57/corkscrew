@@ -609,8 +609,6 @@
                     <span class="extracting-name" title={mod.name}>{mod.name}</span>
                     {#if mod.stepDetail}
                       <span class="extracting-detail">{mod.stepDetail}</span>
-                    {:else if stagingSpeed > 0}
-                      <span class="extracting-detail">{formatBytes(stagingSpeed)}/s</span>
                     {/if}
                   </div>
                   <div class="extracting-bar">

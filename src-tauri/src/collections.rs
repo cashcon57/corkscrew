@@ -528,6 +528,7 @@ pub async fn browse_collections(
     author: Option<&str>,
     min_downloads: Option<i64>,
     min_endorsements: Option<i64>,
+    adult_content: Option<bool>,
 ) -> Result<CollectionSearchResult, CollectionsError> {
     // Map friendly sort names to GraphQL field names
     // Note: NexusMods removed "totalDownloads" from CollectionsSearchSort;
@@ -589,6 +590,12 @@ pub async fn browse_collections(
         filter.insert(
             "endorsements".to_string(),
             serde_json::json!([{ "op": "GREATER_THAN", "value": min_end }]),
+        );
+    }
+    if let Some(nsfw) = adult_content {
+        filter.insert(
+            "adultContent".to_string(),
+            serde_json::json!([{ "op": "EQUALS", "value": nsfw }]),
         );
     }
 

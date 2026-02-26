@@ -872,6 +872,7 @@ export async function browseCollections(
   author?: string,
   minDownloads?: number,
   minEndorsements?: number,
+  adultContent?: boolean | null,
 ): Promise<CollectionSearchResult> {
   return invoke("browse_collections_cmd", {
     gameDomain, count, offset,
@@ -881,6 +882,7 @@ export async function browseCollections(
     author: author ?? null,
     minDownloads: minDownloads ?? null,
     minEndorsements: minEndorsements ?? null,
+    adultContent: adultContent ?? null,
   });
 }
 
