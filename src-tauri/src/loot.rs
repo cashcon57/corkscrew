@@ -4,12 +4,17 @@
 //! LOOT masterlists, and exposes plugin-level warnings/messages to the UI.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use libloot::{EvalMode, GameType, MergeMode};
 use serde::{Deserialize, Serialize};
 
 use crate::bottles::Bottle;
+
+/// Maximum age for a cached masterlist before we re-download it (24 hours).
+const MASTERLIST_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -130,18 +135,66 @@ pub fn local_game_path(bottle: &Bottle, game_id: &str) -> Option<PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
+// Masterlist freshness
+// ---------------------------------------------------------------------------
+
+/// Check if the cached masterlist file is still fresh (less than 24 hours old).
+///
+/// Returns `false` if the file doesn't exist, metadata is unreadable, or
+/// the file is older than [`MASTERLIST_MAX_AGE`].
+pub fn is_masterlist_fresh(masterlist_path: &Path) -> bool {
+    if let Ok(metadata) = std::fs::metadata(masterlist_path) {
+        if let Ok(modified) = metadata.modified() {
+            if let Ok(elapsed) = SystemTime::now().duration_since(modified) {
+                return elapsed < MASTERLIST_MAX_AGE;
+            }
+        }
+    }
+    false // If we can't determine freshness, re-download
+}
+
+// ---------------------------------------------------------------------------
 // Masterlist management
 // ---------------------------------------------------------------------------
 
-/// Download the LOOT masterlist for a game from GitHub.
+/// Download the LOOT masterlist for a game from GitHub, skipping the download
+/// if the cached file is still fresh (< 24 hours old).
+///
+/// The `session_checked` flag, when set, indicates we already verified
+/// freshness this session and can skip both the freshness check and download.
 ///
 /// Also downloads the prelude file if it doesn't exist yet.
-/// Returns the path to the downloaded masterlist.
-pub async fn update_masterlist(game_id: &str) -> Result<PathBuf> {
+/// Returns the path to the (possibly cached) masterlist.
+pub async fn update_masterlist(
+    game_id: &str,
+    session_checked: Option<&AtomicBool>,
+) -> Result<PathBuf> {
+    let ml_path = masterlist_path(game_id);
+
+    // Fast path: if we already checked freshness this session, skip entirely
+    if let Some(flag) = session_checked {
+        if flag.load(Ordering::Relaxed) && ml_path.exists() {
+            log::debug!("LOOT masterlist already verified this session — skipping download");
+            return Ok(ml_path);
+        }
+    }
+
+    // Check file freshness — skip download if still recent
+    if is_masterlist_fresh(&ml_path) {
+        log::info!(
+            "LOOT masterlist for '{}' is fresh — skipping download",
+            game_id
+        );
+        // Mark session as checked
+        if let Some(flag) = session_checked {
+            flag.store(true, Ordering::Relaxed);
+        }
+        return Ok(ml_path);
+    }
+
     let url = masterlist_url(game_id)
         .with_context(|| format!("No LOOT masterlist available for game '{}'", game_id))?;
 
-    let ml_path = masterlist_path(game_id);
     download_file(&url, &ml_path)
         .await
         .with_context(|| format!("Failed to download masterlist for '{}'", game_id))?;
@@ -154,7 +207,53 @@ pub async fn update_masterlist(game_id: &str) -> Result<PathBuf> {
             .context("Failed to download LOOT prelude")?;
     }
 
+    // Mark session as checked
+    if let Some(flag) = session_checked {
+        flag.store(true, Ordering::Relaxed);
+    }
+
     Ok(ml_path)
+}
+
+/// Force-refresh the LOOT masterlist, ignoring any freshness cache.
+///
+/// This resets the session-checked flag so future calls to
+/// [`update_masterlist`] will re-check freshness.
+pub async fn force_refresh_masterlist(
+    game_id: &str,
+    session_checked: Option<&AtomicBool>,
+) -> Result<PathBuf> {
+    // Reset the session flag so we don't skip next time
+    if let Some(flag) = session_checked {
+        flag.store(false, Ordering::Relaxed);
+    }
+
+    let url = masterlist_url(game_id)
+        .with_context(|| format!("No LOOT masterlist available for game '{}'", game_id))?;
+
+    let ml_path = masterlist_path(game_id);
+    download_file(&url, &ml_path)
+        .await
+        .with_context(|| format!("Failed to download masterlist for '{}'", game_id))?;
+
+    // Also refresh the prelude
+    let pl_path = prelude_path();
+    download_file(prelude_url(), &pl_path)
+        .await
+        .context("Failed to download LOOT prelude")?;
+
+    // Mark session as checked after successful download
+    if let Some(flag) = session_checked {
+        flag.store(true, Ordering::Relaxed);
+    }
+
+    Ok(ml_path)
+}
+
+/// Reset the session-checked flag. Call this when the user switches games
+/// so that the next masterlist update re-checks freshness for the new game.
+pub fn reset_masterlist_session_flag(session_checked: &AtomicBool) {
+    session_checked.store(false, Ordering::Relaxed);
 }
 
 /// Download a file from a URL to a local path.
@@ -506,5 +605,27 @@ mod tests {
 
         let paths = discover_plugin_paths(data_dir).unwrap();
         assert_eq!(paths.len(), 3);
+    }
+
+    #[test]
+    fn is_masterlist_fresh_missing_file() {
+        assert!(!is_masterlist_fresh(Path::new("/nonexistent/masterlist.yaml")));
+    }
+
+    #[test]
+    fn is_masterlist_fresh_recent_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("masterlist.yaml");
+        std::fs::write(&path, b"fake masterlist").unwrap();
+        // File was just created — should be fresh
+        assert!(is_masterlist_fresh(&path));
+    }
+
+    #[test]
+    fn reset_masterlist_session_flag_works() {
+        let flag = AtomicBool::new(true);
+        assert!(flag.load(Ordering::Relaxed));
+        reset_masterlist_session_flag(&flag);
+        assert!(!flag.load(Ordering::Relaxed));
     }
 }

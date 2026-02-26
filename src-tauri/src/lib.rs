@@ -52,8 +52,10 @@ pub mod wine_diagnostic;
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, RwLock};
 
+use lru::LruCache;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use bottles::Bottle;
@@ -86,6 +88,12 @@ struct AppState {
     download_queue: Arc<download_queue::DownloadQueue>,
     wj_cancel_tokens:
         std::sync::Mutex<std::collections::HashMap<i64, Arc<std::sync::atomic::AtomicBool>>>,
+    /// LRU cache for parsed FOMOD installers, keyed by archive SHA-256 hash.
+    fomod_cache: Arc<RwLock<LruCache<String, FomodInstaller>>>,
+    /// Session-level flag: once we verify the LOOT masterlist is fresh for the
+    /// current game, we skip further freshness checks until the game changes
+    /// or the user force-refreshes.
+    loot_masterlist_checked: Arc<AtomicBool>,
 }
 
 /// Resolve a bottle by name, returning a useful error if not found.
@@ -2537,8 +2545,22 @@ async fn sort_plugins_loot(game_id: String, bottle_name: String) -> Result<SortR
 }
 
 #[tauri::command]
-async fn update_loot_masterlist(game_id: String) -> Result<String, String> {
-    loot::update_masterlist(&game_id)
+async fn update_loot_masterlist(
+    game_id: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    loot::update_masterlist(&game_id, Some(&state.loot_masterlist_checked))
+        .await
+        .map(|p| p.to_string_lossy().to_string())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn force_refresh_loot_masterlist(
+    game_id: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    loot::force_refresh_masterlist(&game_id, Some(&state.loot_masterlist_checked))
         .await
         .map(|p| p.to_string_lossy().to_string())
         .map_err(|e| e.to_string())
@@ -3187,9 +3209,17 @@ fn get_optimal_download_threads() -> usize {
 // --- FOMOD ---
 
 #[tauri::command]
-fn detect_fomod(staging_path: String) -> Result<Option<FomodInstaller>, String> {
+fn detect_fomod(
+    staging_path: String,
+    archive_hash: Option<String>,
+    state: State<AppState>,
+) -> Result<Option<FomodInstaller>, String> {
     let path = PathBuf::from(&staging_path);
-    fomod::parse_fomod(&path).map_err(|e| e.to_string())
+    // Use archive SHA-256 hash as cache key if provided, otherwise fall back
+    // to the staging path itself (still deterministic per-archive).
+    let cache_key = archive_hash.unwrap_or_else(|| staging_path.clone());
+    fomod::parse_fomod_cached(&state.fomod_cache, &cache_key, &path)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -5085,6 +5115,8 @@ pub fn run() {
                 db: Arc::new(db),
                 download_queue: Arc::new(queue),
                 wj_cancel_tokens: std::sync::Mutex::new(std::collections::HashMap::new()),
+                fomod_cache: Arc::new(fomod::new_fomod_cache()),
+                loot_masterlist_checked: Arc::new(AtomicBool::new(false)),
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -5134,6 +5166,7 @@ pub fn run() {
             verify_mod_integrity,
             sort_plugins_loot,
             update_loot_masterlist,
+            force_refresh_loot_masterlist,
             reorder_plugins_cmd,
             toggle_plugin_cmd,
             move_plugin_cmd,

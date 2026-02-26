@@ -10,9 +10,12 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::num::NonZeroUsize;
 use std::path::Path;
+use std::sync::RwLock;
 
 use anyhow::{Context, Result};
+use lru::LruCache;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use serde::{Deserialize, Serialize};
@@ -501,6 +504,54 @@ pub fn parse_fomod(fomod_dir: &Path) -> Result<Option<FomodInstaller>> {
         .with_context(|| format!("Failed to parse FOMOD config: {}", config_path.display()))?;
 
     Ok(Some(installer))
+}
+
+/// Default capacity for the FOMOD LRU cache (covers a typical modlist).
+pub const FOMOD_CACHE_CAPACITY: usize = 50;
+
+/// Create a new, empty FOMOD LRU cache with the default capacity.
+pub fn new_fomod_cache() -> RwLock<LruCache<String, FomodInstaller>> {
+    RwLock::new(LruCache::new(
+        NonZeroUsize::new(FOMOD_CACHE_CAPACITY).unwrap(),
+    ))
+}
+
+/// Parse a FOMOD installer with LRU caching.
+///
+/// If a cached result exists for `cache_key` (typically the archive's
+/// SHA-256 hash), it is returned immediately. Otherwise the FOMOD is
+/// parsed from disk and stored in the cache.
+///
+/// The `cache` is passed in from [`AppState`] rather than being a static.
+pub fn parse_fomod_cached(
+    cache: &RwLock<LruCache<String, FomodInstaller>>,
+    cache_key: &str,
+    fomod_dir: &Path,
+) -> Result<Option<FomodInstaller>> {
+    // Check cache (write lock needed because `get` updates LRU order)
+    {
+        let mut cache_guard = cache
+            .write()
+            .map_err(|_| anyhow::anyhow!("FOMOD cache lock poisoned"))?;
+        if let Some(cached) = cache_guard.get(cache_key) {
+            log::debug!("FOMOD cache hit for key '{}'", cache_key);
+            return Ok(Some(cached.clone()));
+        }
+    }
+
+    // Cache miss — parse from disk
+    let installer = parse_fomod(fomod_dir)?;
+
+    // Store in cache if parsing succeeded
+    if let Some(ref inst) = installer {
+        let mut cache_guard = cache
+            .write()
+            .map_err(|_| anyhow::anyhow!("FOMOD cache lock poisoned"))?;
+        cache_guard.put(cache_key.to_string(), inst.clone());
+        log::debug!("FOMOD cache miss — stored key '{}'", cache_key);
+    }
+
+    Ok(installer)
 }
 
 /// Determine default selections for each group in the installer.
@@ -1170,5 +1221,53 @@ mod tests {
             Some(&vec!["High Res".to_string()])
         );
         assert_eq!(selections.get("Extras"), Some(&vec![]));
+    }
+
+    #[test]
+    fn fomod_cache_hit_returns_same_result() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fomod_dir = tmp.path().join("fomod");
+        std::fs::create_dir_all(&fomod_dir).unwrap();
+        std::fs::write(fomod_dir.join("ModuleConfig.xml"), SAMPLE_XML).unwrap();
+
+        let cache = new_fomod_cache();
+
+        // First call: cache miss
+        let result1 = parse_fomod_cached(&cache, "abc123", tmp.path()).unwrap();
+        assert!(result1.is_some());
+        assert_eq!(result1.as_ref().unwrap().module_name, "Test Mod");
+
+        // Second call: cache hit (even if files were deleted)
+        std::fs::remove_dir_all(&fomod_dir).unwrap();
+        let result2 = parse_fomod_cached(&cache, "abc123", tmp.path()).unwrap();
+        assert!(result2.is_some());
+        assert_eq!(result2.as_ref().unwrap().module_name, "Test Mod");
+    }
+
+    #[test]
+    fn fomod_cache_miss_for_different_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fomod_dir = tmp.path().join("fomod");
+        std::fs::create_dir_all(&fomod_dir).unwrap();
+        std::fs::write(fomod_dir.join("ModuleConfig.xml"), SAMPLE_XML).unwrap();
+
+        let cache = new_fomod_cache();
+
+        // Populate cache for key "aaa"
+        let _ = parse_fomod_cached(&cache, "aaa", tmp.path()).unwrap();
+
+        // Different key "bbb" should be a cache miss and re-parse
+        let result = parse_fomod_cached(&cache, "bbb", tmp.path()).unwrap();
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn fomod_cache_no_fomod_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = new_fomod_cache();
+
+        // No fomod directory — returns None, does NOT cache
+        let result = parse_fomod_cached(&cache, "empty", tmp.path()).unwrap();
+        assert!(result.is_none());
     }
 }
