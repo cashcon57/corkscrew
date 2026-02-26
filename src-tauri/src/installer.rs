@@ -173,31 +173,50 @@ fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
     // Drop the first archive handle before parallel extraction
     drop(archive);
 
-    // Pass 2: parallel extraction — each rayon thread opens its own ZipArchive
+    // Pass 2: parallel extraction — partition entries into chunks so each rayon
+    // thread opens ONE ZipArchive handle and extracts all its entries, avoiding
+    // the overhead of re-parsing the central directory per file.
+    let num_threads = rayon::current_num_threads().max(1);
     let archive_path_owned = archive_path.to_path_buf();
-    let results: Vec<std::result::Result<PathBuf, String>> = file_entries
+    let chunks: Vec<&[(usize, PathBuf)]> = file_entries.chunks(
+        (file_entries.len() / num_threads).max(1),
+    ).collect();
+
+    let results: Vec<Vec<std::result::Result<PathBuf, String>>> = chunks
         .par_iter()
-        .map(|(idx, out_path)| {
-            let f = io::BufReader::with_capacity(
-                EXTRACT_BUF_SIZE,
-                fs::File::open(&archive_path_owned).map_err(|e| e.to_string())?,
-            );
-            let mut arch = ZipArchive::new(f).map_err(|e| e.to_string())?;
-            let mut entry = arch.by_index(*idx).map_err(|e| e.to_string())?;
-            let mut out_file = io::BufWriter::with_capacity(
-                EXTRACT_BUF_SIZE,
-                fs::File::create(out_path).map_err(|e| e.to_string())?,
-            );
-            io::copy(&mut entry, &mut out_file).map_err(|e| e.to_string())?;
-            Ok(out_path.clone())
+        .map(|chunk| {
+            // Open one archive handle per thread chunk
+            let f = match fs::File::open(&archive_path_owned) {
+                Ok(file) => io::BufReader::with_capacity(EXTRACT_BUF_SIZE, file),
+                Err(e) => {
+                    return chunk.iter().map(|_| Err(format!("Open failed: {}", e))).collect();
+                }
+            };
+            let mut arch = match ZipArchive::new(f) {
+                Ok(a) => a,
+                Err(e) => {
+                    return chunk.iter().map(|_| Err(format!("ZIP parse failed: {}", e))).collect();
+                }
+            };
+            chunk.iter().map(|(idx, out_path)| {
+                let mut entry = arch.by_index(*idx).map_err(|e| e.to_string())?;
+                let mut out_file = io::BufWriter::with_capacity(
+                    EXTRACT_BUF_SIZE,
+                    fs::File::create(out_path).map_err(|e| e.to_string())?,
+                );
+                io::copy(&mut entry, &mut out_file).map_err(|e| e.to_string())?;
+                Ok(out_path.clone())
+            }).collect()
         })
         .collect();
 
-    let mut extracted = Vec::with_capacity(results.len());
-    for r in results {
-        match r {
-            Ok(p) => extracted.push(p),
-            Err(e) => warn!("Failed to extract ZIP entry: {}", e),
+    let mut extracted = Vec::with_capacity(file_entries.len());
+    for chunk_results in results {
+        for r in chunk_results {
+            match r {
+                Ok(p) => extracted.push(p),
+                Err(e) => warn!("Failed to extract ZIP entry: {}", e),
+            }
         }
     }
 

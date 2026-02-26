@@ -1173,9 +1173,9 @@ pub async fn install_collection(
 
                 let temp_dir = std::env::temp_dir().join(format!("corkscrew_extract_{}", idx));
 
-                // Timeout extraction at 10 minutes to prevent indefinite hangs
+                // Timeout extraction at 30 minutes to prevent indefinite hangs
                 let result = tokio::time::timeout(
-                    std::time::Duration::from_secs(600),
+                    std::time::Duration::from_secs(1800),
                     tokio::task::spawn_blocking(move || {
                         // Check cancellation inside blocking task
                         if is_cancelled() {
@@ -1243,13 +1243,13 @@ pub async fn install_collection(
                         None
                     }
                     Err(_) => {
-                        log::warn!("Extraction timed out for mod {} after 10 minutes", idx);
+                        log::warn!("Extraction timed out for mod {} after 30 minutes", idx);
                         let _ = app_c.emit(
                             INSTALL_PROGRESS_EVENT,
                             InstallProgress::StagingModFailed {
                                 mod_index: idx,
                                 mod_name: name,
-                                error: "Extraction timed out after 10 minutes".to_string(),
+                                error: "Extraction timed out after 30 minutes".to_string(),
                             },
                         );
                         None
