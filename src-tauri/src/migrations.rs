@@ -19,7 +19,7 @@ pub enum MigrationError {
 pub type Result<T> = std::result::Result<T, MigrationError>;
 
 /// The current target schema version. Bump this when adding a new migration.
-const TARGET_VERSION: u32 = 12;
+const TARGET_VERSION: u32 = 13;
 
 /// Get the current schema version (0 if no version table exists).
 pub fn current_version(conn: &Connection) -> Result<u32> {
@@ -104,6 +104,11 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     if version == 11 {
         migrate_v11_to_v12(conn)?;
         version = 12;
+    }
+
+    if version == 12 {
+        migrate_v12_to_v13(conn)?;
+        version = 13;
     }
 
     let _ = version; // suppress unused warning when TARGET_VERSION == current
@@ -719,6 +724,24 @@ fn migrate_v11_to_v12(conn: &Connection) -> Result<()> {
     tx.execute("UPDATE schema_version SET version = 12", [])?;
     tx.commit()?;
     log::info!("Migration 11 → 12 complete (pinned game versions)");
+    Ok(())
+}
+
+/// Migration 12 → 13: Incremental deployment index.
+///
+/// Adds a compound index on deployment_manifest(game_id, bottle_name, mod_id)
+/// for fast lookups during incremental deployment diff computation.
+fn migrate_v12_to_v13(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+
+    tx.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_manifest_game_bottle_mod
+            ON deployment_manifest (game_id, bottle_name, mod_id);",
+    )?;
+
+    tx.execute("UPDATE schema_version SET version = 13", [])?;
+    tx.commit()?;
+    log::info!("Migration 12 → 13 complete (incremental deployment index)");
     Ok(())
 }
 

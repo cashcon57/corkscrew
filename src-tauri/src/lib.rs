@@ -1504,6 +1504,27 @@ fn redeploy_all_mods(
     }))
 }
 
+/// Incremental deployment: compute diff and apply only changes.
+/// Falls back to full redeploy if >80% of files would change.
+#[tauri::command]
+fn deploy_incremental_cmd(
+    game_id: String,
+    bottle_name: String,
+    state: State<AppState>,
+) -> Result<deployer::IncrementalDeployResult, String> {
+    let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
+    let db = &state.db;
+
+    let result = deployer::deploy_incremental(db, &game_id, &bottle_name, &data_dir)
+        .map_err(|e| e.to_string())?;
+
+    if game_id == "skyrimse" {
+        let _ = sync_plugins_for_game(&game, &bottle);
+    }
+
+    Ok(result)
+}
+
 /// Check deployment health: verify mods have staging dirs and deployed files.
 #[tauri::command]
 fn check_deployment_health(
@@ -5128,6 +5149,7 @@ pub fn run() {
             set_mod_priority,
             reorder_mods,
             redeploy_all_mods,
+            deploy_incremental_cmd,
             check_deployment_health,
             purge_deployment_cmd,
             verify_mod_integrity,
