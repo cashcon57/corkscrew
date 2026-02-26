@@ -383,17 +383,28 @@
     if (!game || !cleanReport) return;
     cleaning = true;
     try {
+      // "Remove All" = nuclear option: include SKSE, ENB, saves
+      // "Remove Orphaned Only" = safer: exclude SKSE/ENB since they may be from tools
+      const removeAll = !orphansOnly;
       cleanResult = await cleanGameDirectory(game.game_id, game.bottle_name, {
         remove_loose_files: true,
         remove_archives: true,
-        remove_enb: false,
-        remove_saves: cleanRemoveSaves,
-        remove_skse: false,
+        remove_enb: removeAll,
+        remove_saves: removeAll || cleanRemoveSaves,
+        remove_skse: removeAll,
         orphans_only: orphansOnly,
         dry_run: false,
         exclude_patterns: [],
       });
-      showSuccess(`Removed ${cleanResult.removed_files.length} files (${formatBytes(cleanResult.bytes_freed)} freed)`);
+      const removed = cleanResult.removed_files.length;
+      const skipped = cleanResult.skipped_files.length;
+      if (removed > 0) {
+        showSuccess(`Removed ${removed} files (${formatBytes(cleanResult.bytes_freed)} freed)${skipped > 0 ? `, ${skipped} skipped` : ""}`);
+      } else if (skipped > 0) {
+        showError(`Could not remove files — ${skipped} skipped due to permissions or exclusions`);
+      } else {
+        showSuccess("No files to remove");
+      }
       cleanReport = null;
     } catch (e: unknown) {
       showError(`Clean failed: ${e}`);
@@ -1099,7 +1110,7 @@
                       Remove saves ({cleanReport.save_files.length} files)
                     </label>
                   {/if}
-                  <span class="clean-option-note">Tools and SKSE are not affected — manage them in Modding Tools below</span>
+                  <span class="clean-option-note">"Remove Orphaned" preserves SKSE and ENB files — "Remove All" removes everything</span>
                 </div>
                 <div class="clean-actions">
                   <button

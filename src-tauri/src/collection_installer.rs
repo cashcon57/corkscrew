@@ -2376,10 +2376,30 @@ async fn stage_and_deploy(
     let files_to_deploy =
         if let Ok(Some(fomod_installer)) = fomod::parse_fomod(&staging_result.staging_path) {
             let selections = if let Some(ref choices) = mod_entry.choices {
-                parse_fomod_choices(choices)
-                    .unwrap_or_else(|| fomod::get_default_selections(&fomod_installer))
+                match parse_fomod_choices(choices) {
+                    Some(parsed) => {
+                        log::info!(
+                            "FOMOD auto-applying {} group selections for '{}'",
+                            parsed.len(),
+                            mod_name
+                        );
+                        parsed
+                    }
+                    None => {
+                        log::warn!(
+                            "FOMOD choices present but unparseable for '{}': {}",
+                            mod_name,
+                            choices,
+                        );
+                        fomod::get_default_selections(&fomod_installer)
+                    }
+                }
             } else {
                 // No manifest choices — ask user interactively via FOMOD wizard
+                log::info!(
+                    "FOMOD wizard required for '{}' — no choices in manifest",
+                    mod_name
+                );
                 let (correlation_id, rx) = create_fomod_request();
 
                 let _ = app.emit(
@@ -2661,6 +2681,7 @@ fn merge_bundle_into_manifest(
     }
 
     let mut merged_count = 0usize;
+    let mut unmatched = Vec::new();
     for mod_entry in &mut merged.mods {
         // Try (mod_id, file_id) match first, then name fallback
         let bundle_entry = if let (Some(mod_id), Some(file_id)) =
@@ -2671,6 +2692,10 @@ fn merge_bundle_into_manifest(
             None
         }
         .or_else(|| bundle_name_lookup.get(&mod_entry.name.to_lowercase()).copied());
+
+        if bundle_entry.is_none() {
+            unmatched.push(mod_entry.name.clone());
+        }
 
         if let Some(be) = bundle_entry {
             if mod_entry.choices.is_none() {
@@ -2706,6 +2731,13 @@ fn merge_bundle_into_manifest(
         merged.mod_rules.len(),
         merged.plugins.len()
     );
+    if !unmatched.is_empty() {
+        log::warn!(
+            "Bundle merge: {} mods unmatched (no bundle entry found): {:?}",
+            unmatched.len(),
+            &unmatched[..unmatched.len().min(10)]
+        );
+    }
 
     merged
 }

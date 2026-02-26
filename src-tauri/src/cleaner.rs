@@ -350,13 +350,24 @@ pub fn clean_game_directory(
             removed_files.push(file.relative_path.clone());
             bytes_freed += file.size;
         } else if abs_path.exists() {
-            // Make writable before deleting — some mod files are read-only
+            // Make file writable before deleting — some mod files are read-only
             if let Ok(metadata) = fs::metadata(&abs_path) {
                 let perms = metadata.permissions();
                 if perms.readonly() {
                     let mut writable = perms;
                     writable.set_readonly(false);
                     let _ = fs::set_permissions(&abs_path, writable);
+                }
+            }
+            // Also make parent directory writable — deletion requires write on parent
+            if let Some(parent) = abs_path.parent() {
+                if let Ok(dir_meta) = fs::metadata(parent) {
+                    let dir_perms = dir_meta.permissions();
+                    if dir_perms.readonly() {
+                        let mut writable = dir_perms;
+                        writable.set_readonly(false);
+                        let _ = fs::set_permissions(parent, writable);
+                    }
                 }
             }
             match fs::remove_file(&abs_path) {
@@ -371,6 +382,13 @@ pub fn clean_game_directory(
                     skipped_files.push(file.relative_path.clone());
                 }
             }
+        } else {
+            // File was in scan but doesn't exist at constructed path
+            warn!(
+                "File from scan not found at constructed path: {}",
+                abs_path.display()
+            );
+            skipped_files.push(file.relative_path.clone());
         }
     }
 
