@@ -1,5 +1,5 @@
 import { writable, derived } from "svelte/store";
-import type { Bottle, DetectedGame, InstalledMod, AppConfig, SkseStatus, Profile, CollectionSummary } from "./types";
+import type { Bottle, DetectedGame, InstalledMod, AppConfig, SkseStatus, Profile, CollectionSummary, FomodInstaller } from "./types";
 
 // App state
 export const bottles = writable<Bottle[]>([]);
@@ -55,11 +55,15 @@ export interface DownloadItem {
 export interface ModProgressDetail {
   name: string;
   index: number;
-  status: "pending" | "queued" | "downloading" | "downloaded" | "cached" | "extracting" | "staged" | "installing" | "deploying" | "done" | "failed" | "skipped" | "user_action";
+  status: "pending" | "queued" | "downloading" | "downloaded" | "cached" | "extracting" | "staged" | "installing" | "deploying" | "done" | "failed" | "skipped" | "user_action" | "fomod_pending";
   error?: string;
   downloadBytes?: number;
   downloadTotal?: number;
   stepDetail?: string;
+  fomodData?: {
+    correlationId: string;
+    installer: FomodInstaller;
+  };
 }
 
 export interface UserActionItem {
@@ -67,6 +71,13 @@ export interface UserActionItem {
   action: string;
   url?: string;
   instructions?: string;
+}
+
+export interface PendingFomod {
+  modIndex: number;
+  modName: string;
+  correlationId: string;
+  installer: FomodInstaller;
 }
 
 export interface CollectionInstallStatus {
@@ -100,6 +111,8 @@ export interface CollectionInstallStatus {
   result: { installed: number; skipped: number; failed: number } | null;
   // User actions
   userActions: UserActionItem[];
+  // Pending FOMOD wizards
+  pendingFomods: PendingFomod[];
   // Overall progress
   overallProgress: number;
   downloadSpeed: number;

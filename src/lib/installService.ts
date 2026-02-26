@@ -38,6 +38,7 @@ const IMMEDIATE_EVENTS = new Set([
   "modStarted", "modCompleted", "modFailed", "collectionCompleted",
   "userActionRequired", "downloadModStarted", "downloadModCompleted", "downloadModFailed",
   "stagingModStarted", "stagingModCompleted", "stagingModFailed", "initializing",
+  "fomodRequired",
 ]);
 
 function calculateSpeed(currentBytes: number): number {
@@ -162,6 +163,7 @@ export async function startInstallTracking(
     elapsed: "0s",
     result: null,
     userActions: [],
+    pendingFomods: [],
     overallProgress: 0,
     downloadSpeed: 0,
     downloadEta: "",
@@ -230,6 +232,7 @@ function logMessageForEvent(e: InstallProgressEvent): { message: string; level: 
     case "modCompleted": return { message: `Installed: ${e.mod_name}`, level: "info" };
     case "modFailed": return { message: `Install failed: ${e.mod_name} — ${e.error}`, level: "error" };
     case "userActionRequired": return { message: `Action required: ${e.mod_name} — ${e.action}`, level: "warn" };
+    case "fomodRequired": return { message: `FOMOD configuration needed: ${e.mod_name}`, level: "warn" };
     case "collectionCompleted": return { message: `Collection complete (${e.installed} installed, ${e.skipped} skipped, ${e.failed} failed)`, level: e.failed > 0 ? "warn" : "info" };
     case "stepChanged": return e.detail ? { message: `  ${e.detail}`, level: "info" } : null;
     default: return null;
@@ -479,6 +482,29 @@ function handleProgressEvent(e: InstallProgressEvent) {
         }
         break;
 
+      case "fomodRequired":
+        next.modDetails = [...next.modDetails];
+        if (next.modDetails[e.mod_index]) {
+          next.modDetails[e.mod_index] = {
+            ...next.modDetails[e.mod_index],
+            status: "fomod_pending",
+            fomodData: {
+              correlationId: e.correlation_id,
+              installer: e.installer,
+            },
+          };
+        }
+        next.pendingFomods = [
+          ...(next.pendingFomods ?? []),
+          {
+            modIndex: e.mod_index,
+            modName: e.mod_name,
+            correlationId: e.correlation_id,
+            installer: e.installer,
+          },
+        ];
+        break;
+
       case "collectionCompleted":
         next.phase = "complete";
         next.result = {
@@ -547,6 +573,7 @@ export async function resumeInstallTracking(
     elapsed: "0s",
     result: null,
     userActions: [],
+    pendingFomods: [],
     overallProgress: totalMods > 0 ? Math.round((completedMods / totalMods) * 100) : 0,
     downloadSpeed: 0,
     downloadEta: "",

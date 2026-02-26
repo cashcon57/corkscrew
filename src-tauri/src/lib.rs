@@ -4081,6 +4081,14 @@ async fn cancel_collection_install_cmd() -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn submit_fomod_choices(
+    correlation_id: String,
+    selections: std::collections::HashMap<String, Vec<String>>,
+) -> Result<(), String> {
+    collection_installer::submit_fomod_choices(&correlation_id, selections)
+}
+
 // --- Collection Install Resume ---
 
 #[tauri::command]
@@ -5351,6 +5359,7 @@ pub fn run() {
             parse_collection_bundle_cmd,
             install_collection_cmd,
             cancel_collection_install_cmd,
+            submit_fomod_choices,
             get_incomplete_collection_installs,
             get_all_interrupted_installs,
             get_checkpoint_mod_names,

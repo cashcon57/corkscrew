@@ -4,7 +4,7 @@
   import { selectedGame, showError, showSuccess, collectionInstallStatus, collectionUninstallStatus } from "$lib/stores";
   import type { CollectionUninstallStatus } from "$lib/stores";
   import type { UninstallProgressEvent } from "$lib/types";
-  import type { CollectionInfo, CollectionManifest, CollectionMod, CollectionSearchResult, InstalledMod, NexusModInfo, NexusCategory, NexusSearchResult, NexusModFile, CollectionInstallCheckpoint } from "$lib/types";
+  import type { CollectionInfo, CollectionManifest, CollectionMod, CollectionModEntry, CollectionSearchResult, InstalledMod, NexusModInfo, NexusCategory, NexusSearchResult, NexusModFile, CollectionInstallCheckpoint } from "$lib/types";
   import {
     browseCollections,
     browseNexusMods,
@@ -461,6 +461,12 @@
   let showDlcWarning = $state(false);
   let dlcStatus = $state<DlcStatus | null>(null);
   let dlcLaunching = $state(false);
+
+  // Optional mod picker
+  let showOptionalPicker = $state(false);
+  let optionalPickerManifest = $state<(CollectionManifest & Record<string, unknown>) | null>(null);
+  type OptionalModChoice = "install" | "install_disabled" | "skip";
+  let optionalChoices = $state<Map<number, OptionalModChoice>>(new Map());
 
   // ---- Mod Browse State ----
   let browseMods = $state<NexusModInfo[]>([]);
@@ -1176,7 +1182,26 @@
       revision: selectedCollection.latest_revision ?? null,
     };
 
+    // Check for optional mods — show picker if any exist
+    const optionalMods = manifest.mods.filter((m: { optional: boolean }) => m.optional);
+    if (optionalMods.length > 0) {
+      optionalPickerManifest = manifest;
+      const choices = new Map<number, OptionalModChoice>();
+      manifest.mods.forEach((m: { optional: boolean }, i: number) => {
+        if (m.optional) choices.set(i, "install");
+      });
+      optionalChoices = choices;
+      showOptionalPicker = true;
+      return;
+    }
+
     // Check for required tools before installing
+    await checkToolsAndProceed(manifest);
+  }
+
+  async function checkToolsAndProceed(manifest: CollectionManifest & Record<string, unknown>) {
+    if (!$selectedGame) return;
+
     try {
       const manifestJson = JSON.stringify(manifest);
       const tools = await detectCollectionTools(manifestJson, $selectedGame.game_id, $selectedGame.bottle_name);
@@ -1193,6 +1218,27 @@
 
     // Check if game directory needs cleaning before install
     await checkPreInstallCleanup(manifest);
+  }
+
+  function confirmOptionalPicker() {
+    if (!optionalPickerManifest) return;
+
+    const mods = optionalPickerManifest.mods
+      .map((m: CollectionModEntry, i: number) => {
+        const choice = optionalChoices.get(i);
+        if (m.optional && choice === "skip") return null;
+        if (m.optional && choice === "install_disabled") {
+          return { ...m, install_disabled: true };
+        }
+        return m; // required mods + "install" optionals pass through
+      })
+      .filter((m): m is CollectionModEntry => m !== null);
+
+    const filtered = { ...optionalPickerManifest, mods };
+
+    showOptionalPicker = false;
+    optionalPickerManifest = null;
+    checkToolsAndProceed(filtered as CollectionManifest & Record<string, unknown>);
   }
 
   async function checkPreInstallCleanup(manifest: CollectionManifest & Record<string, unknown>) {
@@ -3093,7 +3139,7 @@
     bottleName={$selectedGame.bottle_name}
     oncontinue={() => {
       showToolsPrompt = false;
-      if (pendingManifest) proceedWithInstall(pendingManifest);
+      if (pendingManifest) checkPreInstallCleanup(pendingManifest);
     }}
     oncancel={() => {
       showToolsPrompt = false;
@@ -3101,6 +3147,86 @@
       pendingTools = [];
     }}
   />
+{/if}
+
+<!-- Optional Mod Picker Modal -->
+{#if showOptionalPicker && optionalPickerManifest}
+  <div class="modal-overlay" onclick={(e) => { if (e.target === e.currentTarget) { showOptionalPicker = false; } }} role="presentation">
+    <div class="optional-picker-modal" onclick={(e) => e.stopPropagation()} role="dialog" aria-label="Configure optional mods">
+      <div class="optional-picker-header">
+        <h3>Configure Installation</h3>
+        <p class="optional-picker-subtitle">
+          {optionalPickerManifest.mods.filter((m: { optional: boolean }) => !m.optional).length} required
+          &middot; {optionalPickerManifest.mods.filter((m: { optional: boolean }) => m.optional).length} optional mods
+        </p>
+      </div>
+
+      <div class="optional-picker-body">
+        <!-- Required mods section -->
+        <div class="optional-section">
+          <div class="optional-section-header">
+            <span class="optional-section-label">Required</span>
+          </div>
+          {#each optionalPickerManifest.mods as mod, i}
+            {#if !mod.optional}
+              <div class="optional-mod-row">
+                <svg class="optional-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--green, #22c55e)" stroke-width="2.5" stroke-linecap="round"><path d="M20 6L9 17l-5-5" /></svg>
+                <span class="optional-mod-name">{mod.name}</span>
+                <span class="optional-mod-version">{mod.version || ""}</span>
+              </div>
+            {/if}
+          {/each}
+        </div>
+
+        <!-- Optional mods section -->
+        <div class="optional-section">
+          <div class="optional-section-header">
+            <span class="optional-section-label">Optional</span>
+            <div class="optional-section-actions">
+              <button class="btn btn-ghost btn-xs" onclick={() => {
+                const c = new Map(optionalChoices);
+                optionalPickerManifest?.mods.forEach((m: { optional: boolean }, i: number) => { if (m.optional) c.set(i, "install"); });
+                optionalChoices = c;
+              }}>All</button>
+              <button class="btn btn-ghost btn-xs" onclick={() => {
+                const c = new Map(optionalChoices);
+                optionalPickerManifest?.mods.forEach((m: { optional: boolean }, i: number) => { if (m.optional) c.set(i, "skip"); });
+                optionalChoices = c;
+              }}>None</button>
+            </div>
+          </div>
+          {#each optionalPickerManifest.mods as mod, i}
+            {#if mod.optional}
+              <div class="optional-mod-row">
+                <span class="optional-mod-name">{mod.name}</span>
+                <span class="optional-mod-version">{mod.version || ""}</span>
+                <select
+                  class="optional-mod-select"
+                  value={optionalChoices.get(i) ?? "install"}
+                  onchange={(e) => {
+                    const c = new Map(optionalChoices);
+                    c.set(i, (e.currentTarget as HTMLSelectElement).value as OptionalModChoice);
+                    optionalChoices = c;
+                  }}
+                >
+                  <option value="install">Install</option>
+                  <option value="install_disabled">Install (Disabled)</option>
+                  <option value="skip">Skip</option>
+                </select>
+              </div>
+            {/if}
+          {/each}
+        </div>
+      </div>
+
+      <div class="optional-picker-footer">
+        <button class="btn btn-ghost" onclick={() => { showOptionalPicker = false; }}>Cancel</button>
+        <button class="btn btn-accent" onclick={confirmOptionalPicker}>
+          Install ({optionalPickerManifest.mods.length - Array.from(optionalChoices.values()).filter(v => v === "skip").length} mods)
+        </button>
+      </div>
+    </div>
+  </div>
 {/if}
 
 <!-- DLC Warning Modal -->
@@ -6528,5 +6654,117 @@
     color: var(--text-tertiary);
     margin-left: auto;
     font-family: var(--font-mono);
+  }
+
+  /* ---- Optional Mod Picker ---- */
+
+  .optional-picker-modal {
+    background: color-mix(in srgb, var(--bg-grouped) 75%, transparent);
+    backdrop-filter: blur(40px) saturate(1.5);
+    -webkit-backdrop-filter: blur(40px) saturate(1.5);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: var(--radius-lg, 12px);
+    width: min(600px, 90vw);
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: var(--glass-refraction, none), var(--glass-edge-shadow, none), 0 8px 32px rgba(0, 0, 0, 0.4);
+  }
+
+  .optional-picker-header {
+    padding: var(--space-4) var(--space-5);
+    border-bottom: 1px solid var(--separator);
+    flex-shrink: 0;
+  }
+
+  .optional-picker-header h3 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .optional-picker-subtitle {
+    margin: 4px 0 0;
+    font-size: 12px;
+    color: var(--text-tertiary);
+  }
+
+  .optional-picker-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: var(--space-3) var(--space-5);
+  }
+
+  .optional-section {
+    margin-bottom: var(--space-4);
+  }
+
+  .optional-section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: var(--space-2);
+  }
+
+  .optional-section-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-tertiary);
+  }
+
+  .optional-section-actions {
+    display: flex;
+    gap: 4px;
+  }
+
+  .optional-mod-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: 6px 0;
+    border-bottom: 1px solid var(--separator);
+    font-size: 13px;
+  }
+
+  .optional-mod-name {
+    flex: 1;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .optional-mod-version {
+    color: var(--text-tertiary);
+    font-size: 11px;
+    flex-shrink: 0;
+  }
+
+  .optional-check {
+    flex-shrink: 0;
+  }
+
+  .optional-mod-select {
+    flex-shrink: 0;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-size: 11px;
+    padding: 3px 8px;
+    cursor: pointer;
+    font-family: var(--font-sans);
+  }
+
+  .optional-picker-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-2);
+    padding: var(--space-3) var(--space-5);
+    border-top: 1px solid var(--separator);
+    flex-shrink: 0;
   }
 </style>

@@ -229,6 +229,8 @@ pub struct CollectionModEntry {
     pub phase: Option<u32>,
     #[serde(default, rename = "fileOverrides")]
     pub file_overrides: Vec<String>,
+    #[serde(default)]
+    pub install_disabled: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -585,7 +587,7 @@ pub async fn browse_collections(
     let variables = serde_json::json!({
         "count": count,
         "offset": offset,
-        "filter": filter,
+        "filter": serde_json::Value::Object(filter),
         "sort": sort_array,
     });
 

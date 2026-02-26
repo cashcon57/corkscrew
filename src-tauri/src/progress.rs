@@ -96,6 +96,12 @@ pub enum InstallProgress {
     Initializing {
         message: String,
     },
+    FomodRequired {
+        mod_index: usize,
+        mod_name: String,
+        correlation_id: String,
+        installer: serde_json::Value,
+    },
 }
 
 #[cfg(test)]

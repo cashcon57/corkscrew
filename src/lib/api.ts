@@ -1677,3 +1677,12 @@ export async function removeFromSteam(): Promise<void> {
 export async function isSteamDeck(): Promise<boolean> {
   return invoke("is_steam_deck");
 }
+
+// ---- FOMOD in Collection Install ----
+
+export async function submitFomodChoices(
+  correlationId: string,
+  selections: Record<string, string[]>
+): Promise<void> {
+  return invoke("submit_fomod_choices", { correlationId, selections });
+}

@@ -639,6 +639,7 @@ export interface CollectionModEntry {
   instructions: string | null;
   phase: number | null;
   fileOverrides: string[];
+  install_disabled?: boolean;
 }
 
 export interface CollectionSource {
@@ -1173,6 +1174,7 @@ export type InstallProgressEvent =
   | { kind: "stagingModStarted"; mod_index: number; mod_name: string }
   | { kind: "stagingModCompleted"; mod_index: number; mod_name: string; extracted_size?: number }
   | { kind: "stagingModFailed"; mod_index: number; mod_name: string; error: string }
+  | { kind: "fomodRequired"; mod_index: number; mod_name: string; correlation_id: string; installer: FomodInstaller }
   | { kind: "initializing"; message: string };
 
 // Collection Uninstall Progress Events

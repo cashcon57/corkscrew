@@ -2,17 +2,22 @@
   import { goto } from "$app/navigation";
   import { untrack } from "svelte";
   import { collectionInstallStatus } from "$lib/stores";
+  import type { PendingFomod } from "$lib/stores";
   import { dismissInstall } from "$lib/installService";
-  import { cancelCollectionInstall } from "$lib/api";
+  import { cancelCollectionInstall, submitFomodChoices } from "$lib/api";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { marked } from "marked";
   import DOMPurify from "dompurify";
+  import FomodWizard from "$lib/components/FomodWizard.svelte";
 
   let modLogExpanded = $state(false);
   let modLogAutoExpanded = $state(false);
   let userActionsExpanded = $state(true);
   let verboseLogExpanded = $state(false);
   let verboseLogEl: HTMLDivElement | undefined = $state();
+
+  // FOMOD wizard state
+  let activeFomod = $state<PendingFomod | null>(null);
 
   let status = $derived($collectionInstallStatus);
   let isActive = $derived(status?.active ?? false);
@@ -29,6 +34,7 @@
   let installSpeed = $derived(status?.installSpeed ?? 0);
 
   let logEntries = $derived(status?.logEntries ?? []);
+  let pendingFomods = $derived(status?.pendingFomods ?? []);
   let collectionDescription = $derived(status?.collectionDescription ?? "");
   let descriptionExpanded = $state(false);
   let renderedDescription = $derived(
@@ -641,6 +647,28 @@
       {/if}
     {/if}
 
+    <!-- FOMOD Attention Banner -->
+    {#if pendingFomods.length > 0}
+      <section class="phase-section fomod-attention-section">
+        <div class="fomod-attention-banner">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+          </svg>
+          <span class="fomod-attention-text">
+            {pendingFomods.length} mod{pendingFomods.length > 1 ? "s" : ""} need{pendingFomods.length === 1 ? "s" : ""} FOMOD configuration
+          </span>
+          <div class="fomod-attention-actions">
+            {#each pendingFomods as fomod (fomod.correlationId)}
+              <button class="btn btn-secondary btn-sm" onclick={() => { activeFomod = fomod; }}>
+                {fomod.modName}
+              </button>
+            {/each}
+          </div>
+        </div>
+      </section>
+    {/if}
+
     <!-- User Actions -->
     {#if actions.length > 0}
       <section class="phase-section actions-section">
@@ -821,12 +849,42 @@
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.5"><path d="M5 12h14" /></svg>
               {:else if mod.status === "user_action"}
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
+              {:else if mod.status === "fomod_pending"}
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
               {/if}
             </span>
             <span class="mod-name" title={mod.name}>{mod.name}</span>
             <span class="mod-status-label">{mod.status.replace("_", " ")}</span>
             {#if mod.status === "failed" && mod.error}
               <span class="mod-error" title={mod.error}>{mod.error}</span>
+            {/if}
+            {#if mod.status === "fomod_pending" && mod.fomodData}
+              <button class="btn btn-secondary btn-sm fomod-configure-btn" onclick={() => {
+                if (mod.fomodData) {
+                  activeFomod = {
+                    modIndex: mod.index,
+                    modName: mod.name,
+                    correlationId: mod.fomodData.correlationId,
+                    installer: mod.fomodData.installer,
+                  };
+                }
+              }}>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
+                Configure
+              </button>
+              <button class="btn btn-ghost btn-sm" onclick={async () => {
+                if (mod.fomodData) {
+                  try {
+                    await submitFomodChoices(mod.fomodData.correlationId, {});
+                    collectionInstallStatus.update(s => s ? {
+                      ...s,
+                      pendingFomods: (s.pendingFomods ?? []).filter(f => f.correlationId !== mod.fomodData?.correlationId),
+                    } : s);
+                  } catch { /* best effort */ }
+                }
+              }}>
+                Use Defaults
+              </button>
             {/if}
           </div>
         {/each}
@@ -884,6 +942,26 @@
       </div>
     {/if}
   </div>
+{/if}
+
+<!-- FOMOD Wizard -->
+{#if activeFomod}
+  <FomodWizard
+    installer={activeFomod.installer}
+    onComplete={async (selections) => {
+      if (!activeFomod) return;
+      const corrId = activeFomod.correlationId;
+      try {
+        await submitFomodChoices(corrId, selections);
+        collectionInstallStatus.update(s => s ? {
+          ...s,
+          pendingFomods: (s.pendingFomods ?? []).filter(f => f.correlationId !== corrId),
+        } : s);
+      } catch { /* best effort */ }
+      activeFomod = null;
+    }}
+    onCancel={() => { activeFomod = null; }}
+  />
 {/if}
 
 <!-- Cancel Confirmation Modal -->
@@ -2232,5 +2310,47 @@
     margin-top: var(--space-2);
     width: 100%;
     justify-content: center;
+  }
+
+  /* ---- FOMOD Attention Banner ---- */
+
+  .fomod-attention-section {
+    margin-bottom: var(--space-3);
+  }
+
+  .fomod-attention-banner {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    background: color-mix(in srgb, #a78bfa 10%, var(--surface));
+    border: 1px solid color-mix(in srgb, #a78bfa 30%, var(--separator));
+    border-radius: var(--radius);
+    flex-wrap: wrap;
+  }
+
+  .fomod-attention-text {
+    font-size: 13px;
+    font-weight: 600;
+    color: #a78bfa;
+    flex: 1;
+  }
+
+  .fomod-attention-actions {
+    display: flex;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+  }
+
+  /* ---- FOMOD Configure Button in Mod Log ---- */
+
+  .fomod-configure-btn {
+    flex-shrink: 0;
+  }
+
+  .mod-entry .btn-sm {
+    padding: 2px var(--space-2);
+    font-size: 11px;
+    min-height: 24px;
   }
 </style>

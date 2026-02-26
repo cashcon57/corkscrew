@@ -3,21 +3,62 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use once_cell::sync::Lazy;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
+use tokio::sync::oneshot;
 use tokio::sync::Semaphore;
 
 /// Global cancellation flag for collection installs.
 static INSTALL_CANCELLED: AtomicBool = AtomicBool::new(false);
 
+/// FOMOD selection channel type alias.
+type FomodSelections = HashMap<String, Vec<String>>;
+
+/// Registry of pending FOMOD selections from the frontend.
+static FOMOD_PENDING: Lazy<std::sync::Mutex<HashMap<String, oneshot::Sender<FomodSelections>>>> =
+    Lazy::new(|| std::sync::Mutex::new(HashMap::new()));
+
 /// Request cancellation of the currently running collection install.
 pub fn cancel_install() {
     INSTALL_CANCELLED.store(true, Ordering::SeqCst);
+    // Drain any pending FOMOD wizard channels so blocked tasks unblock immediately
+    drain_fomod_pending();
 }
 
 /// Check if install has been cancelled.
 fn is_cancelled() -> bool {
     INSTALL_CANCELLED.load(Ordering::SeqCst)
+}
+
+/// Create a FOMOD request channel and return a correlation ID + receiver.
+fn create_fomod_request() -> (String, oneshot::Receiver<FomodSelections>) {
+    let id = uuid::Uuid::new_v4().to_string();
+    let (tx, rx) = oneshot::channel();
+    FOMOD_PENDING.lock().unwrap().insert(id.clone(), tx);
+    (id, rx)
+}
+
+/// Submit FOMOD choices from the frontend for a pending request.
+pub fn submit_fomod_choices(
+    correlation_id: &str,
+    selections: FomodSelections,
+) -> Result<(), String> {
+    let tx = FOMOD_PENDING
+        .lock()
+        .unwrap()
+        .remove(correlation_id)
+        .ok_or_else(|| format!("No pending FOMOD request: {}", correlation_id))?;
+    tx.send(selections)
+        .map_err(|_| "FOMOD receiver dropped".to_string())
+}
+
+/// Drain all pending FOMOD channels (used on cancellation).
+fn drain_fomod_pending() {
+    let mut pending = FOMOD_PENDING.lock().unwrap();
+    for (_, tx) in pending.drain() {
+        drop(tx);
+    }
 }
 
 use crate::bottles;
@@ -2260,7 +2301,36 @@ async fn stage_and_deploy(
                 parse_fomod_choices(choices)
                     .unwrap_or_else(|| fomod::get_default_selections(&fomod_installer))
             } else {
-                fomod::get_default_selections(&fomod_installer)
+                // No manifest choices — ask user interactively via FOMOD wizard
+                let (correlation_id, rx) = create_fomod_request();
+
+                let _ = app.emit(
+                    INSTALL_PROGRESS_EVENT,
+                    InstallProgress::FomodRequired {
+                        mod_index,
+                        mod_name: mod_name.to_string(),
+                        correlation_id: correlation_id.clone(),
+                        installer: serde_json::to_value(&fomod_installer).unwrap_or_default(),
+                    },
+                );
+
+                match tokio::time::timeout(std::time::Duration::from_secs(600), rx).await {
+                    Ok(Ok(user_selections)) => {
+                        // Save as recipe for future reuse
+                        let _ = crate::fomod_recipes::save_recipe(
+                            db, mod_id, mod_name, None, &user_selections,
+                        );
+                        user_selections
+                    }
+                    _ => {
+                        log::warn!(
+                            "FOMOD selection timed out or dropped for '{}', using defaults",
+                            mod_name
+                        );
+                        FOMOD_PENDING.lock().unwrap().remove(&correlation_id);
+                        fomod::get_default_selections(&fomod_installer)
+                    }
+                }
             };
 
             let fomod_files = fomod::get_files_for_selections(&fomod_installer, &selections);
@@ -2422,6 +2492,11 @@ async fn stage_and_deploy(
                 return Err(InstallError::Failed(format!("Deploy failed: {}", e)));
             }
         }
+    }
+
+    // If the collection manifest marks this mod as disabled, disable it after deploy
+    if mod_entry.install_disabled {
+        let _ = db.set_enabled(mod_id, false);
     }
 
     Ok(mod_id)

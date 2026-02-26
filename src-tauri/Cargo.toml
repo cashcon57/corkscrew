@@ -1,6 +1,6 @@
 [package]
 name = "corkscrew"
-version = "1.17.1"
+version = "1.18.0"
 description = "A mod manager for CrossOver/Wine games on macOS and Linux"
 authors = ["cashconway"]
 edition = "2021"
@@ -102,6 +102,10 @@ ba2 = "3"
 image = "0.25"
 ddsfile = "0.5"
 image_dds = { version = "0.7", features = ["ddsfile", "image"] }
+
+# UUID generation (FOMOD correlation IDs)
+uuid = { version = "1", features = ["v4"] }
+once_cell = "1"
 
 [dev-dependencies]
 tempfile = "3"

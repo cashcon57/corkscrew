@@ -1930,6 +1930,7 @@ mod tests {
                     instructions: None,
                     phase: None,
                     file_overrides: vec![],
+                    install_disabled: false,
                 })
                 .collect(),
             plugins: vec![],
