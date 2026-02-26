@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tauri::{AppHandle, Emitter, Manager};
+use tokio::sync::Semaphore;
 
 // ---------------------------------------------------------------------------
 // Error types
@@ -560,7 +561,11 @@ pub async fn install_wabbajack_modlist(
     db.update_wj_install_status(install_id, "extracting", None)
         .map_err(|e| WjInstallError::Database(e.to_string()))?;
 
-    let archives_to_extract: Vec<_> = archive_download_paths.iter().collect();
+    // Collect into owned Vec for 'static spawned tasks
+    let archives_to_extract: Vec<(String, PathBuf)> = archive_download_paths
+        .iter()
+        .map(|(h, p)| (h.clone(), p.clone()))
+        .collect();
     let extraction_count = archives_to_extract.len();
 
     emit_progress(
@@ -574,43 +579,91 @@ pub async fn install_wabbajack_modlist(
     let mut extracted_dirs: HashMap<String, PathBuf> = HashMap::new();
     let extraction_temp_base = install_dir.join(".wj_extraction_temp");
 
+    // Parallel extraction: up to 6 concurrent extractions via semaphore
+    let extract_semaphore = Arc::new(Semaphore::new(6));
+    let mut extract_handles = Vec::with_capacity(extraction_count);
+
     for (idx, (hash, archive_path)) in archives_to_extract.iter().enumerate() {
+        // Check cancellation before spawning each extraction task
         if is_cancelled(&cancel_token) {
-            mark_cancelled(db, install_id);
-            emit_progress(app, &WjInstallProgressEvent::InstallCancelled);
-            return Err(WjInstallError::Cancelled);
+            break;
         }
 
-        let archive_name = archive_path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| format!("archive_{}", idx));
+        let sem = Arc::clone(&extract_semaphore);
+        let cancel = Arc::clone(&cancel_token);
+        let hash_owned = hash.clone();
+        let archive_owned = archive_path.clone();
+        let extract_dest = extraction_temp_base.join(&hash_owned);
+        let app_c = app.clone();
+        let total = extraction_count;
 
-        emit_progress(
-            app,
-            &WjInstallProgressEvent::ExtractionProgress {
-                name: archive_name.clone(),
-                index: idx,
-                total: extraction_count,
-            },
-        );
+        let handle = tokio::spawn(async move {
+            let _permit = sem.acquire().await.expect("semaphore closed");
 
-        let extract_dest = extraction_temp_base.join(hash);
+            // Check cancellation after acquiring permit
+            if cancel.load(Ordering::Relaxed) {
+                return (idx, hash_owned, Err("Cancelled".to_string()));
+            }
 
-        match crate::installer::extract_archive(archive_path, &extract_dest) {
-            Ok(_files) => {
-                extracted_dirs.insert((*hash).clone(), extract_dest);
-                log::info!(
-                    "Extracted archive {}/{}: {}",
-                    idx + 1,
-                    extraction_count,
-                    archive_name
-                );
+            let archive_name = archive_owned
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| format!("archive_{}", idx));
+
+            emit_progress(
+                &app_c,
+                &WjInstallProgressEvent::ExtractionProgress {
+                    name: archive_name.clone(),
+                    index: idx,
+                    total,
+                },
+            );
+
+            let dest = extract_dest.clone();
+            let archive_for_blocking = archive_owned.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                crate::installer::extract_archive(&archive_for_blocking, &dest)
+            })
+            .await;
+
+            match result {
+                Ok(Ok(_files)) => {
+                    log::info!(
+                        "Extracted archive {}/{}: {}",
+                        idx + 1,
+                        total,
+                        archive_name
+                    );
+                    (idx, hash_owned, Ok(extract_dest))
+                }
+                Ok(Err(e)) => {
+                    let err_msg = format!("Failed to extract '{}': {}", archive_name, e);
+                    log::error!("{}", err_msg);
+                    (idx, hash_owned, Err(err_msg))
+                }
+                Err(e) => {
+                    let err_msg = format!("Extraction task panicked for '{}': {}", archive_name, e);
+                    log::error!("{}", err_msg);
+                    (idx, hash_owned, Err(err_msg))
+                }
+            }
+        });
+
+        extract_handles.push(handle);
+    }
+
+    // Collect extraction results
+    let extract_results = futures::future::join_all(extract_handles).await;
+    for join_result in extract_results {
+        match join_result {
+            Ok((_idx, hash, Ok(extract_dir))) => {
+                extracted_dirs.insert(hash, extract_dir);
+            }
+            Ok((_idx, _hash, Err(err_msg))) => {
+                warnings.push(err_msg);
             }
             Err(e) => {
-                let err_msg = format!("Failed to extract '{}': {}", archive_name, e);
-                log::error!("{}", err_msg);
-                warnings.push(err_msg);
+                warnings.push(format!("Extraction join error: {}", e));
             }
         }
     }

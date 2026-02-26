@@ -1,8 +1,11 @@
 use crate::wabbajack_types::*;
 use log::{debug, info, warn};
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -139,14 +142,18 @@ impl DirectiveProcessor {
     ///
     /// Execution order:
     /// 1. FromArchive, PatchedFromArchive, InlineFile, RemappedInlineFile,
-    ///    TransformedTexture (file production phase)
-    /// 2. MergedPatch (depends on produced files)
-    /// 3. CreateBSA (consumes produced files into archives)
+    ///    TransformedTexture (file production phase) — **parallel via rayon**
+    /// 2. MergedPatch (depends on produced files) — sequential
+    /// 3. CreateBSA (consumes produced files into archives) — sequential
     /// 4. IgnoredDirectly (any time, no-op)
+    ///
+    /// Phase 1 directives write to unique output paths, so they can safely
+    /// run in parallel. Phases 2 and 3 depend on Phase 1 outputs and MUST
+    /// remain sequential.
     pub fn process_all(
         &self,
         directives: &[WjDirective],
-        progress_callback: &dyn Fn(usize, usize, &str),
+        progress_callback: &(dyn Fn(usize, usize, &str) + Sync),
     ) -> Result<WjDirectiveResult, WjDirectiveError> {
         // Partition directives by processing phase
         let mut phase1: Vec<&WjDirective> = Vec::new(); // File production
@@ -168,7 +175,7 @@ impl DirectiveProcessor {
         }
 
         let total = phase1.len() + phase2.len() + phase3.len() + ignored.len();
-        let mut processed: usize = 0;
+        let processed_counter = AtomicUsize::new(0);
         let mut skipped: usize = 0;
         let warnings: Vec<String> = Vec::new();
         let mut errors: Vec<String> = Vec::new();
@@ -177,25 +184,43 @@ impl DirectiveProcessor {
         for d in &ignored {
             self.process_directive(d).ok();
             skipped += 1;
-            processed += 1;
-            progress_callback(processed, total, "ignored");
+            let count = processed_counter.fetch_add(1, Ordering::Relaxed) + 1;
+            progress_callback(count, total, "ignored");
         }
 
-        // Phase 1: File production
-        for d in &phase1 {
-            match self.process_directive(d) {
-                Ok(()) => {}
-                Err(e) => {
+        // Phase 1: File production — parallel via rayon
+        let phase1_errors = Mutex::new(Vec::new());
+        let num_threads = std::thread::available_parallelism()
+            .map(|n| n.get().min(8))
+            .unwrap_or(4);
+
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()
+            .unwrap_or_else(|_| {
+                rayon::ThreadPoolBuilder::new()
+                    .build()
+                    .expect("failed to build default rayon pool")
+            });
+
+        pool.install(|| {
+            phase1.par_iter().for_each(|d| {
+                if let Err(e) = self.process_directive(d) {
                     let msg = format!("{} -> {}: {}", d.kind_name(), d.to_path(), e);
                     warn!("Directive error: {}", msg);
-                    errors.push(msg);
+                    phase1_errors.lock().unwrap().push(msg);
                 }
-            }
-            processed += 1;
-            progress_callback(processed, total, "files");
-        }
 
-        // Phase 2: Merged patches
+                let count = processed_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                if count.is_multiple_of(10) || count == total {
+                    progress_callback(count, total, "files");
+                }
+            });
+        });
+
+        errors.extend(phase1_errors.into_inner().unwrap());
+
+        // Phase 2: Merged patches (sequential — depends on Phase 1 outputs)
         for d in &phase2 {
             match self.process_directive(d) {
                 Ok(()) => {}
@@ -205,11 +230,11 @@ impl DirectiveProcessor {
                     errors.push(msg);
                 }
             }
-            processed += 1;
-            progress_callback(processed, total, "patches");
+            let count = processed_counter.fetch_add(1, Ordering::Relaxed) + 1;
+            progress_callback(count, total, "patches");
         }
 
-        // Phase 3: BSA creation
+        // Phase 3: BSA creation (sequential — consumes produced files)
         for d in &phase3 {
             match self.process_directive(d) {
                 Ok(()) => {}
@@ -219,9 +244,11 @@ impl DirectiveProcessor {
                     errors.push(msg);
                 }
             }
-            processed += 1;
-            progress_callback(processed, total, "archives");
+            let count = processed_counter.fetch_add(1, Ordering::Relaxed) + 1;
+            progress_callback(count, total, "archives");
         }
+
+        let processed = processed_counter.load(Ordering::Relaxed);
 
         Ok(WjDirectiveResult {
             total_processed: processed - skipped - errors.len(),
