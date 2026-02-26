@@ -4,7 +4,7 @@ use rayon::prelude::*;
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 // ---------------------------------------------------------------------------
@@ -153,7 +153,7 @@ impl DirectiveProcessor {
     pub fn process_all(
         &self,
         directives: &[WjDirective],
-        progress_callback: &(dyn Fn(usize, usize, &str) + Sync),
+        progress_callback: &(dyn Fn(usize, usize, &str, u64, u64) + Sync),
     ) -> Result<WjDirectiveResult, WjDirectiveError> {
         // Partition directives by processing phase
         let mut phase1: Vec<&WjDirective> = Vec::new(); // File production
@@ -176,6 +176,8 @@ impl DirectiveProcessor {
 
         let total = phase1.len() + phase2.len() + phase3.len() + ignored.len();
         let processed_counter = AtomicUsize::new(0);
+        let bytes_processed = AtomicU64::new(0);
+        let total_bytes: u64 = directives.iter().map(|d| d.size().max(0) as u64).sum();
         let mut skipped: usize = 0;
         let warnings: Vec<String> = Vec::new();
         let mut errors: Vec<String> = Vec::new();
@@ -184,8 +186,9 @@ impl DirectiveProcessor {
         for d in &ignored {
             self.process_directive(d).ok();
             skipped += 1;
+            bytes_processed.fetch_add(d.size().max(0) as u64, Ordering::Relaxed);
             let count = processed_counter.fetch_add(1, Ordering::Relaxed) + 1;
-            progress_callback(count, total, "ignored");
+            progress_callback(count, total, "ignored", bytes_processed.load(Ordering::Relaxed), total_bytes);
         }
 
         // Phase 1: File production — parallel via rayon
@@ -211,9 +214,10 @@ impl DirectiveProcessor {
                     phase1_errors.lock().unwrap().push(msg);
                 }
 
+                bytes_processed.fetch_add(d.size().max(0) as u64, Ordering::Relaxed);
                 let count = processed_counter.fetch_add(1, Ordering::Relaxed) + 1;
                 if count.is_multiple_of(10) || count == total {
-                    progress_callback(count, total, "files");
+                    progress_callback(count, total, "files", bytes_processed.load(Ordering::Relaxed), total_bytes);
                 }
             });
         });
@@ -230,8 +234,9 @@ impl DirectiveProcessor {
                     errors.push(msg);
                 }
             }
+            bytes_processed.fetch_add(d.size().max(0) as u64, Ordering::Relaxed);
             let count = processed_counter.fetch_add(1, Ordering::Relaxed) + 1;
-            progress_callback(count, total, "patches");
+            progress_callback(count, total, "patches", bytes_processed.load(Ordering::Relaxed), total_bytes);
         }
 
         // Phase 3: BSA creation (sequential — consumes produced files)
@@ -244,8 +249,9 @@ impl DirectiveProcessor {
                     errors.push(msg);
                 }
             }
+            bytes_processed.fetch_add(d.size().max(0) as u64, Ordering::Relaxed);
             let count = processed_counter.fetch_add(1, Ordering::Relaxed) + 1;
-            progress_callback(count, total, "archives");
+            progress_callback(count, total, "archives", bytes_processed.load(Ordering::Relaxed), total_bytes);
         }
 
         let processed = processed_counter.load(Ordering::Relaxed);

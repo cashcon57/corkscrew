@@ -1045,11 +1045,17 @@ pub async fn install_collection(
     let mut temp_guard = TempDirGuard::new();
 
     if !archives_to_extract.is_empty() {
+        let total_staging_bytes: u64 = archives_to_extract
+            .iter()
+            .filter_map(|(idx, _, _)| manifest.mods.get(*idx).and_then(|m| m.source.file_size))
+            .sum();
+
         let _ = app.emit(
             INSTALL_PROGRESS_EVENT,
             InstallProgress::StagingPhaseStarted {
                 total_mods: archives_to_extract.len(),
                 max_concurrent: max_extract,
+                total_bytes: total_staging_bytes,
             },
         );
 
@@ -1068,6 +1074,7 @@ pub async fn install_collection(
             let idx = *install_idx;
             let app_c = app.clone();
             let name = mod_name.clone();
+            let arc_size = manifest.mods.get(idx).and_then(|m| m.source.file_size).unwrap_or(0);
 
             let handle = tokio::spawn(async move {
                 let _permit = sem.acquire().await.expect("semaphore closed");
@@ -1082,6 +1089,7 @@ pub async fn install_collection(
                     InstallProgress::StagingModStarted {
                         mod_index: idx,
                         mod_name: name.clone(),
+                        archive_size: arc_size,
                     },
                 );
 
@@ -1116,11 +1124,18 @@ pub async fn install_collection(
 
                 match result {
                     Ok(Ok(Ok(dir))) => {
+                        let extracted_size: u64 = walkdir::WalkDir::new(&dir)
+                            .into_iter()
+                            .filter_map(|e| e.ok())
+                            .filter(|e| e.file_type().is_file())
+                            .map(|e| e.metadata().map(|m| m.len()).unwrap_or(0))
+                            .sum();
                         let _ = app_c.emit(
                             INSTALL_PROGRESS_EVENT,
                             InstallProgress::StagingModCompleted {
                                 mod_index: idx,
                                 mod_name: name,
+                                extracted_size,
                             },
                         );
                         Some((idx, dir))

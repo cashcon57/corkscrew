@@ -76,14 +76,17 @@ pub enum InstallProgress {
     StagingPhaseStarted {
         total_mods: usize,
         max_concurrent: usize,
+        total_bytes: u64,
     },
     StagingModStarted {
         mod_index: usize,
         mod_name: String,
+        archive_size: u64,
     },
     StagingModCompleted {
         mod_index: usize,
         mod_name: String,
+        extracted_size: u64,
     },
     StagingModFailed {
         mod_index: usize,

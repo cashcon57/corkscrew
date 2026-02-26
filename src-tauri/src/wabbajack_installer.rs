@@ -20,7 +20,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tauri::{AppHandle, Emitter, Manager};
@@ -115,26 +115,49 @@ pub enum WjInstallProgressEvent {
     },
     ExtractionStarted {
         total: usize,
+        total_bytes: u64,
     },
     ExtractionProgress {
         name: String,
         index: usize,
         total: usize,
+        bytes_completed: u64,
+        total_bytes: u64,
+    },
+    ExtractionArchiveStarted {
+        name: String,
+        index: usize,
+        total: usize,
+        size: u64,
+    },
+    ExtractionArchiveCompleted {
+        name: String,
+        index: usize,
+    },
+    ExtractionArchiveFailed {
+        name: String,
+        error: String,
     },
     DirectivePhaseStarted {
         total: usize,
+        total_bytes: u64,
     },
     DirectiveProgress {
         current: usize,
         total: usize,
         directive_type: String,
+        bytes_processed: u64,
+        total_bytes: u64,
     },
     DeployStarted {
         total: usize,
+        total_bytes: u64,
     },
     DeployProgress {
         current: usize,
         total: usize,
+        bytes_deployed: u64,
+        total_bytes: u64,
     },
     InstallCompleted {
         result: WjInstallResult,
@@ -568,10 +591,22 @@ pub async fn install_wabbajack_modlist(
         .collect();
     let extraction_count = archives_to_extract.len();
 
+    // Build hash→size map for byte-level progress
+    let archive_size_map: HashMap<String, u64> = modlist
+        .archives
+        .iter()
+        .map(|a| (a.hash.0.clone(), a.size))
+        .collect();
+    let total_extract_bytes: u64 = archives_to_extract
+        .iter()
+        .filter_map(|(hash, _)| archive_size_map.get(hash))
+        .sum();
+
     emit_progress(
         app,
         &WjInstallProgressEvent::ExtractionStarted {
             total: extraction_count,
+            total_bytes: total_extract_bytes,
         },
     );
 
@@ -581,6 +616,7 @@ pub async fn install_wabbajack_modlist(
 
     // Parallel extraction: up to 6 concurrent extractions via semaphore
     let extract_semaphore = Arc::new(Semaphore::new(6));
+    let extract_bytes_completed = Arc::new(AtomicU64::new(0));
     let mut extract_handles = Vec::with_capacity(extraction_count);
 
     for (idx, (hash, archive_path)) in archives_to_extract.iter().enumerate() {
@@ -591,11 +627,14 @@ pub async fn install_wabbajack_modlist(
 
         let sem = Arc::clone(&extract_semaphore);
         let cancel = Arc::clone(&cancel_token);
+        let bytes_completed = Arc::clone(&extract_bytes_completed);
         let hash_owned = hash.clone();
         let archive_owned = archive_path.clone();
         let extract_dest = extraction_temp_base.join(&hash_owned);
         let app_c = app.clone();
         let total = extraction_count;
+        let archive_size = archive_size_map.get(hash).copied().unwrap_or(0);
+        let total_bytes = total_extract_bytes;
 
         let handle = tokio::spawn(async move {
             let _permit = sem.acquire().await.expect("semaphore closed");
@@ -612,10 +651,11 @@ pub async fn install_wabbajack_modlist(
 
             emit_progress(
                 &app_c,
-                &WjInstallProgressEvent::ExtractionProgress {
+                &WjInstallProgressEvent::ExtractionArchiveStarted {
                     name: archive_name.clone(),
                     index: idx,
                     total,
+                    size: archive_size,
                 },
             );
 
@@ -628,6 +668,24 @@ pub async fn install_wabbajack_modlist(
 
             match result {
                 Ok(Ok(_files)) => {
+                    let completed = bytes_completed.fetch_add(archive_size, Ordering::Relaxed) + archive_size;
+                    emit_progress(
+                        &app_c,
+                        &WjInstallProgressEvent::ExtractionProgress {
+                            name: archive_name.clone(),
+                            index: idx,
+                            total,
+                            bytes_completed: completed,
+                            total_bytes,
+                        },
+                    );
+                    emit_progress(
+                        &app_c,
+                        &WjInstallProgressEvent::ExtractionArchiveCompleted {
+                            name: archive_name.clone(),
+                            index: idx,
+                        },
+                    );
                     log::info!(
                         "Extracted archive {}/{}: {}",
                         idx + 1,
@@ -639,11 +697,25 @@ pub async fn install_wabbajack_modlist(
                 Ok(Err(e)) => {
                     let err_msg = format!("Failed to extract '{}': {}", archive_name, e);
                     log::error!("{}", err_msg);
+                    emit_progress(
+                        &app_c,
+                        &WjInstallProgressEvent::ExtractionArchiveFailed {
+                            name: archive_name,
+                            error: err_msg.clone(),
+                        },
+                    );
                     (idx, hash_owned, Err(err_msg))
                 }
                 Err(e) => {
                     let err_msg = format!("Extraction task panicked for '{}': {}", archive_name, e);
                     log::error!("{}", err_msg);
+                    emit_progress(
+                        &app_c,
+                        &WjInstallProgressEvent::ExtractionArchiveFailed {
+                            name: archive_name,
+                            error: err_msg.clone(),
+                        },
+                    );
                     (idx, hash_owned, Err(err_msg))
                 }
             }
@@ -681,10 +753,17 @@ pub async fn install_wabbajack_modlist(
     db.update_wj_install_status(install_id, "processing", None)
         .map_err(|e| WjInstallError::Database(e.to_string()))?;
 
+    let total_directive_bytes: u64 = modlist
+        .directives
+        .iter()
+        .map(|d| d.size().max(0) as u64)
+        .sum();
+
     emit_progress(
         app,
         &WjInstallProgressEvent::DirectivePhaseStarted {
             total: total_directives,
+            total_bytes: total_directive_bytes,
         },
     );
 
@@ -716,7 +795,7 @@ pub async fn install_wabbajack_modlist(
         _ => 50,
     };
     let directive_result = processor
-        .process_all(&modlist.directives, &|current, total, phase| {
+        .process_all(&modlist.directives, &|current, total, phase, bytes_processed, total_bytes| {
             if current % progress_interval == 0 || current == total {
                 emit_progress(
                     &app_clone,
@@ -724,6 +803,8 @@ pub async fn install_wabbajack_modlist(
                         current,
                         total,
                         directive_type: phase.to_string(),
+                        bytes_processed,
+                        total_bytes,
                     },
                 );
             }
@@ -784,10 +865,16 @@ pub async fn install_wabbajack_modlist(
         }
     }
 
+    let total_deploy_bytes: u64 = deploy_files
+        .iter()
+        .filter_map(|f| std::fs::metadata(install_dir.join(f)).map(|m| m.len()).ok())
+        .sum();
+
     emit_progress(
         app,
         &WjInstallProgressEvent::DeployStarted {
             total: deploy_files.len(),
+            total_bytes: total_deploy_bytes,
         },
     );
 
@@ -822,6 +909,8 @@ pub async fn install_wabbajack_modlist(
                     &WjInstallProgressEvent::DeployProgress {
                         current: deploy_result.deployed_count,
                         total: deploy_files.len(),
+                        bytes_deployed: total_deploy_bytes,
+                        total_bytes: total_deploy_bytes,
                     },
                 );
 
