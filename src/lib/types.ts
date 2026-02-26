@@ -1237,16 +1237,29 @@ export type WjInstallProgressEvent =
   | { type: "DownloadCompleted"; name: string }
   | { type: "DownloadFailed"; name: string; error: string }
   | { type: "DownloadSkipped"; name: string; reason: string }
-  | { type: "ExtractionStarted"; total: number }
-  | { type: "ExtractionProgress"; name: string; index: number; total: number }
-  | { type: "DirectivePhaseStarted"; total: number }
-  | { type: "DirectiveProgress"; current: number; total: number; directive_type: string }
-  | { type: "DeployStarted"; total: number }
-  | { type: "DeployProgress"; current: number; total: number }
+  | { type: "ExtractionStarted"; total: number; total_bytes: number }
+  | { type: "ExtractionProgress"; name: string; index: number; total: number; bytes_completed: number; total_bytes: number }
+  | { type: "ExtractionArchiveStarted"; name: string; index: number; total: number; size: number }
+  | { type: "ExtractionArchiveCompleted"; name: string; index: number }
+  | { type: "ExtractionArchiveFailed"; name: string; error: string }
+  | { type: "DirectivePhaseStarted"; total: number; total_bytes: number }
+  | { type: "DirectiveProgress"; current: number; total: number; directive_type: string; bytes_processed: number; total_bytes: number }
+  | { type: "DeployStarted"; total: number; total_bytes: number }
+  | { type: "DeployProgress"; current: number; total: number; bytes_deployed: number; total_bytes: number }
   | { type: "InstallCompleted"; result: WjInstallResult }
   | { type: "InstallFailed"; error: string }
   | { type: "InstallCancelled" }
   | { type: "UserActionRequired"; archive_name: string; url: string; prompt: string };
+
+export interface WjArchiveStatus {
+  name: string;
+  index: number;
+  size: number;
+  status: "pending" | "downloading" | "downloaded" | "extracting" | "extracted" | "failed" | "skipped";
+  downloadBytes?: number;
+  downloadTotal?: number;
+  error?: string;
+}
 
 // Wabbajack Install Status (for resume)
 export interface WabbajackInstallStatus {

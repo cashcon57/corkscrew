@@ -17,7 +17,8 @@
     getPendingWabbajackInstalls,
   } from "$lib/api";
   import { showError, showSuccess, selectedGame } from "$lib/stores";
-  import type { ModlistSummary, ParsedModlist, RequiredTool, WabbajackInstallStatus, WjInstallProgressEvent } from "$lib/types";
+  import type { ModlistSummary, ParsedModlist, RequiredTool, WabbajackInstallStatus, WjArchiveStatus, WjInstallProgressEvent } from "$lib/types";
+  import { SpeedTracker } from "$lib/speedTracker";
   import { marked } from "marked";
   import DOMPurify from "dompurify";
   import { bbcodeToHtml } from "$lib/bbcode";
@@ -71,6 +72,18 @@
   let wjTotal = $state(0);
   let wjCurrentFile = $state("");
   let wjUnlisten: UnlistenFn | null = null;
+
+  // Speed tracking
+  let wjSpeedTracker = new SpeedTracker();
+  let wjStartTime = $state(0);
+  let wjElapsed = $state("");
+  let wjSpeed = $state(0);
+  let wjEta = $state("");
+  let wjTotalBytes = $state(0);
+  let wjBytesCompleted = $state(0);
+  let wjOverallProgress = $state(0);
+  let wjArchives = $state<WjArchiveStatus[]>([]);
+  let wjElapsedTimer: ReturnType<typeof setInterval> | null = null;
 
   // Resume banner state
   let pendingWjInstall = $state<WabbajackInstallStatus | null>(null);
@@ -347,6 +360,25 @@
     wjCurrent = 0;
     wjTotal = 0;
     wjCurrentFile = "";
+    wjStartTime = Date.now();
+    wjElapsed = "0s";
+    wjArchives = [];
+    wjSpeed = 0;
+    wjEta = "";
+    wjTotalBytes = 0;
+    wjBytesCompleted = 0;
+    wjOverallProgress = 0;
+    wjSpeedTracker.reset();
+    wjElapsedTimer = setInterval(() => {
+      wjElapsed = SpeedTracker.formatElapsed(wjStartTime);
+      // Compute overall progress as weighted average
+      // Download=30%, Extraction=20%, Directives=30%, Deploy=20%
+      if (wjPhase === "downloading" && wjTotal > 0) wjOverallProgress = Math.round((wjCurrent / wjTotal) * 30);
+      else if (wjPhase === "extracting" && wjTotal > 0) wjOverallProgress = 30 + Math.round((wjCurrent / wjTotal) * 20);
+      else if (wjPhase === "directives" && wjTotal > 0) wjOverallProgress = 50 + Math.round((wjCurrent / wjTotal) * 30);
+      else if (wjPhase === "deploying" && wjTotal > 0) wjOverallProgress = 80 + Math.round((wjCurrent / wjTotal) * 20);
+      else if (wjPhase === "done") wjOverallProgress = 100;
+    }, 1000);
 
     // Determine paths
     let downloadDir: string;
@@ -379,6 +411,8 @@
             wjPhase = "downloading";
             wjTotal = p.total;
             wjCurrent = 0;
+            wjSpeedTracker.reset();
+            wjBytesCompleted = 0;
             installStep = `Downloading archives (0/${p.total})...`;
             break;
           case "DownloadStarted":
@@ -387,10 +421,14 @@
             installStep = `Downloading ${p.name} (${wjCurrent}/${wjTotal})...`;
             break;
           case "DownloadProgress":
-            // Update with byte progress for current file
             if (p.total_bytes > 0) {
-              const pct = Math.round((p.bytes / p.total_bytes) * 100);
-              installStep = `Downloading ${p.name} — ${pct}% (${wjCurrent}/${wjTotal})`;
+              wjBytesCompleted = p.bytes;
+              wjTotalBytes = p.total_bytes;
+              wjSpeed = wjSpeedTracker.update(p.bytes);
+              wjEta = SpeedTracker.formatEta(p.total_bytes - p.bytes, wjSpeed);
+              const dlPct = Math.round((p.bytes / p.total_bytes) * 100);
+              const dlSpeedStr = SpeedTracker.formatSpeed(wjSpeed);
+              installStep = `Downloading ${p.name} — ${dlPct}%${dlSpeedStr ? ` — ${dlSpeedStr}` : ""} (${wjCurrent}/${wjTotal})`;
             }
             break;
           case "DownloadCompleted":
@@ -406,32 +444,75 @@
             wjPhase = "extracting";
             wjTotal = p.total;
             wjCurrent = 0;
+            wjTotalBytes = p.total_bytes ?? 0;
+            wjBytesCompleted = 0;
+            wjSpeedTracker.reset();
             installStep = `Extracting archives (0/${p.total})...`;
+            break;
+          case "ExtractionArchiveStarted":
+            wjArchives = [...wjArchives.filter(a => a.index !== p.index), { name: p.name, index: p.index, size: p.size, status: "extracting" as const }].sort((a, b) => a.index - b.index);
+            wjCurrentFile = p.name;
+            installStep = `Extracting ${p.name} (${wjCurrent + 1}/${wjTotal})...`;
+            break;
+          case "ExtractionArchiveCompleted":
+            wjArchives = wjArchives.map(a => a.index === p.index ? { ...a, status: "extracted" as const } : a);
+            break;
+          case "ExtractionArchiveFailed":
+            wjArchives = wjArchives.map(a => a.name === p.name ? { ...a, status: "failed" as const, error: p.error } : a);
             break;
           case "ExtractionProgress":
             wjCurrent = p.index + 1;
             wjCurrentFile = p.name;
-            installStep = `Extracting ${p.name} (${wjCurrent}/${wjTotal})...`;
+            if (p.total_bytes > 0) {
+              wjBytesCompleted = p.bytes_completed ?? 0;
+              wjTotalBytes = p.total_bytes;
+              wjSpeed = wjSpeedTracker.update(wjBytesCompleted);
+              const extSpeedStr = SpeedTracker.formatSpeed(wjSpeed);
+              installStep = `Extracting ${p.name}${extSpeedStr ? ` — ${extSpeedStr}` : ""} (${wjCurrent}/${wjTotal})`;
+            } else {
+              installStep = `Extracting ${p.name} (${wjCurrent}/${wjTotal})...`;
+            }
             break;
           case "DirectivePhaseStarted":
             wjPhase = "directives";
             wjTotal = p.total;
             wjCurrent = 0;
+            wjTotalBytes = p.total_bytes ?? 0;
+            wjBytesCompleted = 0;
+            wjSpeedTracker.reset();
             installStep = `Processing directives (0/${p.total.toLocaleString()})...`;
             break;
           case "DirectiveProgress":
             wjCurrent = p.current;
-            installStep = `Processing ${p.directive_type} (${p.current.toLocaleString()}/${p.total.toLocaleString()})...`;
+            if (p.total_bytes > 0 && p.bytes_processed > 0) {
+              wjBytesCompleted = p.bytes_processed;
+              wjTotalBytes = p.total_bytes;
+              wjSpeed = wjSpeedTracker.update(p.bytes_processed);
+              const dirSpeedStr = SpeedTracker.formatSpeed(wjSpeed);
+              installStep = `Processing ${p.directive_type} — ${SpeedTracker.formatBytes(p.bytes_processed)} / ${SpeedTracker.formatBytes(p.total_bytes)}${dirSpeedStr ? ` — ${dirSpeedStr}` : ""} (${p.current.toLocaleString()}/${p.total.toLocaleString()})`;
+            } else {
+              installStep = `Processing ${p.directive_type} (${p.current.toLocaleString()}/${p.total.toLocaleString()})...`;
+            }
             break;
           case "DeployStarted":
             wjPhase = "deploying";
             wjTotal = p.total;
             wjCurrent = 0;
+            wjTotalBytes = p.total_bytes ?? 0;
+            wjBytesCompleted = 0;
+            wjSpeedTracker.reset();
             installStep = `Deploying files (0/${p.total.toLocaleString()})...`;
             break;
           case "DeployProgress":
             wjCurrent = p.current;
-            installStep = `Deploying files (${p.current.toLocaleString()}/${p.total.toLocaleString()})...`;
+            if (p.total_bytes > 0 && p.bytes_deployed > 0) {
+              wjBytesCompleted = p.bytes_deployed;
+              wjSpeed = wjSpeedTracker.update(p.bytes_deployed);
+              const depSpeedStr = SpeedTracker.formatSpeed(wjSpeed);
+              installStep = `Deploying files — ${SpeedTracker.formatBytes(p.bytes_deployed)} / ${SpeedTracker.formatBytes(p.total_bytes)}${depSpeedStr ? ` — ${depSpeedStr}` : ""} (${p.current.toLocaleString()}/${p.total.toLocaleString()})`;
+            } else {
+              installStep = `Deploying files (${p.current.toLocaleString()}/${p.total.toLocaleString()})...`;
+            }
             break;
           case "InstallCompleted": {
             const r = p.result;
@@ -485,6 +566,10 @@
     if (wjUnlisten) {
       wjUnlisten();
       wjUnlisten = null;
+    }
+    if (wjElapsedTimer) {
+      clearInterval(wjElapsedTimer);
+      wjElapsedTimer = null;
     }
     if (wjInstallId !== null) {
       cleanupWabbajackInstall(wjInstallId).catch(() => {});
@@ -881,6 +966,7 @@
             <p class="install-note">Select a game in the sidebar to begin installation.</p>
           {:else if installing}
             <div class="wj-progress-section">
+              <!-- Overall header with phase + speed + elapsed -->
               <div class="wj-progress-header">
                 <span class="wj-phase-label">
                   {#if wjPhase === "preflight"}Preflight
@@ -888,11 +974,34 @@
                   {:else if wjPhase === "extracting"}Extracting
                   {:else if wjPhase === "directives"}Processing
                   {:else if wjPhase === "deploying"}Deploying
+                  {:else if wjPhase === "done"}Complete
                   {:else}Starting...
                   {/if}
                 </span>
-                <button class="btn btn-ghost btn-sm" onclick={handleCancelInstall}>Cancel</button>
+                {#if wjSpeed > 0}
+                  <span class="wj-speed-badge">{SpeedTracker.formatSpeed(wjSpeed)}</span>
+                {/if}
+                {#if wjEta}
+                  <span class="wj-eta-badge">{wjEta}</span>
+                {/if}
+                {#if wjElapsed && wjPhase !== "done"}
+                  <span class="wj-elapsed-badge">{wjElapsed}</span>
+                {/if}
+                <button class="btn btn-ghost btn-sm" style="margin-left: auto;" onclick={handleCancelInstall}>Cancel</button>
               </div>
+
+              <!-- Overall progress bar -->
+              {#if wjOverallProgress > 0}
+                <div class="wj-progress-bar-track wj-overall-track">
+                  <div
+                    class="wj-progress-bar-fill wj-overall-fill"
+                    style="width: {wjOverallProgress}%"
+                  ></div>
+                </div>
+                <div class="wj-overall-label">{wjOverallProgress}% overall</div>
+              {/if}
+
+              <!-- Phase progress bar -->
               {#if wjTotal > 0}
                 <div class="wj-progress-bar-track">
                   <div
@@ -902,11 +1011,40 @@
                 </div>
                 <div class="wj-progress-counts">
                   <span>{wjCurrent.toLocaleString()} / {wjTotal.toLocaleString()}</span>
+                  {#if wjTotalBytes > 0}
+                    <span class="wj-bytes-progress">{SpeedTracker.formatBytes(wjBytesCompleted)} / {SpeedTracker.formatBytes(wjTotalBytes)}</span>
+                  {/if}
                   {#if wjCurrentFile}
                     <span class="wj-progress-filename" title={wjCurrentFile}>{wjCurrentFile}</span>
                   {/if}
                 </div>
               {/if}
+
+              <!-- Per-archive status list (during extraction phase) -->
+              {#if wjArchives.length > 0 && (wjPhase === "extracting")}
+                <div class="wj-archive-list">
+                  {#each wjArchives as archive (archive.index)}
+                    <div class="wj-archive-item" class:wj-archive-done={archive.status === "extracted" || archive.status === "downloaded"} class:wj-archive-active={archive.status === "extracting" || archive.status === "downloading"} class:wj-archive-failed={archive.status === "failed"}>
+                      <span class="wj-archive-status">
+                        {#if archive.status === "extracting" || archive.status === "downloading"}
+                          <span class="spinner-xs"></span>
+                        {:else if archive.status === "extracted" || archive.status === "downloaded"}
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--system-green, #34C759)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                        {:else if archive.status === "failed"}
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--system-red, #FF3B30)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                        {:else}
+                          <span class="wj-archive-pending-dot"></span>
+                        {/if}
+                      </span>
+                      <span class="wj-archive-name" title={archive.name}>{archive.name}</span>
+                      {#if archive.size > 0}
+                        <span class="wj-archive-size">{SpeedTracker.formatBytes(archive.size)}</span>
+                      {/if}
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+
               {#if installStep}
                 <p class="install-note">{installStep}</p>
               {/if}
@@ -1910,7 +2048,8 @@
   .wj-progress-header {
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    gap: var(--space-2);
+    flex-wrap: wrap;
   }
 
   .wj-phase-label {
@@ -1965,6 +2104,129 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     color: var(--text-tertiary);
+  }
+
+  .wj-speed-badge,
+  .wj-eta-badge,
+  .wj-elapsed-badge {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .wj-speed-badge {
+    background: color-mix(in srgb, var(--system-accent, #007AFF) 15%, transparent);
+    color: var(--system-accent, #007AFF);
+  }
+
+  .wj-eta-badge {
+    background: color-mix(in srgb, var(--text-secondary) 10%, transparent);
+    color: var(--text-secondary);
+  }
+
+  .wj-elapsed-badge {
+    background: color-mix(in srgb, var(--text-tertiary) 10%, transparent);
+    color: var(--text-tertiary);
+  }
+
+  .wj-overall-track {
+    height: 3px;
+    margin-bottom: 2px;
+  }
+
+  .wj-overall-fill {
+    background: var(--system-green, #34C759);
+  }
+
+  .wj-overall-label {
+    font-size: 10px;
+    color: var(--text-tertiary);
+    text-align: right;
+    margin-bottom: var(--space-2);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .wj-bytes-progress {
+    font-size: 11px;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .wj-archive-list {
+    max-height: 200px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-top: var(--space-2);
+    padding: var(--space-2);
+    background: var(--surface-secondary, rgba(255,255,255,0.03));
+    border-radius: 6px;
+  }
+
+  .wj-archive-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: 3px 6px;
+    border-radius: 4px;
+    font-size: 12px;
+    transition: opacity 0.2s;
+  }
+
+  .wj-archive-done {
+    opacity: 0.5;
+  }
+
+  .wj-archive-active {
+    background: color-mix(in srgb, var(--system-accent, #007AFF) 8%, transparent);
+  }
+
+  .wj-archive-failed {
+    background: color-mix(in srgb, var(--system-red, #FF3B30) 8%, transparent);
+  }
+
+  .wj-archive-status {
+    width: 16px;
+    height: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+
+  .wj-archive-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-primary);
+  }
+
+  .wj-archive-size {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+  }
+
+  .wj-archive-pending-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--text-tertiary);
+    opacity: 0.4;
+  }
+
+  .spinner-xs {
+    width: 12px;
+    height: 12px;
+    border: 2px solid var(--surface-hover, rgba(255,255,255,0.1));
+    border-top-color: var(--system-accent, #007AFF);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
   }
 
   .header-right {
