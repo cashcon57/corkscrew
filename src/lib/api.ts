@@ -388,6 +388,13 @@ export async function redeployAllMods(
   return invoke("redeploy_all_mods", { gameId, bottleName });
 }
 
+export async function checkDeploymentHealth(
+  gameId: string,
+  bottleName: string
+): Promise<DeploymentHealth> {
+  return invoke("check_deployment_health", { gameId, bottleName });
+}
+
 export async function purgeDeployment(
   gameId: string,
   bottleName: string

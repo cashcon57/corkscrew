@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
-  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, checkModToolUpdate, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads, checkSteamStatus, addToSteam, removeFromSteam, scanGameDirectory, cleanGameDirectory } from "$lib/api";
-  import type { CleanReport, CleanResult } from "$lib/types";
+  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, checkModToolUpdate, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads, checkSteamStatus, addToSteam, removeFromSteam, scanGameDirectory, cleanGameDirectory, checkSkyrimVersion, downgradeSkyrim, checkDeploymentHealth, redeployAllMods } from "$lib/api";
+  import type { CleanReport, CleanResult, DowngradeStatus, DeploymentHealth } from "$lib/types";
   import type { SteamStatus } from "$lib/types";
   import { config, showError, showSuccess, selectedGame, skseStatus, currentPage, appVersion, updateReady, updateVersion, updateNotes, updateChecking, updateError, triggerUpdateCheck, controllerMode } from "$lib/stores";
   import type { AppConfig, ModTool, PlatformInfo, ToolInstallProgress, ToolUpdateInfo } from "$lib/types";
@@ -77,6 +77,16 @@
   let toolProgress = $state<Record<string, ToolInstallProgress>>({});
   let checkingUpdate = $state<string | null>(null);
   let toolUpdateResults = $state<Record<string, ToolUpdateInfo>>({});
+
+  // Downgrader
+  let downgradeStatus = $state<DowngradeStatus | null>(null);
+  let downgrading = $state(false);
+  let checkingDowngrade = $state(false);
+
+  // Deployment health
+  let deployHealth = $state<DeploymentHealth | null>(null);
+  let checkingHealth = $state(false);
+  let redeploying = $state(false);
 
   const game = $derived($selectedGame);
   const skse = $derived($skseStatus);
@@ -238,7 +248,73 @@
       steamStatus = await checkSteamStatus();
     } catch { /* not on Linux or Steam not available */ }
 
+    // Check Skyrim version / downgrade status
+    if (game && isSkyrim) {
+      try {
+        downgradeStatus = await checkSkyrimVersion(game.game_id, game.bottle_name);
+      } catch { /* ignore */ }
+    }
+
+    // Check deployment health
+    if (game) {
+      try {
+        deployHealth = await checkDeploymentHealth(game.game_id, game.bottle_name);
+      } catch { /* ignore */ }
+    }
+
   });
+
+  async function handleDowngrade() {
+    if (!game) return;
+    downgrading = true;
+    try {
+      const status = await downgradeSkyrim(game.game_id, game.bottle_name, "full");
+      downgradeStatus = status;
+      showSuccess(`Game downgraded to v${status.target_version}`);
+    } catch (e: unknown) {
+      showError(`Downgrade failed: ${e}`);
+    } finally {
+      downgrading = false;
+    }
+  }
+
+  async function handleRefreshDowngradeStatus() {
+    if (!game) return;
+    checkingDowngrade = true;
+    try {
+      downgradeStatus = await checkSkyrimVersion(game.game_id, game.bottle_name);
+    } catch (e: unknown) {
+      showError(`Failed to check version: ${e}`);
+    } finally {
+      checkingDowngrade = false;
+    }
+  }
+
+  async function handleCheckHealth() {
+    if (!game) return;
+    checkingHealth = true;
+    try {
+      deployHealth = await checkDeploymentHealth(game.game_id, game.bottle_name);
+    } catch (e: unknown) {
+      showError(`Health check failed: ${e}`);
+    } finally {
+      checkingHealth = false;
+    }
+  }
+
+  async function handleRedeploy() {
+    if (!game) return;
+    redeploying = true;
+    try {
+      const result = await redeployAllMods(game.game_id, game.bottle_name);
+      showSuccess(`Redeployed ${result.deployed_count} files`);
+      deployHealth = await checkDeploymentHealth(game.game_id, game.bottle_name);
+    } catch (e: unknown) {
+      showError(`Redeploy failed: ${e}`);
+    } finally {
+      redeploying = false;
+    }
+  }
 
   async function handleOpenSkseDownload() {
     try {
@@ -686,6 +762,120 @@
               </button>
             {/if}
           </div>
+        </div>
+      </div>
+    </div>
+    <!-- Downgrader -->
+    {#if downgradeStatus}
+    <div class="section">
+      <h2 class="section-title">Game Version</h2>
+      <div class="section-card">
+        <div class="card-row tool-row">
+          <div class="tool-icon-wrap" style="color: var(--blue);">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M10 2v12" />
+              <polyline points="6 10 10 14 14 10" />
+              <path d="M4 18h12" />
+            </svg>
+          </div>
+          <div class="tool-info">
+            <span class="row-label">Skyrim SE v{downgradeStatus.current_version}</span>
+            <span class="tool-description">
+              {#if downgradeStatus.is_downgraded}
+                Downgraded — compatible with most SKSE mods
+              {:else}
+                Most mods target v1.5.97. Downgrading creates a separate game copy.
+              {/if}
+            </span>
+          </div>
+          <div class="tool-action">
+            {#if downgradeStatus.is_downgraded}
+              <span class="badge badge-green">Downgraded</span>
+            {:else}
+              <button
+                class="btn-primary"
+                onclick={handleDowngrade}
+                disabled={downgrading}
+                type="button"
+              >
+                {downgrading ? "Downgrading..." : "Downgrade to v1.5.97"}
+              </button>
+            {/if}
+            <button
+              class="btn-ghost"
+              onclick={handleRefreshDowngradeStatus}
+              disabled={checkingDowngrade}
+              type="button"
+              title="Refresh version status"
+            >
+              {checkingDowngrade ? "..." : "Refresh"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+    {/if}
+  {/if}
+
+  <!-- Deployment Health -->
+  {#if game}
+    <div class="section">
+      <h2 class="section-title">Deployment Health</h2>
+      <div class="section-card">
+        <div class="card-row" style="flex-direction: column; align-items: stretch; gap: 12px;">
+          <div style="display: flex; align-items: center; justify-content: space-between;">
+            <div>
+              <span class="row-label">Mod Deployment Status</span>
+              <p class="row-description">Check if installed mods are properly deployed to the game directory.</p>
+            </div>
+            <div style="display: flex; gap: 8px;">
+              <button class="btn-secondary" onclick={handleCheckHealth} disabled={checkingHealth} type="button">
+                {checkingHealth ? "Checking..." : "Check Health"}
+              </button>
+              {#if deployHealth && (deployHealth.needs_redeploy || deployHealth.deployed_files_missing > 0)}
+                <button class="btn-primary" onclick={handleRedeploy} disabled={redeploying} type="button">
+                  {redeploying ? "Redeploying..." : "Redeploy All Mods"}
+                </button>
+              {/if}
+            </div>
+          </div>
+          {#if deployHealth}
+            <div class="health-grid">
+              <div class="health-stat">
+                <span class="health-label">Enabled mods</span>
+                <span class="health-value">{deployHealth.enabled_mods}</span>
+              </div>
+              <div class="health-stat">
+                <span class="health-label">Staging OK</span>
+                <span class="health-value" class:health-good={deployHealth.staging_ok > 0}>{deployHealth.staging_ok}</span>
+              </div>
+              <div class="health-stat">
+                <span class="health-label">Staging missing</span>
+                <span class="health-value" class:health-bad={deployHealth.staging_missing > 0}>{deployHealth.staging_missing}</span>
+              </div>
+              <div class="health-stat">
+                <span class="health-label">Deployed files</span>
+                <span class="health-value" class:health-good={deployHealth.manifest_entries > 0}>{deployHealth.manifest_entries}</span>
+              </div>
+              <div class="health-stat">
+                <span class="health-label">Files OK</span>
+                <span class="health-value" class:health-good={deployHealth.deployed_files_ok > 0}>{deployHealth.deployed_files_ok}</span>
+              </div>
+              <div class="health-stat">
+                <span class="health-label">Files missing</span>
+                <span class="health-value" class:health-bad={deployHealth.deployed_files_missing > 0}>{deployHealth.deployed_files_missing}</span>
+              </div>
+            </div>
+            {#if deployHealth.needs_reinstall}
+              <p class="health-warning">Staging directories are missing. Reinstalling affected mods or the collection is required.</p>
+            {:else if deployHealth.needs_redeploy}
+              <p class="health-warning">Mods have staging but no deployed files. Click "Redeploy All Mods" to fix.</p>
+            {:else if !deployHealth.healthy && deployHealth.deployed_files_missing > 0}
+              <p class="health-warning">Some deployed files are missing from the game directory. Try redeploying.</p>
+            {:else if deployHealth.healthy}
+              <p class="health-ok">All mods are properly deployed.</p>
+            {/if}
+          {/if}
         </div>
       </div>
     </div>
@@ -2648,5 +2838,60 @@
     font-size: 12px;
     color: var(--text-tertiary);
     margin: 2px 0 0;
+  }
+  .tool-icon-wrap {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border-radius: var(--radius);
+    background: color-mix(in srgb, currentColor 10%, transparent);
+    flex-shrink: 0;
+  }
+  .health-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+  }
+  .health-stat {
+    display: flex;
+    flex-direction: column;
+    padding: 8px 12px;
+    background: var(--surface-1);
+    border-radius: var(--radius);
+  }
+  .health-label {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .health-value {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+  .health-good {
+    color: var(--green);
+  }
+  .health-bad {
+    color: var(--red);
+  }
+  .health-warning {
+    font-size: 13px;
+    color: var(--yellow);
+    margin: 4px 0 0;
+    padding: 8px 12px;
+    background: color-mix(in srgb, var(--yellow) 10%, transparent);
+    border-radius: var(--radius);
+  }
+  .health-ok {
+    font-size: 13px;
+    color: var(--green);
+    margin: 4px 0 0;
+    padding: 8px 12px;
+    background: color-mix(in srgb, var(--green) 10%, transparent);
+    border-radius: var(--radius);
   }
 </style>

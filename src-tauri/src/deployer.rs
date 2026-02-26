@@ -150,6 +150,7 @@ pub fn deploy_mod(
 
     let deployed_count = AtomicUsize::new(0);
     let skipped_count = AtomicUsize::new(0);
+    let missing_count = AtomicUsize::new(0);
     let fallback_used = AtomicBool::new(false);
     let staging_str = staging_path.to_string_lossy().to_string();
 
@@ -162,6 +163,14 @@ pub fn deploy_mod(
             let dst = data_dir.join(rel_path);
 
             if !src.exists() {
+                missing_count.fetch_add(1, Ordering::Relaxed);
+                if missing_count.load(Ordering::Relaxed) <= 5 {
+                    warn!(
+                        "Deploy: source file not found in staging: {} (mod {})",
+                        src.display(),
+                        mod_id
+                    );
+                }
                 return None;
             }
 
@@ -206,7 +215,13 @@ pub fn deploy_mod(
                             dst.display(),
                             e
                         );
-                        if fs::copy(&src, &dst).is_err() {
+                        if let Err(copy_err) = fs::copy(&src, &dst) {
+                            warn!(
+                                "Copy also failed for {} → {}: {}",
+                                src.display(),
+                                dst.display(),
+                                copy_err
+                            );
                             return None;
                         }
                         fallback_used.store(true, Ordering::Relaxed);
@@ -214,7 +229,13 @@ pub fn deploy_mod(
                     }
                 }
             } else {
-                if fs::copy(&src, &dst).is_err() {
+                if let Err(copy_err) = fs::copy(&src, &dst) {
+                    warn!(
+                        "Copy failed for {} → {}: {}",
+                        src.display(),
+                        dst.display(),
+                        copy_err
+                    );
                     return None;
                 }
                 fallback_used.store(true, Ordering::Relaxed);
@@ -250,12 +271,42 @@ pub fn deploy_mod(
 
     let final_deployed = deployed_count.load(Ordering::Relaxed);
     let final_skipped = skipped_count.load(Ordering::Relaxed);
+    let final_missing = missing_count.load(Ordering::Relaxed);
     let final_fallback = fallback_used.load(Ordering::Relaxed);
 
+    if final_missing > 5 {
+        warn!(
+            "Deploy mod {}: {} additional source files not found in staging (suppressed)",
+            mod_id,
+            final_missing - 5
+        );
+    }
+
     info!(
-        "Deployed mod {} ({} files, {} skipped, hardlink fallback: {})",
-        mod_id, final_deployed, final_skipped, final_fallback
+        "Deployed mod {} ({} files, {} skipped, {} missing, hardlink fallback: {})",
+        mod_id, final_deployed, final_skipped, final_missing, final_fallback
     );
+
+    // If we expected to deploy files but none succeeded, something is wrong
+    if final_deployed == 0 && !files.is_empty() {
+        warn!(
+            "Deploy mod {}: 0 of {} files deployed! staging_path={}, data_dir={}, exists=({}, {})",
+            mod_id,
+            files.len(),
+            staging_path.display(),
+            data_dir.display(),
+            staging_path.exists(),
+            data_dir.exists(),
+        );
+        return Err(DeployerError::Other(format!(
+            "0 of {} files deployed — staging may be missing or paths may not match \
+             (staging exists: {}, data_dir exists: {}, missing: {})",
+            files.len(),
+            staging_path.exists(),
+            data_dir.exists(),
+            final_missing,
+        )));
+    }
 
     Ok(DeployResult {
         deployed_count: final_deployed,

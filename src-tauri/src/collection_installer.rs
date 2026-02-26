@@ -1407,6 +1407,41 @@ pub async fn install_collection(
         log::info!("Auto-created profile '{}' for collection", profile_name);
     }
 
+    // Post-install deployment verification
+    let manifest_count = db
+        .get_deployment_manifest(game_id, bottle_name)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    if installed > 0 && manifest_count == 0 {
+        log::error!(
+            "DEPLOYMENT BUG: {} mods installed but deployment manifest is empty! \
+             Mods are staged but not linked to the game directory. \
+             data_dir={}, staging_root={}",
+            installed,
+            data_dir.display(),
+            staging::staging_base_dir(game_id, bottle_name).display(),
+        );
+        // Try an emergency redeploy to fix the situation
+        log::info!("Attempting emergency redeploy for {}/{}", game_id, bottle_name);
+        match deployer::redeploy_all(db, game_id, bottle_name, &data_dir) {
+            Ok(result) => {
+                log::info!(
+                    "Emergency redeploy succeeded: {} files deployed",
+                    result.deployed_count
+                );
+            }
+            Err(e) => {
+                log::error!("Emergency redeploy failed: {}", e);
+            }
+        }
+    } else {
+        log::info!(
+            "Post-install check: {} mods installed, {} deployment manifest entries",
+            installed,
+            manifest_count
+        );
+    }
+
     // Mark checkpoint as completed
     let _ = db.complete_checkpoint(checkpoint_id);
 
@@ -2233,9 +2268,23 @@ async fn stage_and_deploy(
         .map_err(|e| InstallError::Failed(format!("Deploy join error: {}", e)))?;
 
         if let Err(e) = deploy_result {
-            let _ = staging::remove_staging(&staging_result.staging_path);
-            let _ = db.remove_mod(mod_id);
-            return Err(InstallError::Failed(format!("Deploy failed: {}", e)));
+            let err_msg = e.to_string();
+            // If deploy failed because 0 files could be found, keep staging + DB
+            // entry so a "redeploy" can fix it later. Only remove staging for
+            // truly fatal errors (I/O, DB, etc.).
+            if err_msg.contains("0 of") && err_msg.contains("files deployed") {
+                log::warn!(
+                    "Deploy returned 0 files for mod {} — keeping staging for later redeploy: {}",
+                    mod_id,
+                    err_msg
+                );
+                // Still return Ok so the mod appears as "installed" — the user
+                // can trigger a redeploy to actually link the files.
+            } else {
+                let _ = staging::remove_staging(&staging_result.staging_path);
+                let _ = db.remove_mod(mod_id);
+                return Err(InstallError::Failed(format!("Deploy failed: {}", e)));
+            }
         }
     }
 
@@ -2270,12 +2319,20 @@ fn is_safe_relative_path(path: &str) -> bool {
         && !path.contains(":\\")
 }
 
-/// Apply FOMOD selections to staging by returning the list of files to deploy.
+/// Apply FOMOD selections to staging by physically rearranging files in the
+/// staging directory to match FOMOD destination layout, then returning the
+/// list of relative paths to deploy.
+///
+/// This is necessary because `deploy_mod` uses `staging_path.join(rel_path)`
+/// to find source files — if FOMOD remaps `source → destination`, we must
+/// move the files so that the destination paths actually exist in staging.
 fn apply_fomod_to_staging(
     staging_path: &Path,
     fomod_files: &[fomod::FomodFile],
 ) -> Option<Vec<String>> {
-    let mut files = Vec::new();
+    // Phase 1: Collect (source_abs, dest_rel) pairs
+    let mut moves: Vec<(std::path::PathBuf, String)> = Vec::new();
+
     for f in fomod_files {
         // Validate source and destination paths to prevent path traversal
         if !is_safe_relative_path(&f.source) {
@@ -2292,7 +2349,6 @@ fn apply_fomod_to_staging(
 
         let src = staging_path.join(&f.source);
         if f.is_folder {
-            // Recursively walk the folder and add all files
             if src.is_dir() {
                 for entry in walkdir::WalkDir::new(&src)
                     .into_iter()
@@ -2300,31 +2356,103 @@ fn apply_fomod_to_staging(
                 {
                     if entry.file_type().is_file() {
                         if let Ok(rel) = entry.path().strip_prefix(&src) {
-                            let dest = if f.destination.is_empty() {
+                            let dest_rel = if f.destination.is_empty() {
                                 rel.to_string_lossy().to_string()
                             } else {
                                 format!("{}/{}", f.destination, rel.to_string_lossy())
                             };
-                            files.push(dest);
+                            moves.push((entry.path().to_path_buf(), dest_rel));
                         }
                     }
                 }
             }
         } else if src.exists() {
-            let dest = if f.destination.is_empty() {
+            let dest_rel = if f.destination.is_empty() {
                 f.source.clone()
             } else {
                 f.destination.clone()
             };
-            files.push(dest);
+            moves.push((src, dest_rel));
         }
     }
 
-    if files.is_empty() {
-        None
-    } else {
-        Some(files)
+    if moves.is_empty() {
+        return None;
     }
+
+    // Phase 2: Copy files to a temp layout dir inside staging, then swap
+    let layout_dir = staging_path.join(".fomod_layout");
+    if layout_dir.exists() {
+        let _ = std::fs::remove_dir_all(&layout_dir);
+    }
+
+    let mut files = Vec::with_capacity(moves.len());
+
+    for (src_abs, dest_rel) in &moves {
+        let dest_abs = layout_dir.join(dest_rel);
+        if let Some(parent) = dest_abs.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                log::warn!("FOMOD layout: failed to create dir {}: {}", parent.display(), e);
+                continue;
+            }
+        }
+        // Copy (not move) because sources may overlap or be referenced multiple times
+        if let Err(e) = std::fs::copy(src_abs, &dest_abs) {
+            log::warn!(
+                "FOMOD layout: failed to copy {} → {}: {}",
+                src_abs.display(),
+                dest_abs.display(),
+                e
+            );
+            continue;
+        }
+        files.push(dest_rel.replace('\\', "/"));
+    }
+
+    if files.is_empty() {
+        let _ = std::fs::remove_dir_all(&layout_dir);
+        return None;
+    }
+
+    // Phase 3: Remove old staging contents (except the layout dir) and move
+    // layout contents to staging root
+    if let Ok(entries) = std::fs::read_dir(staging_path) {
+        for entry in entries.flatten() {
+            if entry.path() != layout_dir {
+                if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                    let _ = std::fs::remove_dir_all(entry.path());
+                } else {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+
+    // Move layout contents to staging root
+    fn move_contents(from: &std::path::Path, to: &std::path::Path) {
+        if let Ok(entries) = std::fs::read_dir(from) {
+            for entry in entries.flatten() {
+                let dest = to.join(entry.file_name());
+                if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                    let _ = std::fs::create_dir_all(&dest);
+                    move_contents(&entry.path(), &dest);
+                    let _ = std::fs::remove_dir_all(entry.path());
+                } else {
+                    let _ = std::fs::rename(entry.path(), &dest);
+                }
+            }
+        }
+    }
+    move_contents(&layout_dir, staging_path);
+    let _ = std::fs::remove_dir_all(&layout_dir);
+
+    log::info!(
+        "FOMOD: rearranged staging to {} files at {}",
+        files.len(),
+        staging_path.display()
+    );
+
+    Some(files)
 }
 
 /// Apply the plugin load order from a collection manifest.

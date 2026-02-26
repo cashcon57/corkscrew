@@ -1504,6 +1504,109 @@ fn redeploy_all_mods(
     }))
 }
 
+/// Check deployment health: verify mods have staging dirs and deployed files.
+#[tauri::command]
+fn check_deployment_health(
+    game_id: String,
+    bottle_name: String,
+    state: State<AppState>,
+) -> Result<serde_json::Value, String> {
+    let (_bottle, _game, data_dir) = resolve_game(&game_id, &bottle_name)?;
+    let db = &state.db;
+
+    let mods = db.list_mods(&game_id, &bottle_name).map_err(|e| e.to_string())?;
+    let manifest = db
+        .get_deployment_manifest(&game_id, &bottle_name)
+        .map_err(|e| e.to_string())?;
+
+    let mut enabled_count = 0usize;
+    let mut staging_ok = 0usize;
+    let mut staging_missing = 0usize;
+    let mut staging_empty = 0usize;
+    let mut no_staging_path = 0usize;
+    let mut missing_mods: Vec<serde_json::Value> = Vec::new();
+
+    for m in &mods {
+        if !m.enabled {
+            continue;
+        }
+        enabled_count += 1;
+        match &m.staging_path {
+            Some(sp) => {
+                let p = std::path::Path::new(sp);
+                if !p.exists() {
+                    staging_missing += 1;
+                    if missing_mods.len() < 20 {
+                        missing_mods.push(serde_json::json!({
+                            "id": m.id,
+                            "name": m.name,
+                            "issue": "staging_missing",
+                        }));
+                    }
+                } else {
+                    let files = staging::list_staging_files(p).unwrap_or_default();
+                    if files.is_empty() {
+                        staging_empty += 1;
+                        if missing_mods.len() < 20 {
+                            missing_mods.push(serde_json::json!({
+                                "id": m.id,
+                                "name": m.name,
+                                "issue": "staging_empty",
+                            }));
+                        }
+                    } else {
+                        staging_ok += 1;
+                    }
+                }
+            }
+            None => {
+                no_staging_path += 1;
+                if missing_mods.len() < 20 {
+                    missing_mods.push(serde_json::json!({
+                        "id": m.id,
+                        "name": m.name,
+                        "issue": "no_staging_path",
+                    }));
+                }
+            }
+        }
+    }
+
+    // Check deployment manifest vs data dir
+    let mut deployed_ok = 0usize;
+    let mut deployed_missing = 0usize;
+    for entry in &manifest {
+        let file_path = data_dir.join(&entry.relative_path);
+        if file_path.exists() {
+            deployed_ok += 1;
+        } else {
+            deployed_missing += 1;
+        }
+    }
+
+    let healthy = staging_missing == 0
+        && staging_empty == 0
+        && no_staging_path == 0
+        && deployed_missing == 0
+        && manifest.len() > 0;
+
+    Ok(serde_json::json!({
+        "healthy": healthy,
+        "total_mods": mods.len(),
+        "enabled_mods": enabled_count,
+        "staging_ok": staging_ok,
+        "staging_missing": staging_missing,
+        "staging_empty": staging_empty,
+        "no_staging_path": no_staging_path,
+        "manifest_entries": manifest.len(),
+        "deployed_files_ok": deployed_ok,
+        "deployed_files_missing": deployed_missing,
+        "problem_mods": missing_mods,
+        "needs_reinstall": staging_missing > 0 || staging_empty > 0,
+        "needs_redeploy": staging_ok > 0 && manifest.is_empty(),
+    }))
+}
+
 #[tauri::command]
 fn purge_deployment_cmd(
     game_id: String,
@@ -5021,6 +5124,7 @@ pub fn run() {
             set_mod_priority,
             reorder_mods,
             redeploy_all_mods,
+            check_deployment_health,
             purge_deployment_cmd,
             verify_mod_integrity,
             sort_plugins_loot,

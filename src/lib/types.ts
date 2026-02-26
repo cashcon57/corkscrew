@@ -168,6 +168,22 @@ export interface DeployResult {
   fallback_used: boolean;
 }
 
+export interface DeploymentHealth {
+  healthy: boolean;
+  total_mods: number;
+  enabled_mods: number;
+  staging_ok: number;
+  staging_missing: number;
+  staging_empty: number;
+  no_staging_path: number;
+  manifest_entries: number;
+  deployed_files_ok: number;
+  deployed_files_missing: number;
+  problem_mods: { id: number; name: string; issue: string }[];
+  needs_reinstall: boolean;
+  needs_redeploy: boolean;
+}
+
 export type ConflictStatus = "AuthorResolved" | "Suggested" | "Manual";
 
 export interface ConflictSuggestion {
