@@ -1934,6 +1934,8 @@ mod tests {
                 })
                 .collect(),
             plugins: vec![],
+            game_versions: vec![],
+            ini_tweaks: vec![],
         }
     }
 

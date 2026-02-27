@@ -73,6 +73,7 @@ use crate::disk_budget;
 use crate::download_queue::{DownloadQueue, DOWNLOAD_QUEUE_EVENT};
 use crate::fomod;
 use crate::games;
+use crate::ini_manager;
 use crate::nexus::NexusClient;
 use crate::oauth;
 use crate::plugins;
@@ -758,6 +759,43 @@ pub async fn install_collection(
             "Collection is for '{}' but target game is '{}' ({})",
             manifest.game_domain, game_slug, game_id
         ));
+    }
+
+    // Game version mismatch warning — check if the collection was built for
+    // a different game version than what's installed.
+    if !manifest.game_versions.is_empty() && game_id == "skyrimse" {
+        let game_path = data_dir.parent().unwrap_or(&data_dir);
+        if let Ok(status) = downgrader::detect_skyrim_version(game_path) {
+            let detected = &status.current_version;
+            let matches = manifest.game_versions.iter().any(|v| {
+                v == detected || v.starts_with(&format!("{}.", detected)) || detected.starts_with(&format!("{}.", v))
+            });
+            if !matches {
+                log::warn!(
+                    "Game version mismatch: collection expects [{}], installed game is {}",
+                    manifest.game_versions.join(", "),
+                    detected
+                );
+                let _ = app.emit(
+                    INSTALL_PROGRESS_EVENT,
+                    InstallProgress::StepChanged {
+                        mod_index: 0,
+                        step: "warning".to_string(),
+                        detail: Some(format!(
+                            "Game version mismatch: collection was built for [{}] but your game is {}. Some mods may not work correctly.",
+                            manifest.game_versions.join(", "),
+                            detected
+                        )),
+                    },
+                );
+            } else {
+                log::info!(
+                    "Game version check passed: {} matches collection targets [{}]",
+                    detected,
+                    manifest.game_versions.join(", ")
+                );
+            }
+        }
     }
 
     // Load existing mods for already-installed detection
@@ -2248,6 +2286,33 @@ pub async fn install_collection(
         _ => {}
     }
 
+    // Apply INI tweaks from collection bundle (if any)
+    if !manifest.ini_tweaks.is_empty() {
+        let _ = app.emit(
+            INSTALL_PROGRESS_EVENT,
+            InstallProgress::StepChanged {
+                mod_index: total_mods,
+                step: "ini_tweaks".to_string(),
+                detail: Some(format!(
+                    "Applying {} INI tweaks...",
+                    manifest.ini_tweaks.len()
+                )),
+            },
+        );
+        let tweak_count = apply_collection_ini_tweaks(
+            &manifest.ini_tweaks,
+            &bottle,
+            game_id,
+        );
+        if tweak_count > 0 {
+            log::info!(
+                "Applied {} INI settings from {} collection tweaks",
+                tweak_count,
+                manifest.ini_tweaks.len()
+            );
+        }
+    }
+
     // Mark checkpoint as completed
     let _ = db.complete_checkpoint(checkpoint_id);
 
@@ -2268,6 +2333,81 @@ pub async fn install_collection(
         failed,
         details,
     })
+}
+
+/// Apply INI tweaks from a collection bundle to the game's INI files.
+///
+/// Each tweak is a partial INI document with `[Section]` blocks.  For each
+/// section+key in the tweak, we find the matching game INI file(s) and write
+/// the value using `ini_manager::set_setting`.  Returns the total number of
+/// individual settings applied.
+fn apply_collection_ini_tweaks(
+    tweaks: &[collections::CollectionIniTweak],
+    bottle: &bottles::Bottle,
+    game_id: &str,
+) -> usize {
+    let ini_files = ini_manager::find_ini_files(bottle, game_id);
+    if ini_files.is_empty() {
+        log::warn!(
+            "No game INI files found for '{}' in bottle '{}' — cannot apply INI tweaks",
+            game_id,
+            bottle.name
+        );
+        return 0;
+    }
+
+    let mut applied = 0usize;
+
+    for tweak in tweaks {
+        for (section, keys) in &tweak.settings {
+            for (key, value) in keys {
+                // Try to apply to each game INI file — set_setting handles
+                // creating new sections/keys if they don't exist.
+                let mut set_any = false;
+                for ini_path in &ini_files {
+                    match ini_manager::set_setting(ini_path, section, key, value) {
+                        Ok(()) => {
+                            log::debug!(
+                                "INI tweak '{}': [{}] {}={} → {}",
+                                tweak.name,
+                                section,
+                                key,
+                                value,
+                                ini_path.display()
+                            );
+                            applied += 1;
+                            set_any = true;
+                            // Only apply to the first matching INI file to
+                            // avoid duplicating settings across INI files.
+                            break;
+                        }
+                        Err(e) => {
+                            log::debug!(
+                                "INI tweak '{}': [{}] {}={} skipped for {}: {}",
+                                tweak.name,
+                                section,
+                                key,
+                                value,
+                                ini_path.display(),
+                                e
+                            );
+                        }
+                    }
+                }
+                if !set_any {
+                    log::warn!(
+                        "INI tweak '{}': could not apply [{}] {}={} to any INI file",
+                        tweak.name,
+                        section,
+                        key,
+                        value
+                    );
+                }
+            }
+        }
+    }
+
+    applied
 }
 
 #[derive(Debug)]
@@ -3011,13 +3151,30 @@ async fn stage_and_deploy(
     // Handle FOMOD if present and manifest provides choices
     let files_to_deploy =
         if let Ok(Some(fomod_installer)) = fomod::parse_fomod(&staging_result.staging_path) {
-            log::info!("[stage_deploy] FOMOD detected for '{}' — {} steps, game_version={:?}", mod_name, fomod_installer.steps.len(), game_version_ref);
-            // Log step visibility with gameDependency info
+            log::info!(
+                "[stage_deploy] FOMOD detected for '{}' — {} steps, {} conditionalFileInstalls, game_version={:?}, data_dir={}",
+                mod_name, fomod_installer.steps.len(),
+                fomod_installer.conditional_file_installs.len(),
+                game_version_ref, data_dir.display()
+            );
+            if fomod_installer.module_dependencies.is_some() {
+                log::info!("[stage_deploy] FOMOD has moduleDependencies (top-level prerequisites)");
+            }
+            // Log step visibility with dependency info
             for (i, step) in fomod_installer.steps.iter().enumerate() {
-                let has_game_dep = step.visible.as_ref().map_or(false, |v| !v.game_dependencies.is_empty());
+                let vis_info = step.visible.as_ref().map_or("none".to_string(), |v| {
+                    format!(
+                        "op={}, flags={}, game_deps={}, file_deps={}, children={}",
+                        v.operator,
+                        v.flags.len(),
+                        v.game_dependencies.len(),
+                        v.file_dependencies.len(),
+                        v.children.len()
+                    )
+                });
                 log::info!(
-                    "[stage_deploy] FOMOD step {}: '{}' — has_game_dep={}, groups=[{}]",
-                    i, step.name, has_game_dep,
+                    "[stage_deploy] FOMOD step {}: '{}' — visible=[{}], groups=[{}]",
+                    i, step.name, vis_info,
                     step.groups.iter().map(|g| g.name.as_str()).collect::<Vec<_>>().join(", ")
                 );
             }
@@ -3040,7 +3197,7 @@ async fn stage_and_deploy(
                             mod_name,
                             choices,
                         );
-                        fomod::get_default_selections(&fomod_installer, game_version_ref)
+                        fomod::get_default_selections(&fomod_installer, game_version_ref, Some(data_dir))
                     }
                 }
             } else {
@@ -3059,11 +3216,25 @@ async fn stage_and_deploy(
                         "FOMOD using defaults for '{}' — no choices in manifest, no saved recipe",
                         mod_name
                     );
-                    fomod::get_default_selections(&fomod_installer, game_version_ref)
+                    fomod::get_default_selections(&fomod_installer, game_version_ref, Some(data_dir))
                 }
             };
 
-            let fomod_files = fomod::get_files_for_selections(&fomod_installer, &selections, game_version_ref);
+            // Check module-level prerequisites and warn if not met.
+            {
+                let flags = HashMap::new();
+                let ctx = fomod::FomodContext {
+                    flags: &flags,
+                    game_version: game_version_ref,
+                    data_dir: Some(data_dir),
+                    skse_version: None,
+                };
+                if let Some(warning) = fomod::check_module_dependencies(&fomod_installer, &ctx) {
+                    log::warn!("[stage_deploy] FOMOD module dependency warning for '{}': {}", mod_name, warning);
+                }
+            }
+
+            let fomod_files = fomod::get_files_for_selections(&fomod_installer, &selections, game_version_ref, Some(data_dir));
             log::info!(
                 "[stage_deploy] FOMOD selections for '{}': {} groups, {} files to install",
                 mod_name, selections.len(), fomod_files.len()
@@ -3119,12 +3290,23 @@ async fn stage_and_deploy(
                     continue;
                 }
             };
+            // Log source file CRC32 for diagnostics when patches fail.
+            let source_crc = crc32fast::hash(&source_data);
+            log::info!(
+                "BSDiff patching '{}': source size={}, CRC32={:08x}",
+                rel_path,
+                source_data.len(),
+                source_crc,
+            );
             match qbsdiff::Bspatch::new(&patch_bytes) {
                 Ok(patcher) => {
                     let target_size = patcher.hint_target_size() as usize;
                     let mut target_data = Vec::with_capacity(target_size);
                     if let Err(e) = patcher.apply(&source_data, &mut target_data) {
-                        log::warn!("Failed to apply patch for {}: {}", rel_path, e);
+                        log::warn!(
+                            "Failed to apply patch for {} (source CRC32={:08x}, size={}): {}",
+                            rel_path, source_crc, source_data.len(), e
+                        );
                         patch_failures += 1;
                         continue;
                     }
@@ -3414,12 +3596,15 @@ fn merge_bundle_into_manifest(
         }
     }
 
-    // Copy mod rules and plugins from bundle if frontend didn't provide them
+    // Copy mod rules, plugins, and INI tweaks from bundle if frontend didn't provide them
     if merged.mod_rules.is_empty() {
         merged.mod_rules = bundle.mod_rules.clone();
     }
     if merged.plugins.is_empty() {
         merged.plugins = bundle.plugins.clone();
+    }
+    if merged.ini_tweaks.is_empty() {
+        merged.ini_tweaks = bundle.ini_tweaks.clone();
     }
 
     let bundle_choices_count = bundle.mods.iter().filter(|m| m.choices.is_some()).count();

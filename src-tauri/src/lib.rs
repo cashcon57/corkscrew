@@ -3452,7 +3452,7 @@ fn detect_fomod(
 fn get_fomod_defaults(
     installer: FomodInstaller,
 ) -> Result<std::collections::HashMap<String, Vec<String>>, String> {
-    Ok(fomod::get_default_selections(&installer, None))
+    Ok(fomod::get_default_selections(&installer, None, None))
 }
 
 #[tauri::command]
@@ -3460,7 +3460,12 @@ fn get_fomod_files(
     installer: FomodInstaller,
     selections: std::collections::HashMap<String, Vec<String>>,
 ) -> Result<Vec<fomod::FomodFile>, String> {
-    Ok(fomod::get_files_for_selections(&installer, &selections, None))
+    Ok(fomod::get_files_for_selections(
+        &installer,
+        &selections,
+        None,
+        None,
+    ))
 }
 
 // --- DLC Detection ---

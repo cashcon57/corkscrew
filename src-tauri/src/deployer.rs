@@ -623,6 +623,8 @@ pub fn purge_deployment(
         .map_err(|e| DeployerError::Database(e.to_string()))?;
 
     let mut removed = Vec::new();
+    let mut purged_mod_ids = std::collections::HashSet::new();
+    let mut failed_mod_ids = std::collections::HashSet::new();
 
     for entry in &manifest {
         // Legacy direct-installed files are not ours to purge
@@ -634,13 +636,29 @@ pub fn purge_deployment(
         if file_path.exists() {
             if let Err(e) = fs::remove_file(&file_path) {
                 warn!("Failed to purge {}: {}", file_path.display(), e);
+                failed_mod_ids.insert(entry.mod_id);
             } else {
                 removed.push(entry.relative_path.clone());
                 prune_empty_dirs(&file_path, data_dir);
+                purged_mod_ids.insert(entry.mod_id);
             }
+        } else {
+            // File already gone from disk — still mark mod for manifest cleanup
+            purged_mod_ids.insert(entry.mod_id);
         }
+    }
 
-        db.remove_deployment_entries_for_mod(entry.mod_id)
+    // Only clean manifest entries for mods whose files were ALL successfully removed.
+    // If any file for a mod failed to delete, keep the manifest so the user can retry.
+    for mod_id in &purged_mod_ids {
+        if failed_mod_ids.contains(mod_id) {
+            warn!(
+                "Skipping manifest cleanup for mod {} — some files could not be removed",
+                mod_id
+            );
+            continue;
+        }
+        db.remove_deployment_entries_for_mod(*mod_id)
             .map_err(|e| DeployerError::Database(e.to_string()))?;
     }
 

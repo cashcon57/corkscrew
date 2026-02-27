@@ -190,6 +190,20 @@ pub struct CollectionMod {
     pub adult_content: bool,
 }
 
+/// An INI tweak bundled with a collection.
+///
+/// Each tweak is a partial INI document extracted from the `INI Tweaks/`
+/// directory in the collection 7z bundle.  It contains one or more
+/// `[Section]` blocks with key=value pairs that should be merged into the
+/// game's INI files (e.g. Skyrim.ini, SkyrimPrefs.ini).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CollectionIniTweak {
+    /// Human-readable tweak name (the filename without extension).
+    pub name: String,
+    /// Parsed INI content: section → (key → value).
+    pub settings: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CollectionManifest {
     pub name: String,
@@ -209,6 +223,14 @@ pub struct CollectionManifest {
     pub image_url: Option<String>,
     #[serde(default)]
     pub revision: Option<u32>,
+    /// Game versions this collection revision was built/tested against.
+    /// Populated from the NexusMods GraphQL `collectionRevision.gameVersions` field.
+    #[serde(default, rename = "gameVersions")]
+    pub game_versions: Vec<String>,
+    /// INI tweaks extracted from the collection bundle's `INI Tweaks/` directory.
+    /// Applied to game INI files after all mods are deployed.
+    #[serde(default, skip)]
+    pub ini_tweaks: Vec<CollectionIniTweak>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -488,6 +510,7 @@ query CollectionRevisions($slug: String!, $viewAdultContent: Boolean) {
 const GET_REVISION_MODS_QUERY: &str = r#"
 query RevisionMods($slug: String!, $revision: Int, $viewAdultContent: Boolean) {
     collectionRevision(slug: $slug, revision: $revision, viewAdultContent: $viewAdultContent) {
+        gameVersions
         modFiles {
             fileId optional
             file {
@@ -841,6 +864,9 @@ pub async fn get_revision_mods(
 }
 
 /// Parse a collection.json manifest from a downloaded collection bundle (7z).
+///
+/// Also extracts INI tweak files from the `INI Tweaks/` or `Ini Tweaks/`
+/// directory in the archive and attaches them to the manifest.
 pub fn parse_collection_bundle(bundle_path: &Path) -> Result<CollectionManifest, CollectionsError> {
     use std::path::PathBuf;
 
@@ -850,6 +876,7 @@ pub fn parse_collection_bundle(bundle_path: &Path) -> Result<CollectionManifest,
     // callback. We use a temp directory and skip writing files we don't need.
     let temp_dir = std::env::temp_dir().join("corkscrew_collection_extract");
     let mut json_data: Option<Vec<u8>> = None;
+    let mut ini_tweak_files: Vec<(String, Vec<u8>)> = Vec::new();
 
     sevenz_rust2::decompress_with_extract_fn(
         file,
@@ -863,7 +890,16 @@ pub fn parse_collection_bundle(bundle_path: &Path) -> Result<CollectionManifest,
                 let mut data = Vec::new();
                 reader.read_to_end(&mut data)?;
                 json_data = Some(data);
-                // Return false to skip the default file-write behaviour
+                return Ok(false);
+            }
+            // Extract INI tweak files (Vortex uses "INI Tweaks/" or "Ini Tweaks/")
+            let lower = entry_name.to_lowercase();
+            if (lower.starts_with("ini tweaks/") || lower.contains("/ini tweaks/"))
+                && lower.ends_with(".ini")
+            {
+                let mut data = Vec::new();
+                reader.read_to_end(&mut data)?;
+                ini_tweak_files.push((entry_name.to_string(), data));
                 return Ok(false);
             }
             // Skip all other entries (don't extract to disk)
@@ -882,7 +918,45 @@ pub fn parse_collection_bundle(bundle_path: &Path) -> Result<CollectionManifest,
         CollectionsError::Archive(format!("Invalid UTF-8 in collection.json: {}", e))
     })?;
 
-    parse_collection_json(&json_str)
+    let mut manifest = parse_collection_json(&json_str)?;
+
+    // Parse extracted INI tweak files into structured data
+    for (path, raw) in &ini_tweak_files {
+        let content = match String::from_utf8(raw.clone()) {
+            Ok(s) => s,
+            Err(_) => {
+                log::warn!("Skipping non-UTF-8 INI tweak: {}", path);
+                continue;
+            }
+        };
+
+        // Derive human-readable name from filename
+        let file_name = path.rsplit('/').next().unwrap_or(path);
+        let name = file_name.strip_suffix(".ini").unwrap_or(file_name).to_string();
+
+        let settings = crate::ini_manager::parse_ini_string(&content);
+        if settings.is_empty() {
+            log::debug!("INI tweak '{}' has no settings, skipping", name);
+            continue;
+        }
+
+        log::info!(
+            "Extracted INI tweak '{}': {} sections, {} total settings",
+            name,
+            settings.len(),
+            settings.values().map(|s| s.len()).sum::<usize>()
+        );
+        manifest.ini_tweaks.push(CollectionIniTweak { name, settings });
+    }
+
+    if !manifest.ini_tweaks.is_empty() {
+        log::info!(
+            "Collection bundle contains {} INI tweaks",
+            manifest.ini_tweaks.len()
+        );
+    }
+
+    Ok(manifest)
 }
 
 /// NexusMods bundle format wraps collection metadata in an `info` object.
@@ -897,6 +971,8 @@ struct NexusBundleFormat {
     mod_rules: Vec<CollectionModRule>,
     #[serde(default)]
     plugins: Vec<CollectionPlugin>,
+    #[serde(default, rename = "gameVersions")]
+    game_versions: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -956,6 +1032,8 @@ pub fn parse_collection_json(json_str: &str) -> Result<CollectionManifest, Colle
         slug: None,
         image_url: None,
         revision: None,
+        game_versions: bundle.game_versions,
+        ini_tweaks: Vec::new(),
     })
 }
 

@@ -200,6 +200,41 @@ pub fn set_setting(path: &Path, section: &str, key: &str, value: &str) -> Result
     Ok(())
 }
 
+/// Parse an INI string into sections and key-value pairs (in-memory, no file).
+///
+/// Used to parse INI tweak content extracted from collection bundles.
+pub fn parse_ini_string(content: &str) -> BTreeMap<String, BTreeMap<String, String>> {
+    let mut sections: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    let mut current_section = String::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() || trimmed.starts_with(';') || trimmed.starts_with('#') {
+            continue;
+        }
+
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            current_section = trimmed[1..trimmed.len() - 1].to_string();
+            sections.entry(current_section.clone()).or_default();
+            continue;
+        }
+
+        if let Some(eq_pos) = trimmed.find('=') {
+            let key = trimmed[..eq_pos].trim().to_string();
+            let value = trimmed[eq_pos + 1..].trim().to_string();
+            if !current_section.is_empty() {
+                sections
+                    .entry(current_section.clone())
+                    .or_default()
+                    .insert(key, value);
+            }
+        }
+    }
+
+    sections
+}
+
 /// Get built-in presets for a game.
 pub fn builtin_presets(game_id: &str) -> Vec<IniPreset> {
     match game_id {
@@ -947,5 +982,54 @@ mod tests {
                 .unwrap(),
             "1"
         );
+    }
+
+    // ── parse_ini_string tests ───────────────────────────────────────────
+
+    #[test]
+    fn parse_ini_string_basic() {
+        let content = "[Display]\niSize W=1920\niSize H=1080\n[General]\nbAlwaysActive=1\n";
+        let sections = parse_ini_string(content);
+        assert_eq!(sections.len(), 2);
+        assert_eq!(
+            sections.get("Display").unwrap().get("iSize W").unwrap(),
+            "1920"
+        );
+        assert_eq!(
+            sections.get("General").unwrap().get("bAlwaysActive").unwrap(),
+            "1"
+        );
+    }
+
+    #[test]
+    fn parse_ini_string_empty() {
+        let sections = parse_ini_string("");
+        assert!(sections.is_empty());
+    }
+
+    #[test]
+    fn parse_ini_string_comments_only() {
+        let content = "; This is a comment\n# Another comment\n";
+        let sections = parse_ini_string(content);
+        assert!(sections.is_empty());
+    }
+
+    #[test]
+    fn parse_ini_string_with_spaces() {
+        let content = "[Section]\n  key = value with spaces  \n";
+        let sections = parse_ini_string(content);
+        assert_eq!(
+            sections.get("Section").unwrap().get("key").unwrap(),
+            "value with spaces"
+        );
+    }
+
+    #[test]
+    fn parse_ini_string_no_section_header() {
+        // Keys before any section header should be ignored
+        let content = "orphan_key=orphan_value\n[Section]\nkey=value\n";
+        let sections = parse_ini_string(content);
+        assert_eq!(sections.len(), 1);
+        assert!(sections.get("Section").unwrap().contains_key("key"));
     }
 }
