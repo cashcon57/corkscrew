@@ -866,26 +866,36 @@ pub async fn install_collection(
         // Skip already-installed mods (check by nexus mod ID + file ID, or name).
         // When the manifest specifies a file_id, require it to match too —
         // the same NM mod can have multiple files (e.g. INI config + DLL).
+        log::info!(
+            "[pre-dl] Checking mod '{}' [{}]: source_type={}, mod_id={:?}, file_id={:?}, has_choices={}",
+            entry.name, i, stype, entry.source.mod_id, entry.source.file_id, entry.choices.is_some()
+        );
         let is_already = existing_mods.iter().any(|m| {
             if let Some(nexus_id) = entry.source.mod_id {
                 if m.nexus_mod_id == Some(nexus_id) {
                     if entry.source.file_id.is_none() || m.nexus_file_id == entry.source.file_id {
+                        log::info!("[pre-dl] '{}' matched existing mod '{}' by mod_id={} file_id={:?}", entry.name, m.name, nexus_id, m.nexus_file_id);
                         return true;
                     }
                 }
             }
             if let Some(file_id) = entry.source.file_id {
                 if m.nexus_file_id == Some(file_id) {
+                    log::info!("[pre-dl] '{}' matched existing mod '{}' by file_id={}", entry.name, m.name, file_id);
                     return true;
                 }
             }
             // Only fall back to name matching when there are no Nexus identifiers
             if entry.source.mod_id.is_none() && entry.source.file_id.is_none() {
-                return m.name.eq_ignore_ascii_case(&entry.name);
+                if m.name.eq_ignore_ascii_case(&entry.name) {
+                    log::info!("[pre-dl] '{}' matched existing mod '{}' by name (no nexus IDs)", entry.name, m.name);
+                    return true;
+                }
             }
             false
         });
         if is_already {
+            log::info!("[pre-dl] SKIPPING '{}' — already installed", entry.name);
             continue;
         }
 
@@ -1654,10 +1664,16 @@ pub async fn install_collection(
         // When file_id is specified, require it to match too — same NM mod can
         // have multiple files (e.g. INI config + DLL).
         let current_mods = db.list_mods(game_id, bottle_name).unwrap_or_default();
+        log::info!(
+            "[checkpoint] Processing '{}' [{}]: source_type={}, mod_id={:?}, file_id={:?}, has_choices={}",
+            mod_name, i, mod_entry.source.source_type, mod_entry.source.mod_id,
+            mod_entry.source.file_id, mod_entry.choices.is_some()
+        );
         let is_already = current_mods.iter().any(|m| {
             if let Some(nexus_id) = mod_entry.source.mod_id {
                 if m.nexus_mod_id == Some(nexus_id) {
                     if mod_entry.source.file_id.is_none() || m.nexus_file_id == mod_entry.source.file_id {
+                        log::info!("[checkpoint] '{}' matched existing '{}' by mod_id={} file_id={:?}", mod_name, m.name, nexus_id, m.nexus_file_id);
                         return true;
                     }
                 }
@@ -1884,26 +1900,38 @@ pub async fn install_collection(
             // Check already-installed (live DB query).
             // Require file_id match when specified — same mod can have multiple files.
             let current_mods = db.list_mods(game_id, bottle_name).unwrap_or_default();
+            log::info!(
+                "[install] Processing '{}' [{}]: source_type={}, mod_id={:?}, file_id={:?}, has_choices={}, pre_dl={}, pre_ext={}",
+                mod_name, i, mod_entry.source.source_type, mod_entry.source.mod_id,
+                mod_entry.source.file_id, mod_entry.choices.is_some(),
+                pre_downloaded.contains_key(&i), extracted_map.lock().map(|m| m.contains_key(&i)).unwrap_or(false)
+            );
             let is_already = current_mods.iter().any(|m| {
                 if let Some(nexus_id) = mod_entry.source.mod_id {
                     if m.nexus_mod_id == Some(nexus_id) {
                         if mod_entry.source.file_id.is_none() || m.nexus_file_id == mod_entry.source.file_id {
+                            log::info!("[install] '{}' matched existing '{}' by mod_id={} file_id={:?}", mod_name, m.name, nexus_id, m.nexus_file_id);
                             return true;
                         }
                     }
                 }
                 if let Some(file_id) = mod_entry.source.file_id {
                     if m.nexus_file_id == Some(file_id) {
+                        log::info!("[install] '{}' matched existing '{}' by file_id={}", mod_name, m.name, file_id);
                         return true;
                     }
                 }
                 if mod_entry.source.mod_id.is_none() && mod_entry.source.file_id.is_none() {
-                    return m.name.eq_ignore_ascii_case(mod_name);
+                    if m.name.eq_ignore_ascii_case(mod_name) {
+                        log::info!("[install] '{}' matched existing '{}' by name (no nexus IDs)", mod_name, m.name);
+                        return true;
+                    }
                 }
                 false
             });
 
             if is_already {
+                log::info!("[install] SKIPPING '{}' — already installed", mod_name);
                 if let Some(existing) = current_mods.iter().find(|m| {
                     if let Some(nexus_id) = mod_entry.source.mod_id {
                         if m.nexus_mod_id == Some(nexus_id) {
@@ -2944,9 +2972,18 @@ async fn stage_and_deploy(
         })?
     };
 
+    log::info!(
+        "[stage_deploy] Staged '{}': {} files in {}, choices={:?}",
+        mod_name,
+        staging_result.files.len(),
+        staging_result.staging_path.display(),
+        mod_entry.choices.as_ref().map(|c| c.to_string().chars().take(200).collect::<String>())
+    );
+
     // Handle FOMOD if present and manifest provides choices
     let files_to_deploy =
         if let Ok(Some(fomod_installer)) = fomod::parse_fomod(&staging_result.staging_path) {
+            log::info!("[stage_deploy] FOMOD detected for '{}' — {} steps", mod_name, fomod_installer.steps.len());
             let selections = if let Some(ref choices) = mod_entry.choices {
                 match parse_fomod_choices(choices) {
                     Some(parsed) => {
@@ -2987,10 +3024,30 @@ async fn stage_and_deploy(
             };
 
             let fomod_files = fomod::get_files_for_selections(&fomod_installer, &selections);
+            log::info!(
+                "[stage_deploy] FOMOD selections for '{}': {} groups, {} files to install",
+                mod_name, selections.len(), fomod_files.len()
+            );
+            for ff in &fomod_files {
+                log::debug!("[stage_deploy] FOMOD file: src={}, dst={}", ff.source, ff.destination);
+            }
 
-            apply_fomod_to_staging(&staging_result.staging_path, &fomod_files)
-                .unwrap_or(staging_result.files.clone())
+            let result = apply_fomod_to_staging(&staging_result.staging_path, &fomod_files)
+                .unwrap_or(staging_result.files.clone());
+            log::info!(
+                "[stage_deploy] FOMOD applied for '{}': {} files after FOMOD filtering",
+                mod_name, result.len()
+            );
+            // Log files containing "po3" or "tweaks" for debugging
+            for f in &result {
+                let fl = f.to_lowercase();
+                if fl.contains("po3") || fl.contains("tweak") || fl.contains("fiss") {
+                    log::info!("[stage_deploy] FOMOD kept notable file: {}", f);
+                }
+            }
+            result
         } else {
+            log::info!("[stage_deploy] No FOMOD for '{}' — deploying all {} staged files", mod_name, staging_result.files.len());
             staging_result.files.clone()
         };
 
