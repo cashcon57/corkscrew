@@ -33,6 +33,16 @@ pub struct FlagDependency {
     pub value: String,
 }
 
+/// A game version dependency used in visibility conditions.
+///
+/// Corresponds to `<gameDependency version="x.x.x"/>` in FOMOD XML.
+/// The condition is met when the detected game version >= the required version.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GameDependency {
+    /// The minimum required game version (e.g. "1.6.1170").
+    pub version: String,
+}
+
 /// A composite condition block with an operator (`And` / `Or`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConditionBlock {
@@ -40,26 +50,64 @@ pub struct ConditionBlock {
     pub operator: String,
     /// Individual flag checks.
     pub flags: Vec<FlagDependency>,
+    /// Game version checks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub game_dependencies: Vec<GameDependency>,
 }
 
 impl ConditionBlock {
-    /// Evaluate this condition block against the current flag state.
-    pub fn evaluate(&self, flags: &HashMap<String, String>) -> bool {
-        if self.flags.is_empty() {
+    /// Evaluate this condition block against the current flag state and game version.
+    ///
+    /// When `game_version` is `None`, game dependency conditions are assumed met
+    /// (permissive fallback for contexts where the game version is unavailable).
+    pub fn evaluate(&self, flags: &HashMap<String, String>, game_version: Option<&str>) -> bool {
+        if self.flags.is_empty() && self.game_dependencies.is_empty() {
             return true;
         }
         match self.operator.as_str() {
-            "Or" => self
-                .flags
-                .iter()
-                .any(|dep| flags.get(&dep.flag) == Some(&dep.value)),
+            "Or" => {
+                self.flags
+                    .iter()
+                    .any(|dep| flags.get(&dep.flag) == Some(&dep.value))
+                    || self
+                        .game_dependencies
+                        .iter()
+                        .any(|dep| game_version.map_or(true, |v| version_gte(v, &dep.version)))
+            }
             // Default to And
-            _ => self
-                .flags
-                .iter()
-                .all(|dep| flags.get(&dep.flag) == Some(&dep.value)),
+            _ => {
+                self.flags
+                    .iter()
+                    .all(|dep| flags.get(&dep.flag) == Some(&dep.value))
+                    && self
+                        .game_dependencies
+                        .iter()
+                        .all(|dep| game_version.map_or(true, |v| version_gte(v, &dep.version)))
+            }
         }
     }
+}
+
+/// Compare two dotted version strings numerically.
+/// Returns `true` if `actual >= required`.
+fn version_gte(actual: &str, required: &str) -> bool {
+    let parse = |s: &str| -> Vec<u64> {
+        s.split('.')
+            .filter_map(|p| p.parse::<u64>().ok())
+            .collect()
+    };
+    let a = parse(actual);
+    let r = parse(required);
+    for i in 0..a.len().max(r.len()) {
+        let av = a.get(i).copied().unwrap_or(0);
+        let rv = r.get(i).copied().unwrap_or(0);
+        match av.cmp(&rv) {
+            std::cmp::Ordering::Greater => return true,
+            std::cmp::Ordering::Less => return false,
+            std::cmp::Ordering::Equal => continue,
+        }
+    }
+    true // Equal versions
 }
 
 /// A single file or folder mapping within a FOMOD option.
@@ -213,17 +261,31 @@ fn parse_condition_block(
                     block = Some(ConditionBlock {
                         operator: op,
                         flags: Vec::new(),
+                        game_dependencies: Vec::new(),
                     });
                 }
             }
             Ok(Event::Empty(ref e)) => {
                 let local = e.local_name();
-                if local.as_ref() == b"flagDependency" {
-                    if let (Some(flag), Some(value)) = (get_attr(e, "flag"), get_attr(e, "value")) {
-                        if let Some(ref mut b) = block {
-                            b.flags.push(FlagDependency { flag, value });
+                match local.as_ref() {
+                    b"flagDependency" => {
+                        if let (Some(flag), Some(value)) =
+                            (get_attr(e, "flag"), get_attr(e, "value"))
+                        {
+                            if let Some(ref mut b) = block {
+                                b.flags.push(FlagDependency { flag, value });
+                            }
                         }
                     }
+                    b"gameDependency" => {
+                        if let Some(version) = get_attr(e, "version") {
+                            if let Some(ref mut b) = block {
+                                b.game_dependencies
+                                    .push(GameDependency { version });
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
             Ok(Event::End(ref e)) => {
@@ -615,13 +677,16 @@ fn resolve_case_insensitive(base: &Path, relative: &str) -> Option<std::path::Pa
 ///   `Recommended` option, or the first option if none qualify.
 /// - `SelectAtLeastOne` / `SelectAny`: all `Required` and `Recommended`
 ///   options; falls back to the first option for `SelectAtLeastOne`.
-pub fn get_default_selections(installer: &FomodInstaller) -> HashMap<String, Vec<String>> {
+pub fn get_default_selections(
+    installer: &FomodInstaller,
+    game_version: Option<&str>,
+) -> HashMap<String, Vec<String>> {
     let mut selections = HashMap::new();
     let mut condition_flags: HashMap<String, String> = HashMap::new();
 
     for step in &installer.steps {
         // Skip steps whose visibility condition is not met.
-        if !step_is_visible(step, &condition_flags) {
+        if !step_is_visible(step, &condition_flags, game_version) {
             continue;
         }
 
@@ -653,13 +718,14 @@ pub fn get_default_selections(installer: &FomodInstaller) -> HashMap<String, Vec
 pub fn get_files_for_selections(
     installer: &FomodInstaller,
     selections: &HashMap<String, Vec<String>>,
+    game_version: Option<&str>,
 ) -> Vec<FomodFile> {
     let mut files: Vec<FomodFile> = installer.required_files.clone();
     let mut condition_flags: HashMap<String, String> = HashMap::new();
 
     for step in &installer.steps {
         // Skip steps whose visibility condition is not met.
-        if !step_is_visible(step, &condition_flags) {
+        if !step_is_visible(step, &condition_flags, game_version) {
             continue;
         }
 
@@ -709,10 +775,14 @@ fn find_case_insensitive(parent: &Path, target: &str) -> Option<std::path::PathB
 
 /// Check whether a step's visibility condition is met.
 /// Returns `true` if the step has no condition or if the condition evaluates to true.
-fn step_is_visible(step: &FomodStep, flags: &HashMap<String, String>) -> bool {
+fn step_is_visible(
+    step: &FomodStep,
+    flags: &HashMap<String, String>,
+    game_version: Option<&str>,
+) -> bool {
     match &step.visible {
         None => true,
-        Some(cond) => cond.evaluate(flags),
+        Some(cond) => cond.evaluate(flags, game_version),
     }
 }
 
@@ -933,7 +1003,7 @@ mod tests {
     #[test]
     fn default_selections_picks_recommended() {
         let installer = parse_fomod_xml(SAMPLE_XML).unwrap();
-        let selections = get_default_selections(&installer);
+        let selections = get_default_selections(&installer, None);
 
         // SelectExactlyOne should pick the Recommended option.
         let tex = selections.get("Textures").unwrap();
@@ -951,7 +1021,7 @@ mod tests {
         selections.insert("Textures".to_string(), vec!["Low Res".to_string()]);
         selections.insert("Extras".to_string(), vec!["ENB Preset".to_string()]);
 
-        let files = get_files_for_selections(&installer, &selections);
+        let files = get_files_for_selections(&installer, &selections, None);
 
         // Should contain: required folder + Low Res folder + ENB file
         assert_eq!(files.len(), 3);
@@ -969,7 +1039,7 @@ mod tests {
         selections.insert("Textures".to_string(), vec!["High Res".to_string()]);
         selections.insert("Extras".to_string(), vec!["ENB Preset".to_string()]);
 
-        let files = get_files_for_selections(&installer, &selections);
+        let files = get_files_for_selections(&installer, &selections, None);
         let priorities: Vec<i32> = files.iter().map(|f| f.priority).collect();
 
         // Should be sorted ascending.
@@ -1154,7 +1224,7 @@ mod tests {
         let installer = parse_fomod_xml(CONDITION_FLAGS_XML).unwrap();
         // Default picks "Dark" (Recommended) → sets style=dark.
         // "Dark Extras" step becomes visible, "Light Extras" does not.
-        let selections = get_default_selections(&installer);
+        let selections = get_default_selections(&installer, None);
 
         // Dark was selected.
         assert_eq!(selections.get("Style"), Some(&vec!["Dark".to_string()]));
@@ -1173,7 +1243,7 @@ mod tests {
         // Even if someone passes LightPatches selections, step is invisible.
         selections.insert("LightPatches".to_string(), vec!["Light Patch".to_string()]);
 
-        let files = get_files_for_selections(&installer, &selections);
+        let files = get_files_for_selections(&installer, &selections, None);
         let sources: Vec<&str> = files.iter().map(|f| f.source.as_str()).collect();
 
         assert!(sources.contains(&"dark/base"));
@@ -1196,19 +1266,20 @@ mod tests {
                     value: "2".into(),
                 },
             ],
+            game_dependencies: vec![],
         };
         let mut flags = HashMap::new();
         // Neither set.
-        assert!(!block.evaluate(&flags));
+        assert!(!block.evaluate(&flags, None));
         // Only one set.
         flags.insert("a".into(), "1".into());
-        assert!(!block.evaluate(&flags));
+        assert!(!block.evaluate(&flags, None));
         // Both set.
         flags.insert("b".into(), "2".into());
-        assert!(block.evaluate(&flags));
+        assert!(block.evaluate(&flags, None));
         // Wrong value.
         flags.insert("b".into(), "3".into());
-        assert!(!block.evaluate(&flags));
+        assert!(!block.evaluate(&flags, None));
     }
 
     #[test]
@@ -1225,14 +1296,15 @@ mod tests {
                     value: "2".into(),
                 },
             ],
+            game_dependencies: vec![],
         };
         let mut flags = HashMap::new();
-        assert!(!block.evaluate(&flags));
+        assert!(!block.evaluate(&flags, None));
         flags.insert("a".into(), "1".into());
-        assert!(block.evaluate(&flags));
+        assert!(block.evaluate(&flags, None));
         flags.clear();
         flags.insert("b".into(), "2".into());
-        assert!(block.evaluate(&flags));
+        assert!(block.evaluate(&flags, None));
     }
 
     #[test]
@@ -1240,8 +1312,58 @@ mod tests {
         let block = ConditionBlock {
             operator: "And".to_string(),
             flags: vec![],
+            game_dependencies: vec![],
         };
-        assert!(block.evaluate(&HashMap::new()));
+        assert!(block.evaluate(&HashMap::new(), None));
+    }
+
+    #[test]
+    fn version_gte_comparisons() {
+        assert!(version_gte("1.6.1170", "1.6.1170")); // equal
+        assert!(version_gte("1.6.1170", "1.5.97")); // greater
+        assert!(!version_gte("1.5.97", "1.6.1170")); // less
+        assert!(version_gte("2.0.0", "1.99.99")); // major greater
+        assert!(!version_gte("1.5.97", "1.6.0")); // minor less
+        assert!(version_gte("1.6.1170", "1.6.640")); // patch greater
+    }
+
+    #[test]
+    fn condition_block_game_dependency_and() {
+        let block = ConditionBlock {
+            operator: "And".to_string(),
+            flags: vec![],
+            game_dependencies: vec![GameDependency {
+                version: "1.6.1130".into(),
+            }],
+        };
+        // AE version meets requirement.
+        assert!(block.evaluate(&HashMap::new(), Some("1.6.1170")));
+        // SE version does not.
+        assert!(!block.evaluate(&HashMap::new(), Some("1.5.97")));
+        // No game version → permissive fallback.
+        assert!(block.evaluate(&HashMap::new(), None));
+    }
+
+    #[test]
+    fn condition_block_game_dependency_or_with_flags() {
+        let block = ConditionBlock {
+            operator: "Or".to_string(),
+            flags: vec![FlagDependency {
+                flag: "useAE".into(),
+                value: "true".into(),
+            }],
+            game_dependencies: vec![GameDependency {
+                version: "1.6.0".into(),
+            }],
+        };
+        // Flag alone satisfies Or.
+        let mut flags = HashMap::new();
+        flags.insert("useAE".into(), "true".into());
+        assert!(block.evaluate(&flags, Some("1.5.97")));
+        // Game version alone satisfies Or.
+        assert!(block.evaluate(&HashMap::new(), Some("1.6.1170")));
+        // Neither satisfies.
+        assert!(!block.evaluate(&HashMap::new(), Some("1.5.97")));
     }
 
     #[test]
@@ -1264,12 +1386,121 @@ mod tests {
         }
 
         // Default selections unchanged.
-        let selections = get_default_selections(&installer);
+        let selections = get_default_selections(&installer, None);
         assert_eq!(
             selections.get("Textures"),
             Some(&vec!["High Res".to_string()])
         );
         assert_eq!(selections.get("Extras"), Some(&vec![]));
+    }
+
+    /// FOMOD XML with gameDependency conditions (typical SE/AE version selection).
+    const GAME_DEP_XML: &str = r#"
+<config>
+    <moduleName>Version DLLs</moduleName>
+    <installSteps order="Explicit">
+        <installStep name="SE DLLs">
+            <visible>
+                <dependencies operator="And">
+                    <gameDependency version="1.5.97"/>
+                </dependencies>
+            </visible>
+            <optionalFileGroups order="Explicit">
+                <group name="SE_Plugins" type="SelectAll">
+                    <plugins order="Explicit">
+                        <plugin name="SE Plugin">
+                            <description>SE version</description>
+                            <files>
+                                <file source="SKSE/Plugins/plugin_se.dll" destination="SKSE/Plugins/plugin.dll" priority="0" />
+                            </files>
+                            <typeDescriptor><type name="Required" /></typeDescriptor>
+                        </plugin>
+                    </plugins>
+                </group>
+            </optionalFileGroups>
+        </installStep>
+        <installStep name="AE DLLs">
+            <visible>
+                <dependencies operator="And">
+                    <gameDependency version="1.6.0"/>
+                </dependencies>
+            </visible>
+            <optionalFileGroups order="Explicit">
+                <group name="AE_Plugins" type="SelectAll">
+                    <plugins order="Explicit">
+                        <plugin name="AE Plugin">
+                            <description>AE version</description>
+                            <files>
+                                <file source="SKSE/Plugins/plugin_ae.dll" destination="SKSE/Plugins/plugin.dll" priority="0" />
+                            </files>
+                            <typeDescriptor><type name="Required" /></typeDescriptor>
+                        </plugin>
+                    </plugins>
+                </group>
+            </optionalFileGroups>
+        </installStep>
+    </installSteps>
+</config>
+"#;
+
+    #[test]
+    fn parse_game_dependency_xml() {
+        let installer = parse_fomod_xml(GAME_DEP_XML).unwrap();
+        assert_eq!(installer.steps.len(), 2);
+
+        // SE step has gameDependency version="1.5.97"
+        let se_vis = installer.steps[0].visible.as_ref().unwrap();
+        assert_eq!(se_vis.game_dependencies.len(), 1);
+        assert_eq!(se_vis.game_dependencies[0].version, "1.5.97");
+        assert!(se_vis.flags.is_empty());
+
+        // AE step has gameDependency version="1.6.0"
+        let ae_vis = installer.steps[1].visible.as_ref().unwrap();
+        assert_eq!(ae_vis.game_dependencies.len(), 1);
+        assert_eq!(ae_vis.game_dependencies[0].version, "1.6.0");
+    }
+
+    #[test]
+    fn game_dep_selects_ae_for_ae_version() {
+        let installer = parse_fomod_xml(GAME_DEP_XML).unwrap();
+        // AE game version: 1.6.1170 — both steps visible (>= 1.5.97 AND >= 1.6.0)
+        // but the important thing is the AE step IS visible.
+        let selections = get_default_selections(&installer, Some("1.6.1170"));
+        assert!(selections.contains_key("AE_Plugins"));
+        // SE step is also visible (1.6.1170 >= 1.5.97), so both would be selected.
+        // In practice, FOMOD authors typically use flag conditions or more specific
+        // version ranges, but our parser correctly evaluates both.
+        assert!(selections.contains_key("SE_Plugins"));
+    }
+
+    #[test]
+    fn game_dep_only_se_for_se_version() {
+        let installer = parse_fomod_xml(GAME_DEP_XML).unwrap();
+        // SE game version: 1.5.97 — only SE step visible (>= 1.5.97 yes, >= 1.6.0 no)
+        let selections = get_default_selections(&installer, Some("1.5.97"));
+        assert!(selections.contains_key("SE_Plugins"));
+        assert!(!selections.contains_key("AE_Plugins"));
+    }
+
+    #[test]
+    fn game_dep_files_for_ae() {
+        let installer = parse_fomod_xml(GAME_DEP_XML).unwrap();
+        let selections = get_default_selections(&installer, Some("1.6.1170"));
+        let files = get_files_for_selections(&installer, &selections, Some("1.6.1170"));
+        let sources: Vec<&str> = files.iter().map(|f| f.source.as_str()).collect();
+        // AE plugin should be included.
+        assert!(sources.contains(&"SKSE/Plugins/plugin_ae.dll"));
+    }
+
+    #[test]
+    fn game_dep_files_for_se() {
+        let installer = parse_fomod_xml(GAME_DEP_XML).unwrap();
+        let selections = get_default_selections(&installer, Some("1.5.97"));
+        let files = get_files_for_selections(&installer, &selections, Some("1.5.97"));
+        let sources: Vec<&str> = files.iter().map(|f| f.source.as_str()).collect();
+        // Only SE plugin should be included, AE step is invisible.
+        assert!(sources.contains(&"SKSE/Plugins/plugin_se.dll"));
+        assert!(!sources.contains(&"SKSE/Plugins/plugin_ae.dll"));
     }
 
     #[test]

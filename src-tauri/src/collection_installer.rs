@@ -68,6 +68,7 @@ use crate::config;
 use crate::database::{self, ModDatabase};
 use crate::conflict_resolver;
 use crate::deployer;
+use crate::downgrader;
 use crate::disk_budget;
 use crate::download_queue::{DownloadQueue, DOWNLOAD_QUEUE_EVENT};
 use crate::fomod;
@@ -2980,18 +2981,57 @@ async fn stage_and_deploy(
         mod_entry.choices.as_ref().map(|c| c.to_string().chars().take(200).collect::<String>())
     );
 
+    // Detect game version for FOMOD gameDependency evaluation.
+    // For Skyrim SE, this determines whether SE (1.5.97) or AE (1.6.x) DLL
+    // variants are selected by version-conditional FOMOD steps.
+    let game_version: Option<String> = if game_id == "skyrimse" {
+        // data_dir is e.g. ".../Skyrim Special Edition/Data" — parent is game root.
+        let game_path = data_dir.parent().unwrap_or(data_dir);
+        match downgrader::detect_skyrim_version(game_path) {
+            Ok(status) => {
+                log::info!(
+                    "[stage_deploy] Detected Skyrim version: {} (for FOMOD gameDependency)",
+                    status.current_version
+                );
+                Some(status.current_version)
+            }
+            Err(e) => {
+                log::warn!(
+                    "[stage_deploy] Failed to detect Skyrim version: {} — FOMOD gameDependency conditions will be permissive",
+                    e
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let game_version_ref = game_version.as_deref();
+
     // Handle FOMOD if present and manifest provides choices
     let files_to_deploy =
         if let Ok(Some(fomod_installer)) = fomod::parse_fomod(&staging_result.staging_path) {
-            log::info!("[stage_deploy] FOMOD detected for '{}' — {} steps", mod_name, fomod_installer.steps.len());
+            log::info!("[stage_deploy] FOMOD detected for '{}' — {} steps, game_version={:?}", mod_name, fomod_installer.steps.len(), game_version_ref);
+            // Log step visibility with gameDependency info
+            for (i, step) in fomod_installer.steps.iter().enumerate() {
+                let has_game_dep = step.visible.as_ref().map_or(false, |v| !v.game_dependencies.is_empty());
+                log::info!(
+                    "[stage_deploy] FOMOD step {}: '{}' — has_game_dep={}, groups=[{}]",
+                    i, step.name, has_game_dep,
+                    step.groups.iter().map(|g| g.name.as_str()).collect::<Vec<_>>().join(", ")
+                );
+            }
             let selections = if let Some(ref choices) = mod_entry.choices {
                 match parse_fomod_choices(choices) {
                     Some(parsed) => {
                         log::info!(
-                            "FOMOD auto-applying {} group selections for '{}'",
-                            parsed.len(),
-                            mod_name
+                            "[stage_deploy] FOMOD using COLLECTION AUTHOR choices for '{}': {} groups",
+                            mod_name,
+                            parsed.len()
                         );
+                        for (group, opts) in &parsed {
+                            log::info!("[stage_deploy]   group '{}': [{}]", group, opts.join(", "));
+                        }
                         parsed
                     }
                     None => {
@@ -3000,7 +3040,7 @@ async fn stage_and_deploy(
                             mod_name,
                             choices,
                         );
-                        fomod::get_default_selections(&fomod_installer)
+                        fomod::get_default_selections(&fomod_installer, game_version_ref)
                     }
                 }
             } else {
@@ -3019,11 +3059,11 @@ async fn stage_and_deploy(
                         "FOMOD using defaults for '{}' — no choices in manifest, no saved recipe",
                         mod_name
                     );
-                    fomod::get_default_selections(&fomod_installer)
+                    fomod::get_default_selections(&fomod_installer, game_version_ref)
                 }
             };
 
-            let fomod_files = fomod::get_files_for_selections(&fomod_installer, &selections);
+            let fomod_files = fomod::get_files_for_selections(&fomod_installer, &selections, game_version_ref);
             log::info!(
                 "[stage_deploy] FOMOD selections for '{}': {} groups, {} files to install",
                 mod_name, selections.len(), fomod_files.len()
