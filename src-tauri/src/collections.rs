@@ -1098,6 +1098,48 @@ pub async fn fetch_collection_bundle(
 
     let bytes = response.bytes().await?;
 
+    // The NM API sometimes returns a JSON redirect containing the real
+    // download URL (e.g. {"download_link": "https://..."}) instead of the
+    // 7z archive directly.  Detect this and follow the redirect.
+    let bytes = if bytes.starts_with(b"{") {
+        log::info!("Bundle response is JSON — checking for download redirect");
+        let json: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|e| CollectionsError::GraphQL(format!("Bundle JSON parse error: {}", e)))?;
+        let real_url = json
+            .get("download_link")
+            .or_else(|| json.get("download_url"))
+            .or_else(|| json.get("url"))
+            .or_else(|| json.get("Uri"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                CollectionsError::GraphQL(format!(
+                    "Bundle response is JSON but no download URL found: {}",
+                    String::from_utf8_lossy(&bytes[..bytes.len().min(500)])
+                ))
+            })?;
+        log::info!("Following bundle redirect to: {}", real_url);
+
+        let mut redirect_request = client.get(real_url);
+        if let Some(key) = api_key {
+            if key.contains('.') && key.len() > 100 {
+                redirect_request =
+                    redirect_request.header(AUTHORIZATION, format!("Bearer {}", key));
+            } else {
+                redirect_request = redirect_request.header("apikey", key);
+            }
+        }
+        let redirect_resp = redirect_request.send().await?;
+        if !redirect_resp.status().is_success() {
+            return Err(CollectionsError::GraphQL(format!(
+                "Bundle redirect download failed: HTTP {}",
+                redirect_resp.status()
+            )));
+        }
+        redirect_resp.bytes().await?
+    } else {
+        bytes
+    };
+
     // Step 3: Write to temp file and parse
     let temp_path = std::env::temp_dir().join(format!(
         "corkscrew_bundle_{}_{}.7z",
