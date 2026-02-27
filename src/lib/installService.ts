@@ -30,20 +30,11 @@ let installSizeAccumulator = 0;
 let lastInstallSpeed = 0;
 const INSTALL_SPEED_WINDOW_MS = 30000;
 
-// Event throttling — batch rapid events to avoid overwhelming the UI
-let pendingEvent: InstallProgressEvent | null = null;
-let throttleTimer: ReturnType<typeof setTimeout> | null = null;
-const THROTTLE_MS = 50; // max ~20 UI updates per second for non-critical events
-
-// Events that should always update immediately (phase transitions, completions)
-const IMMEDIATE_EVENTS = new Set([
-  "downloadPhaseStarted", "allDownloadsCompleted",
-  "stagingPhaseStarted", "installPhaseStarted",
-  "modStarted", "modCompleted", "modFailed", "collectionCompleted",
-  "userActionRequired", "downloadModStarted", "downloadModCompleted", "downloadModFailed",
-  "stagingModStarted", "stagingModCompleted", "stagingModFailed", "initializing",
-  "fomodRequired",
-]);
+// Event batching — collect events and flush once per animation frame.
+// This caps store updates at ~60/s regardless of backend event rate,
+// preventing UI lockup from rapid staging/install events (559+ mods).
+let eventQueue: InstallProgressEvent[] = [];
+let rafId: number | null = null;
 
 function calculateSpeed(currentBytes: number): number {
   const now = Date.now();
@@ -194,29 +185,11 @@ export async function startInstallTracking(
     });
   }, 1000);
 
-  // Subscribe to progress events with throttling for non-critical updates
+  // Subscribe to progress events — queue and flush once per animation frame.
   unlisten = await listen<InstallProgressEvent>("install-progress", (event) => {
-    const e = event.payload;
-    if (IMMEDIATE_EVENTS.has(e.kind)) {
-      // Flush any pending throttled event first, then handle immediately
-      if (pendingEvent) {
-        handleProgressEvent(pendingEvent);
-        pendingEvent = null;
-        if (throttleTimer) { clearTimeout(throttleTimer); throttleTimer = null; }
-      }
-      handleProgressEvent(e);
-    } else {
-      // Throttle high-frequency events (downloadProgress, stepChanged, modStarted, etc.)
-      pendingEvent = e;
-      if (!throttleTimer) {
-        throttleTimer = setTimeout(() => {
-          if (pendingEvent) {
-            handleProgressEvent(pendingEvent);
-            pendingEvent = null;
-          }
-          throttleTimer = null;
-        }, THROTTLE_MS);
-      }
+    eventQueue.push(event.payload);
+    if (rafId === null) {
+      rafId = requestAnimationFrame(flushEventQueue);
     }
   });
 }
@@ -245,21 +218,57 @@ function logMessageForEvent(e: InstallProgressEvent): { message: string; level: 
   }
 }
 
-function handleProgressEvent(e: InstallProgressEvent) {
+/** Flush all queued events in a single store update (called once per animation frame). */
+function flushEventQueue() {
+  rafId = null;
+  if (eventQueue.length === 0) return;
+
+  const batch = eventQueue;
+  eventQueue = [];
+
   collectionInstallStatus.update((s) => {
     if (!s) return s;
     const next = { ...s };
 
-    // Append log entry
-    const logMsg = logMessageForEvent(e);
-    if (logMsg) {
-      next.logEntries = [...next.logEntries, { timestamp: Date.now(), ...logMsg }];
+    // Clone modDetails ONCE for the whole batch, mutate in place
+    let detailsCloned = false;
+    function ensureDetailsCloned() {
+      if (!detailsCloned) {
+        next.modDetails = next.modDetails.slice();
+        detailsCloned = true;
+      }
     }
 
+    // Collect log entries for the batch, append once
+    const newLogs: typeof next.logEntries = [];
+
+    for (const e of batch) {
+      const logMsg = logMessageForEvent(e);
+      if (logMsg) {
+        newLogs.push({ timestamp: Date.now(), ...logMsg });
+      }
+
+      applyEvent(next, e, ensureDetailsCloned);
+    }
+
+    if (newLogs.length > 0) {
+      next.logEntries = [...next.logEntries, ...newLogs];
+    }
+
+    next.overallProgress = computeOverallProgress(next);
+    return next;
+  });
+}
+
+/** Apply a single event to the mutable state object. */
+function applyEvent(
+  next: CollectionInstallStatus,
+  e: InstallProgressEvent,
+  ensureDetailsCloned: () => void,
+) {
     switch (e.kind) {
       // ---- Initialization ----
       case "initializing":
-        // Only adds to log, no state change needed
         break;
 
       // ---- Download Phase ----
@@ -274,17 +283,16 @@ function handleProgressEvent(e: InstallProgressEvent) {
 
       case "downloadQueued":
         if (next.modDetails[e.mod_index]) {
-          next.modDetails = [...next.modDetails];
+          ensureDetailsCloned();
           next.modDetails[e.mod_index] = { ...next.modDetails[e.mod_index], status: "queued" };
         }
         break;
 
       case "downloadModStarted":
         if (next.modDetails[e.mod_index]) {
-          next.modDetails = [...next.modDetails];
+          ensureDetailsCloned();
           next.modDetails[e.mod_index] = { ...next.modDetails[e.mod_index], name: e.mod_name, status: "downloading" };
         }
-        // Add to active downloads
         next.downloadProgress = {
           ...next.downloadProgress,
           active: [
@@ -295,23 +303,20 @@ function handleProgressEvent(e: InstallProgressEvent) {
         break;
 
       case "downloadProgress": {
-        // Update per-mod download bytes
         if (next.modDetails[e.mod_index]) {
-          next.modDetails = [...next.modDetails];
+          ensureDetailsCloned();
           next.modDetails[e.mod_index] = {
             ...next.modDetails[e.mod_index],
             downloadBytes: e.downloaded,
             downloadTotal: e.total,
           };
         }
-        // Update active download list
         const updatedActive = next.downloadProgress.active.map((d) =>
           d.modIndex === e.mod_index
             ? { ...d, downloaded: e.downloaded, total: e.total }
             : d,
         );
         next.downloadProgress = { ...next.downloadProgress, active: updatedActive };
-        // Speed + ETA
         const totalActiveBytes = updatedActive.reduce((sum, d) => sum + d.downloaded, 0);
         const speed = calculateSpeed(totalActiveBytes);
         const totalRemaining = updatedActive.reduce((sum, d) => sum + Math.max(0, d.total - d.downloaded), 0);
@@ -322,7 +327,7 @@ function handleProgressEvent(e: InstallProgressEvent) {
 
       case "downloadModCompleted":
         if (next.modDetails[e.mod_index]) {
-          next.modDetails = [...next.modDetails];
+          ensureDetailsCloned();
           next.modDetails[e.mod_index] = {
             ...next.modDetails[e.mod_index],
             status: e.cached ? "cached" : "downloaded",
@@ -334,13 +339,12 @@ function handleProgressEvent(e: InstallProgressEvent) {
           cached: next.downloadProgress.cached + (e.cached ? 1 : 0),
           active: next.downloadProgress.active.filter((d) => d.modIndex !== e.mod_index),
         };
-        // Update legacy compat
         next.current = next.downloadProgress.completed;
         break;
 
       case "downloadModFailed":
         if (next.modDetails[e.mod_index]) {
-          next.modDetails = [...next.modDetails];
+          ensureDetailsCloned();
           next.modDetails[e.mod_index] = {
             ...next.modDetails[e.mod_index],
             status: "failed",
@@ -374,26 +378,24 @@ function handleProgressEvent(e: InstallProgressEvent) {
 
       case "stagingModStarted":
         if (next.modDetails[e.mod_index]) {
-          next.modDetails = [...next.modDetails];
+          ensureDetailsCloned();
           next.modDetails[e.mod_index] = { ...next.modDetails[e.mod_index], status: "extracting" };
         }
         break;
 
       case "stagingModCompleted": {
-        // Calculate per-mod extraction speed
         let perModExtractSpeed: number | undefined;
         if (e.extracted_size && e.duration_ms && e.duration_ms > 0) {
           perModExtractSpeed = e.extracted_size / (e.duration_ms / 1000);
         }
         if (next.modDetails[e.mod_index]) {
-          next.modDetails = [...next.modDetails];
+          ensureDetailsCloned();
           next.modDetails[e.mod_index] = {
             ...next.modDetails[e.mod_index],
             status: "staged",
             extractionSpeed: perModExtractSpeed,
           };
         }
-        // Track global extraction throughput
         if (e.extracted_size) {
           stagingSizeAccumulator += e.extracted_size;
           next.stagingSpeed = calculateStagingSpeed(stagingSizeAccumulator);
@@ -403,7 +405,7 @@ function handleProgressEvent(e: InstallProgressEvent) {
 
       case "stagingModFailed":
         if (next.modDetails[e.mod_index]) {
-          next.modDetails = [...next.modDetails];
+          ensureDetailsCloned();
           next.modDetails[e.mod_index] = { ...next.modDetails[e.mod_index], status: "failed", error: e.error };
         }
         break;
@@ -428,14 +430,12 @@ function handleProgressEvent(e: InstallProgressEvent) {
           step: "preparing",
           stepDetail: "",
         };
-        // Legacy compat
         next.currentMod = e.mod_name;
         next.current = e.mod_index + 1;
         next.total = e.total_mods;
         next.step = "preparing";
-
         if (next.modDetails[e.mod_index]) {
-          next.modDetails = [...next.modDetails];
+          ensureDetailsCloned();
           next.modDetails[e.mod_index] = { ...next.modDetails[e.mod_index], name: e.mod_name, status: "installing" };
         }
         break;
@@ -451,31 +451,28 @@ function handleProgressEvent(e: InstallProgressEvent) {
           const stepStatus = e.step === "deploying" ? "deploying" as const
             : e.step === "extracting" ? "extracting" as const
             : "installing" as const;
-          next.modDetails = [...next.modDetails];
+          ensureDetailsCloned();
           next.modDetails[e.mod_index] = { ...next.modDetails[e.mod_index], status: stepStatus, stepDetail: e.detail ?? undefined };
         }
         break;
 
       case "modCompleted": {
-        // Calculate per-mod install speed
         let perModInstallSpeed: number | undefined;
         if (e.deployed_size && e.duration_ms && e.duration_ms > 0) {
           perModInstallSpeed = e.deployed_size / (e.duration_ms / 1000);
         }
         if (next.modDetails[e.mod_index]) {
-          next.modDetails = [...next.modDetails];
+          ensureDetailsCloned();
           next.modDetails[e.mod_index] = {
             ...next.modDetails[e.mod_index],
             status: "done",
             installSpeed: perModInstallSpeed,
           };
         }
-        // Track global install throughput
         if (e.deployed_size) {
           installSizeAccumulator += e.deployed_size;
           next.installSpeed = calculateInstallSpeed(installSizeAccumulator);
         }
-        // Also advance install counter (in case modStarted was missed)
         {
           const doneCount = next.modDetails.filter(m => m.status === "done" || m.status === "failed" || m.status === "skipped" || m.status === "user_action").length;
           if (doneCount > next.installProgress.current) {
@@ -488,7 +485,7 @@ function handleProgressEvent(e: InstallProgressEvent) {
 
       case "modFailed":
         if (next.modDetails[e.mod_index]) {
-          next.modDetails = [...next.modDetails];
+          ensureDetailsCloned();
           next.modDetails[e.mod_index] = {
             ...next.modDetails[e.mod_index],
             status: "failed",
@@ -508,13 +505,13 @@ function handleProgressEvent(e: InstallProgressEvent) {
           },
         ];
         if (next.modDetails[e.mod_index]) {
-          next.modDetails = [...next.modDetails];
+          ensureDetailsCloned();
           next.modDetails[e.mod_index] = { ...next.modDetails[e.mod_index], status: "user_action" };
         }
         break;
 
       case "fomodRequired":
-        next.modDetails = [...next.modDetails];
+        ensureDetailsCloned();
         if (next.modDetails[e.mod_index]) {
           next.modDetails[e.mod_index] = {
             ...next.modDetails[e.mod_index],
@@ -537,7 +534,6 @@ function handleProgressEvent(e: InstallProgressEvent) {
         break;
 
       case "collectionCompleted":
-        // Don't override "failed" (cancelled) with "complete"
         if (next.phase !== "failed") {
           next.phase = "complete";
         }
@@ -549,10 +545,6 @@ function handleProgressEvent(e: InstallProgressEvent) {
         next.overallProgress = 100;
         break;
     }
-
-    next.overallProgress = computeOverallProgress(next);
-    return next;
-  });
 }
 
 /** Resume tracking a previously interrupted collection install. */
@@ -630,25 +622,9 @@ export async function resumeInstallTracking(
   }, 1000);
 
   unlisten = await listen<InstallProgressEvent>("install-progress", (event) => {
-    const e = event.payload;
-    if (IMMEDIATE_EVENTS.has(e.kind)) {
-      if (pendingEvent) {
-        handleProgressEvent(pendingEvent);
-        pendingEvent = null;
-        if (throttleTimer) { clearTimeout(throttleTimer); throttleTimer = null; }
-      }
-      handleProgressEvent(e);
-    } else {
-      pendingEvent = e;
-      if (!throttleTimer) {
-        throttleTimer = setTimeout(() => {
-          if (pendingEvent) {
-            handleProgressEvent(pendingEvent);
-            pendingEvent = null;
-          }
-          throttleTimer = null;
-        }, THROTTLE_MS);
-      }
+    eventQueue.push(event.payload);
+    if (rafId === null) {
+      rafId = requestAnimationFrame(flushEventQueue);
     }
   });
 }
@@ -671,8 +647,8 @@ export function stopInstallTracking() {
   installSpeedSamples = [];
   installSizeAccumulator = 0;
   lastInstallSpeed = 0;
-  pendingEvent = null;
-  if (throttleTimer) { clearTimeout(throttleTimer); throttleTimer = null; }
+  eventQueue = [];
+  if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
 }
 
 /** Mark install as finished and deactivate after a delay. */

@@ -738,22 +738,6 @@ impl NexusClient {
     where
         F: Fn(u64, u64),
     {
-        let response = self.client.get(download_url).send().await?;
-        let status = response.status();
-
-        if !status.is_success() {
-            let message = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "no response body".into());
-            return Err(NexusError::Api {
-                status: status.as_u16(),
-                message,
-            });
-        }
-
-        let total = response.content_length().unwrap_or(0);
-
         // Derive the file name from the URL path or fall back to a default.
         let file_name = Url::parse(download_url)
             .ok()
@@ -769,8 +753,55 @@ impl NexusClient {
         // Ensure the destination directory exists.
         tokio::fs::create_dir_all(dest).await?;
 
-        let mut file = tokio::fs::File::create(&file_path).await?;
-        let mut downloaded: u64 = 0;
+        // Resume partial download if the file already exists.
+        let existing_len = tokio::fs::metadata(&file_path)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
+
+        let mut request = self.client.get(download_url);
+        if existing_len > 0 {
+            log::info!(
+                "Resuming download of '{}' from byte {}",
+                file_name,
+                existing_len
+            );
+            request = request.header("Range", format!("bytes={}-", existing_len));
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+
+        // 206 Partial Content = resume accepted, 200 OK = server doesn't support Range
+        let resumed = status == reqwest::StatusCode::PARTIAL_CONTENT;
+        if !status.is_success() && !resumed {
+            let message = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "no response body".into());
+            return Err(NexusError::Api {
+                status: status.as_u16(),
+                message,
+            });
+        }
+
+        let content_length = response.content_length().unwrap_or(0);
+        let total = if resumed {
+            existing_len + content_length
+        } else {
+            content_length
+        };
+
+        let mut file = if resumed {
+            tokio::fs::OpenOptions::new()
+                .append(true)
+                .open(&file_path)
+                .await?
+        } else {
+            tokio::fs::File::create(&file_path).await?
+        };
+
+        let mut downloaded: u64 = if resumed { existing_len } else { 0 };
         let mut stream = response.bytes_stream();
 
         while let Some(chunk) = stream.next().await {
