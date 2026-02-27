@@ -284,6 +284,9 @@ pub fn sync_plugins(
         Vec::new()
     };
 
+    // Save the existing order before consuming into map.
+    let existing_order: Vec<String> = existing.iter().map(|e| e.filename.clone()).collect();
+
     // Build a map of existing entries (lowercase key -> PluginEntry).
     let mut existing_map: std::collections::HashMap<String, PluginEntry> = existing
         .into_iter()
@@ -306,6 +309,7 @@ pub fn sync_plugins(
 
     // Build the final ordered list.
     let mut result: Vec<PluginEntry> = Vec::new();
+    let mut added: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // First add implicit plugins in their canonical order.
     for &implicit in game_implicit_plugins {
@@ -321,38 +325,58 @@ pub fn sync_plugins(
                 filename: real_name,
                 enabled: true,
             });
+            added.insert(key.clone());
             existing_map.remove(&key);
         }
     }
 
-    // Then add remaining plugins in on-disk discovery order, preserving
-    // enabled state from the existing file.
-    for plugin_name in &on_disk {
-        let key = plugin_name.to_lowercase();
+    // Then add remaining plugins from the EXISTING order (preserving the
+    // order from plugins.txt — e.g. collection-defined load order).
+    // Only include plugins that are still on disk.
+    for existing_name in &existing_order {
+        let key = existing_name.to_lowercase();
 
         // Skip implicit plugins already added.
-        if game_implicit_plugins
-            .iter()
-            .any(|&i| i.to_lowercase() == key)
-        {
+        if added.contains(&key) {
+            continue;
+        }
+
+        // Skip plugins no longer on disk.
+        if !on_disk_lower.contains(&key) {
+            existing_map.remove(&key);
             continue;
         }
 
         let base_enabled = if let Some(existing_entry) = existing_map.remove(&key) {
             existing_entry.enabled
         } else {
-            // Newly discovered plugin, default to enabled (matches Vortex/MO2 behavior).
             true
         };
 
         // ESM and ESL files are always loaded by the engine — force them enabled.
         let is_master = key.ends_with(".esm") || key.ends_with(".esl");
-        let entry = PluginEntry {
-            filename: plugin_name.clone(),
+        result.push(PluginEntry {
+            filename: existing_name.clone(),
             enabled: if is_master { true } else { base_enabled },
-        };
+        });
+        added.insert(key);
+    }
 
-        result.push(entry);
+    // Finally, append any NEW on-disk plugins not in the existing file.
+    for plugin_name in &on_disk {
+        let key = plugin_name.to_lowercase();
+
+        if added.contains(&key) {
+            continue;
+        }
+
+        // ESM and ESL files are always loaded by the engine — force them enabled.
+        let is_master = key.ends_with(".esm") || key.ends_with(".esl");
+        result.push(PluginEntry {
+            filename: plugin_name.clone(),
+            enabled: if is_master { true } else { true }, // new plugins default enabled
+        });
+        added.insert(key);
     }
 
     // Write updated files.
