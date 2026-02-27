@@ -99,6 +99,16 @@ pub enum InstallProgress {
         mod_name: String,
         error: String,
     },
+    StagingProgress {
+        mod_index: usize,
+        files_done: u64,
+        files_total: u64,
+    },
+    DeployProgress {
+        mod_index: usize,
+        files_done: u64,
+        files_total: u64,
+    },
     Initializing {
         message: String,
     },

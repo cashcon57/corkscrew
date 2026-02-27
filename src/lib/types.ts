@@ -1177,6 +1177,8 @@ export type InstallProgressEvent =
   | { kind: "stagingModStarted"; mod_index: number; mod_name: string }
   | { kind: "stagingModCompleted"; mod_index: number; mod_name: string; extracted_size?: number; duration_ms?: number }
   | { kind: "stagingModFailed"; mod_index: number; mod_name: string; error: string }
+  | { kind: "stagingProgress"; mod_index: number; files_done: number; files_total: number }
+  | { kind: "deployProgress"; mod_index: number; files_done: number; files_total: number }
   | { kind: "fomodRequired"; mod_index: number; mod_name: string; correlation_id: string; installer: FomodInstaller }
   | { kind: "initializing"; message: string };
 

@@ -1294,6 +1294,9 @@ pub async fn install_collection(
                 let extract_start = std::time::Instant::now();
                 let temp_dir = std::env::temp_dir().join(format!("corkscrew_extract_{}", idx));
 
+                // Clone AppHandle for progress callback inside spawn_blocking
+                let app_progress = app_c.clone();
+
                 // Timeout extraction at 30 minutes to prevent indefinite hangs
                 let result = tokio::time::timeout(
                     std::time::Duration::from_secs(1800),
@@ -1308,7 +1311,31 @@ pub async fn install_collection(
                             let _ = std::fs::remove_dir_all(&temp_dir);
                         }
                         let _ = std::fs::create_dir_all(&temp_dir);
-                        match crate::installer::extract_archive(&archive, &temp_dir) {
+
+                        // Throttled progress: limit events to at most once per 200ms
+                        let last_emit = std::sync::Mutex::new(std::time::Instant::now()
+                            .checked_sub(std::time::Duration::from_secs(1))
+                            .unwrap_or_else(std::time::Instant::now));
+                        let progress_cb = move |files_done: u64, files_total: u64| {
+                            let mut last = last_emit.lock().unwrap_or_else(|e| e.into_inner());
+                            if last.elapsed().as_millis() >= 200 || files_done == files_total {
+                                let _ = app_progress.emit(
+                                    INSTALL_PROGRESS_EVENT,
+                                    InstallProgress::StagingProgress {
+                                        mod_index: idx,
+                                        files_done,
+                                        files_total,
+                                    },
+                                );
+                                *last = std::time::Instant::now();
+                            }
+                        };
+
+                        match crate::installer::extract_archive_with_progress(
+                            &archive,
+                            &temp_dir,
+                            &progress_cb,
+                        ) {
                             Ok(_) => Ok(temp_dir),
                             Err(e) => {
                                 let _ = std::fs::remove_dir_all(&temp_dir);
@@ -2719,9 +2746,31 @@ async fn stage_and_deploy(
         let sp = staging_result.staging_path.clone();
         let dd = data_dir.to_path_buf();
         let files = files_to_deploy.clone();
+        let app_deploy = app.clone();
 
         let deploy_result = tokio::task::spawn_blocking(move || {
-            deployer::deploy_mod_atomic(&db_c, &gid, &bn, mod_id, &sp, &dd, &files)
+            let last_emit = std::sync::Mutex::new(
+                std::time::Instant::now()
+                    .checked_sub(std::time::Duration::from_secs(1))
+                    .unwrap_or_else(std::time::Instant::now),
+            );
+            let progress_cb = move |files_done: u64, files_total: u64| {
+                let mut last = last_emit.lock().unwrap_or_else(|e| e.into_inner());
+                if last.elapsed().as_millis() >= 200 || files_done == files_total {
+                    let _ = app_deploy.emit(
+                        INSTALL_PROGRESS_EVENT,
+                        InstallProgress::DeployProgress {
+                            mod_index,
+                            files_done,
+                            files_total,
+                        },
+                    );
+                    *last = std::time::Instant::now();
+                }
+            };
+            deployer::deploy_mod_atomic_with_progress(
+                &db_c, &gid, &bn, mod_id, &sp, &dd, &files, &progress_cb,
+            )
         })
         .await
         .map_err(|e| InstallError::Failed(format!("Deploy join error: {}", e)))?;

@@ -17,8 +17,13 @@ use std::path::{Path, PathBuf};
 use log::{debug, info, warn};
 use thiserror::Error;
 
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
 use crate::database::ModDatabase;
 use crate::platform;
+
+/// Callback type for reporting deployment progress: (files_done, files_total).
+pub type DeployProgressCb = dyn Fn(u64, u64) + Send + Sync;
 
 // ---------------------------------------------------------------------------
 // Filesystem helpers
@@ -111,8 +116,20 @@ pub fn deploy_mod(
     data_dir: &Path,
     files: &[String],
 ) -> Result<DeployResult> {
+    deploy_mod_inner(db, game_id, bottle_name, mod_id, staging_path, data_dir, files, None)
+}
+
+fn deploy_mod_inner(
+    db: &ModDatabase,
+    game_id: &str,
+    bottle_name: &str,
+    mod_id: i64,
+    staging_path: &Path,
+    data_dir: &Path,
+    files: &[String],
+    progress: Option<&DeployProgressCb>,
+) -> Result<DeployResult> {
     use rayon::prelude::*;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     if !staging_path.exists() {
         return Err(DeployerError::StagingNotFound(staging_path.to_path_buf()));
@@ -245,7 +262,14 @@ pub fn deploy_mod(
                 "copy"
             };
 
-            deployed_count.fetch_add(1, Ordering::Relaxed);
+            let done = deployed_count.fetch_add(1, Ordering::Relaxed) + 1;
+            if let Some(cb) = &progress {
+                let total = files.len() as u64;
+                let interval = (total / 50).max(10).min(100);
+                if done as u64 % interval == 0 || done as u64 == total {
+                    cb(done as u64, total);
+                }
+            }
             Some((rel_path.clone(), method))
         })
         .collect();
@@ -338,6 +362,39 @@ pub fn deploy_mod_atomic(
         staging_path,
         data_dir,
         files,
+    ) {
+        Ok(result) => Ok(result),
+        Err(e) => {
+            warn!(
+                "deploy_mod failed for mod {}, rolling back partially deployed files: {}",
+                mod_id, e
+            );
+            let _ = undeploy_mod(db, game_id, bottle_name, mod_id, data_dir);
+            Err(e)
+        }
+    }
+}
+
+/// Like [`deploy_mod_atomic`] but reports per-file progress via a callback.
+pub fn deploy_mod_atomic_with_progress(
+    db: &ModDatabase,
+    game_id: &str,
+    bottle_name: &str,
+    mod_id: i64,
+    staging_path: &Path,
+    data_dir: &Path,
+    files: &[String],
+    progress: &DeployProgressCb,
+) -> Result<DeployResult> {
+    match deploy_mod_inner(
+        db,
+        game_id,
+        bottle_name,
+        mod_id,
+        staging_path,
+        data_dir,
+        files,
+        Some(progress),
     ) {
         Ok(result) => Ok(result),
         Err(e) => {

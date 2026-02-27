@@ -792,9 +792,17 @@
                     <span class="speed-inline">{formatBytes(downloadSpeed)}/s</span>
                   {/if}
                 {:else if mod.status === "extracting"}
-                  extracting...
+                  {#if mod.extractFilesTotal && mod.extractFilesTotal > 0}
+                    extracting {Math.round(((mod.extractFilesDone ?? 0) / mod.extractFilesTotal) * 100)}%
+                  {:else}
+                    extracting...
+                  {/if}
                 {:else if mod.status === "deploying"}
-                  deploying files...
+                  {#if mod.deployFilesTotal && mod.deployFilesTotal > 0}
+                    deploying {Math.round(((mod.deployFilesDone ?? 0) / mod.deployFilesTotal) * 100)}%
+                  {:else}
+                    deploying files...
+                  {/if}
                 {:else if mod.status === "installing"}
                   installing...
                 {:else if mod.stepDetail}
@@ -806,6 +814,14 @@
               {#if mod.status === "downloading" && mod.downloadTotal && mod.downloadTotal > 0}
                 <div class="activity-bar">
                   <div class="activity-bar-fill" style="width: {Math.min(100, Math.round(((mod.downloadBytes ?? 0) / mod.downloadTotal) * 100))}%"></div>
+                </div>
+              {:else if mod.status === "extracting" && mod.extractFilesTotal && mod.extractFilesTotal > 0}
+                <div class="activity-bar">
+                  <div class="activity-bar-fill" style="width: {Math.min(100, Math.round(((mod.extractFilesDone ?? 0) / mod.extractFilesTotal) * 100))}%"></div>
+                </div>
+              {:else if mod.status === "deploying" && mod.deployFilesTotal && mod.deployFilesTotal > 0}
+                <div class="activity-bar">
+                  <div class="activity-bar-fill" style="width: {Math.min(100, Math.round(((mod.deployFilesDone ?? 0) / mod.deployFilesTotal) * 100))}%"></div>
                 </div>
               {:else if mod.status === "extracting" || mod.status === "installing" || mod.status === "deploying"}
                 <div class="activity-bar">
@@ -908,7 +924,15 @@
               {/if}
             </span>
             <span class="mod-name" title={mod.name}>{mod.name}</span>
-            <span class="mod-status-label">{mod.status.replace("_", " ")}</span>
+            <span class="mod-status-label">
+              {#if mod.status === "extracting" && mod.extractFilesTotal && mod.extractFilesTotal > 0}
+                extracting {Math.round(((mod.extractFilesDone ?? 0) / mod.extractFilesTotal) * 100)}%
+              {:else if mod.status === "deploying" && mod.deployFilesTotal && mod.deployFilesTotal > 0}
+                deploying {Math.round(((mod.deployFilesDone ?? 0) / mod.deployFilesTotal) * 100)}%
+              {:else}
+                {mod.status.replace("_", " ")}
+              {/if}
+            </span>
             {#if mod.status === "failed" && mod.error}
               <span class="mod-error" title={mod.error}>{mod.error}</span>
             {/if}

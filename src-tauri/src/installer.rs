@@ -1,12 +1,17 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use log::{debug, info, warn};
 use rayon::prelude::*;
 use thiserror::Error;
 use walkdir::WalkDir;
 use zip::ZipArchive;
+
+/// Callback type for reporting extraction progress: (files_done, files_total).
+pub type ExtractProgressCb = dyn Fn(u64, u64) + Send + Sync;
 
 /// I/O buffer size for archive extraction (256 KiB).
 /// Rust's default io::copy uses 8 KiB — 32x more syscalls per file.
@@ -123,6 +128,82 @@ pub fn extract_archive(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathB
     }
 }
 
+/// Like [`extract_archive`] but reports per-file progress via a callback.
+///
+/// The callback receives `(files_done, files_total)`.  For ZIP archives
+/// (the vast majority of Nexus mods), progress is reported after every few
+/// files.  For other formats, progress is reported at start (0) and end.
+pub fn extract_archive_with_progress(
+    archive_path: &Path,
+    dest_dir: &Path,
+    progress: &ExtractProgressCb,
+) -> Result<Vec<PathBuf>> {
+    if !archive_path.exists() {
+        return Err(InstallerError::ArchiveNotFound(archive_path.to_path_buf()));
+    }
+
+    fs::create_dir_all(dest_dir)?;
+
+    let name_lower = archive_path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_lowercase();
+
+    // Tar variants — no per-file progress, just bookend
+    if name_lower.ends_with(".tar.gz") || name_lower.ends_with(".tgz") {
+        progress(0, 1);
+        let result = extract_tar_gz(archive_path, dest_dir);
+        if let Ok(ref files) = result {
+            progress(files.len() as u64, files.len() as u64);
+        }
+        return result;
+    }
+    if name_lower.ends_with(".tar.xz") || name_lower.ends_with(".txz") {
+        progress(0, 1);
+        let result = extract_tar_xz(archive_path, dest_dir);
+        if let Ok(ref files) = result {
+            progress(files.len() as u64, files.len() as u64);
+        }
+        return result;
+    }
+    if name_lower.ends_with(".tar.bz2") || name_lower.ends_with(".tbz2") {
+        progress(0, 1);
+        let result = extract_tar_bz2(archive_path, dest_dir);
+        if let Ok(ref files) = result {
+            progress(files.len() as u64, files.len() as u64);
+        }
+        return result;
+    }
+
+    let ext = archive_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    match ext.as_str() {
+        "zip" => extract_zip_with_progress(archive_path, dest_dir, progress),
+        "7z" => {
+            progress(0, 1);
+            let result = extract_7z(archive_path, dest_dir);
+            if let Ok(ref files) = result {
+                progress(files.len() as u64, files.len() as u64);
+            }
+            result
+        }
+        "rar" => {
+            progress(0, 1);
+            let result = extract_rar(archive_path, dest_dir);
+            if let Ok(ref files) = result {
+                progress(files.len() as u64, files.len() as u64);
+            }
+            result
+        }
+        other => Err(InstallerError::UnsupportedFormat(other.to_string())),
+    }
+}
+
 /// Extract a `.zip` archive using the `zip` crate with parallel file extraction.
 ///
 /// Uses a two-pass approach:
@@ -219,6 +300,127 @@ fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
             }
         }
     }
+
+    info!(
+        "Extracted {} files from ZIP: {}",
+        extracted.len(),
+        archive_path.display()
+    );
+    Ok(extracted)
+}
+
+/// Like [`extract_zip`] but reports per-file progress via a shared atomic
+/// counter and a throttled callback.
+fn extract_zip_with_progress(
+    archive_path: &Path,
+    dest_dir: &Path,
+    progress: &ExtractProgressCb,
+) -> Result<Vec<PathBuf>> {
+    let file = io::BufReader::with_capacity(EXTRACT_BUF_SIZE, fs::File::open(archive_path)?);
+    let mut archive = ZipArchive::new(file)?;
+
+    // Pass 1: collect file entries and create directories
+    let mut file_entries: Vec<(usize, PathBuf)> = Vec::new();
+
+    for i in 0..archive.len() {
+        let entry = archive.by_index(i)?;
+        let relative = match entry.enclosed_name() {
+            Some(p) => p.to_path_buf(),
+            None => {
+                warn!("Skipping ZIP entry with unsafe path");
+                continue;
+            }
+        };
+        if relative
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            warn!(
+                "Skipping ZIP path traversal attempt: {}",
+                relative.display()
+            );
+            continue;
+        }
+        let out_path = dest_dir.join(&relative);
+        if entry.is_dir() {
+            fs::create_dir_all(&out_path)?;
+        } else {
+            if let Some(parent) = out_path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            file_entries.push((i, out_path));
+        }
+    }
+
+    drop(archive);
+
+    let total_files = file_entries.len() as u64;
+    progress(0, total_files);
+
+    // Shared atomic counter for cross-thread progress tracking
+    let files_done = Arc::new(AtomicU64::new(0));
+
+    let num_threads = rayon::current_num_threads().max(1);
+    let archive_path_owned = archive_path.to_path_buf();
+    let chunks: Vec<&[(usize, PathBuf)]> =
+        file_entries.chunks((file_entries.len() / num_threads).max(1)).collect();
+
+    let results: Vec<Vec<std::result::Result<PathBuf, String>>> = chunks
+        .par_iter()
+        .map(|chunk| {
+            let f = match fs::File::open(&archive_path_owned) {
+                Ok(file) => io::BufReader::with_capacity(EXTRACT_BUF_SIZE, file),
+                Err(e) => {
+                    return chunk
+                        .iter()
+                        .map(|_| Err(format!("Open failed: {}", e)))
+                        .collect();
+                }
+            };
+            let mut arch = match ZipArchive::new(f) {
+                Ok(a) => a,
+                Err(e) => {
+                    return chunk
+                        .iter()
+                        .map(|_| Err(format!("ZIP parse failed: {}", e)))
+                        .collect();
+                }
+            };
+            chunk
+                .iter()
+                .map(|(idx, out_path)| {
+                    let mut entry = arch.by_index(*idx).map_err(|e| e.to_string())?;
+                    let mut out_file = io::BufWriter::with_capacity(
+                        EXTRACT_BUF_SIZE,
+                        fs::File::create(out_path).map_err(|e| e.to_string())?,
+                    );
+                    io::copy(&mut entry, &mut out_file).map_err(|e| e.to_string())?;
+
+                    let done = files_done.fetch_add(1, Ordering::Relaxed) + 1;
+                    // Throttle progress callbacks — emit every ~2% or every 10 files
+                    let interval = (total_files / 50).max(10).min(100);
+                    if done % interval == 0 || done == total_files {
+                        progress(done, total_files);
+                    }
+
+                    Ok(out_path.clone())
+                })
+                .collect()
+        })
+        .collect();
+
+    let mut extracted = Vec::with_capacity(file_entries.len());
+    for chunk_results in results {
+        for r in chunk_results {
+            match r {
+                Ok(p) => extracted.push(p),
+                Err(e) => warn!("Failed to extract ZIP entry: {}", e),
+            }
+        }
+    }
+
+    // Final progress callback to ensure we report 100%
+    progress(extracted.len() as u64, total_files);
 
     info!(
         "Extracted {} files from ZIP: {}",

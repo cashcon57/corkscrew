@@ -419,6 +419,17 @@ function applyEvent(
         break;
       }
 
+      case "stagingProgress":
+        if (next.modDetails[e.mod_index]) {
+          ensureDetailsCloned();
+          next.modDetails[e.mod_index] = {
+            ...next.modDetails[e.mod_index],
+            extractFilesDone: e.files_done,
+            extractFilesTotal: e.files_total,
+          };
+        }
+        break;
+
       case "stagingModFailed":
         if (next.modDetails[e.mod_index]) {
           ensureDetailsCloned();
@@ -469,6 +480,17 @@ function applyEvent(
             : "installing" as const;
           ensureDetailsCloned();
           next.modDetails[e.mod_index] = { ...next.modDetails[e.mod_index], status: stepStatus, stepDetail: e.detail ?? undefined };
+        }
+        break;
+
+      case "deployProgress":
+        if (next.modDetails[e.mod_index]) {
+          ensureDetailsCloned();
+          next.modDetails[e.mod_index] = {
+            ...next.modDetails[e.mod_index],
+            deployFilesDone: e.files_done,
+            deployFilesTotal: e.files_total,
+          };
         }
         break;
 
