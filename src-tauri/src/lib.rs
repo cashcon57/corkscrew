@@ -955,22 +955,26 @@ fn launch_game_cmd(
     let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
     let game_path = PathBuf::from(&game.game_path);
 
-    // Check for a custom default executable first
-    let custom_exe =
-        executables::get_default_executable(&state.db, &game_id, &bottle_name).unwrap_or(None);
+    // When SKSE is requested, it takes priority over custom executables.
+    // Otherwise, check for a custom default executable first.
+    if !use_skse {
+        let custom_exe =
+            executables::get_default_executable(&state.db, &game_id, &bottle_name)
+                .unwrap_or(None);
 
-    if let Some(custom) = custom_exe {
-        let exe_path = PathBuf::from(&custom.exe_path);
-        let work_dir = custom.working_dir.as_deref().map(Path::new);
+        if let Some(custom) = custom_exe {
+            let exe_path = PathBuf::from(&custom.exe_path);
+            let work_dir = custom.working_dir.as_deref().map(Path::new);
 
-        log::info!(
-            "launch_game_cmd: using custom exe '{}' at {}",
-            custom.name,
-            exe_path.display()
-        );
+            log::info!(
+                "launch_game_cmd: using custom exe '{}' at {}",
+                custom.name,
+                exe_path.display()
+            );
 
-        return launcher::launch_game(&bottle, &exe_path, work_dir.or(Some(&game_path)))
-            .map_err(|e| format!("Launch failed ({}): {}", bottle.source, e));
+            return launcher::launch_game(&bottle, &exe_path, work_dir.or(Some(&game_path)))
+                .map_err(|e| format!("Launch failed ({}): {}", bottle.source, e));
+        }
     }
 
     // Determine which built-in executable to launch
@@ -2128,38 +2132,32 @@ async fn delete_collection_cmd(
             }
         });
 
-        // Phase 3: Handle download records (sequential — DB-bound)
-        for m in &collection_mods {
-            let download =
-                if let (Some(nmod_id), Some(nfile_id)) = (m.nexus_mod_id, m.nexus_file_id) {
-                    db.find_download_by_nexus_ids(nmod_id, nfile_id)
-                        .ok()
-                        .flatten()
+        // Phase 3: Handle download records.
+        // Look up downloads via the collection_refs table directly (reliable),
+        // rather than going through mod records (which may lack nexus IDs or
+        // have full-path archive names that don't match the download registry).
+        if delete_unique_downloads {
+            let unique_downloads = db
+                .get_unique_downloads_for_collection(&game_id, &bottle_name, &collection_name)
+                .unwrap_or_default();
+            for (dl_id, archive_path) in &unique_downloads {
+                if std::fs::remove_file(archive_path).is_ok() {
+                    downloads_removed += 1;
+                    let _ = db.delete_download_record(*dl_id);
                 } else {
-                    None
+                    log::warn!(
+                        "Failed to delete archive (may already be removed): {}",
+                        archive_path
+                    );
                 }
-                .or_else(|| db.find_download_by_name(&m.archive_name).ok().flatten());
-
-            if let Some(dl) = download {
-                let is_unique = db
-                    .is_download_unique_to_collection(dl.id, &collection_name)
-                    .unwrap_or(false);
-
-                if delete_unique_downloads && is_unique {
-                    if std::fs::remove_file(&dl.archive_path).is_ok() {
-                        downloads_removed += 1;
-                        let _ = db.delete_download_record(dl.id);
-                    }
-                }
-
-                let _ = db.remove_download_collection_ref(
-                    dl.id,
-                    &collection_name,
-                    &game_id,
-                    &bottle_name,
-                );
             }
         }
+        // Clean up all collection refs for this collection
+        let _ = db.remove_all_collection_download_refs(
+            &collection_name,
+            &game_id,
+            &bottle_name,
+        );
 
         // Phase 4: Bulk-remove all mods from DB
         let _ = app.emit(

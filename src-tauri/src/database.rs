@@ -1280,6 +1280,53 @@ impl ModDatabase {
         Ok(size)
     }
 
+    /// Get all downloads unique to a collection (not shared with any other collection).
+    /// Returns (download_id, archive_path) pairs for deletion.
+    pub fn get_unique_downloads_for_collection(
+        &self,
+        game_id: &str,
+        bottle_name: &str,
+        collection_name: &str,
+    ) -> Result<Vec<(i64, String)>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT dr.id, dr.archive_path
+             FROM download_registry dr
+             JOIN download_collection_refs dcr ON dcr.download_id = dr.id
+             WHERE dcr.collection_name = ?1
+               AND dcr.game_id = ?2
+               AND dcr.bottle_name = ?3
+               AND dr.id NOT IN (
+                   SELECT download_id FROM download_collection_refs
+                   WHERE collection_name != ?1
+               )",
+        )?;
+        let rows = stmt.query_map(params![collection_name, game_id, bottle_name], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    /// Remove all collection refs for a given collection.
+    pub fn remove_all_collection_download_refs(
+        &self,
+        collection_name: &str,
+        game_id: &str,
+        bottle_name: &str,
+    ) -> Result<usize> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let deleted = conn.execute(
+            "DELETE FROM download_collection_refs
+             WHERE collection_name = ?1 AND game_id = ?2 AND bottle_name = ?3",
+            params![collection_name, game_id, bottle_name],
+        )?;
+        Ok(deleted)
+    }
+
     /// Batch-check which (nexus_mod_id, nexus_file_id) pairs exist in the download registry.
     /// Returns the subset of input pairs that have a matching downloaded file on disk.
     pub fn batch_check_cached_files(&self, pairs: &[(i64, i64)]) -> Result<Vec<(i64, i64)>> {
