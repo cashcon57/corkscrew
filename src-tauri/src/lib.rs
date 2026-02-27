@@ -1949,6 +1949,7 @@ async fn delete_collection_cmd(
     bottle_name: String,
     collection_name: String,
     delete_unique_downloads: bool,
+    remove_all_mods: bool,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     let db = state.db.clone();
@@ -1962,10 +1963,16 @@ async fn delete_collection_cmd(
             &format!("Before deleting collection: {}", collection_name),
         );
 
-        // Get mods in this collection
-        let collection_mods = db
-            .list_mods_by_collection(&game_id, &bottle_name, &collection_name)
-            .map_err(|e| e.to_string())?;
+        // If "remove ALL mods" is selected, get every mod — not just the collection's.
+        // This skips the per-mod restore_next_winner overhead entirely since nothing
+        // remains to restore.
+        let collection_mods = if remove_all_mods {
+            db.list_mods(&game_id, &bottle_name)
+                .map_err(|e| e.to_string())?
+        } else {
+            db.list_mods_by_collection(&game_id, &bottle_name, &collection_name)
+                .map_err(|e| e.to_string())?
+        };
 
         let total_mods = collection_mods.len();
         let mut mods_removed = 0usize;
@@ -1982,22 +1989,11 @@ async fn delete_collection_cmd(
             }),
         );
 
-        // Collect plugin filenames for rule cleanup
+        // Collect plugin filenames for rule cleanup + mod IDs for bulk ops
         let mut plugin_names: Vec<String> = Vec::new();
+        let mod_ids: Vec<i64> = collection_mods.iter().map(|m| m.id).collect();
 
-        for (idx, m) in collection_mods.iter().enumerate() {
-            // Emit: mod uninstalling — undeploy
-            let _ = app.emit(
-                "uninstall-progress",
-                serde_json::json!({
-                    "kind": "modUninstalling",
-                    "mod_index": idx,
-                    "mod_name": &m.name,
-                    "step": "undeploying",
-                }),
-            );
-
-            // Gather plugin filenames before removal
+        for m in &collection_mods {
             for file in &m.installed_files {
                 let lower = file.to_lowercase();
                 if lower.ends_with(".esp") || lower.ends_with(".esm") || lower.ends_with(".esl") {
@@ -2006,41 +2002,76 @@ async fn delete_collection_cmd(
                     }
                 }
             }
+        }
 
-            // Undeploy
-            if let Err(e) = deployer::undeploy_mod(&db, &game_id, &bottle_name, m.id, &data_dir) {
-                errors.push(format!("Failed to undeploy '{}': {}", m.name, e));
-            }
-
-            // Emit: cleaning staging
-            let _ = app.emit(
-                "uninstall-progress",
-                serde_json::json!({
-                    "kind": "modUninstalling",
-                    "mod_index": idx,
-                    "mod_name": &m.name,
-                    "step": "cleaning_staging",
-                }),
-            );
-
-            // Clean orphaned rollback staging directories
-            if let Err(e) = rollback::cleanup_mod_version_staging(&db, m.id) {
-                errors.push(format!(
-                    "Failed to clean rollback staging for '{}': {}",
-                    m.name, e
-                ));
-            }
-
-            // Remove staging
-            if let Some(sp) = &m.staging_path {
-                if let Err(e) = std::fs::remove_dir_all(sp) {
-                    if Path::new(sp).exists() {
-                        errors.push(format!("Failed to remove staging for '{}': {}", m.name, e));
+        // Phase 1: Bulk-remove all deployed files for collection mods.
+        // This avoids the per-file `restore_next_winner` overhead — we do one
+        // redeploy of remaining mods at the end instead.
+        let _ = app.emit(
+            "uninstall-progress",
+            serde_json::json!({
+                "kind": "modUninstalling",
+                "mod_index": 0,
+                "mod_name": "all collection mods",
+                "step": "undeploying",
+            }),
+        );
+        let deployed_paths = db.bulk_remove_deployment_entries(&mod_ids).unwrap_or_default();
+        let removed_count = std::sync::atomic::AtomicUsize::new(0);
+        let path_total = deployed_paths.len();
+        use rayon::prelude::*;
+        deployed_paths.par_iter().for_each(|rel_path| {
+            let file_path = data_dir.join(rel_path);
+            if file_path.exists() {
+                // Make writable before deleting
+                if let Ok(metadata) = std::fs::metadata(&file_path) {
+                    let perms = metadata.permissions();
+                    if perms.readonly() {
+                        let mut writable = perms;
+                        writable.set_readonly(false);
+                        let _ = std::fs::set_permissions(&file_path, writable);
                     }
                 }
+                let _ = std::fs::remove_file(&file_path);
             }
+            let done = removed_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            if done % 5000 == 0 || done == path_total {
+                let _ = app.emit(
+                    "uninstall-progress",
+                    serde_json::json!({
+                        "kind": "modUninstalling",
+                        "mod_index": 0,
+                        "mod_name": format!("Removing files ({}/{})", done, path_total),
+                        "step": "undeploying",
+                    }),
+                );
+            }
+        });
+        log::info!(
+            "Bulk-removed {} deployed files for {} collection mods",
+            path_total,
+            total_mods
+        );
 
-            // Find download record — try nexus IDs first, fall back to archive name
+        // Phase 2: Clean staging + rollback dirs in parallel
+        let _ = app.emit(
+            "uninstall-progress",
+            serde_json::json!({
+                "kind": "modUninstalling",
+                "mod_index": 0,
+                "mod_name": "Cleaning staging directories",
+                "step": "cleaning_staging",
+            }),
+        );
+        collection_mods.par_iter().for_each(|m| {
+            let _ = rollback::cleanup_mod_version_staging(&db, m.id);
+            if let Some(sp) = &m.staging_path {
+                let _ = std::fs::remove_dir_all(sp);
+            }
+        });
+
+        // Phase 3: Handle download records (sequential — DB-bound)
+        for m in &collection_mods {
             let download =
                 if let (Some(nmod_id), Some(nfile_id)) = (m.nexus_mod_id, m.nexus_file_id) {
                     db.find_download_by_nexus_ids(nmod_id, nfile_id)
@@ -2052,62 +2083,59 @@ async fn delete_collection_cmd(
                 .or_else(|| db.find_download_by_name(&m.archive_name).ok().flatten());
 
             if let Some(dl) = download {
-                // Check uniqueness before removing the ref
                 let is_unique = db
                     .is_download_unique_to_collection(dl.id, &collection_name)
                     .unwrap_or(false);
 
-                // Optionally delete the actual archive file if unique to this collection
                 if delete_unique_downloads && is_unique {
-                    if let Err(e) = std::fs::remove_file(&dl.archive_path) {
-                        if Path::new(&dl.archive_path).exists() {
-                            errors
-                                .push(format!("Failed to delete download for '{}': {}", m.name, e));
-                        }
-                    } else {
+                    if std::fs::remove_file(&dl.archive_path).is_ok() {
                         downloads_removed += 1;
-                        // Also remove the download_registry entry since the file is gone
                         let _ = db.delete_download_record(dl.id);
                     }
                 }
 
-                // Always clean up the collection ref
-                if let Err(e) = db.remove_download_collection_ref(
+                let _ = db.remove_download_collection_ref(
                     dl.id,
                     &collection_name,
                     &game_id,
                     &bottle_name,
-                ) {
-                    errors.push(format!(
-                        "Failed to remove download ref for '{}': {}",
-                        m.name, e
-                    ));
+                );
+            }
+        }
+
+        // Phase 4: Bulk-remove all mods from DB
+        let _ = app.emit(
+            "uninstall-progress",
+            serde_json::json!({
+                "kind": "modUninstalling",
+                "mod_index": 0,
+                "mod_name": "Cleaning database",
+                "step": "cleaning_staging",
+            }),
+        );
+        match db.bulk_remove_mods(&mod_ids) {
+            Ok(count) => {
+                mods_removed = count;
+            }
+            Err(e) => {
+                errors.push(format!("Bulk DB removal failed: {}", e));
+                // Fall back to per-mod removal
+                for m in &collection_mods {
+                    if let Err(e2) = db.remove_mod(m.id) {
+                        errors.push(format!("Failed to remove '{}': {}", m.name, e2));
+                    } else {
+                        mods_removed += 1;
+                    }
                 }
             }
+        }
 
-            // Remove from DB (cascades deployment_manifest, file_hashes; also cleans profile_mods)
-            if let Err(e) = db.remove_mod(m.id) {
-                let _ = app.emit(
-                    "uninstall-progress",
-                    serde_json::json!({
-                        "kind": "modUninstallFailed",
-                        "mod_index": idx,
-                        "mod_name": &m.name,
-                        "error": e.to_string(),
-                    }),
-                );
-                errors.push(format!("Failed to remove mod '{}' from DB: {}", m.name, e));
-            } else {
-                mods_removed += 1;
-                let _ = app.emit(
-                    "uninstall-progress",
-                    serde_json::json!({
-                        "kind": "modUninstalled",
-                        "mod_index": idx,
-                        "mod_name": &m.name,
-                    }),
-                );
-            }
+        // Phase 5: Redeploy remaining mods (restores files that collection
+        // mods were overwriting). Only needed if non-collection mods exist.
+        let remaining_mods = db.list_mods(&game_id, &bottle_name).unwrap_or_default();
+        if remaining_mods.iter().any(|m| m.enabled) {
+            log::info!("Redeploying {} remaining mods after collection removal", remaining_mods.len());
+            let _ = deployer::redeploy_all(&db, &game_id, &bottle_name, &data_dir);
         }
 
         // Note: We intentionally do NOT call cleanup_orphaned_downloads() here.

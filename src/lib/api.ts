@@ -1111,13 +1111,15 @@ export async function deleteCollection(
   gameId: string,
   bottleName: string,
   collectionName: string,
-  deleteUniqueDownloads: boolean
+  deleteUniqueDownloads: boolean,
+  removeAllMods: boolean = false
 ): Promise<{ mods_removed: number; downloads_removed: number }> {
   return invoke("delete_collection_cmd", {
     gameId,
     bottleName,
     collectionName,
     deleteUniqueDownloads,
+    removeAllMods,
   });
 }
 

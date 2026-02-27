@@ -264,6 +264,7 @@
             game.bottle_name,
             colName,
             deleteDownloads,
+            false,
           );
           showSuccess(
             `Cancelled and deleted "${colName}" — ${result.mods_removed} mods removed` +

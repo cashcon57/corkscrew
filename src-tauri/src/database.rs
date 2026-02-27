@@ -610,6 +610,60 @@ impl ModDatabase {
         Ok(paths)
     }
 
+    /// Bulk-delete deployment manifest entries for a set of mod IDs in one
+    /// transaction.  Returns all removed relative paths.
+    pub fn bulk_remove_deployment_entries(&self, mod_ids: &[i64]) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        // Collect all paths first
+        let placeholders: String = mod_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let query = format!(
+            "SELECT relative_path FROM deployment_manifest WHERE mod_id IN ({})",
+            placeholders
+        );
+        let mut stmt = conn.prepare(&query)?;
+        let params: Vec<&dyn rusqlite::types::ToSql> =
+            mod_ids.iter().map(|id| id as &dyn rusqlite::types::ToSql).collect();
+        let paths: Vec<String> = stmt
+            .query_map(params.as_slice(), |row| row.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        // Delete in one shot
+        let delete_query = format!(
+            "DELETE FROM deployment_manifest WHERE mod_id IN ({})",
+            placeholders
+        );
+        let mut del_stmt = conn.prepare(&delete_query)?;
+        let del_params: Vec<&dyn rusqlite::types::ToSql> =
+            mod_ids.iter().map(|id| id as &dyn rusqlite::types::ToSql).collect();
+        del_stmt.execute(del_params.as_slice())?;
+        Ok(paths)
+    }
+
+    /// Bulk-remove mods from the database in one transaction.
+    pub fn bulk_remove_mods(&self, mod_ids: &[i64]) -> Result<usize> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let placeholders: String = mod_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        // Clean related tables first (same as remove_mod but in batch)
+        for table in &[
+            "file_hashes",
+            "deployment_manifest",
+            "mod_dependencies",
+            "profile_mods",
+        ] {
+            let q = format!("DELETE FROM {} WHERE mod_id IN ({})", table, placeholders);
+            let mut stmt = conn.prepare(&q)?;
+            let p: Vec<&dyn rusqlite::types::ToSql> =
+                mod_ids.iter().map(|id| id as &dyn rusqlite::types::ToSql).collect();
+            let _ = stmt.execute(p.as_slice());
+        }
+        let q = format!("DELETE FROM installed_mods WHERE id IN ({})", placeholders);
+        let mut stmt = conn.prepare(&q)?;
+        let p: Vec<&dyn rusqlite::types::ToSql> =
+            mod_ids.iter().map(|id| id as &dyn rusqlite::types::ToSql).collect();
+        let deleted = stmt.execute(p.as_slice())?;
+        Ok(deleted)
+    }
+
     /// Get deployed file paths for a mod without deleting the manifest entries.
     pub fn get_deployment_paths_for_mod(&self, mod_id: i64) -> Result<Vec<String>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());

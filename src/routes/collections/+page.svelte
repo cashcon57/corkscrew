@@ -76,6 +76,7 @@
   let deletingCollection = $state<string | null>(null);
   let confirmDeleteCollection = $state<string | null>(null);
   let deleteKeepDownloads = $state(false);
+  let deleteRemoveAllMods = $state(false);
   let deleteCleanGameDir = $state(false);
   let deleteHasSnapshot = $state(false);
   let deleteDownloadSize = $state<number | null>(null);
@@ -266,7 +267,7 @@
     });
 
     try {
-      await deleteCollection(game.game_id, game.bottle_name, name, !deleteKeepDownloads);
+      await deleteCollection(game.game_id, game.bottle_name, name, !deleteKeepDownloads, deleteRemoveAllMods);
 
       // After successful uninstall, optionally clean non-stock files (preserving SKSE)
       if (shouldCleanGameDir) {
@@ -3559,6 +3560,21 @@
           <p class="modal-option-hint">Downloaded archives are kept so you can reinstall later without re-downloading.</p>
         {:else}
           <p class="modal-option-hint modal-option-hint-warn">Archives unique to this collection will be permanently deleted.</p>
+        {/if}
+      </div>
+
+      <div class="modal-option">
+        <label class="modal-checkbox-label">
+          <input type="checkbox" bind:checked={deleteRemoveAllMods} />
+          <span class="modal-checkbox-text">
+            Remove ALL mods, not just this collection
+            <span class="modal-size-note">fastest</span>
+          </span>
+        </label>
+        {#if deleteRemoveAllMods}
+          <p class="modal-option-hint modal-option-hint-warn">Removes every installed mod for this game, including any manually installed mods outside the collection.</p>
+        {:else}
+          <p class="modal-option-hint">Only removes mods that belong to this collection.</p>
         {/if}
       </div>
 
