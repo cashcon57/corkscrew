@@ -1418,6 +1418,10 @@ pub async fn install_collection(
         InstallProgress::InstallPhaseStarted { total_mods },
     );
 
+    // Deferred mods whose extraction wasn't done yet during the first pass.
+    // After pass 1 completes, these are retried (extractions will be done by then).
+    let mut deferred: Vec<(usize, usize)> = Vec::new(); // (order_pos, mod_idx)
+
     for (i, &mod_idx) in install_order.iter().enumerate() {
         // Check for cancellation at the top of each iteration
         if is_cancelled() {
@@ -1473,6 +1477,17 @@ pub async fn install_collection(
                 _ => {
                     // "failed" or "pending" — retry this mod
                 }
+            }
+        }
+
+        // Skip mods still extracting — defer to pass 2 so we don't stall
+        // the entire install pipeline waiting for a few slow archives.
+        if needs_extraction.contains(&i) {
+            let is_done = extraction_done.lock().unwrap_or_else(|e| e.into_inner()).contains(&i);
+            if !is_done {
+                log::info!("Deferring install of '{}' — extraction not done yet", mod_name);
+                deferred.push((i, mod_idx));
+                continue;
             }
         }
 
@@ -1656,6 +1671,184 @@ pub async fn install_collection(
                     url: None,
                     instructions: None,
                 });
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Pass 2: install deferred mods (extraction should be done now)
+    // ---------------------------------------------------------------
+    if !deferred.is_empty() && !is_cancelled() {
+        log::info!(
+            "Pass 2: installing {} deferred mods whose extractions were slow",
+            deferred.len()
+        );
+        for (i, mod_idx) in deferred {
+            if is_cancelled() {
+                break;
+            }
+
+            let mod_entry = &manifest.mods[mod_idx];
+            let mod_name = &mod_entry.name;
+
+            // Wait for extraction to complete (it should be done by now, but be safe)
+            let pre_ext = if needs_extraction.contains(&i) {
+                loop {
+                    if extraction_done.lock().unwrap_or_else(|e| e.into_inner()).contains(&i) {
+                        let dir = extracted_map.lock().unwrap_or_else(|e| e.into_inner()).remove(&i);
+                        if let Some(ref d) = dir {
+                            temp_guard.track(d.clone());
+                        }
+                        break dir;
+                    }
+                    extraction_notify.notified().await;
+                }
+            } else {
+                None
+            };
+            if let Some(ref dir) = pre_ext {
+                temp_guard.untrack(dir);
+            }
+
+            let _ = app.emit(
+                INSTALL_PROGRESS_EVENT,
+                InstallProgress::ModStarted {
+                    mod_index: i,
+                    total_mods,
+                    mod_name: mod_name.clone(),
+                },
+            );
+
+            // Check already-installed (live DB query)
+            let current_mods = db.list_mods(game_id, bottle_name).unwrap_or_default();
+            let is_already = current_mods.iter().any(|m| {
+                if let Some(nexus_id) = mod_entry.source.mod_id {
+                    if m.nexus_mod_id == Some(nexus_id) {
+                        return true;
+                    }
+                }
+                if let Some(file_id) = mod_entry.source.file_id {
+                    if m.nexus_file_id == Some(file_id) {
+                        return true;
+                    }
+                }
+                m.name.eq_ignore_ascii_case(mod_name)
+            });
+
+            if is_already {
+                if let Some(existing) = current_mods.iter().find(|m| {
+                    m.name.eq_ignore_ascii_case(mod_name)
+                        || mod_entry.source.mod_id.map_or(false, |id| m.nexus_mod_id == Some(id))
+                }) {
+                    let _ = db.set_collection_name(existing.id, &manifest.name);
+                }
+                let _ = app.emit(
+                    INSTALL_PROGRESS_EVENT,
+                    InstallProgress::ModCompleted {
+                        mod_index: i,
+                        mod_name: mod_name.clone(),
+                        mod_id: 0,
+                        deployed_size: 0,
+                        duration_ms: 0,
+                    },
+                );
+                already_installed += 1;
+                let _ = db.update_checkpoint_mod_status(checkpoint_id, i, "already_installed");
+                details.push(ModInstallDetail {
+                    name: mod_name.clone(),
+                    status: "already_installed".to_string(),
+                    error: None,
+                    url: None,
+                    instructions: None,
+                });
+                continue;
+            }
+
+            let pre_dl = pre_downloaded.get(&i).map(|p| p.as_path());
+            let install_start = std::time::Instant::now();
+            let result = install_single_mod(
+                app,
+                db,
+                queue,
+                mod_entry,
+                i,
+                game_id,
+                bottle_name,
+                game_slug,
+                &data_dir,
+                &download_dir,
+                &auth_method,
+                is_premium,
+                &manifest.name,
+                pre_dl,
+                pre_ext,
+            )
+            .await;
+
+            match result {
+                Ok((mod_id, deployed_size)) => {
+                    let install_duration_ms = install_start.elapsed().as_millis() as u64;
+                    let _ = db.set_collection_name(mod_id, &manifest.name);
+                    let _ = app.emit(
+                        INSTALL_PROGRESS_EVENT,
+                        InstallProgress::ModCompleted {
+                            mod_index: i,
+                            mod_name: mod_name.clone(),
+                            mod_id,
+                            deployed_size,
+                            duration_ms: install_duration_ms,
+                        },
+                    );
+                    installed += 1;
+                    let _ = db.update_checkpoint_mod_status(checkpoint_id, i, "installed");
+                    details.push(ModInstallDetail {
+                        name: mod_name.clone(),
+                        status: "installed".to_string(),
+                        error: None,
+                        url: None,
+                        instructions: None,
+                    });
+                }
+                Err(InstallError::UserAction { action, url, instructions }) => {
+                    let _ = app.emit(
+                        INSTALL_PROGRESS_EVENT,
+                        InstallProgress::UserActionRequired {
+                            mod_index: i,
+                            mod_name: mod_name.clone(),
+                            action: action.clone(),
+                            url: url.clone(),
+                            instructions: instructions.clone(),
+                        },
+                    );
+                    skipped += 1;
+                    let _ = db.update_checkpoint_mod_status(checkpoint_id, i, "user_action");
+                    details.push(ModInstallDetail {
+                        name: mod_name.clone(),
+                        status: "user_action".to_string(),
+                        error: Some(action),
+                        url,
+                        instructions,
+                    });
+                }
+                Err(InstallError::Failed(error)) => {
+                    let _ = app.emit(
+                        INSTALL_PROGRESS_EVENT,
+                        InstallProgress::ModFailed {
+                            mod_index: i,
+                            mod_name: mod_name.clone(),
+                            error: error.clone(),
+                        },
+                    );
+                    failed += 1;
+                    let _ = db.update_checkpoint_mod_status(checkpoint_id, i, "failed");
+                    details.push(ModInstallDetail {
+                        name: mod_name.clone(),
+                        status: "failed".to_string(),
+                        error: Some(error),
+                        url: None,
+                        instructions: None,
+                    });
+                }
             }
         }
     }
