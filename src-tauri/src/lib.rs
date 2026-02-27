@@ -5311,10 +5311,52 @@ pub fn run() {
     loot_rules::init_schema(&db).expect("Failed to initialize loot rules schema");
     rollback::init_schema(&db).expect("Failed to initialize rollback schema");
 
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+    // Set up logging: write to both stderr and a log file for GUI debugging.
+    let log_path = config::data_dir().join("corkscrew.log");
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path);
+
+    let mut builder =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
+    builder
         .filter_module("tao", log::LevelFilter::Warn)
-        .filter_module("wry", log::LevelFilter::Warn)
-        .init();
+        .filter_module("wry", log::LevelFilter::Warn);
+
+    if let Ok(file) = log_file {
+        // Truncate log if over 10 MB to avoid unbounded growth
+        if let Ok(meta) = std::fs::metadata(&log_path) {
+            if meta.len() > 10 * 1024 * 1024 {
+                let _ = std::fs::write(&log_path, b"");
+            }
+        }
+        let file = std::sync::Mutex::new(file);
+        builder
+            .format(move |buf, record| {
+                use std::io::Write;
+                let ts = buf.timestamp_seconds();
+                let line = format!(
+                    "{} [{}] {}: {}\n",
+                    ts,
+                    record.level(),
+                    record.target(),
+                    record.args()
+                );
+                // Write to stderr (normal env_logger behavior)
+                let _ = write!(buf, "{}", line);
+                // Also write to log file
+                if let Ok(mut f) = file.lock() {
+                    let _ = std::io::Write::write_all(&mut *f, line.as_bytes());
+                    let _ = std::io::Write::flush(&mut *f);
+                }
+                Ok(())
+            })
+            .init();
+        log::info!("Logging to file: {}", log_path.display());
+    } else {
+        builder.init();
+    }
 
     // Recover Dock if a previous session crashed while cursor fix was active
     cursor_clamp::recover_dock_if_needed();
