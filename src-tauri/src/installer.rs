@@ -68,6 +68,10 @@ const MOD_FILE_EXTENSIONS: &[&str] = &[
     "seq", // sequence files
     "swf", // UI files
     "fuz", // voice / lip-sync
+    "dll", // SKSE plugins
+    "bin", // SKSE address library data
+    "ini", // configuration files
+    "json", // mod config / MCM settings
 ];
 
 /// Directory names that are characteristic of Skyrim / Bethesda mod content.
@@ -740,7 +744,19 @@ fn _find_data_root_inner(dir: &Path, depth: u32) -> PathBuf {
                 return entry_path;
             }
 
-            // 1c – recurse into the wrapper directory
+            // 1c – if the single directory IS a recognized mod folder name
+            // (e.g. "skse", "meshes", "textures"), the current directory is the
+            // data root — do NOT recurse into it or we'll strip the folder prefix.
+            if MOD_FOLDER_NAMES.contains(&name.as_str()) {
+                debug!(
+                    "find_data_root: single dir '{}' is a known mod folder -> {}",
+                    name,
+                    dir.display()
+                );
+                return dir.to_path_buf();
+            }
+
+            // Otherwise recurse into the wrapper directory
             return _find_data_root_inner(&entry_path, depth + 1);
         }
     }
@@ -1034,6 +1050,40 @@ mod tests {
 
         let root = find_data_root(&tmp);
         assert_eq!(root, data);
+
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_find_data_root_skse_folder() {
+        // Archive starts with a known mod folder like SKSE/ — should NOT
+        // recurse into it, the parent is the data root.
+        // This is the Address Library for SKSE Plugins case:
+        //   SKSE/Plugins/versionlib.bin
+        let tmp = std::env::temp_dir().join("corkscrew_test_fdr_skse");
+        let _ = fs::remove_dir_all(&tmp);
+        let skse_plugins = tmp.join("SKSE").join("Plugins");
+        fs::create_dir_all(&skse_plugins).unwrap();
+        fs::write(skse_plugins.join("versionlib-1-6-640-0.bin"), b"bin").unwrap();
+
+        let root = find_data_root(&tmp);
+        // The data root should be tmp (parent of SKSE/), NOT SKSE/Plugins/
+        assert_eq!(root, tmp);
+
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_find_data_root_meshes_folder() {
+        // Archive starts with "meshes/" directly — should not recurse.
+        let tmp = std::env::temp_dir().join("corkscrew_test_fdr_meshes");
+        let _ = fs::remove_dir_all(&tmp);
+        let meshes = tmp.join("meshes").join("armor");
+        fs::create_dir_all(&meshes).unwrap();
+        fs::write(meshes.join("cuirass.nif"), b"nif").unwrap();
+
+        let root = find_data_root(&tmp);
+        assert_eq!(root, tmp);
 
         fs::remove_dir_all(&tmp).unwrap();
     }
