@@ -26,7 +26,7 @@ Corkscrew installs, manages, and organizes mods for Windows games running throug
 
 It works by reading and writing directly to your Wine bottle's filesystem, the same way the game itself sees it. Your bottles, your mods, no middleman.
 
-> **v1.16** — Auto-snapshots before destructive operations, snapshot restore, Wabbajack modlist uninstall, return-to-vanilla command, NexusMods OAuth sign-in (browser-based PKCE), and tool install fixes for OAuth users.
+> **v1.0** — First stable release. NexusMods Collections install end-to-end (559 mods, FOMOD replay, binary patches, INI tweaks, plugin sync, delta updates), Wabbajack full pipeline, OAuth sign-in, LOOT sorting, profiles, crash log analysis, auto-updater, and Apple Developer code signing.
 
 ---
 
@@ -189,15 +189,16 @@ Corkscrew includes an in-app auto-updater. When a new version is published on Gi
 - **Direct mod download & install** — Premium users can download and install mods directly from the Browse page: pick a file from the mod's files list (grouped by category), download with real-time progress, and auto-deploy in one step.
 - **Embedded web views** — Toggle between in-app API browsing and an embedded NexusMods/Wabbajack website view. Powered by Tauri v2 multi-webview (native child webview, not an iframe). Available on Browse Nexus, Collections, and Wabbajack Gallery pages.
 - **Collections browser** — Browse NexusMods Collections via the GraphQL v2 API with search, sorting, advanced filtering, and detailed mod/revision views.
-- **Collection installation** — Premium users can install entire NexusMods Collections with one click. The orchestrator resolves install order, downloads mods via the NexusMods API, handles FOMOD selections from the collection manifest, deploys files, and applies the collection's plugin load order. Plugin load order sync works for all games with plugin support (Skyrim SE, Fallout 4, etc.), not just Skyrim SE. Free users see a list of mods with links to download manually from the Nexus website.
-- **Install progress dashboard** — Real-time collection install progress with phase indicators (downloading → staging → installing → complete), per-mod status tracking, download speed, activity feed with recently-completed items, summary chips (done/failed/skipped/pending counts), stall detection (warns after 30s of zero speed), auto-expanding mod log on first failure, expandable verbose log with timestamped event stream, and an activity pulse orb that modulates animation speed based on event throughput.
+- **Collection installation** — Premium users can install entire NexusMods Collections with one click. The orchestrator resolves install order, downloads mods via the NexusMods API, handles FOMOD selections from the collection manifest (including conditional visibility, flag dependencies, game version dependencies, file/mod dependencies, and nested composite conditions), applies binary patches from the collection bundle, merges INI tweaks into game INI files, deploys files, and applies the collection's plugin load order. Plugin load order sync works for all games with plugin support (Skyrim SE, Fallout 4, etc.), not just Skyrim SE. Free users see a list of mods with links to download manually from the Nexus website. Tested with 559-mod collections end-to-end.
+- **Collection delta updates** — Compare your locally installed collection against the author's latest revision to see added, removed, and updated mods, then update in-place without reinstalling everything.
+- **Install progress dashboard** — Real-time collection install progress with phase indicators (downloading → staging → installing → complete), per-mod status tracking, download speed, elapsed timer (freezes at completion so you can see total install time), activity feed with recently-completed items, summary chips (done/failed/skipped/pending counts), stall detection (warns after 30s of zero speed), auto-expanding mod log on first failure, expandable verbose log with timestamped event stream, and an activity pulse orb that modulates animation speed based on event throughput.
 - **Failed install handling** — Dedicated failure panel with error summary, "Installed with errors" state, and post-completion navigation buttons (View Mods, Load Order, Back to Collections).
 - **Resume interrupted installs** — If a collection install is interrupted, a resume banner with mini progress bar appears on the collections page.
 - **Mod endorsements** — Endorse or abstain on mods directly from Corkscrew via the NexusMods API. Endorsement status is shown in the overflow menu, detail panel, and context menu.
 - **Download cache coverage** — When browsing collections, each collection card shows the percentage of required files already cached locally, with filter chips for "90%+ Cached" and "100% Cached".
 - **DLC detection** — Before installing a collection, Corkscrew checks that required DLC files are present in the game directory and warns if any are missing.
 - **Update checking** — Check installed mods against Nexus for available updates.
-- **Collection diff** — Compare your locally installed collection against the author's latest revision to see added, removed, and updated mods.
+- **Collection INI tweaks** — Collections that bundle INI tweaks (partial .ini files in the collection archive) are automatically parsed and merged into the appropriate game INI files during installation.
 - **Tool requirement detection** — Before installing a Collection or Wabbajack modlist, Corkscrew scans for required modding tools (SKSE, Nemesis, BodySlide, etc.) and prompts you to install missing tools before proceeding. Integrated tools (LOOT) are hidden since they're built into Corkscrew. Pandora automatically suppresses Nemesis/FNIS requirements since it's backwards-compatible with both.
 - **Rate limit compliance** — All API calls respect NexusMods rate limits with graceful error handling (skip on failure, no aggressive retries).
 
@@ -361,7 +362,8 @@ Key workflows tested end-to-end:
 - Full mod lifecycle: install from archive → stage → deploy → enable/disable → uninstall
 - NXM protocol link handling (click on Nexus website → mod downloads in Corkscrew)
 - FOMOD installer wizard for mods with complex install options
-- NexusMods Collection installation (premium: automated; free: guided manual download)
+- **NexusMods Collection installation** — 559-mod collection installed, deployed, and launched successfully (premium: fully automated; free: guided manual download). Includes FOMOD replay with game version dependencies, binary patches, INI tweak merging, conflict resolution, and plugin load order sync.
+- Collection delta updates (revision diff for in-place upgrades)
 - LOOT-powered plugin sorting with masterlist fetching
 - Profile save/load/switch with full deployment cycling
 - SKSE auto-download and installation (game-version-aware)
@@ -385,22 +387,16 @@ Key workflows tested end-to-end:
 
 - **Linux testing is limited** — The app builds for Linux and handles Linux paths throughout, but primary testing has been on macOS. Community feedback on SteamOS/Proton setups is especially welcome.
 - **Enhanced game support** — 80+ games are detected and support basic mod deployment. Full-featured support (plugin load order, LOOT sorting, script extender auto-install, INI presets, crash log analysis, game-specific mod tools) currently exists for Skyrim SE and Fallout 4. Other Bethesda games are next in line.
-- **Collections installation** — Works well for most public NexusMods collections (10–150 mods). Install order resolution, FOMOD replay, plugin sync, profile snapshots, binary patch application, and collection delta updates (revision diff) are all functional.
-- **Wabbajack installation** — The full Wabbajack install pipeline is implemented with real downloads (NexusMods, HTTP, MediaFire, ModDB, Google Drive, Wabbajack CDN), directive processing (BSDiff patching, inline files, BSA/BA2 packing, DDS texture transformation, merged patches), and deployment. Checkpoint-based install resume survives interruptions. Game file source extraction is not yet implemented — complex modlists depending on vanilla game files as patch sources will partially fail.
-- **FOMOD conditionals** — The FOMOD installer handles group selection, type badges, file mapping, conditional visibility, flag dependencies, and step filtering based on previous selections.
-- **NexusMods OAuth** — Browser-based OAuth sign-in with PKCE is fully functional. API key fallback is available for users who prefer it.
-- **macOS code signing** — Fully signed and notarized with an Apple Developer certificate as of v1.13. No Gatekeeper bypass needed.
+- **Wabbajack game file sources** — The full Wabbajack install pipeline is implemented with real downloads and directive processing. Game file source extraction is not yet implemented — complex modlists depending on vanilla game files as patch sources will partially fail.
 
 ### Roadmap
 
 **Near-term:**
-- Wire up Wabbajack install UI to backend pipeline (backend complete, frontend not yet connected)
 - Enhanced game plugins for more Bethesda titles (Oblivion, Fallout 3, Fallout NV, Starfield, Morrowind)
 - Per-game tool configuration for non-Bethesda games
 - Wabbajack game file source extraction (vanilla files as patch sources)
 
 **Medium-term:**
-- Same-volume staging with user warning and auto-move option
 - Enhanced dependency visualization with tree view (currently list-based)
 - Install simulation / dry-run preview (currently preflight validation only)
 - Download bandwidth throttling
@@ -472,7 +468,7 @@ src/                          Svelte frontend
 │   └── settings/+page.svelte Config, game tools, auth, INI, diagnostics
 └── app.css                   Design system (tokens, themes, vibrancy, animations)
 
-src-tauri/src/                Rust backend (~50 modules, 607 tests)
+src-tauri/src/                Rust backend (~50 modules, 677 tests)
 ├── lib.rs              Tauri command handlers (~171 IPC commands)
 ├── bottles.rs          Bottle detection (9 sources, macOS + Linux)
 ├── bottle_config.rs    Wine bottle settings (MSync, MetalFX, env vars)
@@ -547,7 +543,7 @@ For **NexusMods Collections**, the `collection_installer` orchestrator handles t
 
 ## Contributing
 
-This is a young project and there's plenty to do. If you're a Mac or Linux gamer who's tired of manually dragging files into Wine prefixes, you're the target audience — and probably the ideal contributor.
+If you're a Mac or Linux gamer who's tired of manually dragging files into Wine prefixes, you're the target audience — and probably the ideal contributor.
 
 Bug reports, feature requests, and pull requests are all welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, PR guidelines, and coding conventions.
 
@@ -562,7 +558,7 @@ cargo tauri dev    # Development mode with hot-reload
 
 ```bash
 # Run tests
-cd src-tauri && cargo test           # 607 Rust tests
+cd src-tauri && cargo test           # 677 Rust tests
 npx svelte-check --threshold error   # Frontend type checking
 ```
 

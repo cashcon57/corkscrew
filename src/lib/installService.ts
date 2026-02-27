@@ -617,6 +617,11 @@ function applyEvent(
           failed: e.failed,
         };
         next.overallProgress = 100;
+        // Freeze the elapsed timer so the user can see the final install time
+        if (timer) {
+          clearInterval(timer);
+          timer = null;
+        }
         break;
     }
 }
