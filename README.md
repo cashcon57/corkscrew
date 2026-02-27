@@ -26,7 +26,7 @@ Corkscrew installs, manages, and organizes mods for Windows games running throug
 
 It works by reading and writing directly to your Wine bottle's filesystem, the same way the game itself sees it. Your bottles, your mods, no middleman.
 
-> **v1.0** — First stable release. NexusMods Collections install end-to-end (559 mods, FOMOD replay, binary patches, INI tweaks, plugin sync, delta updates), Wabbajack full pipeline, OAuth sign-in, LOOT sorting, profiles, crash log analysis, auto-updater, and Apple Developer code signing.
+> **v0.8** — NexusMods Collections install end-to-end (559 mods, FOMOD replay, binary patches, INI tweaks, plugin sync, delta updates), Wabbajack modlist pipeline, OAuth sign-in, LOOT sorting, profiles, crash log analysis, auto-updater, and Apple Developer code signing.
 
 ---
 
