@@ -72,6 +72,9 @@ pub enum InstallProgress {
         failed: usize,
         skipped: usize,
     },
+    DownloadRetryStarted {
+        count: usize,
+    },
     InstallPhaseStarted {
         total_mods: usize,
     },

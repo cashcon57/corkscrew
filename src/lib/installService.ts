@@ -201,6 +201,7 @@ function logMessageForEvent(e: InstallProgressEvent): { message: string; level: 
     case "downloadModStarted": return { message: `Downloading: ${e.mod_name}`, level: "info" };
     case "downloadModCompleted": return { message: `${e.cached ? "Cached" : "Downloaded"}: ${e.mod_name}`, level: "info" };
     case "downloadModFailed": return { message: `Download failed: ${e.mod_name} — ${e.error}`, level: "error" };
+    case "downloadRetryStarted": return { message: `Retrying ${e.count} failed download${e.count !== 1 ? "s" : ""}…`, level: "warn" };
     case "allDownloadsCompleted": return { message: `Downloads complete (${e.downloaded} downloaded, ${e.cached} cached, ${e.failed} failed, ${e.skipped} skipped)`, level: "info" };
     case "stagingPhaseStarted": return { message: `Extraction phase started (${e.total_mods} archives, ${e.max_concurrent} threads)`, level: "info" };
     case "stagingModStarted": return { message: `Extracting: ${e.mod_name}`, level: "info" };
@@ -355,6 +356,21 @@ function applyEvent(
           ...next.downloadProgress,
           failed: next.downloadProgress.failed + 1,
           active: next.downloadProgress.active.filter((d) => d.modIndex !== e.mod_index),
+        };
+        break;
+
+      case "downloadRetryStarted":
+        // Reset failed mod statuses so they show as retrying
+        ensureDetailsCloned();
+        for (const detail of next.modDetails) {
+          if (detail && detail.status === "failed") {
+            detail.status = "queued";
+            detail.error = undefined;
+          }
+        }
+        next.downloadProgress = {
+          ...next.downloadProgress,
+          failed: 0,
         };
         break;
 

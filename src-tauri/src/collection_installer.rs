@@ -177,9 +177,9 @@ fn game_id_to_nexus_slug(game_id: &str) -> &str {
 }
 
 /// Maximum retry attempts for transient collection download failures.
-const COLLECTION_DOWNLOAD_RETRIES: u32 = 3;
+const COLLECTION_DOWNLOAD_RETRIES: u32 = 5;
 /// Base delay in milliseconds for exponential backoff.
-const COLLECTION_RETRY_BASE_MS: u64 = 2000;
+const COLLECTION_RETRY_BASE_MS: u64 = 3000;
 
 /// Download a mod archive without extracting or deploying it.
 ///
@@ -272,18 +272,24 @@ async fn download_mod_archive(
 }
 
 /// Returns true for transient errors worth retrying (network/IO failures).
-/// Permanent errors (404, 403) are NOT retried.
+/// Only permanent errors (404, 403, missing IDs, unsupported source types) are
+/// NOT retried.  Everything else is assumed transient — this is deliberately
+/// permissive because it's better to retry a few extra times than to stall a
+/// 500-mod collection install on a single CDN hiccup.
 fn is_transient_collection_error(e: &InstallError) -> bool {
     match e {
         InstallError::Failed(msg) => {
-            // Never retry permanent HTTP errors (404 Not Found, 403 Forbidden, etc.)
-            if msg.contains("(404)") || msg.contains("(403)") || msg.contains("No Mod Found") {
-                return false;
-            }
-            msg.contains("Download failed:")
-                || msg.contains("Download links failed:")
-                || msg.contains("timed out")
-                || msg.contains("connection")
+            // Never retry permanent HTTP errors or missing-resource errors
+            let permanent = msg.contains("(404)")
+                || msg.contains("(403)")
+                || msg.contains("No Mod Found")
+                || msg.contains("No Nexus mod ID")
+                || msg.contains("No Nexus file ID")
+                || msg.contains("No download URL")
+                || msg.contains("Cannot pre-download source type")
+                || msg.contains("No NexusMods auth configured")
+                || msg.contains("premium");
+            !permanent
         }
         _ => false,
     }
@@ -1024,8 +1030,11 @@ pub async fn install_collection(
     let mut pre_downloaded: HashMap<usize, PathBuf> = HashMap::new();
     let mut dl_downloaded = 0usize;
     let mut dl_cached = 0usize;
-    let mut dl_failed = 0usize;
+    let mut dl_failed_count = 0usize;
     let dl_skipped = total_mods - total_downloads; // browse/manual/bundled/non-premium/already-installed
+
+    // Track which downloads failed so we can retry them as a batch
+    let mut failed_entries: Vec<(usize, usize)> = Vec::new(); // (order_pos, mod_idx)
 
     for join_result in download_results {
         match join_result {
@@ -1037,12 +1046,101 @@ pub async fn install_collection(
                 }
                 pre_downloaded.insert(order_pos, dl.archive_path);
             }
-            Ok((_order_pos, Err(_))) => {
-                dl_failed += 1;
+            Ok((order_pos, Err(e))) => {
+                // Find the mod_idx for this order_pos
+                if let Some(&(_, mod_idx)) = downloadable.iter().find(|&&(op, _)| op == order_pos) {
+                    // Only retry transient errors
+                    if is_transient_collection_error(&e) {
+                        failed_entries.push((order_pos, mod_idx));
+                    } else {
+                        dl_failed_count += 1;
+                    }
+                } else {
+                    dl_failed_count += 1;
+                }
             }
             Err(join_err) => {
                 log::error!("Download task panicked: {}", join_err);
-                dl_failed += 1;
+                dl_failed_count += 1;
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Retry pass: re-attempt failed transient downloads sequentially
+    // ---------------------------------------------------------------
+    // If any downloads failed with transient errors despite per-mod retries,
+    // wait a bit and try them again.  CDN/API hiccups often resolve within
+    // 15-30 seconds, so a second wave of attempts frequently succeeds.
+    if !failed_entries.is_empty() && !is_cancelled() {
+        let retry_count = failed_entries.len();
+        log::info!(
+            "Retrying {} failed downloads after 10s cooldown",
+            retry_count
+        );
+        let _ = app.emit(
+            INSTALL_PROGRESS_EVENT,
+            InstallProgress::DownloadRetryStarted {
+                count: retry_count,
+            },
+        );
+
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+
+        for (order_pos, mod_idx) in failed_entries {
+            if is_cancelled() {
+                dl_failed_count += 1;
+                continue;
+            }
+
+            let entry = &manifest.mods[mod_idx];
+            log::info!("Retry-pass: re-attempting download for '{}'", entry.name);
+
+            let result = download_mod_archive(
+                app,
+                db,
+                queue,
+                entry,
+                order_pos,
+                game_slug,
+                &download_dir,
+                &auth_method,
+                &manifest.name,
+                game_id,
+                bottle_name,
+            )
+            .await;
+
+            match result {
+                Ok(dl) => {
+                    log::info!("Retry-pass succeeded for '{}'", entry.name);
+                    if dl.cached {
+                        dl_cached += 1;
+                    } else {
+                        dl_downloaded += 1;
+                    }
+                    pre_downloaded.insert(order_pos, dl.archive_path);
+                    let _ = app.emit(
+                        INSTALL_PROGRESS_EVENT,
+                        InstallProgress::DownloadModCompleted {
+                            mod_index: order_pos,
+                            mod_name: entry.name.clone(),
+                            cached: dl.cached,
+                        },
+                    );
+                }
+                Err(e) => {
+                    log::warn!("Retry-pass failed for '{}': {:?}", entry.name, e);
+                    dl_failed_count += 1;
+                    let _ = app.emit(
+                        INSTALL_PROGRESS_EVENT,
+                        InstallProgress::DownloadModFailed {
+                            mod_index: order_pos,
+                            mod_name: entry.name.clone(),
+                            error: format!("{:?}", e),
+                        },
+                    );
+                }
             }
         }
     }
@@ -1052,7 +1150,7 @@ pub async fn install_collection(
         InstallProgress::AllDownloadsCompleted {
             downloaded: dl_downloaded,
             cached: dl_cached,
-            failed: dl_failed,
+            failed: dl_failed_count,
             skipped: dl_skipped,
         },
     );
