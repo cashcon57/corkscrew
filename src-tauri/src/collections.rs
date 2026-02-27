@@ -510,7 +510,7 @@ query CollectionRevisions($slug: String!, $viewAdultContent: Boolean) {
 const GET_REVISION_MODS_QUERY: &str = r#"
 query RevisionMods($slug: String!, $revision: Int, $viewAdultContent: Boolean) {
     collectionRevision(slug: $slug, revision: $revision, viewAdultContent: $viewAdultContent) {
-        gameVersions
+        gameVersions { id reference }
         modFiles {
             fileId optional
             file {
