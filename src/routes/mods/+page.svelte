@@ -933,6 +933,9 @@
       const result = await launchGame(game.game_id, game.bottle_name, useSkse);
       if (result.success) {
         showSuccess(`Launched ${game.display_name}${useSkse ? " via SKSE" : ""} — Wine cursor fix applied`);
+        if (result.warning) {
+          showError(`SKSE warning: ${result.warning}`);
+        }
       }
     } catch (e: unknown) {
       showError(`Failed to launch: ${e}`);

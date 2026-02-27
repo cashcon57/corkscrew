@@ -722,9 +722,18 @@ pub async fn install_collection(
                 merge_bundle_into_manifest(manifest, &bundle)
             }
             Err(e) => {
-                log::warn!(
-                    "Failed to download collection bundle: {} — FOMOD choices will require manual selection",
+                log::error!(
+                    "Failed to download collection bundle: {} — ALL FOMOD choices will use defaults (may install wrong DLL variants!)",
                     e
+                );
+                let _ = app.emit(
+                    INSTALL_PROGRESS_EVENT,
+                    InstallProgress::Initializing {
+                        message: format!(
+                            "Warning: Could not download collection manifest — FOMOD options will use defaults. Error: {}",
+                            e
+                        ),
+                    },
                 );
                 manifest.clone()
             }
@@ -3241,6 +3250,18 @@ async fn stage_and_deploy(
             );
             for ff in &fomod_files {
                 log::debug!("[stage_deploy] FOMOD file: src={}, dst={}", ff.source, ff.destination);
+            }
+            // Log SKSE plugin DLLs specifically — these are the most
+            // version-sensitive files and the most common cause of CTDs
+            // when the wrong variant is selected.
+            for ff in &fomod_files {
+                let dst_lower = ff.destination.to_lowercase();
+                if dst_lower.contains("skse") && dst_lower.ends_with(".dll") {
+                    log::info!(
+                        "[stage_deploy] SKSE plugin DLL selected for '{}': {} -> {} (game_version={:?})",
+                        mod_name, ff.source, ff.destination, game_version_ref
+                    );
+                }
             }
 
             let result = apply_fomod_to_staging(&staging_result.staging_path, &fomod_files)

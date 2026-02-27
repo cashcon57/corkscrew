@@ -189,9 +189,12 @@ fn identify_ae_version(hash: &str, file_size: u64) -> String {
         }
     }
 
-    // Unknown AE build — include approximate size for debugging.
+    // Unknown AE build — use a high version number (1.6.9999) so that
+    // FOMOD gameDependency checks like `version >= 1.6.640` still pass.
+    // The parenthetical suffix is for display only; version_gte() will
+    // parse [1, 6, 9999] which correctly satisfies any AE threshold.
     let size_mb = file_size as f64 / (1024.0 * 1024.0);
-    format!("1.6.x (Anniversary Edition, ~{:.1} MB)", size_mb)
+    format!("1.6.9999 (Anniversary Edition, ~{:.1} MB)", size_mb)
 }
 
 /// Find the SkyrimSE.exe file in the game directory (case-insensitive).

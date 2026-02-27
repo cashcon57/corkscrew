@@ -1022,6 +1022,30 @@ fn launch_game_cmd(
         use_skse
     );
 
+    // Pre-launch SKSE compatibility check — warn on version mismatch
+    let mut skse_warning: Option<String> = None;
+    if use_skse && game_id == "skyrimse" {
+        let skse_status = skse::detect_skse(&game_path);
+        if let Ok(downgrade_status) = downgrader::detect_skyrim_version(&game_path) {
+            let compat = skse::check_skse_compatibility(&skse_status, &downgrade_status);
+            if !compat.compatible {
+                log::warn!(
+                    "SKSE compatibility issue: {} (SKSE={:?}, Game={})",
+                    compat.message,
+                    compat.skse_version,
+                    compat.game_version
+                );
+                skse_warning = Some(compat.message);
+            } else {
+                log::info!(
+                    "SKSE compatibility OK: SKSE={:?}, Game={}",
+                    compat.skse_version,
+                    compat.game_version
+                );
+            }
+        }
+    }
+
     // Check if user has disabled automatic game launch fixes
     let fixes_disabled = config::get_config_value("disable_game_fixes")
         .unwrap_or(None)
@@ -1049,11 +1073,16 @@ fn launch_game_cmd(
         }
     }
 
-    let result = launcher::launch_game(&bottle, &exe_path, Some(&game_path))
+    let mut result = launcher::launch_game(&bottle, &exe_path, Some(&game_path))
         .map_err(|e| format!("Launch failed ({}): {}", bottle.source, e))?;
 
     // Cursor fix is now handled by Wine registry keys (set in auto_fix_display
     // above via fix_cursor_grab). No runtime Dock/Hot Corner/event tap needed.
+
+    // Attach any SKSE compatibility warning to the launch result
+    if let Some(warning) = skse_warning {
+        result.warning = Some(warning);
+    }
 
     Ok(result)
 }
