@@ -159,20 +159,27 @@ fn evaluate_file_dependency(dep: &FileDependency, data_dir: Option<&Path>) -> bo
 /// Compare two dotted version strings numerically.
 /// Returns `true` if `actual >= required`.
 fn version_gte(actual: &str, required: &str) -> bool {
-    let parse = |s: &str| -> Vec<u64> {
-        s.split('.')
-            .filter_map(|p| p.parse::<u64>().ok())
-            .collect()
-    };
-    let a = parse(actual);
-    let r = parse(required);
-    for i in 0..a.len().max(r.len()) {
-        let av = a.get(i).copied().unwrap_or(0);
-        let rv = r.get(i).copied().unwrap_or(0);
-        match av.cmp(&rv) {
-            std::cmp::Ordering::Greater => return true,
-            std::cmp::Ordering::Less => return false,
-            std::cmp::Ordering::Equal => continue,
+    // Split on '.' and parse each component.  An unparseable component
+    // (e.g. "x" in "1.6.x") is treated as a wildcard that satisfies any
+    // required value — this prevents unknown AE version strings like
+    // "1.6.x (Anniversary Edition, ~35 MB)" from failing checks like
+    // `>= 1.6.640`.
+    let parts_actual: Vec<&str> = actual.split('.').collect();
+    let parts_required: Vec<&str> = required.split('.').collect();
+    let len = parts_actual.len().max(parts_required.len());
+    for i in 0..len {
+        let a_str = parts_actual.get(i).copied().unwrap_or("0");
+        let r_str = parts_required.get(i).copied().unwrap_or("0");
+        let av = a_str.parse::<u64>();
+        let rv = r_str.parse::<u64>().unwrap_or(0);
+        match av {
+            Ok(av) => match av.cmp(&rv) {
+                std::cmp::Ordering::Greater => return true,
+                std::cmp::Ordering::Less => return false,
+                std::cmp::Ordering::Equal => continue,
+            },
+            // Unparseable component (wildcard) — treat as always >= required
+            Err(_) => return true,
         }
     }
     true // Equal versions
@@ -1851,6 +1858,11 @@ mod tests {
         assert!(version_gte("2.0.0", "1.99.99")); // major greater
         assert!(!version_gte("1.5.97", "1.6.0")); // minor less
         assert!(version_gte("1.6.1170", "1.6.640")); // patch greater
+        // Unknown AE version with "x" wildcard — must pass all AE thresholds
+        assert!(version_gte("1.6.x (Anniversary Edition, ~35.4 MB)", "1.5.97"));
+        assert!(version_gte("1.6.x (Anniversary Edition, ~35.4 MB)", "1.6.0"));
+        assert!(version_gte("1.6.x (Anniversary Edition, ~35.4 MB)", "1.6.640"));
+        assert!(version_gte("1.6.x (Anniversary Edition, ~35.4 MB)", "1.6.1170"));
     }
 
     #[test]
