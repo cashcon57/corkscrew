@@ -101,7 +101,7 @@ After dragging to Applications, double-click to launch. The app is code-signed a
 | `.deb` | Ubuntu 22.04+, Debian 12+, Pop!_OS, Linux Mint |
 | `.rpm` | Fedora 37+, openSUSE |
 
-**SteamOS / Steam Deck:**
+**SteamOS / Steam Deck:** (experimental/untested)
 ```bash
 # Download the AppImage, then make it executable
 chmod +x Corkscrew_*.AppImage
@@ -114,7 +114,7 @@ APPIMAGE_EXTRACT_AND_RUN=1 ./Corkscrew_*.AppImage
 ./squashfs-root/AppRun
 ```
 
-**Ubuntu / Debian:**
+**Ubuntu / Debian:** (experimental/untested)
 ```bash
 sudo apt install ./corkscrew_*.deb
 ```
