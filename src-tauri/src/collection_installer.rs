@@ -1294,8 +1294,39 @@ pub async fn install_collection(
                 let extract_start = std::time::Instant::now();
                 let temp_dir = std::env::temp_dir().join(format!("corkscrew_extract_{}", idx));
 
-                // Clone AppHandle for progress callback inside spawn_blocking
-                let app_progress = app_c.clone();
+                // Estimated extracted size: archive_size * compression ratio.
+                // Game mods (textures, meshes) typically compress ~2-3x.
+                let estimated_total = arc_size.saturating_mul(3);
+
+                // Spawn a dir-size poller that measures extraction progress
+                // for ALL archive formats (ZIP, 7z, RAR, tar).
+                let poller_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let poller_stop_c = poller_stop.clone();
+                let poll_dir = temp_dir.clone();
+                let app_poll = app_c.clone();
+                let poller_handle = tokio::spawn(async move {
+                    let mut prev_bytes = 0u64;
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        if poller_stop_c.load(std::sync::atomic::Ordering::Relaxed) {
+                            break;
+                        }
+                        let bytes = crate::disk_budget::dir_size(&poll_dir);
+                        if bytes != prev_bytes {
+                            let _ = app_poll.emit(
+                                INSTALL_PROGRESS_EVENT,
+                                InstallProgress::StagingProgress {
+                                    mod_index: idx,
+                                    files_done: 0,
+                                    files_total: 0,
+                                    bytes_done: bytes,
+                                    bytes_total: estimated_total,
+                                },
+                            );
+                            prev_bytes = bytes;
+                        }
+                    }
+                });
 
                 // Timeout extraction at 30 minutes to prevent indefinite hangs
                 let result = tokio::time::timeout(
@@ -1311,31 +1342,7 @@ pub async fn install_collection(
                             let _ = std::fs::remove_dir_all(&temp_dir);
                         }
                         let _ = std::fs::create_dir_all(&temp_dir);
-
-                        // Throttled progress: limit events to at most once per 200ms
-                        let last_emit = std::sync::Mutex::new(std::time::Instant::now()
-                            .checked_sub(std::time::Duration::from_secs(1))
-                            .unwrap_or_else(std::time::Instant::now));
-                        let progress_cb = move |files_done: u64, files_total: u64| {
-                            let mut last = last_emit.lock().unwrap_or_else(|e| e.into_inner());
-                            if last.elapsed().as_millis() >= 200 || files_done == files_total {
-                                let _ = app_progress.emit(
-                                    INSTALL_PROGRESS_EVENT,
-                                    InstallProgress::StagingProgress {
-                                        mod_index: idx,
-                                        files_done,
-                                        files_total,
-                                    },
-                                );
-                                *last = std::time::Instant::now();
-                            }
-                        };
-
-                        match crate::installer::extract_archive_with_progress(
-                            &archive,
-                            &temp_dir,
-                            &progress_cb,
-                        ) {
+                        match crate::installer::extract_archive(&archive, &temp_dir) {
                             Ok(_) => Ok(temp_dir),
                             Err(e) => {
                                 let _ = std::fs::remove_dir_all(&temp_dir);
@@ -1345,6 +1352,10 @@ pub async fn install_collection(
                     }),
                 )
                 .await;
+
+                // Stop the poller
+                poller_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                poller_handle.abort();
 
                 match result {
                     Ok(Ok(Ok(dir))) => {
@@ -2956,6 +2967,8 @@ async fn stage_and_deploy(
                             mod_index,
                             files_done,
                             files_total,
+                            bytes_done: 0,
+                            bytes_total: 0,
                         },
                     );
                     *last = std::time::Instant::now();

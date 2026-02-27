@@ -419,16 +419,34 @@ function applyEvent(
         break;
       }
 
-      case "stagingProgress":
+      case "stagingProgress": {
         if (next.modDetails[e.mod_index]) {
           ensureDetailsCloned();
+          const prev = next.modDetails[e.mod_index];
+          // Calculate live per-mod extraction speed from byte deltas
+          const now = Date.now();
+          let liveSpeed = prev.extractSpeedLive ?? 0;
+          const prevBytes = prev.extractLastBytes ?? 0;
+          const prevTime = prev.extractLastTime ?? 0;
+          if (e.bytes_done > prevBytes && prevTime > 0) {
+            const dtSec = (now - prevTime) / 1000;
+            if (dtSec > 0.1) {
+              liveSpeed = (e.bytes_done - prevBytes) / dtSec;
+            }
+          }
           next.modDetails[e.mod_index] = {
-            ...next.modDetails[e.mod_index],
+            ...prev,
             extractFilesDone: e.files_done,
             extractFilesTotal: e.files_total,
+            extractBytesDone: e.bytes_done,
+            extractBytesTotal: e.bytes_total,
+            extractSpeedLive: liveSpeed,
+            extractLastBytes: e.bytes_done,
+            extractLastTime: now,
           };
         }
         break;
+      }
 
       case "stagingModFailed":
         if (next.modDetails[e.mod_index]) {
@@ -483,16 +501,34 @@ function applyEvent(
         }
         break;
 
-      case "deployProgress":
+      case "deployProgress": {
         if (next.modDetails[e.mod_index]) {
           ensureDetailsCloned();
+          const prev = next.modDetails[e.mod_index];
+          // Calculate live deploy speed from byte deltas
+          const now = Date.now();
+          let liveDeploySpeed = prev.deploySpeedLive ?? 0;
+          const prevDBytes = prev.deployLastBytes ?? 0;
+          const prevDTime = prev.deployLastTime ?? 0;
+          if (e.bytes_done > prevDBytes && prevDTime > 0) {
+            const dtSec = (now - prevDTime) / 1000;
+            if (dtSec > 0.1) {
+              liveDeploySpeed = (e.bytes_done - prevDBytes) / dtSec;
+            }
+          }
           next.modDetails[e.mod_index] = {
-            ...next.modDetails[e.mod_index],
+            ...prev,
             deployFilesDone: e.files_done,
             deployFilesTotal: e.files_total,
+            deployBytesDone: e.bytes_done,
+            deployBytesTotal: e.bytes_total,
+            deploySpeedLive: liveDeploySpeed,
+            deployLastBytes: e.bytes_done,
+            deployLastTime: now,
           };
         }
         break;
+      }
 
       case "modCompleted": {
         let perModInstallSpeed: number | undefined;

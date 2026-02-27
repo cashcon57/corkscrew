@@ -103,11 +103,15 @@ pub enum InstallProgress {
         mod_index: usize,
         files_done: u64,
         files_total: u64,
+        bytes_done: u64,
+        bytes_total: u64,
     },
     DeployProgress {
         mod_index: usize,
         files_done: u64,
         files_total: u64,
+        bytes_done: u64,
+        bytes_total: u64,
     },
     Initializing {
         message: String,

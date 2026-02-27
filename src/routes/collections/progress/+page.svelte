@@ -87,9 +87,27 @@
   let stagingTotal = $derived(mods.length);
   let stagingPercent = $derived(stagingTotal > 0 ? Math.round((stagingDone / stagingTotal) * 100) : 0);
 
-  // Activity feed — currently active mods surfaced to the top
+  // Aggregate live extraction speed from all actively extracting mods
+  let liveExtractionSpeed = $derived(
+    extractingMods.reduce((sum, m) => sum + (m.extractSpeedLive ?? 0), 0),
+  );
+
+  // Activity feed — currently active mods surfaced to the top, sorted by most progress
   const ACTIVE_STATUSES = new Set(["downloading", "extracting", "installing", "deploying"]);
-  let activeWorkMods = $derived(mods.filter((m) => ACTIVE_STATUSES.has(m.status)));
+  let activeWorkMods = $derived(
+    mods
+      .filter((m) => ACTIVE_STATUSES.has(m.status))
+      .sort((a, b) => {
+        // Priority: deploying > installing > extracting > downloading
+        const statusOrder: Record<string, number> = { deploying: 0, installing: 1, extracting: 2, downloading: 3 };
+        const orderDiff = (statusOrder[a.status] ?? 9) - (statusOrder[b.status] ?? 9);
+        if (orderDiff !== 0) return orderDiff;
+        // Within same status, sort by most bytes processed (most active first)
+        const aBytes = a.extractBytesDone ?? a.deployBytesDone ?? a.downloadBytes ?? 0;
+        const bBytes = b.extractBytesDone ?? b.deployBytesDone ?? b.downloadBytes ?? 0;
+        return bBytes - aBytes;
+      }),
+  );
 
   // Mod log summary stats
   let modsDone = $derived(mods.filter((m) => m.status === "done").length);
@@ -624,8 +642,8 @@
             {#if stagingCount > 0}
               <span class="cache-badge">{stagingCount} extracting</span>
             {/if}
-            {#if stagingSpeed > 0 && stagingDone < stagingTotal}
-              <span class="speed-badge">{formatBytes(stagingSpeed)}/s</span>
+            {#if (liveExtractionSpeed > 0 || stagingSpeed > 0) && stagingDone < stagingTotal}
+              <span class="speed-badge">{formatBytes(liveExtractionSpeed > 0 ? liveExtractionSpeed : stagingSpeed)}/s</span>
             {/if}
           </div>
           <div class="progress-track">
@@ -633,7 +651,9 @@
           </div>
           {#if extractingMods.length > 0}
             <div class="extracting-list">
-              {#each extractingMods as mod (mod.index)}
+              {#each extractingMods.sort((a, b) => (b.extractBytesDone ?? 0) - (a.extractBytesDone ?? 0)) as mod (mod.index)}
+                {@const hasBytes = (mod.extractBytesTotal ?? 0) > 0}
+                {@const pct = hasBytes ? Math.min(100, Math.round(((mod.extractBytesDone ?? 0) / mod.extractBytesTotal!) * 100)) : 0}
                 <div class="extracting-item-wrap">
                   <div class="extracting-item">
                     <svg class="icon-spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--system-accent)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
@@ -641,13 +661,26 @@
                       <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
                     </svg>
                     <span class="extracting-name" title={mod.name}>{mod.name}</span>
-                    {#if mod.stepDetail}
-                      <span class="extracting-detail">{mod.stepDetail}</span>
-                    {/if}
+                    <span class="extracting-detail">
+                      {#if hasBytes}
+                        {formatBytes(mod.extractBytesDone ?? 0)} / ~{formatBytes(mod.extractBytesTotal!)} ({pct}%)
+                        {#if (mod.extractSpeedLive ?? 0) > 0}
+                          <span class="speed-inline">{formatBytes(mod.extractSpeedLive!)}/s</span>
+                        {/if}
+                      {:else}
+                        extracting...
+                      {/if}
+                    </span>
                   </div>
-                  <div class="extracting-bar">
-                    <div class="extracting-bar-fill"></div>
-                  </div>
+                  {#if hasBytes}
+                    <div class="extracting-bar">
+                      <div class="extracting-bar-fill" style="width: {pct}%; animation: none;"></div>
+                    </div>
+                  {:else}
+                    <div class="extracting-bar">
+                      <div class="extracting-bar-fill"></div>
+                    </div>
+                  {/if}
                 </div>
               {/each}
             </div>
@@ -792,19 +825,33 @@
                     <span class="speed-inline">{formatBytes(downloadSpeed)}/s</span>
                   {/if}
                 {:else if mod.status === "extracting"}
-                  {#if mod.extractFilesTotal && mod.extractFilesTotal > 0}
-                    extracting {Math.round(((mod.extractFilesDone ?? 0) / mod.extractFilesTotal) * 100)}%
+                  {#if (mod.extractBytesTotal ?? 0) > 0}
+                    {formatBytes(mod.extractBytesDone ?? 0)} / ~{formatBytes(mod.extractBytesTotal!)}
+                    ({Math.min(100, Math.round(((mod.extractBytesDone ?? 0) / mod.extractBytesTotal!) * 100))}%)
+                    {#if (mod.extractSpeedLive ?? 0) > 0}
+                      <span class="speed-inline">{formatBytes(mod.extractSpeedLive!)}/s</span>
+                    {/if}
                   {:else}
                     extracting...
                   {/if}
                 {:else if mod.status === "deploying"}
-                  {#if mod.deployFilesTotal && mod.deployFilesTotal > 0}
-                    deploying {Math.round(((mod.deployFilesDone ?? 0) / mod.deployFilesTotal) * 100)}%
+                  {#if (mod.deployBytesTotal ?? 0) > 0}
+                    {formatBytes(mod.deployBytesDone ?? 0)} / {formatBytes(mod.deployBytesTotal!)}
+                    ({Math.min(100, Math.round(((mod.deployBytesDone ?? 0) / mod.deployBytesTotal!) * 100))}%)
+                    {#if (mod.deploySpeedLive ?? 0) > 0}
+                      <span class="speed-inline">{formatBytes(mod.deploySpeedLive!)}/s</span>
+                    {/if}
+                  {:else if (mod.deployFilesTotal ?? 0) > 0}
+                    deploying {Math.round(((mod.deployFilesDone ?? 0) / mod.deployFilesTotal!) * 100)}%
                   {:else}
                     deploying files...
                   {/if}
                 {:else if mod.status === "installing"}
-                  installing...
+                  {#if mod.stepDetail}
+                    {mod.stepDetail}
+                  {:else}
+                    installing...
+                  {/if}
                 {:else if mod.stepDetail}
                   {mod.stepDetail}
                 {:else}
@@ -815,13 +862,17 @@
                 <div class="activity-bar">
                   <div class="activity-bar-fill" style="width: {Math.min(100, Math.round(((mod.downloadBytes ?? 0) / mod.downloadTotal) * 100))}%"></div>
                 </div>
-              {:else if mod.status === "extracting" && mod.extractFilesTotal && mod.extractFilesTotal > 0}
+              {:else if mod.status === "extracting" && (mod.extractBytesTotal ?? 0) > 0}
                 <div class="activity-bar">
-                  <div class="activity-bar-fill" style="width: {Math.min(100, Math.round(((mod.extractFilesDone ?? 0) / mod.extractFilesTotal) * 100))}%"></div>
+                  <div class="activity-bar-fill" style="width: {Math.min(100, Math.round(((mod.extractBytesDone ?? 0) / mod.extractBytesTotal!) * 100))}%"></div>
                 </div>
-              {:else if mod.status === "deploying" && mod.deployFilesTotal && mod.deployFilesTotal > 0}
+              {:else if mod.status === "deploying" && (mod.deployBytesTotal ?? 0) > 0}
                 <div class="activity-bar">
-                  <div class="activity-bar-fill" style="width: {Math.min(100, Math.round(((mod.deployFilesDone ?? 0) / mod.deployFilesTotal) * 100))}%"></div>
+                  <div class="activity-bar-fill" style="width: {Math.min(100, Math.round(((mod.deployBytesDone ?? 0) / mod.deployBytesTotal!) * 100))}%"></div>
+                </div>
+              {:else if mod.status === "deploying" && (mod.deployFilesTotal ?? 0) > 0}
+                <div class="activity-bar">
+                  <div class="activity-bar-fill" style="width: {Math.min(100, Math.round(((mod.deployFilesDone ?? 0) / mod.deployFilesTotal!) * 100))}%"></div>
                 </div>
               {:else if mod.status === "extracting" || mod.status === "installing" || mod.status === "deploying"}
                 <div class="activity-bar">
@@ -925,10 +976,12 @@
             </span>
             <span class="mod-name" title={mod.name}>{mod.name}</span>
             <span class="mod-status-label">
-              {#if mod.status === "extracting" && mod.extractFilesTotal && mod.extractFilesTotal > 0}
-                extracting {Math.round(((mod.extractFilesDone ?? 0) / mod.extractFilesTotal) * 100)}%
-              {:else if mod.status === "deploying" && mod.deployFilesTotal && mod.deployFilesTotal > 0}
-                deploying {Math.round(((mod.deployFilesDone ?? 0) / mod.deployFilesTotal) * 100)}%
+              {#if mod.status === "extracting" && (mod.extractBytesTotal ?? 0) > 0}
+                extracting {Math.min(100, Math.round(((mod.extractBytesDone ?? 0) / mod.extractBytesTotal!) * 100))}%
+              {:else if mod.status === "deploying" && (mod.deployBytesTotal ?? 0) > 0}
+                deploying {Math.min(100, Math.round(((mod.deployBytesDone ?? 0) / mod.deployBytesTotal!) * 100))}%
+              {:else if mod.status === "deploying" && (mod.deployFilesTotal ?? 0) > 0}
+                deploying {Math.round(((mod.deployFilesDone ?? 0) / mod.deployFilesTotal!) * 100)}%
               {:else}
                 {mod.status.replace("_", " ")}
               {/if}

@@ -64,8 +64,18 @@ export interface ModProgressDetail {
   installSpeed?: number;
   extractFilesDone?: number;
   extractFilesTotal?: number;
+  extractBytesDone?: number;
+  extractBytesTotal?: number;
+  extractSpeedLive?: number;
+  extractLastBytes?: number;
+  extractLastTime?: number;
   deployFilesDone?: number;
   deployFilesTotal?: number;
+  deployBytesDone?: number;
+  deployBytesTotal?: number;
+  deploySpeedLive?: number;
+  deployLastBytes?: number;
+  deployLastTime?: number;
   fomodData?: {
     correlationId: string;
     installer: FomodInstaller;
