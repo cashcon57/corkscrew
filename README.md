@@ -362,7 +362,7 @@ Key workflows tested end-to-end:
 - Full mod lifecycle: install from archive → stage → deploy → enable/disable → uninstall
 - NXM protocol link handling (click on Nexus website → mod downloads in Corkscrew)
 - FOMOD installer wizard for mods with complex install options
-- **NexusMods Collection installation** — 559-mod collection installed, deployed, and launched successfully (premium: fully automated; free: guided manual download). Includes FOMOD replay with game version dependencies, binary patches, INI tweak merging, conflict resolution, and plugin load order sync.
+- **NexusMods Collection installation** — 559-mod Skyrim SE collection installed, deployed, and launched successfully (premium: fully automated; free: guided manual download). Includes FOMOD replay with game version dependencies, binary patches, INI tweak merging, conflict resolution, and plugin load order sync. Other games (Fallout 4, etc.) are not yet tested for collection installs.
 - Collection delta updates (revision diff for in-place upgrades)
 - LOOT-powered plugin sorting with masterlist fetching
 - Profile save/load/switch with full deployment cycling
@@ -387,6 +387,7 @@ Key workflows tested end-to-end:
 
 - **Linux testing is limited** — The app builds for Linux and handles Linux paths throughout, but primary testing has been on macOS. Community feedback on SteamOS/Proton setups is especially welcome.
 - **Enhanced game support** — 80+ games are detected and support basic mod deployment. Full-featured support (plugin load order, LOOT sorting, script extender auto-install, INI presets, crash log analysis, game-specific mod tools) currently exists for Skyrim SE and Fallout 4. Other Bethesda games are next in line.
+- **Collection support is Skyrim SE-tested** — NexusMods Collection installs have been end-to-end tested with Skyrim SE only. Other games (Fallout 4, etc.) may work but are untested for collections.
 - **Wabbajack game file sources** — The full Wabbajack install pipeline is implemented with real downloads and directive processing. Game file source extraction is not yet implemented — complex modlists depending on vanilla game files as patch sources will partially fail.
 
 ### Roadmap

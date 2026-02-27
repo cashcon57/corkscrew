@@ -75,7 +75,7 @@
   let switchingCollection = $state<string | null>(null);
   let deletingCollection = $state<string | null>(null);
   let confirmDeleteCollection = $state<string | null>(null);
-  let deleteKeepDownloads = $state(false);
+  let deleteDownloads = $state(false);
   let deleteRemoveAllMods = $state(false);
   let deleteCleanGameDir = $state(false);
   let deleteHasSnapshot = $state(false);
@@ -183,7 +183,7 @@
     const game = $selectedGame;
     if (!game) return;
     confirmDeleteCollection = name;
-    deleteKeepDownloads = true;
+    deleteDownloads = false;
     deleteCleanGameDir = false;
     deleteHasSnapshot = false;
     deleteDownloadSize = null;
@@ -267,7 +267,7 @@
     });
 
     try {
-      await deleteCollection(game.game_id, game.bottle_name, name, !deleteKeepDownloads, deleteRemoveAllMods);
+      await deleteCollection(game.game_id, game.bottle_name, name, deleteDownloads, deleteRemoveAllMods);
 
       // After successful uninstall, optionally clean non-stock files (preserving SKSE)
       if (shouldCleanGameDir) {
@@ -3544,7 +3544,7 @@
 
       <div class="modal-option">
         <label class="modal-checkbox-label">
-          <input type="checkbox" bind:checked={deleteKeepDownloads} />
+          <input type="checkbox" bind:checked={deleteDownloads} />
           <span class="modal-checkbox-text">
             Also delete downloaded archives
             {#if deleteDownloadSizeLoading}
@@ -3556,10 +3556,10 @@
             {/if}
           </span>
         </label>
-        {#if !deleteKeepDownloads}
-          <p class="modal-option-hint">Downloaded archives are kept so you can reinstall later without re-downloading.</p>
-        {:else}
+        {#if deleteDownloads}
           <p class="modal-option-hint modal-option-hint-warn">Archives unique to this collection will be permanently deleted.</p>
+        {:else}
+          <p class="modal-option-hint">Downloaded archives are kept so you can reinstall later without re-downloading.</p>
         {/if}
       </div>
 
