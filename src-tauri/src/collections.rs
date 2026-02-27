@@ -851,13 +851,13 @@ pub fn parse_collection_bundle(bundle_path: &Path) -> Result<CollectionManifest,
     let temp_dir = std::env::temp_dir().join("corkscrew_collection_extract");
     let mut json_data: Option<Vec<u8>> = None;
 
-    sevenz_rust::decompress_with_extract_fn(
+    sevenz_rust2::decompress_with_extract_fn(
         file,
         &temp_dir,
-        |entry: &sevenz_rust::SevenZArchiveEntry,
+        |entry: &sevenz_rust2::ArchiveEntry,
          reader: &mut dyn std::io::Read,
          _dest: &PathBuf|
-         -> Result<bool, sevenz_rust::Error> {
+         -> Result<bool, sevenz_rust2::Error> {
             let entry_name = entry.name();
             if entry_name == "collection.json" || entry_name.ends_with("/collection.json") {
                 let mut data = Vec::new();

@@ -430,9 +430,9 @@ fn extract_zip_with_progress(
     Ok(extracted)
 }
 
-/// Extract a `.7z` archive using the `sevenz-rust` crate.
+/// Extract a `.7z` archive using the `sevenz-rust2` crate (multi-threaded LZMA2).
 fn extract_7z(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
-    sevenz_rust::decompress_file(archive_path, dest_dir).map_err(|e| {
+    sevenz_rust2::decompress_file(archive_path, dest_dir).map_err(|e| {
         InstallerError::SevenZ(format!(
             "Failed to extract 7z {}: {}",
             archive_path.display(),

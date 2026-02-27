@@ -920,7 +920,61 @@ pub async fn install_collection(
         },
     );
 
-    let semaphore = Arc::new(Semaphore::new(max_concurrent));
+    // ---------------------------------------------------------------
+    // Set up extraction shared state BEFORE downloads so each download
+    // task can immediately start extracting upon completion.
+    // ---------------------------------------------------------------
+    let max_extract = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(4, 16);
+
+    // Emit staging phase started early — extraction overlaps with downloads
+    let total_staging_bytes_est: u64 = downloadable
+        .iter()
+        .filter_map(|&(_, mod_idx)| manifest.mods.get(mod_idx).and_then(|m| m.source.file_size))
+        .sum();
+    let _ = app.emit(
+        INSTALL_PROGRESS_EVENT,
+        InstallProgress::StagingPhaseStarted {
+            total_mods: downloadable.len(),
+            max_concurrent: max_extract,
+            total_bytes: total_staging_bytes_est,
+        },
+    );
+
+    // Pre-compute which mods need extraction (not already installed).
+    let current_mods_snapshot = db.list_mods(game_id, bottle_name).unwrap_or_default();
+    let needs_extraction_set: Arc<HashSet<usize>> = Arc::new(
+        downloadable
+            .iter()
+            .filter(|&&(_, mod_idx)| {
+                let entry = &manifest.mods[mod_idx];
+                !current_mods_snapshot.iter().any(|m| {
+                    if let Some(nexus_id) = entry.source.mod_id {
+                        if m.nexus_mod_id == Some(nexus_id) { return true; }
+                    }
+                    if let Some(file_id) = entry.source.file_id {
+                        if m.nexus_file_id == Some(file_id) { return true; }
+                    }
+                    m.name.eq_ignore_ascii_case(&entry.name)
+                })
+            })
+            .map(|&(order_pos, _)| order_pos)
+            .collect(),
+    );
+
+    let extracted_map: Arc<std::sync::Mutex<HashMap<usize, PathBuf>>> =
+        Arc::new(std::sync::Mutex::new(HashMap::new()));
+    let extraction_done: Arc<std::sync::Mutex<HashSet<usize>>> =
+        Arc::new(std::sync::Mutex::new(HashSet::new()));
+    let extraction_notify = Arc::new(Notify::new());
+    let extract_sem = Arc::new(Semaphore::new(max_extract));
+
+    // Manifest data needed by extraction tasks
+    let manifest_mods = Arc::new(manifest.mods.clone());
+
+    let download_sem = Arc::new(Semaphore::new(max_concurrent));
     let mut handles = Vec::with_capacity(total_downloads);
 
     for &(order_pos, mod_idx) in &downloadable {
@@ -945,19 +999,28 @@ pub async fn install_collection(
         let app_h = app.clone();
         let db_c = Arc::clone(db);
         let queue_c = Arc::clone(queue);
-        let sem_c = Arc::clone(&semaphore);
+        let dl_sem_c = Arc::clone(&download_sem);
+        let ext_sem_c = Arc::clone(&extract_sem);
         let game_slug_c = game_slug.to_string();
         let download_dir_c = download_dir.clone();
         let auth_method_c = auth_method.clone();
         let manifest_name_c = manifest.name.clone();
         let game_id_c = game_id.to_string();
         let bottle_name_c = bottle_name.to_string();
+        let needs_ext = Arc::clone(&needs_extraction_set);
+        let map_c = Arc::clone(&extracted_map);
+        let done_c = Arc::clone(&extraction_done);
+        let notify_c = Arc::clone(&extraction_notify);
+        let manifest_mods_c = Arc::clone(&manifest_mods);
 
         let handle = tokio::spawn(async move {
-            let _permit = sem_c.acquire().await.expect("semaphore closed");
+            // ---- Download Phase ----
+            let _dl_permit = dl_sem_c.acquire().await.expect("download semaphore closed");
 
-            // Check cancellation after acquiring permit
             if is_cancelled() {
+                // Mark extraction done so install loop doesn't hang
+                done_c.lock().unwrap_or_else(|e| e.into_inner()).insert(order_pos);
+                notify_c.notify_waiters();
                 return (order_pos, Err(InstallError::Failed("Cancelled".to_string())));
             }
 
@@ -984,6 +1047,9 @@ pub async fn install_collection(
             )
             .await;
 
+            // Release download permit — we're done with network I/O
+            drop(_dl_permit);
+
             match &result {
                 Ok(dl) => {
                     let _ = app_h.emit(
@@ -1004,6 +1070,10 @@ pub async fn install_collection(
                             error: err.clone(),
                         },
                     );
+                    // Download failed — mark extraction as done (no archive to extract)
+                    done_c.lock().unwrap_or_else(|e| e.into_inner()).insert(order_pos);
+                    notify_c.notify_waiters();
+                    return (order_pos, result);
                 }
                 Err(InstallError::UserAction { action, .. }) => {
                     let _ = app_h.emit(
@@ -1014,8 +1084,162 @@ pub async fn install_collection(
                             error: action.clone(),
                         },
                     );
+                    done_c.lock().unwrap_or_else(|e| e.into_inner()).insert(order_pos);
+                    notify_c.notify_waiters();
+                    return (order_pos, result);
                 }
             }
+
+            // ---- Inline Extraction Phase ----
+            // Start extracting immediately after download completes.
+            if let Ok(ref dl) = result {
+                if needs_ext.contains(&order_pos) && !is_cancelled() {
+                    let archive = dl.archive_path.clone();
+                    let arc_size = manifest_mods_c
+                        .get(mod_idx)
+                        .and_then(|m| m.source.file_size)
+                        .unwrap_or(0);
+
+                    let _ = app_h.emit(
+                        INSTALL_PROGRESS_EVENT,
+                        InstallProgress::StagingModStarted {
+                            mod_index: order_pos,
+                            mod_name: mod_name.clone(),
+                            archive_size: arc_size,
+                        },
+                    );
+
+                    let _ext_permit = ext_sem_c.acquire().await.expect("extract semaphore closed");
+
+                    if !is_cancelled() {
+                        let extract_start = std::time::Instant::now();
+                        let estimated_total = arc_size.saturating_mul(3);
+                        let temp_dir = std::env::temp_dir()
+                            .join(format!("corkscrew_extract_{}", order_pos));
+
+                        // Spawn dir-size poller for progress tracking
+                        let poller_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                        let poller_stop_c = poller_stop.clone();
+                        let poll_dir = temp_dir.clone();
+                        let app_poll = app_h.clone();
+                        let poller_handle = tokio::spawn(async move {
+                            let mut prev_bytes = 0u64;
+                            loop {
+                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                if poller_stop_c.load(std::sync::atomic::Ordering::Relaxed) {
+                                    break;
+                                }
+                                let bytes = crate::disk_budget::dir_size(&poll_dir);
+                                if bytes != prev_bytes {
+                                    let _ = app_poll.emit(
+                                        INSTALL_PROGRESS_EVENT,
+                                        InstallProgress::StagingProgress {
+                                            mod_index: order_pos,
+                                            files_done: 0,
+                                            files_total: 0,
+                                            bytes_done: bytes,
+                                            bytes_total: estimated_total,
+                                        },
+                                    );
+                                    prev_bytes = bytes;
+                                }
+                            }
+                        });
+
+                        // Extract with 30-minute timeout
+                        let ext_result = tokio::time::timeout(
+                            std::time::Duration::from_secs(1800),
+                            tokio::task::spawn_blocking({
+                                let archive = archive.clone();
+                                let temp_dir = temp_dir.clone();
+                                move || {
+                                    if is_cancelled() {
+                                        return Err("Cancelled".to_string());
+                                    }
+                                    if let Err(e) = validate_archive(&archive) {
+                                        return Err(format!("Archive validation failed: {}", e));
+                                    }
+                                    if temp_dir.exists() {
+                                        let _ = std::fs::remove_dir_all(&temp_dir);
+                                    }
+                                    let _ = std::fs::create_dir_all(&temp_dir);
+                                    match crate::installer::extract_archive(&archive, &temp_dir) {
+                                        Ok(_) => Ok(temp_dir),
+                                        Err(e) => {
+                                            let _ = std::fs::remove_dir_all(&temp_dir);
+                                            Err(e.to_string())
+                                        }
+                                    }
+                                }
+                            }),
+                        )
+                        .await;
+
+                        // Stop poller
+                        poller_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                        poller_handle.abort();
+
+                        match ext_result {
+                            Ok(Ok(Ok(dir))) => {
+                                let duration_ms = extract_start.elapsed().as_millis() as u64;
+                                let extracted_size: u64 = walkdir::WalkDir::new(&dir)
+                                    .into_iter()
+                                    .filter_map(|e| e.ok())
+                                    .filter(|e| e.file_type().is_file())
+                                    .map(|e| e.metadata().map(|m| m.len()).unwrap_or(0))
+                                    .sum();
+                                let _ = app_h.emit(
+                                    INSTALL_PROGRESS_EVENT,
+                                    InstallProgress::StagingModCompleted {
+                                        mod_index: order_pos,
+                                        mod_name: mod_name.clone(),
+                                        extracted_size,
+                                        duration_ms,
+                                    },
+                                );
+                                map_c.lock().unwrap_or_else(|e| e.into_inner()).insert(order_pos, dir);
+                            }
+                            Ok(Ok(Err(e))) => {
+                                log::warn!("Extraction failed for mod {}: {}", order_pos, e);
+                                let _ = app_h.emit(
+                                    INSTALL_PROGRESS_EVENT,
+                                    InstallProgress::StagingModFailed {
+                                        mod_index: order_pos,
+                                        mod_name: mod_name.clone(),
+                                        error: e,
+                                    },
+                                );
+                            }
+                            Ok(Err(e)) => {
+                                log::warn!("Extraction task panicked for mod {}: {}", order_pos, e);
+                                let _ = app_h.emit(
+                                    INSTALL_PROGRESS_EVENT,
+                                    InstallProgress::StagingModFailed {
+                                        mod_index: order_pos,
+                                        mod_name: mod_name.clone(),
+                                        error: format!("Task panicked: {}", e),
+                                    },
+                                );
+                            }
+                            Err(_) => {
+                                log::warn!("Extraction timed out for mod {} after 30 minutes", order_pos);
+                                let _ = app_h.emit(
+                                    INSTALL_PROGRESS_EVENT,
+                                    InstallProgress::StagingModFailed {
+                                        mod_index: order_pos,
+                                        mod_name: mod_name.clone(),
+                                        error: "Extraction timed out after 30 minutes".to_string(),
+                                    },
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Always mark extraction as done and wake install loop
+            done_c.lock().unwrap_or_else(|e| e.into_inner()).insert(order_pos);
+            notify_c.notify_waiters();
 
             (order_pos, result)
         });
@@ -1023,7 +1247,7 @@ pub async fn install_collection(
         handles.push(handle);
     }
 
-    // Wait for all download tasks
+    // Wait for all download+extract tasks
     let download_results = futures::future::join_all(handles).await;
 
     // Collect successful downloads into a map: order_position -> archive path
@@ -1119,7 +1343,7 @@ pub async fn install_collection(
                     } else {
                         dl_downloaded += 1;
                     }
-                    pre_downloaded.insert(order_pos, dl.archive_path);
+                    pre_downloaded.insert(order_pos, dl.archive_path.clone());
                     let _ = app.emit(
                         INSTALL_PROGRESS_EVENT,
                         InstallProgress::DownloadModCompleted {
@@ -1128,6 +1352,144 @@ pub async fn install_collection(
                             cached: dl.cached,
                         },
                     );
+
+                    // Inline extraction for retried downloads
+                    if needs_extraction_set.contains(&order_pos) && !is_cancelled() {
+                        let archive = dl.archive_path.clone();
+                        let arc_size = entry.source.file_size.unwrap_or(0);
+                        let mod_name_ext = entry.name.clone();
+
+                        let _ = app.emit(
+                            INSTALL_PROGRESS_EVENT,
+                            InstallProgress::StagingModStarted {
+                                mod_index: order_pos,
+                                mod_name: mod_name_ext.clone(),
+                                archive_size: arc_size,
+                            },
+                        );
+
+                        let estimated_total = arc_size.saturating_mul(3);
+                        let temp_dir = std::env::temp_dir()
+                            .join(format!("corkscrew_extract_{}", order_pos));
+
+                        let poller_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                        let poller_stop_c = poller_stop.clone();
+                        let poll_dir = temp_dir.clone();
+                        let app_poll = app.clone();
+                        let poller_handle = tokio::spawn(async move {
+                            let mut prev_bytes = 0u64;
+                            loop {
+                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                if poller_stop_c.load(std::sync::atomic::Ordering::Relaxed) {
+                                    break;
+                                }
+                                let bytes = crate::disk_budget::dir_size(&poll_dir);
+                                if bytes != prev_bytes {
+                                    let _ = app_poll.emit(
+                                        INSTALL_PROGRESS_EVENT,
+                                        InstallProgress::StagingProgress {
+                                            mod_index: order_pos,
+                                            files_done: 0,
+                                            files_total: 0,
+                                            bytes_done: bytes,
+                                            bytes_total: estimated_total,
+                                        },
+                                    );
+                                    prev_bytes = bytes;
+                                }
+                            }
+                        });
+
+                        let extract_start = std::time::Instant::now();
+                        let ext_result = tokio::time::timeout(
+                            std::time::Duration::from_secs(1800),
+                            tokio::task::spawn_blocking({
+                                let archive = archive.clone();
+                                let temp_dir = temp_dir.clone();
+                                move || {
+                                    if is_cancelled() {
+                                        return Err("Cancelled".to_string());
+                                    }
+                                    if let Err(e) = validate_archive(&archive) {
+                                        return Err(format!("Archive validation failed: {}", e));
+                                    }
+                                    if temp_dir.exists() {
+                                        let _ = std::fs::remove_dir_all(&temp_dir);
+                                    }
+                                    let _ = std::fs::create_dir_all(&temp_dir);
+                                    match crate::installer::extract_archive(&archive, &temp_dir) {
+                                        Ok(_) => Ok(temp_dir),
+                                        Err(e) => {
+                                            let _ = std::fs::remove_dir_all(&temp_dir);
+                                            Err(e.to_string())
+                                        }
+                                    }
+                                }
+                            }),
+                        )
+                        .await;
+
+                        poller_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                        poller_handle.abort();
+
+                        match ext_result {
+                            Ok(Ok(Ok(dir))) => {
+                                let duration_ms = extract_start.elapsed().as_millis() as u64;
+                                let extracted_size: u64 = walkdir::WalkDir::new(&dir)
+                                    .into_iter()
+                                    .filter_map(|e| e.ok())
+                                    .filter(|e| e.file_type().is_file())
+                                    .map(|e| e.metadata().map(|m| m.len()).unwrap_or(0))
+                                    .sum();
+                                let _ = app.emit(
+                                    INSTALL_PROGRESS_EVENT,
+                                    InstallProgress::StagingModCompleted {
+                                        mod_index: order_pos,
+                                        mod_name: mod_name_ext,
+                                        extracted_size,
+                                        duration_ms,
+                                    },
+                                );
+                                extracted_map.lock().unwrap_or_else(|e| e.into_inner()).insert(order_pos, dir);
+                            }
+                            Ok(Ok(Err(e))) => {
+                                log::warn!("Retry extraction failed for mod {}: {}", order_pos, e);
+                                let _ = app.emit(
+                                    INSTALL_PROGRESS_EVENT,
+                                    InstallProgress::StagingModFailed {
+                                        mod_index: order_pos,
+                                        mod_name: mod_name_ext,
+                                        error: e,
+                                    },
+                                );
+                            }
+                            Ok(Err(e)) => {
+                                log::warn!("Retry extraction panicked for mod {}: {}", order_pos, e);
+                                let _ = app.emit(
+                                    INSTALL_PROGRESS_EVENT,
+                                    InstallProgress::StagingModFailed {
+                                        mod_index: order_pos,
+                                        mod_name: mod_name_ext,
+                                        error: format!("Task panicked: {}", e),
+                                    },
+                                );
+                            }
+                            Err(_) => {
+                                log::warn!("Retry extraction timed out for mod {}", order_pos);
+                                let _ = app.emit(
+                                    INSTALL_PROGRESS_EVENT,
+                                    InstallProgress::StagingModFailed {
+                                        mod_index: order_pos,
+                                        mod_name: mod_name_ext,
+                                        error: "Extraction timed out after 30 minutes".to_string(),
+                                    },
+                                );
+                            }
+                        }
+
+                        extraction_done.lock().unwrap_or_else(|e| e.into_inner()).insert(order_pos);
+                        extraction_notify.notify_waiters();
+                    }
                 }
                 Err(e) => {
                     log::warn!("Retry-pass failed for '{}': {:?}", entry.name, e);
@@ -1140,6 +1502,9 @@ pub async fn install_collection(
                             error: format!("{:?}", e),
                         },
                     );
+                    // Mark extraction done for failed retries so install loop doesn't hang
+                    extraction_done.lock().unwrap_or_else(|e| e.into_inner()).insert(order_pos);
+                    extraction_notify.notify_waiters();
                 }
             }
         }
@@ -1155,9 +1520,9 @@ pub async fn install_collection(
         },
     );
 
-    // Check for cancellation before extraction phase
+    // Check for cancellation before install phase
     if is_cancelled() {
-        log::info!("Collection install cancelled before extraction phase");
+        log::info!("Collection install cancelled before install phase");
         let _ = app.emit(
             INSTALL_PROGRESS_EVENT,
             InstallProgress::CollectionCompleted {
@@ -1176,254 +1541,11 @@ pub async fn install_collection(
     }
 
     // ---------------------------------------------------------------
-    // Phase 1.5: Concurrent Extraction
-    // ---------------------------------------------------------------
-    // Extract all pre-downloaded archives concurrently using dedicated
-    // blocking threads. This is the biggest single speedup: archive
-    // extraction is CPU+IO-bound and perfectly parallelizable.
-    // Extraction is CPU+IO-bound — use all available cores for max throughput.
-    let max_extract = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
-        .clamp(4, 16);
-
-    // Collect archives that need extraction — query DB live to avoid duplicates
-    let current_mods_for_extract = db.list_mods(game_id, bottle_name).unwrap_or_default();
-    let archives_to_extract: Vec<(usize, PathBuf, String)> = install_order
-        .iter()
-        .enumerate()
-        .filter_map(|(i, &mod_idx)| {
-            if completed_statuses.contains_key(&i) {
-                return None;
-            }
-            let entry = &manifest.mods[mod_idx];
-            let is_already = current_mods_for_extract.iter().any(|m| {
-                if let Some(nexus_id) = entry.source.mod_id {
-                    if m.nexus_mod_id == Some(nexus_id) {
-                        return true;
-                    }
-                }
-                if let Some(file_id) = entry.source.file_id {
-                    if m.nexus_file_id == Some(file_id) {
-                        return true;
-                    }
-                }
-                m.name.eq_ignore_ascii_case(&entry.name)
-            });
-            if is_already {
-                return None;
-            }
-            pre_downloaded
-                .get(&i)
-                .map(|p| (i, p.clone(), entry.name.clone()))
-        })
-        .collect();
-
-    // Shared state for streaming extraction → install overlap.
-    // Extraction tasks insert results here as they complete; the install
-    // loop reads from it, waiting only for the specific mod it needs next.
-    let extracted_map: Arc<std::sync::Mutex<HashMap<usize, PathBuf>>> =
-        Arc::new(std::sync::Mutex::new(HashMap::new()));
-    let extraction_done: Arc<std::sync::Mutex<HashSet<usize>>> =
-        Arc::new(std::sync::Mutex::new(HashSet::new()));
-    let extraction_notify = Arc::new(Notify::new());
-    let mut temp_guard = TempDirGuard::new();
-    let needs_extraction: HashSet<usize> = archives_to_extract
-        .iter()
-        .map(|(idx, _, _)| *idx)
-        .collect();
-
-    if !archives_to_extract.is_empty() {
-        let total_staging_bytes: u64 = archives_to_extract
-            .iter()
-            .filter_map(|(idx, _, _)| manifest.mods.get(*idx).and_then(|m| m.source.file_size))
-            .sum();
-
-        let _ = app.emit(
-            INSTALL_PROGRESS_EVENT,
-            InstallProgress::StagingPhaseStarted {
-                total_mods: archives_to_extract.len(),
-                max_concurrent: max_extract,
-                total_bytes: total_staging_bytes,
-            },
-        );
-
-        let extract_sem = Arc::new(Semaphore::new(max_extract));
-
-        for (install_idx, archive_path, mod_name) in &archives_to_extract {
-            // Check cancellation before spawning each extraction task
-            if is_cancelled() {
-                log::info!("Collection install cancelled during extraction phase");
-                // Mark remaining as done so install loop doesn't hang
-                for (idx, _, _) in &archives_to_extract {
-                    extraction_done.lock().unwrap_or_else(|e| e.into_inner()).insert(*idx);
-                }
-                extraction_notify.notify_waiters();
-                break;
-            }
-
-            let sem = extract_sem.clone();
-            let archive = archive_path.clone();
-            let idx = *install_idx;
-            let app_c = app.clone();
-            let name = mod_name.clone();
-            let arc_size = manifest.mods.get(idx).and_then(|m| m.source.file_size).unwrap_or(0);
-            let map_c = extracted_map.clone();
-            let done_c = extraction_done.clone();
-            let notify_c = extraction_notify.clone();
-
-            tokio::spawn(async move {
-                let _permit = sem.acquire().await.expect("semaphore closed");
-
-                // Check cancellation after acquiring permit
-                if is_cancelled() {
-                    done_c.lock().unwrap_or_else(|e| e.into_inner()).insert(idx);
-                    notify_c.notify_waiters();
-                    return;
-                }
-
-                let _ = app_c.emit(
-                    INSTALL_PROGRESS_EVENT,
-                    InstallProgress::StagingModStarted {
-                        mod_index: idx,
-                        mod_name: name.clone(),
-                        archive_size: arc_size,
-                    },
-                );
-
-                let extract_start = std::time::Instant::now();
-                let temp_dir = std::env::temp_dir().join(format!("corkscrew_extract_{}", idx));
-
-                // Estimated extracted size: archive_size * compression ratio.
-                // Game mods (textures, meshes) typically compress ~2-3x.
-                let estimated_total = arc_size.saturating_mul(3);
-
-                // Spawn a dir-size poller that measures extraction progress
-                // for ALL archive formats (ZIP, 7z, RAR, tar).
-                let poller_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let poller_stop_c = poller_stop.clone();
-                let poll_dir = temp_dir.clone();
-                let app_poll = app_c.clone();
-                let poller_handle = tokio::spawn(async move {
-                    let mut prev_bytes = 0u64;
-                    loop {
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                        if poller_stop_c.load(std::sync::atomic::Ordering::Relaxed) {
-                            break;
-                        }
-                        let bytes = crate::disk_budget::dir_size(&poll_dir);
-                        if bytes != prev_bytes {
-                            let _ = app_poll.emit(
-                                INSTALL_PROGRESS_EVENT,
-                                InstallProgress::StagingProgress {
-                                    mod_index: idx,
-                                    files_done: 0,
-                                    files_total: 0,
-                                    bytes_done: bytes,
-                                    bytes_total: estimated_total,
-                                },
-                            );
-                            prev_bytes = bytes;
-                        }
-                    }
-                });
-
-                // Timeout extraction at 30 minutes to prevent indefinite hangs
-                let result = tokio::time::timeout(
-                    std::time::Duration::from_secs(1800),
-                    tokio::task::spawn_blocking(move || {
-                        if is_cancelled() {
-                            return Err("Cancelled".to_string());
-                        }
-                        if let Err(e) = validate_archive(&archive) {
-                            return Err(format!("Archive validation failed: {}", e));
-                        }
-                        if temp_dir.exists() {
-                            let _ = std::fs::remove_dir_all(&temp_dir);
-                        }
-                        let _ = std::fs::create_dir_all(&temp_dir);
-                        match crate::installer::extract_archive(&archive, &temp_dir) {
-                            Ok(_) => Ok(temp_dir),
-                            Err(e) => {
-                                let _ = std::fs::remove_dir_all(&temp_dir);
-                                Err(e.to_string())
-                            }
-                        }
-                    }),
-                )
-                .await;
-
-                // Stop the poller
-                poller_stop.store(true, std::sync::atomic::Ordering::SeqCst);
-                poller_handle.abort();
-
-                match result {
-                    Ok(Ok(Ok(dir))) => {
-                        let extract_duration_ms = extract_start.elapsed().as_millis() as u64;
-                        let extracted_size: u64 = walkdir::WalkDir::new(&dir)
-                            .into_iter()
-                            .filter_map(|e| e.ok())
-                            .filter(|e| e.file_type().is_file())
-                            .map(|e| e.metadata().map(|m| m.len()).unwrap_or(0))
-                            .sum();
-                        let _ = app_c.emit(
-                            INSTALL_PROGRESS_EVENT,
-                            InstallProgress::StagingModCompleted {
-                                mod_index: idx,
-                                mod_name: name,
-                                extracted_size,
-                                duration_ms: extract_duration_ms,
-                            },
-                        );
-                        map_c.lock().unwrap_or_else(|e| e.into_inner()).insert(idx, dir);
-                    }
-                    Ok(Ok(Err(e))) => {
-                        log::warn!("Pre-extraction failed for mod {}: {}", idx, e);
-                        let _ = app_c.emit(
-                            INSTALL_PROGRESS_EVENT,
-                            InstallProgress::StagingModFailed {
-                                mod_index: idx,
-                                mod_name: name,
-                                error: e,
-                            },
-                        );
-                    }
-                    Ok(Err(e)) => {
-                        log::warn!("Extraction task panicked for mod {}: {}", idx, e);
-                        let _ = app_c.emit(
-                            INSTALL_PROGRESS_EVENT,
-                            InstallProgress::StagingModFailed {
-                                mod_index: idx,
-                                mod_name: name,
-                                error: format!("Task panicked: {}", e),
-                            },
-                        );
-                    }
-                    Err(_) => {
-                        log::warn!("Extraction timed out for mod {} after 30 minutes", idx);
-                        let _ = app_c.emit(
-                            INSTALL_PROGRESS_EVENT,
-                            InstallProgress::StagingModFailed {
-                                mod_index: idx,
-                                mod_name: name,
-                                error: "Extraction timed out after 30 minutes".to_string(),
-                            },
-                        );
-                    }
-                }
-
-                // Always mark as done (success or failure) and wake install loop
-                done_c.lock().unwrap_or_else(|e| e.into_inner()).insert(idx);
-                notify_c.notify_waiters();
-            });
-        }
-    }
-
-    // ---------------------------------------------------------------
     // Phase 2: Sequential Install (overlaps with ongoing extractions)
     // ---------------------------------------------------------------
     // Install starts immediately — the loop waits only for each
     // individual mod's extraction, not all of them.
+    let mut temp_guard = TempDirGuard::new();
     let _ = app.emit(
         INSTALL_PROGRESS_EVENT,
         InstallProgress::InstallPhaseStarted { total_mods },
@@ -1493,7 +1615,7 @@ pub async fn install_collection(
 
         // Skip mods still extracting — defer to pass 2 so we don't stall
         // the entire install pipeline waiting for a few slow archives.
-        if needs_extraction.contains(&i) {
+        if needs_extraction_set.contains(&i) {
             let is_done = extraction_done.lock().unwrap_or_else(|e| e.into_inner()).contains(&i);
             if !is_done {
                 log::info!("Deferring install of '{}' — extraction not done yet", mod_name);
@@ -1572,7 +1694,7 @@ pub async fn install_collection(
 
         // Wait for this mod's extraction if it's in the extraction pipeline.
         // This blocks only until THIS mod is ready, not all of them.
-        let pre_ext = if needs_extraction.contains(&i) {
+        let pre_ext = if needs_extraction_set.contains(&i) {
             loop {
                 // Check if extraction is done (success or failure)
                 if extraction_done.lock().unwrap_or_else(|e| e.into_inner()).contains(&i) {
@@ -1703,7 +1825,7 @@ pub async fn install_collection(
             let mod_name = &mod_entry.name;
 
             // Wait for extraction to complete (it should be done by now, but be safe)
-            let pre_ext = if needs_extraction.contains(&i) {
+            let pre_ext = if needs_extraction_set.contains(&i) {
                 loop {
                     if extraction_done.lock().unwrap_or_else(|e| e.into_inner()).contains(&i) {
                         let dir = extracted_map.lock().unwrap_or_else(|e| e.into_inner()).remove(&i);
@@ -2755,13 +2877,15 @@ async fn stage_and_deploy(
 
         tokio::task::spawn_blocking(move || {
             if let Some(extracted_dir) = pre_extracted {
+                // Fast path: skip SHA-256 hashing for collection installs
                 let result =
-                    staging::stage_mod_from_extracted(&extracted_dir, &gid, &bn, mod_id, &mn);
+                    staging::stage_mod_from_extracted_opts(&extracted_dir, &gid, &bn, mod_id, &mn, true);
                 // Clean up pre-extracted temp dir
                 let _ = std::fs::remove_dir_all(&extracted_dir);
                 result
             } else {
-                staging::stage_mod(&archive, &gid, &bn, mod_id, &mn)
+                // Fallback: direct extraction + staging (also skip hash for collections)
+                staging::stage_mod_extract_direct(&archive, &gid, &bn, mod_id, &mn, true)
             }
         })
         .await

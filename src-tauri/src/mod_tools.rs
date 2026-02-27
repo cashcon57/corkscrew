@@ -1265,7 +1265,7 @@ fn extract_7z(data: &[u8], target: &Path) -> Result<()> {
     let tmp_path = target.join("__download.7z");
     fs::write(&tmp_path, data)?;
 
-    sevenz_rust::decompress_file(&tmp_path, target)
+    sevenz_rust2::decompress_file(&tmp_path, target)
         .map_err(|e| ToolError::SevenZ(e.to_string()))?;
 
     // Clean up temp file

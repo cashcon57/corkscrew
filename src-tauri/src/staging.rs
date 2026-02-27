@@ -209,12 +209,27 @@ pub fn stage_mod(
 ///
 /// Skips the archive extraction step (which was already done concurrently)
 /// and copies files from the pre-extracted directory into the staging folder.
+///
+/// When `skip_hash` is true, files are copied without computing SHA-256 hashes,
+/// which eliminates a full re-read of every file on CoW filesystems (APFS/Btrfs).
 pub fn stage_mod_from_extracted(
     extracted_dir: &Path,
     game_id: &str,
     bottle_name: &str,
     mod_id: i64,
     mod_name: &str,
+) -> Result<StagingResult> {
+    stage_mod_from_extracted_opts(extracted_dir, game_id, bottle_name, mod_id, mod_name, false)
+}
+
+/// Stage a mod from a pre-extracted directory with optional hash skipping.
+pub fn stage_mod_from_extracted_opts(
+    extracted_dir: &Path,
+    game_id: &str,
+    bottle_name: &str,
+    mod_id: i64,
+    mod_name: &str,
+    skip_hash: bool,
 ) -> Result<StagingResult> {
     let staging_dir = mod_staging_dir(game_id, bottle_name, mod_id, mod_name);
 
@@ -231,7 +246,7 @@ pub fn stage_mod_from_extracted(
 
     // Detect the optimal copy method once for the entire batch.
     let copy_method = platform::detect_copy_method(&data_root, &staging_dir);
-    debug!("Pre-extracted staging copy method: {:?}", copy_method);
+    debug!("Pre-extracted staging copy method: {:?} (skip_hash={})", copy_method, skip_hash);
 
     // Collect all file entries first, then process in parallel
     let entries: Vec<_> = WalkDir::new(&data_root)
@@ -240,7 +255,7 @@ pub fn stage_mod_from_extracted(
         .filter(|e| e.file_type().is_file())
         .collect();
 
-    // Parallel copy + hash: each file is read once, written + hashed simultaneously
+    // Parallel copy (+ optional hash)
     let results: Vec<std::result::Result<(String, String, u64), StagingError>> = entries
         .par_iter()
         .map(|entry| {
@@ -254,7 +269,11 @@ pub fn stage_mod_from_extracted(
                 let _ = fs::create_dir_all(parent); // idempotent, safe for parallel
             }
 
-            let (hash, file_size) = copy_and_hash(abs_src, &dest_path, copy_method)?;
+            let (hash, file_size) = if skip_hash {
+                copy_no_hash(abs_src, &dest_path, copy_method)?
+            } else {
+                copy_and_hash(abs_src, &dest_path, copy_method)?
+            };
             let rel_str = relative.to_string_lossy().replace('\\', "/");
             Ok((rel_str, hash, file_size))
         })
@@ -270,10 +289,11 @@ pub fn stage_mod_from_extracted(
     }
 
     info!(
-        "Staged {} files for mod '{}' from pre-extracted dir at {}",
+        "Staged {} files for mod '{}' from pre-extracted dir at {} (skip_hash={})",
         files.len(),
         mod_name,
-        staging_dir.display()
+        staging_dir.display(),
+        skip_hash,
     );
 
     Ok(StagingResult {
@@ -281,6 +301,145 @@ pub fn stage_mod_from_extracted(
         files,
         hashes,
     })
+}
+
+/// Stage a mod by extracting an archive directly into the staging directory.
+///
+/// This is the fast path for collection installs:
+/// 1. Extract archive into a temp subdir within the staging folder
+/// 2. Find the data root inside the extracted content
+/// 3. Move (rename) files from data root to staging root (same FS = instant)
+/// 4. Optionally skip SHA-256 hashing (controlled by `skip_hash`)
+///
+/// This eliminates the temp dir → copy → staging pipeline, saving one full
+/// write pass of all extracted data.
+pub fn stage_mod_extract_direct(
+    archive_path: &Path,
+    game_id: &str,
+    bottle_name: &str,
+    mod_id: i64,
+    mod_name: &str,
+    skip_hash: bool,
+) -> Result<StagingResult> {
+    let staging_dir = mod_staging_dir(game_id, bottle_name, mod_id, mod_name);
+
+    if staging_dir.exists() {
+        fs::remove_dir_all(&staging_dir)?;
+    }
+    fs::create_dir_all(&staging_dir)?;
+
+    // Extract into a temp subdir within staging (same filesystem for instant rename).
+    let extract_subdir = staging_dir.join("__extract_tmp");
+    fs::create_dir_all(&extract_subdir)?;
+
+    info!(
+        "Direct-staging mod '{}' from {} -> {}",
+        mod_name,
+        archive_path.display(),
+        staging_dir.display()
+    );
+
+    installer::extract_archive(archive_path, &extract_subdir)?;
+
+    // Find the data root (unwrap nested single-folder archives).
+    let data_root = installer::find_data_root(&extract_subdir);
+    debug!("Data root for direct-staging: {}", data_root.display());
+
+    // Move files from data_root → staging_dir (same filesystem = rename is instant).
+    // We move each entry from data_root directly into staging_dir.
+    let entries_to_move: Vec<_> = fs::read_dir(&data_root)?
+        .filter_map(|e| e.ok())
+        .collect();
+
+    for entry in &entries_to_move {
+        let dest = staging_dir.join(entry.file_name());
+        // Rename is instant on the same filesystem.
+        if let Err(_) = fs::rename(entry.path(), &dest) {
+            // Fallback: if rename fails (shouldn't happen, same FS), do a copy.
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                copy_dir_recursive(&entry.path(), &dest)?;
+            } else {
+                fs::copy(entry.path(), &dest)?;
+            }
+        }
+    }
+
+    // Remove the temp extraction subdir (now empty or containing only leftovers).
+    let _ = fs::remove_dir_all(&extract_subdir);
+
+    // Walk the staging dir to collect file list and optionally hash.
+    let file_entries: Vec<_> = WalkDir::new(&staging_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .collect();
+
+    let mut files: Vec<String> = Vec::with_capacity(file_entries.len());
+    let mut hashes: Vec<(String, String, u64)> = Vec::with_capacity(file_entries.len());
+
+    if skip_hash {
+        // Fast path: just collect file paths and sizes, no SHA-256.
+        for entry in &file_entries {
+            let abs = entry.path();
+            let relative = abs
+                .strip_prefix(&staging_dir)
+                .map_err(|e| StagingError::Other(e.to_string()))?;
+            let rel_str = relative.to_string_lossy().replace('\\', "/");
+            let size = fs::metadata(abs).map(|m| m.len()).unwrap_or(0);
+            files.push(rel_str.clone());
+            hashes.push((rel_str, String::new(), size));
+        }
+    } else {
+        // Full path: parallel hash computation via rayon.
+        let results: Vec<std::result::Result<(String, String, u64), StagingError>> = file_entries
+            .par_iter()
+            .map(|entry| {
+                let abs = entry.path();
+                let relative = abs
+                    .strip_prefix(&staging_dir)
+                    .map_err(|e| StagingError::Other(e.to_string()))?;
+                let rel_str = relative.to_string_lossy().replace('\\', "/");
+                let hash = compute_sha256(abs)?;
+                let size = fs::metadata(abs).map(|m| m.len()).unwrap_or(0);
+                Ok((rel_str, hash, size))
+            })
+            .collect();
+
+        for result in results {
+            let (rel_str, hash, size) = result?;
+            files.push(rel_str.clone());
+            hashes.push((rel_str, hash, size));
+        }
+    }
+
+    info!(
+        "Direct-staged {} files for mod '{}' at {} (skip_hash={})",
+        files.len(),
+        mod_name,
+        staging_dir.display(),
+        skip_hash,
+    );
+
+    Ok(StagingResult {
+        staging_path: staging_dir,
+        files,
+        hashes,
+    })
+}
+
+/// Recursively copy a directory (fallback if rename fails across filesystems).
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let dest = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&entry.path(), &dest)?;
+        } else {
+            fs::copy(entry.path(), &dest)?;
+        }
+    }
+    Ok(())
 }
 
 /// Remove a mod's staging directory entirely.
@@ -364,6 +523,19 @@ fn copy_and_hash(
     copy_method: platform::FsCopyMethod,
 ) -> Result<(String, u64)> {
     platform::fast_copy_and_hash(src, dst, copy_method).map_err(StagingError::Io)
+}
+
+/// Copy a file without computing SHA-256 hash (fast path for collection installs).
+///
+/// Returns ("", file_size) — empty hash string indicates hash was skipped.
+fn copy_no_hash(
+    src: &Path,
+    dst: &Path,
+    copy_method: platform::FsCopyMethod,
+) -> Result<(String, u64)> {
+    platform::fast_copy(src, dst, copy_method).map_err(StagingError::Io)?;
+    let size = fs::metadata(dst).map(|m| m.len()).unwrap_or(0);
+    Ok((String::new(), size))
 }
 
 /// RAII guard that removes a temporary directory when dropped.

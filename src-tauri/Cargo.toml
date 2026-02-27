@@ -1,6 +1,6 @@
 [package]
 name = "corkscrew"
-version = "1.19.8"
+version = "1.19.9"
 description = "A mod manager for CrossOver/Wine games on macOS and Linux"
 authors = ["cashconway"]
 edition = "2021"
@@ -37,7 +37,7 @@ tokio = { version = "1", features = ["full"] }
 
 # Archive extraction
 zip = "2"
-sevenz-rust = "0.6"
+sevenz-rust2 = "0.20"
 unrar = "0.5"
 tar = "0.4"
 flate2 = "1"
