@@ -562,6 +562,54 @@ pub fn parse_fomod_cached(
 /// conditions are skipped when their dependencies are not met.
 ///
 /// Selection rules:
+/// Resolve relative image paths in every option to absolute filesystem paths
+/// rooted at `staging_dir`.  This lets the frontend convert them with
+/// `convertFileSrc()` for the `asset:` protocol.
+pub fn resolve_image_paths(installer: &mut FomodInstaller, staging_dir: &Path) {
+    for step in &mut installer.steps {
+        for group in &mut step.groups {
+            for option in &mut group.options {
+                if let Some(ref rel) = option.image {
+                    let abs = staging_dir.join(rel);
+                    if abs.exists() {
+                        option.image = Some(abs.to_string_lossy().into_owned());
+                    } else {
+                        // Try case-insensitive lookup — FOMOD paths are often
+                        // authored on Windows with mismatched casing.
+                        if let Some(found) = resolve_case_insensitive(staging_dir, rel) {
+                            option.image = Some(found.to_string_lossy().into_owned());
+                        }
+                        // else leave relative — image just won't render
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Walk path components case-insensitively from `base`.
+fn resolve_case_insensitive(base: &Path, relative: &str) -> Option<std::path::PathBuf> {
+    let mut current = base.to_path_buf();
+    for component in relative.replace('\\', "/").split('/') {
+        if component.is_empty() {
+            continue;
+        }
+        let entries = std::fs::read_dir(&current).ok()?;
+        let mut found = false;
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().eq_ignore_ascii_case(component) {
+                current = entry.path();
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return None;
+        }
+    }
+    Some(current)
+}
+
 /// - `SelectAll` groups: all options selected.
 /// - `SelectExactlyOne` / `SelectAtMostOne`: first `Required` or
 ///   `Recommended` option, or the first option if none qualify.

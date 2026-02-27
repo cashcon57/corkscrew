@@ -2406,7 +2406,9 @@ async fn stage_and_deploy(
                     }
                 }
             } else {
-                // No manifest choices — check saved recipe first, then ask user
+                // No manifest choices — check saved recipe, then use defaults.
+                // Collection curators omit choices when defaults are correct;
+                // prompting the user would stall the entire pipeline.
                 if let Ok(Some(recipe)) = crate::fomod_recipes::get_recipe(db, mod_id) {
                     log::info!(
                         "FOMOD auto-applying saved recipe ({} selections) for '{}'",
@@ -2416,39 +2418,10 @@ async fn stage_and_deploy(
                     recipe.selections
                 } else {
                     log::info!(
-                        "FOMOD wizard required for '{}' — no choices in manifest, no saved recipe",
+                        "FOMOD using defaults for '{}' — no choices in manifest, no saved recipe",
                         mod_name
                     );
-                    let (correlation_id, rx) = create_fomod_request();
-
-                    let _ = app.emit(
-                        INSTALL_PROGRESS_EVENT,
-                        InstallProgress::FomodRequired {
-                            mod_index,
-                            mod_name: mod_name.to_string(),
-                            correlation_id: correlation_id.clone(),
-                            installer: serde_json::to_value(&fomod_installer).unwrap_or_default(),
-                        },
-                    );
-
-                    // 30s timeout: if user doesn't respond (e.g. not on progress page),
-                    // fall back to defaults rather than blocking the entire install pipeline.
-                    match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
-                        Ok(Ok(user_selections)) => {
-                            let _ = crate::fomod_recipes::save_recipe(
-                                db, mod_id, mod_name, None, &user_selections,
-                            );
-                            user_selections
-                        }
-                        _ => {
-                            log::warn!(
-                                "FOMOD selection timed out (30s) or dropped for '{}', using defaults",
-                                mod_name
-                            );
-                            FOMOD_PENDING.lock().unwrap().remove(&correlation_id);
-                            fomod::get_default_selections(&fomod_installer)
-                        }
-                    }
+                    fomod::get_default_selections(&fomod_installer)
                 }
             };
 
@@ -2650,14 +2623,27 @@ fn parse_fomod_choices(
 
     // Check for NexusMods nested format: { "type": "fomod", "options": [...] }
     if obj.get("type").and_then(|v| v.as_str()) == Some("fomod") {
-        let options = obj.get("options")?.as_array()?;
+        let options = match obj.get("options").and_then(|v| v.as_array()) {
+            Some(arr) => arr,
+            None => return None,
+        };
         let mut result = HashMap::new();
 
         for step in options {
-            let groups = step.get("groups").and_then(|v| v.as_array())?;
+            // Skip steps without groups (e.g. informational/welcome pages)
+            let groups = match step.get("groups").and_then(|v| v.as_array()) {
+                Some(arr) => arr,
+                None => continue,
+            };
             for group in groups {
-                let group_name = group.get("name").and_then(|v| v.as_str())?;
-                let group_choices = group.get("choices").and_then(|v| v.as_array())?;
+                let group_name = match group.get("name").and_then(|v| v.as_str()) {
+                    Some(n) => n,
+                    None => continue,
+                };
+                let group_choices = match group.get("choices").and_then(|v| v.as_array()) {
+                    Some(arr) => arr,
+                    None => continue,
+                };
                 let selected: Vec<String> = group_choices
                     .iter()
                     .filter_map(|c| c.get("name").and_then(|v| v.as_str()).map(String::from))

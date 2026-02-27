@@ -3379,8 +3379,14 @@ fn detect_fomod(
     // Use archive SHA-256 hash as cache key if provided, otherwise fall back
     // to the staging path itself (still deterministic per-archive).
     let cache_key = archive_hash.unwrap_or_else(|| staging_path.clone());
-    fomod::parse_fomod_cached(&state.fomod_cache, &cache_key, &path)
-        .map_err(|e| e.to_string())
+    let mut installer = fomod::parse_fomod_cached(&state.fomod_cache, &cache_key, &path)
+        .map_err(|e| e.to_string())?;
+    // Resolve relative image paths to absolute so the frontend can serve them
+    // via the Tauri asset: protocol.
+    if let Some(ref mut inst) = installer {
+        fomod::resolve_image_paths(inst, &path);
+    }
+    Ok(installer)
 }
 
 #[tauri::command]

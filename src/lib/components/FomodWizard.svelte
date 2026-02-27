@@ -1,5 +1,6 @@
 <script lang="ts">
   import { getFomodDefaults } from "$lib/api";
+  import { convertFileSrc } from "@tauri-apps/api/core";
   import type { FomodInstaller, FomodGroup, FomodOption } from "$lib/types";
 
   // ---- Props ----
@@ -172,6 +173,16 @@
     }
   }
 
+  function imageUrl(path: string | undefined | null): string | undefined {
+    if (!path) return undefined;
+    // Absolute path from backend → convert to asset: protocol
+    if (path.startsWith("/")) return convertFileSrc(path);
+    // Already a URL (http/https/asset) → use as-is
+    if (path.startsWith("http") || path.startsWith("asset:")) return path;
+    // Relative path fallback (shouldn't happen with the backend fix)
+    return path;
+  }
+
   function descriptorBg(descriptor: string): string {
     switch (descriptor) {
       case "Required": return "var(--green-subtle)";
@@ -317,7 +328,7 @@
                       aria-label="Preview image for {option.name}"
                     >
                       <img
-                        src={option.image}
+                        src={imageUrl(option.image)}
                         alt={option.name}
                         loading="lazy"
                       />
@@ -378,7 +389,7 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="lightbox-overlay" onclick={() => { previewImage = null; }}>
     <div class="lightbox-content">
-      <img src={previewImage} alt="Preview" />
+      <img src={imageUrl(previewImage)} alt="Preview" />
       <button
         class="lightbox-close"
         onclick={() => { previewImage = null; }}

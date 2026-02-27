@@ -35,7 +35,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data:; connect-src 'self' https://api.nexusmods.com https://users.nexusmods.com https://data.nexusmods.com wss://sso.nexusmods.com https://api.github.com https://objects.githubusercontent.com ipc: http://ipc.localhost; font-src 'self' data:; object-src 'none'"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: asset: https://asset.localhost; connect-src 'self' https://api.nexusmods.com https://users.nexusmods.com https://data.nexusmods.com wss://sso.nexusmods.com https://api.github.com https://objects.githubusercontent.com ipc: http://ipc.localhost; font-src 'self' data:; object-src 'none'"
     }
   },
   "plugins": {
