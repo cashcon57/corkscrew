@@ -424,12 +424,13 @@ async fn download_nexus_archive(
     queue.set_completed(queue_id);
     let _ = app.emit(DOWNLOAD_QUEUE_EVENT, queue.get_all());
 
-    // Register in dedup registry
+    // Register in dedup registry — skip SHA-256 hashing during collection
+    // installs to avoid blocking the download+extract pipeline.  The dedup
+    // registry already uses filename + file_size + nexus IDs for matching.
     let archive_name = archive_path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
-    let sha = staging::compute_sha256(&archive_path).ok();
     let file_size = std::fs::metadata(&archive_path)
         .map(|m| m.len() as i64)
         .unwrap_or(0);
@@ -438,7 +439,7 @@ async fn download_nexus_archive(
         &archive_name,
         Some(nexus_mod_id),
         Some(nexus_file_id),
-        sha.as_deref(),
+        None,
         file_size,
     ) {
         let _ = db.add_download_collection_ref(dl_id, manifest_name, game_id, bottle_name);
@@ -563,12 +564,11 @@ async fn download_direct_archive(
     queue.set_completed(queue_id);
     let _ = app.emit(DOWNLOAD_QUEUE_EVENT, queue.get_all());
 
-    // Register in dedup registry
+    // Register in dedup registry — skip SHA-256 to avoid blocking pipeline
     let archive_name = archive_path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
-    let sha = staging::compute_sha256(&archive_path).ok();
     let file_size = std::fs::metadata(&archive_path)
         .map(|m| m.len() as i64)
         .unwrap_or(0);
@@ -577,7 +577,7 @@ async fn download_direct_archive(
         &archive_name,
         mod_entry.source.mod_id,
         mod_entry.source.file_id,
-        sha.as_deref(),
+        None,
         file_size,
     ) {
         let _ = db.add_download_collection_ref(dl_id, manifest_name, game_id, bottle_name);
@@ -863,11 +863,15 @@ pub async fn install_collection(
             continue;
         }
 
-        // Skip already-installed mods (check by nexus mod ID, file ID, or name)
+        // Skip already-installed mods (check by nexus mod ID + file ID, or name).
+        // When the manifest specifies a file_id, require it to match too —
+        // the same NM mod can have multiple files (e.g. INI config + DLL).
         let is_already = existing_mods.iter().any(|m| {
             if let Some(nexus_id) = entry.source.mod_id {
                 if m.nexus_mod_id == Some(nexus_id) {
-                    return true;
+                    if entry.source.file_id.is_none() || m.nexus_file_id == entry.source.file_id {
+                        return true;
+                    }
                 }
             }
             if let Some(file_id) = entry.source.file_id {
@@ -952,7 +956,11 @@ pub async fn install_collection(
                 let entry = &manifest.mods[mod_idx];
                 !current_mods_snapshot.iter().any(|m| {
                     if let Some(nexus_id) = entry.source.mod_id {
-                        if m.nexus_mod_id == Some(nexus_id) { return true; }
+                        if m.nexus_mod_id == Some(nexus_id) {
+                            if entry.source.file_id.is_none() || m.nexus_file_id == entry.source.file_id {
+                                return true;
+                            }
+                        }
                     }
                     if let Some(file_id) = entry.source.file_id {
                         if m.nexus_file_id == Some(file_id) { return true; }
@@ -1125,7 +1133,7 @@ pub async fn install_collection(
                         let poller_handle = tokio::spawn(async move {
                             let mut prev_bytes = 0u64;
                             loop {
-                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                                 if poller_stop_c.load(std::sync::atomic::Ordering::Relaxed) {
                                     break;
                                 }
@@ -1379,7 +1387,7 @@ pub async fn install_collection(
                         let poller_handle = tokio::spawn(async move {
                             let mut prev_bytes = 0u64;
                             loop {
-                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                                 if poller_stop_c.load(std::sync::atomic::Ordering::Relaxed) {
                                     break;
                                 }
@@ -1635,12 +1643,16 @@ pub async fn install_collection(
         );
 
         // Check if this mod is already installed — query DB live to catch mods
-        // installed earlier in this same run (existing_mods is a stale snapshot)
+        // installed earlier in this same run (existing_mods is a stale snapshot).
+        // When file_id is specified, require it to match too — same NM mod can
+        // have multiple files (e.g. INI config + DLL).
         let current_mods = db.list_mods(game_id, bottle_name).unwrap_or_default();
         let is_already = current_mods.iter().any(|m| {
             if let Some(nexus_id) = mod_entry.source.mod_id {
                 if m.nexus_mod_id == Some(nexus_id) {
-                    return true;
+                    if mod_entry.source.file_id.is_none() || m.nexus_file_id == mod_entry.source.file_id {
+                        return true;
+                    }
                 }
             }
             if let Some(file_id) = mod_entry.source.file_id {
@@ -1657,7 +1669,11 @@ pub async fn install_collection(
             // that may not have been tagged).
             if let Some(existing) = current_mods.iter().find(|m| {
                 if let Some(nexus_id) = mod_entry.source.mod_id {
-                    if m.nexus_mod_id == Some(nexus_id) { return true; }
+                    if m.nexus_mod_id == Some(nexus_id) {
+                        if mod_entry.source.file_id.is_none() || m.nexus_file_id == mod_entry.source.file_id {
+                            return true;
+                        }
+                    }
                 }
                 if let Some(file_id) = mod_entry.source.file_id {
                     if m.nexus_file_id == Some(file_id) { return true; }
@@ -1852,12 +1868,15 @@ pub async fn install_collection(
                 },
             );
 
-            // Check already-installed (live DB query)
+            // Check already-installed (live DB query).
+            // Require file_id match when specified — same mod can have multiple files.
             let current_mods = db.list_mods(game_id, bottle_name).unwrap_or_default();
             let is_already = current_mods.iter().any(|m| {
                 if let Some(nexus_id) = mod_entry.source.mod_id {
                     if m.nexus_mod_id == Some(nexus_id) {
-                        return true;
+                        if mod_entry.source.file_id.is_none() || m.nexus_file_id == mod_entry.source.file_id {
+                            return true;
+                        }
                     }
                 }
                 if let Some(file_id) = mod_entry.source.file_id {
@@ -2532,12 +2551,11 @@ async fn install_nexus_mod(
     queue.set_completed(queue_id);
     let _ = app.emit(DOWNLOAD_QUEUE_EVENT, queue.get_all());
 
-    // Register download in dedup registry
+    // Register download in dedup registry — skip SHA-256 to avoid blocking pipeline
     let archive_name = archive_path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
-    let sha = staging::compute_sha256(&archive_path).ok();
     let file_size = std::fs::metadata(&archive_path)
         .map(|m| m.len() as i64)
         .unwrap_or(0);
@@ -2546,7 +2564,7 @@ async fn install_nexus_mod(
         &archive_name,
         Some(nexus_mod_id),
         Some(nexus_file_id),
-        sha.as_deref(),
+        None,
         file_size,
     ) {
         let _ = db.add_download_collection_ref(dl_id, manifest_name, game_id, bottle_name);
@@ -2767,12 +2785,11 @@ async fn install_direct_mod(
     queue.set_completed(queue_id);
     let _ = app.emit(DOWNLOAD_QUEUE_EVENT, queue.get_all());
 
-    // Register download in dedup registry
+    // Register download in dedup registry — skip SHA-256 to avoid blocking pipeline
     let archive_name = archive_path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
-    let sha = staging::compute_sha256(&archive_path).ok();
     let file_size = std::fs::metadata(&archive_path)
         .map(|m| m.len() as i64)
         .unwrap_or(0);
@@ -2781,7 +2798,7 @@ async fn install_direct_mod(
         &archive_name,
         mod_entry.source.mod_id,
         mod_entry.source.file_id,
-        sha.as_deref(),
+        None,
         file_size,
     ) {
         let _ = db.add_download_collection_ref(dl_id, manifest_name, game_id, bottle_name);

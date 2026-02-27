@@ -1,6 +1,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -434,8 +435,119 @@ fn extract_zip_with_progress(
     Ok(extracted)
 }
 
-/// Extract a `.7z` archive using the `sevenz-rust2` crate (multi-threaded LZMA2).
+/// Find a native `7z` / `7zz` / `7za` binary on the system.
+///
+/// Checks well-known Homebrew and distro paths before falling back to a
+/// bare `$PATH` lookup.  Returns `None` if no binary is found.
+fn find_native_7z() -> Option<PathBuf> {
+    // Candidates in priority order: 7zz (latest official), 7z (p7zip), 7za (standalone)
+    let names = ["7zz", "7z", "7za"];
+
+    // Well-known locations (Homebrew Apple Silicon, Homebrew Intel, Linux distro)
+    let prefixes: &[&str] = &[
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+    ];
+
+    for name in &names {
+        for prefix in prefixes {
+            let candidate = PathBuf::from(prefix).join(name);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    // Fall back to $PATH lookup
+    for name in &names {
+        if let Ok(output) = Command::new("which").arg(name).output() {
+            if output.status.success() {
+                let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path_str.is_empty() {
+                    return Some(PathBuf::from(path_str));
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Extract a `.7z` archive using the native `7z` binary if available,
+/// falling back to the `sevenz-rust2` crate (pure-Rust, much slower).
+///
+/// Native `7z` / `7zz` (C implementation) is 10–100x faster than the pure-Rust
+/// LZMA decoder for solid archives — the difference between seconds and tens of
+/// minutes for large texture mods.
 fn extract_7z(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
+    if let Some(bin) = find_native_7z() {
+        match extract_7z_native(&bin, archive_path, dest_dir) {
+            Ok(files) => return Ok(files),
+            Err(e) => {
+                warn!(
+                    "Native 7z extraction failed ({}), falling back to pure-Rust: {}",
+                    bin.display(),
+                    e
+                );
+            }
+        }
+    } else {
+        info!(
+            "No native 7z binary found — using pure-Rust decoder (slower). \
+             Install p7zip for faster extraction: brew install p7zip (macOS) \
+             or sudo apt install p7zip-full (Linux)."
+        );
+    }
+
+    extract_7z_rust(archive_path, dest_dir)
+}
+
+/// Extract using the native `7z` / `7zz` command-line tool.
+fn extract_7z_native(
+    bin: &Path,
+    archive_path: &Path,
+    dest_dir: &Path,
+) -> Result<Vec<PathBuf>> {
+    info!(
+        "Extracting 7z with native binary {}: {} -> {}",
+        bin.display(),
+        archive_path.display(),
+        dest_dir.display()
+    );
+
+    let output = Command::new(bin)
+        .arg("x")                                         // eXtract with full paths
+        .arg(archive_path)
+        .arg(format!("-o{}", dest_dir.display()))         // output directory
+        .arg("-y")                                        // assume Yes to all prompts
+        .arg("-bso0")                                     // suppress normal stdout
+        .arg("-bsp0")                                     // suppress progress stdout
+        .output()
+        .map_err(|e| {
+            InstallerError::SevenZ(format!("Failed to run {}: {}", bin.display(), e))
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(InstallerError::SevenZ(format!(
+            "7z exited with {}: {}",
+            output.status,
+            stderr.trim()
+        )));
+    }
+
+    // Walk destination to collect extracted files (same as Rust path)
+    collect_extracted_files(dest_dir)
+}
+
+/// Extract using the pure-Rust `sevenz-rust2` crate (slow fallback).
+fn extract_7z_rust(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
+    info!(
+        "Extracting 7z with pure-Rust decoder: {}",
+        archive_path.display()
+    );
+
     sevenz_rust2::decompress_file(archive_path, dest_dir).map_err(|e| {
         InstallerError::SevenZ(format!(
             "Failed to extract 7z {}: {}",
@@ -444,18 +556,20 @@ fn extract_7z(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
         ))
     })?;
 
-    // Canonicalize dest_dir for path traversal validation.
+    collect_extracted_files(dest_dir)
+}
+
+/// Walk `dest_dir` and collect all extracted files, rejecting any that
+/// escape the destination directory (path traversal / symlink attacks).
+fn collect_extracted_files(dest_dir: &Path) -> Result<Vec<PathBuf>> {
     let canonical_dest = dest_dir
         .canonicalize()
         .unwrap_or_else(|_| dest_dir.to_path_buf());
 
-    // Walk the destination to collect the list of extracted files,
-    // rejecting any that escape the destination directory (path traversal).
     let mut extracted: Vec<PathBuf> = Vec::new();
     for entry in WalkDir::new(dest_dir).into_iter().filter_map(|e| e.ok()) {
         if entry.file_type().is_file() {
             let path = entry.into_path();
-            // Verify the file is actually within dest_dir (not a symlink escape)
             if let Ok(canonical) = path.canonicalize() {
                 if canonical.starts_with(&canonical_dest) {
                     extracted.push(path);
@@ -464,7 +578,6 @@ fn extract_7z(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
                         "Skipping 7z entry outside destination: {}",
                         canonical.display()
                     );
-                    // Remove the offending file
                     let _ = std::fs::remove_file(&path);
                 }
             } else {
@@ -476,7 +589,7 @@ fn extract_7z(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
     info!(
         "Extracted {} files from 7z: {}",
         extracted.len(),
-        archive_path.display()
+        dest_dir.display()
     );
     Ok(extracted)
 }
