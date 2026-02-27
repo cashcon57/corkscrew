@@ -879,7 +879,11 @@ pub async fn install_collection(
                     return true;
                 }
             }
-            m.name.eq_ignore_ascii_case(&entry.name)
+            // Only fall back to name matching when there are no Nexus identifiers
+            if entry.source.mod_id.is_none() && entry.source.file_id.is_none() {
+                return m.name.eq_ignore_ascii_case(&entry.name);
+            }
+            false
         });
         if is_already {
             continue;
@@ -965,7 +969,10 @@ pub async fn install_collection(
                     if let Some(file_id) = entry.source.file_id {
                         if m.nexus_file_id == Some(file_id) { return true; }
                     }
-                    m.name.eq_ignore_ascii_case(&entry.name)
+                    if entry.source.mod_id.is_none() && entry.source.file_id.is_none() {
+                        return m.name.eq_ignore_ascii_case(&entry.name);
+                    }
+                    false
                 })
             })
             .map(|&(order_pos, _)| order_pos)
@@ -1660,7 +1667,10 @@ pub async fn install_collection(
                     return true;
                 }
             }
-            m.name.eq_ignore_ascii_case(mod_name)
+            if mod_entry.source.mod_id.is_none() && mod_entry.source.file_id.is_none() {
+                return m.name.eq_ignore_ascii_case(mod_name);
+            }
+            false
         });
 
         if is_already {
@@ -1678,7 +1688,10 @@ pub async fn install_collection(
                 if let Some(file_id) = mod_entry.source.file_id {
                     if m.nexus_file_id == Some(file_id) { return true; }
                 }
-                m.name.eq_ignore_ascii_case(mod_name)
+                if mod_entry.source.mod_id.is_none() && mod_entry.source.file_id.is_none() {
+                    return m.name.eq_ignore_ascii_case(mod_name);
+                }
+                false
             }) {
                 let _ = db.set_collection_name(existing.id, &manifest.name);
             }
@@ -1884,13 +1897,28 @@ pub async fn install_collection(
                         return true;
                     }
                 }
-                m.name.eq_ignore_ascii_case(mod_name)
+                if mod_entry.source.mod_id.is_none() && mod_entry.source.file_id.is_none() {
+                    return m.name.eq_ignore_ascii_case(mod_name);
+                }
+                false
             });
 
             if is_already {
                 if let Some(existing) = current_mods.iter().find(|m| {
-                    m.name.eq_ignore_ascii_case(mod_name)
-                        || mod_entry.source.mod_id.map_or(false, |id| m.nexus_mod_id == Some(id))
+                    if let Some(nexus_id) = mod_entry.source.mod_id {
+                        if m.nexus_mod_id == Some(nexus_id) {
+                            if mod_entry.source.file_id.is_none() || m.nexus_file_id == mod_entry.source.file_id {
+                                return true;
+                            }
+                        }
+                    }
+                    if let Some(file_id) = mod_entry.source.file_id {
+                        if m.nexus_file_id == Some(file_id) { return true; }
+                    }
+                    if mod_entry.source.mod_id.is_none() && mod_entry.source.file_id.is_none() {
+                        return m.name.eq_ignore_ascii_case(mod_name);
+                    }
+                    false
                 }) {
                     let _ = db.set_collection_name(existing.id, &manifest.name);
                 }

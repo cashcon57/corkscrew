@@ -14,6 +14,20 @@ use zip::ZipArchive;
 /// Callback type for reporting extraction progress: (files_done, files_total).
 pub type ExtractProgressCb = dyn Fn(u64, u64) + Send + Sync;
 
+/// Returns `true` if a path component or filename is macOS/archive junk that
+/// should never be staged or deployed (`.DS_Store`, `__MACOSX`, `Thumbs.db`).
+pub fn is_junk_file(path: &Path) -> bool {
+    for component in path.components() {
+        if let std::path::Component::Normal(s) = component {
+            let s = s.to_string_lossy();
+            if s == ".DS_Store" || s == "__MACOSX" || s == "Thumbs.db" || s == "desktop.ini" {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// I/O buffer size for archive extraction (256 KiB).
 /// Rust's default io::copy uses 8 KiB — 32x more syscalls per file.
 const EXTRACT_BUF_SIZE: usize = 256 * 1024;
@@ -246,6 +260,10 @@ fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
         }
         let out_path = dest_dir.join(&relative);
 
+        if is_junk_file(&relative) {
+            continue;
+        }
+
         if entry.is_dir() {
             fs::create_dir_all(&out_path)?;
         } else {
@@ -347,6 +365,11 @@ fn extract_zip_with_progress(
             continue;
         }
         let out_path = dest_dir.join(&relative);
+
+        if is_junk_file(&relative) {
+            continue;
+        }
+
         if entry.is_dir() {
             fs::create_dir_all(&out_path)?;
         } else {
@@ -570,6 +593,11 @@ fn collect_extracted_files(dest_dir: &Path) -> Result<Vec<PathBuf>> {
     for entry in WalkDir::new(dest_dir).into_iter().filter_map(|e| e.ok()) {
         if entry.file_type().is_file() {
             let path = entry.into_path();
+            // Remove junk files that were extracted by native 7z
+            if is_junk_file(&path) {
+                let _ = std::fs::remove_file(&path);
+                continue;
+            }
             if let Ok(canonical) = path.canonicalize() {
                 if canonical.starts_with(&canonical_dest) {
                     extracted.push(path);
@@ -635,6 +663,17 @@ fn extract_rar(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
         }
 
         let out_path = dest_dir.join(&entry.filename);
+
+        if is_junk_file(&entry.filename) {
+            let next = header
+                .skip()
+                .map_err(|e| InstallerError::Rar(e.to_string()))?;
+            cursor = Some(
+                next.read_header()
+                    .map_err(|e| InstallerError::Rar(e.to_string()))?,
+            );
+            continue;
+        }
 
         if entry.is_file() {
             if let Some(parent) = out_path.parent() {
@@ -735,6 +774,10 @@ fn extract_tar<R: io::Read>(
         // Reject symlinks to prevent symlink-based escape attacks
         if entry.header().entry_type().is_symlink() {
             warn!("Skipping symlink in tar archive: {}", rel_path.display());
+            continue;
+        }
+
+        if is_junk_file(&rel_path) {
             continue;
         }
 

@@ -2053,6 +2053,35 @@ async fn delete_collection_cmd(
             total_mods
         );
 
+        // Prune empty directories left behind after file removal.
+        // Collect unique parent directories, sort deepest-first, and remove if empty.
+        {
+            let mut parent_dirs: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
+            for rel_path in &deployed_paths {
+                let mut current = data_dir.join(rel_path);
+                while let Some(parent) = current.parent() {
+                    if parent == data_dir {
+                        break;
+                    }
+                    parent_dirs.insert(parent.to_path_buf());
+                    current = parent.to_path_buf();
+                }
+            }
+            // Sort deepest-first so child dirs are removed before parents
+            let mut sorted: Vec<_> = parent_dirs.into_iter().collect();
+            sorted.sort_by(|a, b| b.components().count().cmp(&a.components().count()));
+            for dir in sorted {
+                if dir.exists() {
+                    let is_empty = std::fs::read_dir(&dir)
+                        .map(|mut rd| rd.next().is_none())
+                        .unwrap_or(false);
+                    if is_empty {
+                        let _ = std::fs::remove_dir(&dir);
+                    }
+                }
+            }
+        }
+
         // Phase 2: Clean staging + rollback dirs in parallel
         let _ = app.emit(
             "uninstall-progress",
@@ -2164,13 +2193,15 @@ async fn delete_collection_cmd(
             errors.push(format!("Failed to remove install checkpoint: {}", e));
         }
 
-        // Clean up orphaned files left behind by partial installs
+        // Clean up orphaned files left behind by partial installs.
+        // remove_skse must be true here — collection mods deploy into SKSE/Plugins/
+        // and those files become orphans once the collection is deleted.
         let clean_opts = cleaner::CleanOptions {
             remove_loose_files: true,
             remove_archives: true,
             remove_enb: false,
             remove_saves: false,
-            remove_skse: false,
+            remove_skse: true,
             orphans_only: true,
             dry_run: false,
             exclude_patterns: Vec::new(),

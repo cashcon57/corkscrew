@@ -160,6 +160,7 @@ pub fn stage_mod(
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
+        .filter(|e| !installer::is_junk_file(e.path()))
         .collect();
 
     // Parallel copy + hash: each file is read once, written + hashed simultaneously
@@ -253,6 +254,7 @@ pub fn stage_mod_from_extracted_opts(
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
+        .filter(|e| !installer::is_junk_file(e.path()))
         .collect();
 
     // Parallel copy (+ optional hash)
@@ -372,6 +374,7 @@ pub fn stage_mod_extract_direct(
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
+        .filter(|e| !installer::is_junk_file(e.path()))
         .collect();
 
     let mut files: Vec<String> = Vec::with_capacity(file_entries.len());
@@ -488,6 +491,9 @@ pub fn list_staging_files(staging_path: &Path) -> Result<Vec<String>> {
         .filter_map(|e| e.ok())
     {
         if !entry.file_type().is_file() {
+            continue;
+        }
+        if installer::is_junk_file(entry.path()) {
             continue;
         }
 

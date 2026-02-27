@@ -4405,6 +4405,7 @@
     justify-content: center;
     width: 32px;
     height: 32px;
+    padding: 0;
     background: var(--surface-hover);
     color: var(--text-secondary);
     border: none;
