@@ -66,6 +66,7 @@ use crate::bottles;
 use crate::collections::{self, CollectionManifest, CollectionModEntry};
 use crate::config;
 use crate::database::{self, ModDatabase};
+use crate::conflict_resolver;
 use crate::deployer;
 use crate::disk_budget;
 use crate::download_queue::{DownloadQueue, DOWNLOAD_QUEUE_EVENT};
@@ -1656,6 +1657,68 @@ pub async fn install_collection(
             installed,
             manifest_count
         );
+    }
+
+    // Auto-resolve file conflicts using heuristics (collection priority order,
+    // identical-content detection, patch naming, etc.) so the user doesn't see
+    // hundreds of unresolved conflicts after a one-click collection install.
+    match db.find_all_conflicts(game_id, bottle_name) {
+        Ok(conflicts) if !conflicts.is_empty() => {
+            let mods = db.list_mods(game_id, bottle_name).unwrap_or_default();
+            let mod_ids: Vec<i64> = conflicts
+                .iter()
+                .flat_map(|c| c.mods.iter().map(|m| m.mod_id))
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
+            let file_hashes = db.get_file_hashes_bulk(&mod_ids).unwrap_or_default();
+            let (suggestions, _) =
+                conflict_resolver::analyze_conflicts(&conflicts, &mods, None, &file_hashes);
+            match conflict_resolver::apply_suggestions(db, game_id, bottle_name, &suggestions) {
+                Ok(result) => {
+                    // Record resolved conflicts so they don't show in the UI
+                    for suggestion in &suggestions {
+                        let winner = match suggestion.status {
+                            conflict_resolver::ConflictStatus::AuthorResolved
+                            | conflict_resolver::ConflictStatus::IdenticalContent => {
+                                suggestion.current_winner_id
+                            }
+                            conflict_resolver::ConflictStatus::Suggested => {
+                                suggestion.suggested_winner_id
+                            }
+                            conflict_resolver::ConflictStatus::Manual => continue,
+                        };
+                        for m in &suggestion.mods {
+                            if m.mod_id != winner {
+                                let _ = db.add_conflict_rule(
+                                    game_id,
+                                    bottle_name,
+                                    winner,
+                                    m.mod_id,
+                                );
+                            }
+                        }
+                    }
+                    log::info!(
+                        "Auto-resolved conflicts: {} total, {} author, {} suggested, {} identical, {} manual, {} priorities changed",
+                        result.total_conflicts,
+                        result.author_resolved,
+                        result.auto_suggested,
+                        result.identical_content,
+                        result.manual_needed,
+                        result.priorities_changed,
+                    );
+                    // Redeploy if priorities changed
+                    if result.priorities_changed > 0 {
+                        let _ = deployer::redeploy_all(db, game_id, bottle_name, &data_dir);
+                    }
+                }
+                Err(e) => {
+                    log::warn!("Auto-conflict resolution failed: {}", e);
+                }
+            }
+        }
+        _ => {}
     }
 
     // Mark checkpoint as completed
