@@ -44,6 +44,23 @@ pub enum StagingError {
 pub type Result<T> = std::result::Result<T, StagingError>;
 
 // ---------------------------------------------------------------------------
+// Path safety
+// ---------------------------------------------------------------------------
+
+/// Check whether a relative path is safe (no directory traversal, no absolute
+/// paths). Returns `true` for safe paths, `false` for anything suspicious.
+///
+/// Used to validate paths from untrusted sources (FOMOD XML, collection
+/// manifests, archive entries) before joining them with a base directory.
+pub fn is_safe_relative_path(path: &str) -> bool {
+    !path.contains("..")
+        && !path.starts_with('/')
+        && !path.starts_with('\\')
+        && !path.contains(":/")
+        && !path.contains(":\\")
+}
+
+// ---------------------------------------------------------------------------
 // StagingResult
 // ---------------------------------------------------------------------------
 
@@ -463,6 +480,13 @@ pub fn verify_staging_integrity(
     let mut mismatched = Vec::new();
 
     for (rel_path, expected_hash, _expected_size) in expected_hashes {
+        // Reject path traversal attempts
+        if !is_safe_relative_path(rel_path) {
+            log::warn!("Skipping integrity check for unsafe path: {}", rel_path);
+            mismatched.push(rel_path.clone());
+            continue;
+        }
+
         let full_path = staging_path.join(rel_path);
 
         if !full_path.exists() {

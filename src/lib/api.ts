@@ -430,6 +430,19 @@ export async function verifyModIntegrity(modId: number): Promise<string[]> {
   return invoke("verify_mod_integrity", { modId });
 }
 
+// Background Hashing
+export async function startBackgroundHashing(
+  gameId: string,
+  bottleName: string,
+  gamePid?: number
+): Promise<void> {
+  return invoke("start_background_hashing", { gameId, bottleName, gamePid: gamePid ?? null });
+}
+
+export async function cancelBackgroundHashing(): Promise<void> {
+  return invoke("cancel_background_hashing");
+}
+
 // LOOT & Plugin Management
 export async function sortPluginsLoot(
   gameId: string,

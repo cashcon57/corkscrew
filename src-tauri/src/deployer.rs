@@ -179,6 +179,12 @@ fn deploy_mod_inner(
     let results: Vec<Option<(String, &str)>> = files
         .par_iter()
         .map(|rel_path| {
+            // Defense-in-depth: reject path traversal
+            if !crate::staging::is_safe_relative_path(rel_path) {
+                warn!("Deploy: skipping unsafe relative path: {}", rel_path);
+                return None;
+            }
+
             let src = staging_path.join(rel_path);
             let dst = data_dir.join(rel_path);
 

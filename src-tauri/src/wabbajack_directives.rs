@@ -1011,8 +1011,18 @@ impl DirectiveProcessor {
     }
 
     /// Resolve a Wabbajack `To` path to an absolute output path.
+    /// Rejects path traversal attempts as defense-in-depth.
     fn resolve_output_path(&self, to: &str) -> PathBuf {
         let normalized = normalize_wj_path(to);
+        if !crate::staging::is_safe_relative_path(&normalized) {
+            log::warn!("WJ directive has unsafe output path, sanitizing: {}", normalized);
+            // Strip any dangerous components and use just the filename
+            let safe = std::path::Path::new(&normalized)
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            return self.output_dir.join(safe);
+        }
         self.output_dir.join(normalized)
     }
 }

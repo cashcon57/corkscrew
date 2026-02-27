@@ -669,12 +669,13 @@ pub fn save_tokens(tokens: &TokenPair) -> Result<(), OAuthError> {
     let path = tokens_path();
 
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        // Set restrictive umask before creating directory to avoid TOCTOU race
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
-        }
+        let _old_umask = unsafe { libc::umask(0o077) };
+        let dir_result = fs::create_dir_all(parent);
+        #[cfg(unix)]
+        unsafe { libc::umask(_old_umask); }
+        dir_result?;
     }
 
     let json = serde_json::to_string_pretty(tokens)?;

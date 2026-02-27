@@ -3266,6 +3266,12 @@ async fn stage_and_deploy(
     if let Some(ref patches) = mod_entry.patches {
         let mut patch_failures = 0u32;
         for (rel_path, b64_patch) in patches {
+            // Reject path traversal attempts (e.g. "../../.env")
+            if !crate::staging::is_safe_relative_path(rel_path) {
+                log::warn!("Skipping patch with unsafe path: {}", rel_path);
+                patch_failures += 1;
+                continue;
+            }
             let file_path = staging_result.staging_path.join(rel_path);
             if !file_path.exists() {
                 log::warn!("Collection patch target not found: {}", file_path.display());
@@ -3631,12 +3637,9 @@ fn merge_bundle_into_manifest(
 }
 
 /// Check if a path component is safe (no traversal or absolute paths).
+/// Re-export shared path safety check.
 fn is_safe_relative_path(path: &str) -> bool {
-    !path.contains("..")
-        && !path.starts_with('/')
-        && !path.starts_with('\\')
-        && !path.contains(":/")
-        && !path.contains(":\\")
+    crate::staging::is_safe_relative_path(path)
 }
 
 /// Apply FOMOD selections to staging by physically rearranging files in the

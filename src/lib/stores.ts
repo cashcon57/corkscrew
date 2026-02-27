@@ -167,6 +167,9 @@ export interface CollectionUninstallStatus {
 }
 export const collectionUninstallStatus = writable<CollectionUninstallStatus | null>(null);
 
+// Background hashing progress (global — visible from any page)
+export const hashingProgress = writable<import("$lib/types").HashingProgress | null>(null);
+
 // SKSE state
 export const skseStatus = writable<SkseStatus | null>(null);
 

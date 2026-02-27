@@ -6,9 +6,11 @@
  * tracking survives page navigation.
  */
 import { listen } from "@tauri-apps/api/event";
-import { collectionInstallStatus } from "$lib/stores";
+import { collectionInstallStatus, selectedGame } from "$lib/stores";
 import type { CollectionInstallStatus, ModProgressDetail, LogEntry } from "$lib/stores";
 import type { InstallProgressEvent } from "$lib/types";
+import { get } from "svelte/store";
+import { triggerBackgroundHashing } from "$lib/hashingService";
 
 let unlisten: (() => void) | null = null;
 let timer: ReturnType<typeof setInterval> | null = null;
@@ -621,6 +623,13 @@ function applyEvent(
         if (timer) {
           clearInterval(timer);
           timer = null;
+        }
+        // Kick off background file hashing (non-blocking)
+        {
+          const game = get(selectedGame);
+          if (game && e.failed === 0) {
+            triggerBackgroundHashing(game.game_id, game.bottle_name).catch(() => {});
+          }
         }
         break;
     }

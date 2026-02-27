@@ -138,6 +138,13 @@ fn evaluate_file_dependency(dep: &FileDependency, data_dir: Option<&Path>) -> bo
 
     // Normalize Windows backslashes to platform separators
     let rel_path = dep.file.replace('\\', "/");
+
+    // Reject path traversal attempts (e.g. "../../../etc/passwd")
+    if !crate::staging::is_safe_relative_path(&rel_path) {
+        log::warn!("FOMOD file dependency has unsafe path, skipping: {}", rel_path);
+        return false;
+    }
+
     let file_path = data_dir.join(&rel_path);
     let exists = file_path.exists();
 

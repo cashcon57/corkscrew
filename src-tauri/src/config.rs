@@ -183,7 +183,13 @@ fn save_config_inner(config: &AppConfig) -> Result<()> {
     let path = config_path();
 
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        // Set restrictive umask before creating directory to avoid TOCTOU race
+        #[cfg(unix)]
+        let _old_umask = unsafe { libc::umask(0o077) };
+        let dir_result = fs::create_dir_all(parent);
+        #[cfg(unix)]
+        unsafe { libc::umask(_old_umask); }
+        dir_result?;
     }
 
     let json = serde_json::to_string_pretty(config)?;
@@ -192,13 +198,23 @@ fn save_config_inner(config: &AppConfig) -> Result<()> {
     // Atomic write: write to temp file then rename to avoid corruption
     // if the process is interrupted mid-write.
     let tmp_path = path.with_extension("json.tmp");
-    fs::write(&tmp_path, &data)?;
 
-    // Set restrictive permissions (owner-only) since config may contain API keys
+    // Write with restrictive permissions atomically (no TOCTOU window)
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600));
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp_path)?;
+        file.write_all(data.as_bytes())?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(&tmp_path, &data)?;
     }
 
     fs::rename(&tmp_path, &path)?;

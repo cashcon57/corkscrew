@@ -11,6 +11,9 @@
   import { relaunch } from "@tauri-apps/plugin-process";
   import { downloadFromNexus, installMod, getAllGames, getDownloadQueue, retryDownload, cancelDownload, clearFinishedDownloads, onDownloadQueueUpdate, listProfiles, listInstalledCollections, getConfig, setConfigValue, launchGame, getAllInterruptedInstalls, resumeCollectionInstall, abandonCollectionInstall, getCheckpointModNames, getPendingWabbajackInstalls, checkSkyrimVersion, getPinnedGameVersion, pinGameVersion, checkSteamStatus, addToSteam } from "$lib/api";
   import { resumeInstallTracking } from "$lib/installService";
+  import { initHashingListener, destroyHashingListener, dismissHashingBanner } from "$lib/hashingService";
+  import { hashingProgress } from "$lib/stores";
+  import { cancelBackgroundHashing } from "$lib/api";
   import type { CollectionInstallCheckpoint, WabbajackInstallStatus } from "$lib/types";
   import { get } from "svelte/store";
   import type { DetectedGame, QueueItem } from "$lib/types";
@@ -224,6 +227,9 @@
     // Steam integration: auto-register on SteamOS, prompt on regular Linux
     checkSteamIntegration();
 
+    // Background hashing event listener
+    initHashingListener();
+
     // Subscribe to download queue updates
     getDownloadQueue().then(items => queueItems = items).catch(() => {});
     onDownloadQueueUpdate((items) => { queueItems = items; }).then(fn => queueUnlisten = fn).catch(() => {});
@@ -364,6 +370,7 @@
       document.removeEventListener("keydown", handleKeydown);
       gamepad.stop();
       if (queueUnlisten) queueUnlisten();
+      destroyHashingListener();
     };
   });
 
@@ -1353,6 +1360,39 @@
               </button>
             {/if}
             <button class="btn btn-ghost btn-sm" onclick={handleDismissInterrupted}>Dismiss</button>
+          </div>
+        </div>
+      {/if}
+
+      {#if $hashingProgress && !$hashingProgress.done}
+        {@const pct = $hashingProgress.totalFiles > 0 ? Math.round(($hashingProgress.hashedFiles / $hashingProgress.totalFiles) * 100) : 0}
+        <div class="hashing-banner" role="status">
+          <div class="hashing-banner-content">
+            <div class="hashing-banner-icon">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="hashing-spinner">
+                <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
+              </svg>
+            </div>
+            <div class="hashing-banner-text">
+              <span class="hashing-banner-title">
+                Verifying files&hellip; {pct}%
+                {#if $hashingProgress.gameRunning}
+                  <span class="hashing-throttled">(throttled &mdash; game running)</span>
+                {/if}
+              </span>
+              <span class="hashing-banner-detail">
+                You can start the game now. If you run into issues, the integrity checker will surface why.
+                {#if $hashingProgress.modsTotal > 0}
+                  &mdash; {$hashingProgress.modsDone}/{$hashingProgress.modsTotal} mods verified
+                {/if}
+              </span>
+            </div>
+            <div class="hashing-banner-actions">
+              <button class="btn btn-ghost btn-sm" onclick={() => { cancelBackgroundHashing(); dismissHashingBanner(); }}>Dismiss</button>
+            </div>
+          </div>
+          <div class="hashing-progress-track">
+            <div class="hashing-progress-fill" style="width: {pct}%"></div>
           </div>
         </div>
       {/if}
@@ -2749,5 +2789,66 @@
   @keyframes shortcutsSlideUp {
     from { opacity: 0; transform: translateY(8px); }
     to { opacity: 1; transform: translateY(0); }
+  }
+
+  /* Background hashing banner */
+  .hashing-banner {
+    margin-bottom: var(--space-3, 12px);
+    background: linear-gradient(135deg, rgba(52, 199, 89, 0.08), rgba(52, 199, 89, 0.03));
+    border: 1px solid rgba(52, 199, 89, 0.25);
+    border-radius: var(--radius-md, 8px);
+    overflow: hidden;
+    animation: resume-fade-in 0.3s ease-out;
+  }
+  .hashing-banner-content {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3, 12px);
+    padding: 10px 16px 8px;
+  }
+  .hashing-banner-icon {
+    color: #34c759;
+    flex-shrink: 0;
+  }
+  .hashing-spinner {
+    animation: hashing-spin 1.5s linear infinite;
+  }
+  @keyframes hashing-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
+  .hashing-banner-text {
+    flex: 1;
+    min-width: 0;
+  }
+  .hashing-banner-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+  .hashing-throttled {
+    font-weight: 400;
+    color: var(--text-tertiary, #888);
+    font-size: 12px;
+  }
+  .hashing-banner-detail {
+    display: block;
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-top: 2px;
+    line-height: 1.4;
+  }
+  .hashing-banner-actions {
+    flex-shrink: 0;
+  }
+  .hashing-progress-track {
+    height: 3px;
+    background: rgba(52, 199, 89, 0.12);
+  }
+  .hashing-progress-fill {
+    height: 100%;
+    background: #34c759;
+    transition: width 0.4s ease-out;
+    border-radius: 0 2px 2px 0;
   }
 </style>

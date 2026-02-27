@@ -336,6 +336,20 @@ export interface IntegrityReport {
   total_scanned: number;
 }
 
+// Background Hashing Progress
+
+export interface HashingProgress {
+  totalFiles: number;
+  hashedFiles: number;
+  hashedBytes: number;
+  totalBytes: number;
+  modsDone: number;
+  modsTotal: number;
+  gameRunning: boolean;
+  done: boolean;
+  error: string | null;
+}
+
 // Game Directory Cleaner
 
 export interface NonStockFile {

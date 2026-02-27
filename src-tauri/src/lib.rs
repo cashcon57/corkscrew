@@ -1,3 +1,4 @@
+pub mod background_hash;
 pub mod baselines;
 pub mod bottle_config;
 pub mod bottles;
@@ -1832,6 +1833,34 @@ fn get_deployment_health(
         "deploy_method": deploy_method,
         "is_deployed": is_deployed,
     }))
+}
+
+// --- Background Hashing ---
+
+#[tauri::command]
+async fn start_background_hashing(
+    app: AppHandle,
+    game_id: String,
+    bottle_name: String,
+    game_pid: Option<u32>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let db = Arc::clone(&state.db);
+    let gid = game_id.clone();
+    let bn = bottle_name.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        background_hash::run_background_hashing(&db, &gid, &bn, game_pid, |progress| {
+            let _ = app.emit("background-hashing-progress", &progress);
+        });
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+fn cancel_background_hashing() {
+    background_hash::cancel();
 }
 
 // --- Collection Management ---
@@ -5574,6 +5603,9 @@ pub fn run() {
             collection_download_size_cmd,
             get_collection_diff_cmd,
             get_deployment_health,
+            // Background Hashing
+            start_background_hashing,
+            cancel_background_hashing,
             // Notes & Tags
             set_mod_notes,
             set_mod_source,
