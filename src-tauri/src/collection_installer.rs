@@ -924,14 +924,10 @@ pub async fn install_collection(
     // Set up extraction shared state BEFORE downloads so each download
     // task can immediately start extracting upon completion.
     // ---------------------------------------------------------------
-    // Limit extraction concurrency: many NexusMods archives use solid LZMA
-    // (not LZMA2), which decompresses on a single core. Running too many
-    // concurrent extractions wastes CPU on context-switching. Use half the
-    // core count so each extraction gets a dedicated performance core.
     let max_extract = std::thread::available_parallelism()
-        .map(|n| n.get() / 2)
+        .map(|n| n.get())
         .unwrap_or(4)
-        .clamp(2, 6);
+        .clamp(4, 16);
 
     // Emit staging phase started early — extraction overlaps with downloads
     let total_staging_bytes_est: u64 = downloadable
