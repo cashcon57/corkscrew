@@ -160,6 +160,33 @@
     }
   }
 
+  async function handleRepairCollection(col: CollectionSummary) {
+    if (!col.slug || !col.game_domain || !$selectedGame) {
+      showError("Cannot repair: collection metadata (slug/game domain) is missing. Try reinstalling from the Nexus tab.");
+      return;
+    }
+    try {
+      // Re-fetch collection detail and mod list from NexusMods
+      const revision = col.installed_revision ?? 1;
+      const [detail, mods] = await Promise.all([
+        getCollection(col.slug, col.game_domain),
+        getCollectionMods(col.slug, revision),
+      ]);
+      // Set as active selection and switch to detail view
+      selectedCollection = detail;
+      selectedMods = mods;
+      if (detail.description) {
+        const html = await marked.parse(detail.description);
+        renderedDescription = DOMPurify.sanitize(html);
+      }
+      activeTab = "nexus";
+      // Build manifest and start install (backend skips already-installed mods)
+      await handleInstallCollection();
+    } catch (e: unknown) {
+      showError(`Repair failed: ${e}`);
+    }
+  }
+
   let unlistenUninstall: (() => void) | null = null;
 
   function humanizeUninstallStep(step: string): string {
@@ -1818,6 +1845,16 @@
                   <span>Rev {col.installed_revision}</span>
                 {/if}
               </div>
+              {#if col.original_mod_count && col.mod_count < col.original_mod_count}
+                <div class="my-collection-warning">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+                    <line x1="12" y1="9" x2="12" y2="13" />
+                    <line x1="12" y1="17" x2="12.01" y2="17" />
+                  </svg>
+                  {col.original_mod_count - col.mod_count} mod{col.original_mod_count - col.mod_count !== 1 ? 's' : ''} failed to install
+                </div>
+              {/if}
               <div class="my-collection-actions" onclick={(e) => e.stopPropagation()}>
                 <button
                   class="btn btn-primary btn-sm"
@@ -1826,6 +1863,15 @@
                 >
                   {switchingCollection === col.name ? "Switching..." : "Activate"}
                 </button>
+                {#if col.original_mod_count && col.mod_count < col.original_mod_count}
+                  <button
+                    class="btn btn-secondary btn-sm"
+                    onclick={(e) => { e.stopPropagation(); handleRepairCollection(col); }}
+                    title="Re-download and install failed mods"
+                  >
+                    Repair
+                  </button>
+                {/if}
                 <button
                   class="btn btn-ghost-danger btn-sm"
                   onclick={(e) => { e.stopPropagation(); showDeleteConfirmation(col.name); }}
@@ -5125,6 +5171,16 @@
   .stat-active {
     color: var(--green);
     font-weight: 500;
+  }
+
+  .my-collection-warning {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    font-size: 11px;
+    font-weight: 500;
+    color: #f59e0b;
+    margin-top: var(--space-1);
   }
 
   .my-collection-actions {

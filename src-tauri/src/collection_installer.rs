@@ -81,6 +81,38 @@ use crate::profiles;
 use crate::progress::{InstallProgress, INSTALL_PROGRESS_EVENT};
 use crate::staging;
 
+/// Derive a meaningful `source_type` for the installed_mods DB from a
+/// collection source entry.  Checks the manifest's declared type first,
+/// then infers from the download URL.
+fn classify_source_type(source: &collections::CollectionSource) -> String {
+    match source.source_type.as_str() {
+        "nexus" => "nexus".to_string(),
+        "direct" | "browse" | "bundle" => {
+            // Infer richer type from URL host
+            if let Some(ref url) = source.url {
+                let lower = url.to_lowercase();
+                if lower.contains("loverslab.com") {
+                    return "loverslab".to_string();
+                } else if lower.contains("moddb.com") {
+                    return "moddb".to_string();
+                } else if lower.contains("curseforge.com") {
+                    return "curseforge".to_string();
+                } else if lower.contains("github.com") || lower.contains("github.io") {
+                    return "github".to_string();
+                } else if lower.contains("mega.nz") || lower.contains("mega.co.nz") {
+                    return "mega".to_string();
+                } else if lower.contains("drive.google.com") {
+                    return "google_drive".to_string();
+                } else if lower.contains("mediafire.com") {
+                    return "mediafire".to_string();
+                }
+            }
+            "direct".to_string()
+        }
+        other => other.to_string(),
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct CollectionInstallResult {
     pub installed: usize,
@@ -136,20 +168,19 @@ impl Drop for TempDirGuard {
     }
 }
 
-/// Check if an extraction error indicates a corrupt/incomplete archive.
-fn is_corrupt_archive_error(error: &str) -> bool {
+/// Check if an extraction error is retryable (archive may be corrupted or incomplete download).
+/// All extraction failures are retryable except user cancellation.
+fn is_retryable_extraction_error(error: &str) -> bool {
     let lower = error.to_lowercase();
-    lower.contains("crc")
-        || lower.contains("corrupt")
-        || lower.contains("badsignature")
-        || lower.contains("bad signature")
-        || lower.contains("nextheadercrcmismatch")
-        || lower.contains("unexpected end of data")
-        || lower.contains("header error")
-        || lower.contains("data error")
-        || lower.contains("broken")
-        || lower.contains("truncated")
+    // Not retryable: user-cancelled
+    if lower.contains("cancelled") || lower.contains("canceled") {
+        return false;
+    }
+    true
 }
+
+/// Maximum number of re-download + re-extract attempts per mod.
+const MAX_EXTRACTION_RETRIES: u32 = 2;
 
 /// Quick-check that an archive file has valid headers before extraction.
 fn validate_archive(path: &Path) -> Result<(), String> {
@@ -774,6 +805,8 @@ pub async fn install_collection(
     let mut skipped = 0usize;
     let mut failed = 0usize;
     let mut details: Vec<ModInstallDetail> = Vec::new();
+    // Map manifest index → installed mod_id for dependency wiring
+    let mut mod_index_to_id: HashMap<usize, i64> = HashMap::new();
 
     // Determine game slug for Nexus API
     let game_slug = game_id_to_nexus_slug(game_id);
@@ -1183,7 +1216,7 @@ pub async fn install_collection(
             // Start extracting immediately after download completes.
             if let Ok(ref dl) = result {
                 if needs_ext.contains(&order_pos) && !is_cancelled() {
-                    let archive = dl.archive_path.clone();
+                    let mut archive = dl.archive_path.clone();
                     let arc_size = manifest_mods_c
                         .get(mod_idx)
                         .and_then(|m| m.source.file_size)
@@ -1268,8 +1301,10 @@ pub async fn install_collection(
                         poller_stop.store(true, std::sync::atomic::Ordering::SeqCst);
                         poller_handle.abort();
 
-                        match ext_result {
+                        // Convert nested Result to a flat extraction outcome
+                        let first_error = match ext_result {
                             Ok(Ok(Ok(dir))) => {
+                                // Success on first try
                                 let duration_ms = extract_start.elapsed().as_millis() as u64;
                                 let extracted_size: u64 = walkdir::WalkDir::new(&dir)
                                     .into_iter()
@@ -1287,13 +1322,24 @@ pub async fn install_collection(
                                     },
                                 );
                                 map_c.lock().unwrap_or_else(|e| e.into_inner()).insert(order_pos, dir);
+                                None // no error
                             }
-                            Ok(Ok(Err(e))) => {
-                                if is_corrupt_archive_error(&e) {
-                                    // Corrupt archive: delete, re-download, retry extraction once
-                                    log::error!(
-                                        "Corrupt archive detected for mod {} ({}): {} — will retry",
-                                        order_pos, mod_name, e
+                            Ok(Ok(Err(e))) => Some(e),
+                            Ok(Err(e)) => Some(format!("Task panicked: {}", e)),
+                            Err(_) => Some("Extraction timed out after 30 minutes".to_string()),
+                        };
+
+                        // Retry loop: if first extraction failed and error is retryable,
+                        // delete the archive, re-download, and re-extract (up to MAX_EXTRACTION_RETRIES times).
+                        if let Some(first_err) = first_error {
+                            if is_retryable_extraction_error(&first_err) {
+                                let mut last_error = first_err.clone();
+                                let mut succeeded = false;
+
+                                for attempt in 1..=MAX_EXTRACTION_RETRIES {
+                                    log::warn!(
+                                        "Extraction failed for mod {} ({}): {} — retry {}/{}",
+                                        order_pos, mod_name, last_error, attempt, MAX_EXTRACTION_RETRIES
                                     );
                                     let _ = app_h.emit(
                                         INSTALL_PROGRESS_EVENT,
@@ -1301,17 +1347,19 @@ pub async fn install_collection(
                                             mod_index: order_pos,
                                             mod_name: mod_name.clone(),
                                             error: format!(
-                                                "Archive corrupted, re-downloading... ({})",
-                                                e
+                                                "Extraction failed, re-downloading (attempt {}/{})... ({})",
+                                                attempt, MAX_EXTRACTION_RETRIES, last_error
                                             ),
                                         },
                                     );
-                                    // Delete corrupt file
+
+                                    // Delete the failed archive
                                     if archive.exists() {
-                                        log::info!("Deleting corrupt archive: {:?}", archive);
+                                        log::info!("Deleting failed archive: {:?}", archive);
                                         let _ = std::fs::remove_file(&archive);
                                     }
-                                    // Remove DB cache entry
+
+                                    // Remove DB cache entry so re-download works
                                     if let (Some(mid), Some(fid)) =
                                         (entry.source.mod_id, entry.source.file_id)
                                     {
@@ -1319,12 +1367,9 @@ pub async fn install_collection(
                                             db_c.find_download_by_nexus_ids(mid, fid)
                                         {
                                             let _ = db_c.delete_download_record(rec.id);
-                                            log::info!(
-                                                "Removed corrupt download record (id={}) for {}",
-                                                rec.id, mod_name
-                                            );
                                         }
                                     }
+
                                     // Re-download
                                     let _ = app_h.emit(
                                         INSTALL_PROGRESS_EVENT,
@@ -1333,175 +1378,110 @@ pub async fn install_collection(
                                             mod_name: mod_name.clone(),
                                         },
                                     );
-                                    match download_mod_archive(
-                                        &app_h,
-                                        &db_c,
-                                        &queue_c,
-                                        &entry,
-                                        order_pos,
-                                        &game_slug_c,
-                                        &download_dir_c,
-                                        &auth_method_c,
-                                        &manifest_name_c,
-                                        &game_id_c,
-                                        &bottle_name_c,
-                                    )
-                                    .await
-                                    {
+                                    let dl_result = download_mod_archive(
+                                        &app_h, &db_c, &queue_c, &entry, order_pos,
+                                        &game_slug_c, &download_dir_c, &auth_method_c,
+                                        &manifest_name_c, &game_id_c, &bottle_name_c,
+                                    ).await;
+
+                                    match dl_result {
                                         Ok(dl2) => {
                                             log::info!(
-                                                "Re-downloaded '{}', retrying extraction",
-                                                mod_name
+                                                "Re-downloaded '{}' (attempt {}), retrying extraction",
+                                                mod_name, attempt
                                             );
                                             let retry_archive = dl2.archive_path.clone();
+                                            // Update archive path for next retry iteration
+                                            archive = dl2.archive_path;
                                             let retry_temp = std::env::temp_dir().join(format!(
-                                                "corkscrew_extract_{}_retry",
-                                                order_pos
+                                                "corkscrew_extract_{}_retry{}",
+                                                order_pos, attempt
                                             ));
                                             let retry_result = tokio::task::spawn_blocking(
                                                 move || {
                                                     if retry_temp.exists() {
-                                                        let _ =
-                                                            std::fs::remove_dir_all(&retry_temp);
+                                                        let _ = std::fs::remove_dir_all(&retry_temp);
                                                     }
                                                     let _ = std::fs::create_dir_all(&retry_temp);
                                                     match crate::installer::extract_archive(
-                                                        &retry_archive,
-                                                        &retry_temp,
+                                                        &retry_archive, &retry_temp,
                                                     ) {
                                                         Ok(_) => Ok(retry_temp),
                                                         Err(e2) => {
-                                                            let _ = std::fs::remove_dir_all(
-                                                                &retry_temp,
-                                                            );
+                                                            let _ = std::fs::remove_dir_all(&retry_temp);
                                                             Err(e2.to_string())
                                                         }
                                                     }
                                                 },
-                                            )
-                                            .await;
+                                            ).await;
+
                                             match retry_result {
                                                 Ok(Ok(dir)) => {
                                                     log::info!(
-                                                        "Retry extraction succeeded for mod {}",
-                                                        order_pos
+                                                        "Retry extraction succeeded for mod {} on attempt {}",
+                                                        order_pos, attempt
                                                     );
-                                                    let extracted_size: u64 =
-                                                        walkdir::WalkDir::new(&dir)
-                                                            .into_iter()
-                                                            .filter_map(|e| e.ok())
-                                                            .filter(|e| e.file_type().is_file())
-                                                            .map(|e| {
-                                                                e.metadata()
-                                                                    .map(|m| m.len())
-                                                                    .unwrap_or(0)
-                                                            })
-                                                            .sum();
+                                                    let extracted_size: u64 = walkdir::WalkDir::new(&dir)
+                                                        .into_iter()
+                                                        .filter_map(|e| e.ok())
+                                                        .filter(|e| e.file_type().is_file())
+                                                        .map(|e| e.metadata().map(|m| m.len()).unwrap_or(0))
+                                                        .sum();
                                                     let _ = app_h.emit(
                                                         INSTALL_PROGRESS_EVENT,
                                                         InstallProgress::StagingModCompleted {
                                                             mod_index: order_pos,
                                                             mod_name: mod_name.clone(),
                                                             extracted_size,
-                                                            duration_ms: extract_start
-                                                                .elapsed()
-                                                                .as_millis()
-                                                                as u64,
+                                                            duration_ms: extract_start.elapsed().as_millis() as u64,
                                                         },
                                                     );
-                                                    map_c
-                                                        .lock()
-                                                        .unwrap_or_else(|e| e.into_inner())
-                                                        .insert(order_pos, dir);
+                                                    map_c.lock().unwrap_or_else(|e| e.into_inner()).insert(order_pos, dir);
+                                                    succeeded = true;
+                                                    break;
                                                 }
                                                 Ok(Err(e2)) => {
-                                                    log::error!(
-                                                        "Retry extraction also failed for mod {}: {}",
-                                                        order_pos, e2
-                                                    );
-                                                    let _ = app_h.emit(
-                                                        INSTALL_PROGRESS_EVENT,
-                                                        InstallProgress::StagingModFailed {
-                                                            mod_index: order_pos,
-                                                            mod_name: mod_name.clone(),
-                                                            error: format!(
-                                                                "Archive still corrupt after re-download: {}",
-                                                                e2
-                                                            ),
-                                                        },
-                                                    );
+                                                    last_error = e2;
+                                                    // Continue to next retry
                                                 }
                                                 Err(e2) => {
-                                                    log::error!(
-                                                        "Retry extraction panicked for mod {}: {}",
-                                                        order_pos, e2
-                                                    );
-                                                    let _ = app_h.emit(
-                                                        INSTALL_PROGRESS_EVENT,
-                                                        InstallProgress::StagingModFailed {
-                                                            mod_index: order_pos,
-                                                            mod_name: mod_name.clone(),
-                                                            error: format!(
-                                                                "Retry extraction failed: {}",
-                                                                e2
-                                                            ),
-                                                        },
-                                                    );
+                                                    last_error = format!("Task panicked: {}", e2);
+                                                    break; // Don't retry panics
                                                 }
                                             }
                                         }
                                         Err(e2) => {
-                                            log::error!(
-                                                "Re-download failed for mod {}: {:?}",
-                                                order_pos, e2
-                                            );
-                                            let _ = app_h.emit(
-                                                INSTALL_PROGRESS_EVENT,
-                                                InstallProgress::StagingModFailed {
-                                                    mod_index: order_pos,
-                                                    mod_name: mod_name.clone(),
-                                                    error: format!(
-                                                        "Archive corrupted and re-download failed: {:?}",
-                                                        e2
-                                                    ),
-                                                },
-                                            );
+                                            last_error = format!("Re-download failed: {:?}", e2);
+                                            break; // Don't retry if download itself fails
                                         }
                                     }
-                                } else {
-                                    log::warn!(
-                                        "Extraction failed for mod {}: {}",
-                                        order_pos, e
+                                }
+
+                                if !succeeded {
+                                    log::error!(
+                                        "All extraction attempts exhausted for mod {} ({}): {}",
+                                        order_pos, mod_name, last_error
                                     );
                                     let _ = app_h.emit(
                                         INSTALL_PROGRESS_EVENT,
                                         InstallProgress::StagingModFailed {
                                             mod_index: order_pos,
                                             mod_name: mod_name.clone(),
-                                            error: e,
+                                            error: format!(
+                                                "Extraction failed after {} attempts: {}",
+                                                MAX_EXTRACTION_RETRIES + 1, last_error
+                                            ),
                                         },
                                     );
                                 }
-                            }
-                            Ok(Err(e)) => {
-                                log::warn!("Extraction task panicked for mod {}: {}", order_pos, e);
+                            } else {
+                                // Non-retryable (e.g. cancelled)
                                 let _ = app_h.emit(
                                     INSTALL_PROGRESS_EVENT,
                                     InstallProgress::StagingModFailed {
                                         mod_index: order_pos,
                                         mod_name: mod_name.clone(),
-                                        error: format!("Task panicked: {}", e),
-                                    },
-                                );
-                            }
-                            Err(_) => {
-                                log::warn!("Extraction timed out for mod {} after 30 minutes", order_pos);
-                                let _ = app_h.emit(
-                                    INSTALL_PROGRESS_EVENT,
-                                    InstallProgress::StagingModFailed {
-                                        mod_index: order_pos,
-                                        mod_name: mod_name.clone(),
-                                        error: "Extraction timed out after 30 minutes".to_string(),
+                                        error: first_err,
                                     },
                                 );
                             }
@@ -2198,6 +2178,7 @@ pub async fn install_collection(
                     false
                 }) {
                     let _ = db.set_collection_name(existing.id, &manifest.name);
+                    mod_index_to_id.insert(mod_idx, existing.id);
                 }
                 let _ = app.emit(
                     INSTALL_PROGRESS_EVENT,
@@ -2245,6 +2226,7 @@ pub async fn install_collection(
 
             match result {
                 Ok((mod_id, deployed_size)) => {
+                    mod_index_to_id.insert(mod_idx, mod_id);
                     let install_duration_ms = install_start.elapsed().as_millis() as u64;
                     let _ = db.set_collection_name(mod_id, &manifest.name);
                     let _ = app.emit(
@@ -2521,6 +2503,64 @@ pub async fn install_collection(
                 tweak_count,
                 manifest.ini_tweaks.len()
             );
+        }
+    }
+
+    // Wire up mod dependencies from collection mod_rules
+    if !manifest.mod_rules.is_empty() && !mod_index_to_id.is_empty() {
+        // Build lookup tables matching collections::resolve_install_order
+        let name_to_idx: HashMap<String, usize> = manifest.mods.iter().enumerate()
+            .map(|(i, m)| (m.name.to_lowercase(), i)).collect();
+        let mut md5_to_idx: HashMap<String, usize> = HashMap::new();
+        for (i, m) in manifest.mods.iter().enumerate() {
+            if let Some(ref md5) = m.source.md5 {
+                md5_to_idx.insert(md5.to_lowercase(), i);
+            }
+        }
+        let resolve_ref = |r: &collections::ModReference| -> Option<usize> {
+            if let Some(ref md5) = r.file_md5 {
+                if let Some(&idx) = md5_to_idx.get(&md5.to_lowercase()) { return Some(idx); }
+            }
+            if let Some(ref name) = r.logical_file_name {
+                if let Some(&idx) = name_to_idx.get(&name.to_lowercase()) { return Some(idx); }
+            }
+            if let Some(ref hint) = r.id_hint {
+                if let Some(&idx) = name_to_idx.get(&hint.to_lowercase()) { return Some(idx); }
+            }
+            if let Some(ref tag) = r.tag {
+                if let Some(&idx) = name_to_idx.get(&tag.to_lowercase()) { return Some(idx); }
+            }
+            None
+        };
+
+        let mut dep_count = 0usize;
+        for rule in &manifest.mod_rules {
+            let src_idx = resolve_ref(&rule.source);
+            let dst_idx = resolve_ref(&rule.reference);
+            if let (Some(s), Some(d)) = (src_idx, dst_idx) {
+                if s == d { continue; }
+                let src_mod_id = mod_index_to_id.get(&s);
+                let dst_mod_id = mod_index_to_id.get(&d);
+                if let (Some(&src_id), Some(&dst_id)) = (src_mod_id, dst_mod_id) {
+                    let relationship = match rule.rule_type.as_str() {
+                        "requires" | "before" | "after" => "requires",
+                        "conflicts" => "conflicts",
+                        "recommends" => continue,  // Don't track weak recommendations
+                        _ => continue,
+                    };
+                    let dep_name = &manifest.mods[d].name;
+                    let nexus_dep_id = manifest.mods[d].source.mod_id;
+                    let _ = crate::mod_dependencies::add_dependency(
+                        &db, game_id, bottle_name,
+                        src_id, Some(dst_id), nexus_dep_id,
+                        dep_name, relationship,
+                    );
+                    dep_count += 1;
+                }
+            }
+        }
+        if dep_count > 0 {
+            log::info!("Wired {} dependency relationships from collection mod_rules", dep_count);
         }
     }
 
@@ -2801,13 +2841,11 @@ async fn install_nexus_mod(
         .await?;
 
         let _ = db.set_nexus_ids(mod_id, nexus_mod_id, Some(nexus_file_id));
-        let _ = db.set_source_url(
-            mod_id,
-            &format!(
-                "https://www.nexusmods.com/{}/mods/{}",
-                game_slug, nexus_mod_id
-            ),
+        let nexus_url = format!(
+            "https://www.nexusmods.com/{}/mods/{}",
+            game_slug, nexus_mod_id
         );
+        let _ = db.set_mod_source(mod_id, "nexus", Some(&nexus_url));
         return Ok((mod_id, deployed_size));
     }
 
@@ -2860,13 +2898,11 @@ async fn install_nexus_mod(
                 .await?;
 
                 let _ = db.set_nexus_ids(mod_id, nexus_mod_id, Some(nexus_file_id));
-                let _ = db.set_source_url(
-                    mod_id,
-                    &format!(
-                        "https://www.nexusmods.com/{}/mods/{}",
-                        game_slug, nexus_mod_id
-                    ),
+                let nexus_url = format!(
+                    "https://www.nexusmods.com/{}/mods/{}",
+                    game_slug, nexus_mod_id
                 );
+                let _ = db.set_mod_source(mod_id, "nexus", Some(&nexus_url));
 
                 // Add collection ref for the reused download
                 let _ = db.add_download_collection_ref(
@@ -3001,13 +3037,11 @@ async fn install_nexus_mod(
 
     // Set Nexus IDs for tracking
     let _ = db.set_nexus_ids(mod_id, nexus_mod_id, Some(nexus_file_id));
-    let _ = db.set_source_url(
-        mod_id,
-        &format!(
-            "https://www.nexusmods.com/{}/mods/{}",
-            game_slug, nexus_mod_id
-        ),
+    let nexus_url = format!(
+        "https://www.nexusmods.com/{}/mods/{}",
+        game_slug, nexus_mod_id
     );
+    let _ = db.set_mod_source(mod_id, "nexus", Some(&nexus_url));
 
     Ok((mod_id, deployed_size))
 }
@@ -3061,9 +3095,8 @@ async fn install_direct_mod(
         )
         .await?;
 
-        if let Some(ref source_url) = mod_entry.source.url {
-            let _ = db.set_source_url(mod_id, source_url);
-        }
+        let source_type = classify_source_type(&mod_entry.source);
+        let _ = db.set_mod_source(mod_id, &source_type, mod_entry.source.url.as_deref());
         return Ok((mod_id, deployed_size));
     }
 
@@ -3125,9 +3158,8 @@ async fn install_direct_mod(
                     )
                     .await?;
 
-                    if let Some(ref source_url) = mod_entry.source.url {
-                        let _ = db.set_source_url(mod_id, source_url);
-                    }
+                    let source_type = classify_source_type(&mod_entry.source);
+                    let _ = db.set_mod_source(mod_id, &source_type, mod_entry.source.url.as_deref());
 
                     return Ok((mod_id, deployed_size));
                 } else {
@@ -3236,9 +3268,8 @@ async fn install_direct_mod(
     )
     .await?;
 
-    if let Some(ref source_url) = mod_entry.source.url {
-        let _ = db.set_source_url(mod_id, source_url);
-    }
+    let source_type = classify_source_type(&mod_entry.source);
+    let _ = db.set_mod_source(mod_id, &source_type, mod_entry.source.url.as_deref());
 
     Ok((mod_id, deployed_size))
 }

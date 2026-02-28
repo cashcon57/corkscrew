@@ -15,7 +15,7 @@ export interface DetectedGame {
   bottle_path: string;
 }
 
-export type ModSourceType = "nexus" | "direct" | "loverslab" | "moddb" | "curseforge" | "manual";
+export type ModSourceType = "nexus" | "direct" | "loverslab" | "moddb" | "curseforge" | "github" | "mega" | "google_drive" | "mediafire" | "manual";
 
 export interface InstalledMod {
   id: number;

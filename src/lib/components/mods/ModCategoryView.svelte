@@ -44,16 +44,17 @@
   });
 
   const categoryColors: Record<string, string> = {
-    "Plugins": "#6366f1",
-    "Textures": "#22c55e",
-    "Models": "#f59e0b",
-    "SKSE Plugins": "#ef4444",
-    "Audio": "#8b5cf6",
-    "UI": "#06b6d4",
-    "Scripts": "#f97316",
-    "ENB": "#ec4899",
-    "ReShade": "#14b8a6",
-    "Miscellaneous": "#6b7280",
+    "Gameplay":          "#6366f1",  // Indigo
+    "Texture":           "#22c55e",  // Green
+    "Model & Mesh":      "#f59e0b",  // Amber
+    "Framework":         "#ef4444",  // Red
+    "Audio":             "#8b5cf6",  // Violet
+    "UI":                "#06b6d4",  // Cyan
+    "Script":            "#f97316",  // Orange
+    "Lighting & Weather":"#ec4899",  // Pink
+    "Animation":         "#3b82f6",  // Blue
+    "Misc":              "#6b7280",  // Gray
+    "Miscellaneous":     "#6b7280",  // Gray (legacy)
   };
 </script>
 

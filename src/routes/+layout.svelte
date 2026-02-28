@@ -826,18 +826,8 @@
     return () => { if (successTimer) clearTimeout(successTimer); };
   });
 
-  // Auto-dismiss collection install status bar after completion/failure
-  let installStatusTimer: ReturnType<typeof setTimeout> | null = null;
-  $effect(() => {
-    const s = $collectionInstallStatus;
-    if (s?.active && (s.phase === "complete" || s.phase === "failed")) {
-      if (installStatusTimer) clearTimeout(installStatusTimer);
-      installStatusTimer = setTimeout(() => collectionInstallStatus.set(null), 15000);
-    } else {
-      if (installStatusTimer) { clearTimeout(installStatusTimer); installStatusTimer = null; }
-    }
-    return () => { if (installStatusTimer) clearTimeout(installStatusTimer); };
-  });
+  // NOTE: Post-install results persist until user explicitly dismisses them.
+  // No auto-dismiss — the user clicks "View Mods", "Back to Collections", etc.
 
   function formatBytes(bytes: number): string {
     if (bytes === 0) return "0 B";

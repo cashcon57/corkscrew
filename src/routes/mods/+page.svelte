@@ -51,8 +51,11 @@
     getUserEndorsements,
     getConfig,
     setConfigValue,
+    getNexusModDetail,
+    getModDependencies,
+    getModDependents,
   } from "$lib/api";
-  import type { InstallProgressEvent, DeploymentHealth, IncrementalDeployResult, ConflictSuggestion, ResolutionResult, DeployProgress, ModTool, UserEndorsement, IdenticalContentStats } from "$lib/types";
+  import type { InstallProgressEvent, DeploymentHealth, IncrementalDeployResult, ConflictSuggestion, ResolutionResult, DeployProgress, ModTool, UserEndorsement, IdenticalContentStats, NexusModInfo, ModDependency } from "$lib/types";
   import {
     selectedGame,
     installedMods,
@@ -78,6 +81,8 @@
   import SkeletonRows from "$lib/components/SkeletonRows.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import ConflictMap from "$lib/components/ConflictMap.svelte";
+  import DOMPurify from "dompurify";
+  import { bbcodeToHtml } from "$lib/bbcode";
 
   // Game launch fixes opt-out (display fix + cursor clamp)
   let disableGameFixes = $state(false);
@@ -147,6 +152,12 @@
 
   // Detail panel
   let detailMod = $state<InstalledMod | null>(null);
+  let nexusDetail = $state<NexusModInfo | null>(null);
+  let nexusDetailLoading = $state(false);
+  let nexusDetailModId = $state<number | null>(null);  // Track which mod we loaded for
+  let detailDeps = $state<ModDependency[]>([]);
+  let detailDependents = $state<ModDependency[]>([]);
+  let detailDepsLoading = $state(false);
 
   // Notes/tags editing
   let editingNotesId = $state<number | null>(null);
@@ -189,6 +200,13 @@
 
   // Selected mod for dependency panel
   let selectedModId = $state<number | undefined>(undefined);
+
+  // Virtual scrolling for mods table
+  const ROW_HEIGHT = 36;
+  const SCROLL_BUFFER = 10; // extra rows above/below viewport
+  let tableBodyEl = $state<HTMLDivElement | null>(null);
+  let scrollTop = $state(0);
+  let containerHeight = $state(600);
 
   // Deploy progress
   let deployProgress = $state(0);
@@ -464,6 +482,40 @@
 
     return mods;
   })());
+
+  // Virtual scrolling derived (needs filteredMods)
+  let visibleRange = $derived((() => {
+    const totalItems = filteredMods.length;
+    if (totalItems === 0) return { start: 0, end: 0, paddingTop: 0, paddingBottom: 0 };
+    const startRaw = Math.floor(scrollTop / ROW_HEIGHT) - SCROLL_BUFFER;
+    const visibleCount = Math.ceil(containerHeight / ROW_HEIGHT) + SCROLL_BUFFER * 2;
+    const start = Math.max(0, startRaw);
+    const end = Math.min(totalItems, start + visibleCount);
+    return {
+      start,
+      end,
+      paddingTop: start * ROW_HEIGHT,
+      paddingBottom: Math.max(0, (totalItems - end) * ROW_HEIGHT),
+    };
+  })());
+
+  function handleTableScroll(e: Event) {
+    const el = e.target as HTMLDivElement;
+    scrollTop = el.scrollTop;
+  }
+
+  // Measure container height on mount and resize
+  $effect(() => {
+    if (!tableBodyEl) return;
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        containerHeight = entry.contentRect.height;
+      }
+    });
+    ro.observe(tableBodyEl);
+    containerHeight = tableBodyEl.clientHeight;
+    return () => ro.disconnect();
+  });
 
   // Bulk selection derived and functions (after filteredMods is defined)
   let selectAll = $derived(filteredMods.length > 0 && filteredMods.every(m => selectedModIds.has(m.id)));
@@ -1219,6 +1271,23 @@
     return null;
   }
 
+  const SOURCE_LABELS: Record<string, string> = {
+    nexus: "Nexus",
+    loverslab: "LoversLab",
+    moddb: "ModDB",
+    curseforge: "CurseForge",
+    github: "GitHub",
+    mega: "Mega",
+    google_drive: "Google Drive",
+    mediafire: "MediaFire",
+    direct: "Direct",
+    manual: "Manual",
+  };
+
+  function originLabel(sourceType: string): string {
+    return SOURCE_LABELS[sourceType] ?? sourceType;
+  }
+
   async function handleLaunchTool(toolId: string) {
     const game = pickedGame ?? $selectedGame;
     if (!game) return;
@@ -1679,12 +1748,16 @@
   }
 
   function scrollFocusedIntoView() {
-    requestAnimationFrame(() => {
-      const rows = document.querySelectorAll(".table-row");
-      if (rows[focusedIndex]) {
-        rows[focusedIndex].scrollIntoView({ block: "nearest" });
-      }
-    });
+    if (!tableBodyEl || focusedIndex < 0) return;
+    const rowTop = focusedIndex * ROW_HEIGHT;
+    const rowBottom = rowTop + ROW_HEIGHT;
+    const viewTop = tableBodyEl.scrollTop;
+    const viewBottom = viewTop + tableBodyEl.clientHeight;
+    if (rowTop < viewTop) {
+      tableBodyEl.scrollTop = rowTop;
+    } else if (rowBottom > viewBottom) {
+      tableBodyEl.scrollTop = rowBottom - tableBodyEl.clientHeight;
+    }
   }
 
   // Context menu handler
@@ -1710,43 +1783,90 @@
     return escapeHtml(text).replace(new RegExp(`(${escaped})`, "gi"), "<mark>$1</mark>");
   }
 
-  // Category colors keyed by new descriptive names
+  // Category colors — intuitive color associations
   const categoryColors: Record<string, string> = {
-    "Plugin": "#6366f1",
-    "Texture": "#22c55e",
-    "3D Model": "#f59e0b",
-    "SKSE Plugin": "#ef4444",
-    "Audio": "#8b5cf6",
-    "UI Mod": "#06b6d4",
-    "Script": "#f97316",
-    "ENB Preset": "#ec4899",
-    "ReShade Preset": "#14b8a6",
-    "Misc": "#6b7280",
+    "Gameplay":          "#6366f1",  // Indigo — core game content
+    "Texture":           "#22c55e",  // Green — visual surfaces
+    "Model & Mesh":      "#f59e0b",  // Amber — 3D shapes
+    "Framework":         "#ef4444",  // Red — critical infrastructure
+    "Audio":             "#8b5cf6",  // Violet — sound/music
+    "UI":                "#06b6d4",  // Cyan — interface elements
+    "Script":            "#f97316",  // Orange — code/logic
+    "Lighting & Weather":"#ec4899",  // Pink — ENB/ReShade/atmosphere
+    "Animation":         "#3b82f6",  // Blue — motion/movement
+    "Misc":              "#6b7280",  // Gray — uncategorized
   };
 
   // Category SVG icon paths (monochrome, 16x16 viewBox="0 0 24 24")
   const categoryIcons: Record<string, string> = {
-    // Plug icon for Plugin
-    "Plugin": '<path d="M12 2v6m-4-2v4m8-4v4M8 10h8v4a4 4 0 0 1-4 4 4 4 0 0 1-4-4v-4zM12 18v4" />',
-    // Plug with S badge for SKSE Plugin
-    "SKSE Plugin": '<path d="M12 2v6m-4-2v4m8-4v4M8 10h8v4a4 4 0 0 1-4 4 4 4 0 0 1-4-4v-4zM12 18v4" />',
-    // Texture/image icon
+    // Sword/shield — core gameplay content
+    "Gameplay": '<path d="M14.5 17.5L3 6V3h3l11.5 11.5" /><path d="M13 19l6-6" /><path d="M16 16l4 4" /><path d="M19 21a2 2 0 0 0 2-2" />',
+    // Image/texture icon
     "Texture": '<rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="m21 15-5-5L5 21" />',
-    // Wireframe cube for 3D Model
-    "3D Model": '<path d="M12 2 2 7l10 5 10-5-10-5z" /><path d="m2 17 10 5 10-5" /><path d="m2 12 10 5 10-5" />',
-    // Music note for Audio
+    // Wireframe cube for 3D models
+    "Model & Mesh": '<path d="M12 2 2 7l10 5 10-5-10-5z" /><path d="m2 17 10 5 10-5" /><path d="m2 12 10 5 10-5" />',
+    // Wrench/cog — critical framework (SKSE etc.)
+    "Framework": '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />',
+    // Music note
     "Audio": '<path d="M9 18V5l12-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="18" cy="16" r="3" />',
-    // Layout icon for UI Mod
-    "UI Mod": '<rect x="3" y="3" width="18" height="18" rx="2" /><line x1="3" y1="9" x2="21" y2="9" /><line x1="9" y1="21" x2="9" y2="9" />',
-    // Code/script icon
+    // Layout/panel for UI
+    "UI": '<rect x="3" y="3" width="18" height="18" rx="2" /><line x1="3" y1="9" x2="21" y2="9" /><line x1="9" y1="21" x2="9" y2="9" />',
+    // Code brackets for scripts
     "Script": '<polyline points="16 18 22 12 16 6" /><polyline points="8 6 2 12 8 18" />',
-    // Palette icon for ENB
-    "ENB Preset": '<circle cx="13.5" cy="6.5" r="2.5" /><circle cx="17.5" cy="10.5" r="2.5" /><circle cx="8.5" cy="7.5" r="2.5" /><circle cx="6.5" cy="12" r="2.5" /><path d="M12 22c5.5 0 10-4.5 10-10S17.5 2 12 2 2 6.5 2 12c0 1.8.5 3.5 1.2 5L12 22z" />',
-    // Sliders for ReShade
-    "ReShade Preset": '<line x1="4" y1="21" x2="4" y2="14" /><line x1="4" y1="10" x2="4" y2="3" /><line x1="12" y1="21" x2="12" y2="12" /><line x1="12" y1="8" x2="12" y2="3" /><line x1="20" y1="21" x2="20" y2="16" /><line x1="20" y1="12" x2="20" y2="3" /><line x1="1" y1="14" x2="7" y2="14" /><line x1="9" y1="8" x2="15" y2="8" /><line x1="17" y1="16" x2="23" y2="16" />',
-    // Puzzle piece for Misc
+    // Sun/palette for ENB/ReShade/lighting
+    "Lighting & Weather": '<circle cx="12" cy="12" r="4" /><path d="M12 2v2" /><path d="M12 20v2" /><path d="m4.93 4.93 1.41 1.41" /><path d="m17.66 17.66 1.41 1.41" /><path d="M2 12h2" /><path d="M20 12h2" /><path d="m6.34 17.66-1.41 1.41" /><path d="m19.07 4.93-1.41 1.41" />',
+    // Running figure for animation
+    "Animation": '<path d="M13 4a1.5 1.5 0 1 1 3 0 1.5 1.5 0 0 1-3 0z" /><path d="M7 21l3-9 2.5 2v7" /><path d="M17 14l-3-3-3 3-2-4 5-3 3 2z" />',
+    // Puzzle piece for misc
     "Misc": '<path d="M19.439 7.85c-.049.322.059.648.289.878l1.568 1.568c.47.47.706 1.087.706 1.704s-.235 1.233-.706 1.704l-1.611 1.611a.98.98 0 0 1-.837.276c-.47-.07-.802-.48-.968-.925a2.501 2.501 0 1 0-3.214 3.214c.446.166.855.497.925.968a.979.979 0 0 1-.276.837l-1.61 1.611a2.404 2.404 0 0 1-1.705.706 2.404 2.404 0 0 1-1.704-.706l-1.568-1.568a1.026 1.026 0 0 0-.877-.29c-.493.074-.84.504-1.02.968a2.5 2.5 0 1 1-3.237-3.237c.464-.18.894-.527.967-1.02a1.026 1.026 0 0 0-.289-.877l-1.568-1.568A2.404 2.404 0 0 1 1.998 12c0-.617.236-1.234.706-1.704L4.315 8.685a.98.98 0 0 1 .837-.276c.47.07.802.48.968.925a2.501 2.501 0 1 0 3.214-3.214c-.446-.166-.855-.497-.925-.968a.979.979 0 0 1 .276-.837l1.611-1.611a2.404 2.404 0 0 1 1.704-.706c.617 0 1.234.236 1.704.706l1.568 1.568c.23.23.556.338.877.29.493-.074.84-.504 1.02-.968a2.5 2.5 0 1 1 3.237 3.237c-.464.18-.894.527-.967 1.02z" />',
   };
+
+  // Load NexusMods detail when a mod with nexus_mod_id is selected
+  $effect(() => {
+    const mod = detailMod;
+    if (!mod || !mod.nexus_mod_id || !activeGame?.nexus_slug) {
+      nexusDetail = null;
+      nexusDetailModId = null;
+      return;
+    }
+    // Don't reload if we already have it
+    if (nexusDetailModId === mod.id) return;
+    nexusDetailModId = mod.id;
+    nexusDetailLoading = true;
+    nexusDetail = null;
+    getNexusModDetail(activeGame.nexus_slug, mod.nexus_mod_id)
+      .then((info) => {
+        // Only apply if still viewing the same mod
+        if (detailMod?.id === mod.id) {
+          nexusDetail = info;
+        }
+      })
+      .catch(() => {})
+      .finally(() => { nexusDetailLoading = false; });
+  });
+
+  // Load dependencies for selected mod in detail panel
+  $effect(() => {
+    const mod = detailMod;
+    if (!mod) {
+      detailDeps = [];
+      detailDependents = [];
+      return;
+    }
+    detailDepsLoading = true;
+    Promise.all([
+      getModDependencies(mod.id),
+      getModDependents(mod.id),
+    ])
+      .then(([deps, dependents]) => {
+        if (detailMod?.id === mod.id) {
+          detailDeps = deps;
+          detailDependents = dependents;
+        }
+      })
+      .catch(() => {})
+      .finally(() => { detailDepsLoading = false; });
+  });
 
   // Auto-backfill/reclassify categories on load
   let categoriesBackfilled = false;
@@ -2643,7 +2763,7 @@
           </div>
 
           <!-- Mod Rows -->
-          <div class="table-body">
+          <div class="table-body" bind:this={tableBodyEl} onscroll={handleTableScroll}>
             {#if filteredMods.length === 0 && $installedMods.length > 0}
               <div class="empty-filter-state">
                 <p>No mods match your filters.</p>
@@ -2713,7 +2833,9 @@
                 {/if}
               {/each}
             {:else}
-            {#each filteredMods as mod, i (mod.id)}
+            <div style="height: {visibleRange.paddingTop}px;" aria-hidden="true"></div>
+            {#each filteredMods.slice(visibleRange.start, visibleRange.end) as mod, sliceIdx (mod.id)}
+              {@const i = visibleRange.start + sliceIdx}
               <div
                 class="table-row"
                 class:row-disabled={!mod.enabled}
@@ -2812,23 +2934,13 @@
 
                 <!-- DL Origin -->
                 <span class="col-origin">
-                  {#if mod.source_type === "nexus"}
-                    <span class="origin-label origin-nexus">Nexus</span>
-                  {:else if mod.source_type === "loverslab"}
-                    <span class="origin-label origin-loverslab">LoversLab</span>
-                  {:else if mod.source_type === "moddb"}
-                    <span class="origin-label origin-moddb">ModDB</span>
-                  {:else if mod.source_type === "curseforge"}
-                    <span class="origin-label origin-curseforge">CurseForge</span>
-                  {:else if mod.source_type === "direct"}
-                    <span class="origin-label origin-direct">Direct</span>
-                  {:else}
-                    <span class="origin-label origin-manual">Manual</span>
-                  {/if}
                   {#if getModSourceUrl(mod)}
-                    <button class="origin-link-btn" title="Open mod page" onclick={(e) => { e.stopPropagation(); openUrl(getModSourceUrl(mod)!); }}>
-                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></svg>
+                    <button class="origin-label origin-{mod.source_type} origin-link" title="Open mod page" onclick={(e) => { e.stopPropagation(); openUrl(getModSourceUrl(mod)!); }}>
+                      {originLabel(mod.source_type)}
+                      <svg class="origin-link-icon" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></svg>
                     </button>
+                  {:else}
+                    <span class="origin-label origin-{mod.source_type}">{originLabel(mod.source_type)}</span>
                   {/if}
                 </span>
 
@@ -2946,6 +3058,7 @@
                 </span>
               </div>
             {/each}
+            <div style="height: {visibleRange.paddingBottom}px;" aria-hidden="true"></div>
             {/if}
           </div>
         </div>
@@ -2996,23 +3109,13 @@
               <div class="detail-row">
                 <span class="detail-label">Source</span>
                 <span class="detail-value">
-                  {#if detailMod.source_type === "nexus"}
-                    <span class="origin-label origin-nexus">Nexus</span>
-                  {:else if detailMod.source_type === "loverslab"}
-                    <span class="origin-label origin-loverslab">LoversLab</span>
-                  {:else if detailMod.source_type === "moddb"}
-                    <span class="origin-label origin-moddb">ModDB</span>
-                  {:else if detailMod.source_type === "curseforge"}
-                    <span class="origin-label origin-curseforge">CurseForge</span>
-                  {:else if detailMod.source_type === "direct"}
-                    <span class="origin-label origin-direct">Direct</span>
-                  {:else}
-                    <span class="origin-label origin-manual">Manual</span>
-                  {/if}
                   {#if getModSourceUrl(detailMod)}
-                    <button class="origin-link-btn" title="Open mod page" onclick={() => openUrl(getModSourceUrl(detailMod!)!)}>
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></svg>
+                    <button class="origin-label origin-{detailMod.source_type} origin-link" onclick={() => openUrl(getModSourceUrl(detailMod!)!)}>
+                      {originLabel(detailMod.source_type)}
+                      <svg class="origin-link-icon" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></svg>
                     </button>
+                  {:else}
+                    <span class="origin-label origin-{detailMod.source_type}">{originLabel(detailMod.source_type)}</span>
                   {/if}
                 </span>
               </div>
@@ -3042,6 +3145,42 @@
               {/if}
             </div>
 
+            <!-- NexusMods Detail (loaded dynamically) -->
+            {#if nexusDetailLoading}
+              <div class="detail-section">
+                <span class="detail-empty">Loading mod details...</span>
+              </div>
+            {:else if nexusDetail}
+              <div class="detail-section nexus-detail-section">
+                {#if nexusDetail.summary}
+                  <p class="nexus-summary">{nexusDetail.summary}</p>
+                {/if}
+                <div class="nexus-stats">
+                  <span class="nexus-stat" title="Author">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" /></svg>
+                    {nexusDetail.author}
+                  </span>
+                  <span class="nexus-stat" title="Endorsements">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3" /></svg>
+                    {nexusDetail.endorsement_count.toLocaleString()}
+                  </span>
+                  <span class="nexus-stat" title="Unique downloads">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
+                    {nexusDetail.unique_downloads.toLocaleString()}
+                  </span>
+                </div>
+                {#if nexusDetail.description}
+                  <details class="nexus-description-toggle">
+                    <summary>Show full description</summary>
+                    <div class="nexus-description">
+                      <!-- eslint-disable-next-line svelte/no-at-html-tags -->
+                      {@html DOMPurify.sanitize(bbcodeToHtml(nexusDetail.description))}
+                    </div>
+                  </details>
+                {/if}
+              </div>
+            {/if}
+
             {#if updateMap.has(detailMod.id)}
               {@const update = updateMap.get(detailMod.id)!}
               <div class="detail-update-banner">
@@ -3057,6 +3196,44 @@
                     <span class="detail-conflict-badge">{conflictName}</span>
                   {/each}
                 </div>
+              </div>
+            {/if}
+
+            <!-- Dependencies -->
+            {#if detailDepsLoading}
+              <div class="detail-section">
+                <h4 class="detail-section-title">Dependencies</h4>
+                <span class="detail-empty">Loading...</span>
+              </div>
+            {:else if detailDeps.length > 0 || detailDependents.length > 0}
+              <div class="detail-section">
+                <h4 class="detail-section-title">Dependencies</h4>
+                {#if detailDeps.length > 0}
+                  <div class="detail-dep-group">
+                    <span class="detail-dep-label">Depends on</span>
+                    <div class="detail-dep-list">
+                      {#each detailDeps as dep (dep.id)}
+                        <span class="detail-dep-badge" class:dep-requires={dep.relationship === "requires"} class:dep-conflicts={dep.relationship === "conflicts"} class:dep-patches={dep.relationship === "patches"}>
+                          <span class="dep-rel-tag">{dep.relationship === "requires" ? "req" : dep.relationship === "conflicts" ? "conflict" : "patch"}</span>
+                          {dep.dep_name}
+                        </span>
+                      {/each}
+                    </div>
+                  </div>
+                {/if}
+                {#if detailDependents.length > 0}
+                  <div class="detail-dep-group">
+                    <span class="detail-dep-label">Required by</span>
+                    <div class="detail-dep-list">
+                      {#each detailDependents as dep (dep.id)}
+                        {@const depMod = $installedMods.find(m => m.id === dep.mod_id)}
+                        <span class="detail-dep-badge dep-requires">
+                          {depMod?.name ?? dep.dep_name ?? `Mod #${dep.mod_id}`}
+                        </span>
+                      {/each}
+                    </div>
+                  </div>
+                {/if}
               </div>
             {/if}
 
@@ -4006,6 +4183,8 @@
     padding: var(--space-2) var(--space-3);
     align-items: center;
     font-size: 13px;
+    height: 36px;
+    box-sizing: border-box;
     transition:
       background var(--duration-fast) var(--ease),
       opacity var(--duration-fast) var(--ease),
@@ -5463,6 +5642,122 @@
     font-weight: 500;
   }
 
+  /* Dependencies in detail panel */
+  .detail-dep-group {
+    margin-bottom: var(--space-2);
+  }
+  .detail-dep-group:last-child {
+    margin-bottom: 0;
+  }
+  .detail-dep-label {
+    display: block;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-tertiary);
+    margin-bottom: var(--space-1);
+  }
+  .detail-dep-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .detail-dep-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: var(--radius-sm);
+    font-weight: 500;
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .dep-requires {
+    background: rgba(0, 122, 255, 0.1);
+    color: var(--system-accent);
+  }
+  .dep-conflicts {
+    background: rgba(255, 69, 58, 0.1);
+    color: var(--red);
+  }
+  .dep-patches {
+    background: rgba(255, 214, 10, 0.1);
+    color: var(--yellow);
+  }
+  .dep-rel-tag {
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+    opacity: 0.7;
+  }
+
+  /* NexusMods mod detail */
+  .nexus-detail-section {
+    border-top: 1px solid var(--border-subtle);
+    padding-top: var(--space-3);
+  }
+
+  .nexus-summary {
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+    margin: 0 0 var(--space-2) 0;
+  }
+
+  .nexus-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+    margin-bottom: var(--space-2);
+  }
+
+  .nexus-stat {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: var(--text-tertiary);
+  }
+  .nexus-stat svg {
+    opacity: 0.6;
+  }
+
+  .nexus-description-toggle {
+    margin-top: var(--space-2);
+  }
+
+  .nexus-description-toggle summary {
+    font-size: 11px;
+    color: var(--accent, #d98f40);
+    cursor: pointer;
+    user-select: none;
+  }
+  .nexus-description-toggle summary:hover {
+    text-decoration: underline;
+  }
+
+  .nexus-description {
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.6;
+    max-height: 300px;
+    overflow-y: auto;
+    margin-top: var(--space-2);
+    padding: var(--space-2);
+    background: var(--surface-hover);
+    border-radius: var(--radius-sm);
+    word-break: break-word;
+  }
+  .nexus-description img {
+    max-width: 100%;
+    height: auto;
+    border-radius: var(--radius-sm);
+  }
+
   .detail-tags {
     display: flex;
     flex-wrap: wrap;
@@ -5677,7 +5972,25 @@
   .origin-label {
     font-size: 11px;
     font-weight: 500;
+    background: none;
+    border: none;
+    padding: 0;
   }
+
+  .origin-link {
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    transition: opacity 0.15s;
+  }
+  .origin-link:hover { opacity: 0.8; }
+
+  .origin-link-icon {
+    opacity: 0.5;
+    flex-shrink: 0;
+  }
+  .origin-link:hover .origin-link-icon { opacity: 1; }
 
   .origin-nexus {
     color: var(--accent, #d98f40);
@@ -5693,6 +6006,22 @@
 
   .origin-curseforge {
     color: #f16436;
+  }
+
+  .origin-github {
+    color: #c9d1d9;
+  }
+
+  .origin-mega {
+    color: #d9534f;
+  }
+
+  .origin-google_drive {
+    color: #4285f4;
+  }
+
+  .origin-mediafire {
+    color: #4c9aff;
   }
 
   .origin-direct {

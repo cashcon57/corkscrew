@@ -2699,6 +2699,8 @@ fn backfill_categories(
     state: State<AppState>,
 ) -> Result<usize, String> {
     let db = &state.db;
+    // Also backfill source_type for legacy mods with nexus_mod_id but source_type="manual"
+    let _ = db.backfill_source_types(&game_id, &bottle_name);
     db.backfill_categories(&game_id, &bottle_name)
         .map_err(|e| e.to_string())
 }
@@ -4828,6 +4830,14 @@ fn get_mod_dependencies(
 }
 
 #[tauri::command]
+fn get_mod_dependents(
+    mod_id: i64,
+    state: State<AppState>,
+) -> Result<Vec<mod_dependencies::ModDependency>, String> {
+    mod_dependencies::get_dependents(&state.db, mod_id)
+}
+
+#[tauri::command]
 fn check_dependency_issues(
     game_id: String,
     bottle_name: String,
@@ -5678,6 +5688,7 @@ pub fn run() {
             add_mod_dependency,
             remove_mod_dependency,
             get_mod_dependencies,
+            get_mod_dependents,
             check_dependency_issues,
             // Mod Recommendations
             get_mod_recommendations,

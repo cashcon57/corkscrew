@@ -384,6 +384,9 @@ impl RateLimitState {
 /// Async client for the Nexus Mods v1 REST API.
 pub struct NexusClient {
     client: reqwest::Client,
+    /// Separate client for file downloads — no `Accept: application/json`,
+    /// longer timeouts (10 min per-request + 30s connect).
+    download_client: reqwest::Client,
     rate_limit: RateLimitState,
     /// When created from OAuth, premium status is known from the JWT claims
     /// and we don't need to hit the v1 REST API (which doesn't support Bearer
@@ -457,14 +460,30 @@ impl NexusClient {
         headers.insert("Application-Version", app_version);
         headers.insert("Protocol-Version", HeaderValue::from_static("0.15.5"));
 
+        // API client: 30s timeout for JSON API calls
         let client = reqwest::Client::builder()
-            .default_headers(headers)
+            .default_headers(headers.clone())
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .expect("failed to build reqwest client");
 
+        // Download client: no Accept: application/json, 10 min per-request
+        // timeout, 30s connect timeout.  CDN file downloads can be hundreds of
+        // MB and the 30s API timeout was aborting them mid-stream, surfacing as
+        // "error decoding response body".
+        let mut dl_headers = headers;
+        dl_headers.remove(ACCEPT);
+        dl_headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
+        let download_client = reqwest::Client::builder()
+            .default_headers(dl_headers)
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(600))
+            .build()
+            .expect("failed to build download client");
+
         Self {
             client,
+            download_client,
             rate_limit: RateLimitState::new(),
             oauth_premium: None,
         }
@@ -759,7 +778,7 @@ impl NexusClient {
             .map(|m| m.len())
             .unwrap_or(0);
 
-        let mut request = self.client.get(download_url);
+        let mut request = self.download_client.get(download_url);
         if existing_len > 0 {
             log::info!(
                 "Resuming download of '{}' from byte {}",

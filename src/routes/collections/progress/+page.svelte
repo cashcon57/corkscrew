@@ -438,18 +438,18 @@
         </div>
         {#if (result?.failed ?? 0) > 0}
           <div class="error-summary">
-            <h4 class="error-summary-title">Failed Mods</h4>
-            {#each failedMods.slice(0, 5) as mod}
-              <div class="error-summary-item">
-                <span class="error-mod-name">{mod.name}</span>
-                {#if mod.error}
-                  <span class="error-mod-reason">{mod.error}</span>
-                {/if}
-              </div>
-            {/each}
-            {#if failedMods.length > 5}
-              <span class="error-more">+{failedMods.length - 5} more — check Mod Log below</span>
-            {/if}
+            <h4 class="error-summary-title">Failed Mods ({failedMods.length})</h4>
+            <div class="error-list-scroll">
+              {#each failedMods as mod}
+                <div class="error-summary-item">
+                  <span class="error-mod-name">{mod.name}</span>
+                  {#if mod.error}
+                    <span class="error-mod-reason">{mod.error}</span>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+            <p class="error-help-text">You can repair this collection from "My Collections" to retry failed mods.</p>
           </div>
         {/if}
         <p class="completion-elapsed">Total time: {status.elapsed}</p>
@@ -499,18 +499,18 @@
         </div>
         {#if failedMods.length > 0}
           <div class="error-summary">
-            <h4 class="error-summary-title">Errors</h4>
-            {#each failedMods.slice(0, 8) as mod}
-              <div class="error-summary-item">
-                <span class="error-mod-name">{mod.name}</span>
-                {#if mod.error}
-                  <span class="error-mod-reason">{mod.error}</span>
-                {/if}
-              </div>
-            {/each}
-            {#if failedMods.length > 8}
-              <span class="error-more">+{failedMods.length - 8} more errors</span>
-            {/if}
+            <h4 class="error-summary-title">Errors ({failedMods.length})</h4>
+            <div class="error-list-scroll">
+              {#each failedMods as mod}
+                <div class="error-summary-item">
+                  <span class="error-mod-name">{mod.name}</span>
+                  {#if mod.error}
+                    <span class="error-mod-reason">{mod.error}</span>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+            <p class="error-help-text">You can repair this collection from "My Collections" to retry failed mods.</p>
           </div>
         {/if}
         <p class="completion-elapsed">Time elapsed: {status.elapsed}</p>
@@ -1811,13 +1811,15 @@
   .error-mod-reason {
     font-size: 11px;
     color: #ef4444;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    word-break: break-word;
   }
 
-  .error-more {
-    display: block;
+  .error-list-scroll {
+    max-height: 240px;
+    overflow-y: auto;
+  }
+
+  .error-help-text {
     font-size: 11px;
     color: var(--text-tertiary);
     margin-top: var(--space-2);

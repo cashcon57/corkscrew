@@ -1641,15 +1641,22 @@ impl ModDatabase {
     /// Classify a mod into a category based on its installed file paths.
     pub fn classify_mod_category(installed_files: &[String]) -> Option<String> {
         let mut counts: HashMap<&str, usize> = HashMap::new();
+        let mut has_plugin_file = false;
 
         for file in installed_files {
             let lower = file.to_lowercase();
+
+            // Track whether the mod ships any .esp/.esm/.esl
+            if lower.ends_with(".esp") || lower.ends_with(".esm") || lower.ends_with(".esl") {
+                has_plugin_file = true;
+            }
+
             let cat = if lower.contains("skse/plugins/") || lower.contains("skse\\plugins\\") {
-                "SKSE Plugin"
+                "Framework"
             } else if lower.contains("enbseries") || lower.starts_with("d3d") {
-                "ENB Preset"
+                "Lighting & Weather"
             } else if lower.contains("shaderfx") || lower.contains("reshade") {
-                "ReShade Preset"
+                "Lighting & Weather"
             } else if lower.contains("textures/")
                 || lower.contains("textures\\")
                 || lower.ends_with(".dds")
@@ -1659,38 +1666,61 @@ impl ModDatabase {
                 || lower.contains("meshes\\")
                 || lower.ends_with(".nif")
             {
-                "3D Model"
-            } else if lower.ends_with(".esp") || lower.ends_with(".esm") || lower.ends_with(".esl")
-            {
-                "Plugin"
+                "Model & Mesh"
             } else if lower.contains("interface/")
                 || lower.contains("interface\\")
                 || lower.ends_with(".swf")
             {
-                "UI Mod"
+                "UI"
             } else if lower.contains("sound/")
                 || lower.contains("sound\\")
                 || lower.contains("music/")
                 || lower.contains("music\\")
             {
                 "Audio"
-            } else if lower.contains("scripts/")
-                || lower.contains("scripts\\")
-                || lower.ends_with(".pex")
+            } else if lower.contains("animations/")
+                || lower.contains("animations\\")
+                || lower.ends_with(".hkx")
+            {
+                "Animation"
+            } else if (lower.contains("scripts/") || lower.contains("scripts\\"))
+                && lower.ends_with(".pex")
             {
                 "Script"
+            } else if lower.contains("seq/") || lower.contains("seq\\") {
+                "Gameplay"
             } else {
                 "Misc"
             };
             *counts.entry(cat).or_insert(0) += 1;
         }
 
-        counts
+        // Pick the dominant non-Misc category
+        let best = counts
             .into_iter()
             .filter(|(cat, _)| *cat != "Misc")
             .max_by_key(|(_, count)| *count)
-            .map(|(cat, _)| cat.to_string())
-            .or(Some("Misc".to_string()))
+            .map(|(cat, _)| cat.to_string());
+
+        match best {
+            Some(cat) => {
+                // If the only content category is Script and there's a plugin file,
+                // the mod is really a gameplay mod that happens to use scripts.
+                if cat == "Script" && has_plugin_file {
+                    Some("Gameplay".to_string())
+                } else {
+                    Some(cat)
+                }
+            }
+            None => {
+                // No strong content signal — if it has a plugin file it's a gameplay mod
+                if has_plugin_file {
+                    Some("Gameplay".to_string())
+                } else {
+                    Some("Misc".to_string())
+                }
+            }
+        }
     }
 
     /// Set the auto_category for a mod.
@@ -1736,6 +1766,20 @@ impl ModDatabase {
                 }
             }
         }
+        Ok(updated)
+    }
+
+    /// Backfill source_type for mods that have nexus_mod_id but source_type
+    /// is still "manual" (legacy data from before source tracking was wired up).
+    pub fn backfill_source_types(&self, game_id: &str, bottle_name: &str) -> Result<usize> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let updated = conn.execute(
+            "UPDATE installed_mods SET source_type = 'nexus'
+             WHERE game_id = ?1 AND bottle_name = ?2
+               AND nexus_mod_id IS NOT NULL
+               AND (source_type = 'manual' OR source_type IS NULL)",
+            params![game_id, bottle_name],
+        )?;
         Ok(updated)
     }
 

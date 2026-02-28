@@ -1392,6 +1392,10 @@ export async function getModDependencies(modId: number): Promise<ModDependency[]
   return invoke("get_mod_dependencies", { modId });
 }
 
+export async function getModDependents(modId: number): Promise<ModDependency[]> {
+  return invoke("get_mod_dependents", { modId });
+}
+
 export async function checkDependencyIssues(
   gameId: string,
   bottleName: string
