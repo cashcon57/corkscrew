@@ -307,6 +307,12 @@ export async function getDepotDownloadCommand(
   return invoke("get_depot_download_command", { gameId, bottleName });
 }
 
+export async function startDepotDownload(
+  gameId: string
+): Promise<boolean> {
+  return invoke("start_depot_download", { gameId });
+}
+
 export async function checkDepotReady(
   gameId: string,
   bottleName: string

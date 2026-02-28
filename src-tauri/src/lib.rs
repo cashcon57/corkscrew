@@ -1022,12 +1022,19 @@ fn launch_game_cmd(
         use_skse
     );
 
+    // Detect game version once for both SKSE compat check and version guard
+    let detected_version = if game_id == "skyrimse" {
+        downgrader::detect_skyrim_version(&game_path).ok()
+    } else {
+        None
+    };
+
     // Pre-launch SKSE compatibility check — warn on version mismatch
     let mut skse_warning: Option<String> = None;
     if use_skse && game_id == "skyrimse" {
         let skse_status = skse::detect_skse(&game_path);
-        if let Ok(downgrade_status) = downgrader::detect_skyrim_version(&game_path) {
-            let compat = skse::check_skse_compatibility(&skse_status, &downgrade_status);
+        if let Some(ref downgrade_status) = detected_version {
+            let compat = skse::check_skse_compatibility(&skse_status, downgrade_status);
             if !compat.compatible {
                 log::warn!(
                     "SKSE compatibility issue: {} (SKSE={:?}, Game={})",
@@ -1042,6 +1049,63 @@ fn launch_game_cmd(
                     compat.skse_version,
                     compat.game_version
                 );
+            }
+        }
+    }
+
+    // Pre-launch version guard — check active collection's target version
+    if let Some(ref downgrade_status) = detected_version {
+        let collections = state
+            .db
+            .list_installed_collections(&game_id, &bottle_name)
+            .unwrap_or_default();
+        let metadata_list = state
+            .db
+            .list_collection_metadata(&game_id, &bottle_name)
+            .unwrap_or_default();
+
+        let active_versions: Option<Vec<String>> = collections
+            .iter()
+            .find(|(_, _, enabled)| *enabled > 0)
+            .and_then(|(name, _, _)| {
+                metadata_list
+                    .iter()
+                    .find(|m| m.collection_name == *name)
+            })
+            .and_then(|m| m.manifest_json.as_ref())
+            .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+            .and_then(|v| v.get("gameVersions").cloned())
+            .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok());
+
+        if let Some(target_versions) = active_versions {
+            if !target_versions.is_empty() {
+                let current = &downgrade_status.current_version;
+                let is_se = current.starts_with("1.5.");
+                let targets_se = target_versions.iter().any(|v| v.starts_with("1.5."));
+                let targets_ae = target_versions.iter().any(|v| v.starts_with("1.6."));
+
+                let mismatch =
+                    (is_se && !targets_se && targets_ae) || (!is_se && targets_se && !targets_ae);
+
+                if mismatch {
+                    let target_label = if targets_se {
+                        "SE (1.5.x)"
+                    } else {
+                        "AE (1.6.x)"
+                    };
+                    let current_label = if is_se { "SE" } else { "AE" };
+                    let warning_msg = format!(
+                        "Version mismatch: Active collection targets Skyrim {} but your game is {}. \
+                         You may experience crashes or incompatible mods. \
+                         Use Settings → Game Version to switch.",
+                        target_label, current_label
+                    );
+
+                    skse_warning = Some(match skse_warning {
+                        Some(existing) => format!("{} | {}", existing, warning_msg),
+                        None => warning_msg,
+                    });
+                }
             }
         }
     }
@@ -1306,6 +1370,14 @@ fn get_depot_download_command(
 }
 
 #[tauri::command]
+fn start_depot_download(game_id: String) -> Result<bool, String> {
+    if game_id != "skyrimse" {
+        return Err("Depot download only supported for Skyrim SE".into());
+    }
+    downgrader::send_depot_command_to_steam()
+}
+
+#[tauri::command]
 fn check_depot_ready(
     game_id: String,
     bottle_name: String,
@@ -1347,7 +1419,7 @@ fn list_game_versions(game_id: String) -> Result<Vec<downgrader::CachedVersion>,
 }
 
 #[tauri::command]
-fn swap_game_version(
+async fn swap_game_version(
     game_id: String,
     bottle_name: String,
     target_version: String,
@@ -1360,8 +1432,26 @@ fn swap_game_version(
         log::warn!("Failed to cache current version before swap: {}", e);
     }
 
-    downgrader::swap_to_version(&game_path, &game_id, &target_version)
-        .map_err(|e| e.to_string())
+    let status = downgrader::swap_to_version(&game_path, &game_id, &target_version)
+        .map_err(|e| e.to_string())?;
+
+    // Auto-reinstall SKSE for the new version if SKSE preference is enabled
+    if game_id == "skyrimse" && skse::get_skse_preference(&game_id, &bottle_name) {
+        match skse::install_skse_auto(&game_path, &target_version).await {
+            Ok(skse_status) => {
+                log::info!(
+                    "Auto-reinstalled SKSE for version {}: {:?}",
+                    target_version,
+                    skse_status.version
+                );
+            }
+            Err(e) => {
+                log::warn!("SKSE auto-reinstall failed after version swap: {}", e);
+            }
+        }
+    }
+
+    Ok(status)
 }
 
 #[tauri::command]
@@ -5597,6 +5687,7 @@ pub fn run() {
             fix_skyrim_display,
             downgrade_skyrim,
             get_depot_download_command,
+            start_depot_download,
             check_depot_ready,
             apply_downgrade_cmd,
             list_game_versions,

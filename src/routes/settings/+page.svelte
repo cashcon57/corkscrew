@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
-  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, uninstallSkse, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, checkModToolUpdate, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads, checkSteamStatus, addToSteam, removeFromSteam, scanGameDirectory, cleanGameDirectory, checkSkyrimVersion, downgradeSkyrim, checkDeploymentHealth, redeployAllMods, getVerificationLevel, setVerificationLevel, getDepotDownloadCommand, checkDepotReady, applyDowngrade, listGameVersions, swapGameVersion } from "$lib/api";
+  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, uninstallSkse, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, checkModToolUpdate, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads, checkSteamStatus, addToSteam, removeFromSteam, scanGameDirectory, cleanGameDirectory, checkSkyrimVersion, downgradeSkyrim, checkDeploymentHealth, redeployAllMods, getVerificationLevel, setVerificationLevel, getDepotDownloadCommand, startDepotDownload, checkDepotReady, applyDowngrade, listGameVersions, swapGameVersion } from "$lib/api";
   import type { CleanReport, CleanResult, DowngradeStatus, DeploymentHealth, VerificationLevel, CachedVersion, DepotDownloadInfo } from "$lib/types";
   import type { SteamStatus } from "$lib/types";
   import { config, showError, showSuccess, selectedGame, skseStatus, currentPage, appVersion, updateReady, updateVersion, updateNotes, updateChecking, updateError, triggerUpdateCheck, controllerMode } from "$lib/stores";
@@ -95,13 +95,14 @@
   let checkingDowngrade = $state(false);
   let cachedVersions = $state<CachedVersion[]>([]);
   let showDowngradeWizard = $state(false);
-  type WizardStep = "detect" | "guide" | "wait" | "apply" | "done";
+  type WizardStep = "detect" | "downloading" | "guide" | "wait" | "apply" | "done";
   let wizardStep = $state<WizardStep>("detect");
   let depotInfo = $state<DepotDownloadInfo | null>(null);
   let depotPolling = $state(false);
   let depotPollTimer = $state<ReturnType<typeof setInterval> | null>(null);
   let depotExePath = $state<string | null>(null);
   let swapping = $state(false);
+  let depotAutoFailed = $state(false);
 
   // Deployment health
   let deployHealth = $state<DeploymentHealth | null>(null);
@@ -321,22 +322,38 @@
     } catch { /* ignore */ }
   }
 
-  async function wizardGoToGuide() {
+  async function wizardStartDownload() {
     if (!game) return;
-    wizardStep = "guide";
+    depotAutoFailed = false;
+
+    // Get depot info for polling path
     try {
       depotInfo = await getDepotDownloadCommand(game.game_id, game.bottle_name);
     } catch (e: unknown) {
       showError(`Failed to get depot info: ${e}`);
+      return;
     }
+
+    // Try automated download first (macOS AppleScript)
+    try {
+      const automated = await startDepotDownload(game.game_id);
+      if (automated) {
+        // Automation worked — show downloading state and start polling
+        wizardStep = "downloading";
+        startDepotPolling();
+        return;
+      }
+    } catch { /* automation unavailable */ }
+
+    // Fallback to manual instructions
+    depotAutoFailed = true;
+    wizardStep = "guide";
   }
 
-  async function wizardStartPolling() {
+  function startDepotPolling() {
     if (!game) return;
-    wizardStep = "wait";
     depotPolling = true;
 
-    // Start polling every 3 seconds
     depotPollTimer = setInterval(async () => {
       if (!game) return;
       try {
@@ -1015,9 +1032,10 @@
           <div class="cleanup-header">
             <h3 class="cleanup-title">
               {#if wizardStep === "detect"}Manage Game Version
-              {:else if wizardStep === "guide"}Step 1: Download Old Version
-              {:else if wizardStep === "wait"}Step 2: Waiting for Download
-              {:else if wizardStep === "apply"}Step 3: Apply Downgrade
+              {:else if wizardStep === "downloading"}Downloading v1.5.97
+              {:else if wizardStep === "guide"}Download Old Version
+              {:else if wizardStep === "wait"}Waiting for Download
+              {:else if wizardStep === "apply"}Apply Downgrade
               {:else}Downgrade Complete
               {/if}
             </h3>
@@ -1055,20 +1073,37 @@
                 {/if}
               </div>
 
+            {:else if wizardStep === "downloading"}
+              <div class="cleanup-summary">
+                <p class="cleanup-info">
+                  Downloading Skyrim SE v1.5.97 from Steam...
+                </p>
+                <div style="display: flex; align-items: center; gap: 0.75rem; margin: 1rem 0; padding: 1rem; background: var(--surface-1); border-radius: 6px;">
+                  <div class="spinner" style="width: 24px; height: 24px; border: 2px solid var(--border); border-top-color: var(--blue); border-radius: 50%; animation: spin 1s linear infinite;"></div>
+                  <span>Downloading via Steam depot... this may take several minutes.</span>
+                </div>
+                {#if depotInfo?.expected_path}
+                  <p class="cleanup-info" style="font-size: 0.8rem; opacity: 0.7;">
+                    Looking in: {depotInfo.expected_path}
+                  </p>
+                {/if}
+                <p class="cleanup-info" style="margin-top: 0.75rem; font-size: 0.85rem; opacity: 0.7;">
+                  The download command was sent to Steam automatically. If nothing happens, click "Manual Download" to enter the command yourself.
+                </p>
+              </div>
+
             {:else if wizardStep === "guide"}
               <div class="cleanup-summary">
                 <p class="cleanup-info">
-                  To download the old Skyrim SE v1.5.97 executable, you need to use Steam's console.
+                  Paste this command into the Steam console that was opened:
                 </p>
                 <div style="margin: 1rem 0; padding: 0.75rem; background: var(--surface-1); border-radius: 6px; font-family: monospace; font-size: 0.85rem; word-break: break-all;">
                   {depotInfo?.command ?? "download_depot 489830 489833 4063321535627579835"}
                 </div>
                 <ol style="margin: 0.75rem 0; padding-left: 1.5rem; line-height: 1.8;">
-                  <li>Click "Open Steam Console" below</li>
-                  <li>Click "Copy Command" to copy the depot command</li>
+                  <li>Click "Copy Command" below</li>
                   <li>Paste the command into the Steam console and press Enter</li>
                   <li>Wait for the download to complete (may take several minutes)</li>
-                  <li>Click "Next" to proceed</li>
                 </ol>
               </div>
 
@@ -1119,10 +1154,16 @@
             {#if wizardStep === "detect"}
               <button class="btn btn-ghost" onclick={closeWizard} type="button">Close</button>
               {#if !downgradeStatus?.is_downgraded}
-                <button class="btn btn-primary" onclick={wizardGoToGuide} type="button">
+                <button class="btn btn-primary" onclick={wizardStartDownload} type="button">
                   Download v1.5.97
                 </button>
               {/if}
+
+            {:else if wizardStep === "downloading"}
+              <button class="btn btn-ghost" onclick={() => { if (depotPollTimer) clearInterval(depotPollTimer); depotPollTimer = null; depotPolling = false; wizardStep = "detect"; }} type="button">Cancel</button>
+              <button class="btn btn-ghost" onclick={() => { if (depotPollTimer) clearInterval(depotPollTimer); depotPollTimer = null; depotPolling = false; wizardStep = "guide"; }} type="button">
+                Manual Download
+              </button>
 
             {:else if wizardStep === "guide"}
               <button class="btn btn-ghost" onclick={() => { wizardStep = "detect"; }} type="button">Back</button>
@@ -1134,7 +1175,7 @@
               <button class="btn btn-ghost" onclick={() => copyToClipboard(depotInfo?.command ?? "")} type="button">
                 Copy Command
               </button>
-              <button class="btn btn-primary" onclick={wizardStartPolling} type="button">
+              <button class="btn btn-primary" onclick={() => { wizardStep = "wait"; startDepotPolling(); }} type="button">
                 Next
               </button>
 

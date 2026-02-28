@@ -31,6 +31,10 @@
     checkSkyrimVersion,
     listGameVersions,
     swapGameVersion,
+    startDepotDownload,
+    checkDepotReady,
+    applyDowngrade,
+    getDepotDownloadCommand,
     getIncompleteCollectionInstalls,
     resumeCollectionInstall,
     abandonCollectionInstall,
@@ -43,7 +47,7 @@
   } from "$lib/api";
   import { startInstallTracking, stopInstallTracking, resumeInstallTracking } from "$lib/installService";
   import { listen } from "@tauri-apps/api/event";
-  import type { CollectionSummary, CollectionDiff, RequiredTool, CleanReport, CleanOptions, DlcStatus, DeploymentHealth, CachedVersion } from "$lib/types";
+  import type { CollectionSummary, CollectionDiff, RequiredTool, CleanReport, CleanOptions, DlcStatus, DeploymentHealth, CachedVersion, DepotDownloadInfo } from "$lib/types";
   import { config } from "$lib/stores";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { marked } from "marked";
@@ -529,6 +533,8 @@
   let versionMismatchInfo = $state<{ expected: string[]; detected: string } | null>(null);
   let versionSwapping = $state(false);
   let versionCache = $state<CachedVersion[]>([]);
+  let depotDownloading = $state(false);
+  let depotPollTimer = $state<ReturnType<typeof setInterval> | null>(null);
 
   // DLC Detection
   let showDlcWarning = $state(false);
@@ -3427,15 +3433,23 @@
             SKSE plugins in this collection may not be compatible with your game version.
             {#if versionCache.some(cv => versionMismatchInfo?.expected.some(v => cv.version === v || cv.version.startsWith(v) || v.startsWith(cv.version)))}
               A compatible version is cached and can be swapped instantly.
+            {:else if depotDownloading}
+              Downloading the correct game version from Steam...
             {:else}
-              You can downgrade your game in <strong>Settings</strong>, or continue at your own risk.
+              You can download and switch to the correct version, or continue at your own risk.
             {/if}
           </p>
+          {#if depotDownloading}
+            <div style="display: flex; align-items: center; gap: 0.75rem; margin: 0.75rem 0; padding: 0.75rem; background: var(--surface-1); border-radius: 6px;">
+              <div class="spinner" style="width: 20px; height: 20px; border: 2px solid var(--border); border-top-color: var(--blue); border-radius: 50%; animation: spin 1s linear infinite;"></div>
+              <span style="font-size: 0.9rem;">Downloading via Steam depot... this may take several minutes.</span>
+            </div>
+          {/if}
         </div>
       </div>
 
       <div class="cleanup-actions">
-        <button class="btn btn-ghost" onclick={() => { showVersionMismatch = false; versionMismatchInfo = null; pendingManifest = null; }}>Cancel</button>
+        <button class="btn btn-ghost" disabled={depotDownloading} onclick={() => { showVersionMismatch = false; versionMismatchInfo = null; pendingManifest = null; if (depotPollTimer) { clearInterval(depotPollTimer); depotPollTimer = null; } depotDownloading = false; }}>Cancel</button>
         {#each versionCache.filter(cv => versionMismatchInfo?.expected.some(v => cv.version === v || cv.version.startsWith(v) || v.startsWith(cv.version))) as matchingVersion}
           <button class="btn btn-secondary" disabled={versionSwapping} onclick={async () => {
             if (!$selectedGame) return;
@@ -3455,8 +3469,47 @@
             {versionSwapping ? "Switching..." : `Switch to v${matchingVersion.version}`}
           </button>
         {/each}
-        <button class="btn btn-secondary" onclick={() => { showVersionMismatch = false; versionMismatchInfo = null; goto('/settings'); }}>Open Settings</button>
-        <button class="btn btn-primary" onclick={async () => {
+        {#if !versionCache.some(cv => versionMismatchInfo?.expected.some(v => cv.version === v || cv.version.startsWith(v) || v.startsWith(cv.version))) && !depotDownloading}
+          <button class="btn btn-secondary" onclick={async () => {
+            if (!$selectedGame) return;
+            depotDownloading = true;
+            try {
+              const automated = await startDepotDownload($selectedGame.game_id);
+              if (!automated) {
+                // Fallback: open Steam console and copy command to clipboard
+                try {
+                  const info = await getDepotDownloadCommand($selectedGame.game_id, $selectedGame.bottle_name);
+                  await navigator.clipboard.writeText(info.command);
+                  showSuccess("Command copied! Paste it in the Steam console that was opened.");
+                } catch { /* ignore clipboard errors */ }
+              }
+              // Start polling for depot files
+              depotPollTimer = setInterval(async () => {
+                if (!$selectedGame) return;
+                try {
+                  const result = await checkDepotReady($selectedGame.game_id, $selectedGame.bottle_name);
+                  if (result) {
+                    if (depotPollTimer) clearInterval(depotPollTimer);
+                    depotPollTimer = null;
+                    // Auto-apply downgrade
+                    const status = await applyDowngrade($selectedGame.game_id, $selectedGame.bottle_name);
+                    depotDownloading = false;
+                    showVersionMismatch = false;
+                    versionMismatchInfo = null;
+                    showSuccess(`Switched to v${status.current_version}`);
+                    if (pendingManifest) await checkPreInstallCleanup(pendingManifest);
+                  }
+                } catch { /* keep polling */ }
+              }, 3000);
+            } catch (e) {
+              depotDownloading = false;
+              showError(`Download failed: ${e}`);
+            }
+          }}>
+            Download & Switch to SE
+          </button>
+        {/if}
+        <button class="btn btn-primary" disabled={depotDownloading} onclick={async () => {
           showVersionMismatch = false;
           versionMismatchInfo = null;
           if (pendingManifest) await checkPreInstallCleanup(pendingManifest);

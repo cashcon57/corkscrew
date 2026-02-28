@@ -534,6 +534,60 @@ pub fn apply_depot_downgrade(game_path: &Path, depot_exe: &Path, game_id: &str) 
     swap_to_version(game_path, game_id, &imported.version)
 }
 
+/// Automate the depot download by opening Steam console and typing the command.
+/// macOS only — uses osascript to send keystrokes to Steam.
+/// Returns Ok(true) if the command was sent successfully, Ok(false) if automation unavailable.
+pub fn send_depot_command_to_steam() -> std::result::Result<bool, String> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command as ProcessCommand;
+
+        // Open Steam console via protocol handler
+        ProcessCommand::new("open")
+            .arg("steam://open/console")
+            .spawn()
+            .map_err(|e| format!("Failed to open Steam console: {}", e))?;
+
+        // Wait for console to open
+        std::thread::sleep(std::time::Duration::from_secs(3));
+
+        // Type the depot command via AppleScript keystroke
+        let depot_command = format!(
+            "download_depot {} {} {}",
+            SKYRIM_APP_ID, SKYRIM_DEPOT_ID, SKYRIM_SE_MANIFEST
+        );
+        let script = format!(
+            "tell application \"Steam\" to activate\n\
+             delay 1\n\
+             tell application \"System Events\"\n\
+                 keystroke \"{}\"\n\
+                 delay 0.3\n\
+                 keystroke return\n\
+             end tell",
+            depot_command
+        );
+
+        let output = ProcessCommand::new("osascript")
+            .arg("-e")
+            .arg(&script)
+            .output()
+            .map_err(|e| format!("AppleScript execution failed: {}", e))?;
+
+        if output.status.success() {
+            info!("Depot download command sent to Steam console via AppleScript");
+            Ok(true)
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!("AppleScript automation failed: {}", stderr);
+            Ok(false)
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(false)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Downgrade copy creation (legacy)
 // ---------------------------------------------------------------------------
