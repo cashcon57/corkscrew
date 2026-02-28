@@ -27,6 +27,7 @@
     getNexusModDetail,
     downloadAndInstallNexusMod,
     closeBrowserWebview,
+    checkDeploymentHealth,
     getIncompleteCollectionInstalls,
     resumeCollectionInstall,
     abandonCollectionInstall,
@@ -39,7 +40,7 @@
   } from "$lib/api";
   import { startInstallTracking, stopInstallTracking, resumeInstallTracking } from "$lib/installService";
   import { listen } from "@tauri-apps/api/event";
-  import type { CollectionSummary, CollectionDiff, RequiredTool, CleanReport, CleanOptions, DlcStatus } from "$lib/types";
+  import type { CollectionSummary, CollectionDiff, RequiredTool, CleanReport, CleanOptions, DlcStatus, DeploymentHealth } from "$lib/types";
   import { config } from "$lib/stores";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { marked } from "marked";
@@ -82,6 +83,19 @@
   let deleteDownloadSize = $state<number | null>(null);
   let deleteDownloadSizeLoading = $state(false);
   let collectionDiffs = $state<Record<string, CollectionDiff | "loading" | "error">>({});
+  let collectionHealth = $state<Record<string, DeploymentHealth | "loading" | "error">>({});
+
+  async function handleVerifyCollection(colName: string) {
+    const game = $selectedGame;
+    if (!game) return;
+    collectionHealth = { ...collectionHealth, [colName]: "loading" };
+    try {
+      const health = await checkDeploymentHealth(game.game_id, game.bottle_name);
+      collectionHealth = { ...collectionHealth, [colName]: health };
+    } catch {
+      collectionHealth = { ...collectionHealth, [colName]: "error" };
+    }
+  }
 
   // Local detail view
   let selectedMyCollection = $state<CollectionSummary | null>(null);
@@ -1855,6 +1869,46 @@
                   {col.original_mod_count - col.mod_count} mod{col.original_mod_count - col.mod_count !== 1 ? 's' : ''} failed to install
                 </div>
               {/if}
+              {#if collectionHealth[col.name] && collectionHealth[col.name] !== "loading" && collectionHealth[col.name] !== "error"}
+                {@const h = collectionHealth[col.name] as DeploymentHealth}
+                <div class="my-collection-health" onclick={(e) => e.stopPropagation()}>
+                  {#if h.healthy}
+                    <div class="health-status health-ok">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                      Healthy — {h.deployed_files_ok ?? 0} files deployed, {h.staging_ok ?? 0}/{h.enabled_mods ?? 0} mods OK
+                    </div>
+                  {:else}
+                    <div class="health-status health-warn">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                      Issues found
+                    </div>
+                    <div class="health-details">
+                      {#if (h.staging_missing ?? 0) > 0}<div class="health-issue">Missing staging: {h.staging_missing} mod(s)</div>{/if}
+                      {#if (h.staging_empty ?? 0) > 0}<div class="health-issue">Empty staging: {h.staging_empty} mod(s)</div>{/if}
+                      {#if (h.deployed_files_missing ?? 0) > 0}<div class="health-issue">Missing deployed files: {h.deployed_files_missing}</div>{/if}
+                      {#if (h.hash_mismatches ?? 0) > 0}<div class="health-issue">Hash mismatches: {h.hash_mismatches}</div>{/if}
+                      {#if (h.needs_reinstall ?? false)}<div class="health-issue">Needs reinstall — staging data missing</div>{/if}
+                      {#if (h.needs_redeploy ?? false)}<div class="health-issue">Needs redeploy — mods staged but not deployed</div>{/if}
+                      {#if h.problem_mods && h.problem_mods.length > 0}
+                        <div class="health-problem-list">
+                          {#each h.problem_mods.slice(0, 10) as pm}
+                            <div class="health-problem-mod">{pm.name}: {pm.issue.replace(/_/g, " ")}</div>
+                          {/each}
+                          {#if h.problem_mods.length > 10}
+                            <div class="health-problem-mod">...and {h.problem_mods.length - 10} more</div>
+                          {/if}
+                        </div>
+                      {/if}
+                    </div>
+                  {/if}
+                  <button class="btn-dismiss-health" onclick={() => { collectionHealth = { ...collectionHealth }; delete collectionHealth[col.name]; collectionHealth = collectionHealth; }}>Dismiss</button>
+                </div>
+              {:else if collectionHealth[col.name] === "error"}
+                <div class="my-collection-health" onclick={(e) => e.stopPropagation()}>
+                  <div class="health-status health-err">Health check failed</div>
+                  <button class="btn-dismiss-health" onclick={() => { delete collectionHealth[col.name]; collectionHealth = { ...collectionHealth }; }}>Dismiss</button>
+                </div>
+              {/if}
               <div class="my-collection-actions" onclick={(e) => e.stopPropagation()}>
                 <button
                   class="btn btn-primary btn-sm"
@@ -1862,6 +1916,14 @@
                   disabled={switchingCollection === col.name}
                 >
                   {switchingCollection === col.name ? "Switching..." : "Activate"}
+                </button>
+                <button
+                  class="btn btn-secondary btn-sm"
+                  onclick={(e) => { e.stopPropagation(); handleVerifyCollection(col.name); }}
+                  disabled={collectionHealth[col.name] === "loading"}
+                  title="Verify staging files, deployed files, and file integrity"
+                >
+                  {collectionHealth[col.name] === "loading" ? "Checking..." : "Verify"}
                 </button>
                 {#if col.original_mod_count && col.mod_count < col.original_mod_count}
                   <button
@@ -5182,6 +5244,54 @@
     color: #f59e0b;
     margin-top: var(--space-1);
   }
+
+  .my-collection-health {
+    margin-top: var(--space-2);
+    padding: var(--space-2);
+    border-radius: var(--radius-sm);
+    background: var(--bg-tertiary);
+    font-size: 11px;
+  }
+  .health-status {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    font-weight: 600;
+  }
+  .health-ok { color: #22c55e; }
+  .health-warn { color: #f59e0b; }
+  .health-err { color: var(--red); }
+  .health-details {
+    margin-top: var(--space-1);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .health-issue {
+    color: var(--text-secondary);
+    padding-left: 16px;
+  }
+  .health-problem-list {
+    margin-top: 2px;
+    padding-left: 16px;
+    max-height: 80px;
+    overflow-y: auto;
+  }
+  .health-problem-mod {
+    color: var(--text-tertiary);
+    font-size: 10px;
+  }
+  .btn-dismiss-health {
+    margin-top: var(--space-1);
+    background: none;
+    border: none;
+    color: var(--text-tertiary);
+    font-size: 10px;
+    cursor: pointer;
+    padding: 0;
+    text-decoration: underline;
+  }
+  .btn-dismiss-health:hover { color: var(--text-secondary); }
 
   .my-collection-actions {
     display: flex;
