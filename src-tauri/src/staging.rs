@@ -43,6 +43,86 @@ pub enum StagingError {
 
 pub type Result<T> = std::result::Result<T, StagingError>;
 
+/// File extensions that indicate root-level files (game executables, loaders,
+/// DLL injectors) which should be deployed alongside the game executable
+/// rather than into the Data/ directory.
+const ROOT_FILE_EXTENSIONS: &[&str] = &["exe", "dll"];
+
+/// When `find_data_root()` resolves to a `Data/` subdirectory, check its
+/// parent for sibling files that look like root-level content (.exe, .dll).
+/// If found, copy them into a `Root/` folder inside `staging_dir` so that
+/// the collection installer's existing Root folder detection picks them up.
+///
+/// This handles archives like SKSE which contain both root executables and
+/// a `Data/` directory with scripts/plugins:
+/// ```text
+/// skse64_2_02_06/
+///   skse64_loader.exe   → staging/Root/skse64_loader.exe
+///   skse64_*.dll        → staging/Root/skse64_*.dll
+///   Data/
+///     Scripts/...       → staging/Scripts/...
+///     SKSE/...          → staging/SKSE/...
+/// ```
+fn preserve_root_files(data_root: &Path, staging_dir: &Path) {
+    // Only applies when find_data_root returned a "Data" subdirectory.
+    let dir_name = data_root
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase());
+    if dir_name.as_deref() != Some("data") {
+        return;
+    }
+
+    let parent = match data_root.parent() {
+        Some(p) => p,
+        None => return,
+    };
+
+    let entries = match fs::read_dir(parent) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    let root_staging = staging_dir.join("Root");
+    let mut count = 0u32;
+
+    for entry in entries.flatten() {
+        // Only interested in files (not directories like Data/).
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        let ext = name_str
+            .rsplit('.')
+            .next()
+            .map(|e| e.to_lowercase())
+            .unwrap_or_default();
+
+        if ROOT_FILE_EXTENSIONS.contains(&ext.as_str()) {
+            if count == 0 {
+                let _ = fs::create_dir_all(&root_staging);
+            }
+            let dest = root_staging.join(&name);
+            if fs::rename(entry.path(), &dest).is_err() {
+                let _ = fs::copy(entry.path(), &dest);
+            }
+            info!(
+                "Preserved root file: {} → Root/{}",
+                name_str,
+                name.to_string_lossy()
+            );
+            count += 1;
+        }
+    }
+
+    if count > 0 {
+        info!(
+            "Preserved {} root files from sibling of Data/ directory",
+            count
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Path safety
 // ---------------------------------------------------------------------------
@@ -168,6 +248,10 @@ pub fn stage_mod(
     let data_root = installer::find_data_root(&temp_dir);
     debug!("Data root for staging: {}", data_root.display());
 
+    // If find_data_root resolved to a Data/ subdirectory, preserve sibling
+    // .exe/.dll files as Root/ content for game-root deployment.
+    preserve_root_files(&data_root, &staging_dir);
+
     // Detect the optimal copy method once for the entire batch.
     let copy_method = platform::detect_copy_method(&data_root, &staging_dir);
     debug!("Staging copy method: {:?}", copy_method);
@@ -261,6 +345,10 @@ pub fn stage_mod_from_extracted_opts(
         "Data root for pre-extracted staging: {}",
         data_root.display()
     );
+
+    // If find_data_root resolved to a Data/ subdirectory, preserve sibling
+    // .exe/.dll files as Root/ content for game-root deployment.
+    preserve_root_files(&data_root, &staging_dir);
 
     // Detect the optimal copy method once for the entire batch.
     let copy_method = platform::detect_copy_method(&data_root, &staging_dir);
@@ -363,6 +451,10 @@ pub fn stage_mod_extract_direct(
     // Find the data root (unwrap nested single-folder archives).
     let data_root = installer::find_data_root(&extract_subdir);
     debug!("Data root for direct-staging: {}", data_root.display());
+
+    // If find_data_root resolved to a Data/ subdirectory, preserve sibling
+    // .exe/.dll files as Root/ content for game-root deployment.
+    preserve_root_files(&data_root, &staging_dir);
 
     // Move files from data_root → staging_dir (same filesystem = rename is instant).
     // We move each entry from data_root directly into staging_dir.
@@ -668,5 +760,50 @@ mod tests {
         let hashes = vec![("missing.esp".to_string(), "abc123".to_string(), 100)];
         let bad = verify_staging_integrity(staging, &hashes).unwrap();
         assert_eq!(bad.len(), 1);
+    }
+
+    #[test]
+    fn preserve_root_files_creates_root_dir() {
+        // Simulate an SKSE-like archive: Data/ dir + sibling .exe/.dll files.
+        let tmp = tempfile::tempdir().unwrap();
+        let archive_root = tmp.path().join("skse64_2_02_06");
+        let data_subdir = archive_root.join("Data");
+        let scripts_dir = data_subdir.join("Scripts");
+        fs::create_dir_all(&scripts_dir).unwrap();
+        fs::write(scripts_dir.join("SKSE.pex"), b"pex").unwrap();
+
+        // Root-level files alongside Data/
+        fs::write(archive_root.join("skse64_loader.exe"), b"loader").unwrap();
+        fs::write(archive_root.join("skse64_1_6_1170.dll"), b"dll").unwrap();
+        fs::write(archive_root.join("skse64_readme.txt"), b"readme").unwrap(); // not .exe/.dll
+
+        let staging = tmp.path().join("staging");
+        fs::create_dir_all(&staging).unwrap();
+
+        // Call preserve_root_files with data_root pointing to Data/
+        preserve_root_files(&data_subdir, &staging);
+
+        // Root/ should exist with .exe and .dll files
+        let root_dir = staging.join("Root");
+        assert!(root_dir.is_dir());
+        assert!(root_dir.join("skse64_loader.exe").exists());
+        assert!(root_dir.join("skse64_1_6_1170.dll").exists());
+        // .txt should NOT be preserved (only .exe/.dll)
+        assert!(!root_dir.join("skse64_readme.txt").exists());
+    }
+
+    #[test]
+    fn preserve_root_files_noop_when_not_data_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let non_data = tmp.path().join("meshes");
+        fs::create_dir_all(&non_data).unwrap();
+
+        let staging = tmp.path().join("staging");
+        fs::create_dir_all(&staging).unwrap();
+
+        preserve_root_files(&non_data, &staging);
+
+        // Root/ should NOT be created
+        assert!(!staging.join("Root").exists());
     }
 }
