@@ -3526,7 +3526,14 @@ async fn stage_and_deploy(
             }
 
             let result = apply_fomod_to_staging(&staging_result.staging_path, &fomod_files)
-                .unwrap_or(staging_result.files.clone());
+                .unwrap_or_else(|| {
+                    // FOMOD produced no valid moves — fall back to all staged
+                    // files but filter out packaging junk.
+                    staging_result.files.iter()
+                        .filter(|f| !crate::installer::is_deploy_junk(Path::new(f)))
+                        .cloned()
+                        .collect()
+                });
             log::info!(
                 "[stage_deploy] FOMOD applied for '{}': {} files after FOMOD filtering",
                 mod_name, result.len()
@@ -3540,8 +3547,13 @@ async fn stage_and_deploy(
             }
             result
         } else {
-            log::info!("[stage_deploy] No FOMOD for '{}' — deploying all {} staged files", mod_name, staging_result.files.len());
-            staging_result.files.clone()
+            // No FOMOD — deploy all staged files, filtering packaging junk.
+            let files: Vec<String> = staging_result.files.iter()
+                .filter(|f| !crate::installer::is_deploy_junk(Path::new(f)))
+                .cloned()
+                .collect();
+            log::info!("[stage_deploy] No FOMOD for '{}' — deploying {} of {} staged files (junk filtered)", mod_name, files.len(), staging_result.files.len());
+            files
         };
 
     // Apply collection patches (BSDiff) if any
@@ -3996,7 +4008,10 @@ fn apply_fomod_to_staging(
             continue;
         }
 
-        let src = staging_path.join(&f.source);
+        // Resolve source path case-insensitively (critical on Linux/SteamOS
+        // where the filesystem is case-sensitive but FOMOD XMLs use arbitrary casing).
+        let src = fomod::resolve_path_case_insensitive(staging_path, &f.source)
+            .unwrap_or_else(|| staging_path.join(&f.source));
         if f.is_folder {
             if src.is_dir() {
                 for entry in walkdir::WalkDir::new(&src)
@@ -4045,6 +4060,12 @@ fn apply_fomod_to_staging(
                 continue;
             }
         }
+        // Skip packaging junk even if the FOMOD XML referenced it
+        let normalised = dest_rel.replace('\\', "/");
+        if crate::installer::is_deploy_junk(Path::new(&normalised)) {
+            log::debug!("FOMOD layout: skipping junk dest: {}", normalised);
+            continue;
+        }
         // Copy (not move) because sources may overlap or be referenced multiple times
         if let Err(e) = std::fs::copy(src_abs, &dest_abs) {
             log::warn!(
@@ -4055,7 +4076,7 @@ fn apply_fomod_to_staging(
             );
             continue;
         }
-        files.push(dest_rel.replace('\\', "/"));
+        files.push(normalised);
     }
 
     if files.is_empty() {

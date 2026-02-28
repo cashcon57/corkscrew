@@ -239,6 +239,12 @@ fn deploy_mod_inner(
                 return None;
             }
 
+            // Defense-in-depth: skip packaging junk (fomod/, meta.ini, etc.)
+            if crate::installer::is_deploy_junk(std::path::Path::new(rel_path)) {
+                debug!("Deploy: skipping junk file: {}", rel_path);
+                return None;
+            }
+
             let src = staging_path.join(rel_path);
             let dst = data_dir.join(rel_path);
 

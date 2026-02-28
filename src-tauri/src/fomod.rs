@@ -341,10 +341,32 @@ fn get_attr(tag: &quick_xml::events::BytesStart<'_>, name: &str) -> Option<Strin
     None
 }
 
+/// Strip a leading `Data/` (case-insensitive) prefix from a FOMOD destination
+/// path. Many Windows-authored FOMOD XMLs include `destination="Data\meshes"`
+/// but we deploy INTO the Data directory, so the prefix would create a nested
+/// `Data/Data/meshes/` layout.
+fn strip_data_prefix(path: &str) -> String {
+    let lower = path.to_lowercase();
+    if lower == "data" || lower == "data/" {
+        return String::new();
+    }
+    if lower.starts_with("data/") {
+        return path[5..].to_string();
+    }
+    path.to_string()
+}
+
 /// Parse a `<file>` or `<folder>` element into a [`FomodFile`].
+///
+/// Normalises Windows backslash separators to forward slashes and strips any
+/// leading `Data/` prefix from destinations so that files deploy correctly on
+/// macOS / Linux.
 fn parse_file_element(tag: &quick_xml::events::BytesStart<'_>, is_folder: bool) -> FomodFile {
-    let source = get_attr(tag, "source").unwrap_or_default();
-    let destination = get_attr(tag, "destination").unwrap_or_default();
+    // Normalise backslash → forward-slash (FOMOD XMLs from Windows use backslashes).
+    let source = get_attr(tag, "source").unwrap_or_default().replace('\\', "/");
+    let destination = get_attr(tag, "destination").unwrap_or_default().replace('\\', "/");
+    // Strip "Data/" prefix from destination — we already deploy into Data/.
+    let destination = strip_data_prefix(&destination);
     let priority = get_attr(tag, "priority")
         .and_then(|v| v.parse::<i32>().ok())
         .unwrap_or(0);
@@ -902,6 +924,11 @@ pub fn parse_fomod(fomod_dir: &Path) -> Result<Option<FomodInstaller>> {
     let xml_content = read_xml_any_encoding(&config_path)
         .with_context(|| format!("Failed to read FOMOD config: {}", config_path.display()))?;
 
+    // Strip the encoding="..." declaration — many FOMOD XMLs declare
+    // "Windows-1252" or "utf-16" but are actually UTF-8 after our BOM-based
+    // decoding. The wrong declaration confuses quick_xml.
+    let xml_content = strip_xml_encoding_declaration(&xml_content);
+
     let installer = parse_fomod_xml(&xml_content)
         .with_context(|| format!("Failed to parse FOMOD config: {}", config_path.display()))?;
 
@@ -1105,9 +1132,43 @@ pub fn get_files_for_selections(
         }
 
         for group in &step.groups {
-            if let Some(selected_names) = selections.get(&group.name) {
+            // Try exact match first, then case-insensitive lookup.
+            let selected_names = selections.get(&group.name)
+                .or_else(|| {
+                    let lower = group.name.to_lowercase();
+                    selections.iter()
+                        .find(|(k, _)| k.to_lowercase() == lower)
+                        .map(|(_, v)| v)
+                });
+
+            if let Some(names) = selected_names {
                 for option in &group.options {
-                    if selected_names.contains(&option.name) {
+                    if names.contains(&option.name) {
+                        files.extend(option.files.clone());
+                        for (k, v) in &option.condition_flags {
+                            condition_flags.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+            } else {
+                // No match in selections — apply defaults for this group so
+                // Required/Recommended options are not silently dropped.
+                let ctx = FomodContext {
+                    flags: &condition_flags,
+                    game_version,
+                    data_dir,
+                    skse_version: None,
+                };
+                let defaults = default_selections_for_group(group, &ctx);
+                if !defaults.is_empty() {
+                    log::info!(
+                        "FOMOD: no selection for group '{}' — applying defaults: [{}]",
+                        group.name,
+                        defaults.join(", ")
+                    );
+                }
+                for option in &group.options {
+                    if defaults.contains(&option.name) {
                         files.extend(option.files.clone());
                         for (k, v) in &option.condition_flags {
                             condition_flags.insert(k.clone(), v.clone());
@@ -1174,6 +1235,62 @@ pub fn check_module_dependencies(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+/// Remove the `encoding="..."` attribute from an XML declaration header.
+///
+/// After BOM-based decoding we always have a valid UTF-8 string, but the
+/// original XML may still declare `encoding="Windows-1252"` or `encoding="utf-16"`
+/// which confuses the parser. Stripping it lets quick_xml default to UTF-8.
+fn strip_xml_encoding_declaration(xml: &str) -> String {
+    // Only look at the first 200 bytes — the XML declaration is always at the start.
+    let search_area = &xml[..xml.len().min(200)];
+    let header_start = match search_area.find("<?xml") {
+        Some(pos) => pos,
+        None => return xml.to_string(),
+    };
+    let header_end = match xml[header_start..].find("?>") {
+        Some(pos) => header_start + pos + 2,
+        None => return xml.to_string(),
+    };
+    let header = &xml[header_start..header_end];
+
+    // Find the encoding attribute (case-insensitive key, any quote style).
+    let header_lower = header.to_lowercase();
+    let enc_offset = match header_lower.find("encoding") {
+        Some(pos) => pos,
+        None => return xml.to_string(), // No encoding attribute — nothing to strip.
+    };
+
+    // Walk forward from "encoding" to find = then the quoted value.
+    let after_key = &header[enc_offset..];
+    let eq_pos = match after_key.find('=') {
+        Some(pos) => pos,
+        None => return xml.to_string(),
+    };
+    let after_eq = after_key[eq_pos + 1..].trim_start();
+    let quote = match after_eq.bytes().next() {
+        Some(b'"') | Some(b'\'') => after_eq.as_bytes()[0] as char,
+        _ => return xml.to_string(),
+    };
+    let value_start = 1; // skip opening quote
+    let value_end = match after_eq[value_start..].find(quote) {
+        Some(pos) => value_start + pos,
+        None => return xml.to_string(),
+    };
+
+    // Compute byte offsets within the original XML.
+    let attr_start_in_xml = header_start + enc_offset;
+    let consumed_in_after_key = eq_pos + 1 + (after_key[eq_pos + 1..].len() - after_eq.len()) + value_end + 1;
+    let attr_end_in_xml = attr_start_in_xml + consumed_in_after_key;
+
+    // Rebuild XML without the encoding attribute (also trim any trailing space).
+    let mut result = String::with_capacity(xml.len());
+    result.push_str(&xml[..attr_start_in_xml]);
+    let rest = &xml[attr_end_in_xml..];
+    // Avoid double spaces where the attribute was.
+    result.push_str(rest.strip_prefix(' ').unwrap_or(rest));
+    result
+}
+
 /// Read an XML file that may be encoded as UTF-8, UTF-8 with BOM, or UTF-16
 /// (LE/BE). Many FOMOD configs from Windows mod authors are saved as UTF-16.
 fn read_xml_any_encoding(path: &Path) -> Result<String> {
@@ -1218,7 +1335,7 @@ fn read_xml_any_encoding(path: &Path) -> Result<String> {
 }
 
 /// Find a child entry in `parent` whose name matches `target` case-insensitively.
-fn find_case_insensitive(parent: &Path, target: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn find_case_insensitive(parent: &Path, target: &str) -> Option<std::path::PathBuf> {
     // Fast path: try exact match first.
     let exact = parent.join(target);
     if exact.exists() {
@@ -1235,6 +1352,18 @@ fn find_case_insensitive(parent: &Path, target: &str) -> Option<std::path::PathB
     }
 
     None
+}
+
+/// Resolve a multi-component relative path against `base`, matching each
+/// component case-insensitively. Returns `None` if any component fails to
+/// match. This is essential on case-sensitive filesystems (Linux / SteamOS)
+/// where FOMOD source paths like `Textures/High` may not match `textures/high`.
+pub(crate) fn resolve_path_case_insensitive(base: &Path, rel: &str) -> Option<std::path::PathBuf> {
+    let mut current = base.to_path_buf();
+    for component in rel.split('/').filter(|c| !c.is_empty()) {
+        current = find_case_insensitive(&current, component)?;
+    }
+    Some(current)
 }
 
 /// Check whether a step's visibility condition is met.
@@ -2572,5 +2701,188 @@ mod tests {
         assert!(result.is_some());
         let installer = result.unwrap();
         assert_eq!(installer.module_name, "Test Mod");
+    }
+
+    // -----------------------------------------------------------------------
+    // v0.8.8 — Backslash normalization, Data/ prefix stripping, selection
+    // fallback, encoding declaration stripping, case-insensitive resolution
+    // -----------------------------------------------------------------------
+
+    /// FOMOD XML that uses Windows backslashes in source/destination paths.
+    const BACKSLASH_XML: &str = r#"
+<config>
+    <moduleName>Backslash Test</moduleName>
+    <requiredInstallFiles>
+        <folder source="Core\meshes" destination="" priority="0" />
+    </requiredInstallFiles>
+    <installSteps order="Explicit">
+        <installStep name="Options">
+            <optionalFileGroups order="Explicit">
+                <group name="Quality" type="SelectExactlyOne">
+                    <plugins order="Explicit">
+                        <plugin name="HQ">
+                            <description>High quality</description>
+                            <files>
+                                <folder source="textures\high" destination="textures" priority="0" />
+                            </files>
+                            <typeDescriptor><type name="Recommended" /></typeDescriptor>
+                        </plugin>
+                        <plugin name="LQ">
+                            <description>Low quality</description>
+                            <files>
+                                <folder source="textures\low" destination="textures" priority="0" />
+                            </files>
+                            <typeDescriptor><type name="Optional" /></typeDescriptor>
+                        </plugin>
+                    </plugins>
+                </group>
+            </optionalFileGroups>
+        </installStep>
+    </installSteps>
+</config>
+"#;
+
+    #[test]
+    fn backslash_paths_normalised_to_forward_slash() {
+        let installer = parse_fomod_xml(BACKSLASH_XML).expect("parse should succeed");
+        // Required files: source "Core\meshes" → "Core/meshes"
+        assert_eq!(installer.required_files[0].source, "Core/meshes");
+        // Option files: source "textures\high" → "textures/high"
+        let hq = &installer.steps[0].groups[0].options[0];
+        assert_eq!(hq.files[0].source, "textures/high");
+    }
+
+    /// FOMOD XML with "Data\" prefix in destinations.
+    const DATA_PREFIX_XML: &str = r#"
+<config>
+    <moduleName>Data Prefix Test</moduleName>
+    <installSteps order="Explicit">
+        <installStep name="Step">
+            <optionalFileGroups order="Explicit">
+                <group name="Main" type="SelectAll">
+                    <plugins order="Explicit">
+                        <plugin name="Core">
+                            <description>Core files</description>
+                            <files>
+                                <folder source="src\meshes" destination="Data\meshes" priority="0" />
+                                <file source="plugin.esp" destination="Data\plugin.esp" priority="0" />
+                                <folder source="root_stuff" destination="Data" priority="0" />
+                            </files>
+                            <typeDescriptor><type name="Required" /></typeDescriptor>
+                        </plugin>
+                    </plugins>
+                </group>
+            </optionalFileGroups>
+        </installStep>
+    </installSteps>
+</config>
+"#;
+
+    #[test]
+    fn data_prefix_stripped_from_destinations() {
+        let installer = parse_fomod_xml(DATA_PREFIX_XML).expect("parse should succeed");
+        let files = &installer.steps[0].groups[0].options[0].files;
+        // "Data\meshes" → normalise backslash → "Data/meshes" → strip prefix → "meshes"
+        assert_eq!(files[0].destination, "meshes");
+        // "Data\plugin.esp" → "plugin.esp"
+        assert_eq!(files[1].destination, "plugin.esp");
+        // "Data" (bare) → ""
+        assert_eq!(files[2].destination, "");
+    }
+
+    #[test]
+    fn strip_data_prefix_edge_cases() {
+        assert_eq!(strip_data_prefix(""), "");
+        assert_eq!(strip_data_prefix("data"), "");
+        assert_eq!(strip_data_prefix("Data"), "");
+        assert_eq!(strip_data_prefix("DATA/"), "");
+        assert_eq!(strip_data_prefix("Data/meshes"), "meshes");
+        assert_eq!(strip_data_prefix("data/Textures/High"), "Textures/High");
+        // "Database" should NOT be stripped
+        assert_eq!(strip_data_prefix("Database/files"), "Database/files");
+        // No prefix — pass through
+        assert_eq!(strip_data_prefix("meshes/test"), "meshes/test");
+    }
+
+    #[test]
+    fn case_insensitive_group_name_matching() {
+        let installer = parse_fomod_xml(SAMPLE_XML).unwrap();
+        // Provide selections with different casing: "textures" instead of "Textures"
+        let mut selections = HashMap::new();
+        selections.insert("textures".to_string(), vec!["Low Res".to_string()]);
+
+        let files = get_files_for_selections(&installer, &selections, None, None);
+        let sources: Vec<&str> = files.iter().map(|f| f.source.as_str()).collect();
+        // Should still match the "Textures" group via case-insensitive lookup
+        assert!(sources.contains(&"textures/low"));
+    }
+
+    #[test]
+    fn unmatched_group_falls_back_to_defaults() {
+        let installer = parse_fomod_xml(SAMPLE_XML).unwrap();
+        // Empty selections — no groups matched at all
+        let selections = HashMap::new();
+
+        let files = get_files_for_selections(&installer, &selections, None, None);
+        let sources: Vec<&str> = files.iter().map(|f| f.source.as_str()).collect();
+        // Should fall back to default for SelectExactlyOne: "Recommended" = "High Res"
+        assert!(sources.contains(&"core")); // required
+        assert!(sources.contains(&"textures/high")); // default for SelectExactlyOne
+        // SelectAny "Extras" with no Required/Recommended → nothing selected
+        assert!(!sources.contains(&"optional/enb.ini"));
+    }
+
+    #[test]
+    fn strip_xml_encoding_declaration_removes_encoding() {
+        let xml = r#"<?xml version="1.0" encoding="Windows-1252"?><config></config>"#;
+        let result = strip_xml_encoding_declaration(xml);
+        assert!(!result.contains("encoding"));
+        assert!(result.contains("<?xml"));
+        assert!(result.contains("<config>"));
+    }
+
+    #[test]
+    fn strip_xml_encoding_declaration_handles_single_quotes() {
+        let xml = r#"<?xml version='1.0' encoding='utf-16'?><config></config>"#;
+        let result = strip_xml_encoding_declaration(xml);
+        assert!(!result.contains("encoding"));
+        assert!(result.contains("<?xml"));
+    }
+
+    #[test]
+    fn strip_xml_encoding_declaration_no_encoding_passthrough() {
+        let xml = r#"<?xml version="1.0"?><config></config>"#;
+        let result = strip_xml_encoding_declaration(xml);
+        assert_eq!(result, xml);
+    }
+
+    #[test]
+    fn strip_xml_encoding_declaration_no_header_passthrough() {
+        let xml = r#"<config></config>"#;
+        let result = strip_xml_encoding_declaration(xml);
+        assert_eq!(result, xml);
+    }
+
+    #[test]
+    fn resolve_path_case_insensitive_works() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Create "Textures/High/diffuse.dds"
+        let dir = tmp.path().join("Textures").join("High");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("diffuse.dds"), b"test").unwrap();
+
+        // Resolve with different casing
+        let resolved = resolve_path_case_insensitive(tmp.path(), "textures/high");
+        assert!(resolved.is_some());
+        assert!(resolved.unwrap().is_dir());
+
+        // Resolve a file path
+        let resolved = resolve_path_case_insensitive(tmp.path(), "textures/high/diffuse.dds");
+        assert!(resolved.is_some());
+        assert!(resolved.unwrap().is_file());
+
+        // Non-existent path returns None
+        let resolved = resolve_path_case_insensitive(tmp.path(), "nonexistent/path");
+        assert!(resolved.is_none());
     }
 }

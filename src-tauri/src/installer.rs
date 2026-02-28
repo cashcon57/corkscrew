@@ -28,6 +28,34 @@ pub fn is_junk_file(path: &Path) -> bool {
     false
 }
 
+/// Returns `true` if a relative path is FOMOD/NMM metadata or other mod
+/// packaging artefacts that should never be deployed into the game directory.
+/// This is a superset of [`is_junk_file`] — it additionally catches `fomod/`
+/// directories, `meta.ini`, `info.xml`, and loose `ModuleConfig.xml` files.
+pub fn is_deploy_junk(path: &Path) -> bool {
+    if is_junk_file(path) {
+        return true;
+    }
+
+    for component in path.components() {
+        if let std::path::Component::Normal(s) = component {
+            let s = s.to_string_lossy().to_lowercase();
+            if s == "fomod" || s == "__fomod" {
+                return true;
+            }
+        }
+    }
+
+    if let Some(name) = path.file_name() {
+        let n = name.to_string_lossy().to_lowercase();
+        if n == "meta.ini" || n == "info.xml" || n == "moduleconfig.xml" {
+            return true;
+        }
+    }
+
+    false
+}
+
 /// I/O buffer size for archive extraction (256 KiB).
 /// Rust's default io::copy uses 8 KiB — 32x more syscalls per file.
 const EXTRACT_BUF_SIZE: usize = 256 * 1024;
@@ -1335,5 +1363,31 @@ mod tests {
         assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());
         assert!(err_msg.contains("Archive not found"));
+    }
+
+    #[test]
+    fn test_is_deploy_junk() {
+        // Existing junk still detected
+        assert!(is_deploy_junk(Path::new(".DS_Store")));
+        assert!(is_deploy_junk(Path::new("__MACOSX/something")));
+        assert!(is_deploy_junk(Path::new("Thumbs.db")));
+
+        // FOMOD metadata directories
+        assert!(is_deploy_junk(Path::new("fomod/ModuleConfig.xml")));
+        assert!(is_deploy_junk(Path::new("fomod/images/preview.png")));
+        assert!(is_deploy_junk(Path::new("FoMod/info.xml")));
+        assert!(is_deploy_junk(Path::new("__fomod/something")));
+
+        // Loose metadata files
+        assert!(is_deploy_junk(Path::new("meta.ini")));
+        assert!(is_deploy_junk(Path::new("info.xml")));
+        assert!(is_deploy_junk(Path::new("ModuleConfig.xml")));
+
+        // Valid mod content should NOT be junk
+        assert!(!is_deploy_junk(Path::new("meshes/armor/cuirass.nif")));
+        assert!(!is_deploy_junk(Path::new("textures/diffuse.dds")));
+        assert!(!is_deploy_junk(Path::new("mymod.esp")));
+        assert!(!is_deploy_junk(Path::new("skse/plugins/engine.dll")));
+        assert!(!is_deploy_junk(Path::new("scripts/script.pex")));
     }
 }
