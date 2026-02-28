@@ -230,7 +230,17 @@
   });
 
   // Mod log: show 10 items when collapsed, all when expanded
-  let visibleMods = $derived(modLogExpanded ? mods : mods.slice(0, 10));
+  // Sort mod log: failed & user_action first, then active, then done/pending
+  let sortedMods = $derived(
+    [...mods].sort((a, b) => {
+      const priority: Record<string, number> = { failed: 0, user_action: 1, fomod_pending: 2, extracting: 3, deploying: 3, downloading: 3, installing: 3 };
+      const pa = priority[a.status] ?? 5;
+      const pb = priority[b.status] ?? 5;
+      if (pa !== pb) return pa - pb;
+      return a.index - b.index;
+    }),
+  );
+  let visibleMods = $derived(modLogExpanded ? sortedMods : sortedMods.slice(0, 10));
 
   // Phase timeline
   const phases = [
@@ -467,7 +477,9 @@
                 </div>
               {/each}
             </div>
-            <p class="error-help-text">You can repair this collection from "My Collections" to retry failed mods.</p>
+            <button class="btn btn-secondary btn-sm" style="margin-top: 8px;" onclick={() => { dismissInstall(); goto('/collections').catch(() => { window.location.href = '/collections'; }); }}>
+              Repair Collection (retry failed mods)
+            </button>
           </div>
         {/if}
         {#if skseScanResult && skseScanResult.warnings.length > 0}
@@ -552,7 +564,9 @@
                 </div>
               {/each}
             </div>
-            <p class="error-help-text">You can repair this collection from "My Collections" to retry failed mods.</p>
+            <button class="btn btn-secondary btn-sm" style="margin-top: 8px;" onclick={() => { dismissInstall(); goto('/collections').catch(() => { window.location.href = '/collections'; }); }}>
+              Repair Collection (retry failed mods)
+            </button>
           </div>
         {/if}
         <p class="completion-elapsed">Time elapsed: {status.elapsed}</p>
@@ -694,8 +708,9 @@
           {#if extractingMods.length > 0}
             <div class="extracting-list">
               {#each extractingMods.sort((a, b) => (b.extractBytesDone ?? 0) - (a.extractBytesDone ?? 0)) as mod (mod.index)}
-                {@const hasBytes = (mod.extractBytesTotal ?? 0) > 0}
-                {@const pct = hasBytes ? Math.min(100, Math.round(((mod.extractBytesDone ?? 0) / mod.extractBytesTotal!) * 100)) : 0}
+                {@const hasBytes = (mod.extractBytesTotal ?? 0) > 0 || (mod.extractBytesDone ?? 0) > 0}
+                {@const effectiveTotal = Math.max(mod.extractBytesTotal ?? 0, mod.extractBytesDone ?? 0)}
+                {@const pct = effectiveTotal > 0 ? Math.min(100, Math.round(((mod.extractBytesDone ?? 0) / effectiveTotal) * 100)) : 0}
                 <div class="extracting-item-wrap">
                   <div class="extracting-item">
                     <svg class="icon-spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--system-accent)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
@@ -705,7 +720,7 @@
                     <span class="extracting-name" title={mod.name}>{mod.name}</span>
                     <span class="extracting-detail">
                       {#if hasBytes}
-                        {formatBytes(mod.extractBytesDone ?? 0)} / ~{formatBytes(mod.extractBytesTotal!)} ({pct}%)
+                        {formatBytes(mod.extractBytesDone ?? 0)} / ~{formatBytes(effectiveTotal)} ({pct}%)
                         {#if (mod.extractSpeedLive ?? 0) > 0}
                           <span class="speed-inline">{formatBytes(mod.extractSpeedLive!)}/s</span>
                         {/if}
@@ -867,9 +882,10 @@
                     <span class="speed-inline">{formatBytes(downloadSpeed)}/s</span>
                   {/if}
                 {:else if mod.status === "extracting"}
-                  {#if (mod.extractBytesTotal ?? 0) > 0}
-                    {formatBytes(mod.extractBytesDone ?? 0)} / ~{formatBytes(mod.extractBytesTotal!)}
-                    ({Math.min(100, Math.round(((mod.extractBytesDone ?? 0) / mod.extractBytesTotal!) * 100))}%)
+                  {#if (mod.extractBytesTotal ?? 0) > 0 || (mod.extractBytesDone ?? 0) > 0}
+                    {@const actTotal = Math.max(mod.extractBytesTotal ?? 0, mod.extractBytesDone ?? 0)}
+                    {formatBytes(mod.extractBytesDone ?? 0)} / ~{formatBytes(actTotal)}
+                    ({actTotal > 0 ? Math.min(100, Math.round(((mod.extractBytesDone ?? 0) / actTotal) * 100)) : 0}%)
                     {#if (mod.extractSpeedLive ?? 0) > 0}
                       <span class="speed-inline">{formatBytes(mod.extractSpeedLive!)}/s</span>
                     {/if}
@@ -1018,8 +1034,8 @@
             </span>
             <span class="mod-name" title={mod.name}>{mod.name}</span>
             <span class="mod-status-label">
-              {#if mod.status === "extracting" && (mod.extractBytesTotal ?? 0) > 0}
-                extracting {Math.min(100, Math.round(((mod.extractBytesDone ?? 0) / mod.extractBytesTotal!) * 100))}%
+              {#if mod.status === "extracting" && ((mod.extractBytesTotal ?? 0) > 0 || (mod.extractBytesDone ?? 0) > 0)}
+                extracting {Math.min(100, Math.round(((mod.extractBytesDone ?? 0) / Math.max(mod.extractBytesTotal ?? 0, mod.extractBytesDone ?? 0)) * 100))}%
               {:else if mod.status === "deploying" && (mod.deployBytesTotal ?? 0) > 0}
                 deploying {Math.min(100, Math.round(((mod.deployBytesDone ?? 0) / mod.deployBytesTotal!) * 100))}%
               {:else if mod.status === "deploying" && (mod.deployFilesTotal ?? 0) > 0}

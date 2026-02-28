@@ -1209,10 +1209,15 @@ pub async fn install_collection(
             if let Ok(ref dl) = result {
                 if needs_ext.contains(&order_pos) && !is_cancelled() {
                     let mut archive = dl.archive_path.clone();
-                    let arc_size = manifest_mods_c
-                        .get(mod_idx)
-                        .and_then(|m| m.source.file_size)
-                        .unwrap_or(0);
+                    // Use actual file size on disk (more accurate than manifest file_size)
+                    let arc_size = std::fs::metadata(&archive)
+                        .map(|m| m.len())
+                        .unwrap_or_else(|_| {
+                            manifest_mods_c
+                                .get(mod_idx)
+                                .and_then(|m| m.source.file_size)
+                                .unwrap_or(0)
+                        });
 
                     let _ = app_h.emit(
                         INSTALL_PROGRESS_EVENT,
@@ -1601,7 +1606,10 @@ pub async fn install_collection(
                     // Inline extraction for retried downloads
                     if needs_extraction_set.contains(&order_pos) && !is_cancelled() {
                         let archive = dl.archive_path.clone();
-                        let arc_size = entry.source.file_size.unwrap_or(0);
+                        // Use actual file size on disk (more accurate than manifest file_size)
+                        let arc_size = std::fs::metadata(&archive)
+                            .map(|m| m.len())
+                            .unwrap_or_else(|_| entry.source.file_size.unwrap_or(0));
                         let mod_name_ext = entry.name.clone();
 
                         let _ = app.emit(

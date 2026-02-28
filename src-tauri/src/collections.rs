@@ -283,7 +283,7 @@ pub struct CollectionModEntry {
 /// Returns true if the collection mod entry indicates root folder deployment
 /// (alongside the game exe rather than in the Data folder).
 pub fn is_root_mod(entry: &CollectionModEntry) -> bool {
-    const ROOT_TYPES: &[&str] = &["dinput", "enb", "rootmod"];
+    const ROOT_TYPES: &[&str] = &["dinput", "enb", "rootmod", "engine_injector"];
     // Check top-level type field
     if let Some(ref mt) = entry.mod_type {
         if ROOT_TYPES.contains(&mt.to_lowercase().as_str()) {
