@@ -907,6 +907,7 @@ pub async fn install_wabbajack_modlist(
             install_dir,
             &game_dir,
             &deploy_files,
+            &game_dir,
         ) {
             Ok(deploy_result) => {
                 emit_progress(

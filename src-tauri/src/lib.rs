@@ -427,7 +427,7 @@ fn uninstall_mod(
     // Remove deployed files from game directory
     let removed = if installed_mod.staging_path.is_some() {
         // Staged mod: undeploy via deployment manifest
-        deployer::undeploy_mod(db, &game_id, &bottle_name, mod_id, &data_dir)
+        deployer::undeploy_mod(db, &game_id, &bottle_name, mod_id, &data_dir, &game.game_path)
             .map_err(|e| e.to_string())?
     } else {
         // Legacy mod: remove files directly
@@ -492,7 +492,7 @@ fn toggle_mod(
             .map_err(|e| e.to_string())?;
         } else {
             // Undeploy (remove from game dir, keep staging intact)
-            deployer::undeploy_mod(db, &game_id, &bottle_name, mod_id, &data_dir)
+            deployer::undeploy_mod(db, &game_id, &bottle_name, mod_id, &data_dir, &game.game_path)
                 .map_err(|e| e.to_string())?;
         }
 
@@ -1487,7 +1487,7 @@ fn resolve_all_conflicts_cmd(
     // Redeploy to apply new priorities if any changed.
     if result.priorities_changed > 0 {
         let (_bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
-        deployer::redeploy_all(db, &game_id, &bottle_name, &data_dir).map_err(|e| e.to_string())?;
+        deployer::redeploy_all(db, &game_id, &bottle_name, &data_dir, &game.game_path).map_err(|e| e.to_string())?;
         if game_id == "skyrimse" {
             let bottle = resolve_bottle(&bottle_name)?;
             let _ = sync_plugins_for_game(&game, &bottle);
@@ -1545,7 +1545,7 @@ fn reorder_mods(
     let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
 
     // Redeploy to reflect new priority order
-    deployer::redeploy_all(db, &game_id, &bottle_name, &data_dir).map_err(|e| e.to_string())?;
+    deployer::redeploy_all(db, &game_id, &bottle_name, &data_dir, &game.game_path).map_err(|e| e.to_string())?;
 
     // Sync plugins after redeploy
     if game_id == "skyrimse" {
@@ -1571,6 +1571,7 @@ fn redeploy_all_mods(
         &game_id,
         &bottle_name,
         &data_dir,
+        &game.game_path,
         Some(
             move |current: usize,
                   total: usize,
@@ -1614,7 +1615,7 @@ fn deploy_incremental_cmd(
     let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
     let db = &state.db;
 
-    let result = deployer::deploy_incremental(db, &game_id, &bottle_name, &data_dir)
+    let result = deployer::deploy_incremental(db, &game_id, &bottle_name, &data_dir, &game.game_path)
         .map_err(|e| e.to_string())?;
 
     if game_id == "skyrimse" {
@@ -1787,7 +1788,7 @@ fn purge_deployment_cmd(
 
     auto_snapshot_before_destructive(db, &game_id, &bottle_name, "Before purge deployment");
 
-    let removed = deployer::purge_deployment(db, &game_id, &bottle_name, &data_dir)
+    let removed = deployer::purge_deployment(db, &game_id, &bottle_name, &data_dir, &game.game_path)
         .map_err(|e| e.to_string())?;
 
     if game_id == "skyrimse" {
@@ -1953,7 +1954,7 @@ fn switch_collection_cmd(
     let db = &state.db;
 
     // 1. Purge current deployment
-    deployer::purge_deployment(db, &game_id, &bottle_name, &data_dir).map_err(|e| e.to_string())?;
+    deployer::purge_deployment(db, &game_id, &bottle_name, &data_dir, &game.game_path).map_err(|e| e.to_string())?;
 
     // 2. Disable all mods for this game/bottle
     {
@@ -1978,7 +1979,7 @@ fn switch_collection_cmd(
 
     // 4. Redeploy
     let result =
-        deployer::redeploy_all(db, &game_id, &bottle_name, &data_dir).map_err(|e| e.to_string())?;
+        deployer::redeploy_all(db, &game_id, &bottle_name, &data_dir, &game.game_path).map_err(|e| e.to_string())?;
 
     // 5. Sync plugins if Skyrim SE
     if game_id == "skyrimse" {
@@ -2220,7 +2221,7 @@ async fn delete_collection_cmd(
         let remaining_mods = db.list_mods(&game_id, &bottle_name).unwrap_or_default();
         if remaining_mods.iter().any(|m| m.enabled) {
             log::info!("Redeploying {} remaining mods after collection removal", remaining_mods.len());
-            let _ = deployer::redeploy_all(&db, &game_id, &bottle_name, &data_dir);
+            let _ = deployer::redeploy_all(&db, &game_id, &bottle_name, &data_dir, &game.game_path);
         }
 
         // Note: We intentionally do NOT call cleanup_orphaned_downloads() here.
@@ -2284,7 +2285,7 @@ async fn delete_collection_cmd(
         );
 
         // Redeploy remaining mods to restore any files that were shadowed
-        if let Err(e) = deployer::redeploy_all(&db, &game_id, &bottle_name, &data_dir) {
+        if let Err(e) = deployer::redeploy_all(&db, &game_id, &bottle_name, &data_dir, &game.game_path) {
             errors.push(format!("Failed to redeploy remaining mods: {}", e));
         }
 
@@ -2383,7 +2384,7 @@ async fn uninstall_wabbajack_modlist(
             }
 
             // Undeploy
-            if let Err(e) = deployer::undeploy_mod(&db, &game_id, &bottle_name, m.id, &data_dir) {
+            if let Err(e) = deployer::undeploy_mod(&db, &game_id, &bottle_name, m.id, &data_dir, &game.game_path) {
                 errors.push(format!("Failed to undeploy '{}': {}", m.name, e));
             }
 
@@ -2465,7 +2466,7 @@ async fn uninstall_wabbajack_modlist(
 
         // Redeploy remaining mods
         let _ = app.emit("uninstall-progress", serde_json::json!({ "kind": "redeployStarted" }));
-        if let Err(e) = deployer::redeploy_all(&db, &game_id, &bottle_name, &data_dir) {
+        if let Err(e) = deployer::redeploy_all(&db, &game_id, &bottle_name, &data_dir, &game.game_path) {
             errors.push(format!("Failed to redeploy remaining mods: {}", e));
         }
         let _ = app.emit("uninstall-progress", serde_json::json!({ "kind": "redeployCompleted" }));
@@ -2510,7 +2511,7 @@ async fn restore_mod_snapshot(
 
         // Redeploy to apply the restored state
         let _ = app.emit("deploy-progress", serde_json::json!({ "kind": "redeployStarted" }));
-        deployer::redeploy_all(&db, &game_id, &bottle_name, &data_dir)
+        deployer::redeploy_all(&db, &game_id, &bottle_name, &data_dir, &game.game_path)
             .map_err(|e| format!("Failed to redeploy after snapshot restore: {}", e))?;
         let _ = app.emit("deploy-progress", serde_json::json!({ "kind": "redeployCompleted" }));
 
@@ -2543,7 +2544,7 @@ async fn return_to_vanilla(
         auto_snapshot_before_destructive(&db, &game_id, &bottle_name, "Before return to vanilla");
 
         // 2. Purge deployment
-        let removed = deployer::purge_deployment(&db, &game_id, &bottle_name, &data_dir)
+        let removed = deployer::purge_deployment(&db, &game_id, &bottle_name, &data_dir, &game.game_path)
             .map_err(|e| e.to_string())?;
         let files_removed = removed.len();
 
@@ -3064,7 +3065,7 @@ fn activate_profile(
     }
 
     // 2. Purge current deployment
-    let _ = deployer::purge_deployment(db, &game_id, &bottle_name, &data_dir);
+    let _ = deployer::purge_deployment(db, &game_id, &bottle_name, &data_dir, &game.game_path);
 
     // 3. Load target profile state
     let mod_states = profiles::get_mod_states(db, profile_id).map_err(|e| e.to_string())?;
@@ -3076,7 +3077,7 @@ fn activate_profile(
     }
 
     // 5. Redeploy enabled mods
-    let _ = deployer::redeploy_all(db, &game_id, &bottle_name, &data_dir);
+    let _ = deployer::redeploy_all(db, &game_id, &bottle_name, &data_dir, &game.game_path);
 
     // 6. Restore saves for the incoming profile
     if let Some(ref sd) = saves_dir {

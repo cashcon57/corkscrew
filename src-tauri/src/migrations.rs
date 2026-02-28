@@ -19,7 +19,7 @@ pub enum MigrationError {
 pub type Result<T> = std::result::Result<T, MigrationError>;
 
 /// The current target schema version. Bump this when adding a new migration.
-const TARGET_VERSION: u32 = 13;
+const TARGET_VERSION: u32 = 14;
 
 /// Get the current schema version (0 if no version table exists).
 pub fn current_version(conn: &Connection) -> Result<u32> {
@@ -109,6 +109,11 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     if version == 12 {
         migrate_v12_to_v13(conn)?;
         version = 13;
+    }
+
+    if version == 13 {
+        migrate_v13_to_v14(conn)?;
+        version = 14;
     }
 
     let _ = version; // suppress unused warning when TARGET_VERSION == current
@@ -745,6 +750,22 @@ fn migrate_v12_to_v13(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// v13 → v14: Add `deploy_target` column to deployment_manifest.
+/// Values: "data" (default, normal Data/ folder) or "root" (game root folder).
+fn migrate_v13_to_v14(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+
+    tx.execute_batch(
+        "ALTER TABLE deployment_manifest
+            ADD COLUMN deploy_target TEXT NOT NULL DEFAULT 'data';",
+    )?;
+
+    tx.execute("UPDATE schema_version SET version = 14", [])?;
+    tx.commit()?;
+    log::info!("Migration 13 → 14 complete (deploy_target column)");
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -886,7 +907,7 @@ mod tests {
     fn v13_creates_deployment_manifest_index() {
         let conn = memory_db();
         migrate(&conn).unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 13);
+        assert_eq!(current_version(&conn).unwrap(), 14);
 
         // Verify the compound index exists
         let index_exists: bool = conn

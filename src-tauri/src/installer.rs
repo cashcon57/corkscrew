@@ -858,6 +858,32 @@ pub fn find_data_root(extracted_dir: &Path) -> PathBuf {
     _find_data_root_inner(extracted_dir, 0)
 }
 
+/// Check if an extracted archive contains a "Root" folder (MO2 convention).
+/// Returns `(root_folder, data_root)` — root_folder is `Some(path)` if a
+/// case-insensitive "Root" child directory exists. Files inside it should be
+/// deployed to the game root folder, not the Data folder.
+pub fn split_root_and_data(extracted_dir: &Path) -> (Option<PathBuf>, PathBuf) {
+    let entries: Vec<_> = std::fs::read_dir(extracted_dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .collect();
+
+    let root_folder = entries.iter().find(|e| {
+        e.file_type().map(|ft| ft.is_dir()).unwrap_or(false)
+            && e.file_name().to_string_lossy().to_lowercase() == "root"
+    });
+
+    if let Some(rf) = root_folder {
+        // If there's a "Root" folder, the data root is the rest of the archive
+        let data_root = find_data_root(extracted_dir);
+        (Some(rf.path()), data_root)
+    } else {
+        (None, find_data_root(extracted_dir))
+    }
+}
+
 /// Inner recursive helper with a depth guard to avoid infinite loops on
 /// pathological archives.
 fn _find_data_root_inner(dir: &Path, depth: u32) -> PathBuf {

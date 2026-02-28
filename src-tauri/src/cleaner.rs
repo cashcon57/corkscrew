@@ -137,6 +137,54 @@ pub struct CleanResult {
 // ENB / save detection patterns
 // ---------------------------------------------------------------------------
 
+/// Critical game files that must NEVER be deleted by the cleaner, regardless of
+/// baseline or snapshot state. This is a hard safety rail to prevent catastrophic
+/// game directory destruction.
+///
+/// Patterns are matched case-insensitively against relative paths.
+const CRITICAL_FILE_PATTERNS: &[&str] = &[
+    // Skyrim SE / AE master files
+    "skyrim.esm",
+    "update.esm",
+    "dawnguard.esm",
+    "hearthfires.esm",
+    "dragonborn.esm",
+    // Fallout 4 master files
+    "fallout4.esm",
+    "dlcrobot.esm",
+    "dlcworkshop01.esm",
+    "dlcworkshop02.esm",
+    "dlcworkshop03.esm",
+    "dlccoast.esm",
+    "dlcnukaworld.esm",
+];
+
+/// File extensions that should never be deleted from a game Data directory
+/// unless they are confirmed mod files (tracked in deployment manifest AND
+/// have a staging counterpart).
+const PROTECTED_EXTENSIONS: &[&str] = &[".esm", ".bsa", ".ba2"];
+
+/// Returns true if a file is a critical game file that must never be deleted.
+fn is_critical_file(rel_path: &str) -> bool {
+    let lower = rel_path.to_lowercase();
+    // Check exact critical filenames (top-level master files)
+    for pattern in CRITICAL_FILE_PATTERNS {
+        if lower == *pattern {
+            return true;
+        }
+    }
+    // Any .esm/.bsa/.ba2 file at the root level (not in a subdirectory) is
+    // likely a vanilla game file and should be protected
+    if !lower.contains('/') {
+        for ext in PROTECTED_EXTENSIONS {
+            if lower.ends_with(ext) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Known ENB-related files and directories (case-insensitive check).
 const ENB_PATTERNS: &[&str] = &[
     "d3d11.dll",
@@ -178,7 +226,9 @@ pub fn scan_game_directory(
 ) -> Result<CleanReport> {
     let conn = db.conn().map_err(|e| CleanerError::Other(e.to_string()))?;
 
-    // Load snapshot paths into a HashSet for O(1) lookup
+    // Load snapshot paths into a HashSet for O(1) lookup.
+    // Normalize to lowercase for case-insensitive comparison — file systems
+    // under Wine/CrossOver may differ in casing from our baseline.
     let mut stmt = conn.prepare(
         "SELECT relative_path FROM game_file_snapshots
          WHERE game_id = ?1 AND bottle_name = ?2",
@@ -186,6 +236,7 @@ pub fn scan_game_directory(
     let snapshot_paths: HashSet<String> = stmt
         .query_map(params![game_id, bottle_name], |row| row.get::<_, String>(0))?
         .filter_map(|r| r.ok())
+        .map(|p| p.to_lowercase())
         .collect();
 
     // Fall back to built-in baseline if no user-created snapshot exists
@@ -199,7 +250,8 @@ pub fn scan_game_directory(
                     bottle_name,
                     baseline.len()
                 );
-                baseline
+                // Lowercase the built-in baseline too for case-insensitive matching
+                baseline.into_iter().map(|p| p.to_lowercase()).collect()
             }
             None => {
                 return Err(CleanerError::NoSnapshot(
@@ -244,14 +296,21 @@ pub fn scan_game_directory(
         let rel_str = relative.to_string_lossy().replace('\\', "/");
         disk_file_count += 1;
 
-        // Skip files that are in the baseline snapshot (stock files)
-        if snapshot_paths.contains(&rel_str) {
+        // SAFETY: Critical game files are NEVER flagged as non-stock,
+        // regardless of baseline or snapshot state.
+        if is_critical_file(&rel_str) {
             continue;
         }
 
-        // When using built-in baseline, also check stock patterns
-        // (catches CC content not in the explicit list, video files, etc.)
-        if using_builtin && baselines::is_stock_pattern(game_id, &rel_str) {
+        // Skip files that are in the baseline snapshot (case-insensitive)
+        if snapshot_paths.contains(&rel_str.to_lowercase()) {
+            continue;
+        }
+
+        // Also check stock patterns (catches CC content, video files, etc.)
+        // Apply this check regardless of whether using built-in baseline —
+        // stock patterns should always be protected.
+        if baselines::is_stock_pattern(game_id, &rel_str) {
             continue;
         }
 
@@ -317,6 +376,17 @@ pub fn clean_game_directory(
     let mut bytes_freed: u64 = 0;
 
     for file in &report.non_stock_files {
+        // SAFETY: Double-check critical files even if they somehow made it
+        // into the non_stock list. This is the last line of defense.
+        if is_critical_file(&file.relative_path) {
+            warn!(
+                "SAFETY: Refusing to delete critical file: {}",
+                file.relative_path
+            );
+            skipped_files.push(file.relative_path.clone());
+            continue;
+        }
+
         // Check exclude patterns
         if matches_exclude_pattern(&file.relative_path, &options.exclude_patterns) {
             skipped_files.push(file.relative_path.clone());
@@ -807,5 +877,87 @@ mod tests {
         assert!(!simple_glob_match("*.esp", "mod.esm"));
         assert!(simple_glob_match("meshes/*", "meshes/armor.nif"));
         assert!(!simple_glob_match("meshes/*", "textures/body.dds"));
+    }
+
+    #[test]
+    fn critical_file_detection() {
+        // Master ESM files are always critical
+        assert!(is_critical_file("Skyrim.esm"));
+        assert!(is_critical_file("skyrim.esm")); // case-insensitive
+        assert!(is_critical_file("SKYRIM.ESM")); // all caps
+        assert!(is_critical_file("Update.esm"));
+        assert!(is_critical_file("Dawnguard.esm"));
+        assert!(is_critical_file("Dragonborn.esm"));
+        assert!(is_critical_file("HearthFires.esm"));
+        assert!(is_critical_file("Fallout4.esm"));
+
+        // Top-level .esm/.bsa/.ba2 files are protected
+        assert!(is_critical_file("SomeOther.esm"));
+        assert!(is_critical_file("Skyrim - Textures0.bsa"));
+        assert!(is_critical_file("Dawnguard.bsa"));
+
+        // Subdirectory .esm files are NOT protected (mod-specific)
+        assert!(!is_critical_file("mods/something.esm"));
+
+        // Regular mod files are not critical
+        assert!(!is_critical_file("mod.esp"));
+        assert!(!is_critical_file("textures/something.dds"));
+        assert!(!is_critical_file("meshes/armor.nif"));
+    }
+
+    #[test]
+    fn cleaner_never_deletes_critical_files() {
+        let (db, tmp) = test_db();
+        let data_dir = tmp.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+
+        // Write both stock and non-stock files
+        fs::write(data_dir.join("Skyrim.esm"), b"master").unwrap();
+        fs::write(data_dir.join("Update.esm"), b"update").unwrap();
+        fs::write(data_dir.join("Skyrim - Textures0.bsa"), b"textures").unwrap();
+        fs::write(data_dir.join("mod.esp"), b"mod").unwrap();
+        fs::write(data_dir.join("modname.bsa"), b"mod archive").unwrap();
+
+        // Use an unknown game ID with no baseline — critical file protection
+        // should still prevent deletion of .esm and .bsa files
+        integrity::create_game_snapshot(&db, "testgame", "Gaming", &data_dir).unwrap();
+
+        // Now add the "non-stock" files after snapshot
+        fs::write(data_dir.join("extra.esp"), b"extra").unwrap();
+
+        // Even with no baseline, master files must survive
+        let options = CleanOptions::default();
+        let result =
+            clean_game_directory(&db, "testgame", "Gaming", &data_dir, &options).unwrap();
+
+        // extra.esp should be removed (it was added after snapshot)
+        assert!(result.removed_files.contains(&"extra.esp".to_string()));
+        // Stock files must still exist
+        assert!(data_dir.join("Skyrim.esm").exists());
+        assert!(data_dir.join("Update.esm").exists());
+        assert!(data_dir.join("Skyrim - Textures0.bsa").exists());
+    }
+
+    #[test]
+    fn case_insensitive_baseline_matching() {
+        let (db, tmp) = test_db();
+        let data_dir = tmp.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+
+        // Write stock file with different casing
+        fs::write(data_dir.join("skyrim.esm"), b"master").unwrap();
+        fs::write(data_dir.join("mod.esp"), b"mod").unwrap();
+
+        // No snapshot — falls back to built-in baseline which has "Skyrim.esm"
+        let report = scan_game_directory(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+
+        // skyrim.esm should NOT appear (case-insensitive match with baseline)
+        let paths: Vec<&str> = report
+            .non_stock_files
+            .iter()
+            .map(|f| f.relative_path.as_str())
+            .collect();
+        assert!(!paths.contains(&"skyrim.esm"), "skyrim.esm should be recognized as stock");
+        assert!(paths.contains(&"mod.esp"), "mod.esp should be non-stock");
     }
 }

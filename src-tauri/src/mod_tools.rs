@@ -1931,6 +1931,8 @@ mod tests {
                     phase: None,
                     file_overrides: vec![],
                     install_disabled: false,
+                    mod_type: None,
+                    details: None,
                 })
                 .collect(),
             plugins: vec![],

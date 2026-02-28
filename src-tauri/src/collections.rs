@@ -253,6 +253,79 @@ pub struct CollectionModEntry {
     pub file_overrides: Vec<String>,
     #[serde(default)]
     pub install_disabled: bool,
+    /// Vortex mod type — "dinput"/"enb" indicates root folder deployment.
+    #[serde(default, rename = "type")]
+    pub mod_type: Option<String>,
+    /// Extra details from Vortex (may contain nested `type` field).
+    #[serde(default)]
+    pub details: Option<serde_json::Value>,
+}
+
+/// Returns true if the collection mod entry indicates root folder deployment
+/// (alongside the game exe rather than in the Data folder).
+pub fn is_root_mod(entry: &CollectionModEntry) -> bool {
+    const ROOT_TYPES: &[&str] = &["dinput", "enb", "rootmod"];
+    // Check top-level type field
+    if let Some(ref mt) = entry.mod_type {
+        if ROOT_TYPES.contains(&mt.to_lowercase().as_str()) {
+            return true;
+        }
+    }
+    // Check details.type nested field
+    if let Some(ref details) = entry.details {
+        if let Some(dt) = details.get("type").and_then(|v| v.as_str()) {
+            if ROOT_TYPES.contains(&dt.to_lowercase().as_str()) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Known DLL filenames that belong in the game root folder, not Data/.
+/// These are injector/wrapper DLLs used by ENB, Engine Fixes, ReShade, etc.
+const ROOT_DLLS: &[&str] = &[
+    "d3dx9_42.dll",
+    "d3d11.dll",
+    "d3d9.dll",
+    "d3dcompiler_46e.dll",
+    "dinput8.dll",
+    "dxgi.dll",
+    "tbb.dll",
+    "tbbmalloc.dll",
+    "winhttp.dll",
+    "bink2w64.dll",
+    "binkw64.dll",
+    // ENB files
+    "enbhost.exe",
+    "enblocal.ini",
+    "enbseries.ini",
+    "enbraindrops.ini",
+];
+
+/// Known root-level file patterns (case-insensitive prefix/suffix checks).
+const ROOT_PREFIXES: &[&str] = &["enb"];
+
+/// Returns true if a set of staged file paths looks like root folder content
+/// (e.g. just DLLs/INIs that belong next to the game exe, not in Data/).
+pub fn looks_like_root_files(files: &[String]) -> bool {
+    if files.is_empty() {
+        return false;
+    }
+    // Every file must look like a root-level file (no subdirectory structure
+    // typical of Data/ content like meshes/, textures/, SKSE/, etc.)
+    files.iter().all(|f| {
+        let name = f.rsplit('/').next().unwrap_or(f).to_lowercase();
+        // Check against known root DLLs/files
+        if ROOT_DLLS.contains(&name.as_str()) {
+            return true;
+        }
+        // Check ENB-prefixed files
+        if ROOT_PREFIXES.iter().any(|p| name.starts_with(p)) {
+            return true;
+        }
+        false
+    })
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1105,12 +1178,17 @@ pub async fn fetch_collection_bundle(
         log::info!("Bundle response is JSON — checking for download redirect");
         let json: serde_json::Value = serde_json::from_slice(&bytes)
             .map_err(|e| CollectionsError::GraphQL(format!("Bundle JSON parse error: {}", e)))?;
+        // NM API returns: {"download_links":[{"name":"...","short_name":"...","URI":"https://cdn..."}]}
         let real_url = json
-            .get("download_link")
-            .or_else(|| json.get("download_url"))
-            .or_else(|| json.get("url"))
-            .or_else(|| json.get("Uri"))
+            .get("download_links")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|entry| entry.get("URI").or_else(|| entry.get("uri")).or_else(|| entry.get("url")))
             .and_then(|v| v.as_str())
+            // Fallback: singular field names
+            .or_else(|| json.get("download_link").and_then(|v| v.as_str()))
+            .or_else(|| json.get("download_url").and_then(|v| v.as_str()))
+            .or_else(|| json.get("url").and_then(|v| v.as_str()))
             .ok_or_else(|| {
                 CollectionsError::GraphQL(format!(
                     "Bundle response is JSON but no download URL found: {}",

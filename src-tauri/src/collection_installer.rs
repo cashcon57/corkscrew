@@ -136,6 +136,21 @@ impl Drop for TempDirGuard {
     }
 }
 
+/// Check if an extraction error indicates a corrupt/incomplete archive.
+fn is_corrupt_archive_error(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    lower.contains("crc")
+        || lower.contains("corrupt")
+        || lower.contains("badsignature")
+        || lower.contains("bad signature")
+        || lower.contains("nextheadercrcmismatch")
+        || lower.contains("unexpected end of data")
+        || lower.contains("header error")
+        || lower.contains("data error")
+        || lower.contains("broken")
+        || lower.contains("truncated")
+}
+
 /// Quick-check that an archive file has valid headers before extraction.
 fn validate_archive(path: &Path) -> Result<(), String> {
     let ext = path
@@ -662,6 +677,7 @@ pub async fn install_collection(
         .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
 
     let data_dir = PathBuf::from(&game.data_dir);
+    let game_path = PathBuf::from(&game.game_path);
 
     // Get download directory
     let download_dir = config::get_config()
@@ -1273,15 +1289,199 @@ pub async fn install_collection(
                                 map_c.lock().unwrap_or_else(|e| e.into_inner()).insert(order_pos, dir);
                             }
                             Ok(Ok(Err(e))) => {
-                                log::warn!("Extraction failed for mod {}: {}", order_pos, e);
-                                let _ = app_h.emit(
-                                    INSTALL_PROGRESS_EVENT,
-                                    InstallProgress::StagingModFailed {
-                                        mod_index: order_pos,
-                                        mod_name: mod_name.clone(),
-                                        error: e,
-                                    },
-                                );
+                                if is_corrupt_archive_error(&e) {
+                                    // Corrupt archive: delete, re-download, retry extraction once
+                                    log::error!(
+                                        "Corrupt archive detected for mod {} ({}): {} — will retry",
+                                        order_pos, mod_name, e
+                                    );
+                                    let _ = app_h.emit(
+                                        INSTALL_PROGRESS_EVENT,
+                                        InstallProgress::StagingModFailed {
+                                            mod_index: order_pos,
+                                            mod_name: mod_name.clone(),
+                                            error: format!(
+                                                "Archive corrupted, re-downloading... ({})",
+                                                e
+                                            ),
+                                        },
+                                    );
+                                    // Delete corrupt file
+                                    if archive.exists() {
+                                        log::info!("Deleting corrupt archive: {:?}", archive);
+                                        let _ = std::fs::remove_file(&archive);
+                                    }
+                                    // Remove DB cache entry
+                                    if let (Some(mid), Some(fid)) =
+                                        (entry.source.mod_id, entry.source.file_id)
+                                    {
+                                        if let Ok(Some(rec)) =
+                                            db_c.find_download_by_nexus_ids(mid, fid)
+                                        {
+                                            let _ = db_c.delete_download_record(rec.id);
+                                            log::info!(
+                                                "Removed corrupt download record (id={}) for {}",
+                                                rec.id, mod_name
+                                            );
+                                        }
+                                    }
+                                    // Re-download
+                                    let _ = app_h.emit(
+                                        INSTALL_PROGRESS_EVENT,
+                                        InstallProgress::DownloadModStarted {
+                                            mod_index: order_pos,
+                                            mod_name: mod_name.clone(),
+                                        },
+                                    );
+                                    match download_mod_archive(
+                                        &app_h,
+                                        &db_c,
+                                        &queue_c,
+                                        &entry,
+                                        order_pos,
+                                        &game_slug_c,
+                                        &download_dir_c,
+                                        &auth_method_c,
+                                        &manifest_name_c,
+                                        &game_id_c,
+                                        &bottle_name_c,
+                                    )
+                                    .await
+                                    {
+                                        Ok(dl2) => {
+                                            log::info!(
+                                                "Re-downloaded '{}', retrying extraction",
+                                                mod_name
+                                            );
+                                            let retry_archive = dl2.archive_path.clone();
+                                            let retry_temp = std::env::temp_dir().join(format!(
+                                                "corkscrew_extract_{}_retry",
+                                                order_pos
+                                            ));
+                                            let retry_result = tokio::task::spawn_blocking(
+                                                move || {
+                                                    if retry_temp.exists() {
+                                                        let _ =
+                                                            std::fs::remove_dir_all(&retry_temp);
+                                                    }
+                                                    let _ = std::fs::create_dir_all(&retry_temp);
+                                                    match crate::installer::extract_archive(
+                                                        &retry_archive,
+                                                        &retry_temp,
+                                                    ) {
+                                                        Ok(_) => Ok(retry_temp),
+                                                        Err(e2) => {
+                                                            let _ = std::fs::remove_dir_all(
+                                                                &retry_temp,
+                                                            );
+                                                            Err(e2.to_string())
+                                                        }
+                                                    }
+                                                },
+                                            )
+                                            .await;
+                                            match retry_result {
+                                                Ok(Ok(dir)) => {
+                                                    log::info!(
+                                                        "Retry extraction succeeded for mod {}",
+                                                        order_pos
+                                                    );
+                                                    let extracted_size: u64 =
+                                                        walkdir::WalkDir::new(&dir)
+                                                            .into_iter()
+                                                            .filter_map(|e| e.ok())
+                                                            .filter(|e| e.file_type().is_file())
+                                                            .map(|e| {
+                                                                e.metadata()
+                                                                    .map(|m| m.len())
+                                                                    .unwrap_or(0)
+                                                            })
+                                                            .sum();
+                                                    let _ = app_h.emit(
+                                                        INSTALL_PROGRESS_EVENT,
+                                                        InstallProgress::StagingModCompleted {
+                                                            mod_index: order_pos,
+                                                            mod_name: mod_name.clone(),
+                                                            extracted_size,
+                                                            duration_ms: extract_start
+                                                                .elapsed()
+                                                                .as_millis()
+                                                                as u64,
+                                                        },
+                                                    );
+                                                    map_c
+                                                        .lock()
+                                                        .unwrap_or_else(|e| e.into_inner())
+                                                        .insert(order_pos, dir);
+                                                }
+                                                Ok(Err(e2)) => {
+                                                    log::error!(
+                                                        "Retry extraction also failed for mod {}: {}",
+                                                        order_pos, e2
+                                                    );
+                                                    let _ = app_h.emit(
+                                                        INSTALL_PROGRESS_EVENT,
+                                                        InstallProgress::StagingModFailed {
+                                                            mod_index: order_pos,
+                                                            mod_name: mod_name.clone(),
+                                                            error: format!(
+                                                                "Archive still corrupt after re-download: {}",
+                                                                e2
+                                                            ),
+                                                        },
+                                                    );
+                                                }
+                                                Err(e2) => {
+                                                    log::error!(
+                                                        "Retry extraction panicked for mod {}: {}",
+                                                        order_pos, e2
+                                                    );
+                                                    let _ = app_h.emit(
+                                                        INSTALL_PROGRESS_EVENT,
+                                                        InstallProgress::StagingModFailed {
+                                                            mod_index: order_pos,
+                                                            mod_name: mod_name.clone(),
+                                                            error: format!(
+                                                                "Retry extraction failed: {}",
+                                                                e2
+                                                            ),
+                                                        },
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        Err(e2) => {
+                                            log::error!(
+                                                "Re-download failed for mod {}: {:?}",
+                                                order_pos, e2
+                                            );
+                                            let _ = app_h.emit(
+                                                INSTALL_PROGRESS_EVENT,
+                                                InstallProgress::StagingModFailed {
+                                                    mod_index: order_pos,
+                                                    mod_name: mod_name.clone(),
+                                                    error: format!(
+                                                        "Archive corrupted and re-download failed: {:?}",
+                                                        e2
+                                                    ),
+                                                },
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    log::warn!(
+                                        "Extraction failed for mod {}: {}",
+                                        order_pos, e
+                                    );
+                                    let _ = app_h.emit(
+                                        INSTALL_PROGRESS_EVENT,
+                                        InstallProgress::StagingModFailed {
+                                            mod_index: order_pos,
+                                            mod_name: mod_name.clone(),
+                                            error: e,
+                                        },
+                                    );
+                                }
                             }
                             Ok(Err(e)) => {
                                 log::warn!("Extraction task panicked for mod {}: {}", order_pos, e);
@@ -1819,6 +2019,7 @@ pub async fn install_collection(
             bottle_name,
             game_slug,
             &data_dir,
+            &game_path,
             &download_dir,
             &auth_method,
             is_premium,
@@ -2032,6 +2233,7 @@ pub async fn install_collection(
                 bottle_name,
                 game_slug,
                 &data_dir,
+                &game_path,
                 &download_dir,
                 &auth_method,
                 is_premium,
@@ -2214,7 +2416,7 @@ pub async fn install_collection(
         );
         // Try an emergency redeploy to fix the situation
         log::info!("Attempting emergency redeploy for {}/{}", game_id, bottle_name);
-        match deployer::redeploy_all(db, game_id, bottle_name, &data_dir) {
+        match deployer::redeploy_all(db, game_id, bottle_name, &data_dir, &game_path) {
             Ok(result) => {
                 log::info!(
                     "Emergency redeploy succeeded: {} files deployed",
@@ -2284,7 +2486,7 @@ pub async fn install_collection(
                     );
                     // Redeploy if priorities changed
                     if result.priorities_changed > 0 {
-                        let _ = deployer::redeploy_all(db, game_id, bottle_name, &data_dir);
+                        let _ = deployer::redeploy_all(db, game_id, bottle_name, &data_dir, &game_path);
                     }
                 }
                 Err(e) => {
@@ -2444,6 +2646,7 @@ async fn install_single_mod(
     bottle_name: &str,
     game_slug: &str,
     data_dir: &Path,
+    game_path: &Path,
     download_dir: &Path,
     auth_method: &oauth::AuthMethod,
     is_premium: bool,
@@ -2465,6 +2668,7 @@ async fn install_single_mod(
                 bottle_name,
                 game_slug,
                 data_dir,
+                game_path,
                 download_dir,
                 auth_method,
                 is_premium,
@@ -2484,6 +2688,7 @@ async fn install_single_mod(
                 game_id,
                 bottle_name,
                 data_dir,
+                game_path,
                 download_dir,
                 auth_method,
                 manifest_name,
@@ -2533,6 +2738,7 @@ async fn install_nexus_mod(
     bottle_name: &str,
     game_slug: &str,
     data_dir: &Path,
+    game_path: &Path,
     download_dir: &Path,
     auth_method: &oauth::AuthMethod,
     is_premium: bool,
@@ -2589,6 +2795,7 @@ async fn install_nexus_mod(
             game_id,
             bottle_name,
             data_dir,
+            game_path,
             pre_extracted,
         )
         .await?;
@@ -2647,6 +2854,7 @@ async fn install_nexus_mod(
                     game_id,
                     bottle_name,
                     data_dir,
+                    game_path,
                     None,
                 )
                 .await?;
@@ -2786,6 +2994,7 @@ async fn install_nexus_mod(
         game_id,
         bottle_name,
         data_dir,
+        game_path,
         None,
     )
     .await?;
@@ -2816,6 +3025,7 @@ async fn install_direct_mod(
     game_id: &str,
     bottle_name: &str,
     data_dir: &Path,
+    game_path: &Path,
     download_dir: &Path,
     auth_method: &oauth::AuthMethod,
     manifest_name: &str,
@@ -2846,6 +3056,7 @@ async fn install_direct_mod(
             game_id,
             bottle_name,
             data_dir,
+            game_path,
             pre_extracted,
         )
         .await?;
@@ -2909,6 +3120,7 @@ async fn install_direct_mod(
                         game_id,
                         bottle_name,
                         data_dir,
+                        game_path,
                         None,
                     )
                     .await?;
@@ -3019,6 +3231,7 @@ async fn install_direct_mod(
         game_id,
         bottle_name,
         data_dir,
+        game_path,
         None,
     )
     .await?;
@@ -3046,6 +3259,7 @@ async fn stage_and_deploy(
     game_id: &str,
     bottle_name: &str,
     data_dir: &Path,
+    game_path: &Path,
     pre_extracted: Option<PathBuf>,
 ) -> Result<(i64, u64), InstallError> {
     let mod_name = &mod_entry.name;
@@ -3129,6 +3343,53 @@ async fn stage_and_deploy(
         staging_result.staging_path.display(),
         mod_entry.choices.as_ref().map(|c| c.to_string().chars().take(200).collect::<String>())
     );
+
+    // Check for MO2-style "Root" folder in staging. If present, the files
+    // inside it should be deployed to game_path (root), not data_dir.
+    // We flatten Root/* up into staging root so they deploy correctly.
+    let has_root_folder = {
+        let root_candidate = staging_result.staging_path.join("Root");
+        let root_candidate_lc = staging_result.staging_path.join("root");
+        if root_candidate.is_dir() {
+            Some(root_candidate)
+        } else if root_candidate_lc.is_dir() {
+            Some(root_candidate_lc)
+        } else {
+            None
+        }
+    };
+    let mut root_files: Vec<String> = Vec::new();
+    if let Some(ref root_dir) = has_root_folder {
+        // Collect files from Root/ and move them up to staging root.
+        // These will be deployed to game_path instead of data_dir.
+        for entry in walkdir::WalkDir::new(root_dir)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+        {
+            if let Ok(rel) = entry.path().strip_prefix(root_dir) {
+                let dest = staging_result.staging_path.join(rel);
+                if let Some(parent) = dest.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if std::fs::rename(entry.path(), &dest).is_ok()
+                    || std::fs::copy(entry.path(), &dest).map(|_| ()).is_ok()
+                {
+                    root_files.push(rel.to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+        // Clean up the Root/ folder after flattening
+        let _ = std::fs::remove_dir_all(root_dir);
+        if !root_files.is_empty() {
+            log::info!(
+                "[stage_deploy] Flattened {} files from Root/ folder for '{}': {:?}",
+                root_files.len(),
+                mod_name,
+                &root_files,
+            );
+        }
+    }
 
     // Detect game version for FOMOD gameDependency evaluation.
     // For Skyrim SE, this determines whether SE (1.5.97) or AE (1.6.x) DLL
@@ -3370,7 +3631,7 @@ async fn stage_and_deploy(
     }
 
     // Apply file overrides — when non-empty, only deploy listed files
-    let files_to_deploy = if !mod_entry.file_overrides.is_empty() {
+    let mut files_to_deploy = if !mod_entry.file_overrides.is_empty() {
         files_to_deploy
             .into_iter()
             .filter(|f| {
@@ -3390,6 +3651,18 @@ async fn stage_and_deploy(
     } else {
         files_to_deploy
     };
+
+    // Include flattened Root/ files in the deploy list (they were moved
+    // into staging root above, so the deployer can find them).
+    if !root_files.is_empty() {
+        let mut merged = files_to_deploy;
+        for rf in &root_files {
+            if !merged.iter().any(|f| f == rf) {
+                merged.push(rf.clone());
+            }
+        }
+        files_to_deploy = merged;
+    }
 
     // Update DB with staging info (brief locks)
     let _ = app.emit(
@@ -3418,12 +3691,39 @@ async fn stage_and_deploy(
         },
     );
 
+    // Determine if this is a root mod (deploy to game root vs Data folder).
+    // Detection priority (OR'd — first match wins):
+    //   1. Collection metadata (mod_type == "dinput"/"enb"/"rootmod")
+    //   2. Archive had a "Root" folder (MO2 convention, flattened above)
+    //   3. File heuristic (all staged files are known root DLLs like d3dx9_42.dll)
+    let is_root_metadata = crate::collections::is_root_mod(mod_entry);
+    let is_root_archive = !root_files.is_empty();
+    let is_root_heuristic = crate::collections::looks_like_root_files(&files_to_deploy);
+    let is_root = is_root_metadata || is_root_archive || is_root_heuristic;
+    let deploy_target_str = if is_root { "root" } else { "data" };
+    if is_root {
+        log::info!(
+            "Mod '{}' detected as root mod (metadata={}, archive_root={}, heuristic={}, type={:?}, files={:?}) — deploying to game root",
+            mod_name,
+            is_root_metadata,
+            is_root_archive,
+            is_root_heuristic,
+            mod_entry.mod_type,
+            &files_to_deploy,
+        );
+    }
+
     {
         let db_c = Arc::clone(db);
         let gid = game_id.to_string();
         let bn = bottle_name.to_string();
         let sp = staging_result.staging_path.clone();
-        let dd = data_dir.to_path_buf();
+        let effective_dir = if is_root {
+            game_path.to_path_buf()
+        } else {
+            data_dir.to_path_buf()
+        };
+        let gp = game_path.to_path_buf();
         let files = files_to_deploy.clone();
         let app_deploy = app.clone();
 
@@ -3450,7 +3750,7 @@ async fn stage_and_deploy(
                 }
             };
             deployer::deploy_mod_atomic_with_progress(
-                &db_c, &gid, &bn, mod_id, &sp, &dd, &files, &progress_cb,
+                &db_c, &gid, &bn, mod_id, &sp, &effective_dir, &files, &progress_cb, &gp,
             )
         })
         .await
@@ -3475,6 +3775,11 @@ async fn stage_and_deploy(
                 return Err(InstallError::Failed(format!("Deploy failed: {}", e)));
             }
         }
+    }
+
+    // Record deploy target if root mod
+    if is_root {
+        let _ = db.set_deploy_target_for_mod(mod_id, deploy_target_str);
     }
 
     // If the collection manifest marks this mod as disabled, disable it after deploy

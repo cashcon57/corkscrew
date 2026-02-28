@@ -74,6 +74,8 @@ pub struct DeploymentEntry {
     pub sha256: Option<String>,
     pub deployed_at: String,
     pub mod_name: String,
+    /// "data" (default — game Data/ folder) or "root" (game root folder).
+    pub deploy_target: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -599,7 +601,8 @@ impl ModDatabase {
 
     /// Remove all deployment manifest entries for a mod.
     pub fn remove_deployment_entries_for_mod(&self, mod_id: i64) -> Result<Vec<String>> {
-        let paths = self.get_deployment_paths_for_mod(mod_id)?;
+        let paths_with_target = self.get_deployment_paths_for_mod(mod_id)?;
+        let paths: Vec<String> = paths_with_target.into_iter().map(|(p, _)| p).collect();
 
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
@@ -665,15 +668,46 @@ impl ModDatabase {
     }
 
     /// Get deployed file paths for a mod without deleting the manifest entries.
-    pub fn get_deployment_paths_for_mod(&self, mod_id: i64) -> Result<Vec<String>> {
+    /// Returns `(relative_path, deploy_target)` tuples.
+    pub fn get_deployment_paths_for_mod(&self, mod_id: i64) -> Result<Vec<(String, String)>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let mut stmt =
-            conn.prepare("SELECT relative_path FROM deployment_manifest WHERE mod_id = ?1")?;
-        let paths: Vec<String> = stmt
-            .query_map(params![mod_id], |row| row.get(0))?
+        let mut stmt = conn.prepare(
+            "SELECT relative_path, deploy_target FROM deployment_manifest WHERE mod_id = ?1",
+        )?;
+        let paths: Vec<(String, String)> = stmt
+            .query_map(params![mod_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1).unwrap_or_else(|_| "data".to_string()),
+                ))
+            })?
             .filter_map(|r| r.ok())
             .collect();
         Ok(paths)
+    }
+
+    /// Set deploy_target for all deployment entries of a mod.
+    pub fn set_deploy_target_for_mod(&self, mod_id: i64, target: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "UPDATE deployment_manifest SET deploy_target = ?1 WHERE mod_id = ?2",
+            params![target, mod_id],
+        )?;
+        Ok(())
+    }
+
+    /// Get the deploy_target for a mod (from its deployment manifest entries).
+    /// Returns "data" if no entries exist.
+    pub fn get_deploy_target_for_mod(&self, mod_id: i64) -> Result<String> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let result: Option<String> = conn
+            .query_row(
+                "SELECT deploy_target FROM deployment_manifest WHERE mod_id = ?1 LIMIT 1",
+                params![mod_id],
+                |row| row.get(0),
+            )
+            .ok();
+        Ok(result.unwrap_or_else(|| "data".to_string()))
     }
 
     /// Get deployment manifest for a game/bottle.
@@ -686,7 +720,8 @@ impl ModDatabase {
         let mut stmt = conn.prepare(
             "SELECT dm.id, dm.game_id, dm.bottle_name, dm.mod_id, dm.relative_path,
                     dm.staging_path, dm.deploy_method, dm.sha256, dm.deployed_at,
-                    COALESCE(im.name, 'Unknown') as mod_name
+                    COALESCE(im.name, 'Unknown') as mod_name,
+                    dm.deploy_target
              FROM deployment_manifest dm
              LEFT JOIN installed_mods im ON dm.mod_id = im.id
              WHERE dm.game_id = ?1 AND dm.bottle_name = ?2
@@ -705,6 +740,7 @@ impl ModDatabase {
                 sha256: row.get(7)?,
                 deployed_at: row.get(8)?,
                 mod_name: row.get(9)?,
+                deploy_target: row.get::<_, String>(10).unwrap_or_else(|_| "data".to_string()),
             })
         })?;
 
@@ -726,7 +762,8 @@ impl ModDatabase {
         let mut stmt = conn.prepare(
             "SELECT dm.id, dm.game_id, dm.bottle_name, dm.mod_id, dm.relative_path,
                     dm.staging_path, dm.deploy_method, dm.sha256, dm.deployed_at,
-                    COALESCE(im.name, 'Unknown') as mod_name
+                    COALESCE(im.name, 'Unknown') as mod_name,
+                    dm.deploy_target
              FROM deployment_manifest dm
              LEFT JOIN installed_mods im ON dm.mod_id = im.id
              WHERE dm.game_id = ?1 AND dm.bottle_name = ?2 AND dm.relative_path = ?3",
@@ -744,6 +781,7 @@ impl ModDatabase {
                 sha256: row.get(7)?,
                 deployed_at: row.get(8)?,
                 mod_name: row.get(9)?,
+                deploy_target: row.get::<_, String>(10).unwrap_or_else(|_| "data".to_string()),
             })
         })?;
 

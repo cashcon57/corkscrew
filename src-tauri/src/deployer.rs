@@ -19,8 +19,62 @@ use thiserror::Error;
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use crate::baselines;
 use crate::database::ModDatabase;
 use crate::platform;
+
+// ---------------------------------------------------------------------------
+// Vanilla file protection
+// ---------------------------------------------------------------------------
+
+/// Quick check for top-level game files that must never be deleted.
+/// This is a fast path that doesn't require a baseline lookup.
+fn is_protected_extension(rel_path: &str) -> bool {
+    let lower = rel_path.to_lowercase();
+    if !lower.contains('/') {
+        if lower.ends_with(".esm") || lower.ends_with(".bsa") || lower.ends_with(".ba2") {
+            return true;
+        }
+    }
+    false
+}
+
+/// Build a set of known vanilla file paths for a game (lowercase, for O(1) lookup).
+/// Returns None if no baseline is available for the game.
+fn build_vanilla_set(game_id: &str) -> Option<std::collections::HashSet<String>> {
+    baselines::get_builtin_baseline(game_id)
+        .map(|baseline| baseline.into_iter().map(|p| p.to_lowercase()).collect())
+}
+
+/// Check if a file is a vanilla/stock game file that should NOT be deleted
+/// during purge or undeploy operations. Uses a pre-built vanilla set for
+/// efficiency when checking many files.
+fn is_vanilla_file_with_set(
+    game_id: &str,
+    rel_path: &str,
+    vanilla_set: Option<&std::collections::HashSet<String>>,
+) -> bool {
+    // Fast path: top-level .esm/.bsa/.ba2 are always protected
+    if is_protected_extension(rel_path) {
+        return true;
+    }
+
+    let lower = rel_path.to_lowercase();
+
+    // Check built-in baseline (pre-computed set)
+    if let Some(set) = vanilla_set {
+        if set.contains(&lower) {
+            return true;
+        }
+    }
+
+    // Check stock patterns (CC content, video files, etc.)
+    if baselines::is_stock_pattern(game_id, rel_path) {
+        return true;
+    }
+
+    false
+}
 
 /// Callback type for reporting deployment progress: (files_done, files_total).
 pub type DeployProgressCb = dyn Fn(u64, u64) + Send + Sync;
@@ -210,10 +264,26 @@ fn deploy_mod_inner(
                     skipped_count.fetch_add(1, Ordering::Relaxed);
                     return None;
                 }
-                // We win — remove existing file
+                // We win — remove existing deployed file
                 if dst.exists() {
                     let _ = fs::remove_file(&dst);
                 }
+            } else if dst.exists() {
+                // File exists on disk but is NOT in the deployment manifest.
+                // This is likely a vanilla game file. Do NOT overwrite it —
+                // removing the existing file and deploying over it would make
+                // the vanilla file unrecoverable on undeploy/purge.
+                if is_protected_extension(rel_path) {
+                    warn!(
+                        "Deploy: skipping {} — would overwrite unmanaged vanilla file",
+                        rel_path
+                    );
+                    skipped_count.fetch_add(1, Ordering::Relaxed);
+                    return None;
+                }
+                // For non-protected files (textures, scripts, etc.), remove
+                // the existing file so the hardlink can succeed.
+                let _ = fs::remove_file(&dst);
             }
 
             if let Some(parent) = dst.parent() {
@@ -359,6 +429,7 @@ pub fn deploy_mod_atomic(
     staging_path: &Path,
     data_dir: &Path,
     files: &[String],
+    game_path: &Path,
 ) -> Result<DeployResult> {
     match deploy_mod(
         db,
@@ -375,7 +446,7 @@ pub fn deploy_mod_atomic(
                 "deploy_mod failed for mod {}, rolling back partially deployed files: {}",
                 mod_id, e
             );
-            let _ = undeploy_mod(db, game_id, bottle_name, mod_id, data_dir);
+            let _ = undeploy_mod(db, game_id, bottle_name, mod_id, data_dir, game_path);
             Err(e)
         }
     }
@@ -391,6 +462,7 @@ pub fn deploy_mod_atomic_with_progress(
     data_dir: &Path,
     files: &[String],
     progress: &DeployProgressCb,
+    game_path: &Path,
 ) -> Result<DeployResult> {
     match deploy_mod_inner(
         db,
@@ -408,7 +480,7 @@ pub fn deploy_mod_atomic_with_progress(
                 "deploy_mod failed for mod {}, rolling back partially deployed files: {}",
                 mod_id, e
             );
-            let _ = undeploy_mod(db, game_id, bottle_name, mod_id, data_dir);
+            let _ = undeploy_mod(db, game_id, bottle_name, mod_id, data_dir, game_path);
             Err(e)
         }
     }
@@ -424,6 +496,7 @@ pub fn undeploy_mod(
     bottle_name: &str,
     mod_id: i64,
     data_dir: &Path,
+    game_path: &Path,
 ) -> Result<Vec<String>> {
     // Query manifest paths FIRST without deleting entries.
     // Entries are only deleted after files are successfully removed,
@@ -432,12 +505,26 @@ pub fn undeploy_mod(
         .get_deployment_paths_for_mod(mod_id)
         .map_err(|e| DeployerError::Database(e.to_string()))?;
 
+    let vanilla_set = build_vanilla_set(game_id);
     let mut actually_removed = Vec::new();
     let mut errors = Vec::new();
     let mut restore_failures = Vec::new();
 
-    for rel_path in &manifest_paths {
-        let file_path = data_dir.join(rel_path);
+    for (rel_path, deploy_target) in &manifest_paths {
+        // SAFETY: Never delete vanilla game files even if they're in the manifest.
+        if deploy_target != "root"
+            && is_vanilla_file_with_set(game_id, rel_path, vanilla_set.as_ref())
+        {
+            warn!(
+                "SAFETY: Refusing to undeploy vanilla file: {}",
+                rel_path
+            );
+            actually_removed.push(rel_path.clone()); // Clean manifest entry
+            continue;
+        }
+
+        let base = if deploy_target == "root" { game_path } else { data_dir };
+        let file_path = base.join(rel_path);
 
         if file_path.exists() {
             // Make writable before deleting — some mod files are read-only
@@ -452,7 +539,7 @@ pub fn undeploy_mod(
             match fs::remove_file(&file_path) {
                 Ok(()) => {
                     actually_removed.push(rel_path.clone());
-                    prune_empty_dirs(&file_path, data_dir);
+                    prune_empty_dirs(&file_path, base);
                 }
                 Err(e) => {
                     errors.push(format!("{}: {}", rel_path, e));
@@ -467,7 +554,7 @@ pub fn undeploy_mod(
         // Restore next-priority mod's version of this file if applicable.
         // This runs BEFORE manifest deletion so that on failure, the manifest
         // still tracks the file until cleanup completes.
-        if let Err(e) = restore_next_winner(db, game_id, bottle_name, rel_path, data_dir) {
+        if let Err(e) = restore_next_winner(db, game_id, bottle_name, rel_path, base) {
             warn!("Failed to restore winner for {}: {}", rel_path, e);
             restore_failures.push(rel_path.clone());
         }
@@ -510,12 +597,14 @@ pub fn redeploy_all(
     game_id: &str,
     bottle_name: &str,
     data_dir: &Path,
+    game_path: &Path,
 ) -> Result<DeployResult> {
     redeploy_all_with_progress(
         db,
         game_id,
         bottle_name,
         data_dir,
+        game_path,
         None::<fn(usize, usize, &str, usize, usize)>,
     )
 }
@@ -529,6 +618,7 @@ pub fn redeploy_all_with_progress<F>(
     game_id: &str,
     bottle_name: &str,
     data_dir: &Path,
+    game_path: &Path,
     on_progress: Option<F>,
 ) -> Result<DeployResult>
 where
@@ -550,7 +640,7 @@ where
             .map_err(DeployerError::Other)?;
     }
 
-    purge_deployment(db, game_id, bottle_name, data_dir)?;
+    purge_deployment(db, game_id, bottle_name, data_dir, game_path)?;
 
     let mods = db
         .list_mods(game_id, bottle_name)
@@ -584,6 +674,12 @@ where
                 let files = crate::staging::list_staging_files(&staging_path)
                     .map_err(|e| DeployerError::Other(e.to_string()))?;
 
+                // Determine deploy target for this mod (root vs data)
+                let mod_target = db
+                    .get_deploy_target_for_mod(m.id)
+                    .unwrap_or_else(|_| "data".to_string());
+                let effective_dir = if mod_target == "root" { game_path } else { data_dir };
+
                 let file_count = files.len();
                 let result = deploy_mod(
                     db,
@@ -591,7 +687,7 @@ where
                     bottle_name,
                     m.id,
                     &staging_path,
-                    data_dir,
+                    effective_dir,
                     &files,
                 )?;
 
@@ -623,11 +719,13 @@ pub fn purge_deployment(
     game_id: &str,
     bottle_name: &str,
     data_dir: &Path,
+    game_path: &Path,
 ) -> Result<Vec<String>> {
     let manifest = db
         .get_deployment_manifest(game_id, bottle_name)
         .map_err(|e| DeployerError::Database(e.to_string()))?;
 
+    let vanilla_set = build_vanilla_set(game_id);
     let mut removed = Vec::new();
     let mut purged_mod_ids = std::collections::HashSet::new();
     let mut failed_mod_ids = std::collections::HashSet::new();
@@ -638,14 +736,28 @@ pub fn purge_deployment(
             continue;
         }
 
-        let file_path = data_dir.join(&entry.relative_path);
+        // SAFETY: Never delete vanilla game files even if they're in the manifest.
+        // This can happen if a mod overwrote a vanilla file during deployment.
+        if entry.deploy_target != "root"
+            && is_vanilla_file_with_set(game_id, &entry.relative_path, vanilla_set.as_ref())
+        {
+            warn!(
+                "SAFETY: Refusing to purge vanilla file: {}",
+                entry.relative_path
+            );
+            purged_mod_ids.insert(entry.mod_id); // Still clean manifest entry
+            continue;
+        }
+
+        let base = if entry.deploy_target == "root" { game_path } else { data_dir };
+        let file_path = base.join(&entry.relative_path);
         if file_path.exists() {
             if let Err(e) = fs::remove_file(&file_path) {
                 warn!("Failed to purge {}: {}", file_path.display(), e);
                 failed_mod_ids.insert(entry.mod_id);
             } else {
                 removed.push(entry.relative_path.clone());
-                prune_empty_dirs(&file_path, data_dir);
+                prune_empty_dirs(&file_path, base);
                 purged_mod_ids.insert(entry.mod_id);
             }
         } else {
@@ -1003,6 +1115,7 @@ pub fn deploy_incremental(
     game_id: &str,
     bottle_name: &str,
     data_dir: &Path,
+    game_path: &Path,
 ) -> Result<IncrementalDeployResult> {
     use rayon::prelude::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -1039,7 +1152,7 @@ pub fn deploy_incremental(
             total_changes * 100 / total_files.max(1)
         );
 
-        let full_result = redeploy_all(db, game_id, bottle_name, data_dir)?;
+        let full_result = redeploy_all(db, game_id, bottle_name, data_dir, game_path)?;
         return Ok(IncrementalDeployResult {
             files_added: full_result.deployed_count,
             files_removed: 0,
@@ -1473,7 +1586,7 @@ mod tests {
         .unwrap();
         assert!(data_dir.join("test.esp").exists());
 
-        let removed = undeploy_mod(&db, "skyrimse", "Gaming", mod_id, &data_dir).unwrap();
+        let removed = undeploy_mod(&db, "skyrimse", "Gaming", mod_id, &data_dir, &data_dir).unwrap();
         assert_eq!(removed.len(), 1);
         assert!(!data_dir.join("test.esp").exists());
     }
@@ -1600,7 +1713,7 @@ mod tests {
         ]);
 
         // From empty → 100% new files → triggers >80% fallback to full redeploy
-        let result = deploy_incremental(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+        let result = deploy_incremental(&db, "skyrimse", "Gaming", &data_dir, &data_dir).unwrap();
         assert!(result.fallback_used, "Initial deploy from empty should use fallback");
         assert!(data_dir.join("textures/sky.dds").exists());
         assert!(data_dir.join("meshes/tree.nif").exists());
@@ -1620,7 +1733,7 @@ mod tests {
             ("data.esp", b"esp data"),
             ("extra1.bsa", b"bsa data"),
         ]);
-        let r1 = deploy_incremental(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+        let r1 = deploy_incremental(&db, "skyrimse", "Gaming", &data_dir, &data_dir).unwrap();
         assert!(r1.fallback_used); // First deploy is full
 
         // Now add a small second mod — should be incremental (1 new file < 80%)
@@ -1628,7 +1741,7 @@ mod tests {
             ("new_plugin.esp", b"new esp data"),
         ]);
 
-        let r2 = deploy_incremental(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+        let r2 = deploy_incremental(&db, "skyrimse", "Gaming", &data_dir, &data_dir).unwrap();
         // fallback_used tracks copy-vs-hardlink (expected true in test env), not full-vs-incremental
         // File counts prove incremental behavior:
         assert_eq!(r2.files_added, 1);
@@ -1656,13 +1769,13 @@ mod tests {
         ]);
 
         // Initial deploy (fallback)
-        deploy_incremental(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+        deploy_incremental(&db, "skyrimse", "Gaming", &data_dir, &data_dir).unwrap();
         assert!(data_dir.join("small.esp").exists());
 
         // Disable the small mod — only 1 removal out of 5 files (~20% change)
         db.set_enabled(mod_b, false).unwrap();
 
-        let r2 = deploy_incremental(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+        let r2 = deploy_incremental(&db, "skyrimse", "Gaming", &data_dir, &data_dir).unwrap();
         // File counts prove incremental behavior (1 removal out of 5 total):
         assert_eq!(r2.files_removed, 1);
         assert_eq!(r2.files_added, 0);
@@ -1691,7 +1804,7 @@ mod tests {
         ]);
 
         // Initial deploy — ModB wins shared.esp (higher priority), fallback
-        deploy_incremental(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+        deploy_incremental(&db, "skyrimse", "Gaming", &data_dir, &data_dir).unwrap();
         let content = fs::read_to_string(data_dir.join("shared.esp")).unwrap();
         assert_eq!(content, "content from B");
 
@@ -1699,7 +1812,7 @@ mod tests {
         db.set_mod_priority(mod_a, 20).unwrap();
 
         // Incremental redeploy — should update shared.esp (1 of 5 files = 20%)
-        let r2 = deploy_incremental(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+        let r2 = deploy_incremental(&db, "skyrimse", "Gaming", &data_dir, &data_dir).unwrap();
         // File counts prove incremental behavior (1 update out of 5 total):
         assert_eq!(r2.files_updated, 1);
         assert_eq!(r2.files_added, 0);
@@ -1720,10 +1833,10 @@ mod tests {
         ]);
 
         // Deploy once (fallback since from empty)
-        deploy_incremental(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+        deploy_incremental(&db, "skyrimse", "Gaming", &data_dir, &data_dir).unwrap();
 
         // Deploy again — nothing changed
-        let r2 = deploy_incremental(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+        let r2 = deploy_incremental(&db, "skyrimse", "Gaming", &data_dir, &data_dir).unwrap();
         assert_eq!(r2.files_unchanged, 1);
         assert_eq!(r2.files_added, 0);
         assert_eq!(r2.files_removed, 0);
@@ -1736,7 +1849,7 @@ mod tests {
         let (db, _tmp, _, data_dir) = setup();
 
         // No mods — should be a no-op
-        let result = deploy_incremental(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+        let result = deploy_incremental(&db, "skyrimse", "Gaming", &data_dir, &data_dir).unwrap();
         assert_eq!(result.files_added, 0);
         assert_eq!(result.files_unchanged, 0);
         assert!(!result.fallback_used);
@@ -1753,7 +1866,7 @@ mod tests {
             add_test_mod(db, staging_root, name, *priority, files);
         }
         // Use full redeploy to establish baseline
-        redeploy_all(db, "skyrimse", "Gaming", data_dir).unwrap();
+        redeploy_all(db, "skyrimse", "Gaming", data_dir, data_dir).unwrap();
 
         // Manually update manifest entries with hashes
         let manifest = db.get_deployment_manifest("skyrimse", "Gaming").unwrap();
