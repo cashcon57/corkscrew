@@ -615,19 +615,24 @@ impl ModDatabase {
 
     /// Bulk-delete deployment manifest entries for a set of mod IDs in one
     /// transaction.  Returns all removed relative paths.
-    pub fn bulk_remove_deployment_entries(&self, mod_ids: &[i64]) -> Result<Vec<String>> {
+    pub fn bulk_remove_deployment_entries(&self, mod_ids: &[i64]) -> Result<Vec<(String, String)>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        // Collect all paths first
+        // Collect all paths + deploy targets first
         let placeholders: String = mod_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let query = format!(
-            "SELECT relative_path FROM deployment_manifest WHERE mod_id IN ({})",
+            "SELECT relative_path, deploy_target FROM deployment_manifest WHERE mod_id IN ({})",
             placeholders
         );
         let mut stmt = conn.prepare(&query)?;
         let params: Vec<&dyn rusqlite::types::ToSql> =
             mod_ids.iter().map(|id| id as &dyn rusqlite::types::ToSql).collect();
-        let paths: Vec<String> = stmt
-            .query_map(params.as_slice(), |row| row.get(0))?
+        let paths: Vec<(String, String)> = stmt
+            .query_map(params.as_slice(), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1).unwrap_or_else(|_| "data".to_string()),
+                ))
+            })?
             .filter_map(|r| r.ok())
             .collect();
         // Delete in one shot

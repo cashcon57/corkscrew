@@ -899,7 +899,7 @@ pub fn parse_fomod(fomod_dir: &Path) -> Result<Option<FomodInstaller>> {
         None => return Ok(None),
     };
 
-    let xml_content = fs::read_to_string(&config_path)
+    let xml_content = read_xml_any_encoding(&config_path)
         .with_context(|| format!("Failed to read FOMOD config: {}", config_path.display()))?;
 
     let installer = parse_fomod_xml(&xml_content)
@@ -1173,6 +1173,49 @@ pub fn check_module_dependencies(
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+/// Read an XML file that may be encoded as UTF-8, UTF-8 with BOM, or UTF-16
+/// (LE/BE). Many FOMOD configs from Windows mod authors are saved as UTF-16.
+fn read_xml_any_encoding(path: &Path) -> Result<String> {
+    let raw = fs::read(path)?;
+
+    if raw.len() < 2 {
+        // Too small to have a BOM — treat as UTF-8
+        return Ok(String::from_utf8_lossy(&raw).into_owned());
+    }
+
+    // UTF-16 LE BOM: FF FE
+    if raw[0] == 0xFF && raw[1] == 0xFE {
+        let u16_iter = raw[2..]
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]));
+        let decoded: String = char::decode_utf16(u16_iter)
+            .map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER))
+            .collect();
+        log::info!("FOMOD config decoded from UTF-16 LE: {}", path.display());
+        return Ok(decoded);
+    }
+
+    // UTF-16 BE BOM: FE FF
+    if raw[0] == 0xFE && raw[1] == 0xFF {
+        let u16_iter = raw[2..]
+            .chunks_exact(2)
+            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]));
+        let decoded: String = char::decode_utf16(u16_iter)
+            .map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER))
+            .collect();
+        log::info!("FOMOD config decoded from UTF-16 BE: {}", path.display());
+        return Ok(decoded);
+    }
+
+    // UTF-8 BOM: EF BB BF — strip it
+    if raw.len() >= 3 && raw[0] == 0xEF && raw[1] == 0xBB && raw[2] == 0xBF {
+        return Ok(String::from_utf8_lossy(&raw[3..]).into_owned());
+    }
+
+    // No BOM — try UTF-8 first, then fall back to lossy
+    Ok(String::from_utf8_lossy(&raw).into_owned())
+}
 
 /// Find a child entry in `parent` whose name matches `target` case-insensitively.
 fn find_case_insensitive(parent: &Path, target: &str) -> Option<std::path::PathBuf> {
@@ -2485,5 +2528,49 @@ mod tests {
         // but the flagDependency x=1 is not met).
         let sel = get_default_selections(&installer, None, None);
         assert!(!sel.contains_key("G"));
+    }
+
+    #[test]
+    fn read_xml_utf16le() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let xml = "<config><moduleName>Test</moduleName></config>";
+        // Write UTF-16 LE with BOM
+        let mut bytes: Vec<u8> = vec![0xFF, 0xFE]; // BOM
+        for c in xml.encode_utf16() {
+            bytes.extend_from_slice(&c.to_le_bytes());
+        }
+        std::fs::write(tmp.path(), &bytes).unwrap();
+        let result = read_xml_any_encoding(tmp.path()).unwrap();
+        assert!(result.contains("<moduleName>Test</moduleName>"));
+    }
+
+    #[test]
+    fn read_xml_utf8_bom() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let xml = "<config><moduleName>Test</moduleName></config>";
+        let mut bytes: Vec<u8> = vec![0xEF, 0xBB, 0xBF]; // UTF-8 BOM
+        bytes.extend_from_slice(xml.as_bytes());
+        std::fs::write(tmp.path(), &bytes).unwrap();
+        let result = read_xml_any_encoding(tmp.path()).unwrap();
+        assert!(result.contains("<moduleName>Test</moduleName>"));
+        assert!(!result.starts_with('\u{FEFF}')); // BOM stripped
+    }
+
+    #[test]
+    fn parse_fomod_utf16le() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fomod_dir = tmp.path().join("fomod");
+        std::fs::create_dir_all(&fomod_dir).unwrap();
+        let xml = SAMPLE_XML;
+        // Write as UTF-16 LE
+        let mut bytes: Vec<u8> = vec![0xFF, 0xFE];
+        for c in xml.encode_utf16() {
+            bytes.extend_from_slice(&c.to_le_bytes());
+        }
+        std::fs::write(fomod_dir.join("ModuleConfig.xml"), &bytes).unwrap();
+        let result = parse_fomod(tmp.path()).unwrap();
+        assert!(result.is_some());
+        let installer = result.unwrap();
+        assert_eq!(installer.module_name, "Test Mod");
     }
 }

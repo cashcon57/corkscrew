@@ -2082,9 +2082,11 @@ async fn delete_collection_cmd(
         let deployed_paths = db.bulk_remove_deployment_entries(&mod_ids).unwrap_or_default();
         let removed_count = std::sync::atomic::AtomicUsize::new(0);
         let path_total = deployed_paths.len();
+        let game_path = game.game_path.clone();
         use rayon::prelude::*;
-        deployed_paths.par_iter().for_each(|rel_path| {
-            let file_path = data_dir.join(rel_path);
+        deployed_paths.par_iter().for_each(|(rel_path, deploy_target)| {
+            let base = if deploy_target == "root" { &game_path } else { &data_dir };
+            let file_path = base.join(rel_path);
             if file_path.exists() {
                 // Make writable before deleting
                 if let Ok(metadata) = std::fs::metadata(&file_path) {
@@ -2120,10 +2122,11 @@ async fn delete_collection_cmd(
         // Collect unique parent directories, sort deepest-first, and remove if empty.
         {
             let mut parent_dirs: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
-            for rel_path in &deployed_paths {
-                let mut current = data_dir.join(rel_path);
+            for (rel_path, deploy_target) in &deployed_paths {
+                let base = if deploy_target == "root" { &game_path } else { &data_dir };
+                let mut current = base.join(rel_path);
                 while let Some(parent) = current.parent() {
-                    if parent == data_dir {
+                    if parent == data_dir || parent == game_path {
                         break;
                     }
                     parent_dirs.insert(parent.to_path_buf());
