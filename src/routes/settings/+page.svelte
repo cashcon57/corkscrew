@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
-  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, uninstallSkse, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, checkModToolUpdate, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads, checkSteamStatus, addToSteam, removeFromSteam, scanGameDirectory, cleanGameDirectory, checkSkyrimVersion, downgradeSkyrim, checkDeploymentHealth, redeployAllMods, getVerificationLevel, setVerificationLevel } from "$lib/api";
-  import type { CleanReport, CleanResult, DowngradeStatus, DeploymentHealth, VerificationLevel } from "$lib/types";
+  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, uninstallSkse, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, checkModToolUpdate, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads, checkSteamStatus, addToSteam, removeFromSteam, scanGameDirectory, cleanGameDirectory, checkSkyrimVersion, downgradeSkyrim, checkDeploymentHealth, redeployAllMods, getVerificationLevel, setVerificationLevel, getDepotDownloadCommand, checkDepotReady, applyDowngrade, listGameVersions, swapGameVersion } from "$lib/api";
+  import type { CleanReport, CleanResult, DowngradeStatus, DeploymentHealth, VerificationLevel, CachedVersion, DepotDownloadInfo } from "$lib/types";
   import type { SteamStatus } from "$lib/types";
   import { config, showError, showSuccess, selectedGame, skseStatus, currentPage, appVersion, updateReady, updateVersion, updateNotes, updateChecking, updateError, triggerUpdateCheck, controllerMode } from "$lib/stores";
   import type { AppConfig, ModTool, PlatformInfo, ToolInstallProgress, ToolUpdateInfo } from "$lib/types";
@@ -89,10 +89,19 @@
   let checkingUpdate = $state<string | null>(null);
   let toolUpdateResults = $state<Record<string, ToolUpdateInfo>>({});
 
-  // Downgrader
+  // Downgrader + Version Manager
   let downgradeStatus = $state<DowngradeStatus | null>(null);
   let downgrading = $state(false);
   let checkingDowngrade = $state(false);
+  let cachedVersions = $state<CachedVersion[]>([]);
+  let showDowngradeWizard = $state(false);
+  type WizardStep = "detect" | "guide" | "wait" | "apply" | "done";
+  let wizardStep = $state<WizardStep>("detect");
+  let depotInfo = $state<DepotDownloadInfo | null>(null);
+  let depotPolling = $state(false);
+  let depotPollTimer = $state<ReturnType<typeof setInterval> | null>(null);
+  let depotExePath = $state<string | null>(null);
+  let swapping = $state(false);
 
   // Deployment health
   let deployHealth = $state<DeploymentHealth | null>(null);
@@ -262,10 +271,11 @@
       steamStatus = await checkSteamStatus();
     } catch { /* not on Linux or Steam not available */ }
 
-    // Check Skyrim version / downgrade status
+    // Check Skyrim version / downgrade status + cached versions
     if (game && isSkyrim) {
       try {
         downgradeStatus = await checkSkyrimVersion(game.game_id, game.bottle_name);
+        cachedVersions = await listGameVersions(game.game_id);
       } catch { /* ignore */ }
     }
 
@@ -286,13 +296,71 @@
 
   });
 
-  async function handleDowngrade() {
+  async function handleRefreshDowngradeStatus() {
+    if (!game) return;
+    checkingDowngrade = true;
+    try {
+      downgradeStatus = await checkSkyrimVersion(game.game_id, game.bottle_name);
+      cachedVersions = await listGameVersions(game.game_id);
+    } catch (e: unknown) {
+      showError(`Failed to check version: ${e}`);
+    } finally {
+      checkingDowngrade = false;
+    }
+  }
+
+  async function openDowngradeWizard() {
+    if (!game) return;
+    showDowngradeWizard = true;
+    wizardStep = "detect";
+    depotExePath = null;
+
+    try {
+      downgradeStatus = await checkSkyrimVersion(game.game_id, game.bottle_name);
+      cachedVersions = await listGameVersions(game.game_id);
+    } catch { /* ignore */ }
+  }
+
+  async function wizardGoToGuide() {
+    if (!game) return;
+    wizardStep = "guide";
+    try {
+      depotInfo = await getDepotDownloadCommand(game.game_id, game.bottle_name);
+    } catch (e: unknown) {
+      showError(`Failed to get depot info: ${e}`);
+    }
+  }
+
+  async function wizardStartPolling() {
+    if (!game) return;
+    wizardStep = "wait";
+    depotPolling = true;
+
+    // Start polling every 3 seconds
+    depotPollTimer = setInterval(async () => {
+      if (!game) return;
+      try {
+        const result = await checkDepotReady(game.game_id, game.bottle_name);
+        if (result) {
+          depotExePath = result;
+          depotPolling = false;
+          if (depotPollTimer) clearInterval(depotPollTimer);
+          depotPollTimer = null;
+          wizardStep = "apply";
+        }
+      } catch { /* keep polling */ }
+    }, 3000);
+  }
+
+  async function wizardApplyDowngrade() {
     if (!game) return;
     downgrading = true;
     try {
-      const status = await downgradeSkyrim(game.game_id, game.bottle_name, "full");
+      const status = await applyDowngrade(game.game_id, game.bottle_name);
       downgradeStatus = status;
-      showSuccess(`Game downgraded to v${status.target_version}`);
+      cachedVersions = await listGameVersions(game.game_id);
+      wizardStep = "done";
+      showSuccess(`Game downgraded to v${status.current_version}`);
     } catch (e: unknown) {
       showError(`Downgrade failed: ${e}`);
     } finally {
@@ -300,15 +368,35 @@
     }
   }
 
-  async function handleRefreshDowngradeStatus() {
+  function closeWizard() {
+    showDowngradeWizard = false;
+    if (depotPollTimer) {
+      clearInterval(depotPollTimer);
+      depotPollTimer = null;
+    }
+    depotPolling = false;
+  }
+
+  async function handleSwapVersion(version: string) {
     if (!game) return;
-    checkingDowngrade = true;
+    swapping = true;
     try {
-      downgradeStatus = await checkSkyrimVersion(game.game_id, game.bottle_name);
+      const status = await swapGameVersion(game.game_id, game.bottle_name, version);
+      downgradeStatus = status;
+      showSuccess(`Switched game to v${version}`);
     } catch (e: unknown) {
-      showError(`Failed to check version: ${e}`);
+      showError(`Version swap failed: ${e}`);
     } finally {
-      checkingDowngrade = false;
+      swapping = false;
+    }
+  }
+
+  async function copyToClipboard(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      showSuccess("Copied to clipboard");
+    } catch {
+      showError("Failed to copy to clipboard");
     }
   }
 
@@ -849,7 +937,7 @@
         </div>
       </div>
     </div>
-    <!-- Downgrader -->
+    <!-- Game Version Manager -->
     {#if downgradeStatus}
     <div class="section">
       <h2 class="section-title">Game Version</h2>
@@ -866,25 +954,25 @@
             <span class="row-label">Skyrim SE v{downgradeStatus.current_version}</span>
             <span class="tool-description">
               {#if downgradeStatus.is_downgraded}
-                Downgraded — compatible with most SKSE mods
+                Running SE (1.5.97) — compatible with most SKSE mods
               {:else}
-                Most mods target v1.5.97. Downgrading creates a separate game copy.
+                Running Anniversary Edition — some SKSE mods require v1.5.97
               {/if}
             </span>
           </div>
           <div class="tool-action">
             {#if downgradeStatus.is_downgraded}
-              <span class="badge badge-green">Downgraded</span>
+              <span class="badge badge-green">SE (1.5.97)</span>
             {:else}
-              <button
-                class="btn-primary"
-                onclick={handleDowngrade}
-                disabled={downgrading}
-                type="button"
-              >
-                {downgrading ? "Downgrading..." : "Downgrade to v1.5.97"}
-              </button>
+              <span class="badge badge-blue">AE</span>
             {/if}
+            <button
+              class="btn-primary"
+              onclick={openDowngradeWizard}
+              type="button"
+            >
+              Manage Versions
+            </button>
             <button
               class="btn-ghost"
               onclick={handleRefreshDowngradeStatus}
@@ -896,8 +984,175 @@
             </button>
           </div>
         </div>
+
+        <!-- Cached versions -->
+        {#if cachedVersions.length > 0}
+          <div class="card-row" style="flex-direction: column; gap: 0.5rem; padding-top: 0;">
+            <span class="row-label" style="font-size: 0.75rem; opacity: 0.7;">Cached versions (instant swap):</span>
+            <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+              {#each cachedVersions as cv}
+                <button
+                  class="btn-ghost"
+                  style="font-size: 0.8rem; padding: 0.25rem 0.75rem;"
+                  disabled={swapping || downgradeStatus?.current_version === cv.version}
+                  onclick={() => handleSwapVersion(cv.version)}
+                  type="button"
+                >
+                  {downgradeStatus?.current_version === cv.version ? `v${cv.version} (active)` : `Switch to v${cv.version}`}
+                </button>
+              {/each}
+            </div>
+          </div>
+        {/if}
       </div>
     </div>
+    {/if}
+
+    <!-- Downgrade Wizard Modal -->
+    {#if showDowngradeWizard}
+      <div class="modal-overlay" onclick={closeWizard} role="presentation">
+        <div class="cleanup-modal" onclick={(e) => e.stopPropagation()} role="dialog" aria-label="Downgrade wizard">
+          <div class="cleanup-header">
+            <h3 class="cleanup-title">
+              {#if wizardStep === "detect"}Manage Game Version
+              {:else if wizardStep === "guide"}Step 1: Download Old Version
+              {:else if wizardStep === "wait"}Step 2: Waiting for Download
+              {:else if wizardStep === "apply"}Step 3: Apply Downgrade
+              {:else}Downgrade Complete
+              {/if}
+            </h3>
+            <button class="cleanup-close" onclick={closeWizard}>&times;</button>
+          </div>
+
+          <div class="cleanup-body">
+            {#if wizardStep === "detect"}
+              <div class="cleanup-summary">
+                <p class="cleanup-info">
+                  <strong>Current version:</strong> {downgradeStatus?.current_version ?? "Unknown"}
+                </p>
+                {#if cachedVersions.length > 0}
+                  <p class="cleanup-info" style="margin-top: 0.5rem;">
+                    <strong>Cached versions:</strong>
+                  </p>
+                  {#each cachedVersions as cv}
+                    <div style="display: flex; align-items: center; gap: 0.5rem; margin: 0.25rem 0; padding: 0.5rem; background: var(--surface-1); border-radius: 6px;">
+                      <span style="flex: 1;">v{cv.version}</span>
+                      <button
+                        class="btn-ghost"
+                        style="font-size: 0.8rem;"
+                        disabled={swapping || downgradeStatus?.current_version === cv.version}
+                        onclick={() => handleSwapVersion(cv.version)}
+                        type="button"
+                      >
+                        {downgradeStatus?.current_version === cv.version ? "Active" : "Switch"}
+                      </button>
+                    </div>
+                  {/each}
+                {:else}
+                  <p class="cleanup-info" style="margin-top: 0.5rem; opacity: 0.7;">
+                    No cached versions yet. Download v1.5.97 using Steam's depot system.
+                  </p>
+                {/if}
+              </div>
+
+            {:else if wizardStep === "guide"}
+              <div class="cleanup-summary">
+                <p class="cleanup-info">
+                  To download the old Skyrim SE v1.5.97 executable, you need to use Steam's console.
+                </p>
+                <div style="margin: 1rem 0; padding: 0.75rem; background: var(--surface-1); border-radius: 6px; font-family: monospace; font-size: 0.85rem; word-break: break-all;">
+                  {depotInfo?.command ?? "download_depot 489830 489833 4063321535627579835"}
+                </div>
+                <ol style="margin: 0.75rem 0; padding-left: 1.5rem; line-height: 1.8;">
+                  <li>Click "Open Steam Console" below</li>
+                  <li>Click "Copy Command" to copy the depot command</li>
+                  <li>Paste the command into the Steam console and press Enter</li>
+                  <li>Wait for the download to complete (may take several minutes)</li>
+                  <li>Click "Next" to proceed</li>
+                </ol>
+              </div>
+
+            {:else if wizardStep === "wait"}
+              <div class="cleanup-summary">
+                <p class="cleanup-info">
+                  Waiting for Steam to finish downloading depot files...
+                </p>
+                <div style="display: flex; align-items: center; gap: 0.75rem; margin: 1rem 0; padding: 1rem; background: var(--surface-1); border-radius: 6px;">
+                  <div class="spinner" style="width: 24px; height: 24px; border: 2px solid var(--border); border-top-color: var(--blue); border-radius: 50%; animation: spin 1s linear infinite;"></div>
+                  <span>Polling for SkyrimSE.exe in depot folder...</span>
+                </div>
+                {#if depotInfo?.expected_path}
+                  <p class="cleanup-info" style="font-size: 0.8rem; opacity: 0.7;">
+                    Looking in: {depotInfo.expected_path}
+                  </p>
+                {/if}
+              </div>
+
+            {:else if wizardStep === "apply"}
+              <div class="cleanup-summary">
+                <p class="cleanup-info">
+                  Depot files downloaded successfully. Ready to apply the downgrade.
+                </p>
+                <p class="cleanup-info" style="margin-top: 0.5rem;">
+                  This will:
+                </p>
+                <ul style="margin: 0.5rem 0; padding-left: 1.5rem; line-height: 1.8;">
+                  <li>Cache your current AE executable (so you can switch back later)</li>
+                  <li>Cache the v1.5.97 executable from the depot download</li>
+                  <li>Replace the game's SkyrimSE.exe with the v1.5.97 version</li>
+                </ul>
+              </div>
+
+            {:else if wizardStep === "done"}
+              <div class="cleanup-summary">
+                <p class="cleanup-info">
+                  Downgrade complete! Your game is now running <strong>v{downgradeStatus?.current_version}</strong>.
+                </p>
+                <p class="cleanup-info" style="margin-top: 0.5rem;">
+                  You can switch between versions anytime from the Game Version section in Settings.
+                </p>
+              </div>
+            {/if}
+          </div>
+
+          <div class="cleanup-actions">
+            {#if wizardStep === "detect"}
+              <button class="btn btn-ghost" onclick={closeWizard} type="button">Close</button>
+              {#if !downgradeStatus?.is_downgraded}
+                <button class="btn btn-primary" onclick={wizardGoToGuide} type="button">
+                  Download v1.5.97
+                </button>
+              {/if}
+
+            {:else if wizardStep === "guide"}
+              <button class="btn btn-ghost" onclick={() => { wizardStep = "detect"; }} type="button">Back</button>
+              {#if depotInfo?.steam_uri}
+                <button class="btn btn-secondary" onclick={() => openUrl(depotInfo!.steam_uri)} type="button">
+                  Open Steam Console
+                </button>
+              {/if}
+              <button class="btn btn-ghost" onclick={() => copyToClipboard(depotInfo?.command ?? "")} type="button">
+                Copy Command
+              </button>
+              <button class="btn btn-primary" onclick={wizardStartPolling} type="button">
+                Next
+              </button>
+
+            {:else if wizardStep === "wait"}
+              <button class="btn btn-ghost" onclick={() => { if (depotPollTimer) clearInterval(depotPollTimer); depotPollTimer = null; depotPolling = false; wizardStep = "guide"; }} type="button">Back</button>
+
+            {:else if wizardStep === "apply"}
+              <button class="btn btn-ghost" onclick={closeWizard} type="button">Cancel</button>
+              <button class="btn btn-primary" onclick={wizardApplyDowngrade} disabled={downgrading} type="button">
+                {downgrading ? "Applying..." : "Apply Downgrade"}
+              </button>
+
+            {:else if wizardStep === "done"}
+              <button class="btn btn-primary" onclick={closeWizard} type="button">Done</button>
+            {/if}
+          </div>
+        </div>
+      </div>
     {/if}
   {/if}
 

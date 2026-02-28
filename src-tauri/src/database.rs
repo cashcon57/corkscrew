@@ -109,6 +109,8 @@ pub struct CollectionSummary {
     pub game_domain: Option<String>,
     pub installed_revision: Option<u32>,
     pub original_mod_count: Option<usize>,
+    #[serde(default)]
+    pub game_versions: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------

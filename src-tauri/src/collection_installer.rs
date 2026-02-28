@@ -32,14 +32,6 @@ fn is_cancelled() -> bool {
     INSTALL_CANCELLED.load(Ordering::SeqCst)
 }
 
-/// Create a FOMOD request channel and return a correlation ID + receiver.
-fn create_fomod_request() -> (String, oneshot::Receiver<FomodSelections>) {
-    let id = uuid::Uuid::new_v4().to_string();
-    let (tx, rx) = oneshot::channel();
-    FOMOD_PENDING.lock().unwrap().insert(id.clone(), tx);
-    (id, rx)
-}
-
 /// Submit FOMOD choices from the frontend for a pending request.
 pub fn submit_fomod_choices(
     correlation_id: &str,
@@ -838,7 +830,7 @@ pub async fn install_collection(
                     INSTALL_PROGRESS_EVENT,
                     InstallProgress::StepChanged {
                         mod_index: 0,
-                        step: "warning".to_string(),
+                        step: "version_warning".to_string(),
                         detail: Some(format!(
                             "Game version mismatch: collection was built for [{}] but your game is {}. Some mods may not work correctly.",
                             manifest.game_versions.join(", "),
@@ -3980,6 +3972,9 @@ fn merge_bundle_into_manifest(
     }
     if merged.ini_tweaks.is_empty() {
         merged.ini_tweaks = bundle.ini_tweaks.clone();
+    }
+    if merged.game_versions.is_empty() {
+        merged.game_versions = bundle.game_versions.clone();
     }
 
     let bundle_choices_count = bundle.mods.iter().filter(|m| m.choices.is_some()).count();

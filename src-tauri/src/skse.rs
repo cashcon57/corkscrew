@@ -918,6 +918,117 @@ pub fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Post-install SKSE plugin scan
+// ---------------------------------------------------------------------------
+
+/// Warning about a specific SKSE plugin DLL.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SksePluginWarning {
+    /// Name of the DLL file.
+    pub dll_name: String,
+    /// Description of the issue.
+    pub warning: String,
+}
+
+/// Results of scanning SKSE plugins for compatibility issues.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SksePluginScanResult {
+    /// Total number of DLL files found in the plugins directory.
+    pub total_plugins: usize,
+    /// Address Library version detected ("SE" for 1.5.97, "AE" for 1.6.x, or "unknown").
+    pub address_library_version: String,
+    /// Whether the Address Library matches the game version.
+    pub address_library_matches: bool,
+    /// Specific DLL warnings.
+    pub warnings: Vec<SksePluginWarning>,
+}
+
+/// Scan SKSE plugins directory for compatibility issues.
+///
+/// Checks:
+/// - Number of DLL plugins present
+/// - Address Library version files (`versionlib-1-5-97-0.bin` for SE, `versionlib-1-6-*.bin` for AE)
+/// - Whether Address Library matches the game version
+pub fn scan_skse_plugins(data_dir: &Path, game_version: &str) -> SksePluginScanResult {
+    let plugins_dir = data_dir.join("SKSE").join("Plugins");
+    let mut total_plugins = 0;
+    let mut warnings = Vec::new();
+
+    // Count DLL plugins
+    if plugins_dir.exists() {
+        if let Ok(entries) = fs::read_dir(&plugins_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_lowercase();
+                if name.ends_with(".dll") {
+                    total_plugins += 1;
+                }
+            }
+        }
+    }
+
+    // Check Address Library version
+    let is_se = game_version.starts_with("1.5");
+    let se_lib = data_dir.join("SKSE").join("Plugins").join("versionlib-1-5-97-0.bin");
+    let has_se_lib = se_lib.exists();
+
+    // Check for any AE address library file
+    let mut has_ae_lib = false;
+    if plugins_dir.exists() {
+        if let Ok(entries) = fs::read_dir(&plugins_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_lowercase();
+                if name.starts_with("versionlib-1-6-") && name.ends_with(".bin") {
+                    has_ae_lib = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    let address_library_version = if has_se_lib && has_ae_lib {
+        "both".to_string()
+    } else if has_se_lib {
+        "SE".to_string()
+    } else if has_ae_lib {
+        "AE".to_string()
+    } else {
+        "none".to_string()
+    };
+
+    let address_library_matches = if !has_se_lib && !has_ae_lib {
+        true // No Address Library present — nothing to mismatch
+    } else if is_se {
+        has_se_lib
+    } else {
+        has_ae_lib
+    };
+
+    if !address_library_matches {
+        let expected = if is_se { "SE (1.5.97)" } else { "AE (1.6.x)" };
+        let found = if has_se_lib { "SE" } else { "AE" };
+        warnings.push(SksePluginWarning {
+            dll_name: "Address Library".to_string(),
+            warning: format!(
+                "Address Library is for {} but your game is {}. SKSE plugins may crash.",
+                found, expected
+            ),
+        });
+    }
+
+    info!(
+        "SKSE plugin scan: {} plugins, Address Library: {} (matches: {}), {} warnings",
+        total_plugins, address_library_version, address_library_matches, warnings.len()
+    );
+
+    SksePluginScanResult {
+        total_plugins,
+        address_library_version,
+        address_library_matches,
+        warnings,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

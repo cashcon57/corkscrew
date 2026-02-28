@@ -28,6 +28,9 @@
     downloadAndInstallNexusMod,
     closeBrowserWebview,
     checkDeploymentHealth,
+    checkSkyrimVersion,
+    listGameVersions,
+    swapGameVersion,
     getIncompleteCollectionInstalls,
     resumeCollectionInstall,
     abandonCollectionInstall,
@@ -40,7 +43,7 @@
   } from "$lib/api";
   import { startInstallTracking, stopInstallTracking, resumeInstallTracking } from "$lib/installService";
   import { listen } from "@tauri-apps/api/event";
-  import type { CollectionSummary, CollectionDiff, RequiredTool, CleanReport, CleanOptions, DlcStatus, DeploymentHealth } from "$lib/types";
+  import type { CollectionSummary, CollectionDiff, RequiredTool, CleanReport, CleanOptions, DlcStatus, DeploymentHealth, CachedVersion } from "$lib/types";
   import { config } from "$lib/stores";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { marked } from "marked";
@@ -164,6 +167,31 @@
     if (!game) return;
     switchingCollection = name;
     try {
+      // Auto-swap game version if collection targets a different version
+      if (game.game_id === "skyrimse") {
+        const col = myCollections.find(c => c.name === name);
+        if (col && col.game_versions.length > 0) {
+          try {
+            const status = await checkSkyrimVersion(game.game_id, game.bottle_name);
+            const needsSwap = !col.game_versions.some(v =>
+              v === status.current_version ||
+              v.startsWith(`${status.current_version}.`) ||
+              status.current_version.startsWith(`${v}.`)
+            );
+            if (needsSwap) {
+              const cached = await listGameVersions(game.game_id);
+              const match = cached.find(cv =>
+                col.game_versions.some(v => cv.version === v || cv.version.startsWith(v) || v.startsWith(cv.version))
+              );
+              if (match) {
+                await swapGameVersion(game.game_id, game.bottle_name, match.version);
+                showSuccess(`Switched game to v${match.version} for this collection`);
+              }
+            }
+          } catch { /* version swap is best-effort */ }
+        }
+      }
+
       await switchCollection(game.game_id, game.bottle_name, name);
       showSuccess(`Switched to "${name}" — mods deployed`);
       await loadMyCollections();
@@ -182,13 +210,14 @@
     try {
       // Re-fetch collection detail and mod list from NexusMods
       const revision = col.installed_revision ?? 1;
-      const [detail, mods] = await Promise.all([
+      const [detail, modsResult] = await Promise.all([
         getCollection(col.slug, col.game_domain),
         getCollectionMods(col.slug, revision),
       ]);
       // Set as active selection and switch to detail view
       selectedCollection = detail;
-      selectedMods = mods;
+      selectedMods = modsResult.mods;
+      selectedGameVersions = modsResult.game_versions;
       if (detail.description) {
         const html = await marked.parse(detail.description);
         renderedDescription = DOMPurify.sanitize(html);
@@ -455,6 +484,7 @@
 
   let selectedCollection = $state<CollectionInfo | null>(null);
   let selectedMods = $state<CollectionMod[]>([]);
+  let selectedGameVersions = $state<string[]>([]);
   let loadingDetail = $state(false);
   let detailCacheInfo = $state<{ cached: number; total: number; nexusTotal: number } | null>(null);
   let installing = $state(false);
@@ -493,6 +523,12 @@
     exclude_patterns: [],
   });
   let cleanExcludeInput = $state("");
+
+  // Version mismatch
+  let showVersionMismatch = $state(false);
+  let versionMismatchInfo = $state<{ expected: string[]; detected: string } | null>(null);
+  let versionSwapping = $state(false);
+  let versionCache = $state<CachedVersion[]>([]);
 
   // DLC Detection
   let showDlcWarning = $state(false);
@@ -1062,7 +1098,7 @@
         );
         for (let j = 0; j < results.length; j++) {
           const r = results[j];
-          modLists[i + j] = r.status === "fulfilled" ? r.value : null;
+          modLists[i + j] = r.status === "fulfilled" ? r.value.mods : null;
         }
       }
 
@@ -1129,12 +1165,13 @@
     renderedDescription = "";
     detailCacheInfo = null;
     try {
-      const [detail, mods] = await Promise.all([
+      const [detail, modsResult] = await Promise.all([
         getCollection(collection.slug, collection.game_domain),
         getCollectionMods(collection.slug, collection.latest_revision),
       ]);
       selectedCollection = detail;
-      selectedMods = mods;
+      selectedMods = modsResult.mods;
+      selectedGameVersions = modsResult.game_versions;
 
       // Pre-render the description as markdown
       if (detail.description) {
@@ -1143,7 +1180,7 @@
       }
 
       // Compute cache percentage for this collection
-      computeDetailCacheInfo(mods);
+      computeDetailCacheInfo(modsResult.mods);
     } catch (e: unknown) {
       showError(`Failed to load collection details: ${e}`);
     } finally {
@@ -1217,6 +1254,7 @@
       slug: selectedCollection.slug ?? null,
       image_url: selectedCollection.image_url ?? null,
       revision: selectedCollection.latest_revision ?? null,
+      gameVersions: selectedGameVersions,
     };
 
     // Check for optional mods — show picker if any exist
@@ -1253,7 +1291,45 @@
       // Tool detection is best-effort; proceed with install if it fails
     }
 
-    // Check if game directory needs cleaning before install
+    // Check game version compatibility
+    await checkGameVersionAndProceed(manifest);
+  }
+
+  async function checkGameVersionAndProceed(manifest: CollectionManifest & Record<string, unknown>) {
+    if (!$selectedGame) return;
+
+    const versions = manifest.gameVersions ?? [];
+    // Skip if no game versions specified or not Skyrim SE
+    if (versions.length === 0 || $selectedGame.game_id !== "skyrimse") {
+      await checkPreInstallCleanup(manifest);
+      return;
+    }
+
+    try {
+      const status = await checkSkyrimVersion($selectedGame.game_id, $selectedGame.bottle_name);
+      const detected = status.current_version;
+
+      // Check if current version matches any of the collection's target versions
+      const matches = versions.some(v =>
+        v === detected ||
+        v.startsWith(`${detected}.`) ||
+        detected.startsWith(`${v}.`)
+      );
+
+      if (!matches) {
+        // Fetch cached versions to offer swap buttons
+        try {
+          versionCache = await listGameVersions($selectedGame.game_id);
+        } catch { versionCache = []; }
+        versionMismatchInfo = { expected: versions, detected };
+        pendingManifest = manifest;
+        showVersionMismatch = true;
+        return;
+      }
+    } catch {
+      // Version check is best-effort; proceed if it fails
+    }
+
     await checkPreInstallCleanup(manifest);
   }
 
@@ -3243,7 +3319,7 @@
     bottleName={$selectedGame.bottle_name}
     oncontinue={() => {
       showToolsPrompt = false;
-      if (pendingManifest) checkPreInstallCleanup(pendingManifest);
+      if (pendingManifest) checkGameVersionAndProceed(pendingManifest);
     }}
     oncancel={() => {
       showToolsPrompt = false;
@@ -3327,6 +3403,64 @@
         <button class="btn btn-accent" onclick={confirmOptionalPicker}>
           Install ({optionalPickerManifest.mods.length - Array.from(optionalChoices.values()).filter(v => v === "skip").length} mods)
         </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- Version Mismatch Modal -->
+{#if showVersionMismatch && versionMismatchInfo}
+  <div class="modal-overlay" onclick={() => { showVersionMismatch = false; versionMismatchInfo = null; }} role="presentation">
+    <div class="cleanup-modal" onclick={(e) => e.stopPropagation()} role="dialog" aria-label="Version mismatch warning">
+      <div class="cleanup-header">
+        <h3 class="cleanup-title">Game Version Mismatch</h3>
+        <button class="cleanup-close" onclick={() => { showVersionMismatch = false; versionMismatchInfo = null; }}>&times;</button>
+      </div>
+
+      <div class="cleanup-body">
+        <div class="cleanup-summary">
+          <p class="cleanup-info">
+            This collection was built for <strong>Skyrim {versionMismatchInfo.expected.join(' / ')}</strong>,
+            but your game is <strong>version {versionMismatchInfo.detected}</strong>.
+          </p>
+          <p class="cleanup-info" style="margin-top: 0.5rem;">
+            SKSE plugins in this collection may not be compatible with your game version.
+            {#if versionCache.some(cv => versionMismatchInfo?.expected.some(v => cv.version === v || cv.version.startsWith(v) || v.startsWith(cv.version)))}
+              A compatible version is cached and can be swapped instantly.
+            {:else}
+              You can downgrade your game in <strong>Settings</strong>, or continue at your own risk.
+            {/if}
+          </p>
+        </div>
+      </div>
+
+      <div class="cleanup-actions">
+        <button class="btn btn-ghost" onclick={() => { showVersionMismatch = false; versionMismatchInfo = null; pendingManifest = null; }}>Cancel</button>
+        {#each versionCache.filter(cv => versionMismatchInfo?.expected.some(v => cv.version === v || cv.version.startsWith(v) || v.startsWith(cv.version))) as matchingVersion}
+          <button class="btn btn-secondary" disabled={versionSwapping} onclick={async () => {
+            if (!$selectedGame) return;
+            versionSwapping = true;
+            try {
+              await swapGameVersion($selectedGame.game_id, $selectedGame.bottle_name, matchingVersion.version);
+              showVersionMismatch = false;
+              versionMismatchInfo = null;
+              showSuccess(`Switched to v${matchingVersion.version}`);
+              if (pendingManifest) await checkPreInstallCleanup(pendingManifest);
+            } catch (e) {
+              showError(`Version swap failed: ${e}`);
+            } finally {
+              versionSwapping = false;
+            }
+          }}>
+            {versionSwapping ? "Switching..." : `Switch to v${matchingVersion.version}`}
+          </button>
+        {/each}
+        <button class="btn btn-secondary" onclick={() => { showVersionMismatch = false; versionMismatchInfo = null; goto('/settings'); }}>Open Settings</button>
+        <button class="btn btn-primary" onclick={async () => {
+          showVersionMismatch = false;
+          versionMismatchInfo = null;
+          if (pendingManifest) await checkPreInstallCleanup(pendingManifest);
+        }}>Continue Anyway</button>
       </div>
     </div>
   </div>

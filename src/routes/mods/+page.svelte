@@ -783,7 +783,7 @@
     showModlistNamePrompt = false;
     const game = pickedGame ?? $selectedGame;
     if (!game) return;
-    activeCollection.set({ name, mod_count: 0, enabled_count: 0, slug: null, author: null, image_url: null, game_domain: null, installed_revision: null, original_mod_count: null });
+    activeCollection.set({ name, mod_count: 0, enabled_count: 0, slug: null, author: null, image_url: null, game_domain: null, installed_revision: null, original_mod_count: null, game_versions: [] });
     if (pendingInstallFilePath) {
       await doInstallMod(pendingInstallFilePath);
       pendingInstallFilePath = null;

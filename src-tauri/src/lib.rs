@@ -61,8 +61,8 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use bottles::Bottle;
 use collections::{
-    CollectionDiff, CollectionInfo, CollectionManifest, CollectionMod, CollectionRevision,
-    CollectionSearchResult,
+    CollectionDiff, CollectionInfo, CollectionManifest, CollectionRevision,
+    CollectionSearchResult, RevisionModsResult,
 };
 use config::AppConfig;
 use crashlog::{CrashLogEntry, CrashReport};
@@ -1240,12 +1240,28 @@ async fn install_skse_auto_cmd(game_id: String, bottle_name: String) -> Result<S
 }
 
 #[tauri::command]
+fn scan_skse_plugins_cmd(
+    game_id: String,
+    bottle_name: String,
+) -> Result<skse::SksePluginScanResult, String> {
+    if game_id != "skyrimse" {
+        return Err("SKSE plugin scan is only available for Skyrim SE".into());
+    }
+
+    let (_, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
+    let game_path = PathBuf::from(&game.game_path);
+    let version = downgrader::detect_skyrim_version(&game_path)
+        .map(|s| s.current_version)
+        .unwrap_or_else(|_| "unknown".to_string());
+
+    Ok(skse::scan_skse_plugins(&data_dir, &version))
+}
+
+#[tauri::command]
 fn fix_skyrim_display(bottle_name: String) -> Result<display_fix::DisplayFixResult, String> {
     let bottle = resolve_bottle(&bottle_name)?;
     display_fix::auto_fix_display(&bottle)
 }
-
-
 
 #[tauri::command]
 async fn downgrade_skyrim(
@@ -1278,6 +1294,74 @@ async fn downgrade_skyrim(
 
     // Return status (actual USSEDP patching is a future enhancement)
     downgrader::detect_skyrim_version(&downgrade_path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_depot_download_command(
+    game_id: String,
+    bottle_name: String,
+) -> Result<downgrader::DepotDownloadInfo, String> {
+    let (bottle, _, _) = resolve_game(&game_id, &bottle_name)?;
+    downgrader::get_depot_download_info(&game_id, &bottle.path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn check_depot_ready(
+    game_id: String,
+    bottle_name: String,
+) -> Result<Option<String>, String> {
+    let (bottle, _, _) = resolve_game(&game_id, &bottle_name)?;
+    let steam_dir = downgrader::find_steam_dir(&bottle.path)
+        .ok_or_else(|| "Steam directory not found in bottle".to_string())?;
+
+    Ok(downgrader::check_depot_downloaded(
+        &steam_dir,
+        downgrader::SKYRIM_APP_ID,
+        downgrader::SKYRIM_DEPOT_ID,
+    ).map(|p| p.to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
+fn apply_downgrade_cmd(
+    game_id: String,
+    bottle_name: String,
+) -> Result<DowngradeStatus, String> {
+    let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
+    let game_path = PathBuf::from(&game.game_path);
+    let steam_dir = downgrader::find_steam_dir(&bottle.path)
+        .ok_or_else(|| "Steam directory not found in bottle".to_string())?;
+
+    let depot_exe = downgrader::check_depot_downloaded(
+        &steam_dir,
+        downgrader::SKYRIM_APP_ID,
+        downgrader::SKYRIM_DEPOT_ID,
+    ).ok_or_else(|| "Depot files not downloaded yet. Run download_depot in Steam console first.".to_string())?;
+
+    downgrader::apply_depot_downgrade(&game_path, &depot_exe, &game_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_game_versions(game_id: String) -> Result<Vec<downgrader::CachedVersion>, String> {
+    Ok(downgrader::list_cached_versions(&game_id))
+}
+
+#[tauri::command]
+fn swap_game_version(
+    game_id: String,
+    bottle_name: String,
+    target_version: String,
+) -> Result<DowngradeStatus, String> {
+    let (_, game, _) = resolve_game(&game_id, &bottle_name)?;
+    let game_path = PathBuf::from(&game.game_path);
+
+    // Cache current version before swapping
+    if let Err(e) = downgrader::cache_current_version(&game_path, &game_id) {
+        log::warn!("Failed to cache current version before swap: {}", e);
+    }
+
+    downgrader::swap_to_version(&game_path, &game_id, &target_version)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1916,6 +2000,14 @@ fn list_installed_collections_cmd(
         .into_iter()
         .map(|(name, mod_count, enabled_count)| {
             let meta = metadata_list.iter().find(|m| m.collection_name == name);
+            // Extract game_versions from stored manifest JSON if available
+            let game_versions = meta
+                .and_then(|m| m.manifest_json.as_ref())
+                .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+                .and_then(|v| v.get("gameVersions").cloned())
+                .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok())
+                .unwrap_or_default();
+
             CollectionSummary {
                 name,
                 mod_count,
@@ -1926,6 +2018,7 @@ fn list_installed_collections_cmd(
                 game_domain: meta.and_then(|m| m.game_domain.clone()),
                 installed_revision: meta.and_then(|m| m.installed_revision),
                 original_mod_count: meta.and_then(|m| m.total_mods),
+                game_versions,
             }
         })
         .collect())
@@ -2638,7 +2731,7 @@ async fn get_collection_diff_cmd(
     let latest_revision = info.latest_revision;
 
     // Fetch mods from the latest revision
-    let latest_mods = collections::get_revision_mods(token.as_deref(), &slug, latest_revision)
+    let latest_result = collections::get_revision_mods(token.as_deref(), &slug, latest_revision)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -2648,7 +2741,7 @@ async fn get_collection_diff_cmd(
         meta.installed_revision,
         latest_revision,
         &manifest.mods,
-        &latest_mods,
+        &latest_result.mods,
     ))
 }
 
@@ -4225,7 +4318,7 @@ async fn get_collection_revisions(slug: String) -> Result<Vec<CollectionRevision
 }
 
 #[tauri::command]
-async fn get_collection_mods(slug: String, revision: u32) -> Result<Vec<CollectionMod>, String> {
+async fn get_collection_mods(slug: String, revision: u32) -> Result<RevisionModsResult, String> {
     let token = nexus_api_key_or_token().await.ok().map(|(t, _)| t);
 
     collections::get_revision_mods(token.as_deref(), &slug, revision)
@@ -5500,8 +5593,14 @@ pub fn run() {
             set_skse_preference_cmd,
             check_skyrim_version,
             check_skse_compatibility_cmd,
+            scan_skse_plugins_cmd,
             fix_skyrim_display,
             downgrade_skyrim,
+            get_depot_download_command,
+            check_depot_ready,
+            apply_downgrade_cmd,
+            list_game_versions,
+            swap_game_version,
             set_vibrancy,
             add_custom_exe,
             remove_custom_exe,

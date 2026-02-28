@@ -4,7 +4,8 @@
   import { collectionInstallStatus, selectedGame, showError, showSuccess } from "$lib/stores";
   import type { PendingFomod } from "$lib/stores";
   import { dismissInstall } from "$lib/installService";
-  import { cancelCollectionInstall, submitFomodChoices, deleteCollection } from "$lib/api";
+  import { cancelCollectionInstall, submitFomodChoices, deleteCollection, scanSksePlugins } from "$lib/api";
+  import type { SksePluginScanResult } from "$lib/types";
   import { get } from "svelte/store";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { marked } from "marked";
@@ -38,6 +39,23 @@
   let pendingFomods = $derived(status?.pendingFomods ?? []);
   let collectionDescription = $derived(status?.collectionDescription ?? "");
   let descriptionExpanded = $state(false);
+
+  // Post-install SKSE plugin scan
+  let skseScanResult = $state<SksePluginScanResult | null>(null);
+  let skseScanDone = $state(false);
+
+  $effect(() => {
+    const p = phase;
+    if (p === "complete" && !skseScanDone) {
+      skseScanDone = true;
+      const game = $selectedGame;
+      if (game && game.game_id === "skyrimse") {
+        scanSksePlugins(game.game_id, game.bottle_name)
+          .then(r => { skseScanResult = r; })
+          .catch(() => { /* best-effort */ });
+      }
+    }
+  });
   let renderedDescription = $derived(
     collectionDescription ? DOMPurify.sanitize(marked.parse(collectionDescription) as string) : "",
   );
@@ -451,6 +469,30 @@
             </div>
             <p class="error-help-text">You can repair this collection from "My Collections" to retry failed mods.</p>
           </div>
+        {/if}
+        {#if skseScanResult && skseScanResult.warnings.length > 0}
+          <div class="error-summary" style="border-color: #f59e0b;">
+            <h4 class="error-summary-title" style="color: #f59e0b;">SKSE Plugin Warnings</h4>
+            <div class="error-list-scroll">
+              {#each skseScanResult.warnings as w}
+                <div class="error-summary-item">
+                  <span class="error-mod-name">{w.dll_name}</span>
+                  <span class="error-mod-reason">{w.warning}</span>
+                </div>
+              {/each}
+            </div>
+            <p class="error-help-text">
+              {skseScanResult.total_plugins} SKSE plugins found.
+              Address Library: {skseScanResult.address_library_version}.
+              {#if !skseScanResult.address_library_matches}
+                Consider downgrading your game in Settings to match this collection.
+              {/if}
+            </p>
+          </div>
+        {:else if skseScanResult && skseScanResult.total_plugins > 0}
+          <p style="font-size: 0.85rem; opacity: 0.7; margin: 0.5rem 0;">
+            {skseScanResult.total_plugins} SKSE plugins scanned — no compatibility issues detected.
+          </p>
         {/if}
         <p class="completion-elapsed">Total time: {status.elapsed}</p>
         <div class="completion-actions">

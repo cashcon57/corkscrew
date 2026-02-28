@@ -241,7 +241,301 @@ fn compute_sha256(path: &Path) -> Result<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Downgrade copy creation
+// Version cache
+// ---------------------------------------------------------------------------
+
+/// Steam depot constants for Skyrim SE downgrade.
+pub const SKYRIM_APP_ID: u32 = 489830;
+pub const SKYRIM_DEPOT_ID: u32 = 489833;
+pub const SKYRIM_SE_MANIFEST: &str = "4063321535627579835";
+
+/// A cached game executable version.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CachedVersion {
+    /// Version string (e.g. "1.5.97" or "1.6.1170").
+    pub version: String,
+    /// Full path to the cached SkyrimSE.exe.
+    pub exe_path: String,
+    /// SHA-256 hash of the cached executable.
+    pub hash: String,
+    /// ISO 8601 timestamp of when this version was cached.
+    pub cached_at: String,
+}
+
+/// Information needed to run the Steam depot download command.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DepotDownloadInfo {
+    /// The console command to paste (e.g. "download_depot 489830 489833 ...").
+    pub command: String,
+    /// Steam URI to open the console.
+    pub steam_uri: String,
+    /// The expected download path after completion.
+    pub expected_path: String,
+}
+
+/// Returns the version cache directory for a given game.
+///
+/// Layout: `{data_dir}/game_versions/{game_id}/`
+///   - `ae/{version}/SkyrimSE.exe` — backed-up AE executables
+///   - `se/1.5.97/SkyrimSE.exe` — cached SE executable
+fn version_cache_dir(game_id: &str) -> PathBuf {
+    config::data_dir().join("game_versions").join(game_id)
+}
+
+/// Cache the current game executable before modifying it.
+///
+/// Detects the version, copies the exe to the version cache, and returns
+/// the cached version info.
+pub fn cache_current_version(game_path: &Path, game_id: &str) -> Result<CachedVersion> {
+    let exe_path = find_skyrim_exe(game_path)?;
+    let hash = compute_sha256(&exe_path)?;
+    let metadata = fs::metadata(&exe_path)?;
+    let file_size = metadata.len();
+
+    // Determine version string
+    let version = if hash == HASH_SE_1_5_97 || file_size == SIZE_SE_1_5_97 {
+        "1.5.97".to_string()
+    } else {
+        identify_ae_version(&hash, file_size)
+    };
+
+    // Determine cache subdirectory
+    let subdir = if version == "1.5.97" || version == "1.5.97 (unverified)" {
+        "se"
+    } else {
+        "ae"
+    };
+
+    let cache_dir = version_cache_dir(game_id).join(subdir).join(&version);
+    fs::create_dir_all(&cache_dir)?;
+
+    let dest = cache_dir.join("SkyrimSE.exe");
+    fs::copy(&exe_path, &dest)?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let cached = CachedVersion {
+        version: version.clone(),
+        exe_path: dest.to_string_lossy().into_owned(),
+        hash,
+        cached_at: now,
+    };
+
+    info!("Cached game version {} at {}", version, dest.display());
+    Ok(cached)
+}
+
+/// List all cached versions for a game.
+pub fn list_cached_versions(game_id: &str) -> Vec<CachedVersion> {
+    let base = version_cache_dir(game_id);
+    let mut versions = Vec::new();
+
+    for subdir in &["se", "ae"] {
+        let dir = base.join(subdir);
+        if !dir.exists() {
+            continue;
+        }
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                    continue;
+                }
+                let version = entry.file_name().to_string_lossy().into_owned();
+                let exe = entry.path().join("SkyrimSE.exe");
+                if !exe.exists() {
+                    continue;
+                }
+                let hash = compute_sha256(&exe).unwrap_or_default();
+                // Try to get modification time as cached_at
+                let cached_at = fs::metadata(&exe)
+                    .and_then(|m| m.modified())
+                    .map(|t| {
+                        let dt: chrono::DateTime<chrono::Utc> = t.into();
+                        dt.to_rfc3339()
+                    })
+                    .unwrap_or_default();
+
+                versions.push(CachedVersion {
+                    version,
+                    exe_path: exe.to_string_lossy().into_owned(),
+                    hash,
+                    cached_at,
+                });
+            }
+        }
+    }
+
+    versions
+}
+
+/// Swap the game executable to a specific cached version.
+///
+/// Copies the cached exe over the current game exe.
+pub fn swap_to_version(game_path: &Path, game_id: &str, target_version: &str) -> Result<DowngradeStatus> {
+    // Find the cached version
+    let cached = list_cached_versions(game_id);
+    let target = cached.iter().find(|c| c.version == target_version)
+        .ok_or_else(|| DowngraderError::Other(
+            format!("Version {} is not cached. Download it first.", target_version)
+        ))?;
+
+    let exe_path = find_skyrim_exe(game_path)?;
+    let cached_exe = Path::new(&target.exe_path);
+
+    if !cached_exe.exists() {
+        return Err(DowngraderError::Other(format!(
+            "Cached exe not found at: {}", target.exe_path
+        )));
+    }
+
+    // Copy cached version over current
+    fs::copy(cached_exe, &exe_path)?;
+
+    info!("Swapped game to version {} from cache", target_version);
+
+    // Return updated status
+    detect_skyrim_version(game_path)
+}
+
+/// Import a depot-downloaded exe into the version cache.
+///
+/// Copies the exe from the depot download location into the SE cache.
+pub fn import_depot_exe(depot_exe_path: &Path, game_id: &str) -> Result<CachedVersion> {
+    if !depot_exe_path.exists() {
+        return Err(DowngraderError::Other(format!(
+            "Depot exe not found at: {}", depot_exe_path.display()
+        )));
+    }
+
+    let hash = compute_sha256(depot_exe_path)?;
+    let metadata = fs::metadata(depot_exe_path)?;
+    let file_size = metadata.len();
+
+    // Determine version — depot download should be 1.5.97
+    let version = if hash == HASH_SE_1_5_97 || file_size == SIZE_SE_1_5_97 {
+        "1.5.97".to_string()
+    } else {
+        identify_ae_version(&hash, file_size)
+    };
+
+    let cache_dir = version_cache_dir(game_id).join("se").join(&version);
+    fs::create_dir_all(&cache_dir)?;
+
+    let dest = cache_dir.join("SkyrimSE.exe");
+    fs::copy(depot_exe_path, &dest)?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let cached = CachedVersion {
+        version: version.clone(),
+        exe_path: dest.to_string_lossy().into_owned(),
+        hash,
+        cached_at: now,
+    };
+
+    info!("Imported depot exe as version {} at {}", version, dest.display());
+    Ok(cached)
+}
+
+// ---------------------------------------------------------------------------
+// Steam depot detection
+// ---------------------------------------------------------------------------
+
+/// Find the Steam installation directory within a Wine bottle.
+pub fn find_steam_dir(bottle_path: &Path) -> Option<PathBuf> {
+    // Common Steam paths within Wine bottles
+    let candidates = [
+        bottle_path.join("drive_c/Program Files (x86)/Steam"),
+        bottle_path.join("drive_c/Program Files/Steam"),
+    ];
+
+    for path in &candidates {
+        if path.exists() {
+            return Some(path.clone());
+        }
+    }
+
+    None
+}
+
+/// Get the expected depot download path after `download_depot` completes.
+///
+/// Returns: `{steam_dir}/steamapps/content/app_{app_id}/depot_{depot_id}/`
+pub fn get_depot_download_path(steam_dir: &Path, app_id: u32, depot_id: u32) -> PathBuf {
+    steam_dir
+        .join("steamapps")
+        .join("content")
+        .join(format!("app_{}", app_id))
+        .join(format!("depot_{}", depot_id))
+}
+
+/// Check if depot files have been downloaded.
+///
+/// Returns the path to SkyrimSE.exe if found in the depot content directory.
+pub fn check_depot_downloaded(steam_dir: &Path, app_id: u32, depot_id: u32) -> Option<PathBuf> {
+    let depot_dir = get_depot_download_path(steam_dir, app_id, depot_id);
+
+    if !depot_dir.exists() {
+        return None;
+    }
+
+    // Look for SkyrimSE.exe (case-insensitive)
+    let target = "skyrimse.exe";
+    if let Ok(entries) = fs::read_dir(&depot_dir) {
+        for entry in entries.flatten() {
+            if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+                let name = entry.file_name().to_string_lossy().to_lowercase();
+                if name == target {
+                    return Some(entry.path());
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Get the depot download command and info for the frontend wizard.
+pub fn get_depot_download_info(game_id: &str, bottle_path: &Path) -> Result<DepotDownloadInfo> {
+    if game_id != "skyrimse" {
+        return Err(DowngraderError::Other(
+            "Depot download is only supported for Skyrim SE".to_string()
+        ));
+    }
+
+    let steam_dir = find_steam_dir(bottle_path)
+        .ok_or_else(|| DowngraderError::Other(
+            "Steam directory not found in the bottle".to_string()
+        ))?;
+
+    let expected_path = get_depot_download_path(&steam_dir, SKYRIM_APP_ID, SKYRIM_DEPOT_ID);
+
+    Ok(DepotDownloadInfo {
+        command: format!("download_depot {} {} {}", SKYRIM_APP_ID, SKYRIM_DEPOT_ID, SKYRIM_SE_MANIFEST),
+        steam_uri: "steam://open/console".to_string(),
+        expected_path: expected_path.to_string_lossy().into_owned(),
+    })
+}
+
+/// Full downgrade flow: cache current AE exe → import depot SE exe → swap.
+pub fn apply_depot_downgrade(game_path: &Path, depot_exe: &Path, game_id: &str) -> Result<DowngradeStatus> {
+    // Step 1: Cache current version before overwriting
+    info!("Caching current game version before downgrade...");
+    match cache_current_version(game_path, game_id) {
+        Ok(cached) => info!("Cached current version: {}", cached.version),
+        Err(e) => warn!("Failed to cache current version (continuing anyway): {}", e),
+    }
+
+    // Step 2: Import the depot exe into cache
+    info!("Importing depot exe into version cache...");
+    let imported = import_depot_exe(depot_exe, game_id)?;
+    info!("Imported depot version: {}", imported.version);
+
+    // Step 3: Swap to the imported version
+    info!("Swapping game to downgraded version...");
+    swap_to_version(game_path, game_id, &imported.version)
+}
+
+// ---------------------------------------------------------------------------
+// Downgrade copy creation (legacy)
 // ---------------------------------------------------------------------------
 
 /// Create a downgrade copy of the entire game installation.

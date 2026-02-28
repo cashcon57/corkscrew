@@ -190,6 +190,25 @@ pub struct CollectionMod {
     pub adult_content: bool,
 }
 
+/// A game version reference from the NexusMods GraphQL API.
+///
+/// The `collectionRevision.gameVersions` field returns objects like
+/// `{ "id": "2990", "reference": "1.5.97" }` rather than plain strings.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GameVersionRef {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub reference: String,
+}
+
+/// Result from `get_revision_mods()` including game version data.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RevisionModsResult {
+    pub mods: Vec<CollectionMod>,
+    pub game_versions: Vec<String>,
+}
+
 /// An INI tweak bundled with a collection.
 ///
 /// Each tweak is a partial INI document extracted from the `INI Tweaks/`
@@ -809,12 +828,12 @@ pub async fn get_revisions(
     Ok(result)
 }
 
-/// Get the mod list for a specific revision.
+/// Get the mod list and game versions for a specific revision.
 pub async fn get_revision_mods(
     api_key: Option<&str>,
     slug: &str,
     revision: u32,
-) -> Result<Vec<CollectionMod>, CollectionsError> {
+) -> Result<RevisionModsResult, CollectionsError> {
     let variables = serde_json::json!({
         "slug": slug,
         "revision": revision,
@@ -830,6 +849,27 @@ pub async fn get_revision_mods(
 
     if revision_node.is_null() {
         return Err(CollectionsError::NotFound(format!("{}@{}", slug, revision)));
+    }
+
+    // Extract game versions from the GraphQL response.
+    // The API returns objects like { "id": "2990", "reference": "1.5.97" };
+    // we extract the human-readable `reference` strings.
+    let game_versions: Vec<String> = revision_node
+        .get("gameVersions")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|gv| gv.get("reference").and_then(|r| r.as_str()))
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if !game_versions.is_empty() {
+        log::info!(
+            "Collection revision {slug}@{revision} targets game versions: [{}]",
+            game_versions.join(", ")
+        );
     }
 
     let mut mods = Vec::new();
@@ -933,7 +973,10 @@ pub async fn get_revision_mods(
         }
     }
 
-    Ok(mods)
+    Ok(RevisionModsResult {
+        mods,
+        game_versions,
+    })
 }
 
 /// Parse a collection.json manifest from a downloaded collection bundle (7z).

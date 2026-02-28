@@ -91,6 +91,31 @@ export interface DowngradeStatus {
   downgrade_path: string | null;
 }
 
+export interface CachedVersion {
+  version: string;
+  exe_path: string;
+  hash: string;
+  cached_at: string;
+}
+
+export interface DepotDownloadInfo {
+  command: string;
+  steam_uri: string;
+  expected_path: string;
+}
+
+export interface SksePluginWarning {
+  dll_name: string;
+  warning: string;
+}
+
+export interface SksePluginScanResult {
+  total_plugins: number;
+  address_library_version: string;
+  address_library_matches: boolean;
+  warnings: SksePluginWarning[];
+}
+
 export interface SkseCompatibility {
   compatible: boolean;
   skse_version: string | null;
@@ -633,6 +658,11 @@ export interface CollectionMod {
   adult_content: boolean;
 }
 
+export interface RevisionModsResult {
+  mods: CollectionMod[];
+  game_versions: string[];
+}
+
 export interface CollectionManifest {
   name: string;
   author: string;
@@ -642,6 +672,7 @@ export interface CollectionManifest {
   modRules: CollectionModRule[];
   plugins: CollectionPlugin[];
   installInstructions: string | null;
+  gameVersions?: string[];
 }
 
 export interface CollectionModEntry {
@@ -870,6 +901,7 @@ export interface CollectionSummary {
   game_domain: string | null;
   installed_revision: number | null;
   original_mod_count: number | null;
+  game_versions: string[];
 }
 
 export interface CollectionDiff {

@@ -11,7 +11,10 @@ import type {
   LaunchResult,
   SkseStatus,
   SkseCompatibility,
+  SksePluginScanResult,
   DowngradeStatus,
+  CachedVersion,
+  DepotDownloadInfo,
   CustomExecutable,
   DeploymentEntry,
   FileConflict,
@@ -34,6 +37,7 @@ import type {
   CollectionInfo,
   CollectionRevision,
   CollectionMod,
+  RevisionModsResult,
   CollectionManifest,
   PluginRule,
   PluginRuleType,
@@ -251,6 +255,13 @@ export async function checkSkseCompatibility(
   return invoke("check_skse_compatibility_cmd", { gameId, bottleName });
 }
 
+export async function scanSksePlugins(
+  gameId: string,
+  bottleName: string
+): Promise<SksePluginScanResult> {
+  return invoke("scan_skse_plugins_cmd", { gameId, bottleName });
+}
+
 // SKSE Auto-Download
 export async function getSkseBuilds(
   gameId: string,
@@ -287,6 +298,41 @@ export async function downgradeSkyrim(
   mode: string
 ): Promise<DowngradeStatus> {
   return invoke("downgrade_skyrim", { gameId, bottleName, mode });
+}
+
+export async function getDepotDownloadCommand(
+  gameId: string,
+  bottleName: string
+): Promise<DepotDownloadInfo> {
+  return invoke("get_depot_download_command", { gameId, bottleName });
+}
+
+export async function checkDepotReady(
+  gameId: string,
+  bottleName: string
+): Promise<string | null> {
+  return invoke("check_depot_ready", { gameId, bottleName });
+}
+
+export async function applyDowngrade(
+  gameId: string,
+  bottleName: string
+): Promise<DowngradeStatus> {
+  return invoke("apply_downgrade_cmd", { gameId, bottleName });
+}
+
+export async function listGameVersions(
+  gameId: string
+): Promise<CachedVersion[]> {
+  return invoke("list_game_versions", { gameId });
+}
+
+export async function swapGameVersion(
+  gameId: string,
+  bottleName: string,
+  targetVersion: string
+): Promise<DowngradeStatus> {
+  return invoke("swap_game_version", { gameId, bottleName, targetVersion });
 }
 
 // Vibrancy
@@ -915,7 +961,7 @@ export async function getCollectionRevisions(
 export async function getCollectionMods(
   slug: string,
   revision: number
-): Promise<CollectionMod[]> {
+): Promise<RevisionModsResult> {
   return invoke("get_collection_mods", { slug, revision });
 }
 
