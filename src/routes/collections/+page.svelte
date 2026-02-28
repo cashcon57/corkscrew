@@ -177,15 +177,16 @@
         if (col && col.game_versions.length > 0) {
           try {
             const status = await checkSkyrimVersion(game.game_id, game.bottle_name);
-            const needsSwap = !col.game_versions.some(v =>
-              v === status.current_version ||
-              v.startsWith(`${status.current_version}.`) ||
-              status.current_version.startsWith(`${v}.`)
-            );
+            const detectedIsSE = status.current_version.startsWith("1.5.");
+            const colTargetsSE = col.game_versions.some(v => v.startsWith("1.5."));
+            const colTargetsAE = col.game_versions.some(v => v.startsWith("1.6."));
+            // Only swap if SE/AE categories differ
+            const needsSwap = (detectedIsSE && !colTargetsSE && colTargetsAE)
+              || (!detectedIsSE && colTargetsSE && !colTargetsAE);
             if (needsSwap) {
               const cached = await listGameVersions(game.game_id);
               const match = cached.find(cv =>
-                col.game_versions.some(v => cv.version === v || cv.version.startsWith(v) || v.startsWith(cv.version))
+                colTargetsSE ? cv.version.startsWith("1.5.") : cv.version.startsWith("1.6.")
               );
               if (match) {
                 await swapGameVersion(game.game_id, game.bottle_name, match.version);
@@ -1315,15 +1316,17 @@
       const status = await checkSkyrimVersion($selectedGame.game_id, $selectedGame.bottle_name);
       const detected = status.current_version;
 
-      // Check if current version matches any of the collection's target versions
-      const matches = versions.some(v =>
-        v === detected ||
-        v.startsWith(`${detected}.`) ||
-        detected.startsWith(`${v}.`)
-      );
+      // Compare SE vs AE categories, not exact version strings.
+      // SE = 1.5.x, AE = 1.6.x. If both are in the same category, no mismatch.
+      const detectedIsSE = detected.startsWith("1.5.");
+      const targetsSE = versions.some(v => v.startsWith("1.5."));
+      const targetsAE = versions.some(v => v.startsWith("1.6."));
 
-      if (!matches) {
-        // Fetch cached versions to offer swap buttons
+      // Mismatch only when categories differ (e.g., user has AE but collection targets SE only)
+      const mismatch = (detectedIsSE && !targetsSE && targetsAE)
+        || (!detectedIsSE && targetsSE && !targetsAE);
+
+      if (mismatch) {
         try {
           versionCache = await listGameVersions($selectedGame.game_id);
         } catch { versionCache = []; }
@@ -3424,14 +3427,17 @@
       </div>
 
       <div class="cleanup-body">
+        {#if versionMismatchInfo}
+        {@const targetsSE = versionMismatchInfo.expected.some(v => v.startsWith("1.5."))}
+        {@const cachedMatch = versionCache.some(cv => targetsSE ? cv.version.startsWith("1.5.") : cv.version.startsWith("1.6."))}
         <div class="cleanup-summary">
           <p class="cleanup-info">
-            This collection was built for <strong>Skyrim {versionMismatchInfo.expected.join(' / ')}</strong>,
-            but your game is <strong>version {versionMismatchInfo.detected}</strong>.
+            This collection was built for <strong>Skyrim {versionMismatchInfo.expected.join(' / ')}</strong>{targetsSE ? " (SE)" : " (AE)"},
+            but your game is <strong>{versionMismatchInfo.detected}</strong>{versionMismatchInfo.detected.startsWith("1.5.") ? " (SE)" : " (AE)"}.
           </p>
           <p class="cleanup-info" style="margin-top: 0.5rem;">
             SKSE plugins in this collection may not be compatible with your game version.
-            {#if versionCache.some(cv => versionMismatchInfo?.expected.some(v => cv.version === v || cv.version.startsWith(v) || v.startsWith(cv.version)))}
+            {#if cachedMatch}
               A compatible version is cached and can be swapped instantly.
             {:else if depotDownloading}
               Downloading the correct game version from Steam...
@@ -3446,11 +3452,15 @@
             </div>
           {/if}
         </div>
+      {/if}
       </div>
 
       <div class="cleanup-actions">
+        {#if versionMismatchInfo}
+        {@const targetsSEBtn = versionMismatchInfo.expected.some(v => v.startsWith("1.5."))}
+        {@const matchingCached = versionCache.filter(cv => targetsSEBtn ? cv.version.startsWith("1.5.") : cv.version.startsWith("1.6."))}
         <button class="btn btn-ghost" disabled={depotDownloading} onclick={() => { showVersionMismatch = false; versionMismatchInfo = null; pendingManifest = null; if (depotPollTimer) { clearInterval(depotPollTimer); depotPollTimer = null; } depotDownloading = false; }}>Cancel</button>
-        {#each versionCache.filter(cv => versionMismatchInfo?.expected.some(v => cv.version === v || cv.version.startsWith(v) || v.startsWith(cv.version))) as matchingVersion}
+        {#each matchingCached as matchingVersion}
           <button class="btn btn-secondary" disabled={versionSwapping} onclick={async () => {
             if (!$selectedGame) return;
             versionSwapping = true;
@@ -3466,10 +3476,10 @@
               versionSwapping = false;
             }
           }}>
-            {versionSwapping ? "Switching..." : `Switch to v${matchingVersion.version}`}
+            {versionSwapping ? "Switching..." : `Switch to ${matchingVersion.version.startsWith("1.5.") ? "SE" : "AE"} (v${matchingVersion.version})`}
           </button>
         {/each}
-        {#if !versionCache.some(cv => versionMismatchInfo?.expected.some(v => cv.version === v || cv.version.startsWith(v) || v.startsWith(cv.version))) && !depotDownloading}
+        {#if matchingCached.length === 0 && !depotDownloading && targetsSEBtn}
           <button class="btn btn-secondary" onclick={async () => {
             if (!$selectedGame) return;
             depotDownloading = true;
@@ -3514,6 +3524,7 @@
           versionMismatchInfo = null;
           if (pendingManifest) await checkPreInstallCleanup(pendingManifest);
         }}>Continue Anyway</button>
+        {/if}
       </div>
     </div>
   </div>
