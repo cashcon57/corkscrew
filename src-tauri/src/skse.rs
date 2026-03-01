@@ -1532,6 +1532,13 @@ pub fn fix_engine_fixes_for_wine(
 ) -> usize {
     let mut patched = 0;
 
+    // Disable the d3dx9_42.dll preloader — it crashes Wine because it hooks
+    // during DLL load, before the SKSE plugin phase.  We rename it rather
+    // than delete so it can be restored if the user ever switches to native
+    // Windows.  Check both the deployed game root AND every staging dir that
+    // ships the preloader (collections often include it as a root-deploy file).
+    disable_engine_fixes_preloader(data_dir, db, game_id, bottle_name);
+
     // Collect all paths to check: deployed + every staging dir
     let mut toml_paths: Vec<PathBuf> = Vec::new();
 
@@ -1572,6 +1579,55 @@ pub fn fix_engine_fixes_for_wine(
     }
 
     patched
+}
+
+/// Disable the original Engine Fixes files that are incompatible with Wine.
+///
+/// Two files must be neutralized:
+/// 1. `d3dx9_42.dll` (game root) — preloader that hooks during DLL load,
+///    crashes Wine ~63s into launch.
+/// 2. `EngineFixes.dll` (Data/SKSE/Plugins/) — the original SKSE plugin
+///    that checks for the preloader and force-closes the game if it's missing.
+///
+/// Both are renamed to `.dll.disabled` (recoverable, not deleted).
+/// We also disable these in staging dirs so redeploys don't bring them back.
+fn disable_engine_fixes_preloader(
+    data_dir: &Path,
+    db: &Arc<ModDatabase>,
+    game_id: &str,
+    bottle_name: &str,
+) {
+    // Helper: rename a DLL to .disabled if it exists
+    let disable_dll = |path: &Path| {
+        if path.exists() {
+            let disabled = path.with_extension("dll.disabled");
+            match fs::rename(path, &disabled) {
+                Ok(()) => info!("EngineFixes Wine fix: disabled {}", path.display()),
+                Err(e) => warn!("EngineFixes Wine fix: failed to disable {}: {}", path.display(), e),
+            }
+        }
+    };
+
+    // 1. Deployed copies
+    if let Some(game_root) = data_dir.parent() {
+        // Preloader in game root
+        disable_dll(&game_root.join("d3dx9_42.dll"));
+    }
+    // Original SKSE plugin in Data/SKSE/Plugins/
+    disable_dll(&data_dir.join("SKSE").join("Plugins").join("EngineFixes.dll"));
+
+    // 2. Staging copies — collections often include both files
+    if let Ok(mods) = db.list_mods(game_id, bottle_name) {
+        for m in &mods {
+            if let Some(ref sp) = m.staging_path {
+                let sp = PathBuf::from(sp);
+                // Root-deployed preloader
+                disable_dll(&sp.join("d3dx9_42.dll"));
+                // SKSE plugin
+                disable_dll(&sp.join("SKSE").join("Plugins").join("EngineFixes.dll"));
+            }
+        }
+    }
 }
 
 /// All boolean keys in EngineFixes.toml that must be set to `false` under Wine.
