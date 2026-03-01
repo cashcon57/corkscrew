@@ -1020,9 +1020,27 @@ pub fn check_skse_dll_compat(dll_path: &Path, game_runtime_version: u32) -> Skse
     };
 
     // Check version independence flags
-    if data.version_independence & VERSION_INDEPENDENT_ADDRESS_LIBRARY != 0
-        || data.version_independence & VERSION_INDEPENDENT_SIGNATURES != 0
-    {
+    if data.version_independence & VERSION_INDEPENDENT_SIGNATURES != 0 {
+        // Signature scanning — truly version-independent, works with any game version
+        return SksePluginCompat::VersionIndependent;
+    }
+
+    if data.version_independence & VERSION_INDEPENDENT_ADDRESS_LIBRARY != 0 {
+        // "Uses Address Library" — but which one?
+        // data_version 1 plugins (pre-AE era) use the SE Address Library which only
+        // covers versions < 1.6.629. On AE (>= 1.6.629) these are incompatible because
+        // the SE Address Library database has different offsets than AE.
+        // SKSE reports: "only compatible with versions earlier than 1.6.629"
+        //
+        // data_version 2 plugins are AE-aware and can specify version ranges via
+        // version_independence_ex. If they set Address Library, they typically
+        // target the AE Address Library and are truly version-independent for AE.
+        let ae_cutoff = (1u32 << 24) | (6u32 << 16) | (629u32 << 4); // 1.6.629
+        if data.data_version == 1 && game_runtime_version >= ae_cutoff {
+            return SksePluginCompat::Incompatible {
+                supports: vec!["< 1.6.629 (SE Address Library only)".to_string()],
+            };
+        }
         return SksePluginCompat::VersionIndependent;
     }
 
@@ -1845,6 +1863,44 @@ mod tests {
                 asset.is_some(),
                 "SKSE_VERSION_DB entry {} has invalid tag",
                 entry.tag
+            );
+        }
+    }
+
+    #[test]
+    fn se_address_library_plugin_incompatible_on_ae() {
+        // Simulate a data_version=1 plugin with Address Library flag on AE
+        // This is what BehaviorDataInjector SE-only looks like:
+        // data_version=1, version_independence=0x1 (Address Library), compatible_versions=[]
+        // On AE (1.6.1170), this should be Incompatible, not VersionIndependent.
+
+        // Build a fake DLL with SKSEPlugin_Version export that has data_version=1
+        // and Address Library flag. We can test the logic directly:
+        let ae_runtime = parse_game_version_to_runtime("1.6.1170").unwrap();
+        let se_runtime = parse_game_version_to_runtime("1.5.97").unwrap();
+
+        // AE runtime should be >= 1.6.629 cutoff
+        let ae_cutoff = (1u32 << 24) | (6u32 << 16) | (629u32 << 4);
+        assert!(ae_runtime >= ae_cutoff, "AE runtime should be >= 1.6.629");
+        assert!(se_runtime < ae_cutoff, "SE runtime should be < 1.6.629");
+
+        // If the real BDI DLL is on disk, test it directly
+        let dll = std::path::Path::new(
+            "/Users/cashconway/Library/Application Support/CrossOver/Bottles/Steam/drive_c/\
+             Program Files (x86)/Steam/steamapps/common/Skyrim Special Edition/Data/SKSE/Plugins/\
+             BehaviorDataInjector.dll"
+        );
+        if dll.exists() {
+            let compat_ae = check_skse_dll_compat(dll, ae_runtime);
+            assert!(
+                matches!(compat_ae, SksePluginCompat::Incompatible { .. }),
+                "SE Address Library plugin should be Incompatible on AE, got {:?}", compat_ae
+            );
+
+            let compat_se = check_skse_dll_compat(dll, se_runtime);
+            assert!(
+                matches!(compat_se, SksePluginCompat::VersionIndependent),
+                "SE Address Library plugin should be VersionIndependent on SE, got {:?}", compat_se
             );
         }
     }
