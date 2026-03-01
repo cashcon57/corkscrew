@@ -758,7 +758,7 @@ impl NexusClient {
         F: Fn(u64, u64),
     {
         // Derive the file name from the URL path or fall back to a default.
-        let file_name = Url::parse(download_url)
+        let url_file_name = Url::parse(download_url)
             .ok()
             .and_then(|u| {
                 u.path_segments()
@@ -767,22 +767,21 @@ impl NexusClient {
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| "download".to_string());
 
-        let file_path = dest.join(&file_name);
-
         // Ensure the destination directory exists.
         tokio::fs::create_dir_all(dest).await?;
 
+        let mut request = self.download_client.get(download_url);
+
         // Resume partial download if the file already exists.
-        let existing_len = tokio::fs::metadata(&file_path)
+        let existing_len = tokio::fs::metadata(dest.join(&url_file_name))
             .await
             .map(|m| m.len())
             .unwrap_or(0);
 
-        let mut request = self.download_client.get(download_url);
         if existing_len > 0 {
             log::info!(
                 "Resuming download of '{}' from byte {}",
-                file_name,
+                url_file_name,
                 existing_len
             );
             request = request.header("Range", format!("bytes={}-", existing_len));
@@ -803,6 +802,31 @@ impl NexusClient {
                 message,
             });
         }
+
+        // Try Content-Disposition header for real filename (more reliable than URL path)
+        let file_name = response
+            .headers()
+            .get("content-disposition")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|cd| {
+                cd.split(';').find_map(|part| {
+                    let part = part.trim();
+                    if part.to_lowercase().starts_with("filename=") {
+                        Some(
+                            part[9..] // skip "filename="
+                                .trim_matches('"')
+                                .trim_matches('\'')
+                                .to_string(),
+                        )
+                    } else {
+                        None
+                    }
+                })
+            })
+            .filter(|n| !n.is_empty())
+            .unwrap_or(url_file_name);
+
+        let file_path = dest.join(&file_name);
 
         let content_length = response.content_length().unwrap_or(0);
         let total = if resumed {

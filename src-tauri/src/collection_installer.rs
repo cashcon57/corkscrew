@@ -176,6 +176,19 @@ const MAX_EXTRACTION_RETRIES: u32 = 2;
 
 /// Quick-check that an archive file has valid headers before extraction.
 fn validate_archive(path: &Path) -> Result<(), String> {
+    // Quick size check — files under 100 bytes are likely error pages, not archives
+    let file_len = std::fs::metadata(path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    if file_len > 0 && file_len < 100 {
+        let content = std::fs::read_to_string(path).unwrap_or_default();
+        return Err(format!(
+            "Downloaded file is only {} bytes (likely an error page): {}",
+            file_len,
+            &content[..content.len().min(200)]
+        ));
+    }
+
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -185,9 +198,22 @@ fn validate_archive(path: &Path) -> Result<(), String> {
         "zip" | "fomod" => {
             let file = std::fs::File::open(path)
                 .map_err(|e| format!("Cannot open archive: {}", e))?;
-            let _ = zip::ZipArchive::new(file)
-                .map_err(|e| format!("Invalid ZIP archive: {}", e))?;
-            Ok(())
+            match zip::ZipArchive::new(file) {
+                Ok(_) => Ok(()),
+                Err(e) => {
+                    // ZIP validation failed — check if the file is actually a different format
+                    if let Some(actual) = crate::installer::detect_format_from_magic(path) {
+                        if actual != "zip" {
+                            log::info!(
+                                "Archive '{}' has .zip extension but magic bytes indicate {} — will extract as {}",
+                                path.display(), actual, actual
+                            );
+                            return Ok(()); // Allow extraction to proceed with magic byte fallback
+                        }
+                    }
+                    Err(format!("Invalid ZIP archive: {}", e))
+                }
+            }
         }
         "7z" => {
             // Just verify the file is readable and non-empty.
@@ -198,7 +224,19 @@ fn validate_archive(path: &Path) -> Result<(), String> {
             }
             Ok(())
         }
-        _ => Ok(()),
+        _ => {
+            // Unknown extension — try magic byte detection to validate
+            if let Some(detected) = crate::installer::detect_format_from_magic(path) {
+                if detected == "zip" {
+                    let file = std::fs::File::open(path)
+                        .map_err(|e| format!("Cannot open archive: {}", e))?;
+                    let _ = zip::ZipArchive::new(file)
+                        .map_err(|e| format!("Invalid ZIP archive: {}", e))?;
+                }
+                // 7z/rar with unknown extension: will be handled by extract_archive magic byte fallback
+            }
+            Ok(())
+        }
     }
 }
 

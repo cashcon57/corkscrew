@@ -137,6 +137,39 @@ const MOD_FOLDER_NAMES: &[&str] = &[
 /// Supported formats (matched by file extension):
 /// - `.zip`
 /// - `.7z`
+/// Detect archive format from magic bytes (first 8 bytes of file).
+/// Returns "zip", "7z", "rar", or None if unrecognized.
+pub(crate) fn detect_format_from_magic(path: &Path) -> Option<&'static str> {
+    let mut buf = [0u8; 8];
+    let mut file = std::fs::File::open(path).ok()?;
+    std::io::Read::read_exact(&mut file, &mut buf).ok()?;
+    if buf[0] == 0x50 && buf[1] == 0x4B {
+        Some("zip")
+    } else if buf.len() >= 6 && buf[0..6] == [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C] {
+        Some("7z")
+    } else if buf[0..4] == [0x52, 0x61, 0x72, 0x21] {
+        Some("rar")
+    } else {
+        None
+    }
+}
+
+/// Try extracting with detected magic byte format (fallback path).
+fn extract_by_magic(archive_path: &Path, dest_dir: &Path) -> Option<Result<Vec<PathBuf>>> {
+    let detected = detect_format_from_magic(archive_path)?;
+    log::info!(
+        "Trying magic-byte-detected format '{}' for '{}'",
+        detected,
+        archive_path.display()
+    );
+    Some(match detected {
+        "zip" => extract_zip(archive_path, dest_dir),
+        "7z" => extract_7z(archive_path, dest_dir),
+        "rar" => extract_rar(archive_path, dest_dir),
+        _ => return None,
+    })
+}
+
 pub fn extract_archive(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
     if !archive_path.exists() {
         return Err(InstallerError::ArchiveNotFound(archive_path.to_path_buf()));
@@ -168,10 +201,37 @@ pub fn extract_archive(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathB
         .to_lowercase();
 
     match ext.as_str() {
-        "zip" => extract_zip(archive_path, dest_dir),
+        "zip" => extract_zip(archive_path, dest_dir).or_else(|zip_err| {
+            // ZIP failed — check if file is actually a different format
+            if let Some(actual) = detect_format_from_magic(archive_path) {
+                if actual != "zip" {
+                    log::warn!(
+                        "File '{}' has .zip extension but magic bytes indicate {} — retrying",
+                        archive_path.display(),
+                        actual
+                    );
+                    // Clean failed extraction attempt before retrying
+                    let _ = fs::remove_dir_all(dest_dir);
+                    let _ = fs::create_dir_all(dest_dir);
+                    return match actual {
+                        "7z" => extract_7z(archive_path, dest_dir),
+                        "rar" => extract_rar(archive_path, dest_dir),
+                        _ => Err(zip_err),
+                    };
+                }
+            }
+            Err(zip_err)
+        }),
         "7z" => extract_7z(archive_path, dest_dir),
         "rar" => extract_rar(archive_path, dest_dir),
-        other => Err(InstallerError::UnsupportedFormat(other.to_string())),
+        // Unknown extension — try magic bytes before giving up
+        other => {
+            if let Some(result) = extract_by_magic(archive_path, dest_dir) {
+                result
+            } else {
+                Err(InstallerError::UnsupportedFormat(other.to_string()))
+            }
+        }
     }
 }
 
@@ -230,7 +290,30 @@ pub fn extract_archive_with_progress(
         .to_lowercase();
 
     match ext.as_str() {
-        "zip" => extract_zip_with_progress(archive_path, dest_dir, progress),
+        "zip" => extract_zip_with_progress(archive_path, dest_dir, progress).or_else(|zip_err| {
+            if let Some(actual) = detect_format_from_magic(archive_path) {
+                if actual != "zip" {
+                    log::warn!(
+                        "File '{}' has .zip extension but magic bytes indicate {} — retrying",
+                        archive_path.display(),
+                        actual
+                    );
+                    let _ = fs::remove_dir_all(dest_dir);
+                    let _ = fs::create_dir_all(dest_dir);
+                    progress(0, 1);
+                    let result = match actual {
+                        "7z" => extract_7z(archive_path, dest_dir),
+                        "rar" => extract_rar(archive_path, dest_dir),
+                        _ => return Err(zip_err),
+                    };
+                    if let Ok(ref files) = result {
+                        progress(files.len() as u64, files.len() as u64);
+                    }
+                    return result;
+                }
+            }
+            Err(zip_err)
+        }),
         "7z" => {
             progress(0, 1);
             let result = extract_7z(archive_path, dest_dir);
@@ -247,7 +330,30 @@ pub fn extract_archive_with_progress(
             }
             result
         }
-        other => Err(InstallerError::UnsupportedFormat(other.to_string())),
+        // Unknown extension — try magic bytes before giving up
+        other => {
+            if let Some(detected) = detect_format_from_magic(archive_path) {
+                log::info!(
+                    "Unknown extension '{}', magic bytes indicate {} — extracting",
+                    other, detected
+                );
+                progress(0, 1);
+                let result = match detected {
+                    "zip" => extract_zip_with_progress(archive_path, dest_dir, progress),
+                    "7z" => extract_7z(archive_path, dest_dir),
+                    "rar" => extract_rar(archive_path, dest_dir),
+                    _ => return Err(InstallerError::UnsupportedFormat(other.to_string())),
+                };
+                if let Ok(ref files) = result {
+                    if detected != "zip" {
+                        progress(files.len() as u64, files.len() as u64);
+                    }
+                }
+                result
+            } else {
+                Err(InstallerError::UnsupportedFormat(other.to_string()))
+            }
+        }
     }
 }
 
