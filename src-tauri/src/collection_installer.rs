@@ -2341,6 +2341,27 @@ pub async fn install_collection(
         }
     }
 
+    // Apply fileOverrides conflict resolution: re-deploy specific files from
+    // the mod that should win, regardless of overall priority ordering.
+    if manifest.mods.iter().any(|m| !m.file_overrides.is_empty()) {
+        let _ = app.emit(
+            INSTALL_PROGRESS_EVENT,
+            InstallProgress::Initializing {
+                message: "Applying file override conflict resolution...".to_string(),
+            },
+        );
+        apply_file_overrides(
+            db,
+            manifest,
+            &mod_index_to_id,
+            &install_order,
+            &data_dir,
+            &game_path,
+            game_id,
+            bottle_name,
+        );
+    }
+
     // Apply plugin load order from manifest (works for any game with plugin support)
     if !manifest.plugins.is_empty() {
         let has_plugin_support = games::with_plugin(game_id, |plugin| {
@@ -3711,27 +3732,17 @@ async fn stage_and_deploy(
         }
     }
 
-    // Apply file overrides — when non-empty, only deploy listed files
-    let mut files_to_deploy = if !mod_entry.file_overrides.is_empty() {
-        files_to_deploy
-            .into_iter()
-            .filter(|f| {
-                let staging_prefix = staging_result.staging_path.to_string_lossy();
-                let rel = f
-                    .strip_prefix(staging_prefix.as_ref())
-                    .unwrap_or(f)
-                    .trim_start_matches('/')
-                    .trim_start_matches('\\')
-                    .replace('\\', "/");
-                mod_entry.file_overrides.iter().any(|ov| {
-                    let norm_ov = ov.replace('\\', "/");
-                    rel == norm_ov || rel.ends_with(&format!("/{}", norm_ov))
-                })
-            })
-            .collect()
-    } else {
-        files_to_deploy
-    };
+    // fileOverrides — marks files where this mod should win conflicts
+    // regardless of priority. Applied in a post-install pass after all mods
+    // are deployed (see apply_file_overrides). All files deploy normally here.
+    if !mod_entry.file_overrides.is_empty() {
+        log::info!(
+            "Mod '{}' has {} fileOverrides — will be resolved in post-install pass",
+            mod_name,
+            mod_entry.file_overrides.len()
+        );
+    }
+    let mut files_to_deploy = files_to_deploy;
 
     // Include flattened Root/ files in the deploy list (they were moved
     // into staging root above, so the deployer can find them).
@@ -4195,6 +4206,144 @@ fn apply_fomod_to_staging(
     );
 
     Some(files)
+}
+
+/// Post-install pass: apply fileOverrides conflict resolution.
+///
+/// In Vortex, `fileOverrides` on a collection mod means "for these specific
+/// files, THIS mod should win conflicts regardless of its overall install
+/// priority." After all mods are deployed with normal priority-based conflict
+/// resolution, this function re-deploys override files from the designated
+/// winning mod, correcting any files that were overwritten by higher-priority
+/// mods during the initial deployment.
+fn apply_file_overrides(
+    db: &Arc<crate::database::ModDatabase>,
+    manifest: &collections::CollectionManifest,
+    mod_index_to_id: &HashMap<usize, i64>,
+    install_order: &[usize],
+    data_dir: &Path,
+    game_path: &Path,
+    game_id: &str,
+    bottle_name: &str,
+) {
+    // Load the current deployment manifest once for efficiency.
+    let current_manifest = db
+        .get_deployment_manifest(game_id, bottle_name)
+        .unwrap_or_default();
+    let owner_map: HashMap<String, i64> = current_manifest
+        .iter()
+        .map(|e| (e.relative_path.replace('\\', "/"), e.mod_id))
+        .collect();
+
+    let mut overridden_count = 0u32;
+
+    // Process in install order so that if two mods both claim the same file
+    // via fileOverrides, the later (higher-priority) one wins naturally.
+    for &mod_idx in install_order {
+        let mod_entry = &manifest.mods[mod_idx];
+        if mod_entry.file_overrides.is_empty() {
+            continue;
+        }
+
+        let mod_id = match mod_index_to_id.get(&mod_idx) {
+            Some(&id) => id,
+            None => continue, // Mod wasn't installed (skipped/failed)
+        };
+
+        let mod_info = match db.get_mod(mod_id) {
+            Ok(Some(info)) => info,
+            _ => continue,
+        };
+
+        let staging_path = match &mod_info.staging_path {
+            Some(p) => PathBuf::from(p),
+            None => continue,
+        };
+
+        let is_root = crate::collections::is_root_mod(mod_entry);
+        let target_dir = if is_root { game_path } else { data_dir };
+
+        for override_file in &mod_entry.file_overrides {
+            let norm = override_file.replace('\\', "/");
+
+            // Check if we already own this file — no action needed
+            if owner_map.get(&norm) == Some(&mod_id) {
+                continue;
+            }
+
+            let src = staging_path.join(&norm);
+            if !src.exists() {
+                log::debug!(
+                    "fileOverride: source not found for mod {} ('{}'): {}",
+                    mod_id,
+                    mod_info.name,
+                    norm
+                );
+                continue;
+            }
+
+            let dst = target_dir.join(&norm);
+
+            // Remove existing file (from the current winner)
+            if dst.exists() {
+                let _ = std::fs::remove_file(&dst);
+            }
+            if let Some(parent) = dst.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+
+            // Deploy our version
+            let method = match std::fs::hard_link(&src, &dst) {
+                Ok(_) => "hardlink",
+                Err(_) => match std::fs::copy(&src, &dst) {
+                    Ok(_) => "copy",
+                    Err(e) => {
+                        log::warn!(
+                            "fileOverride: failed to deploy '{}' from mod {} ('{}'): {}",
+                            norm,
+                            mod_id,
+                            mod_info.name,
+                            e
+                        );
+                        continue;
+                    }
+                },
+            };
+
+            // Update deployment manifest — INSERT OR REPLACE handles ownership transfer
+            let _ = db.add_deployment_entry(
+                game_id,
+                bottle_name,
+                mod_id,
+                &norm,
+                &staging_path.to_string_lossy(),
+                method,
+                None,
+            );
+
+            // Preserve deploy_target for root mods
+            if is_root {
+                let _ = db.set_deploy_target_for_mod(mod_id, "root");
+            }
+
+            overridden_count += 1;
+            log::info!(
+                "fileOverride: mod {} ('{}') now wins '{}' (was owned by {:?}, method={})",
+                mod_id,
+                mod_info.name,
+                norm,
+                owner_map.get(&norm),
+                method
+            );
+        }
+    }
+
+    if overridden_count > 0 {
+        log::info!(
+            "fileOverride resolution complete: {} file(s) re-deployed to correct winners",
+            overridden_count
+        );
+    }
 }
 
 /// Apply the plugin load order from a collection manifest.
