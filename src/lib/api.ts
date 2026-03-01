@@ -1222,6 +1222,14 @@ export async function getDeploymentHealth(
   return invoke("get_deployment_health", { gameId, bottleName });
 }
 
+/** Lightweight deployment stats — skips expensive conflict computation. */
+export async function getDeploymentStats(
+  gameId: string,
+  bottleName: string
+): Promise<DeploymentHealth> {
+  return invoke("get_deployment_stats", { gameId, bottleName });
+}
+
 // Mod Tools
 export async function detectModTools(
   gameId: string,

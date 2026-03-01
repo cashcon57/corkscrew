@@ -28,6 +28,7 @@
     deployIncremental,
     purgeDeployment,
     getDeploymentHealth,
+    getDeploymentStats,
     setModNotes,
     setModTags,
     setModPriority,
@@ -639,7 +640,8 @@
       dismissedBanners = savedBanners ? new Set(JSON.parse(savedBanners)) : new Set();
       // Clear selection
       selectedModIds = new Set();
-      loadMods(activeGame);
+      // Load mods and deployment stats in parallel
+      Promise.all([loadMods(activeGame), refreshHealth(activeGame)]);
     }
   });
 
@@ -663,21 +665,17 @@
     const thisLoad = ++loadGeneration;
     loadingMods = true;
     try {
-      const mods = await getInstalledMods(game.game_id, game.bottle_name);
+      // Run all three queries in parallel instead of serially
+      const [mods, newConflicts, tools] = await Promise.all([
+        getInstalledMods(game.game_id, game.bottle_name),
+        getConflicts(game.game_id, game.bottle_name).catch(() => [] as import('$lib/types').FileConflict[]),
+        detectModTools(game.game_id, game.bottle_name).catch(() => [] as import('$lib/types').ModTool[]),
+      ]);
       // Only update state if this is still the latest load request
       if (thisLoad !== loadGeneration) return;
       installedMods.set(mods);
-      // Also load conflicts and tools
-      try {
-        conflicts = await getConflicts(game.game_id, game.bottle_name);
-      } catch {
-        conflicts = [];
-      }
-      try {
-        modTools = await detectModTools(game.game_id, game.bottle_name);
-      } catch {
-        modTools = [];
-      }
+      conflicts = newConflicts;
+      modTools = tools;
       // Load endorsements in background (best-effort)
       loadEndorsements(game.nexus_slug);
     } catch (e: unknown) {
@@ -914,11 +912,20 @@
     const game = pickedGame ?? $selectedGame;
     if (!game) return;
     togglingMod = mod.id;
+    const newEnabled = !mod.enabled;
+
+    // Optimistic UI update — flip immediately so the toggle feels instant
+    mod.enabled = newEnabled;
+    installedMods.set($installedMods);
+
     try {
-      await toggleMod(mod.id, game.game_id, game.bottle_name, !mod.enabled);
-      await loadMods(game);
-      await refreshHealth(game);
+      await toggleMod(mod.id, game.game_id, game.bottle_name, newEnabled);
+      // Refresh data in parallel, non-blocking (UI already updated)
+      Promise.all([loadMods(game), refreshHealth(game)]).catch(() => {});
     } catch (e: unknown) {
+      // Revert optimistic update on failure
+      mod.enabled = !newEnabled;
+      installedMods.set($installedMods);
       showError(`Failed to toggle mod: ${e}`);
     } finally {
       togglingMod = null;
@@ -1560,18 +1567,16 @@
 
   async function refreshHealth(game: DetectedGame) {
     try {
-      deployHealth = await getDeploymentHealth(game.game_id, game.bottle_name);
+      // Use lightweight stats (skips expensive find_all_conflicts — conflicts
+      // are already loaded by loadMods → getConflicts)
+      const stats = await getDeploymentStats(game.game_id, game.bottle_name);
+      deployHealth = { ...stats, conflict_count: conflicts.length };
     } catch {
       deployHealth = null;
     }
   }
 
-  // Load health on game change
-  $effect(() => {
-    if (activeGame) {
-      refreshHealth(activeGame);
-    }
-  });
+  // Health is now loaded in parallel with mods in the activeGame $effect above
 
   // --- Notes ---
   async function handleSaveNotes(modId: number) {

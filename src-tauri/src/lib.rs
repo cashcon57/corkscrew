@@ -2068,6 +2068,54 @@ fn get_deployment_health(
     }))
 }
 
+/// Lightweight deployment stats without the expensive `find_all_conflicts()` call.
+/// The frontend already loads conflicts separately via `get_conflicts`, so this
+/// avoids computing them twice.  Used after mod toggle and for sidebar stats.
+#[tauri::command]
+fn get_deployment_stats(
+    game_id: String,
+    bottle_name: String,
+    state: State<AppState>,
+) -> Result<serde_json::Value, String> {
+    let db = &state.db;
+
+    let manifest = db
+        .get_deployment_manifest(&game_id, &bottle_name)
+        .map_err(|e| e.to_string())?;
+    let mods = db
+        .list_mods(&game_id, &bottle_name)
+        .map_err(|e| e.to_string())?;
+
+    let total_mods = mods.len();
+    let total_enabled = mods.iter().filter(|m| m.enabled).count();
+    let is_deployed = !manifest.is_empty();
+    let total_deployed = manifest.len();
+
+    let deploy_method = if is_deployed {
+        match resolve_game(&game_id, &bottle_name) {
+            Ok((_, _, data_dir)) => {
+                let staging_root = staging::staging_base_dir(&game_id, &bottle_name);
+                if deployer::same_filesystem(&staging_root, &data_dir) {
+                    "hardlink"
+                } else {
+                    "copy"
+                }
+            }
+            Err(_) => "unknown",
+        }
+    } else {
+        "none"
+    };
+
+    Ok(serde_json::json!({
+        "total_deployed": total_deployed,
+        "total_enabled": total_enabled,
+        "total_mods": total_mods,
+        "deploy_method": deploy_method,
+        "is_deployed": is_deployed,
+    }))
+}
+
 // --- Background Hashing ---
 
 #[tauri::command]
@@ -5860,6 +5908,7 @@ pub fn run() {
             collection_download_size_cmd,
             get_collection_diff_cmd,
             get_deployment_health,
+            get_deployment_stats,
             // Background Hashing
             start_background_hashing,
             cancel_background_hashing,
