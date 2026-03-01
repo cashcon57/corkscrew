@@ -975,8 +975,20 @@ pub fn parse_game_version_to_runtime(version_str: &str) -> Option<u32> {
     let minor: u8 = parts[1].parse().ok()?;
     // Build might have non-numeric suffix (e.g., "1170") — parse digits only
     let build_str: String = parts[2].chars().take_while(|c| c.is_ascii_digit()).collect();
-    let build: u16 = build_str.parse().ok()?;
-    Some(((major as u32) << 24) | ((minor as u32) << 16) | ((build as u32) << 4))
+    match build_str.parse::<u16>() {
+        Ok(build) => Some(((major as u32) << 24) | ((minor as u32) << 16) | ((build as u32) << 4)),
+        Err(_) => {
+            // Wildcard version like "1.6.x (Anniversary Edition, ~35.4 MB)" —
+            // the exe hash didn't match any known version but file size indicates AE.
+            // Use 1.6.1170 as representative AE runtime for compat checks.
+            if major == 1 && minor == 6 {
+                info!("parse_game_version_to_runtime: wildcard '{}' → treating as AE 1.6.1170", version_str);
+                Some((1u32 << 24) | (6u32 << 16) | (1170u32 << 4))
+            } else {
+                None
+            }
+        }
+    }
 }
 
 /// Decode SKSE runtime version u32 back to human-readable string.
@@ -1785,6 +1797,15 @@ mod tests {
         assert_eq!(parse_game_version_to_runtime("1.6.1170"), Some(0x01064920));
         // 1.6.640 → (1 << 24) | (6 << 16) | (640 << 4)
         assert_eq!(parse_game_version_to_runtime("1.6.640"), Some(0x01062800));
+        // Wildcard AE version (exe hash unknown) — should resolve to 1.6.1170
+        assert_eq!(
+            parse_game_version_to_runtime("1.6.x (Anniversary Edition, ~35.4 MB)"),
+            Some(0x01064920)
+        );
+        assert_eq!(
+            parse_game_version_to_runtime("1.6.x (Anniversary Edition, ~50.1 MB)"),
+            Some(0x01064920)
+        );
         // Invalid
         assert_eq!(parse_game_version_to_runtime("invalid"), None);
         assert_eq!(parse_game_version_to_runtime("1.2"), None);
