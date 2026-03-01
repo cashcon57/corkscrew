@@ -1258,6 +1258,19 @@ pub fn scan_skse_plugins(data_dir: &Path, game_version: &str) -> SksePluginScanR
 ///    an SE-only mod (1.3M) and a Universal Support mod (1.4M) both provide the
 ///    same DLL.
 ///
+/// Check if a mod name suggests it's the AE-compatible build of an SKSE plugin.
+/// Used to add directional preference when both SE and AE Address Library DLLs
+/// are available — prevents oscillating swaps between launches.
+fn is_ae_preferred_mod_name(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.contains("universal")
+        || lower.contains("anniversary")
+        || lower.contains(" ae")
+        || lower.contains("ae ")
+        || lower.contains("(ae)")
+        || lower.contains("[ae]")
+}
+
 /// Runs during collection install and before every Skyrim SE launch.
 /// Returns the number of DLLs swapped.
 pub fn fix_skse_plugin_conflicts(
@@ -1336,30 +1349,44 @@ pub fn fix_skse_plugin_conflicts(
         let needs_fix = match &compat {
             // Explicit incompatibility from compatible_versions check
             SksePluginCompat::Incompatible { .. } => true,
-            // Address Library DLL on AE — might be SE build, check for alternatives
+            // Address Library DLL on AE — might be SE build, check for a BETTER alternative.
+            // Uses directional preference to prevent oscillating swaps between launches:
+            // prefer mods with "Universal"/"AE" in name, then larger DLLs as fallback.
             SksePluginCompat::VersionIndependent if is_ae => {
-                // Only investigate if another mod has a different-sized copy
                 let deployed_size = fs::metadata(dll_path).map(|m| m.len()).unwrap_or(0);
                 let rel_skse = format!("SKSE/Plugins/{}", dll_name);
                 let current_owner_id = manifest_map.get(&rel_skse).map(|e| e.mod_id);
 
-                all_mods.iter().any(|m| {
-                    if Some(m.id) == current_owner_id || !m.enabled { return false; }
-                    let staging = match &m.staging_path {
-                        Some(s) => PathBuf::from(s),
-                        None => return false,
-                    };
-                    let candidate = staging.join("SKSE").join("Plugins").join(&dll_name);
-                    if let Ok(meta) = fs::metadata(&candidate) {
-                        meta.len() != deployed_size
-                    } else {
-                        // Try case-insensitive
-                        find_file_case_insensitive(&staging.join("SKSE").join("Plugins"), &dll_name)
-                            .and_then(|p| fs::metadata(&p).ok())
-                            .map(|meta| meta.len() != deployed_size)
-                            .unwrap_or(false)
-                    }
-                })
+                // If current owner mod already has an AE-indicating name, don't swap
+                let current_mod_name = current_owner_id
+                    .and_then(|id| all_mods.iter().find(|m| m.id == id))
+                    .map(|m| m.name.as_str())
+                    .unwrap_or("");
+                if is_ae_preferred_mod_name(current_mod_name) {
+                    false
+                } else {
+                    // Look for a preferred alternative (AE-named or larger)
+                    all_mods.iter().any(|m| {
+                        if Some(m.id) == current_owner_id || !m.enabled { return false; }
+                        let staging = match &m.staging_path {
+                            Some(s) => PathBuf::from(s),
+                            None => return false,
+                        };
+                        let candidate = staging.join("SKSE").join("Plugins").join(&dll_name);
+                        let alt_size = if let Ok(meta) = fs::metadata(&candidate) {
+                            meta.len()
+                        } else {
+                            find_file_case_insensitive(&staging.join("SKSE").join("Plugins"), &dll_name)
+                                .and_then(|p| fs::metadata(&p).ok())
+                                .map(|meta| meta.len())
+                                .unwrap_or(0)
+                        };
+                        if alt_size == 0 || alt_size == deployed_size { return false; }
+
+                        // Swap only toward AE-preferred mods, or larger DLLs as tiebreaker
+                        is_ae_preferred_mod_name(&m.name) || alt_size > deployed_size
+                    })
+                }
             }
             _ => false,
         };
@@ -1385,6 +1412,7 @@ pub fn fix_skse_plugin_conflicts(
 
         // Search all mods' staging directories for an alternative
         let mut best_candidate: Option<(PathBuf, i64, String)> = None;
+        let mut best_is_ae_preferred = false;
 
         for m in &all_mods {
             if Some(m.id) == current_owner_id { continue; }
@@ -1417,14 +1445,20 @@ pub fn fix_skse_plugin_conflicts(
                     break;
                 }
                 SksePluginCompat::VersionIndependent => {
-                    // Both are VersionIndependent (Address Library) — prefer the
-                    // alternative if it's a different file (different size), as the
-                    // collection likely included both SE and AE builds.
-                    if alt_size != deployed_size {
-                        let quality = format!("alternative build ({}KB vs deployed {}KB)",
-                            alt_size / 1024, deployed_size / 1024);
-                        if best_candidate.is_none() {
-                            best_candidate = Some((candidate, m.id, quality));
+                    // Both are VersionIndependent (Address Library) — use directional
+                    // preference to pick the right one and prevent oscillation:
+                    // 1. Prefer AE-named mods ("Universal", "AE", "Anniversary")
+                    // 2. Fallback: prefer larger DLLs (AE builds tend to be larger)
+                    if alt_size != deployed_size && alt_size > 0 {
+                        let alt_is_ae = is_ae_preferred_mod_name(&m.name);
+                        if alt_is_ae || alt_size > deployed_size {
+                            let quality = format!("alternative build ({}KB vs deployed {}KB)",
+                                alt_size / 1024, deployed_size / 1024);
+                            // AE-named mods beat non-AE; among same tier, first wins
+                            if best_candidate.is_none() || (alt_is_ae && !best_is_ae_preferred) {
+                                best_candidate = Some((candidate, m.id, quality));
+                                best_is_ae_preferred = alt_is_ae;
+                            }
                         }
                     }
                 }
