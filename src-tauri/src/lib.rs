@@ -1137,6 +1137,11 @@ fn launch_game_cmd(
         }
     }
 
+    // Pre-launch plugin sync — ensure plugins.txt reflects all deployed
+    // plugins as enabled.  This catches any staleness from the game itself
+    // rewriting the file on a previous exit/crash.
+    let _ = sync_plugins_for_game(&game, &bottle);
+
     // Pre-launch SKSE plugin DLL version fix — swap incompatible plugins
     // for compatible alternatives from other installed mods' staging dirs.
     if game_id == "skyrimse" {
@@ -3372,7 +3377,10 @@ fn activate_profile(
         }
     }
 
-    // 8. Mark profile as active
+    // 8. Sync plugins to ensure plugins.txt matches on-disk state
+    let _ = sync_plugins_for_game(&game, &bottle);
+
+    // 9. Mark profile as active
     profiles::set_active_profile(db, &game_id, &bottle_name, profile_id)
         .map_err(|e| e.to_string())?;
 
