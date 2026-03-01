@@ -1152,6 +1152,15 @@ fn launch_game_cmd(
         if skse_fixes > 0 {
             log::info!("Pre-launch: swapped {} incompatible SKSE plugin DLL(s)", skse_fixes);
         }
+
+        // EngineFixes Wine compatibility: disable MemoryManager overrides
+        // (tbbmalloc is incompatible with Wine/CrossOver)
+        let ef_fixes = skse::fix_engine_fixes_for_wine(
+            &data_dir, &state.db, &game_id, &bottle_name,
+        );
+        if ef_fixes > 0 {
+            log::info!("Pre-launch: patched {} EngineFixes TOML(s) for Wine compatibility", ef_fixes);
+        }
     }
 
     let mut result = launcher::launch_game(&bottle, &exe_path, Some(&game_path))
@@ -1799,6 +1808,10 @@ fn redeploy_all_mods(
 
     if game_id == "skyrimse" {
         let _ = sync_plugins_for_game(&game, &bottle);
+        let ef = skse::fix_engine_fixes_for_wine(&data_dir, &state.db, &game_id, &bottle_name);
+        if ef > 0 {
+            log::info!("Redeploy: patched {} EngineFixes TOML(s) for Wine compatibility", ef);
+        }
     }
 
     Ok(serde_json::json!({
@@ -1824,6 +1837,10 @@ fn deploy_incremental_cmd(
 
     if game_id == "skyrimse" {
         let _ = sync_plugins_for_game(&game, &bottle);
+        let ef = skse::fix_engine_fixes_for_wine(&data_dir, &state.db, &game_id, &bottle_name);
+        if ef > 0 {
+            log::info!("Incremental deploy: patched {} EngineFixes TOML(s) for Wine compatibility", ef);
+        }
     }
 
     Ok(result)

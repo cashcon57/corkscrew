@@ -1505,6 +1505,120 @@ pub fn fix_skse_plugin_conflicts(
 }
 
 // ---------------------------------------------------------------------------
+// EngineFixes Wine compatibility
+// ---------------------------------------------------------------------------
+
+/// Disable EngineFixes' MemoryManager overrides which replace Skyrim's
+/// allocator with tbbmalloc.  This is incompatible with Wine/CrossOver and
+/// causes a crash ~67 seconds into launch during InitTESThread.
+///
+/// We patch every `EngineFixes.toml` we can find — both in the deployed
+/// game Data directory and in every staging directory that contains one —
+/// so the fix persists across redeploys.
+///
+/// Returns the number of TOML files patched.
+pub fn fix_engine_fixes_for_wine(
+    data_dir: &Path,
+    db: &Arc<ModDatabase>,
+    game_id: &str,
+    bottle_name: &str,
+) -> usize {
+    let mut patched = 0;
+
+    // Collect all paths to check: deployed + every staging dir
+    let mut toml_paths: Vec<PathBuf> = Vec::new();
+
+    // 1. Deployed copy
+    let deployed = data_dir.join("SKSE").join("Plugins").join("EngineFixes.toml");
+    if deployed.exists() {
+        toml_paths.push(deployed);
+    }
+
+    // 2. Staging copies from all installed mods
+    if let Ok(mods) = db.list_mods(game_id, bottle_name) {
+        for m in &mods {
+            if let Some(ref sp) = m.staging_path {
+                let staging_toml = PathBuf::from(sp)
+                    .join("SKSE")
+                    .join("Plugins")
+                    .join("EngineFixes.toml");
+                if staging_toml.exists() {
+                    toml_paths.push(staging_toml);
+                }
+            }
+        }
+    }
+
+    for path in &toml_paths {
+        match patch_engine_fixes_toml(path) {
+            Ok(true) => {
+                info!("EngineFixes Wine fix: patched {}", path.display());
+                patched += 1;
+            }
+            Ok(false) => {
+                debug!("EngineFixes Wine fix: already patched {}", path.display());
+            }
+            Err(e) => {
+                warn!("EngineFixes Wine fix: failed to patch {}: {}", path.display(), e);
+            }
+        }
+    }
+
+    patched
+}
+
+/// Keys in the `[MemoryManager]` section that must be `false` under Wine.
+const MEMORY_MANAGER_KEYS: &[&str] = &[
+    "bOverrideMemoryManager",
+    "bOverrideScrapHeap",
+    "bOverrideScaleformAllocator",
+    "bOverrideRenderPassCache",
+    "bOverrideHavokMemorySystem",
+    "bReplaceImports",
+];
+
+/// Patch a single EngineFixes.toml for Wine compatibility:
+/// - Set all [MemoryManager] keys to false
+/// - Set bDisableTBB = true in [Debug] (TBB allocator is Wine-incompatible)
+/// Returns Ok(true) if the file was modified, Ok(false) if already correct.
+fn patch_engine_fixes_toml(path: &Path) -> std::result::Result<bool, String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("read {}: {}", path.display(), e))?;
+
+    let mut new_content = content.clone();
+    let mut changed = false;
+
+    for key in MEMORY_MANAGER_KEYS {
+        // Match "key = true" with optional surrounding whitespace and trailing comment
+        let pattern = format!("{} = true", key);
+        if new_content.contains(&pattern) {
+            let replacement = format!("{} = false", key);
+            new_content = new_content.replacen(&pattern, &replacement, 1);
+            changed = true;
+        }
+    }
+
+    // Disable TBB allocator — it's hardcoded to load during preload and
+    // the [MemoryManager] TOML keys only control class-level overrides,
+    // not the underlying TBB library. bDisableTBB forces CRT instead.
+    if new_content.contains("bDisableTBB = false") {
+        new_content = new_content.replacen("bDisableTBB = false", "bDisableTBB = true", 1);
+        changed = true;
+    }
+
+    if changed {
+        // Atomic write: temp file + rename
+        let tmp = path.with_extension("toml.tmp");
+        std::fs::write(&tmp, &new_content)
+            .map_err(|e| format!("write {}: {}", tmp.display(), e))?;
+        std::fs::rename(&tmp, path)
+            .map_err(|e| format!("rename {} -> {}: {}", tmp.display(), path.display(), e))?;
+    }
+
+    Ok(changed)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

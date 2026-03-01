@@ -580,10 +580,17 @@ impl ModDatabase {
         let deployed_at = chrono::Utc::now().to_rfc3339();
         let tx = conn.unchecked_transaction()?;
         {
+            // Preserve existing deploy_target via COALESCE — if a row already
+            // exists for this (game_id, bottle_name, relative_path), keep its
+            // deploy_target; otherwise default to 'data'.
             let mut stmt = tx.prepare_cached(
                 "INSERT OR REPLACE INTO deployment_manifest
-                    (game_id, bottle_name, mod_id, relative_path, staging_path, deploy_method, sha256, deployed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7)",
+                    (game_id, bottle_name, mod_id, relative_path, staging_path, deploy_method, sha256, deployed_at, deploy_target)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7,
+                    COALESCE(
+                        (SELECT deploy_target FROM deployment_manifest
+                         WHERE game_id = ?1 AND bottle_name = ?2 AND relative_path = ?4),
+                        'data'))",
             )?;
             for (game_id, bottle_name, mod_id, rel_path, staging_path, method) in entries {
                 stmt.execute(params![
@@ -877,10 +884,15 @@ impl ModDatabase {
         let deployed_at = chrono::Utc::now().to_rfc3339();
         let tx = conn.unchecked_transaction()?;
         {
+            // Preserve existing deploy_target via COALESCE (see batch_add_deployment_entries)
             let mut stmt = tx.prepare_cached(
                 "INSERT OR REPLACE INTO deployment_manifest
-                    (game_id, bottle_name, mod_id, relative_path, staging_path, deploy_method, sha256, deployed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    (game_id, bottle_name, mod_id, relative_path, staging_path, deploy_method, sha256, deployed_at, deploy_target)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+                    COALESCE(
+                        (SELECT deploy_target FROM deployment_manifest
+                         WHERE game_id = ?1 AND bottle_name = ?2 AND relative_path = ?4),
+                        'data'))",
             )?;
             for (game_id, bottle_name, mod_id, rel_path, staging_path, method, sha256) in entries {
                 stmt.execute(params![
