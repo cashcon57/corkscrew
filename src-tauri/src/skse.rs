@@ -918,6 +918,158 @@ pub fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// SKSE plugin DLL version compatibility (PE parsing)
+// ---------------------------------------------------------------------------
+
+/// SKSE plugin version data struct, matching the C++ `SKSEPluginVersionData`
+/// from SKSE64's PluginAPI.h. Exported by SKSE plugins as `SKSEPlugin_Version`.
+/// Total size: 0x350 (848 bytes).
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct SKSEPluginVersionData {
+    data_version: u32,              // 0x000 — must be 1
+    plugin_version: u32,            // 0x004
+    name: [u8; 256],                // 0x008
+    author: [u8; 256],              // 0x108
+    support_email: [u8; 252],       // 0x208
+    version_independence_ex: u32,   // 0x304
+    version_independence: u32,      // 0x308
+    compatible_versions: [u32; 16], // 0x30C — zero-terminated list
+    se_version_required: u32,       // 0x34C
+}
+
+// Safety: SKSEPluginVersionData is #[repr(C)] with only primitive fields.
+unsafe impl pelite::Pod for SKSEPluginVersionData {}
+
+/// Version independence flags from SKSE64 PluginAPI.h.
+const VERSION_INDEPENDENT_ADDRESS_LIBRARY: u32 = 1 << 0;
+const VERSION_INDEPENDENT_SIGNATURES: u32 = 1 << 1;
+
+/// Result of checking an SKSE plugin DLL's compatibility with a game version.
+#[derive(Clone, Debug)]
+pub enum SksePluginCompat {
+    /// DLL explicitly lists this game version as compatible.
+    Compatible,
+    /// DLL does not list this game version. `supports` has human-readable versions it does support.
+    Incompatible { supports: Vec<String> },
+    /// DLL uses Address Library or signature scanning — works with any game version.
+    VersionIndependent,
+    /// DLL has no `SKSEPlugin_Version` export (legacy plugin).
+    NoVersionData,
+    /// Could not parse the DLL.
+    ParseError(String),
+}
+
+/// Encode a game version string like "1.6.1170" into SKSE's runtime version u32.
+/// Format: `(major << 24) | (minor << 16) | (build << 4)`.
+pub fn parse_game_version_to_runtime(version_str: &str) -> Option<u32> {
+    let parts: Vec<&str> = version_str.split('.').collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    let major: u8 = parts[0].parse().ok()?;
+    let minor: u8 = parts[1].parse().ok()?;
+    // Build might have non-numeric suffix (e.g., "1170") — parse digits only
+    let build_str: String = parts[2].chars().take_while(|c| c.is_ascii_digit()).collect();
+    let build: u16 = build_str.parse().ok()?;
+    Some(((major as u32) << 24) | ((minor as u32) << 16) | ((build as u32) << 4))
+}
+
+/// Decode SKSE runtime version u32 back to human-readable string.
+fn decode_runtime_version(v: u32) -> String {
+    let major = (v >> 24) & 0xFF;
+    let minor = (v >> 16) & 0xFF;
+    let build = (v >> 4) & 0xFFF;
+    format!("{}.{}.{}", major, minor, build)
+}
+
+/// Check an SKSE plugin DLL's compatibility with a specific game runtime version.
+///
+/// Parses the PE export table to find the `SKSEPlugin_Version` data export,
+/// reads the `SKSEPluginVersionData` struct, and checks whether the DLL supports
+/// the given game version — the same check SKSE performs at load time.
+pub fn check_skse_dll_compat(dll_path: &Path, game_runtime_version: u32) -> SksePluginCompat {
+    let bytes = match std::fs::read(dll_path) {
+        Ok(b) => b,
+        Err(e) => return SksePluginCompat::ParseError(format!("read error: {}", e)),
+    };
+
+    // Try PE64 first (most SKSE plugins are 64-bit), fall back to PE32
+    let version_data = read_version_data_pe64(&bytes)
+        .or_else(|| read_version_data_pe32(&bytes));
+
+    let data = match version_data {
+        Some(d) => d,
+        None => return SksePluginCompat::NoVersionData,
+    };
+
+    // Check version independence flags
+    if data.version_independence & VERSION_INDEPENDENT_ADDRESS_LIBRARY != 0
+        || data.version_independence & VERSION_INDEPENDENT_SIGNATURES != 0
+    {
+        return SksePluginCompat::VersionIndependent;
+    }
+
+    // Check compatible_versions array (zero-terminated)
+    let mut supported = Vec::new();
+    for &ver in &data.compatible_versions {
+        if ver == 0 {
+            break;
+        }
+        if ver == game_runtime_version {
+            return SksePluginCompat::Compatible;
+        }
+        supported.push(decode_runtime_version(ver));
+    }
+
+    if supported.is_empty() {
+        // No versions listed and not version-independent — treat as unknown
+        SksePluginCompat::NoVersionData
+    } else {
+        SksePluginCompat::Incompatible { supports: supported }
+    }
+}
+
+/// Extract the plugin name from an SKSE plugin DLL's version data.
+pub fn get_skse_plugin_name(dll_path: &Path) -> Option<String> {
+    let bytes = std::fs::read(dll_path).ok()?;
+    let data = read_version_data_pe64(&bytes).or_else(|| read_version_data_pe32(&bytes))?;
+    let name = std::str::from_utf8(&data.name)
+        .ok()?
+        .trim_end_matches('\0')
+        .to_string();
+    if name.is_empty() { None } else { Some(name) }
+}
+
+/// Try to read SKSEPluginVersionData from a PE64 DLL.
+fn read_version_data_pe64(bytes: &[u8]) -> Option<SKSEPluginVersionData> {
+    use pelite::pe64::{Pe, PeFile};
+    let pe = PeFile::from_bytes(bytes).ok()?;
+    let exports = pe.exports().ok()?.by().ok()?;
+    let export = exports.name("SKSEPlugin_Version").ok()?;
+    let rva = export.symbol()?;
+    let data: &SKSEPluginVersionData = pe.derva(rva).ok()?;
+    if data.data_version == 0 || data.data_version > 2 {
+        return None;
+    }
+    Some(*data)
+}
+
+/// Try to read SKSEPluginVersionData from a PE32 DLL.
+fn read_version_data_pe32(bytes: &[u8]) -> Option<SKSEPluginVersionData> {
+    use pelite::pe32::{Pe, PeFile};
+    let pe = PeFile::from_bytes(bytes).ok()?;
+    let exports = pe.exports().ok()?.by().ok()?;
+    let export = exports.name("SKSEPlugin_Version").ok()?;
+    let rva = export.symbol()?;
+    let data: &SKSEPluginVersionData = pe.derva(rva).ok()?;
+    if data.data_version == 0 || data.data_version > 2 {
+        return None;
+    }
+    Some(*data)
+}
+
+// ---------------------------------------------------------------------------
 // Post-install SKSE plugin scan
 // ---------------------------------------------------------------------------
 
@@ -949,18 +1101,21 @@ pub struct SksePluginScanResult {
 /// - Number of DLL plugins present
 /// - Address Library version files (`versionlib-1-5-97-0.bin` for SE, `versionlib-1-6-*.bin` for AE)
 /// - Whether Address Library matches the game version
+/// - Each DLL's PE-exported `SKSEPlugin_Version` data for version compatibility
 pub fn scan_skse_plugins(data_dir: &Path, game_version: &str) -> SksePluginScanResult {
     let plugins_dir = data_dir.join("SKSE").join("Plugins");
     let mut total_plugins = 0;
     let mut warnings = Vec::new();
+    let mut dll_paths: Vec<PathBuf> = Vec::new();
 
-    // Count DLL plugins
+    // Collect DLL plugins
     if plugins_dir.exists() {
         if let Ok(entries) = fs::read_dir(&plugins_dir) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_lowercase();
                 if name.ends_with(".dll") {
                     total_plugins += 1;
+                    dll_paths.push(entry.path());
                 }
             }
         }
@@ -1013,6 +1168,36 @@ pub fn scan_skse_plugins(data_dir: &Path, game_version: &str) -> SksePluginScanR
                 found, expected
             ),
         });
+    }
+
+    // Per-DLL version compatibility check (if we can parse the game version)
+    if let Some(runtime) = parse_game_version_to_runtime(game_version) {
+        for dll_path in &dll_paths {
+            let dll_name = dll_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+
+            match check_skse_dll_compat(dll_path, runtime) {
+                SksePluginCompat::Incompatible { supports } => {
+                    let plugin_name = get_skse_plugin_name(dll_path)
+                        .unwrap_or_else(|| dll_name.clone());
+                    warnings.push(SksePluginWarning {
+                        dll_name: dll_name.clone(),
+                        warning: format!(
+                            "{}: incompatible (built for {}, game is {})",
+                            plugin_name,
+                            supports.join("/"),
+                            game_version,
+                        ),
+                    });
+                }
+                SksePluginCompat::ParseError(e) => {
+                    debug!("Could not parse SKSE plugin '{}': {}", dll_name, e);
+                }
+                _ => {} // Compatible, VersionIndependent, NoVersionData — all fine
+            }
+        }
     }
 
     info!(
@@ -1390,6 +1575,47 @@ mod tests {
     fn get_builds_unknown_version() {
         let builds = get_available_skse_builds("invalid-version");
         assert!(builds.recommended.is_none());
+    }
+
+    // --- SKSE plugin version compat tests ---
+
+    #[test]
+    fn runtime_version_encoding() {
+        // 1.5.97 → (1 << 24) | (5 << 16) | (97 << 4)
+        assert_eq!(parse_game_version_to_runtime("1.5.97"), Some(0x01050610));
+        // 1.6.1170 → (1 << 24) | (6 << 16) | (1170 << 4)
+        assert_eq!(parse_game_version_to_runtime("1.6.1170"), Some(0x01064920));
+        // 1.6.640 → (1 << 24) | (6 << 16) | (640 << 4)
+        assert_eq!(parse_game_version_to_runtime("1.6.640"), Some(0x01062800));
+        // Invalid
+        assert_eq!(parse_game_version_to_runtime("invalid"), None);
+        assert_eq!(parse_game_version_to_runtime("1.2"), None);
+    }
+
+    #[test]
+    fn runtime_version_roundtrip() {
+        let v = parse_game_version_to_runtime("1.6.1170").unwrap();
+        assert_eq!(decode_runtime_version(v), "1.6.1170");
+
+        let v = parse_game_version_to_runtime("1.5.97").unwrap();
+        assert_eq!(decode_runtime_version(v), "1.5.97");
+    }
+
+    #[test]
+    fn check_compat_non_pe_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dll = tmp.path().join("fake.dll");
+        fs::write(&dll, b"this is not a PE file").unwrap();
+        let runtime = parse_game_version_to_runtime("1.6.1170").unwrap();
+        let result = check_skse_dll_compat(&dll, runtime);
+        // Should return NoVersionData (graceful) since it can't parse as PE
+        assert!(matches!(result, SksePluginCompat::NoVersionData | SksePluginCompat::ParseError(_)));
+    }
+
+    #[test]
+    fn check_compat_missing_file() {
+        let result = check_skse_dll_compat(Path::new("/nonexistent/fake.dll"), 0x01064920);
+        assert!(matches!(result, SksePluginCompat::ParseError(_)));
     }
 
     #[test]
