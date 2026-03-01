@@ -4230,6 +4230,11 @@ fn apply_fomod_to_staging(
 }
 
 /// Apply the plugin load order from a collection manifest.
+///
+/// The collection manifest marks some plugins as `enabled: false` — typically
+/// patches for mods outside the collection.  However, if a plugin file is
+/// actually deployed to the Data directory it should be active, so we override
+/// `enabled` to `true` for any plugin present on disk.
 fn apply_collection_plugin_order(
     collection_plugins: &[collections::CollectionPlugin],
     game: &games::DetectedGame,
@@ -4248,11 +4253,38 @@ fn apply_collection_plugin_order(
             .map(|p| p.join("loadorder.txt"))
             .unwrap_or_else(|| pf.with_file_name("loadorder.txt"));
 
+        // Build a case-insensitive set of plugin files actually on disk.
+        let data_dir = Path::new(&game.data_dir);
+        let on_disk: std::collections::HashSet<String> = std::fs::read_dir(data_dir)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                let lower = name.to_lowercase();
+                if lower.ends_with(".esp")
+                    || lower.ends_with(".esm")
+                    || lower.ends_with(".esl")
+                {
+                    Some(lower)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         let entries: Vec<plugins::skyrim_plugins::PluginEntry> = collection_plugins
             .iter()
-            .map(|p| plugins::skyrim_plugins::PluginEntry {
-                filename: p.name.clone(),
-                enabled: p.enabled,
+            .map(|p| {
+                // If the plugin file exists on disk, enable it regardless of
+                // what the collection manifest says.  The manifest's
+                // enabled=false is only meaningful for plugins that aren't
+                // deployed (e.g. patches for mods outside this collection).
+                let file_on_disk = on_disk.contains(&p.name.to_lowercase());
+                plugins::skyrim_plugins::PluginEntry {
+                    filename: p.name.clone(),
+                    enabled: if file_on_disk { true } else { p.enabled },
+                }
             })
             .collect();
 

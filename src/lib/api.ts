@@ -1230,6 +1230,14 @@ export async function getDeploymentStats(
   return invoke("get_deployment_stats", { gameId, bottleName });
 }
 
+/** Re-sync Plugins.txt, enabling all deployed plugin files. */
+export async function syncPlugins(
+  gameId: string,
+  bottleName: string
+): Promise<{ ok: boolean }> {
+  return invoke("sync_plugins_cmd", { gameId, bottleName });
+}
+
 // Mod Tools
 export async function detectModTools(
   gameId: string,

@@ -354,10 +354,18 @@ pub fn sync_plugins(
         };
 
         // ESM and ESL files are always loaded by the engine — force them enabled.
+        // All on-disk plugins should be enabled: if a file is deployed, it should
+        // be active.  The only "disabled" entries should be for plugins listed in
+        // plugins.txt that no longer have a file on disk (and those are already
+        // skipped above at line 345).
         let is_master = key.ends_with(".esm") || key.ends_with(".esl");
         result.push(PluginEntry {
             filename: existing_name.clone(),
-            enabled: if is_master { true } else { base_enabled },
+            enabled: if is_master || on_disk_lower.contains(&key) {
+                true
+            } else {
+                base_enabled
+            },
         });
         added.insert(key);
     }
@@ -952,12 +960,14 @@ mod tests {
             .unwrap();
         assert!(master.enabled, "ESM files must be forced enabled by sync");
 
-        // ESP should preserve its disabled state.
+        // On-disk ESPs should be enabled — if the file is deployed, it should
+        // be active.  (Changed from the old behaviour that preserved disabled
+        // state, which left 1500+ collection plugins inactive.)
         let esp = entries
             .iter()
             .find(|e| e.filename == "UserMod.esp")
             .unwrap();
-        assert!(!esp.enabled, "ESP disabled state should be preserved");
+        assert!(esp.enabled, "On-disk ESP should be enabled by sync");
     }
 
     #[test]

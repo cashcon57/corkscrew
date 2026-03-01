@@ -4110,6 +4110,20 @@ fn sync_plugins_for_game(game: &DetectedGame, bottle: &Bottle) -> Result<(), Str
     Ok(())
 }
 
+/// Re-sync plugin load order, enabling all deployed plugins.
+///
+/// Call this after a collection install (or any time Plugins.txt looks wrong)
+/// to ensure every plugin file in the Data directory is marked as enabled.
+#[tauri::command]
+fn sync_plugins_cmd(
+    game_id: String,
+    bottle_name: String,
+) -> Result<serde_json::Value, String> {
+    let (bottle, game, _data_dir) = resolve_game(&game_id, &bottle_name)?;
+    sync_plugins_for_game(&game, &bottle)?;
+    Ok(serde_json::json!({ "ok": true }))
+}
+
 // --- Nexus SSO ---
 
 #[tauri::command]
@@ -5909,6 +5923,7 @@ pub fn run() {
             get_collection_diff_cmd,
             get_deployment_health,
             get_deployment_stats,
+            sync_plugins_cmd,
             // Background Hashing
             start_background_hashing,
             cancel_background_hashing,
