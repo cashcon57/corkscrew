@@ -1508,9 +1508,16 @@ pub fn fix_skse_plugin_conflicts(
 // EngineFixes Wine compatibility
 // ---------------------------------------------------------------------------
 
-/// Disable EngineFixes' MemoryManager overrides which replace Skyrim's
-/// allocator with tbbmalloc.  This is incompatible with Wine/CrossOver and
-/// causes a crash ~67 seconds into launch during InitTESThread.
+/// Disable all EngineFixes patches that are incompatible with Wine/CrossOver.
+///
+/// Engine Fixes' code-patching mechanism (hooking game functions during the
+/// d3dx9_42.dll preload phase) crashes under Wine ~63 seconds into launch
+/// during InitTESThread.  This affects ALL [Fixes] and [Patches] — even
+/// trivial ones like MaxStdIO — not just the memory manager.
+///
+/// The DLL itself loads fine; it's the actual hooks that are the problem.
+/// We disable every boolean setting in [Fixes], [Patches], [MemoryManager],
+/// and [Warnings], then force `bDisableTBB = true` in [Debug].
 ///
 /// We patch every `EngineFixes.toml` we can find — both in the deployed
 /// game Data directory and in every staging directory that contains one —
@@ -1567,19 +1574,79 @@ pub fn fix_engine_fixes_for_wine(
     patched
 }
 
-/// Keys in the `[MemoryManager]` section that must be `false` under Wine.
-const MEMORY_MANAGER_KEYS: &[&str] = &[
+/// All boolean keys in EngineFixes.toml that must be set to `false` under Wine.
+/// Every [Fixes], [Patches], [MemoryManager], and [Warnings] boolean is included
+/// because Engine Fixes' hooking mechanism itself crashes under Wine.
+const WINE_DISABLE_KEYS: &[&str] = &[
+    // [Fixes]
+    "bArcheryDownwardAiming",
+    "bAnimationLoadSignedCrash",
+    "bBethesdaNetCrash",
+    "bBGSKeywordFormLoadCrash",
+    "bBSLightingAmbientSpecular",
+    "bBSLightingShaderForceAlphaTest",
+    "bBSLightingShaderParallaxBug",
+    "bBSLightingShaderPropertyShadowMap",
+    "bBSTempEffectNiRTTI",
+    "bCalendarSkipping",
+    "bCellInit",
+    "bClimateLoad",
+    "bConjurationEnchantAbsorbs",
+    "bCreateArmorNodeNullPtrCrash",
+    "bDoublePerkApply",
+    "bESLCELLLoadBug",
+    "bEquipShoutEventSpam",
+    "bFaceGenMorphDataHeadNullPtrCrash",
+    "bGetKeywordItemCount",
+    "bGHeapLeakDetectionCrash",
+    "bGlobalTime",
+    "bInitializeHitDataNullPtrCrash",
+    "bLipSync",
+    "bMemoryAccessErrors",
+    "bMO5STypo",
+    "bMusicOverlap",
+    "bNiControllerNoTarget",
+    "bNullProcessCrash",
+    "bPerkFragmentIsRunning",
+    "bPrecomputedPaths",
+    "bRemovedSpellBook",
+    "bSaveScreenshots",
+    "bSavedHavokDataLoadInit",
+    "bShadowSceneNodeNullPtrCrash",
+    "bTextureLoadCrash",
+    "bTorchLandscape",
+    "bTreeReflections",
+    "bVerticalLookSensitivity",
+    "bWeaponBlockScaling",
+    // [Patches]
+    "bDisableChargenPrecache",
+    "bDisableSnowFlag",
+    "bEnableAchievementsWithMods",
+    "bFormCaching",
+    "bINISettingCollection",
+    "bMaxStdIO",
+    "bRegularQuicksaves",
+    "bSafeExit",
+    "bSaveAddedSoundCategories",
+    "bScrollingDoesntSwitchPOV",
+    "bTreeLodReferenceCaching",
+    "bWaterflowAnimation",
+    // [MemoryManager]
     "bOverrideMemoryManager",
     "bOverrideScrapHeap",
     "bOverrideScaleformAllocator",
     "bOverrideRenderPassCache",
     "bOverrideHavokMemorySystem",
     "bReplaceImports",
+    // [Warnings]
+    "bTextureLoadFailed",
+    "bPrecomputedPathHasErrors",
+    "bRefHandleLimit",
 ];
 
 /// Patch a single EngineFixes.toml for Wine compatibility:
-/// - Set all [MemoryManager] keys to false
-/// - Set bDisableTBB = true in [Debug] (TBB allocator is Wine-incompatible)
+/// - Set all boolean [Fixes]/[Patches]/[MemoryManager]/[Warnings] keys to false
+/// - Set bDisableTBB = true in [Debug] (force CRT allocator instead of TBB)
 /// Returns Ok(true) if the file was modified, Ok(false) if already correct.
 fn patch_engine_fixes_toml(path: &Path) -> std::result::Result<bool, String> {
     let content = std::fs::read_to_string(path)
@@ -1588,8 +1655,7 @@ fn patch_engine_fixes_toml(path: &Path) -> std::result::Result<bool, String> {
     let mut new_content = content.clone();
     let mut changed = false;
 
-    for key in MEMORY_MANAGER_KEYS {
-        // Match "key = true" with optional surrounding whitespace and trailing comment
+    for key in WINE_DISABLE_KEYS {
         let pattern = format!("{} = true", key);
         if new_content.contains(&pattern) {
             let replacement = format!("{} = false", key);
@@ -1598,9 +1664,7 @@ fn patch_engine_fixes_toml(path: &Path) -> std::result::Result<bool, String> {
         }
     }
 
-    // Disable TBB allocator — it's hardcoded to load during preload and
-    // the [MemoryManager] TOML keys only control class-level overrides,
-    // not the underlying TBB library. bDisableTBB forces CRT instead.
+    // Force CRT allocator — TBB is Wine-incompatible
     if new_content.contains("bDisableTBB = false") {
         new_content = new_content.replacen("bDisableTBB = false", "bDisableTBB = true", 1);
         changed = true;
@@ -1616,6 +1680,303 @@ fn patch_engine_fixes_toml(path: &Path) -> std::result::Result<bool, String> {
     }
 
     Ok(changed)
+}
+
+// ---------------------------------------------------------------------------
+// SSE Engine Fixes for Wine — auto-download and deploy
+// ---------------------------------------------------------------------------
+
+/// GitHub repo for SSE Engine Fixes for Wine releases.
+const ENGINE_FIXES_WINE_REPO: &str = "cashcon57/SSEEngineFixesForWine";
+
+/// DLL name of the Wine-compatible Engine Fixes plugin.
+const ENGINE_FIXES_WINE_DLL: &str = "SSEEngineFixesForWine.dll";
+
+/// TOML config name for the Wine-compatible Engine Fixes plugin.
+const ENGINE_FIXES_WINE_TOML: &str = "SSEEngineFixesForWine.toml";
+
+/// Check if SSE Engine Fixes for Wine is already deployed.
+pub fn is_engine_fixes_wine_installed(data_dir: &Path) -> bool {
+    data_dir
+        .join("SKSE")
+        .join("Plugins")
+        .join(ENGINE_FIXES_WINE_DLL)
+        .exists()
+}
+
+/// Download and deploy the latest SSE Engine Fixes for Wine release.
+///
+/// This is the Wine-compatible replacement for SSE Engine Fixes.
+/// It downloads the AE build (1.6.1170) from GitHub and deploys
+/// `SSEEngineFixesForWine.dll` + `SSEEngineFixesForWine.toml`
+/// to `Data/SKSE/Plugins/`.
+///
+/// Returns Ok(true) if newly installed, Ok(false) if already present.
+pub async fn install_engine_fixes_wine(data_dir: &Path) -> Result<bool> {
+    let plugins_dir = data_dir.join("SKSE").join("Plugins");
+
+    // Skip if already installed
+    if plugins_dir.join(ENGINE_FIXES_WINE_DLL).exists() {
+        debug!("SSE Engine Fixes for Wine already deployed, skipping");
+        return Ok(false);
+    }
+
+    info!("Downloading SSE Engine Fixes for Wine from GitHub...");
+
+    let client = reqwest::Client::builder()
+        .user_agent(format!("Corkscrew/{}", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| SkseError::Other(format!("HTTP client error: {}", e)))?;
+
+    // Fetch latest release from GitHub API
+    let url = format!(
+        "https://api.github.com/repos/{}/releases/latest",
+        ENGINE_FIXES_WINE_REPO
+    );
+    let release: serde_json::Value = client
+        .get(&url)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| SkseError::Other(format!("GitHub API request failed: {}", e)))?
+        .error_for_status()
+        .map_err(|e| SkseError::Other(format!("GitHub API error: {}", e)))?
+        .json()
+        .await
+        .map_err(|e| SkseError::Other(format!("GitHub API JSON parse error: {}", e)))?;
+
+    // Find the AE zip asset (SSEEngineFixesForWine-AE-1.6.1170.zip)
+    let assets = release["assets"]
+        .as_array()
+        .ok_or_else(|| SkseError::Other("No assets in release".into()))?;
+
+    let ae_asset = assets
+        .iter()
+        .find(|a| {
+            a["name"]
+                .as_str()
+                .map(|n| n.contains("AE") && n.ends_with(".zip"))
+                .unwrap_or(false)
+        })
+        .ok_or_else(|| SkseError::Other("No AE zip asset found in release".into()))?;
+
+    let download_url = ae_asset["browser_download_url"]
+        .as_str()
+        .ok_or_else(|| SkseError::Other("No download URL for asset".into()))?;
+
+    let tag = release["tag_name"].as_str().unwrap_or("unknown");
+    info!(
+        "Downloading SSE Engine Fixes for Wine {} from {}",
+        tag, download_url
+    );
+
+    // Download the zip
+    let bytes = client
+        .get(download_url)
+        .send()
+        .await
+        .map_err(|e| SkseError::Other(format!("Download failed: {}", e)))?
+        .error_for_status()
+        .map_err(|e| SkseError::Other(format!("Download failed: {}", e)))?
+        .bytes()
+        .await
+        .map_err(|e| SkseError::Other(format!("Download failed: {}", e)))?;
+
+    info!(
+        "Downloaded SSE Engine Fixes for Wine ({} bytes), extracting...",
+        bytes.len()
+    );
+
+    // Extract to temp directory
+    let extract_dir = std::env::temp_dir().join("corkscrew_engine_fixes_wine");
+    if extract_dir.exists() {
+        fs::remove_dir_all(&extract_dir)?;
+    }
+    fs::create_dir_all(&extract_dir)?;
+
+    let tmp_zip = extract_dir.join("SSEEngineFixesForWine.zip");
+    fs::write(&tmp_zip, &bytes)?;
+
+    installer::extract_archive(&tmp_zip, &extract_dir)
+        .map_err(|e| SkseError::Extraction(format!("Failed to extract: {}", e)))?;
+    let _ = fs::remove_file(&tmp_zip);
+
+    // Find and copy the DLL and TOML into the game's plugins directory
+    fs::create_dir_all(&plugins_dir)?;
+
+    let mut found_dll = false;
+    let mut found_toml = false;
+
+    // Walk extracted directory to find our files (they're in SKSE/Plugins/ inside the zip)
+    for entry in walkdir::WalkDir::new(&extract_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if name.eq_ignore_ascii_case(ENGINE_FIXES_WINE_DLL) {
+                fs::copy(path, plugins_dir.join(ENGINE_FIXES_WINE_DLL))?;
+                found_dll = true;
+                info!("Deployed {}", ENGINE_FIXES_WINE_DLL);
+            } else if name.eq_ignore_ascii_case(ENGINE_FIXES_WINE_TOML) {
+                // Only copy TOML if it doesn't already exist (preserve user config)
+                let dest = plugins_dir.join(ENGINE_FIXES_WINE_TOML);
+                if !dest.exists() {
+                    fs::copy(path, &dest)?;
+                    info!("Deployed {} (default config)", ENGINE_FIXES_WINE_TOML);
+                } else {
+                    debug!("{} already exists, preserving user config", ENGINE_FIXES_WINE_TOML);
+                }
+                found_toml = true;
+            }
+        }
+    }
+
+    // Clean up
+    if let Err(e) = fs::remove_dir_all(&extract_dir) {
+        warn!("Failed to clean up extraction dir: {}", e);
+    }
+
+    if !found_dll {
+        return Err(SkseError::Other(
+            "SSEEngineFixesForWine.dll not found in release archive".into(),
+        ));
+    }
+
+    if !found_toml {
+        warn!("SSEEngineFixesForWine.toml not found in release archive; DLL deployed without config");
+    }
+
+    info!("SSE Engine Fixes for Wine {} installed successfully", tag);
+    Ok(true)
+}
+
+/// Blocking variant of `install_engine_fixes_wine` for use in sync contexts
+/// (pre-launch, deploy commands). Uses reqwest::blocking internally.
+///
+/// Returns Ok(true) if newly installed, Ok(false) if already present.
+pub fn install_engine_fixes_wine_blocking(data_dir: &Path) -> Result<bool> {
+    let plugins_dir = data_dir.join("SKSE").join("Plugins");
+
+    if plugins_dir.join(ENGINE_FIXES_WINE_DLL).exists() {
+        debug!("SSE Engine Fixes for Wine already deployed, skipping");
+        return Ok(false);
+    }
+
+    info!("Downloading SSE Engine Fixes for Wine from GitHub (blocking)...");
+
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(format!("Corkscrew/{}", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| SkseError::Other(format!("HTTP client error: {}", e)))?;
+
+    let url = format!(
+        "https://api.github.com/repos/{}/releases/latest",
+        ENGINE_FIXES_WINE_REPO
+    );
+    let release: serde_json::Value = client
+        .get(&url)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .map_err(|e| SkseError::Other(format!("GitHub API request failed: {}", e)))?
+        .error_for_status()
+        .map_err(|e| SkseError::Other(format!("GitHub API error: {}", e)))?
+        .json()
+        .map_err(|e| SkseError::Other(format!("GitHub API JSON parse error: {}", e)))?;
+
+    let assets = release["assets"]
+        .as_array()
+        .ok_or_else(|| SkseError::Other("No assets in release".into()))?;
+
+    let ae_asset = assets
+        .iter()
+        .find(|a| {
+            a["name"]
+                .as_str()
+                .map(|n| n.contains("AE") && n.ends_with(".zip"))
+                .unwrap_or(false)
+        })
+        .ok_or_else(|| SkseError::Other("No AE zip asset found in release".into()))?;
+
+    let download_url = ae_asset["browser_download_url"]
+        .as_str()
+        .ok_or_else(|| SkseError::Other("No download URL for asset".into()))?;
+
+    let tag = release["tag_name"].as_str().unwrap_or("unknown");
+    info!(
+        "Downloading SSE Engine Fixes for Wine {} from {}",
+        tag, download_url
+    );
+
+    let bytes = client
+        .get(download_url)
+        .send()
+        .map_err(|e| SkseError::Other(format!("Download failed: {}", e)))?
+        .error_for_status()
+        .map_err(|e| SkseError::Other(format!("Download failed: {}", e)))?
+        .bytes()
+        .map_err(|e| SkseError::Other(format!("Download failed: {}", e)))?;
+
+    info!(
+        "Downloaded SSE Engine Fixes for Wine ({} bytes), extracting...",
+        bytes.len()
+    );
+
+    let extract_dir = std::env::temp_dir().join("corkscrew_engine_fixes_wine");
+    if extract_dir.exists() {
+        fs::remove_dir_all(&extract_dir)?;
+    }
+    fs::create_dir_all(&extract_dir)?;
+
+    let tmp_zip = extract_dir.join("SSEEngineFixesForWine.zip");
+    fs::write(&tmp_zip, &bytes)?;
+
+    installer::extract_archive(&tmp_zip, &extract_dir)
+        .map_err(|e| SkseError::Extraction(format!("Failed to extract: {}", e)))?;
+    let _ = fs::remove_file(&tmp_zip);
+
+    fs::create_dir_all(&plugins_dir)?;
+
+    let mut found_dll = false;
+    let mut found_toml = false;
+
+    for entry in walkdir::WalkDir::new(&extract_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if name.eq_ignore_ascii_case(ENGINE_FIXES_WINE_DLL) {
+                fs::copy(path, plugins_dir.join(ENGINE_FIXES_WINE_DLL))?;
+                found_dll = true;
+                info!("Deployed {}", ENGINE_FIXES_WINE_DLL);
+            } else if name.eq_ignore_ascii_case(ENGINE_FIXES_WINE_TOML) {
+                let dest = plugins_dir.join(ENGINE_FIXES_WINE_TOML);
+                if !dest.exists() {
+                    fs::copy(path, &dest)?;
+                    info!("Deployed {} (default config)", ENGINE_FIXES_WINE_TOML);
+                }
+                found_toml = true;
+            }
+        }
+    }
+
+    if let Err(e) = fs::remove_dir_all(&extract_dir) {
+        warn!("Failed to clean up extraction dir: {}", e);
+    }
+
+    if !found_dll {
+        return Err(SkseError::Other(
+            "SSEEngineFixesForWine.dll not found in release archive".into(),
+        ));
+    }
+
+    if !found_toml {
+        warn!("SSEEngineFixesForWine.toml not found in release archive; DLL deployed without config");
+    }
+
+    info!("SSE Engine Fixes for Wine {} installed successfully", tag);
+    Ok(true)
 }
 
 // ---------------------------------------------------------------------------

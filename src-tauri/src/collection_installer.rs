@@ -2529,12 +2529,18 @@ pub async fn install_collection(
         }
     }
 
-    // EngineFixes Wine compatibility: disable MemoryManager overrides
-    // (tbbmalloc is incompatible with Wine/CrossOver)
+    // EngineFixes Wine compatibility: disable all patches and deploy Wine-safe replacement
     if game_id == "skyrimse" {
         let ef_fixes = skse::fix_engine_fixes_for_wine(&data_dir, db, game_id, bottle_name);
         if ef_fixes > 0 {
             log::info!("EngineFixes Wine fix: patched {} TOML file(s)", ef_fixes);
+        }
+
+        // Auto-deploy SSE Engine Fixes for Wine (Wine-safe replacement)
+        match skse::install_engine_fixes_wine(&data_dir).await {
+            Ok(true) => log::info!("Auto-deployed SSE Engine Fixes for Wine"),
+            Ok(false) => log::debug!("SSE Engine Fixes for Wine already deployed"),
+            Err(e) => log::warn!("Could not auto-deploy SSE Engine Fixes for Wine: {}", e),
         }
     }
 

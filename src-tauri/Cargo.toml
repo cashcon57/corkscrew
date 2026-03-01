@@ -30,7 +30,7 @@ serde_json = "1"
 rusqlite = { version = "0.31", features = ["bundled"] }
 
 # HTTP client (for Nexus API)
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", features = ["json", "stream", "blocking"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

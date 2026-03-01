@@ -1153,13 +1153,19 @@ fn launch_game_cmd(
             log::info!("Pre-launch: swapped {} incompatible SKSE plugin DLL(s)", skse_fixes);
         }
 
-        // EngineFixes Wine compatibility: disable MemoryManager overrides
-        // (tbbmalloc is incompatible with Wine/CrossOver)
+        // EngineFixes Wine compatibility: disable all patches (they crash under Wine)
         let ef_fixes = skse::fix_engine_fixes_for_wine(
             &data_dir, &state.db, &game_id, &bottle_name,
         );
         if ef_fixes > 0 {
             log::info!("Pre-launch: patched {} EngineFixes TOML(s) for Wine compatibility", ef_fixes);
+        }
+
+        // Auto-deploy SSE Engine Fixes for Wine (Wine-safe replacement)
+        match skse::install_engine_fixes_wine_blocking(&data_dir) {
+            Ok(true) => log::info!("Pre-launch: auto-deployed SSE Engine Fixes for Wine"),
+            Ok(false) => log::debug!("Pre-launch: SSE Engine Fixes for Wine already deployed"),
+            Err(e) => log::warn!("Pre-launch: could not auto-deploy SSE Engine Fixes for Wine: {}", e),
         }
     }
 
@@ -1812,6 +1818,12 @@ fn redeploy_all_mods(
         if ef > 0 {
             log::info!("Redeploy: patched {} EngineFixes TOML(s) for Wine compatibility", ef);
         }
+        // Auto-deploy SSE Engine Fixes for Wine on redeploy
+        match skse::install_engine_fixes_wine_blocking(&data_dir) {
+            Ok(true) => log::info!("Redeploy: auto-deployed SSE Engine Fixes for Wine"),
+            Ok(false) => {},
+            Err(e) => log::warn!("Redeploy: could not auto-deploy SSE Engine Fixes for Wine: {}", e),
+        }
     }
 
     Ok(serde_json::json!({
@@ -1840,6 +1852,11 @@ fn deploy_incremental_cmd(
         let ef = skse::fix_engine_fixes_for_wine(&data_dir, &state.db, &game_id, &bottle_name);
         if ef > 0 {
             log::info!("Incremental deploy: patched {} EngineFixes TOML(s) for Wine compatibility", ef);
+        }
+        match skse::install_engine_fixes_wine_blocking(&data_dir) {
+            Ok(true) => log::info!("Incremental deploy: auto-deployed SSE Engine Fixes for Wine"),
+            Ok(false) => {},
+            Err(e) => log::warn!("Incremental deploy: could not auto-deploy SSE Engine Fixes for Wine: {}", e),
         }
     }
 
