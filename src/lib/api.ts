@@ -262,6 +262,13 @@ export async function scanSksePlugins(
   return invoke("scan_skse_plugins_cmd", { gameId, bottleName });
 }
 
+export async function fixSksePlugins(
+  gameId: string,
+  bottleName: string
+): Promise<number> {
+  return invoke("fix_skse_plugins_cmd", { gameId, bottleName });
+}
+
 // SKSE Auto-Download
 export async function getSkseBuilds(
   gameId: string,

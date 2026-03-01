@@ -1137,6 +1137,18 @@ fn launch_game_cmd(
         }
     }
 
+    // Pre-launch SKSE plugin DLL version fix — swap incompatible plugins
+    // for compatible alternatives from other installed mods' staging dirs.
+    if game_id == "skyrimse" {
+        let data_dir = PathBuf::from(&game.data_dir);
+        let skse_fixes = skse::fix_skse_plugin_conflicts(
+            &state.db, &game_id, &bottle_name, &data_dir, &game_path,
+        );
+        if skse_fixes > 0 {
+            log::info!("Pre-launch: swapped {} incompatible SKSE plugin DLL(s)", skse_fixes);
+        }
+    }
+
     let mut result = launcher::launch_game(&bottle, &exe_path, Some(&game_path))
         .map_err(|e| format!("Launch failed ({}): {}", bottle.source, e))?;
 
@@ -1319,6 +1331,19 @@ fn scan_skse_plugins_cmd(
         .unwrap_or_else(|_| "unknown".to_string());
 
     Ok(skse::scan_skse_plugins(&data_dir, &version))
+}
+
+#[tauri::command]
+fn fix_skse_plugins_cmd(
+    game_id: String,
+    bottle_name: String,
+    state: State<AppState>,
+) -> Result<usize, String> {
+    let (_, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
+    let game_path = PathBuf::from(&game.game_path);
+    Ok(skse::fix_skse_plugin_conflicts(
+        &state.db, &game_id, &bottle_name, &data_dir, &game_path,
+    ))
 }
 
 #[tauri::command]
@@ -5684,6 +5709,7 @@ pub fn run() {
             check_skyrim_version,
             check_skse_compatibility_cmd,
             scan_skse_plugins_cmd,
+            fix_skse_plugins_cmd,
             fix_skyrim_display,
             downgrade_skyrim,
             get_depot_download_command,

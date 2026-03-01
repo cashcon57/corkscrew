@@ -17,7 +17,11 @@ use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use std::sync::Arc;
+
 use crate::config;
+use crate::database::ModDatabase;
+use crate::downgrader;
 use crate::installer;
 
 // ---------------------------------------------------------------------------
@@ -1211,6 +1215,200 @@ pub fn scan_skse_plugins(data_dir: &Path, game_version: &str) -> SksePluginScanR
         address_library_matches,
         warnings,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Post-deploy SKSE plugin conflict fixer
+// ---------------------------------------------------------------------------
+
+/// Scan deployed SKSE plugin DLLs for version incompatibilities and swap in
+/// compatible alternatives from other installed mods' staging directories.
+///
+/// This runs both during collection install (in collection_installer.rs) AND
+/// before every Skyrim SE launch (in launch_game_cmd) to catch retroactive
+/// issues when the user updates the app but already has mods installed.
+///
+/// Returns the number of DLLs swapped.
+pub fn fix_skse_plugin_conflicts(
+    db: &Arc<ModDatabase>,
+    game_id: &str,
+    bottle_name: &str,
+    data_dir: &Path,
+    game_path: &Path,
+) -> usize {
+    if game_id != "skyrimse" {
+        return 0;
+    }
+
+    // Detect game version and encode to SKSE runtime format
+    let ds = match downgrader::detect_skyrim_version(game_path) {
+        Ok(status) => status,
+        Err(e) => {
+            debug!("SKSE plugin fix: could not detect game version: {}", e);
+            return 0;
+        }
+    };
+    let runtime = match parse_game_version_to_runtime(&ds.current_version) {
+        Some(v) => v,
+        None => {
+            debug!("SKSE plugin fix: could not parse game version '{}'", ds.current_version);
+            return 0;
+        }
+    };
+
+    let plugins_dir = data_dir.join("SKSE").join("Plugins");
+    if !plugins_dir.exists() {
+        return 0;
+    }
+
+    // Collect deployed DLLs
+    let deployed_dlls: Vec<PathBuf> = match fs::read_dir(&plugins_dir) {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_type().map(|ft| ft.is_file()).unwrap_or(false)
+                    && e.file_name().to_string_lossy().to_lowercase().ends_with(".dll")
+            })
+            .map(|e| e.path())
+            .collect(),
+        Err(_) => return 0,
+    };
+
+    if deployed_dlls.is_empty() {
+        return 0;
+    }
+
+    // Get all installed mods for this game+bottle (for searching alternatives)
+    let all_mods = match db.list_mods(game_id, bottle_name) {
+        Ok(mods) => mods,
+        Err(_) => return 0,
+    };
+
+    // Get deployment manifest to find current owners
+    let manifest_map = match db.get_deployment_manifest_map(game_id, bottle_name) {
+        Ok(m) => m,
+        Err(_) => return 0,
+    };
+
+    let mut fixes = 0usize;
+
+    for dll_path in &deployed_dlls {
+        let dll_name = match dll_path.file_name() {
+            Some(n) => n.to_string_lossy().to_string(),
+            None => continue,
+        };
+
+        let compat = check_skse_dll_compat(dll_path, runtime);
+        if !matches!(compat, SksePluginCompat::Incompatible { .. }) {
+            continue;
+        }
+
+        let supports_str = if let SksePluginCompat::Incompatible { ref supports } = compat {
+            supports.join(", ")
+        } else {
+            String::new()
+        };
+
+        info!(
+            "SKSE plugin fix: '{}' is incompatible (supports: {}), searching for alternative...",
+            dll_name, supports_str
+        );
+
+        // Find the deployment entry for this DLL to get the current owner
+        let rel_skse = format!("SKSE/Plugins/{}", dll_name);
+        let current_owner_id = manifest_map.get(&rel_skse).map(|e| e.mod_id);
+
+        // Search all mods' staging directories for an alternative copy
+        let mut best_candidate: Option<(PathBuf, i64, &str)> = None;
+
+        for m in &all_mods {
+            if Some(m.id) == current_owner_id {
+                continue;
+            }
+            if !m.enabled {
+                continue;
+            }
+
+            let staging = match &m.staging_path {
+                Some(s) => PathBuf::from(s),
+                None => continue,
+            };
+
+            // Look for the same DLL in this mod's staging
+            let candidate_path = staging.join("SKSE").join("Plugins").join(&dll_name);
+            let candidate = if candidate_path.exists() {
+                Some(candidate_path)
+            } else {
+                find_file_case_insensitive(
+                    &staging.join("SKSE").join("Plugins"),
+                    &dll_name,
+                )
+            };
+
+            let candidate = match candidate {
+                Some(p) => p,
+                None => continue,
+            };
+
+            let alt_compat = check_skse_dll_compat(&candidate, runtime);
+            match alt_compat {
+                SksePluginCompat::VersionIndependent => {
+                    best_candidate = Some((candidate, m.id, "version-independent"));
+                    break;
+                }
+                SksePluginCompat::Compatible => {
+                    if best_candidate.as_ref().map(|c| c.2 != "version-independent").unwrap_or(true) {
+                        best_candidate = Some((candidate, m.id, "compatible"));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if let Some((src_path, new_owner_id, quality)) = best_candidate {
+            let new_owner_name = all_mods.iter()
+                .find(|m| m.id == new_owner_id)
+                .map(|m| m.name.as_str())
+                .unwrap_or("unknown");
+
+            info!(
+                "SKSE plugin fix: swapping '{}' — deploying {} version from mod '{}' (id {})",
+                dll_name, quality, new_owner_name, new_owner_id
+            );
+
+            if let Err(e) = fs::remove_file(dll_path) {
+                warn!("SKSE plugin fix: failed to remove '{}': {}", dll_path.display(), e);
+                continue;
+            }
+
+            if let Err(e) = fs::copy(&src_path, dll_path) {
+                warn!(
+                    "SKSE plugin fix: failed to copy '{}' -> '{}': {}",
+                    src_path.display(), dll_path.display(), e
+                );
+                continue;
+            }
+
+            let _ = db.add_deployment_entry(
+                game_id,
+                bottle_name,
+                new_owner_id,
+                &rel_skse,
+                &src_path.to_string_lossy(),
+                "copy",
+                None,
+            );
+
+            fixes += 1;
+        } else {
+            warn!(
+                "SKSE plugin fix: no compatible alternative found for '{}' (supports: {})",
+                dll_name, supports_str
+            );
+        }
+    }
+
+    fixes
 }
 
 // ---------------------------------------------------------------------------
