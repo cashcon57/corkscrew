@@ -1026,21 +1026,12 @@ pub fn check_skse_dll_compat(dll_path: &Path, game_runtime_version: u32) -> Skse
     }
 
     if data.version_independence & VERSION_INDEPENDENT_ADDRESS_LIBRARY != 0 {
-        // "Uses Address Library" — but which one?
-        // data_version 1 plugins (pre-AE era) use the SE Address Library which only
-        // covers versions < 1.6.629. On AE (>= 1.6.629) these are incompatible because
-        // the SE Address Library database has different offsets than AE.
-        // SKSE reports: "only compatible with versions earlier than 1.6.629"
-        //
-        // data_version 2 plugins are AE-aware and can specify version ranges via
-        // version_independence_ex. If they set Address Library, they typically
-        // target the AE Address Library and are truly version-independent for AE.
-        let ae_cutoff = (1u32 << 24) | (6u32 << 16) | (629u32 << 4); // 1.6.629
-        if data.data_version == 1 && game_runtime_version >= ae_cutoff {
-            return SksePluginCompat::Incompatible {
-                supports: vec!["< 1.6.629 (SE Address Library only)".to_string()],
-            };
-        }
+        // "Uses Address Library" — the plugin resolves offsets at runtime via an
+        // Address Library database file. Both SE and AE plugins set this flag with
+        // data_version=1 and empty compatible_versions, so we CANNOT distinguish
+        // SE-only from AE-compatible plugins via PE metadata alone.
+        // Return VersionIndependent here; the fix_skse_plugin_conflicts() function
+        // uses a file-comparison approach to detect and swap mismatched DLLs.
         return SksePluginCompat::VersionIndependent;
     }
 
@@ -1251,13 +1242,23 @@ pub fn scan_skse_plugins(data_dir: &Path, game_version: &str) -> SksePluginScanR
 // Post-deploy SKSE plugin conflict fixer
 // ---------------------------------------------------------------------------
 
-/// Scan deployed SKSE plugin DLLs for version incompatibilities and swap in
-/// compatible alternatives from other installed mods' staging directories.
+/// Scan deployed SKSE plugin DLLs and fix version incompatibilities by swapping
+/// in alternative builds from other installed mods' staging directories.
 ///
-/// This runs both during collection install (in collection_installer.rs) AND
-/// before every Skyrim SE launch (in launch_game_cmd) to catch retroactive
-/// issues when the user updates the app but already has mods installed.
+/// **Strategy:** Since SE and AE Address Library plugins have identical PE metadata
+/// (both set data_version=1 + Address Library flag with empty compatible_versions),
+/// we cannot distinguish them via static analysis. Instead we use two approaches:
 ///
+/// 1. **PE compat check** — for DLLs with explicit compatible_versions, swap if
+///    the game version isn't listed.
+/// 2. **Alternative swap** — for Address Library DLLs (VersionIndependent), check
+///    if another mod provides a DIFFERENT build of the same DLL (different file
+///    size). If so, on AE the current DLL might be an SE build. Swap in the
+///    alternative. This correctly handles cases like BehaviorDataInjector where
+///    an SE-only mod (1.3M) and a Universal Support mod (1.4M) both provide the
+///    same DLL.
+///
+/// Runs during collection install and before every Skyrim SE launch.
 /// Returns the number of DLLs swapped.
 pub fn fix_skse_plugin_conflicts(
     db: &Arc<ModDatabase>,
@@ -1270,7 +1271,7 @@ pub fn fix_skse_plugin_conflicts(
         return 0;
     }
 
-    // Detect game version and encode to SKSE runtime format
+    // Detect game version
     let ds = match downgrader::detect_skyrim_version(game_path) {
         Ok(status) => status,
         Err(e) => {
@@ -1285,6 +1286,9 @@ pub fn fix_skse_plugin_conflicts(
             return 0;
         }
     };
+
+    let ae_cutoff = (1u32 << 24) | (6u32 << 16) | (629u32 << 4); // 1.6.629
+    let is_ae = runtime >= ae_cutoff;
 
     let plugins_dir = data_dir.join("SKSE").join("Plugins");
     if !plugins_dir.exists() {
@@ -1308,13 +1312,11 @@ pub fn fix_skse_plugin_conflicts(
         return 0;
     }
 
-    // Get all installed mods for this game+bottle (for searching alternatives)
     let all_mods = match db.list_mods(game_id, bottle_name) {
         Ok(mods) => mods,
         Err(_) => return 0,
     };
 
-    // Get deployment manifest to find current owners
     let manifest_map = match db.get_deployment_manifest_map(game_id, bottle_name) {
         Ok(m) => m,
         Err(_) => return 0,
@@ -1329,50 +1331,75 @@ pub fn fix_skse_plugin_conflicts(
         };
 
         let compat = check_skse_dll_compat(dll_path, runtime);
-        if !matches!(compat, SksePluginCompat::Incompatible { .. }) {
+
+        // Determine if this DLL needs fixing
+        let needs_fix = match &compat {
+            // Explicit incompatibility from compatible_versions check
+            SksePluginCompat::Incompatible { .. } => true,
+            // Address Library DLL on AE — might be SE build, check for alternatives
+            SksePluginCompat::VersionIndependent if is_ae => {
+                // Only investigate if another mod has a different-sized copy
+                let deployed_size = fs::metadata(dll_path).map(|m| m.len()).unwrap_or(0);
+                let rel_skse = format!("SKSE/Plugins/{}", dll_name);
+                let current_owner_id = manifest_map.get(&rel_skse).map(|e| e.mod_id);
+
+                all_mods.iter().any(|m| {
+                    if Some(m.id) == current_owner_id || !m.enabled { return false; }
+                    let staging = match &m.staging_path {
+                        Some(s) => PathBuf::from(s),
+                        None => return false,
+                    };
+                    let candidate = staging.join("SKSE").join("Plugins").join(&dll_name);
+                    if let Ok(meta) = fs::metadata(&candidate) {
+                        meta.len() != deployed_size
+                    } else {
+                        // Try case-insensitive
+                        find_file_case_insensitive(&staging.join("SKSE").join("Plugins"), &dll_name)
+                            .and_then(|p| fs::metadata(&p).ok())
+                            .map(|meta| meta.len() != deployed_size)
+                            .unwrap_or(false)
+                    }
+                })
+            }
+            _ => false,
+        };
+
+        if !needs_fix {
             continue;
         }
 
-        let supports_str = if let SksePluginCompat::Incompatible { ref supports } = compat {
-            supports.join(", ")
-        } else {
-            String::new()
+        let reason = match &compat {
+            SksePluginCompat::Incompatible { supports } => format!("incompatible (supports: {})", supports.join(", ")),
+            SksePluginCompat::VersionIndependent => "Address Library plugin with different-sized alternative available".to_string(),
+            _ => "unknown".to_string(),
         };
 
         info!(
-            "SKSE plugin fix: '{}' is incompatible (supports: {}), searching for alternative...",
-            dll_name, supports_str
+            "SKSE plugin fix: '{}' — {}, searching for alternative...",
+            dll_name, reason
         );
 
-        // Find the deployment entry for this DLL to get the current owner
         let rel_skse = format!("SKSE/Plugins/{}", dll_name);
         let current_owner_id = manifest_map.get(&rel_skse).map(|e| e.mod_id);
+        let deployed_size = fs::metadata(dll_path).map(|m| m.len()).unwrap_or(0);
 
-        // Search all mods' staging directories for an alternative copy
-        let mut best_candidate: Option<(PathBuf, i64, &str)> = None;
+        // Search all mods' staging directories for an alternative
+        let mut best_candidate: Option<(PathBuf, i64, String)> = None;
 
         for m in &all_mods {
-            if Some(m.id) == current_owner_id {
-                continue;
-            }
-            if !m.enabled {
-                continue;
-            }
+            if Some(m.id) == current_owner_id { continue; }
+            if !m.enabled { continue; }
 
             let staging = match &m.staging_path {
                 Some(s) => PathBuf::from(s),
                 None => continue,
             };
 
-            // Look for the same DLL in this mod's staging
             let candidate_path = staging.join("SKSE").join("Plugins").join(&dll_name);
             let candidate = if candidate_path.exists() {
                 Some(candidate_path)
             } else {
-                find_file_case_insensitive(
-                    &staging.join("SKSE").join("Plugins"),
-                    &dll_name,
-                )
+                find_file_case_insensitive(&staging.join("SKSE").join("Plugins"), &dll_name)
             };
 
             let candidate = match candidate {
@@ -1381,14 +1408,24 @@ pub fn fix_skse_plugin_conflicts(
             };
 
             let alt_compat = check_skse_dll_compat(&candidate, runtime);
+            let alt_size = fs::metadata(&candidate).map(|m| m.len()).unwrap_or(0);
+
             match alt_compat {
-                SksePluginCompat::VersionIndependent => {
-                    best_candidate = Some((candidate, m.id, "version-independent"));
+                SksePluginCompat::Compatible => {
+                    // Explicit version match — best possible
+                    best_candidate = Some((candidate, m.id, "compatible".to_string()));
                     break;
                 }
-                SksePluginCompat::Compatible => {
-                    if best_candidate.as_ref().map(|c| c.2 != "version-independent").unwrap_or(true) {
-                        best_candidate = Some((candidate, m.id, "compatible"));
+                SksePluginCompat::VersionIndependent => {
+                    // Both are VersionIndependent (Address Library) — prefer the
+                    // alternative if it's a different file (different size), as the
+                    // collection likely included both SE and AE builds.
+                    if alt_size != deployed_size {
+                        let quality = format!("alternative build ({}KB vs deployed {}KB)",
+                            alt_size / 1024, deployed_size / 1024);
+                        if best_candidate.is_none() {
+                            best_candidate = Some((candidate, m.id, quality));
+                        }
                     }
                 }
                 _ => {}
@@ -1402,7 +1439,7 @@ pub fn fix_skse_plugin_conflicts(
                 .unwrap_or("unknown");
 
             info!(
-                "SKSE plugin fix: swapping '{}' — deploying {} version from mod '{}' (id {})",
+                "SKSE plugin fix: swapping '{}' — deploying {} from mod '{}' (id {})",
                 dll_name, quality, new_owner_name, new_owner_id
             );
 
@@ -1412,28 +1449,20 @@ pub fn fix_skse_plugin_conflicts(
             }
 
             if let Err(e) = fs::copy(&src_path, dll_path) {
-                warn!(
-                    "SKSE plugin fix: failed to copy '{}' -> '{}': {}",
-                    src_path.display(), dll_path.display(), e
-                );
+                warn!("SKSE plugin fix: failed to copy '{}' -> '{}': {}", src_path.display(), dll_path.display(), e);
                 continue;
             }
 
             let _ = db.add_deployment_entry(
-                game_id,
-                bottle_name,
-                new_owner_id,
-                &rel_skse,
-                &src_path.to_string_lossy(),
-                "copy",
-                None,
+                game_id, bottle_name, new_owner_id, &rel_skse,
+                &src_path.to_string_lossy(), "copy", None,
             );
 
             fixes += 1;
         } else {
             warn!(
-                "SKSE plugin fix: no compatible alternative found for '{}' (supports: {})",
-                dll_name, supports_str
+                "SKSE plugin fix: no alternative found for '{}' ({})",
+                dll_name, reason
             );
         }
     }
@@ -1868,40 +1897,46 @@ mod tests {
     }
 
     #[test]
-    fn se_address_library_plugin_incompatible_on_ae() {
-        // Simulate a data_version=1 plugin with Address Library flag on AE
-        // This is what BehaviorDataInjector SE-only looks like:
-        // data_version=1, version_independence=0x1 (Address Library), compatible_versions=[]
-        // On AE (1.6.1170), this should be Incompatible, not VersionIndependent.
+    fn address_library_plugins_both_version_independent() {
+        // Both SE-only and AE Address Library plugins have identical PE metadata:
+        // data_version=1, version_independence=0x1, compatible_versions=[]
+        // Both should return VersionIndependent from check_skse_dll_compat.
+        // The fix_skse_plugin_conflicts() function uses file-size comparison
+        // to detect and swap mismatched DLLs on AE.
 
-        // Build a fake DLL with SKSEPlugin_Version export that has data_version=1
-        // and Address Library flag. We can test the logic directly:
         let ae_runtime = parse_game_version_to_runtime("1.6.1170").unwrap();
-        let se_runtime = parse_game_version_to_runtime("1.5.97").unwrap();
 
-        // AE runtime should be >= 1.6.629 cutoff
-        let ae_cutoff = (1u32 << 24) | (6u32 << 16) | (629u32 << 4);
-        assert!(ae_runtime >= ae_cutoff, "AE runtime should be >= 1.6.629");
-        assert!(se_runtime < ae_cutoff, "SE runtime should be < 1.6.629");
-
-        // If the real BDI DLL is on disk, test it directly
-        let dll = std::path::Path::new(
+        // If the real BDI DLLs are on disk, verify both return VersionIndependent
+        let se_dll = std::path::Path::new(
             "/Users/cashconway/Library/Application Support/CrossOver/Bottles/Steam/drive_c/\
              Program Files (x86)/Steam/steamapps/common/Skyrim Special Edition/Data/SKSE/Plugins/\
              BehaviorDataInjector.dll"
         );
-        if dll.exists() {
-            let compat_ae = check_skse_dll_compat(dll, ae_runtime);
+        let ae_dll = std::path::Path::new(
+            "/Users/cashconway/Library/Application Support/corkscrew/staging/skyrimse/Steam/\
+             28438_Behavior_Data_Injector_Universal_Support/SKSE/Plugins/BehaviorDataInjector.dll"
+        );
+        if se_dll.exists() {
+            let compat = check_skse_dll_compat(se_dll, ae_runtime);
             assert!(
-                matches!(compat_ae, SksePluginCompat::Incompatible { .. }),
-                "SE Address Library plugin should be Incompatible on AE, got {:?}", compat_ae
+                matches!(compat, SksePluginCompat::VersionIndependent),
+                "SE BDI should be VersionIndependent (Address Library), got {:?}", compat
             );
-
-            let compat_se = check_skse_dll_compat(dll, se_runtime);
+        }
+        if ae_dll.exists() {
+            let compat = check_skse_dll_compat(ae_dll, ae_runtime);
             assert!(
-                matches!(compat_se, SksePluginCompat::VersionIndependent),
-                "SE Address Library plugin should be VersionIndependent on SE, got {:?}", compat_se
+                matches!(compat, SksePluginCompat::VersionIndependent),
+                "AE BDI should be VersionIndependent (Address Library), got {:?}", compat
             );
+            // Key: the two DLLs should have DIFFERENT file sizes
+            if se_dll.exists() {
+                let se_size = fs::metadata(se_dll).unwrap().len();
+                let ae_size = fs::metadata(ae_dll).unwrap().len();
+                assert_ne!(se_size, ae_size,
+                    "SE and AE BDI DLLs should have different sizes for swap detection");
+                eprintln!("SE size: {}KB, AE size: {}KB", se_size / 1024, ae_size / 1024);
+            }
         }
     }
 }
