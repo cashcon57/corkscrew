@@ -5678,6 +5678,85 @@ fn cleanup_orphaned_temp_dirs() {
     }
 }
 
+// --- CLI headless launch ---
+
+/// Run the full pre-launch pipeline and spawn the game without opening the UI.
+///
+/// Usage:  corkscrew --launch <game_id> <bottle_name> [--skse]
+/// Example: corkscrew --launch skyrimse Steam --skse
+fn cli_launch(game_id: &str, bottle_name: &str, use_skse: bool, db: &Arc<ModDatabase>) {
+    println!("[corkscrew] --launch mode: game={} bottle={} skse={}", game_id, bottle_name, use_skse);
+
+    let (bottle, game, _) = match resolve_game(game_id, bottle_name) {
+        Ok(r) => r,
+        Err(e) => { eprintln!("[corkscrew] ERROR: {}", e); std::process::exit(1); }
+    };
+    let game_path = PathBuf::from(&game.game_path);
+
+    let exe_name = if use_skse && game_id == "skyrimse" {
+        "skse64_loader.exe".to_string()
+    } else {
+        games::with_plugin(game_id, |plugin| {
+            plugin.executables().first().map(|s| s.to_string()).unwrap_or_default()
+        }).unwrap_or_default()
+    };
+
+    if exe_name.is_empty() {
+        eprintln!("[corkscrew] ERROR: No executable configured for game '{}'", game_id);
+        std::process::exit(1);
+    }
+
+    let exe_path = match launcher::find_executable(&game_path, &exe_name) {
+        Some(p) => p,
+        None => {
+            eprintln!("[corkscrew] ERROR: {} not found in {}", exe_name, game_path.display());
+            std::process::exit(1);
+        }
+    };
+
+    let fixes_disabled = config::get_config_value("disable_game_fixes")
+        .unwrap_or(None)
+        .map(|v| v == "true")
+        .unwrap_or(false);
+
+    if game_id == "skyrimse" && !fixes_disabled {
+        match display_fix::auto_fix_display(&bottle) {
+            Ok(r) => { if r.fixed { println!("[corkscrew] Display fix applied: {}x{} fullscreen", r.applied.width, r.applied.height); } }
+            Err(e) => eprintln!("[corkscrew] Warning: display fix failed: {}", e),
+        }
+    }
+
+    let _ = sync_plugins_for_game(&game, &bottle);
+
+    if game_id == "skyrimse" {
+        let data_dir = PathBuf::from(&game.data_dir);
+
+        let fixes = skse::fix_skse_plugin_conflicts(db, game_id, bottle_name, &data_dir, &game_path);
+        if fixes > 0 { println!("[corkscrew] Fixed {} SKSE plugin DLL(s)", fixes); }
+
+        let ef = skse::fix_engine_fixes_for_wine(&data_dir, db, game_id, bottle_name);
+        if ef > 0 { println!("[corkscrew] Patched {} EngineFixes TOML(s) for Wine", ef); }
+
+        match skse::install_engine_fixes_wine_blocking(&data_dir) {
+            Ok(true)  => println!("[corkscrew] Deployed SSE Engine Fixes for Wine"),
+            Ok(false) => println!("[corkscrew] SSE Engine Fixes for Wine already up to date"),
+            Err(e)    => eprintln!("[corkscrew] Warning: Engine Fixes deploy failed: {}", e),
+        }
+    }
+
+    println!("[corkscrew] Launching {} ...", exe_path.display());
+    match launcher::launch_game(&bottle, &exe_path, Some(&game_path)) {
+        Ok(r) => {
+            println!("[corkscrew] Launched OK (pid={:?})", r.pid);
+            if let Some(w) = r.warning { eprintln!("[corkscrew] Warning: {}", w); }
+        }
+        Err(e) => {
+            eprintln!("[corkscrew] ERROR: Launch failed: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
 // --- App Entry Point ---
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -5689,7 +5768,7 @@ pub fn run() {
 
     // Initialize database
     let db_path = config::db_path();
-    let db = ModDatabase::new(&db_path).expect("Failed to initialize mod database");
+    let db = Arc::new(ModDatabase::new(&db_path).expect("Failed to initialize mod database"));
 
     // Initialize additional schemas
     executables::init_schema(&db).expect("Failed to initialize executables schema");
@@ -5745,6 +5824,25 @@ pub fn run() {
         builder.init();
     }
 
+    // --- CLI mode: --launch <game_id> <bottle_name> [--skse] ---
+    // When invoked with --launch, run the game pipeline headlessly and exit.
+    // This allows scripted/automated testing without opening the UI.
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if let Some(pos) = args.iter().position(|a| a == "--launch") {
+            let game_id    = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("");
+            let bottle_name = args.get(pos + 2).map(|s| s.as_str()).unwrap_or("");
+            let use_skse   = args.iter().any(|a| a == "--skse");
+            if game_id.is_empty() || bottle_name.is_empty() {
+                eprintln!("Usage: corkscrew --launch <game_id> <bottle_name> [--skse]");
+                eprintln!("  Example: corkscrew --launch skyrimse Steam --skse");
+                std::process::exit(1);
+            }
+            cli_launch(game_id, bottle_name, use_skse, &db);
+            return;
+        }
+    }
+
     // Recover Dock if a previous session crashed while cursor fix was active
     cursor_clamp::recover_dock_if_needed();
 
@@ -5777,7 +5875,7 @@ pub fn run() {
                 Err(e) => log::warn!("Failed to load download queue from database: {}", e),
             }
             AppState {
-                db: Arc::new(db),
+                db: Arc::clone(&db),
                 download_queue: Arc::new(queue),
                 wj_cancel_tokens: std::sync::Mutex::new(std::collections::HashMap::new()),
                 fomod_cache: Arc::new(fomod::new_fomod_cache()),
