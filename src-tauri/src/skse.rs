@@ -1940,6 +1940,7 @@ pub fn install_engine_fixes_wine_blocking(data_dir: &Path) -> Result<bool> {
 
     let client = reqwest::blocking::Client::builder()
         .user_agent(format!("Corkscrew/{}", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| SkseError::Other(format!("HTTP client error: {}", e)))?;
 
