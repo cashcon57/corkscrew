@@ -1746,10 +1746,15 @@ fn patch_engine_fixes_toml(path: &Path) -> std::result::Result<bool, String> {
 const ENGINE_FIXES_WINE_REPO: &str = "cashcon57/SSEEngineFixesForWine";
 
 /// DLL name of the Wine-compatible Engine Fixes plugin.
-const ENGINE_FIXES_WINE_DLL: &str = "SSEEngineFixesForWine.dll";
+/// Prefixed with "0_" so SKSE loads it before all letter-named plugins,
+/// ensuring the editor ID cache fix runs before other plugins' kDataLoaded handlers.
+const ENGINE_FIXES_WINE_DLL: &str = "0_SSEEngineFixesForWine.dll";
 
 /// TOML config name for the Wine-compatible Engine Fixes plugin.
 const ENGINE_FIXES_WINE_TOML: &str = "SSEEngineFixesForWine.toml";
+
+/// Version marker file — stores the deployed release tag for auto-update.
+const ENGINE_FIXES_WINE_VERSION: &str = "SSEEngineFixesForWine.version";
 
 /// Check if SSE Engine Fixes for Wine is already deployed.
 pub fn is_engine_fixes_wine_installed(data_dir: &Path) -> bool {
@@ -1764,20 +1769,12 @@ pub fn is_engine_fixes_wine_installed(data_dir: &Path) -> bool {
 ///
 /// This is the Wine-compatible replacement for SSE Engine Fixes.
 /// It downloads the AE build (1.6.1170) from GitHub and deploys
-/// `SSEEngineFixesForWine.dll` + `SSEEngineFixesForWine.toml`
+/// `0_SSEEngineFixesForWine.dll` + `SSEEngineFixesForWine.toml`
 /// to `Data/SKSE/Plugins/`.
 ///
 /// Returns Ok(true) if newly installed, Ok(false) if already present.
 pub async fn install_engine_fixes_wine(data_dir: &Path) -> Result<bool> {
     let plugins_dir = data_dir.join("SKSE").join("Plugins");
-
-    // Skip if already installed
-    if plugins_dir.join(ENGINE_FIXES_WINE_DLL).exists() {
-        debug!("SSE Engine Fixes for Wine already deployed, skipping");
-        return Ok(false);
-    }
-
-    info!("Downloading SSE Engine Fixes for Wine from GitHub...");
 
     let client = reqwest::Client::builder()
         .user_agent(format!("Corkscrew/{}", env!("CARGO_PKG_VERSION")))
@@ -1801,6 +1798,28 @@ pub async fn install_engine_fixes_wine(data_dir: &Path) -> Result<bool> {
         .await
         .map_err(|e| SkseError::Other(format!("GitHub API JSON parse error: {}", e)))?;
 
+    let tag = release["tag_name"].as_str().unwrap_or("unknown");
+
+    // Check if already deployed at the latest version
+    let version_file = plugins_dir.join(ENGINE_FIXES_WINE_VERSION);
+    if plugins_dir.join(ENGINE_FIXES_WINE_DLL).exists() {
+        if let Ok(deployed_tag) = fs::read_to_string(&version_file) {
+            if deployed_tag.trim() == tag {
+                debug!("SSE Engine Fixes for Wine {} already deployed, skipping", tag);
+                return Ok(false);
+            }
+            info!(
+                "SSE Engine Fixes for Wine update available: {} -> {}",
+                deployed_tag.trim(),
+                tag
+            );
+        } else {
+            info!("SSE Engine Fixes for Wine deployed without version marker, updating to {}", tag);
+        }
+    }
+
+    info!("Downloading SSE Engine Fixes for Wine {} from GitHub...", tag);
+
     // Find the AE zip asset (SSEEngineFixesForWine-AE-1.6.1170.zip)
     let assets = release["assets"]
         .as_array()
@@ -1819,12 +1838,6 @@ pub async fn install_engine_fixes_wine(data_dir: &Path) -> Result<bool> {
     let download_url = ae_asset["browser_download_url"]
         .as_str()
         .ok_or_else(|| SkseError::Other("No download URL for asset".into()))?;
-
-    let tag = release["tag_name"].as_str().unwrap_or("unknown");
-    info!(
-        "Downloading SSE Engine Fixes for Wine {} from {}",
-        tag, download_url
-    );
 
     // Download the zip
     let bytes = client
@@ -1874,6 +1887,12 @@ pub async fn install_engine_fixes_wine(data_dir: &Path) -> Result<bool> {
                 fs::copy(path, plugins_dir.join(ENGINE_FIXES_WINE_DLL))?;
                 found_dll = true;
                 info!("Deployed {}", ENGINE_FIXES_WINE_DLL);
+                // Clean up old-named DLL from pre-v1.3.0 (was SSEEngineFixesForWine.dll)
+                let old_dll = plugins_dir.join("SSEEngineFixesForWine.dll");
+                if old_dll.exists() {
+                    let _ = fs::remove_file(&old_dll);
+                    info!("Removed old SSEEngineFixesForWine.dll (renamed to 0_ prefix)");
+                }
             } else if name.eq_ignore_ascii_case(ENGINE_FIXES_WINE_TOML) {
                 // Only copy TOML if it doesn't already exist (preserve user config)
                 let dest = plugins_dir.join(ENGINE_FIXES_WINE_TOML);
@@ -1895,12 +1914,17 @@ pub async fn install_engine_fixes_wine(data_dir: &Path) -> Result<bool> {
 
     if !found_dll {
         return Err(SkseError::Other(
-            "SSEEngineFixesForWine.dll not found in release archive".into(),
+            "0_SSEEngineFixesForWine.dll not found in release archive".into(),
         ));
     }
 
     if !found_toml {
         warn!("SSEEngineFixesForWine.toml not found in release archive; DLL deployed without config");
+    }
+
+    // Write version marker for future update checks
+    if let Err(e) = fs::write(&version_file, tag) {
+        warn!("Failed to write Engine Fixes Wine version marker: {}", e);
     }
 
     info!("SSE Engine Fixes for Wine {} installed successfully", tag);
@@ -1913,13 +1937,6 @@ pub async fn install_engine_fixes_wine(data_dir: &Path) -> Result<bool> {
 /// Returns Ok(true) if newly installed, Ok(false) if already present.
 pub fn install_engine_fixes_wine_blocking(data_dir: &Path) -> Result<bool> {
     let plugins_dir = data_dir.join("SKSE").join("Plugins");
-
-    if plugins_dir.join(ENGINE_FIXES_WINE_DLL).exists() {
-        debug!("SSE Engine Fixes for Wine already deployed, skipping");
-        return Ok(false);
-    }
-
-    info!("Downloading SSE Engine Fixes for Wine from GitHub (blocking)...");
 
     let client = reqwest::blocking::Client::builder()
         .user_agent(format!("Corkscrew/{}", env!("CARGO_PKG_VERSION")))
@@ -1940,6 +1957,29 @@ pub fn install_engine_fixes_wine_blocking(data_dir: &Path) -> Result<bool> {
         .json()
         .map_err(|e| SkseError::Other(format!("GitHub API JSON parse error: {}", e)))?;
 
+    let tag = release["tag_name"].as_str().unwrap_or("unknown");
+
+    // Check if already deployed at the latest version
+    let version_file = plugins_dir.join(ENGINE_FIXES_WINE_VERSION);
+    if plugins_dir.join(ENGINE_FIXES_WINE_DLL).exists() {
+        if let Ok(deployed_tag) = fs::read_to_string(&version_file) {
+            if deployed_tag.trim() == tag {
+                debug!("SSE Engine Fixes for Wine {} already deployed, skipping", tag);
+                return Ok(false);
+            }
+            info!(
+                "SSE Engine Fixes for Wine update available: {} -> {}",
+                deployed_tag.trim(),
+                tag
+            );
+        } else {
+            // DLL exists but no version marker — legacy install, re-deploy to update
+            info!("SSE Engine Fixes for Wine deployed without version marker, updating to {}", tag);
+        }
+    }
+
+    info!("Downloading SSE Engine Fixes for Wine {} from GitHub (blocking)...", tag);
+
     let assets = release["assets"]
         .as_array()
         .ok_or_else(|| SkseError::Other("No assets in release".into()))?;
@@ -1957,8 +1997,6 @@ pub fn install_engine_fixes_wine_blocking(data_dir: &Path) -> Result<bool> {
     let download_url = ae_asset["browser_download_url"]
         .as_str()
         .ok_or_else(|| SkseError::Other("No download URL for asset".into()))?;
-
-    let tag = release["tag_name"].as_str().unwrap_or("unknown");
     info!(
         "Downloading SSE Engine Fixes for Wine {} from {}",
         tag, download_url
@@ -2006,6 +2044,12 @@ pub fn install_engine_fixes_wine_blocking(data_dir: &Path) -> Result<bool> {
                 fs::copy(path, plugins_dir.join(ENGINE_FIXES_WINE_DLL))?;
                 found_dll = true;
                 info!("Deployed {}", ENGINE_FIXES_WINE_DLL);
+                // Clean up old-named DLL from pre-v1.3.0
+                let old_dll = plugins_dir.join("SSEEngineFixesForWine.dll");
+                if old_dll.exists() {
+                    let _ = fs::remove_file(&old_dll);
+                    info!("Removed old SSEEngineFixesForWine.dll (renamed to 0_ prefix)");
+                }
             } else if name.eq_ignore_ascii_case(ENGINE_FIXES_WINE_TOML) {
                 let dest = plugins_dir.join(ENGINE_FIXES_WINE_TOML);
                 if !dest.exists() {
@@ -2023,12 +2067,17 @@ pub fn install_engine_fixes_wine_blocking(data_dir: &Path) -> Result<bool> {
 
     if !found_dll {
         return Err(SkseError::Other(
-            "SSEEngineFixesForWine.dll not found in release archive".into(),
+            "0_SSEEngineFixesForWine.dll not found in release archive".into(),
         ));
     }
 
     if !found_toml {
         warn!("SSEEngineFixesForWine.toml not found in release archive; DLL deployed without config");
+    }
+
+    // Write version marker for future update checks
+    if let Err(e) = fs::write(&version_file, tag) {
+        warn!("Failed to write Engine Fixes Wine version marker: {}", e);
     }
 
     info!("SSE Engine Fixes for Wine {} installed successfully", tag);
