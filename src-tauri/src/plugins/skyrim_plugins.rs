@@ -235,6 +235,12 @@ pub fn discover_plugins(data_dir: &Path) -> Result<Vec<String>> {
         .with_context(|| format!("Failed to read data directory: {}", data_dir.display()))?;
 
     for entry in entries.flatten() {
+        // Skip directories — a folder named "esp" would otherwise pass the
+        // extension check below (rsplit('.') on a no-dot name returns the
+        // whole string, which matches "esp").
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
         let name = entry.file_name().to_string_lossy().to_string();
         if is_plugin_file(&name) {
             plugins.push(name);
@@ -247,6 +253,11 @@ pub fn discover_plugins(data_dir: &Path) -> Result<Vec<String>> {
 
 /// Check whether a filename has a recognised plugin extension.
 fn is_plugin_file(filename: &str) -> bool {
+    // Must contain a dot so bare names like "esp" (which are directories
+    // mistakenly named after plugin extensions) are rejected.
+    if !filename.contains('.') {
+        return false;
+    }
     let ext = filename.rsplit('.').next().unwrap_or("");
     matches!(ext.to_lowercase().as_str(), "esp" | "esm" | "esl")
 }
