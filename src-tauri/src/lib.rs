@@ -5678,6 +5678,314 @@ fn cleanup_orphaned_temp_dirs() {
     }
 }
 
+// --- CLI diagnostic tools ---
+
+/// List all installed mods for a game+bottle.
+fn cli_list_mods(game_id: &str, bottle_name: &str, db: &Arc<ModDatabase>) {
+    let mods = match db.list_mods(game_id, bottle_name) {
+        Ok(m) => m,
+        Err(e) => { eprintln!("[corkscrew] ERROR: {}", e); std::process::exit(1); }
+    };
+    println!("[corkscrew] {} mods installed for {}:{}", mods.len(), game_id, bottle_name);
+    println!("{:<8} {:<50} {:<10} {:<10} {}", "ID", "Name", "Enabled", "Files", "Staging");
+    println!("{}", "-".repeat(120));
+    for m in &mods {
+        let staging = m.staging_path.as_deref().unwrap_or("(inline)");
+        println!("{:<8} {:<50} {:<10} {:<10} {}",
+            m.id,
+            if m.name.len() > 48 { format!("{}…", &m.name[..47]) } else { m.name.clone() },
+            if m.enabled { "yes" } else { "NO" },
+            m.installed_files.len(),
+            staging,
+        );
+    }
+}
+
+/// Search installed mods by name (case-insensitive substring).
+fn cli_search_mods(query: &str, game_id: &str, bottle_name: &str, db: &Arc<ModDatabase>) {
+    let mods = match db.list_mods(game_id, bottle_name) {
+        Ok(m) => m,
+        Err(e) => { eprintln!("[corkscrew] ERROR: {}", e); std::process::exit(1); }
+    };
+    let q = query.to_lowercase();
+    let matches: Vec<_> = mods.iter().filter(|m| m.name.to_lowercase().contains(&q)).collect();
+    println!("[corkscrew] {} match(es) for '{}' in {}:{}", matches.len(), query, game_id, bottle_name);
+    for m in matches {
+        let staging = m.staging_path.as_deref().unwrap_or("(inline)");
+        println!("  ID={} name='{}' enabled={} files={} nexus_id={:?}",
+            m.id, m.name, m.enabled, m.installed_files.len(), m.nexus_mod_id);
+        println!("    staging: {}", staging);
+        if !m.installed_files.is_empty() {
+            let plugins: Vec<_> = m.installed_files.iter()
+                .filter(|f| {
+                    let fl = f.to_lowercase();
+                    fl.ends_with(".esp") || fl.ends_with(".esm") || fl.ends_with(".esl")
+                })
+                .collect();
+            if !plugins.is_empty() {
+                println!("    plugin files: {}", plugins.iter().map(|p| p.as_str()).collect::<Vec<_>>().join(", "));
+            }
+        }
+    }
+}
+
+/// Find files matching a pattern across all staging dirs for a game+bottle.
+fn cli_find_file(pattern: &str, game_id: &str, bottle_name: &str, db: &Arc<ModDatabase>) {
+    let mods = match db.list_mods(game_id, bottle_name) {
+        Ok(m) => m,
+        Err(e) => { eprintln!("[corkscrew] ERROR: {}", e); std::process::exit(1); }
+    };
+
+    // Also load current plugins state so we can flag deployed-but-inactive plugins
+    let plugin_active: std::collections::HashMap<String, bool> = {
+        // Try to get game resolution for plugins.txt
+        match resolve_game(game_id, bottle_name) {
+            Ok((bottle, game, _)) => {
+                let game_path = PathBuf::from(&game.game_path);
+                let pf = games::with_plugin(game_id, |p| p.get_plugins_file(&game_path, &bottle)).flatten();
+                if let Some(pf) = pf {
+                    plugins::skyrim_plugins::read_plugins_txt(&pf)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|e| (e.filename.to_lowercase(), e.enabled))
+                        .collect()
+                } else {
+                    Default::default()
+                }
+            }
+            Err(_) => Default::default(),
+        }
+    };
+
+    let pat = pattern.to_lowercase();
+    let mut found = 0usize;
+
+    for m in &mods {
+        // Check registered installed_files list
+        let file_matches: Vec<_> = m.installed_files.iter()
+            .filter(|f| f.to_lowercase().contains(&pat))
+            .collect();
+
+        if !file_matches.is_empty() {
+            println!("  [mod {}] id={} enabled={}", m.name, m.id, m.enabled);
+            for f in &file_matches {
+                let fl = f.to_lowercase();
+                let is_plugin = fl.ends_with(".esp") || fl.ends_with(".esm") || fl.ends_with(".esl");
+                let basename = f.rsplit(['/', '\\']).next().unwrap_or(f.as_str());
+                let active_note = if is_plugin {
+                    match plugin_active.get(&basename.to_lowercase()) {
+                        Some(true)  => " [plugin: ACTIVE ✓]",
+                        Some(false) => " [plugin: INACTIVE ✗]",
+                        None        => " [plugin: not in plugins.txt]",
+                    }
+                } else { "" };
+                println!("    {}{}", f, active_note);
+                found += 1;
+            }
+        }
+
+        // Also walk staging dir if available (catches files not in DB list)
+        if let Some(ref sp) = m.staging_path {
+            let staging = PathBuf::from(sp);
+            if staging.is_dir() {
+                for entry in walkdir::WalkDir::new(&staging).into_iter().flatten() {
+                    let name = entry.file_name().to_string_lossy().to_lowercase();
+                    if name.contains(&pat) {
+                        let rel = entry.path().strip_prefix(&staging).unwrap_or(entry.path());
+                        // Only show if NOT already in installed_files
+                        if !m.installed_files.iter().any(|f| f.to_lowercase().contains(&pat)) {
+                            if found == 0 || true {
+                                println!("  [mod {}] id={} (staged, not deployed)", m.name, m.id);
+                            }
+                            println!("    staging/{}", rel.display());
+                            found += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    println!("[corkscrew] find-file '{}': {} result(s)", pattern, found);
+}
+
+/// Show plugin load order state: active/inactive/on-disk/stale.
+fn cli_check_plugins(game_id: &str, bottle_name: &str, inactive_only: bool, deployed_inactive_only: bool, db: &Arc<ModDatabase>) {
+    let (bottle, game, data_dir) = match resolve_game(game_id, bottle_name) {
+        Ok(r) => r,
+        Err(e) => { eprintln!("[corkscrew] ERROR: {}", e); std::process::exit(1); }
+    };
+
+    let game_path = PathBuf::from(&game.game_path);
+    let pf = match games::with_plugin(game_id, |p| p.get_plugins_file(&game_path, &bottle)).flatten() {
+        Some(p) => p,
+        None => { eprintln!("[corkscrew] No plugins.txt path for game '{}'", game_id); std::process::exit(1); }
+    };
+
+    println!("[corkscrew] plugins.txt: {}", pf.display());
+    if let Ok(meta) = std::fs::metadata(&pf) {
+        if let Ok(modified) = meta.modified() {
+            let secs = modified.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+            println!("[corkscrew] plugins.txt last modified: {} (unix {})", {
+                let dt = chrono::DateTime::<chrono::Local>::from(modified);
+                dt.format("%Y-%m-%d %H:%M:%S").to_string()
+            }, secs);
+        }
+    }
+
+    // Read plugins.txt
+    let entries = match plugins::skyrim_plugins::read_plugins_txt(&pf) {
+        Ok(e) => e,
+        Err(e) => { eprintln!("[corkscrew] ERROR reading plugins.txt: {}", e); std::process::exit(1); }
+    };
+
+    // Discover on-disk plugins
+    let on_disk = plugins::skyrim_plugins::discover_plugins(&data_dir).unwrap_or_default();
+    let on_disk_lower: std::collections::HashSet<String> = on_disk.iter().map(|s| s.to_lowercase()).collect();
+
+    // Build active set from plugins.txt
+    let in_txt_active: std::collections::HashMap<String, bool> = entries.iter()
+        .map(|e| (e.filename.to_lowercase(), e.enabled))
+        .collect();
+
+    // Build "which mod owns this plugin" map from DB
+    let mods = db.list_mods(game_id, bottle_name).unwrap_or_default();
+    let mut plugin_owner: std::collections::HashMap<String, String> = Default::default();
+    for m in &mods {
+        for f in &m.installed_files {
+            let fl = f.to_lowercase();
+            if fl.ends_with(".esp") || fl.ends_with(".esm") || fl.ends_with(".esl") {
+                let basename = f.rsplit(['/', '\\']).next().unwrap_or(f.as_str());
+                plugin_owner.insert(basename.to_lowercase(), m.name.clone());
+            }
+        }
+    }
+
+    let active_count = entries.iter().filter(|e| e.enabled).count();
+    let inactive_count = entries.iter().filter(|e| !e.enabled).count();
+    println!("[corkscrew] plugins.txt: {} active, {} inactive, {} total entries", active_count, inactive_count, entries.len());
+    println!("[corkscrew] on disk: {} plugin files", on_disk.len());
+
+    // Find deployed-but-inactive: on disk AND in plugins.txt but NOT active
+    let mut deployed_inactive: Vec<&str> = Vec::new();
+    for p in &on_disk {
+        let key = p.to_lowercase();
+        if let Some(&active) = in_txt_active.get(&key) {
+            if !active {
+                deployed_inactive.push(p.as_str());
+            }
+        }
+    }
+
+    // Find on-disk but not in plugins.txt at all
+    let not_in_txt: Vec<&str> = on_disk.iter()
+        .filter(|p| !in_txt_active.contains_key(&p.to_lowercase()))
+        .map(|p| p.as_str())
+        .collect();
+
+    // Find in plugins.txt but not on disk (stale)
+    let stale: Vec<_> = entries.iter()
+        .filter(|e| !on_disk_lower.contains(&e.filename.to_lowercase()))
+        .collect();
+
+    if deployed_inactive_only {
+        println!("\n[DEPLOYED BUT INACTIVE in plugins.txt] ({} plugins):", deployed_inactive.len());
+        for p in &deployed_inactive {
+            let owner = plugin_owner.get(&p.to_lowercase()).map(|s| s.as_str()).unwrap_or("unknown mod");
+            println!("  {} ({})", p, owner);
+        }
+        return;
+    }
+
+    println!("\n[DEPLOYED BUT INACTIVE in plugins.txt] ({} plugins):", deployed_inactive.len());
+    for p in &deployed_inactive {
+        let owner = plugin_owner.get(&p.to_lowercase()).map(|s| s.as_str()).unwrap_or("unknown mod");
+        println!("  {} ({})", p, owner);
+    }
+
+    println!("\n[ON DISK BUT NOT IN plugins.txt] ({} plugins):", not_in_txt.len());
+    for p in not_in_txt.iter().take(20) {
+        println!("  {}", p);
+    }
+    if not_in_txt.len() > 20 {
+        println!("  ... and {} more", not_in_txt.len() - 20);
+    }
+
+    println!("\n[STALE: in plugins.txt but NOT on disk] ({} plugins):", stale.len());
+    for e in stale.iter().take(20) {
+        println!("  {} ({})", e.filename, if e.enabled { "active" } else { "inactive" });
+    }
+    if stale.len() > 20 {
+        println!("  ... and {} more", stale.len() - 20);
+    }
+
+    if !inactive_only {
+        println!("\n[ALL INACTIVE in plugins.txt] ({} plugins, showing first 50):", inactive_count);
+        let mut shown = 0;
+        for e in entries.iter().filter(|e| !e.enabled) {
+            let on_disk_flag = if on_disk_lower.contains(&e.filename.to_lowercase()) { " [on-disk]" } else { " [missing]" };
+            let owner = plugin_owner.get(&e.filename.to_lowercase()).map(|s| format!(" ({})", s)).unwrap_or_default();
+            println!("  {}{}{}", e.filename, on_disk_flag, owner);
+            shown += 1;
+            if shown >= 50 { println!("  ... and {} more inactive", inactive_count - shown); break; }
+        }
+    }
+}
+
+/// Manually run plugin sync for a game+bottle.
+fn cli_sync_plugins(game_id: &str, bottle_name: &str) {
+    let (bottle, game, _) = match resolve_game(game_id, bottle_name) {
+        Ok(r) => r,
+        Err(e) => { eprintln!("[corkscrew] ERROR: {}", e); std::process::exit(1); }
+    };
+    match sync_plugins_for_game(&game, &bottle) {
+        Ok(()) => println!("[corkscrew] Plugin sync complete for {}:{}", game_id, bottle_name),
+        Err(e) => { eprintln!("[corkscrew] ERROR: sync failed: {}", e); std::process::exit(1); }
+    }
+}
+
+/// Show all files registered for a specific mod (by ID or name substring).
+fn cli_mod_files(search: &str, game_id: &str, bottle_name: &str, db: &Arc<ModDatabase>) {
+    let mods = match db.list_mods(game_id, bottle_name) {
+        Ok(m) => m,
+        Err(e) => { eprintln!("[corkscrew] ERROR: {}", e); std::process::exit(1); }
+    };
+    let q = search.to_lowercase();
+    let matched: Vec<_> = if let Ok(id) = search.parse::<i64>() {
+        mods.iter().filter(|m| m.id == id).collect()
+    } else {
+        mods.iter().filter(|m| m.name.to_lowercase().contains(&q)).collect()
+    };
+    if matched.is_empty() {
+        println!("[corkscrew] No mods found matching '{}'", search);
+        return;
+    }
+    for m in matched {
+        println!("[mod {}] id={} enabled={} nexus_id={:?}", m.name, m.id, m.enabled, m.nexus_mod_id);
+        if let Some(sp) = &m.staging_path { println!("  staging: {}", sp); }
+        println!("  registered files ({}):", m.installed_files.len());
+        for f in &m.installed_files {
+            println!("    {}", f);
+        }
+        // Also list staging dir if present and different
+        if let Some(sp) = &m.staging_path {
+            let staging = PathBuf::from(sp);
+            if staging.is_dir() {
+                let staged: Vec<_> = walkdir::WalkDir::new(&staging)
+                    .into_iter()
+                    .flatten()
+                    .filter(|e| e.file_type().is_file())
+                    .map(|e| e.path().strip_prefix(&staging).unwrap_or(e.path()).to_path_buf())
+                    .collect();
+                println!("  staged files ({}):", staged.len());
+                for f in &staged {
+                    println!("    {}", f.display());
+                }
+            }
+        }
+    }
+}
+
 // --- CLI headless launch ---
 
 /// Run the full pre-launch pipeline and spawn the game without opening the UI.
@@ -5824,21 +6132,99 @@ pub fn run() {
         builder.init();
     }
 
-    // --- CLI mode: --launch <game_id> <bottle_name> [--skse] ---
-    // When invoked with --launch, run the game pipeline headlessly and exit.
-    // This allows scripted/automated testing without opening the UI.
+    // --- CLI mode ---
+    // Subcommands dispatched here. Each exits after completion.
     {
         let args: Vec<String> = std::env::args().collect();
+
+        // --launch <game_id> <bottle_name> [--skse]
         if let Some(pos) = args.iter().position(|a| a == "--launch") {
-            let game_id    = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("");
+            let game_id     = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("");
             let bottle_name = args.get(pos + 2).map(|s| s.as_str()).unwrap_or("");
-            let use_skse   = args.iter().any(|a| a == "--skse");
+            let use_skse    = args.iter().any(|a| a == "--skse");
             if game_id.is_empty() || bottle_name.is_empty() {
                 eprintln!("Usage: corkscrew --launch <game_id> <bottle_name> [--skse]");
                 eprintln!("  Example: corkscrew --launch skyrimse Steam --skse");
                 std::process::exit(1);
             }
             cli_launch(game_id, bottle_name, use_skse, &db);
+            return;
+        }
+
+        // --list-mods <game_id> <bottle_name>
+        if let Some(pos) = args.iter().position(|a| a == "--list-mods") {
+            let game_id     = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("");
+            let bottle_name = args.get(pos + 2).map(|s| s.as_str()).unwrap_or("");
+            if game_id.is_empty() || bottle_name.is_empty() {
+                eprintln!("Usage: corkscrew --list-mods <game_id> <bottle_name>");
+                std::process::exit(1);
+            }
+            cli_list_mods(game_id, bottle_name, &db);
+            return;
+        }
+
+        // --search-mods <query> <game_id> <bottle_name>
+        if let Some(pos) = args.iter().position(|a| a == "--search-mods") {
+            let query       = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("");
+            let game_id     = args.get(pos + 2).map(|s| s.as_str()).unwrap_or("");
+            let bottle_name = args.get(pos + 3).map(|s| s.as_str()).unwrap_or("");
+            if query.is_empty() || game_id.is_empty() || bottle_name.is_empty() {
+                eprintln!("Usage: corkscrew --search-mods <query> <game_id> <bottle_name>");
+                std::process::exit(1);
+            }
+            cli_search_mods(query, game_id, bottle_name, &db);
+            return;
+        }
+
+        // --find-file <pattern> <game_id> <bottle_name>
+        if let Some(pos) = args.iter().position(|a| a == "--find-file") {
+            let pattern     = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("");
+            let game_id     = args.get(pos + 2).map(|s| s.as_str()).unwrap_or("");
+            let bottle_name = args.get(pos + 3).map(|s| s.as_str()).unwrap_or("");
+            if pattern.is_empty() || game_id.is_empty() || bottle_name.is_empty() {
+                eprintln!("Usage: corkscrew --find-file <pattern> <game_id> <bottle_name>");
+                std::process::exit(1);
+            }
+            cli_find_file(pattern, game_id, bottle_name, &db);
+            return;
+        }
+
+        // --check-plugins <game_id> <bottle_name> [--inactive-only] [--deployed-inactive]
+        if let Some(pos) = args.iter().position(|a| a == "--check-plugins") {
+            let game_id     = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("");
+            let bottle_name = args.get(pos + 2).map(|s| s.as_str()).unwrap_or("");
+            if game_id.is_empty() || bottle_name.is_empty() {
+                eprintln!("Usage: corkscrew --check-plugins <game_id> <bottle_name> [--inactive-only] [--deployed-inactive]");
+                std::process::exit(1);
+            }
+            let inactive_only        = args.iter().any(|a| a == "--inactive-only");
+            let deployed_inactive    = args.iter().any(|a| a == "--deployed-inactive");
+            cli_check_plugins(game_id, bottle_name, inactive_only, deployed_inactive, &db);
+            return;
+        }
+
+        // --sync-plugins <game_id> <bottle_name>
+        if let Some(pos) = args.iter().position(|a| a == "--sync-plugins") {
+            let game_id     = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("");
+            let bottle_name = args.get(pos + 2).map(|s| s.as_str()).unwrap_or("");
+            if game_id.is_empty() || bottle_name.is_empty() {
+                eprintln!("Usage: corkscrew --sync-plugins <game_id> <bottle_name>");
+                std::process::exit(1);
+            }
+            cli_sync_plugins(game_id, bottle_name);
+            return;
+        }
+
+        // --mod-files <mod_id_or_name> <game_id> <bottle_name>
+        if let Some(pos) = args.iter().position(|a| a == "--mod-files") {
+            let search      = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("");
+            let game_id     = args.get(pos + 2).map(|s| s.as_str()).unwrap_or("");
+            let bottle_name = args.get(pos + 3).map(|s| s.as_str()).unwrap_or("");
+            if search.is_empty() || game_id.is_empty() || bottle_name.is_empty() {
+                eprintln!("Usage: corkscrew --mod-files <mod_id_or_name> <game_id> <bottle_name>");
+                std::process::exit(1);
+            }
+            cli_mod_files(search, game_id, bottle_name, &db);
             return;
         }
     }
