@@ -227,12 +227,20 @@ impl ModDatabase {
     /// Column order must match [`Self::SELECT_COLUMNS`].
     fn row_to_mod(row: &rusqlite::Row<'_>) -> rusqlite::Result<InstalledMod> {
         let files_json: String = row.get(7)?;
-        let installed_files: Vec<String> = serde_json::from_str(&files_json).unwrap_or_default();
+        let installed_files: Vec<String> = serde_json::from_str(&files_json).unwrap_or_else(|e| {
+            log::warn!("Failed to parse installed_files JSON: {}", e);
+            Vec::new()
+        });
         let enabled_int: i64 = row.get(9)?;
 
         let tags_json: Option<String> = row.get(16)?;
         let user_tags: Vec<String> = tags_json
-            .and_then(|s| serde_json::from_str(&s).ok())
+            .map(|s| {
+                serde_json::from_str(&s).unwrap_or_else(|e| {
+                    log::warn!("Failed to parse user_tags JSON: {}", e);
+                    Vec::new()
+                })
+            })
             .unwrap_or_default();
 
         Ok(InstalledMod {

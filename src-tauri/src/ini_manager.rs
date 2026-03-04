@@ -145,11 +145,13 @@ pub fn get_setting(ini: &IniFile, section: &str, key: &str) -> Option<String> {
 
 /// Set a specific value in an INI file on disk.
 pub fn set_setting(path: &Path, section: &str, key: &str, value: &str) -> Result<()> {
-    if !path.exists() {
-        return Err(IniError::NotFound(path.to_string_lossy().to_string()));
-    }
-
-    let content = fs::read_to_string(path)?;
+    let content = fs::read_to_string(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            IniError::NotFound(path.to_string_lossy().to_string())
+        } else {
+            IniError::Io(e)
+        }
+    })?;
     let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
 
     let mut in_section = false;

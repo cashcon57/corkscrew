@@ -26,7 +26,7 @@ Corkscrew installs, manages, and organizes mods for Windows games running throug
 
 It works by reading and writing directly to your Wine bottle's filesystem, the same way the game itself sees it. Your bottles, your mods, no middleman.
 
-> **v0.8** — NexusMods Collections install end-to-end (559 mods, FOMOD replay, binary patches, INI tweaks, plugin sync, delta updates), Wabbajack modlist pipeline, OAuth sign-in, LOOT sorting, profiles, crash log analysis, auto-updater, and Apple Developer code signing.
+> **v0.9** — NexusMods Collections install end-to-end (559 mods, FOMOD replay, binary patches, INI tweaks, plugin sync, delta updates), Wabbajack modlist pipeline (full directive processing, BSA/BA2 packing, multi-source downloads), OAuth sign-in, LOOT sorting, profiles, crash log analysis, auto-updater, SSE Engine Fixes for Wine auto-deploy, SKSE plugin compatibility engine, and Apple Developer code signing.
 
 ---
 
@@ -239,7 +239,7 @@ Corkscrew includes an in-app auto-updater. When a new version is published on Gi
 - **Game launching** — Play your modded game straight from Corkscrew, through whatever Wine layer the bottle uses.
 - **Script extender auto-install** — Auto-detect your game version and install the correct script extender (SKSE for Skyrim SE, F4SE for Fallout 4) from GitHub with one click. Game-version-aware: picks the right release for your specific game build. Correctly detected when already installed.
 - **Script extender launching** — Launch through SKSE/F4SE with one click after installation. Compatibility checks against your game version.
-- **SSE Engine Fixes for Wine — auto-deploy and management** — [SSE Engine Fixes for Wine](https://github.com/corkscrewmodding/SSEEngineFixesForWine) is Corkscrew's own Wine-compatible drop-in replacement for the popular [SSE Engine Fixes](https://github.com/aers/EngineFixesSkyrim64) mod. The original crashes under Wine because its Intel TBB allocator and d3dx9_42.dll preloader are incompatible with Wine's DLL loader; the Wine fork replaces both with Wine-safe alternatives and adds a fix for a Wine-specific bug that silently skips all form loading when plugin count exceeds ~600 files. Before every launch of Skyrim SE on Wine/CrossOver, Corkscrew automatically: disables the original SSE Engine Fixes preloader (`d3dx9_42.dll`) and SKSE plugin (`EngineFixes.dll`) that crash Wine ~63s into launch; patches `EngineFixes.toml` to disable all hooks in deployed and staging copies; downloads and deploys SSE Engine Fixes for Wine if not present; and auto-updates the DLL when a new GitHub release is available. User config (`SSEEngineFixesForWine.toml`) is never overwritten. This enables large modlists with 1000+ plugins — including 1700+ plugin Wabbajack lists like Gate to Sovngarde — to load fully under Wine, reaching the main menu in ~2 minutes.
+- **SSE Engine Fixes for Wine — auto-deploy and management** — [SSE Engine Fixes for Wine](https://github.com/corkscrewmodding/SSEEngineFixesForWine) is Corkscrew's own Wine-compatible drop-in replacement for the popular [SSE Engine Fixes](https://github.com/aers/EngineFixesSkyrim64) mod. The original crashes under Wine because its Intel TBB allocator and d3dx9_42.dll preloader are incompatible with Wine's DLL loader; the Wine fork replaces both with Wine-safe alternatives and includes: a fix for a Wine-specific bug that silently skips all form loading when plugin count exceeds ~600 files; a sentinel zero page architecture with a Vectored Exception Handler for handling null-pointer and form-ID-as-pointer crashes; SEH-isolated form initialization with kDeleted flagging for permanently faulted forms; and PAGE_READWRITE optimization to eliminate VEH exception floods during initial load. Before every launch of Skyrim SE on Wine/CrossOver, Corkscrew automatically: disables the original SSE Engine Fixes preloader (`d3dx9_42.dll`) and SKSE plugin (`EngineFixes.dll`) that crash Wine ~63s into launch; patches `EngineFixes.toml` to disable all hooks in deployed and staging copies; downloads and deploys SSE Engine Fixes for Wine if not present; and auto-updates the DLL when a new GitHub release is available. User config (`SSEEngineFixesForWine.toml`) is never overwritten. This enables large modlists with 1000+ plugins — including 1700+ plugin Wabbajack lists like Gate to Sovngarde — to load fully under Wine, reaching the main menu in ~2 minutes.
 - **Skyrim SE downgrade** — Detect your Skyrim version via SHA-256 hash and create a "Stock Game" copy to lock v1.5.97 and prevent Steam auto-updates (same approach pioneered by Wabbajack).
 - **Display scaling fix** — Automatically fix Skyrim SE display scaling issues in CrossOver on macOS by detecting your screen resolution and forcing exclusive fullscreen mode.
 - **INI settings manager** — Browse, search, and edit game INI files with built-in presets for common configurations. Supports Skyrim SE (Skyrim.ini, SkyrimPrefs.ini) and Fallout 4 (Fallout4.ini, Fallout4Prefs.ini) with game-specific presets for Steam Deck optimization, ultra graphics, and performance profiles.
@@ -420,15 +420,15 @@ Key workflows tested end-to-end:
 
 **Rust** handles everything that touches the filesystem or network: bottle discovery across nine different Wine sources, archive extraction, staging-based mod deployment via hardlinks, LOOT plugin sorting, Nexus Mods API calls, NexusMods Collections GraphQL queries, SKSE auto-download from GitHub, Skyrim SE version detection, crash log analysis, mod tool management, and Wabbajack modlist gallery fetching. The plugin-based game detection system (`GamePlugin` trait) makes adding new game support straightforward.
 
-**SQLite** (via `rusqlite`) with a versioned migration system (v1→v9) tracks installed mods, deployment manifests, file hashes, profiles, plugin rules, conflict rules, mod version history, game file snapshots, mod dependencies, FOMOD recipes, game sessions, collection metadata, auto-categories, download registry, and notification logs.
+**SQLite** (via `rusqlite`) with a versioned migration system (v1→v14) tracks installed mods, deployment manifests, file hashes, profiles, plugin rules, conflict rules, mod version history, game file snapshots, mod dependencies, FOMOD recipes, game sessions, collection metadata, auto-categories, download registry, and notification logs.
 
 ### Project Structure
 
 ```
 src/                          Svelte frontend
 ├── lib/
-│   ├── api.ts                Tauri IPC bindings (~171 typed invoke wrappers)
-│   ├── types.ts              Shared TypeScript interfaces (~118 types)
+│   ├── api.ts                Tauri IPC bindings (~223 typed invoke wrappers)
+│   ├── types.ts              Shared TypeScript interfaces (~149 types)
 │   ├── stores.ts             Svelte stores (game selection, mods, toasts, notifications)
 │   ├── theme.ts              Theme detection, persistence, and vibrancy
 │   └── components/
@@ -470,8 +470,8 @@ src/                          Svelte frontend
 │   └── settings/+page.svelte Config, game tools, auth, INI, diagnostics
 └── app.css                   Design system (tokens, themes, vibrancy, animations)
 
-src-tauri/src/                Rust backend (~50 modules, 677 tests)
-├── lib.rs              Tauri command handlers (~171 IPC commands)
+src-tauri/src/                Rust backend (~53 modules, 706 tests)
+├── lib.rs              Tauri command handlers (~224 IPC commands)
 ├── bottles.rs          Bottle detection (9 sources, macOS + Linux)
 ├── bottle_config.rs    Wine bottle settings (MSync, MetalFX, env vars)
 ├── games.rs            Game detection framework + plugin registry
@@ -480,7 +480,7 @@ src-tauri/src/                Rust backend (~50 modules, 677 tests)
 ├── staging.rs          Staging folder management + SHA-256 hashing
 ├── deployer.rs         Hardlink/copy deployment engine + atomic rollback + manifest tracking
 ├── database.rs         SQLite mod tracking with versioned migrations + notification log
-├── migrations.rs       Schema versioning + migration runner (v1→v9)
+├── migrations.rs       Schema versioning + migration runner (v1→v14)
 ├── loot.rs             libloot wrapper + masterlist management
 ├── loot_rules.rs       Custom plugin load order rules
 ├── profiles.rs         Mod profile CRUD + activation flow
@@ -493,9 +493,11 @@ src-tauri/src/                Rust backend (~50 modules, 677 tests)
 ├── wabbajack_downloader.rs  Multi-source download engine (Nexus, HTTP, Mega, GDrive)
 ├── wabbajack_installer.rs   Full modlist install pipeline + cancellation support
 ├── launcher.rs         Game launching through Wine/CrossOver/Whisky/Proton
-├── skse.rs             SKSE detection, auto-download, installation + version-aware builds
+├── skse.rs             SKSE detection, auto-download, installation + SKSE plugin DLL compat engine + Engine Fixes Wine auto-deploy
 ├── downgrader.rs       Skyrim version detection + Stock Game creation
-├── display_fix.rs      Skyrim display scaling fix (exclusive fullscreen for Wine/Retina)
+├── display_fix.rs      Skyrim display scaling fix (exclusive fullscreen) + Wine cursor grab (registry keys)
+├── baselines.rs        Built-in vanilla file baselines for game directory protection
+├── cursor_clamp.rs     Legacy cursor fix cleanup (Dock recovery for upgrades)
 ├── nexus.rs            Nexus Mods API client + update checking
 ├── nexus_sso.rs        WebSocket SSO authentication (pending NM approval)
 ├── oauth.rs            OAuth 2.0 + PKCE authentication
@@ -560,7 +562,7 @@ cargo tauri dev    # Development mode with hot-reload
 
 ```bash
 # Run tests
-cd src-tauri && cargo test           # 677 Rust tests
+cd src-tauri && cargo test           # 706 Rust tests
 npx svelte-check --threshold error   # Frontend type checking
 ```
 

@@ -3,7 +3,6 @@
   import { get } from "svelte/store";
   import { open } from "@tauri-apps/plugin-dialog";
   import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
-  import ModVersionHistory from "$lib/components/ModVersionHistory.svelte";
   import ModlistImportWizard from "$lib/components/ModlistImportWizard.svelte";
   import FomodWizard from "$lib/components/FomodWizard.svelte";
   import {
@@ -52,11 +51,8 @@
     getUserEndorsements,
     getConfig,
     setConfigValue,
-    getNexusModDetail,
-    getModDependencies,
-    getModDependents,
   } from "$lib/api";
-  import type { InstallProgressEvent, DeploymentHealth, IncrementalDeployResult, ConflictSuggestion, ResolutionResult, DeployProgress, ModTool, UserEndorsement, IdenticalContentStats, NexusModInfo, ModDependency } from "$lib/types";
+  import type { InstallProgressEvent, DeploymentHealth, IncrementalDeployResult, ConflictSuggestion, ResolutionResult, DeployProgress, ModTool, UserEndorsement, IdenticalContentStats } from "$lib/types";
   import {
     selectedGame,
     installedMods,
@@ -82,8 +78,7 @@
   import SkeletonRows from "$lib/components/SkeletonRows.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import ConflictMap from "$lib/components/ConflictMap.svelte";
-  import DOMPurify from "dompurify";
-  import { bbcodeToHtml } from "$lib/bbcode";
+  import ModDetailPanel from "$lib/components/mods/ModDetailPanel.svelte";
 
   // Game launch fixes opt-out (display fix + cursor clamp)
   let disableGameFixes = $state(false);
@@ -153,16 +148,6 @@
 
   // Detail panel
   let detailMod = $state<InstalledMod | null>(null);
-  let nexusDetail = $state<NexusModInfo | null>(null);
-  let nexusDetailLoading = $state(false);
-  let nexusDetailModId = $state<number | null>(null);  // Track which mod we loaded for
-  let detailDeps = $state<ModDependency[]>([]);
-  let detailDependents = $state<ModDependency[]>([]);
-  let detailDepsLoading = $state(false);
-
-  // Notes/tags editing
-  let editingNotesId = $state<number | null>(null);
-  let editingNotesValue = $state("");
 
   // Conflict panel state
   let showConflictPanel = $state(false);
@@ -1579,10 +1564,9 @@
   // Health is now loaded in parallel with mods in the activeGame $effect above
 
   // --- Notes ---
-  async function handleSaveNotes(modId: number) {
+  async function handleSaveNotes(modId: number, value: string) {
     try {
-      await setModNotes(modId, editingNotesValue || null);
-      editingNotesId = null;
+      await setModNotes(modId, value || null);
       const game = pickedGame ?? $selectedGame;
       if (game) await loadMods(game);
     } catch (e: unknown) {
@@ -1825,53 +1809,6 @@
     // Puzzle piece for misc
     "Misc": '<path d="M19.439 7.85c-.049.322.059.648.289.878l1.568 1.568c.47.47.706 1.087.706 1.704s-.235 1.233-.706 1.704l-1.611 1.611a.98.98 0 0 1-.837.276c-.47-.07-.802-.48-.968-.925a2.501 2.501 0 1 0-3.214 3.214c.446.166.855.497.925.968a.979.979 0 0 1-.276.837l-1.61 1.611a2.404 2.404 0 0 1-1.705.706 2.404 2.404 0 0 1-1.704-.706l-1.568-1.568a1.026 1.026 0 0 0-.877-.29c-.493.074-.84.504-1.02.968a2.5 2.5 0 1 1-3.237-3.237c.464-.18.894-.527.967-1.02a1.026 1.026 0 0 0-.289-.877l-1.568-1.568A2.404 2.404 0 0 1 1.998 12c0-.617.236-1.234.706-1.704L4.315 8.685a.98.98 0 0 1 .837-.276c.47.07.802.48.968.925a2.501 2.501 0 1 0 3.214-3.214c-.446-.166-.855-.497-.925-.968a.979.979 0 0 1 .276-.837l1.611-1.611a2.404 2.404 0 0 1 1.704-.706c.617 0 1.234.236 1.704.706l1.568 1.568c.23.23.556.338.877.29.493-.074.84-.504 1.02-.968a2.5 2.5 0 1 1 3.237 3.237c-.464.18-.894.527-.967 1.02z" />',
   };
-
-  // Load NexusMods detail when a mod with nexus_mod_id is selected
-  $effect(() => {
-    const mod = detailMod;
-    if (!mod || !mod.nexus_mod_id || !activeGame?.nexus_slug) {
-      nexusDetail = null;
-      nexusDetailModId = null;
-      return;
-    }
-    // Don't reload if we already have it
-    if (nexusDetailModId === mod.id) return;
-    nexusDetailModId = mod.id;
-    nexusDetailLoading = true;
-    nexusDetail = null;
-    getNexusModDetail(activeGame.nexus_slug, mod.nexus_mod_id)
-      .then((info) => {
-        // Only apply if still viewing the same mod
-        if (detailMod?.id === mod.id) {
-          nexusDetail = info;
-        }
-      })
-      .catch(() => {})
-      .finally(() => { nexusDetailLoading = false; });
-  });
-
-  // Load dependencies for selected mod in detail panel
-  $effect(() => {
-    const mod = detailMod;
-    if (!mod) {
-      detailDeps = [];
-      detailDependents = [];
-      return;
-    }
-    detailDepsLoading = true;
-    Promise.all([
-      getModDependencies(mod.id),
-      getModDependents(mod.id),
-    ])
-      .then(([deps, dependents]) => {
-        if (detailMod?.id === mod.id) {
-          detailDeps = deps;
-          detailDependents = dependents;
-        }
-      })
-      .catch(() => {})
-      .finally(() => { detailDepsLoading = false; });
-  });
 
   // Auto-backfill/reclassify categories on load
   let categoriesBackfilled = false;
@@ -3071,225 +3008,25 @@
 
       <!-- Detail Sidebar -->
       {#if detailMod}
-        <div class="mod-detail-panel">
-          <div class="detail-header">
-            <h3 class="detail-name">{detailMod.name}</h3>
-            <button class="detail-close" onclick={() => { detailMod = null; selectedModId = undefined; }}>
-              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-                <line x1="3" y1="3" x2="11" y2="11" /><line x1="11" y1="3" x2="3" y2="11" />
-              </svg>
-            </button>
-          </div>
-
-          <div class="detail-body">
-            <div class="detail-meta">
-              <div class="detail-row">
-                <span class="detail-label">Version</span>
-                <span class="detail-value">{detailMod.version || "\u2014"}</span>
-              </div>
-              <div class="detail-row">
-                <span class="detail-label">Installed</span>
-                <span class="detail-value">{formatDate(detailMod.installed_at)}</span>
-              </div>
-              <div class="detail-row">
-                <span class="detail-label">Files</span>
-                <span class="detail-value">{detailMod.installed_files.length}</span>
-              </div>
-              <div class="detail-row">
-                <span class="detail-label">Priority</span>
-                <span class="detail-value">{detailMod.install_priority}</span>
-              </div>
-              {#if detailMod.archive_name}
-                <div class="detail-row">
-                  <span class="detail-label">Archive</span>
-                  <span class="detail-value detail-archive">{detailMod.archive_name}</span>
-                </div>
-              {/if}
-              {#if detailMod.collection_name}
-                <div class="detail-row">
-                  <span class="detail-label">Collection</span>
-                  <span class="detail-value collection-badge">{detailMod.collection_name}</span>
-                </div>
-              {/if}
-              <div class="detail-row">
-                <span class="detail-label">Source</span>
-                <span class="detail-value">
-                  {#if getModSourceUrl(detailMod)}
-                    <button class="origin-label origin-{detailMod.source_type} origin-link" onclick={() => openUrl(getModSourceUrl(detailMod!)!)}>
-                      {originLabel(detailMod.source_type)}
-                      <svg class="origin-link-icon" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></svg>
-                    </button>
-                  {:else}
-                    <span class="origin-label origin-{detailMod.source_type}">{originLabel(detailMod.source_type)}</span>
-                  {/if}
-                </span>
-              </div>
-              {#if detailMod.nexus_mod_id}
-                <div class="detail-row">
-                  <span class="detail-label">Nexus</span>
-                  <a class="detail-value detail-link" href="https://www.nexusmods.com/{activeGame?.nexus_slug}/mods/{detailMod.nexus_mod_id}" target="_blank" rel="noopener noreferrer">
-                    Mod #{detailMod.nexus_mod_id}
-                  </a>
-                </div>
-                <div class="detail-row">
-                  <span class="detail-label">Endorse</span>
-                  <span class="detail-value">
-                    {#if endorsements.get(detailMod.nexus_mod_id) === "Endorsed"}
-                      <button class="btn btn-sm endorse-btn endorsed" onclick={() => handleAbstainMod(detailMod!.id, detailMod!.nexus_mod_id!)} disabled={endorsingModId === detailMod.id}>
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3" /></svg>
-                        Endorsed
-                      </button>
-                    {:else}
-                      <button class="btn btn-sm endorse-btn" onclick={() => handleEndorseMod(detailMod!.id, detailMod!.nexus_mod_id!, detailMod!.version)} disabled={endorsingModId === detailMod.id}>
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3" /></svg>
-                        Endorse
-                      </button>
-                    {/if}
-                  </span>
-                </div>
-              {/if}
-            </div>
-
-            <!-- NexusMods Detail (loaded dynamically) -->
-            {#if nexusDetailLoading}
-              <div class="detail-section">
-                <span class="detail-empty">Loading mod details...</span>
-              </div>
-            {:else if nexusDetail}
-              <div class="detail-section nexus-detail-section">
-                {#if nexusDetail.summary}
-                  <p class="nexus-summary">{nexusDetail.summary}</p>
-                {/if}
-                <div class="nexus-stats">
-                  <span class="nexus-stat" title="Author">
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" /></svg>
-                    {nexusDetail.author}
-                  </span>
-                  <span class="nexus-stat" title="Endorsements">
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3" /></svg>
-                    {nexusDetail.endorsement_count.toLocaleString()}
-                  </span>
-                  <span class="nexus-stat" title="Unique downloads">
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
-                    {nexusDetail.unique_downloads.toLocaleString()}
-                  </span>
-                </div>
-                {#if nexusDetail.description}
-                  <details class="nexus-description-toggle">
-                    <summary>Show full description</summary>
-                    <div class="nexus-description">
-                      <!-- eslint-disable-next-line svelte/no-at-html-tags -->
-                      {@html DOMPurify.sanitize(bbcodeToHtml(nexusDetail.description))}
-                    </div>
-                  </details>
-                {/if}
-              </div>
-            {/if}
-
-            {#if updateMap.has(detailMod.id)}
-              {@const update = updateMap.get(detailMod.id)!}
-              <div class="detail-update-banner">
-                <span class="detail-update-text">Update: v{update.current_version} &rarr; v{update.latest_version}</span>
-              </div>
-            {/if}
-
-            {#if conflictModIds.has(detailMod.id)}
-              <div class="detail-section">
-                <h4 class="detail-section-title">Conflicts</h4>
-                <div class="detail-conflict-list">
-                  {#each [...(conflictDetails.get(detailMod.id) ?? [])] as conflictName}
-                    <span class="detail-conflict-badge">{conflictName}</span>
-                  {/each}
-                </div>
-              </div>
-            {/if}
-
-            <!-- Dependencies -->
-            {#if detailDepsLoading}
-              <div class="detail-section">
-                <h4 class="detail-section-title">Dependencies</h4>
-                <span class="detail-empty">Loading...</span>
-              </div>
-            {:else if detailDeps.length > 0 || detailDependents.length > 0}
-              <div class="detail-section">
-                <h4 class="detail-section-title">Dependencies</h4>
-                {#if detailDeps.length > 0}
-                  <div class="detail-dep-group">
-                    <span class="detail-dep-label">Depends on</span>
-                    <div class="detail-dep-list">
-                      {#each detailDeps as dep (dep.id)}
-                        <span class="detail-dep-badge" class:dep-requires={dep.relationship === "requires"} class:dep-conflicts={dep.relationship === "conflicts"} class:dep-patches={dep.relationship === "patches"}>
-                          <span class="dep-rel-tag">{dep.relationship === "requires" ? "req" : dep.relationship === "conflicts" ? "conflict" : "patch"}</span>
-                          {dep.dep_name}
-                        </span>
-                      {/each}
-                    </div>
-                  </div>
-                {/if}
-                {#if detailDependents.length > 0}
-                  <div class="detail-dep-group">
-                    <span class="detail-dep-label">Required by</span>
-                    <div class="detail-dep-list">
-                      {#each detailDependents as dep (dep.id)}
-                        {@const depMod = $installedMods.find(m => m.id === dep.mod_id)}
-                        <span class="detail-dep-badge dep-requires">
-                          {depMod?.name ?? dep.dep_name ?? `Mod #${dep.mod_id}`}
-                        </span>
-                      {/each}
-                    </div>
-                  </div>
-                {/if}
-              </div>
-            {/if}
-
-            <!-- Tags -->
-            <div class="detail-section">
-              <h4 class="detail-section-title">Tags</h4>
-              <div class="detail-tags">
-                {#each detailMod.user_tags as tag}
-                  <span class="detail-tag">{tag}</span>
-                {/each}
-                {#if detailMod.user_tags.length === 0}
-                  <span class="detail-empty">No tags</span>
-                {/if}
-              </div>
-            </div>
-
-            <!-- Notes -->
-            <div class="detail-section">
-              <h4 class="detail-section-title">Notes</h4>
-              {#if editingNotesId === detailMod.id}
-                <textarea class="detail-notes-input" bind:value={editingNotesValue} rows="3" placeholder="Add notes about this mod..."></textarea>
-                <div class="detail-notes-actions">
-                  <button class="btn btn-primary btn-sm" onclick={() => handleSaveNotes(detailMod!.id)}>Save</button>
-                  <button class="btn btn-ghost btn-sm" onclick={() => editingNotesId = null}>Cancel</button>
-                </div>
-              {:else}
-                <button class="detail-notes-display" onclick={() => { editingNotesId = detailMod!.id; editingNotesValue = detailMod!.user_notes ?? ""; }}>
-                  {detailMod.user_notes || "Click to add notes..."}
-                </button>
-              {/if}
-            </div>
-
-            <!-- Version History -->
-            <div class="detail-section">
-              <ModVersionHistory mod={detailMod} onrollback={() => { const g = pickedGame ?? $selectedGame; if (g) loadMods(g); }} />
-            </div>
-
-            <!-- Actions -->
-            <div class="detail-actions">
-              <button class="btn btn-secondary btn-sm" onclick={() => handleToggle(detailMod!)}>
-                {detailMod.enabled ? "Disable" : "Enable"}
-              </button>
-              {#if confirmUninstall === detailMod.id}
-                <button class="btn btn-danger btn-sm" onclick={() => handleUninstall(detailMod!.id)}>Confirm</button>
-                <button class="btn btn-ghost btn-sm" onclick={() => confirmUninstall = null}>Cancel</button>
-              {:else}
-                <button class="btn btn-ghost-danger btn-sm" onclick={() => confirmUninstall = detailMod!.id}>Uninstall</button>
-              {/if}
-            </div>
-          </div>
-        </div>
+        <ModDetailPanel
+          mod={detailMod}
+          nexusSlug={activeGame?.nexus_slug}
+          {conflictModIds}
+          {conflictDetails}
+          {updateMap}
+          {endorsements}
+          {endorsingModId}
+          {confirmUninstall}
+          onclose={() => { detailMod = null; selectedModId = undefined; }}
+          ontoggle={handleToggle}
+          onuninstall={handleUninstall}
+          onconfirmuninstall={(id) => confirmUninstall = id}
+          onsavenotes={handleSaveNotes}
+          onendorse={handleEndorseMod}
+          onabstain={handleAbstainMod}
+          onreinstall={handleInstallOverMod}
+          onreload={() => { const g = pickedGame ?? $selectedGame; if (g) loadMods(g); }}
+        />
       {/if}
       </div>
     {/if}
@@ -3404,7 +3141,7 @@
       <button class="context-item" onclick={() => { handleToggle(contextMenuMod!); closeContextMenu(); }}>
         {contextMenuMod.enabled ? "Disable" : "Enable"}
       </button>
-      <button class="context-item" onclick={() => { detailMod = contextMenuMod; selectedModId = contextMenuMod!.id; editingNotesId = contextMenuMod!.id; editingNotesValue = contextMenuMod!.user_notes ?? ""; closeContextMenu(); }}>
+      <button class="context-item" onclick={() => { detailMod = contextMenuMod; selectedModId = contextMenuMod!.id; closeContextMenu(); }}>
         Edit Notes
       </button>
       <div class="context-separator"></div>

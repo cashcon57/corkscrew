@@ -965,6 +965,11 @@
 
   onDestroy(() => {
     statsBarObserver?.disconnect();
+    if (collectionsSearchTimer) { clearTimeout(collectionsSearchTimer); collectionsSearchTimer = null; }
+    if (collectionsAuthorTimer) { clearTimeout(collectionsAuthorTimer); collectionsAuthorTimer = null; }
+    if (browseSearchTimer) { clearTimeout(browseSearchTimer); browseSearchTimer = null; }
+    if (browseAuthorTimer) { clearTimeout(browseAuthorTimer); browseAuthorTimer = null; }
+    if (depotPollTimer) { clearInterval(depotPollTimer); depotPollTimer = null; }
     // Close any active webviews when navigating away
     closeBrowserWebview().catch(() => {});
   });

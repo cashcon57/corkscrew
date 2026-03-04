@@ -39,7 +39,7 @@ pub fn submit_fomod_choices(
 ) -> Result<(), String> {
     let tx = FOMOD_PENDING
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .remove(correlation_id)
         .ok_or_else(|| format!("No pending FOMOD request: {}", correlation_id))?;
     tx.send(selections)
@@ -48,7 +48,7 @@ pub fn submit_fomod_choices(
 
 /// Drain all pending FOMOD channels (used on cancellation).
 fn drain_fomod_pending() {
-    let mut pending = FOMOD_PENDING.lock().unwrap();
+    let mut pending = FOMOD_PENDING.lock().unwrap_or_else(|e| e.into_inner());
     for (_, tx) in pending.drain() {
         drop(tx);
     }

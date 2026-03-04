@@ -107,6 +107,8 @@ impl WjDownloader {
         let http_client = reqwest::Client::builder()
             .default_headers(default_headers)
             .redirect(reqwest::redirect::Policy::limited(10))
+            .timeout(std::time::Duration::from_secs(600))
+            .connect_timeout(std::time::Duration::from_secs(30))
             .build()
             .expect("failed to build reqwest client");
 
