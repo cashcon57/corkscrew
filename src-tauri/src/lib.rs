@@ -6576,6 +6576,7 @@ pub fn run() {
     // Clean up stale corkscrew_extract_* temp dirs from collection installs
     cleanup_orphaned_temp_dirs();
 
+    #[allow(unused_mut)]
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
