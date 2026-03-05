@@ -139,6 +139,7 @@
   let filterCollection = $state<string | null>(null);
   let sortBy = $state<"priority" | "name" | "date" | "version" | "files">("priority");
   let sortDir = $state<"asc" | "desc">("asc");
+  let filterCategory = $state<string | null>(null);
 
   // Persistent search: restore from sessionStorage on mount
   function searchStorageKey(game: DetectedGame) {
@@ -283,7 +284,12 @@
   });
 
   // View mode state
-  let viewMode = $state<"flat" | "collection" | "category">("flat");
+  let viewMode = $state<"flat" | "collection" | "category">(
+    (() => { try { const v = localStorage.getItem("corkscrew:viewMode"); if (v === "flat" || v === "collection" || v === "category") return v; } catch {} return "flat"; })()
+  );
+
+  // Persist view mode preference
+  $effect(() => { try { localStorage.setItem("corkscrew:viewMode", viewMode); } catch {} });
 
   // Semantic version comparison
   function compareVersions(a: string, b: string): number {
@@ -466,12 +472,46 @@
       }
     }
 
+    if (filterCategory !== null) {
+      mods = mods.filter(m => (m.auto_category || "Miscellaneous") === filterCategory);
+    }
+
     return mods;
   })());
 
-  // Virtual scrolling derived (needs filteredMods)
+  // Split filtered mods into enabled and disabled for the disabled separator
+  let disabledSectionCollapsed = $state(true);
+  let enabledFilteredMods = $derived(
+    filterStatus === "all" ? filteredMods.filter(m => m.enabled) : filteredMods
+  );
+  let disabledFilteredMods = $derived(
+    filterStatus === "all" ? filteredMods.filter(m => !m.enabled) : []
+  );
+
+  // Mod stats (computed from full installed list, not filtered)
+  let modStats = $derived({
+    total: $installedMods.length,
+    enabled: $installedMods.filter(m => m.enabled).length,
+    disabled: $installedMods.filter(m => !m.enabled).length,
+    conflicts: conflictModIds.size,
+    updates: modUpdates.length,
+  });
+
+  // Unique categories across all installed mods (for filter chips)
+  let uniqueCategories = $derived((() => {
+    const counts = new Map<string, number>();
+    for (const mod of $installedMods) {
+      const cat = mod.auto_category || "Miscellaneous";
+      counts.set(cat, (counts.get(cat) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .sort(([, a], [, b]) => b - a); // most popular first
+  })());
+
+  // Virtual scrolling derived — uses enabledFilteredMods in flat view to exclude disabled mods
+  let flatViewMods = $derived(viewMode === "flat" ? enabledFilteredMods : filteredMods);
   let visibleRange = $derived((() => {
-    const totalItems = filteredMods.length;
+    const totalItems = flatViewMods.length;
     if (totalItems === 0) return { start: 0, end: 0, paddingTop: 0, paddingBottom: 0 };
     const startRaw = Math.floor(scrollTop / ROW_HEIGHT) - SCROLL_BUFFER;
     const visibleCount = Math.ceil(containerHeight / ROW_HEIGHT) + SCROLL_BUFFER * 2;
@@ -2573,7 +2613,7 @@
             class="view-mode-btn"
             class:active={viewMode === "flat"}
             onclick={() => viewMode = "flat"}
-            title="List view"
+            title="List View"
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <line x1="8" y1="6" x2="21" y2="6" /><line x1="8" y1="12" x2="21" y2="12" /><line x1="8" y1="18" x2="21" y2="18" />
@@ -2584,7 +2624,7 @@
             class="view-mode-btn"
             class:active={viewMode === "collection"}
             onclick={() => viewMode = "collection"}
-            title="Group by collection"
+            title="Collection View"
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
@@ -2594,7 +2634,7 @@
             class="view-mode-btn"
             class:active={viewMode === "category"}
             onclick={() => viewMode = "category"}
-            title="Group by category"
+            title="Category View"
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <rect x="3" y="3" width="7" height="7" /><rect x="14" y="3" width="7" height="7" />
@@ -2602,10 +2642,54 @@
             </svg>
           </button>
         </div>
-        {#if searchQuery || filterStatus !== "all" || filterSource !== "all" || filterCollection !== null}
+        {#if searchQuery || filterStatus !== "all" || filterSource !== "all" || filterCollection !== null || filterCategory !== null}
           <span class="filter-count">{filteredMods.length} of {$installedMods.length}</span>
         {/if}
       </div>
+
+      <!-- Stats Bar -->
+      {#if $installedMods.length > 0}
+        <div class="stats-bar">
+          <div class="stats-badges">
+            <span class="stat-badge stat-enabled">{modStats.enabled} Enabled</span>
+            <span class="stat-badge stat-disabled">{modStats.disabled} Disabled</span>
+            {#if modStats.conflicts > 0}
+              <span class="stat-badge stat-conflicts">{modStats.conflicts} Conflicts</span>
+            {/if}
+            {#if modStats.updates > 0}
+              <span class="stat-badge stat-updates">{modStats.updates} Updates</span>
+            {/if}
+          </div>
+          {#if uniqueCategories.length > 1}
+            <div class="category-chips">
+              {#each uniqueCategories as [cat, count]}
+                {@const catColor = categoryColors[cat] ?? '#6b7280'}
+                <button
+                  class="category-filter-chip"
+                  class:active={filterCategory === cat}
+                  style="--chip-color: {catColor};"
+                  onclick={() => filterCategory = filterCategory === cat ? null : cat}
+                  title="{cat} ({count} mods)"
+                >
+                  {#if categoryIcons[cat]}
+                    <!-- eslint-disable-next-line svelte/no-at-html-tags -->
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">{@html categoryIcons[cat]}</svg>
+                  {/if}
+                  {cat}
+                  <span class="chip-count">{count}</span>
+                </button>
+              {/each}
+              {#if filterCategory}
+                <button class="category-clear-btn" onclick={() => filterCategory = null} title="Clear category filter">
+                  <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                    <line x1="3" y1="3" x2="9" y2="9" /><line x1="9" y1="3" x2="3" y2="9" />
+                  </svg>
+                </button>
+              {/if}
+            </div>
+          {/if}
+        </div>
+      {/if}
     {/if}
 
     <!-- Content Area -->
@@ -2706,15 +2790,24 @@
 
           <!-- Mod Rows -->
           <div class="table-body" bind:this={tableBodyEl} onscroll={handleTableScroll}>
-            {#if filteredMods.length === 0 && $installedMods.length > 0}
+            {#if filteredMods.length === 0 && disabledFilteredMods.length === 0 && $installedMods.length > 0}
               <div class="empty-filter-state">
                 <p>No mods match your filters.</p>
-                <button class="btn btn-ghost btn-sm" onclick={() => { searchQuery = ""; filterStatus = "all"; filterSource = "all"; filterCollection = null; }}>
+                <button class="btn btn-ghost btn-sm" onclick={() => { searchQuery = ""; filterStatus = "all"; filterSource = "all"; filterCollection = null; filterCategory = null; }}>
                   Clear Filters
                 </button>
               </div>
             {:else if viewMode === "category"}
-              <ModCategoryView mods={filteredMods} />
+              <ModCategoryView
+                mods={filteredMods}
+                {categoryColors}
+                {categoryIcons}
+                {conflictModIds}
+                {togglingMod}
+                {selectedModId}
+                onselect={(mod) => { selectedModId = selectedModId === mod.id ? undefined : mod.id; detailMod = detailMod?.id === mod.id ? null : mod; }}
+                ontoggle={handleToggle}
+              />
             {:else if viewMode === "collection" && groupedMods}
               {#each [...groupedMods.entries()] as [groupName, groupMods]}
                 <button class="group-header" onclick={() => toggleGroup(groupName)}>
@@ -2776,7 +2869,7 @@
               {/each}
             {:else}
             <div style="height: {visibleRange.paddingTop}px;" aria-hidden="true"></div>
-            {#each filteredMods.slice(visibleRange.start, visibleRange.end) as mod, sliceIdx (mod.id)}
+            {#each flatViewMods.slice(visibleRange.start, visibleRange.end) as mod, sliceIdx (mod.id)}
               {@const i = visibleRange.start + sliceIdx}
               <div
                 class="table-row"
@@ -3001,6 +3094,54 @@
               </div>
             {/each}
             <div style="height: {visibleRange.paddingBottom}px;" aria-hidden="true"></div>
+
+            <!-- Disabled Mods Separator -->
+            {#if disabledFilteredMods.length > 0 && viewMode === "flat"}
+              <button class="disabled-separator" onclick={() => disabledSectionCollapsed = !disabledSectionCollapsed}>
+                <svg
+                  class="group-chevron"
+                  class:expanded={!disabledSectionCollapsed}
+                  width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                >
+                  <path d="M4 2l4 4-4 4" />
+                </svg>
+                <span class="disabled-separator-label">Disabled</span>
+                <span class="group-count">{disabledFilteredMods.length}</span>
+                <span class="disabled-separator-line"></span>
+              </button>
+              {#if !disabledSectionCollapsed}
+                {#each disabledFilteredMods as mod (mod.id)}
+                  <div
+                    class="table-row row-disabled"
+                    class:row-selected={selectedModId === mod.id}
+                    class:row-has-conflict={conflictModIds.has(mod.id)}
+                    onclick={() => { selectedModId = selectedModId === mod.id ? undefined : mod.id; detailMod = detailMod?.id === mod.id ? null : mod; }}
+                  >
+                    <label class="col-check" onclick={(e) => e.stopPropagation()}>
+                      <input type="checkbox" checked={selectedModIds.has(mod.id)} onchange={() => toggleSelectMod(mod.id)} />
+                    </label>
+                    <span class="col-grip"></span>
+                    <span class="col-toggle"><button class="toggle-switch" class:toggle-on={mod.enabled} class:toggle-busy={togglingMod === mod.id} onclick={() => handleToggle(mod)} title="Enable mod" aria-label="Enable {mod.name}" aria-pressed={mod.enabled} role="switch"><span class="toggle-track"><span class="toggle-thumb"></span></span></button></span>
+                    <span class="col-name"><span class="mod-name">{mod.name}</span></span>
+                    <span class="col-category">{#if mod.auto_category}<span class="category-cell" style="color: {categoryColors[mod.auto_category] ?? '#6b7280'};" title={mod.auto_category}>{#if categoryIcons[mod.auto_category]}<svg class="category-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{@html categoryIcons[mod.auto_category]}</svg>{/if}<span class="category-label">{mod.auto_category}</span></span>{:else}<span class="text-muted">&mdash;</span>{/if}</span>
+                    <span class="col-origin">{#if mod.source_type === "nexus"}<span class="origin-label origin-nexus">Nexus</span>{:else}<span class="origin-label origin-manual">Manual</span>{/if}</span>
+                    <span class="col-source">{#if mod.collection_name}<span class="source-label source-collection" title={mod.collection_name}>{mod.collection_name}</span>{:else}<span class="source-label source-user">User</span>{/if}</span>
+                    <span class="col-version"><span class="version-text">{mod.version || "\u2014"}</span></span>
+                    <span class="col-files">{mod.installed_files.length}</span>
+                    <span class="col-date">{formatDate(mod.installed_at)}</span>
+                    <span class="col-actions">
+                      {#if confirmUninstall === mod.id}
+                        <div class="confirm-actions"><button class="btn btn-danger btn-sm" onclick={() => handleUninstall(mod.id)}>Yes</button><button class="btn btn-ghost btn-sm" onclick={() => (confirmUninstall = null)}>No</button></div>
+                      {:else}
+                        <div class="mod-action-group">
+                          <button class="mod-uninstall-btn" onclick={(e) => { e.stopPropagation(); confirmUninstall = mod.id; }} title="Uninstall mod"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg></button>
+                        </div>
+                      {/if}
+                    </span>
+                  </div>
+                {/each}
+              {/if}
+            {/if}
             {/if}
           </div>
         </div>
@@ -4864,6 +5005,112 @@
   }
 
   /* ============================
+     Stats Bar & Category Chips
+     ============================ */
+  .stats-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-3);
+    border-bottom: 1px solid var(--separator);
+  }
+
+  .stats-badges {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    flex-shrink: 0;
+  }
+
+  .stat-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 1px 7px;
+    border-radius: 4px;
+    white-space: nowrap;
+  }
+
+  .stat-enabled {
+    background: color-mix(in srgb, #22c55e 12%, transparent);
+    color: #22c55e;
+  }
+
+  .stat-disabled {
+    background: color-mix(in srgb, var(--text-tertiary) 10%, transparent);
+    color: var(--text-tertiary);
+  }
+
+  .stat-conflicts {
+    background: color-mix(in srgb, #f59e0b 12%, transparent);
+    color: #f59e0b;
+  }
+
+  .stat-updates {
+    background: color-mix(in srgb, #3b82f6 12%, transparent);
+    color: #3b82f6;
+  }
+
+  .category-chips {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+    margin-left: auto;
+  }
+
+  .category-filter-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 11px;
+    font-weight: 500;
+    padding: 1px 7px;
+    border-radius: 4px;
+    cursor: pointer;
+    white-space: nowrap;
+    color: var(--chip-color);
+    background: color-mix(in srgb, var(--chip-color) 8%, transparent);
+    border: 1px solid transparent;
+    transition: all var(--duration-fast) var(--ease);
+  }
+
+  .category-filter-chip:hover {
+    background: color-mix(in srgb, var(--chip-color) 15%, transparent);
+  }
+
+  .category-filter-chip.active {
+    background: color-mix(in srgb, var(--chip-color) 20%, transparent);
+    border-color: color-mix(in srgb, var(--chip-color) 40%, transparent);
+  }
+
+  .chip-count {
+    font-size: 10px;
+    opacity: 0.6;
+  }
+
+  .category-clear-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    cursor: pointer;
+    color: var(--text-tertiary);
+    background: color-mix(in srgb, var(--text-tertiary) 10%, transparent);
+    transition: all var(--duration-fast) var(--ease);
+  }
+
+  .category-clear-btn:hover {
+    background: color-mix(in srgb, var(--text-tertiary) 20%, transparent);
+    color: var(--text-primary);
+  }
+
+  /* ============================
      Collection & Notes Badges
      ============================ */
   .collection-badge {
@@ -5232,6 +5479,37 @@
     font-size: 11px;
     color: var(--text-tertiary);
     font-weight: 500;
+  }
+
+  .disabled-separator {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    width: 100%;
+    padding: var(--space-2) var(--space-3);
+    background: color-mix(in srgb, var(--bg-secondary) 80%, transparent);
+    border-top: 1px solid var(--separator);
+    border-bottom: 1px solid var(--separator);
+    cursor: pointer;
+    text-align: left;
+    transition: background var(--duration-fast) var(--ease);
+  }
+
+  .disabled-separator:hover {
+    background: var(--surface-hover);
+  }
+
+  .disabled-separator-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+  }
+
+  .disabled-separator-line {
+    flex: 1;
+    height: 1px;
+    background: var(--separator);
+    margin-left: var(--space-2);
   }
 
   /* ============================
