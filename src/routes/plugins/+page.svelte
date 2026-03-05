@@ -184,10 +184,21 @@
     return type === "ESM" || type === "ESL";
   }
 
+  const warningsByPlugin = $derived(
+    warnings.reduce((map, w) => {
+      const key = w.plugin_name.toLowerCase();
+      let arr = map.get(key);
+      if (!arr) {
+        arr = [];
+        map.set(key, arr);
+      }
+      arr.push(w);
+      return map;
+    }, new Map<string, PluginWarning[]>())
+  );
+
   function getWarningsForPlugin(pluginName: string): PluginWarning[] {
-    return warnings.filter(
-      (w) => w.plugin_name.toLowerCase() === pluginName.toLowerCase()
-    );
+    return warningsByPlugin.get(pluginName.toLowerCase()) ?? [];
   }
 
   const enabledCount = $derived(plugins.filter((p) => p.enabled).length);
@@ -206,11 +217,11 @@
 
   // Search/filter
   let pluginSearch = $state("");
-  let filteredPlugins = $derived(
-    pluginSearch.trim()
-      ? plugins.filter((p) => p.filename.toLowerCase().includes(pluginSearch.toLowerCase()))
-      : plugins
-  );
+  let filteredPlugins = $derived.by(() => {
+    const term = pluginSearch.trim().toLowerCase();
+    if (!term) return plugins;
+    return plugins.filter((p) => p.filename.toLowerCase().includes(term));
+  });
 </script>
 
 <svelte:window onkeydown={handlePluginKeydown} />
@@ -220,13 +231,6 @@
   <div class="page-header">
     <div class="header-title">
       <h2>Load Order</h2>
-      {#if $selectedGame}
-        <span class="header-context">
-          {$selectedGame.display_name}
-          <span class="header-separator">/</span>
-          {$selectedGame.bottle_name}
-        </span>
-      {/if}
     </div>
     {#if plugins.length > 0}
       <div class="header-meta">

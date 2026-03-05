@@ -142,7 +142,7 @@
       <h2 class="page-title">Profiles</h2>
       <p class="page-subtitle">
         {#if game}
-          Save and switch between mod configurations for {game.display_name}
+          Save and switch between mod configurations
         {:else}
           Select a game from the Dashboard first
         {/if}

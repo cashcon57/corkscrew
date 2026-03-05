@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from "svelte";
+  import { onMount } from "svelte";
   import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, uninstallSkse, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, checkModToolUpdate, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads, checkSteamStatus, addToSteam, removeFromSteam, scanGameDirectory, cleanGameDirectory, checkSkyrimVersion, downgradeSkyrim, checkDeploymentHealth, redeployAllMods, getVerificationLevel, setVerificationLevel, getDepotDownloadCommand, startDepotDownload, checkDepotReady, applyDowngrade, listGameVersions, swapGameVersion, listDisabledWinePlugins, reenableWinePlugin } from "$lib/api";
   import type { CleanReport, CleanResult, DowngradeStatus, DeploymentHealth, VerificationLevel, CachedVersion, DepotDownloadInfo } from "$lib/types";
   import type { SteamStatus } from "$lib/types";
@@ -33,6 +33,9 @@
   let uninstallingSkse = $state(false);
   let showComparisonDialog = $state(false);
 
+  // Launch fixes toggle
+  let disableGameFixes = $state(false);
+
   // Download concurrency
   let downloadThreads = $state("auto");
   let optimalThreads = $state(6);
@@ -54,16 +57,40 @@
 
   // Settings tabs
   let settingsTab = $state<"general" | "game" | "system">("general");
-  let prevTab = $state<"general" | "game" | "system">("general");
-  let tabAnimKey = $state(0);
-  let showLimitedTools = $state(false);
-  let showNotRecommendedTools = $state(false);
+  let tabVisible = $state(true);
+  let showOtherTools = $state(false);
+
+  // Track which Game tab sections are collapsed (all collapsed by default except Game Tools)
+  let collapsedSections = $state<Set<string>>(new Set([
+    "gameVersion",
+    "winePlugins",
+    "deploymentHealth",
+    "gameMaintenance",
+    "moddingTools",
+    "iniSettings",
+    "wineDiagnostics",
+  ]));
+
+  function toggleSection(section: string) {
+    const next = new Set(collapsedSections);
+    if (next.has(section)) {
+      next.delete(section);
+    } else {
+      next.add(section);
+    }
+    collapsedSections = next;
+  }
 
   function switchTab(tab: "general" | "game" | "system") {
     if (tab === settingsTab) return;
-    prevTab = settingsTab;
-    settingsTab = tab;
-    tabAnimKey++;
+    tabVisible = false;
+    // Allow one frame for opacity:0 to apply, then switch content and fade in
+    requestAnimationFrame(() => {
+      settingsTab = tab;
+      requestAnimationFrame(() => {
+        tabVisible = true;
+      });
+    });
   }
 
   // Wine-incompatible plugins
@@ -171,8 +198,7 @@
   };
   // Filter out SKSE from the tools list — it has its own dedicated section above
   const recommendedTools = $derived(modTools.filter(t => t.wine_compat === "good" && t.id !== "skse"));
-  const limitedTools = $derived(modTools.filter(t => t.wine_compat === "limited" && t.id !== "skse"));
-  const notRecommendedTools = $derived(modTools.filter(t => t.wine_compat === "not_recommended" && t.id !== "skse"));
+  const otherTools = $derived(modTools.filter(t => (t.wine_compat === "limited" || t.wine_compat === "not_recommended") && t.id !== "skse"));
 
   // Platform detection via Tauri command
   let platformInfo = $state<PlatformInfo>({ os: "macos", is_steam_os: false, cpu_cores: 0, cpu_brand: "", memory_gb: 0, arch: "" });
@@ -243,13 +269,18 @@
     });
   }
 
-  let unlistenProgress: (() => void) | undefined;
-  listen<ToolInstallProgress>("tool-install-progress", (event) => {
-    toolProgress = { ...toolProgress, [event.payload.tool_id]: event.payload };
-  }).then((fn) => { unlistenProgress = fn; });
-  onDestroy(() => unlistenProgress?.());
+  let unlistenProgress: (() => void) | null = null;
 
-  onMount(async () => {
+  onMount(() => {
+    // Set up tool-install-progress listener with cleanup
+    listen<ToolInstallProgress>("tool-install-progress", (event) => {
+      toolProgress[event.payload.tool_id] = event.payload;
+      toolProgress = toolProgress;
+    }).then(fn => { unlistenProgress = fn; });
+
+    // Kick off async init
+    (async () => {
+
     // Load platform info
     try { platformInfo = await getPlatformDetail(); } catch { /* fallback defaults */ }
 
@@ -258,6 +289,14 @@
       config.set(cfg);
       downloadDir = cfg.download_dir ?? "";
       autoDeleteArchives = (cfg as Record<string, unknown>).auto_delete_archives === "true";
+      disableGameFixes = (cfg as Record<string, unknown>).disable_game_fixes === "true";
+      // Read download threads from the same config
+      const saved = (cfg as Record<string, unknown>).download_threads;
+      if (saved && saved !== "auto") {
+        downloadThreads = String(saved);
+      } else {
+        downloadThreads = "auto";
+      }
     } catch (e: unknown) {
       showError(`Failed to load config: ${e}`);
     }
@@ -269,16 +308,9 @@
       } catch { /* ignore */ }
     }
 
-    // Load download threads config
+    // Load optimal thread count (CPU-based detection, separate from config)
     try {
       optimalThreads = await getOptimalDownloadThreads();
-      const cfg2 = await getConfig();
-      const saved = (cfg2 as Record<string, unknown>).download_threads;
-      if (saved && saved !== "auto") {
-        downloadThreads = String(saved);
-      } else {
-        downloadThreads = "auto";
-      }
     } catch { /* ignore */ }
 
     // Load download stats
@@ -329,6 +361,9 @@
       } catch { /* ignore */ }
     }
 
+    })();
+
+    return () => { unlistenProgress?.(); };
   });
 
   async function handleRefreshDowngradeStatus() {
@@ -653,7 +688,8 @@
     checkingUpdate = toolId;
     try {
       const info = await checkModToolUpdate(toolId, game.game_id, game.bottle_name);
-      toolUpdateResults = { ...toolUpdateResults, [toolId]: info };
+      toolUpdateResults[toolId] = info;
+      toolUpdateResults = toolUpdateResults;
       if (info.update_available) {
         showSuccess(`Update available for ${info.tool_name}: ${info.latest_version}`);
       } else {
@@ -874,8 +910,7 @@
 
   <!-- ============ GENERAL TAB ============ -->
   {#if settingsTab === "general"}
-  {#key tabAnimKey}
-  <div class="tab-content-animated">
+  <div class="tab-content" class:tab-visible={tabVisible}>
 
   <!-- Appearance -->
   <div class="section">
@@ -928,13 +963,123 @@
     </div>
   </div>
 
+  <!-- Nexus Mods Account -->
+  <SettingsAuthSection />
+
+  <!-- Performance -->
+  <div class="section">
+    <h2 class="section-title">Performance</h2>
+    <div class="section-card">
+      <div class="card-row">
+        <div class="toggle-info">
+          <span class="row-label">Download Threads</span>
+          <span class="toggle-description">
+            Number of simultaneous mod downloads during collection installs.
+            {#if platformInfo.cpu_brand}
+              Detected: {platformInfo.cpu_brand} ({platformInfo.cpu_cores} cores, {platformInfo.memory_gb} GB RAM)
+            {/if}
+          </span>
+        </div>
+        <div class="row-control">
+          <select
+            class="settings-select"
+            value={downloadThreads}
+            onchange={(e) => saveDownloadThreads(e.currentTarget.value)}
+            disabled={savingThreads}
+          >
+            <option value="auto">Auto ({optimalThreads})</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+            <option value="4">4</option>
+            <option value="6">6</option>
+            <option value="8">8</option>
+            <option value="10">10</option>
+            <option value="12">12</option>
+          </select>
+        </div>
+      </div>
+    </div>
   </div>
-  {/key}
+
+  <!-- About -->
+  <div class="section">
+    <h2 class="section-title">About</h2>
+    <div class="section-card">
+      <div class="card-row about-row">
+        <span class="row-label">Version</span>
+        <div class="version-row-right">
+          <span class="row-value">v{$appVersion}</span>
+          {#if $updateReady}
+            <button class="btn-update-ready" onclick={() => relaunch()} type="button">
+              Restart for v{$updateVersion}
+            </button>
+          {:else}
+            <button
+              class="btn-ghost btn-sm"
+              onclick={handleCheckForUpdates}
+              disabled={$updateChecking}
+              type="button"
+            >
+              {#if $updateChecking}
+                <span class="spinner-xs"></span> Checking...
+              {:else if manualCheckDone && $updateError}
+                <span title={$updateError}>Check failed</span>
+              {:else if manualCheckDone && !$updateReady}
+                Up to date
+              {:else}
+                Check for Updates
+              {/if}
+            </button>
+          {/if}
+        </div>
+      </div>
+      {#if $updateNotes && $updateReady}
+        <div class="card-divider"></div>
+        <div class="card-row about-row">
+          <span class="row-label">Patch Notes</span>
+          <div class="row-value patch-notes-container">
+            <div class="patch-notes-text" class:expanded={settingsNotesExpanded}>
+              {$updateNotes}
+            </div>
+            {#if $updateNotes.length > 150}
+              <button class="patch-notes-toggle" onclick={() => settingsNotesExpanded = !settingsNotesExpanded}>
+                {settingsNotesExpanded ? "Show less" : "Read more..."}
+              </button>
+            {/if}
+          </div>
+        </div>
+      {/if}
+      <div class="card-divider"></div>
+      <div class="card-row about-row">
+        <span class="row-label">Author</span>
+        <span class="row-value">cashconway</span>
+      </div>
+      <div class="card-divider"></div>
+      <div class="card-row about-row">
+        <span class="row-label">License</span>
+        <span class="row-value">GPL-3.0-or-later</span>
+      </div>
+      <div class="card-divider"></div>
+      <div class="card-row about-row">
+        <span class="row-label">Platform</span>
+        <span class="row-value">macOS / Linux</span>
+      </div>
+      <div class="card-divider"></div>
+      <div class="card-row about-row">
+        <span class="row-label">Links</span>
+        <div class="row-value about-links">
+          <button class="btn-link" onclick={() => openUrl("https://github.com/cashcon57/corkscrew")}>GitHub</button>
+          <button class="btn-link" onclick={() => openUrl("https://ko-fi.com/cash508287")}>Support</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  </div>
   {/if}
   <!-- ============ GAME TAB ============ -->
   {#if settingsTab === "game"}
-  {#key tabAnimKey}
-  <div class="tab-content-animated">
+  <div class="tab-content" class:tab-visible={tabVisible}>
 
   {#if isSkyrim}
     <!-- Game Tools -->
@@ -991,7 +1136,11 @@
     <!-- Game Version Manager -->
     {#if downgradeStatus}
     <div class="section">
-      <h2 class="section-title">Game Version</h2>
+      <button class="section-title section-title-collapsible" onclick={() => toggleSection('gameVersion')}>
+        <span class="section-chevron">{collapsedSections.has('gameVersion') ? '\u25B8' : '\u25BE'}</span>
+        Game Version
+      </button>
+      {#if !collapsedSections.has('gameVersion')}
       <div class="section-card">
         <div class="card-row tool-row">
           <div class="tool-icon-wrap" style="color: var(--blue);">
@@ -1056,6 +1205,7 @@
           </div>
         {/if}
       </div>
+      {/if}
     </div>
     {/if}
 
@@ -1233,7 +1383,11 @@
     <!-- Wine-Incompatible Plugins -->
     {#if disabledWinePlugins.length > 0}
     <div class="section">
-      <h2 class="section-title">Wine-Incompatible Plugins</h2>
+      <button class="section-title section-title-collapsible" onclick={() => toggleSection('winePlugins')}>
+        <span class="section-chevron">{collapsedSections.has('winePlugins') ? '\u25B8' : '\u25BE'}</span>
+        Wine-Incompatible Plugins
+      </button>
+      {#if !collapsedSections.has('winePlugins')}
       <div class="section-card">
         <div class="card-row" style="flex-direction: column; gap: 0.5rem;">
           <p class="toggle-description" style="margin: 0;">
@@ -1261,6 +1415,7 @@
           {/each}
         </div>
       </div>
+      {/if}
     </div>
     {/if}
   {/if}
@@ -1268,7 +1423,11 @@
   <!-- Deployment Health -->
   {#if game}
     <div class="section">
-      <h2 class="section-title">Deployment Health</h2>
+      <button class="section-title section-title-collapsible" onclick={() => toggleSection('deploymentHealth')}>
+        <span class="section-chevron">{collapsedSections.has('deploymentHealth') ? '\u25B8' : '\u25BE'}</span>
+        Deployment Health
+      </button>
+      {#if !collapsedSections.has('deploymentHealth')}
       <div class="section-card">
         <div class="card-row">
           <div class="toggle-info">
@@ -1373,14 +1532,38 @@
           {/if}
         </div>
       </div>
+      {/if}
     </div>
   {/if}
 
   <!-- Game Maintenance -->
   {#if game}
     <div class="section">
-      <h2 class="section-title">Game Maintenance</h2>
+      <button class="section-title section-title-collapsible" onclick={() => toggleSection('gameMaintenance')}>
+        <span class="section-chevron">{collapsedSections.has('gameMaintenance') ? '\u25B8' : '\u25BE'}</span>
+        Game Maintenance
+      </button>
+      {#if !collapsedSections.has('gameMaintenance')}
       <div class="section-card">
+        <div class="card-row appearance-row">
+          <div class="toggle-info">
+            <span class="row-label">Disable Launch Fixes</span>
+            <span class="toggle-description">Not Recommended — disables Wine display and cursor fixes</span>
+          </div>
+          <button
+            class="toggle-switch"
+            class:toggle-on={disableGameFixes}
+            onclick={() => {
+              disableGameFixes = !disableGameFixes;
+              setConfigValue("disable_game_fixes", disableGameFixes ? "true" : "false").catch(() => {});
+            }}
+            type="button"
+            role="switch"
+            aria-checked={disableGameFixes}
+          >
+            <span class="toggle-thumb"></span>
+          </button>
+        </div>
         <div class="card-row" style="flex-direction: column; align-items: stretch; gap: 12px;">
           <div style="display: flex; align-items: center; justify-content: space-between;">
             <div>
@@ -1515,13 +1698,18 @@
           {/if}
         </div>
       </div>
+      {/if}
     </div>
   {/if}
 
   <!-- Modding Tools -->
   {#if game}
     <div class="section">
-      <h2 class="section-title">Modding Tools</h2>
+      <button class="section-title section-title-collapsible" onclick={() => toggleSection('moddingTools')}>
+        <span class="section-chevron">{collapsedSections.has('moddingTools') ? '\u25B8' : '\u25BE'}</span>
+        Modding Tools
+      </button>
+      {#if !collapsedSections.has('moddingTools')}
       {#if isSteamOS}
         <p class="platform-note">These tools run via Proton/Steam on SteamOS.</p>
       {:else if isLinux}
@@ -1550,6 +1738,7 @@
                   {@render toolIcon(tool.id)}
                   <div class="tool-info">
                     <div class="tool-name-row">
+                      <span class="compat-dot compat-good" title="Recommended"></span>
                       <span class="row-label">{tool.name}</span>
                       {#if tool.support_url}
                         <button class="tool-support-link" onclick={() => openUrl(tool.support_url!)} type="button" title="Support {tool.name} author">
@@ -1648,23 +1837,24 @@
           </div>
         {/if}
 
-        <!-- Limited Wine compatibility tools -->
-        {#if limitedTools.length > 0}
+        <!-- Other tools (limited + not recommended, merged) -->
+        {#if otherTools.length > 0}
           <div class="layers-group">
-            <button class="layers-group-label collapsible-label" onclick={() => showLimitedTools = !showLimitedTools}>
-              <svg class="collapse-chevron" class:collapse-open={showLimitedTools} width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 2l4 3-4 3" /></svg>
-              Limited Wine Compatibility
-              <span class="collapse-count">{limitedTools.length}</span>
+            <button class="layers-group-label collapsible-label" onclick={() => showOtherTools = !showOtherTools}>
+              <svg class="collapse-chevron" class:collapse-open={showOtherTools} width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 2l4 3-4 3" /></svg>
+              Other Tools
+              <span class="collapse-count">{otherTools.length}</span>
             </button>
-            {#if showLimitedTools}
+            {#if showOtherTools}
             <div class="section-card">
-              {#each limitedTools as tool, i (tool.id)}
+              {#each otherTools as tool, i (tool.id)}
                 {#if i > 0}<div class="card-divider"></div>{/if}
                 <div class="card-row tool-row">
                   {@render toolIcon(tool.id)}
                   <div class="tool-info">
                     <div class="tool-name-row">
-                      <span class="row-label">{tool.name}</span>
+                      <span class="compat-dot" class:compat-limited={tool.wine_compat === "limited"} class:compat-bad={tool.wine_compat === "not_recommended"} title={tool.wine_compat === "limited" ? "Limited compatibility" : "Not recommended"}></span>
+                      <span class="row-label" class:tool-warn-name={tool.wine_compat === "not_recommended"}>{tool.name}</span>
                       {#if tool.support_url}
                         <button class="tool-support-link" onclick={() => openUrl(tool.support_url!)} type="button" title="Support {tool.name} author">
                           <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
@@ -1676,13 +1866,28 @@
                       <span class="tool-license">{tool.license}</span>
                     </span>
                     {#if tool.wine_notes}
-                      <span class="tool-wine-note tool-wine-warn">{tool.wine_notes}</span>
+                      <span class="tool-wine-note" class:tool-wine-warn={tool.wine_compat === "limited"} class:tool-wine-danger={tool.wine_compat === "not_recommended"}>{tool.wine_notes}</span>
+                    {/if}
+                    {#if tool.recommended_alternative}
+                      {@const alt = modTools.find(t => t.id === tool.recommended_alternative)}
+                      {#if alt}
+                        <span class="tool-alternative">
+                          Use <strong>{alt.name}</strong> instead
+                          {#if !alt.detected_path && alt.can_auto_install}
+                            — <button class="tool-alt-link" onclick={() => handleInstallTool(alt.id)} type="button">Install it</button>
+                          {:else if alt.detected_path}
+                            — already installed
+                          {/if}
+                        </span>
+                      {/if}
                     {/if}
                   </div>
                   <div class="tool-action">
                     {#if tool.detected_path}
                       {#if toolUpdateResults[tool.id]?.update_available}
                         <span class="badge badge-amber" title="Update available: {toolUpdateResults[tool.id].latest_version}">Update</span>
+                      {:else if tool.wine_compat === "not_recommended"}
+                        <span class="badge badge-amber">Installed</span>
                       {:else}
                         <span class="badge badge-green">Installed</span>
                       {/if}
@@ -1708,6 +1913,15 @@
                             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
                           {/if}
                         </button>
+                        <button
+                          class="btn-secondary btn-sm"
+                          onclick={() => handleReinstallTool(tool.id)}
+                          disabled={reinstallingTool === tool.id}
+                          type="button"
+                          title="Reinstall {tool.name}"
+                        >
+                          {reinstallingTool === tool.id ? "..." : "Reinstall"}
+                        </button>
                       {/if}
                       <button
                         class="btn-delete-sm"
@@ -1724,106 +1938,17 @@
                           </svg>
                         {/if}
                       </button>
-                    {:else if tool.download_url}
-                      <button
-                        class="btn-secondary btn-sm"
-                        onclick={() => openUrl(tool.download_url!)}
-                        type="button"
-                      >
-                        Download
-                      </button>
-                    {/if}
-                  </div>
-                </div>
-              {/each}
-            </div>
-            {/if}
-          </div>
-        {/if}
-
-        <!-- Not recommended via Wine -->
-        {#if notRecommendedTools.length > 0}
-          <div class="layers-group">
-            <button class="layers-group-label collapsible-label tool-warn-label" onclick={() => showNotRecommendedTools = !showNotRecommendedTools}>
-              <svg class="collapse-chevron" class:collapse-open={showNotRecommendedTools} width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 2l4 3-4 3" /></svg>
-              Not Recommended via Wine
-              <span class="collapse-count">{notRecommendedTools.length}</span>
-            </button>
-            {#if showNotRecommendedTools}
-            <div class="section-card tool-warn-card">
-              {#each notRecommendedTools as tool, i (tool.id)}
-                {#if i > 0}<div class="card-divider"></div>{/if}
-                <div class="card-row tool-row">
-                  {@render toolIcon(tool.id)}
-                  <div class="tool-info">
-                    <div class="tool-name-row">
-                      <span class="row-label tool-warn-name">{tool.name}</span>
-                      {#if tool.support_url}
-                        <button class="tool-support-link" onclick={() => openUrl(tool.support_url!)} type="button" title="Support {tool.name} author">
-                          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
-                        </button>
-                      {/if}
-                    </div>
-                    <span class="tool-description">
-                      {tool.description}
-                      <span class="tool-license">{tool.license}</span>
-                    </span>
-                    {#if tool.wine_notes}
-                      <span class="tool-wine-note tool-wine-danger">{tool.wine_notes}</span>
-                    {/if}
-                    {#if tool.recommended_alternative}
-                      {@const alt = modTools.find(t => t.id === tool.recommended_alternative)}
-                      {#if alt}
-                        <span class="tool-alternative">
-                          Use <strong>{alt.name}</strong> instead
-                          {#if !alt.detected_path && alt.can_auto_install}
-                            — <button class="tool-alt-link" onclick={() => handleInstallTool(alt.id)} type="button">Install it</button>
-                          {:else if alt.detected_path}
-                            — already installed
-                          {/if}
-                        </span>
-                      {/if}
-                    {/if}
-                  </div>
-                  <div class="tool-action">
-                    {#if tool.detected_path}
-                      <span class="badge badge-amber">Installed</span>
+                    {:else if tool.can_auto_install}
                       <button
                         class="btn-primary btn-sm"
-                        onclick={() => handleLaunchTool(tool.id)}
-                        disabled={launchingTool === tool.id}
+                        onclick={() => handleInstallTool(tool.id)}
+                        disabled={installingTool === tool.id}
                         type="button"
                       >
-                        {launchingTool === tool.id ? "..." : "Launch"}
-                      </button>
-                      {#if tool.can_auto_install}
-                        <button
-                          class="btn-secondary btn-sm"
-                          onclick={() => handleCheckToolUpdate(tool.id)}
-                          disabled={checkingUpdate === tool.id}
-                          type="button"
-                          title="Check for updates"
-                        >
-                          {#if checkingUpdate === tool.id}
-                            <span class="spinner-xs"></span>
-                          {:else}
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
-                          {/if}
-                        </button>
-                      {/if}
-                      <button
-                        class="btn-delete-sm"
-                        onclick={() => handleUninstallTool(tool.id)}
-                        disabled={uninstallingTool === tool.id}
-                        type="button"
-                        aria-label="Uninstall {tool.name}"
-                      >
-                        {#if uninstallingTool === tool.id}
-                          <span class="spinner-xs"></span>
+                        {#if installingTool === tool.id}
+                          <span class="spinner-xs"></span> {toolProgress[tool.id]?.detail ?? "Installing..."}
                         {:else}
-                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                          </svg>
+                          Install
                         {/if}
                       </button>
                     {:else if tool.download_url}
@@ -1843,78 +1968,41 @@
           </div>
         {/if}
       {/if}
+      {/if}
     </div>
   {/if}
 
   <!-- INI Settings (Skyrim) -->
   {#if isSkyrim && game}
     <div class="section">
-      <h2 class="section-title">INI Settings</h2>
+      <button class="section-title section-title-collapsible" onclick={() => toggleSection('iniSettings')}>
+        <span class="section-chevron">{collapsedSections.has('iniSettings') ? '\u25B8' : '\u25BE'}</span>
+        INI Settings
+      </button>
+      {#if !collapsedSections.has('iniSettings')}
       <IniManagerPanel gameId={game.game_id} bottleName={game.bottle_name} />
+      {/if}
     </div>
   {/if}
 
   <!-- Wine Diagnostics -->
   {#if game}
     <div class="section">
-      <h2 class="section-title">Wine Diagnostics</h2>
+      <button class="section-title section-title-collapsible" onclick={() => toggleSection('wineDiagnostics')}>
+        <span class="section-chevron">{collapsedSections.has('wineDiagnostics') ? '\u25B8' : '\u25BE'}</span>
+        Wine Diagnostics
+      </button>
+      {#if !collapsedSections.has('wineDiagnostics')}
       <WineDiagnosticsPanel gameId={game.game_id} bottleName={game.bottle_name} gamePath={game.game_path} />
+      {/if}
     </div>
   {/if}
 
   </div>
-  {/key}
-  {/if}
-  <!-- ============ GENERAL TAB (continued) ============ -->
-  {#if settingsTab === "general"}
-  {#key tabAnimKey}
-  <div class="tab-content-animated">
-
-  <!-- Nexus Mods Account -->
-  <SettingsAuthSection />
-
-  <!-- Performance -->
-  <div class="section">
-    <h2 class="section-title">Performance</h2>
-    <div class="section-card">
-      <div class="card-row">
-        <div class="toggle-info">
-          <span class="row-label">Download Threads</span>
-          <span class="toggle-description">
-            Number of simultaneous mod downloads during collection installs.
-            {#if platformInfo.cpu_brand}
-              Detected: {platformInfo.cpu_brand} ({platformInfo.cpu_cores} cores, {platformInfo.memory_gb} GB RAM)
-            {/if}
-          </span>
-        </div>
-        <div class="row-control">
-          <select
-            class="settings-select"
-            value={downloadThreads}
-            onchange={(e) => saveDownloadThreads(e.currentTarget.value)}
-            disabled={savingThreads}
-          >
-            <option value="auto">Auto ({optimalThreads})</option>
-            <option value="2">2</option>
-            <option value="3">3</option>
-            <option value="4">4</option>
-            <option value="6">6</option>
-            <option value="8">8</option>
-            <option value="10">10</option>
-            <option value="12">12</option>
-          </select>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  </div>
-  {/key}
   {/if}
   <!-- ============ SYSTEM TAB ============ -->
   {#if settingsTab === "system"}
-  {#key tabAnimKey}
-  <div class="tab-content-animated">
+  <div class="tab-content" class:tab-visible={tabVisible}>
 
   <!-- Downloads -->
   <div class="section">
@@ -2210,89 +2298,6 @@
   {/if}
 
   </div>
-  {/key}
-  {/if}
-  <!-- ============ GENERAL TAB (About) ============ -->
-  {#if settingsTab === "general"}
-  {#key tabAnimKey}
-  <div class="tab-content-animated">
-
-  <!-- About -->
-  <div class="section">
-    <h2 class="section-title">About</h2>
-    <div class="section-card">
-      <div class="card-row about-row">
-        <span class="row-label">Version</span>
-        <div class="version-row-right">
-          <span class="row-value">v{$appVersion}</span>
-          {#if $updateReady}
-            <button class="btn-update-ready" onclick={() => relaunch()} type="button">
-              Restart for v{$updateVersion}
-            </button>
-          {:else}
-            <button
-              class="btn-ghost btn-sm"
-              onclick={handleCheckForUpdates}
-              disabled={$updateChecking}
-              type="button"
-            >
-              {#if $updateChecking}
-                <span class="spinner-xs"></span> Checking...
-              {:else if manualCheckDone && $updateError}
-                <span title={$updateError}>Check failed</span>
-              {:else if manualCheckDone && !$updateReady}
-                Up to date
-              {:else}
-                Check for Updates
-              {/if}
-            </button>
-          {/if}
-        </div>
-      </div>
-      {#if $updateNotes && $updateReady}
-        <div class="card-divider"></div>
-        <div class="card-row about-row">
-          <span class="row-label">Patch Notes</span>
-          <div class="row-value patch-notes-container">
-            <div class="patch-notes-text" class:expanded={settingsNotesExpanded}>
-              {$updateNotes}
-            </div>
-            {#if $updateNotes.length > 150}
-              <button class="patch-notes-toggle" onclick={() => settingsNotesExpanded = !settingsNotesExpanded}>
-                {settingsNotesExpanded ? "Show less" : "Read more..."}
-              </button>
-            {/if}
-          </div>
-        </div>
-      {/if}
-      <div class="card-divider"></div>
-      <div class="card-row about-row">
-        <span class="row-label">Author</span>
-        <span class="row-value">cashconway</span>
-      </div>
-      <div class="card-divider"></div>
-      <div class="card-row about-row">
-        <span class="row-label">License</span>
-        <span class="row-value">GPL-3.0-or-later</span>
-      </div>
-      <div class="card-divider"></div>
-      <div class="card-row about-row">
-        <span class="row-label">Platform</span>
-        <span class="row-value">macOS / Linux</span>
-      </div>
-      <div class="card-divider"></div>
-      <div class="card-row about-row">
-        <span class="row-label">Links</span>
-        <div class="row-value about-links">
-          <button class="btn-link" onclick={() => openUrl("https://github.com/cashcon57/corkscrew")}>GitHub</button>
-          <button class="btn-link" onclick={() => openUrl("https://ko-fi.com/cash508287")}>Support</button>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  </div>
-  {/key}
   {/if}
 </div>
 
@@ -2349,8 +2354,13 @@
                 inset 0 1px 0 0 rgba(255, 255, 255, 0.12);
   }
 
-  .tab-content-animated {
-    animation: glass-fade-in var(--duration) var(--ease-out);
+  .tab-content {
+    opacity: 0;
+    transition: opacity 0.15s ease;
+  }
+
+  .tab-content.tab-visible {
+    opacity: 1;
   }
 
   /* --- Sections --- */
@@ -3542,5 +3552,58 @@
     padding: 8px 12px;
     background: color-mix(in srgb, var(--green) 10%, transparent);
     border-radius: var(--radius);
+  }
+
+  /* --- Collapsible Section Titles --- */
+
+  .section-title-collapsible {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    border: none;
+    background: none;
+    cursor: pointer;
+    text-align: left;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+    padding: 0 var(--space-4);
+    margin-bottom: var(--space-2);
+  }
+
+  .section-title-collapsible:hover {
+    color: var(--text-primary);
+  }
+
+  .section-chevron {
+    font-size: 11px;
+    line-height: 1;
+    flex-shrink: 0;
+    color: var(--text-tertiary);
+  }
+
+  /* --- Compatibility Dots --- */
+
+  .compat-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .compat-good {
+    background: var(--green, #30d158);
+  }
+
+  .compat-limited {
+    background: var(--yellow, #ffd60a);
+  }
+
+  .compat-bad {
+    background: var(--red, #ff453a);
   }
 </style>

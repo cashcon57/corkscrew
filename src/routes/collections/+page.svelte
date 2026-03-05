@@ -497,6 +497,12 @@
   let renderedDescription = $state("");
   let userActions = $state<Array<{mod_name: string, action: string, url: string | null, instructions: string | null}>>([]);
 
+  // Pre-grouped install result details to avoid inline .filter() in template
+  const installResultInstalled = $derived(installResult?.details.filter(d => d.status === "installed") ?? []);
+  const installResultAlreadyInstalled = $derived(installResult?.details.filter(d => d.status === "already_installed") ?? []);
+  const installResultUserAction = $derived(installResult?.details.filter(d => d.status === "user_action") ?? []);
+  const installResultFailed = $derived(installResult?.details.filter(d => d.status === "failed") ?? []);
+
   // Floating install button
   let statsBarEl = $state<HTMLElement | null>(null);
   let showFloatingInstall = $state(false);
@@ -547,6 +553,19 @@
   let optionalPickerManifest = $state<(CollectionManifest & Record<string, unknown>) | null>(null);
   type OptionalModChoice = "install" | "install_disabled" | "skip";
   let optionalChoices = $state<Map<number, OptionalModChoice>>(new Map());
+
+  // Pre-computed counts for optional picker to avoid inline .filter() in template
+  const optionalPickerRequiredCount = $derived(
+    optionalPickerManifest?.mods.filter((m: { optional: boolean }) => !m.optional).length ?? 0
+  );
+  const optionalPickerOptionalCount = $derived(
+    optionalPickerManifest?.mods.filter((m: { optional: boolean }) => m.optional).length ?? 0
+  );
+  const optionalPickerInstallCount = $derived(
+    optionalPickerManifest
+      ? optionalPickerManifest.mods.length - Array.from(optionalChoices.values()).filter(v => v === "skip").length
+      : 0
+  );
 
   // ---- Mod Browse State ----
   let browseMods = $state<NexusModInfo[]>([]);
@@ -943,6 +962,15 @@
         }
       } catch {
         // Silently ignore — not critical
+      }
+      // Smart default tab: if user has no installed collections, show Nexus browse tab
+      try {
+        const installed = await listInstalledCollections(game.game_id, game.bottle_name);
+        if (installed.length === 0) {
+          activeTab = "nexus";
+        }
+      } catch {
+        // Silently ignore — fall back to default "my" tab
       }
     }
   });
@@ -1921,7 +1949,7 @@
       </div>
     {:else}
       <div class="my-collections-grid">
-        {#each myCollections as col}
+        {#each myCollections as col (col.name)}
           <!-- svelte-ignore a11y_no_static_element_interactions -->
           <div class="my-collection-card" role="button" tabindex="0" onclick={() => viewLocalCollection(col)} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') viewLocalCollection(col); }}>
             <div class="my-card-image">
@@ -2234,7 +2262,7 @@
                   <span class="col-mod-optional">Required</span>
                 </div>
                 <div class="mods-table-body">
-                  {#each selectedMods as mod, i}
+                  {#each selectedMods as mod, i (mod.name)}
                     <div class="mods-table-row">
                       <span class="col-mod-name">
                         <span class="mod-name-text">{mod.name}</span>
@@ -2359,7 +2387,7 @@
 
               <!-- Per-mod details -->
               <div class="result-mod-list">
-                {#each installResult.details.filter(d => d.status === "installed") as detail}
+                {#each installResultInstalled as detail}
                   <div class="result-mod-row">
                     <svg class="result-mod-icon result-mod-icon--installed" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                       <polyline points="20 6 9 17 4 12" />
@@ -2367,7 +2395,7 @@
                     <span class="result-mod-name">{detail.name}</span>
                   </div>
                 {/each}
-                {#each installResult.details.filter(d => d.status === "already_installed") as detail}
+                {#each installResultAlreadyInstalled as detail}
                   <div class="result-mod-row">
                     <svg class="result-mod-icon result-mod-icon--existing" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                       <polyline points="20 6 9 17 4 12" />
@@ -2376,7 +2404,7 @@
                     <span class="result-mod-badge result-mod-badge--existing">Already installed</span>
                   </div>
                 {/each}
-                {#each installResult.details.filter(d => d.status === "user_action") as detail}
+                {#each installResultUserAction as detail}
                   <div class="result-mod-card result-mod-card--action">
                     <div class="result-mod-card-header">
                       <svg class="result-mod-icon result-mod-icon--action" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
@@ -2403,7 +2431,7 @@
                     {/if}
                   </div>
                 {/each}
-                {#each installResult.details.filter(d => d.status === "failed") as detail}
+                {#each installResultFailed as detail}
                   <div class="result-mod-card result-mod-card--failed">
                     <div class="result-mod-card-header">
                       <svg class="result-mod-icon result-mod-icon--failed" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
@@ -2793,7 +2821,7 @@
         </div>
       {:else}
         <div class="mod-browse-grid">
-          {#each browseMods as mod}
+          {#each browseMods as mod (mod.mod_id)}
             <div class="mod-browse-card" onclick={() => openModDetail(mod)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === "Enter") openModDetail(mod); }}>
               {#if browseInstalledNexusIds.has(mod.mod_id)}
                 <div class="browse-installed-badge">Installed</div>
@@ -3350,8 +3378,8 @@
       <div class="optional-picker-header">
         <h3>Configure Installation</h3>
         <p class="optional-picker-subtitle">
-          {optionalPickerManifest.mods.filter((m: { optional: boolean }) => !m.optional).length} required
-          &middot; {optionalPickerManifest.mods.filter((m: { optional: boolean }) => m.optional).length} optional mods
+          {optionalPickerRequiredCount} required
+          &middot; {optionalPickerOptionalCount} optional mods
         </p>
       </div>
 
@@ -3361,7 +3389,7 @@
           <div class="optional-section-header">
             <span class="optional-section-label">
               <svg class="optional-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--green, #22c55e)" stroke-width="2.5" stroke-linecap="round"><path d="M20 6L9 17l-5-5" /></svg>
-              {optionalPickerManifest.mods.filter((m: { optional: boolean }) => !m.optional).length} required mods will be installed
+              {optionalPickerRequiredCount} required mods will be installed
             </span>
           </div>
         </div>
@@ -3415,7 +3443,7 @@
       <div class="optional-picker-footer">
         <button class="btn btn-ghost" onclick={() => { showOptionalPicker = false; }}>Cancel</button>
         <button class="btn btn-accent" onclick={confirmOptionalPicker}>
-          Install ({optionalPickerManifest.mods.length - Array.from(optionalChoices.values()).filter(v => v === "skip").length} mods)
+          Install ({optionalPickerInstallCount} mods)
         </button>
       </div>
     </div>

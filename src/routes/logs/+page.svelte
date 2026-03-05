@@ -205,9 +205,6 @@
       <p class="page-subtitle">Analyze game crashes and get fix suggestions</p>
     </div>
     <div class="header-actions">
-      {#if game}
-        <span class="header-game-context">{game.display_name}</span>
-      {/if}
       <button
         class="btn btn-secondary"
         onclick={handleRefresh}

@@ -74,7 +74,6 @@
   import SessionHistoryPanel from "$lib/components/SessionHistoryPanel.svelte";
   import ModCategoryView from "$lib/components/mods/ModCategoryView.svelte";
   import ModBisect from "$lib/components/ModBisect.svelte";
-  import HelpTooltip from "$lib/components/HelpTooltip.svelte";
   import SkeletonRows from "$lib/components/SkeletonRows.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import ConflictMap from "$lib/components/ConflictMap.svelte";
@@ -140,6 +139,7 @@
   let sortBy = $state<"priority" | "name" | "date" | "version" | "files">("priority");
   let sortDir = $state<"asc" | "desc">("asc");
   let filterCategory = $state<string | null>(null);
+  let showCategoryPopover = $state(false);
 
   // Persistent search: restore from sessionStorage on mount
   function searchStorageKey(game: DetectedGame) {
@@ -217,6 +217,7 @@
   // Tools quick-launch
   let modTools = $state<ModTool[]>([]);
   let showToolsMenu = $state(false);
+  let showOverflowMenu = $state(false);
   let launchingToolId = $state<string | null>(null);
   let installedTools = $derived(modTools.filter(t => t.detected_path));
 
@@ -371,131 +372,129 @@
   // Derived parsed search for use in UI (facet pills)
   let parsedSearch = $derived(parseFacets(searchQuery));
 
-  // Filtered mods based on faceted search and dropdown filters
+  // Filtered mods based on faceted search and dropdown filters — single-pass filter
   let filteredMods = $derived((() => {
-    let mods = sortedMods;
     const { facets, freeText } = parsedSearch;
 
-    // Apply facet filters
-    const tagFacet = facets.get("tag");
-    if (tagFacet) {
-      const t = tagFacet.toLowerCase();
-      mods = mods.filter(m => m.user_tags.some(tag => tag.toLowerCase().includes(t)));
-    }
-
-    const sourceFacet = facets.get("source");
-    if (sourceFacet) {
-      const s = sourceFacet.toLowerCase();
-      mods = mods.filter(m => (m.source_type || "manual").toLowerCase() === s);
-    }
-
-    const enabledFacet = facets.get("enabled");
-    if (enabledFacet) {
-      const val = enabledFacet.toLowerCase() === "true";
-      mods = mods.filter(m => m.enabled === val);
-    }
-
-    const conflictFacet = facets.get("conflict");
-    if (conflictFacet && conflictFacet.toLowerCase() === "true") {
-      mods = mods.filter(m => conflictModIds.has(m.id));
-    }
-
-    const updateFacet = facets.get("update");
-    if (updateFacet && updateFacet.toLowerCase() === "true") {
-      mods = mods.filter(m => updateMap.has(m.id));
-    }
-
-    const categoryFacet = facets.get("category");
-    if (categoryFacet) {
-      const c = categoryFacet.toLowerCase();
-      mods = mods.filter(m => m.auto_category?.toLowerCase().includes(c));
-    }
-
-    const collectionFacet = facets.get("collection");
-    if (collectionFacet) {
-      const c = collectionFacet.toLowerCase();
-      mods = mods.filter(m => m.collection_name?.toLowerCase().includes(c));
-    }
+    // Pre-compute facet values outside the loop
+    const tagFacet = facets.get("tag")?.toLowerCase() ?? null;
+    const sourceFacet = facets.get("source")?.toLowerCase() ?? null;
+    const enabledFacet = facets.has("enabled") ? facets.get("enabled")!.toLowerCase() === "true" : null;
+    const conflictFacet = facets.get("conflict")?.toLowerCase() === "true" || false;
+    const updateFacet = facets.get("update")?.toLowerCase() === "true" || false;
+    const categoryFacet = facets.get("category")?.toLowerCase() ?? null;
+    const collectionFacet = facets.get("collection")?.toLowerCase() ?? null;
 
     const priorityFacet = facets.get("priority");
+    let priorityOp: ">" | "<" | null = null;
+    let priorityN = 0;
     if (priorityFacet) {
       const match = priorityFacet.match(/^([><])(\d+)$/);
-      if (match) {
-        const n = parseInt(match[2]);
-        if (match[1] === ">") mods = mods.filter(m => m.install_priority > n);
-        else mods = mods.filter(m => m.install_priority < n);
-      }
+      if (match) { priorityOp = match[1] as ">" | "<"; priorityN = parseInt(match[2]); }
     }
 
     const filesFacet = facets.get("files");
+    let filesOp: ">" | "<" | null = null;
+    let filesN = 0;
     if (filesFacet) {
       const match = filesFacet.match(/^([><])(\d+)$/);
-      if (match) {
-        const n = parseInt(match[2]);
-        if (match[1] === ">") mods = mods.filter(m => m.installed_files.length > n);
-        else mods = mods.filter(m => m.installed_files.length < n);
+      if (match) { filesOp = match[1] as ">" | "<"; filesN = parseInt(match[2]); }
+    }
+
+    const q = freeText.trim() ? freeText.toLowerCase() : null;
+
+    // Local copies of dropdown filter state for the closure
+    const fStatus = filterStatus;
+    const fSource = filterSource;
+    const fCollection = filterCollection;
+    const fCategory = filterCategory;
+
+    return sortedMods.filter(m => {
+      // Facet: tag
+      if (tagFacet !== null && !m.user_tags.some(tag => tag.toLowerCase().includes(tagFacet))) return false;
+      // Facet: source
+      if (sourceFacet !== null && (m.source_type || "manual").toLowerCase() !== sourceFacet) return false;
+      // Facet: enabled
+      if (enabledFacet !== null && m.enabled !== enabledFacet) return false;
+      // Facet: conflict
+      if (conflictFacet && !conflictModIds.has(m.id)) return false;
+      // Facet: update
+      if (updateFacet && !updateMap.has(m.id)) return false;
+      // Facet: category
+      if (categoryFacet !== null && !m.auto_category?.toLowerCase().includes(categoryFacet)) return false;
+      // Facet: collection
+      if (collectionFacet !== null && !m.collection_name?.toLowerCase().includes(collectionFacet)) return false;
+      // Facet: priority
+      if (priorityOp === ">" && m.install_priority <= priorityN) return false;
+      if (priorityOp === "<" && m.install_priority >= priorityN) return false;
+      // Facet: files
+      if (filesOp === ">" && m.installed_files.length <= filesN) return false;
+      if (filesOp === "<" && m.installed_files.length >= filesN) return false;
+      // Free text search across name, tags, notes, collection, category
+      if (q !== null &&
+        !m.name.toLowerCase().includes(q) &&
+        !m.user_tags.some(t => t.toLowerCase().includes(q)) &&
+        !(m.user_notes && m.user_notes.toLowerCase().includes(q)) &&
+        !(m.collection_name && m.collection_name.toLowerCase().includes(q)) &&
+        !(m.auto_category && m.auto_category.toLowerCase().includes(q))
+      ) return false;
+      // Dropdown: status filter
+      if (fStatus === "enabled" && !m.enabled) return false;
+      if (fStatus === "disabled" && m.enabled) return false;
+      if (fStatus === "conflicts" && !conflictModIds.has(m.id)) return false;
+      if (fStatus === "has-updates" && !updateMap.has(m.id)) return false;
+      // Dropdown: source filter
+      if (fSource !== "all" && (m.source_type || "manual") !== fSource) return false;
+      // Dropdown: collection filter
+      if (fCollection !== null) {
+        if (fCollection === "__standalone__") { if (m.collection_name) return false; }
+        else { if (m.collection_name !== fCollection) return false; }
       }
-    }
+      // Dropdown: category filter
+      if (fCategory !== null && (m.auto_category || "Miscellaneous") !== fCategory) return false;
 
-    // Free text search across name, tags, notes, collection, category
-    if (freeText.trim()) {
-      const q = freeText.toLowerCase();
-      mods = mods.filter(m =>
-        m.name.toLowerCase().includes(q) ||
-        m.user_tags.some(t => t.toLowerCase().includes(q)) ||
-        (m.user_notes && m.user_notes.toLowerCase().includes(q)) ||
-        (m.collection_name && m.collection_name.toLowerCase().includes(q)) ||
-        (m.auto_category && m.auto_category.toLowerCase().includes(q))
-      );
-    }
-
-    // Dropdown filters (independent AND layer — always applied on top of facets)
-    if (filterStatus === "enabled") {
-      mods = mods.filter(m => m.enabled);
-    } else if (filterStatus === "disabled") {
-      mods = mods.filter(m => !m.enabled);
-    } else if (filterStatus === "conflicts") {
-      mods = mods.filter(m => conflictModIds.has(m.id));
-    } else if (filterStatus === "has-updates") {
-      mods = mods.filter(m => updateMap.has(m.id));
-    }
-
-    if (filterSource !== "all") {
-      mods = mods.filter(m => (m.source_type || "manual") === filterSource);
-    }
-
-    if (filterCollection !== null) {
-      if (filterCollection === "__standalone__") {
-        mods = mods.filter(m => !m.collection_name);
-      } else {
-        mods = mods.filter(m => m.collection_name === filterCollection);
-      }
-    }
-
-    if (filterCategory !== null) {
-      mods = mods.filter(m => (m.auto_category || "Miscellaneous") === filterCategory);
-    }
-
-    return mods;
+      return true;
+    });
   })());
 
-  // Split filtered mods into enabled and disabled for the disabled separator
+  // Split filtered mods into enabled and disabled — single partition pass
   let disabledSectionCollapsed = $state(true);
-  let enabledFilteredMods = $derived(
-    filterStatus === "all" ? filteredMods.filter(m => m.enabled) : filteredMods
-  );
-  let disabledFilteredMods = $derived(
-    filterStatus === "all" ? filteredMods.filter(m => !m.enabled) : []
-  );
+  let partitionedFilteredMods = $derived((() => {
+    if (filterStatus !== "all") return { enabled: filteredMods, disabled: [] as typeof filteredMods };
+    const enabled: typeof filteredMods = [];
+    const disabled: typeof filteredMods = [];
+    for (const m of filteredMods) {
+      if (m.enabled) enabled.push(m);
+      else disabled.push(m);
+    }
+    return { enabled, disabled };
+  })());
+  let enabledFilteredMods = $derived(partitionedFilteredMods.enabled);
+  let disabledFilteredMods = $derived(partitionedFilteredMods.disabled);
 
-  // Mod stats (computed from full installed list, not filtered)
-  let modStats = $derived({
-    total: $installedMods.length,
-    enabled: $installedMods.filter(m => m.enabled).length,
-    disabled: $installedMods.filter(m => !m.enabled).length,
-    conflicts: conflictModIds.size,
-    updates: modUpdates.length,
-  });
+  // Mod stats (computed from full installed list, not filtered) — single pass
+  let modStats = $derived((() => {
+    let enabled = 0;
+    for (const m of $installedMods) {
+      if (m.enabled) enabled++;
+    }
+    return {
+      total: $installedMods.length,
+      enabled,
+      disabled: $installedMods.length - enabled,
+      conflicts: conflictModIds.size,
+      updates: modUpdates.length,
+    };
+  })());
+
+  // Pre-computed index map for O(1) lookup of mod position in filteredMods
+  let filteredModIndex = $derived((() => {
+    const map = new Map<number, number>();
+    for (let i = 0; i < filteredMods.length; i++) {
+      map.set(filteredMods[i].id, i);
+    }
+    return map;
+  })());
 
   // Unique categories across all installed mods (for filter chips)
   let uniqueCategories = $derived((() => {
@@ -1710,7 +1709,7 @@
   }
 
   const modCount = $derived($installedMods.length);
-  const enabledCount = $derived($installedMods.filter((m) => m.enabled).length);
+  const enabledCount = $derived(modStats.enabled);
 
   // Keyboard shortcuts
   function handleKeydown(e: KeyboardEvent) {
@@ -1863,7 +1862,7 @@
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<svelte:window onkeydown={handleKeydown} onclick={() => { showToolsMenu = false; showSkseMenu = false; }} />
+<svelte:window onkeydown={handleKeydown} onclick={() => { showToolsMenu = false; showSkseMenu = false; showOverflowMenu = false; }} />
 <div
   class="mods-page"
   class:drag-active={draggingOver}
@@ -2028,11 +2027,6 @@
             {/if}
             Fix Display
           </button>
-          <!-- svelte-ignore a11y_label_has_associated_control -->
-          <label class="game-fixes-toggle" title="When enabled, Corkscrew skips automatic display and Wine cursor fixes on launch">
-            <input type="checkbox" checked={disableGameFixes} onchange={toggleGameFixes} />
-            Disable launch fixes (Not Recommended)
-          </label>
         {/if}
         <button class="btn btn-ghost" onclick={() => { pickedGame = null; selectedGame.set(null); }}>
           Change Game
@@ -2076,7 +2070,6 @@
             Deploy
           {/if}
         </button>
-        <HelpTooltip text="Copies mod files into the game directory so the game can load them" />
         <button
           class="btn btn-ghost-danger"
           onclick={handlePurge}
@@ -2094,65 +2087,17 @@
             Purge
           {/if}
         </button>
-        <HelpTooltip text="Removes all deployed mod files from the game directory" />
         {#if deployHealth}
           <span class="deploy-status" class:status-deployed={deployHealth.is_deployed} class:status-purged={!deployHealth.is_deployed}>
             {deployHealth.is_deployed ? "Deployed" : "Purged"}
           </span>
         {/if}
       {/if}
-      <!-- Import / Export -->
-      <button
-        class="btn btn-ghost"
-        onclick={() => showImportWizard = true}
-        title="Import a mod list"
-      >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-          <polyline points="7 10 12 15 17 10" />
-          <line x1="12" y1="15" x2="12" y2="3" />
-        </svg>
-        Import
-      </button>
-      <button
-        class="btn btn-ghost"
-        onclick={handleExport}
-        disabled={exporting || $installedMods.length === 0}
-        title="Export current mod list"
-      >
-        {#if exporting}
-          <span class="spinner spinner-sm"></span>
-          Exporting...
-        {:else}
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-            <polyline points="17 8 12 3 7 8" />
-            <line x1="12" y1="3" x2="12" y2="15" />
-          </svg>
-          Export
-        {/if}
-      </button>
-
-      {#if $installedMods.filter(m => m.enabled).length >= 10}
-        <button
-          class="btn btn-ghost"
-          onclick={() => showBisect = true}
-          title="Binary search to find which mod causes crashes"
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="11" cy="11" r="8" />
-            <line x1="21" y1="21" x2="16.65" y2="16.65" />
-            <line x1="8" y1="11" x2="14" y2="11" />
-          </svg>
-          Bisect
-        </button>
-      {/if}
-
       {#if installedTools.length > 0}
         <div class="tools-dropdown-wrap">
           <button
             class="btn btn-ghost"
-            onclick={(e) => { e.stopPropagation(); showToolsMenu = !showToolsMenu; showSkseMenu = false; }}
+            onclick={(e) => { e.stopPropagation(); showToolsMenu = !showToolsMenu; showSkseMenu = false; showOverflowMenu = false; }}
             disabled={launchingToolId !== null}
             title="Launch modding tools"
           >
@@ -2187,17 +2132,71 @@
         </div>
       {/if}
 
-      {#if activeGame}
+      <!-- Overflow menu: Import, Export, Bisect, Open Folder -->
+      <div class="overflow-menu-wrap">
         <button
-          class="btn btn-icon-sm"
-          onclick={() => revealItemInDir(activeGame!.game_path)}
-          title="Open game directory in Finder"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-          </svg>
-        </button>
-      {/if}
+          class="btn btn-ghost btn-overflow"
+          onclick={(e) => { e.stopPropagation(); showOverflowMenu = !showOverflowMenu; showToolsMenu = false; showSkseMenu = false; }}
+          title="More actions"
+          aria-label="More actions"
+        >&#8230;</button>
+        {#if showOverflowMenu}
+          <div class="overflow-dropdown">
+            <button
+              class="dropdown-item"
+              onclick={() => { showOverflowMenu = false; showImportWizard = true; }}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="7 10 12 15 17 10" />
+                <line x1="12" y1="15" x2="12" y2="3" />
+              </svg>
+              Import
+            </button>
+            <button
+              class="dropdown-item"
+              onclick={() => { showOverflowMenu = false; handleExport(); }}
+              disabled={exporting || $installedMods.length === 0}
+            >
+              {#if exporting}
+                <span class="spinner spinner-sm"></span>
+                Exporting...
+              {:else}
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="17 8 12 3 7 8" />
+                  <line x1="12" y1="3" x2="12" y2="15" />
+                </svg>
+                Export
+              {/if}
+            </button>
+            {#if modStats.enabled >= 10}
+              <button
+                class="dropdown-item"
+                onclick={() => { showOverflowMenu = false; showBisect = true; }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="11" cy="11" r="8" />
+                  <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                  <line x1="8" y1="11" x2="14" y2="11" />
+                </svg>
+                Bisect
+              </button>
+            {/if}
+            {#if activeGame}
+              <button
+                class="dropdown-item"
+                onclick={() => { showOverflowMenu = false; revealItemInDir(activeGame!.game_path); }}
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                </svg>
+                Open Folder
+              </button>
+            {/if}
+          </div>
+        {/if}
+      </div>
       <div class="play-button-group">
         <button class="btn btn-play" onclick={handlePlay} disabled={launching || installingSkse}>
           {#if launching}
@@ -2561,7 +2560,7 @@
             <circle cx="11" cy="11" r="8" />
             <line x1="21" y1="21" x2="16.65" y2="16.65" />
           </svg>
-          {#each [...parsedSearch.facets] as [key, value]}
+          {#each [...parsedSearch.facets] as [key, value] (key)}
             <button
               class="facet-pill"
               onclick={() => {
@@ -2607,6 +2606,77 @@
           <option value="direct">Direct</option>
           <option value="manual">Manual</option>
         </select>
+        <!-- Category dropdown button -->
+        {#if uniqueCategories.length > 1}
+          <div class="category-dropdown-wrapper">
+            <button
+              class="filter-select category-dropdown-btn"
+              class:has-active={filterCategory !== null}
+              onclick={() => showCategoryPopover = !showCategoryPopover}
+            >
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="3" width="7" height="7" /><rect x="14" y="3" width="7" height="7" />
+                <rect x="14" y="14" width="7" height="7" /><rect x="3" y="14" width="7" height="7" />
+              </svg>
+              Categories
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="6 9 12 15 18 9" />
+              </svg>
+            </button>
+            {#if filterCategory}
+              {@const catColor = categoryColors[filterCategory] ?? '#6b7280'}
+              <button
+                class="active-category-chip"
+                style="--chip-color: {catColor};"
+                onclick={() => filterCategory = null}
+                title="Clear category filter"
+              >
+                {#if categoryIcons[filterCategory]}
+                  <!-- eslint-disable-next-line svelte/no-at-html-tags -->
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">{@html categoryIcons[filterCategory]}</svg>
+                {/if}
+                {filterCategory}
+                <svg width="9" height="9" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                  <line x1="3" y1="3" x2="9" y2="9" /><line x1="9" y1="3" x2="3" y2="9" />
+                </svg>
+              </button>
+            {/if}
+            {#if showCategoryPopover}
+              <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <div class="category-popover-backdrop" onclick={() => showCategoryPopover = false} onkeydown={(e) => { if (e.key === 'Escape') showCategoryPopover = false; }}></div>
+              <div class="category-popover">
+                {#each uniqueCategories as [cat, count]}
+                  {@const catColor = categoryColors[cat] ?? '#6b7280'}
+                  <button
+                    class="category-filter-chip"
+                    class:active={filterCategory === cat}
+                    style="--chip-color: {catColor};"
+                    onclick={() => { filterCategory = filterCategory === cat ? null : cat; showCategoryPopover = false; }}
+                    title="{cat} ({count} mods)"
+                  >
+                    {#if categoryIcons[cat]}
+                      <!-- eslint-disable-next-line svelte/no-at-html-tags -->
+                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">{@html categoryIcons[cat]}</svg>
+                    {/if}
+                    {cat}
+                    <span class="chip-count">{count}</span>
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          </div>
+        {/if}
+        <!-- Stat badges (inline) -->
+        <div class="stats-badges">
+          <span class="stat-badge stat-enabled">{modStats.enabled} Enabled</span>
+          <span class="stat-badge stat-disabled">{modStats.disabled} Disabled</span>
+          {#if modStats.conflicts > 0}
+            <span class="stat-badge stat-conflicts">{modStats.conflicts} Conflicts</span>
+          {/if}
+          {#if modStats.updates > 0}
+            <span class="stat-badge stat-updates">{modStats.updates} Updates</span>
+          {/if}
+        </div>
         <!-- View mode toggle -->
         <div class="view-mode-toggle">
           <button
@@ -2646,50 +2716,6 @@
           <span class="filter-count">{filteredMods.length} of {$installedMods.length}</span>
         {/if}
       </div>
-
-      <!-- Stats Bar -->
-      {#if $installedMods.length > 0}
-        <div class="stats-bar">
-          <div class="stats-badges">
-            <span class="stat-badge stat-enabled">{modStats.enabled} Enabled</span>
-            <span class="stat-badge stat-disabled">{modStats.disabled} Disabled</span>
-            {#if modStats.conflicts > 0}
-              <span class="stat-badge stat-conflicts">{modStats.conflicts} Conflicts</span>
-            {/if}
-            {#if modStats.updates > 0}
-              <span class="stat-badge stat-updates">{modStats.updates} Updates</span>
-            {/if}
-          </div>
-          {#if uniqueCategories.length > 1}
-            <div class="category-chips">
-              {#each uniqueCategories as [cat, count]}
-                {@const catColor = categoryColors[cat] ?? '#6b7280'}
-                <button
-                  class="category-filter-chip"
-                  class:active={filterCategory === cat}
-                  style="--chip-color: {catColor};"
-                  onclick={() => filterCategory = filterCategory === cat ? null : cat}
-                  title="{cat} ({count} mods)"
-                >
-                  {#if categoryIcons[cat]}
-                    <!-- eslint-disable-next-line svelte/no-at-html-tags -->
-                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">{@html categoryIcons[cat]}</svg>
-                  {/if}
-                  {cat}
-                  <span class="chip-count">{count}</span>
-                </button>
-              {/each}
-              {#if filterCategory}
-                <button class="category-clear-btn" onclick={() => filterCategory = null} title="Clear category filter">
-                  <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-                    <line x1="3" y1="3" x2="9" y2="9" /><line x1="9" y1="3" x2="3" y2="9" />
-                  </svg>
-                </button>
-              {/if}
-            </div>
-          {/if}
-        </div>
-      {/if}
     {/if}
 
     <!-- Content Area -->
@@ -2809,7 +2835,7 @@
                 ontoggle={handleToggle}
               />
             {:else if viewMode === "collection" && groupedMods}
-              {#each [...groupedMods.entries()] as [groupName, groupMods]}
+              {#each [...groupedMods.entries()] as [groupName, groupMods] (groupName)}
                 <button class="group-header" onclick={() => toggleGroup(groupName)}>
                   <svg
                     class="group-chevron"
@@ -2823,7 +2849,7 @@
                 </button>
                 {#if !collapsedGroups.has(groupName)}
                   {#each groupMods as mod, i (mod.id)}
-                    {@const globalIndex = filteredMods.indexOf(mod)}
+                    {@const globalIndex = filteredModIndex.get(mod.id) ?? 0}
                     <!-- Re-use the same row markup with global index for DnD -->
                     <div
                       class="table-row"
@@ -4629,6 +4655,41 @@
     letter-spacing: 0.5px;
   }
 
+  /* --- Overflow menu --- */
+
+  .overflow-menu-wrap {
+    position: relative;
+  }
+
+  .btn-overflow {
+    font-size: 18px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    min-width: 36px;
+    padding: var(--space-1) var(--space-2);
+    line-height: 1;
+  }
+
+  .overflow-dropdown {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    margin-top: var(--space-1);
+    background: var(--bg-elevated);
+    border: 1px solid var(--separator-opaque);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-lg);
+    min-width: 180px;
+    z-index: 100;
+    overflow: hidden;
+  }
+
+  .overflow-dropdown .dropdown-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
   /* --- SKSE Banner --- */
 
   .skse-banner {
@@ -5005,22 +5066,14 @@
   }
 
   /* ============================
-     Stats Bar & Category Chips
+     Stats Badges (inline in filter bar)
      ============================ */
-  .stats-bar {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-1) var(--space-3);
-    border-bottom: 1px solid var(--separator);
-  }
-
   .stats-badges {
     display: flex;
     align-items: center;
     gap: var(--space-1);
     flex-shrink: 0;
+    margin-left: auto;
   }
 
   .stat-badge {
@@ -5054,12 +5107,69 @@
     color: #3b82f6;
   }
 
-  .category-chips {
+  /* ============================
+     Category Dropdown & Popover
+     ============================ */
+  .category-dropdown-wrapper {
+    position: relative;
     display: flex;
-    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1);
+  }
+
+  .category-dropdown-btn {
+    display: inline-flex;
     align-items: center;
     gap: 4px;
-    margin-left: auto;
+    white-space: nowrap;
+  }
+
+  .category-dropdown-btn.has-active {
+    border-color: var(--accent-muted);
+    color: var(--text-primary);
+  }
+
+  .active-category-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 11px;
+    font-weight: 500;
+    padding: 1px 7px;
+    border-radius: 4px;
+    cursor: pointer;
+    white-space: nowrap;
+    color: var(--chip-color);
+    background: color-mix(in srgb, var(--chip-color) 20%, transparent);
+    border: 1px solid color-mix(in srgb, var(--chip-color) 40%, transparent);
+    transition: all var(--duration-fast) var(--ease);
+  }
+
+  .active-category-chip:hover {
+    background: color-mix(in srgb, var(--chip-color) 30%, transparent);
+  }
+
+  .category-popover-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 99;
+  }
+
+  .category-popover {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    z-index: 100;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding: var(--space-2);
+    background: var(--bg-secondary);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius-sm);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+    min-width: 200px;
+    max-width: 400px;
   }
 
   .category-filter-chip {
@@ -5090,24 +5200,6 @@
   .chip-count {
     font-size: 10px;
     opacity: 0.6;
-  }
-
-  .category-clear-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
-    cursor: pointer;
-    color: var(--text-tertiary);
-    background: color-mix(in srgb, var(--text-tertiary) 10%, transparent);
-    transition: all var(--duration-fast) var(--ease);
-  }
-
-  .category-clear-btn:hover {
-    background: color-mix(in srgb, var(--text-tertiary) 20%, transparent);
-    color: var(--text-primary);
   }
 
   /* ============================
