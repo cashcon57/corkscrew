@@ -494,7 +494,7 @@ impl WjDownloader {
                     if self
                         .cancel_token
                         .as_ref()
-                        .map_or(false, |t| t.load(Ordering::Relaxed))
+                        .is_some_and(|t| t.load(Ordering::Relaxed))
                     {
                         break 'retry Err(last_err.unwrap_or(WjDownloadError::Cancelled));
                     }

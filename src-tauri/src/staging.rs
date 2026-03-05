@@ -466,7 +466,7 @@ pub fn stage_mod_extract_direct(
     for entry in &entries_to_move {
         let dest = staging_dir.join(entry.file_name());
         // Rename is instant on the same filesystem.
-        if let Err(_) = fs::rename(entry.path(), &dest) {
+        if fs::rename(entry.path(), &dest).is_err() {
             // Fallback: if rename fails (shouldn't happen, same FS), do a copy.
             if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                 copy_dir_recursive(&entry.path(), &dest)?;

@@ -11,6 +11,8 @@
 use std::collections::HashSet;
 use std::fs;
 use std::io;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use log::{info, warn};
@@ -424,9 +426,18 @@ pub fn clean_game_directory(
             if let Ok(metadata) = fs::metadata(&abs_path) {
                 let perms = metadata.permissions();
                 if perms.readonly() {
-                    let mut writable = perms;
-                    writable.set_readonly(false);
-                    let _ = fs::set_permissions(&abs_path, writable);
+                    #[cfg(unix)]
+                    {
+                        let mut writable = perms;
+                        writable.set_mode(0o644);
+                        let _ = fs::set_permissions(&abs_path, writable);
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        let mut writable = perms;
+                        writable.set_readonly(false);
+                        let _ = fs::set_permissions(&abs_path, writable);
+                    }
                 }
             }
             // Also make parent directory writable — deletion requires write on parent
@@ -434,9 +445,18 @@ pub fn clean_game_directory(
                 if let Ok(dir_meta) = fs::metadata(parent) {
                     let dir_perms = dir_meta.permissions();
                     if dir_perms.readonly() {
-                        let mut writable = dir_perms;
-                        writable.set_readonly(false);
-                        let _ = fs::set_permissions(parent, writable);
+                        #[cfg(unix)]
+                        {
+                            let mut writable = dir_perms;
+                            writable.set_mode(0o755);
+                            let _ = fs::set_permissions(parent, writable);
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            let mut writable = dir_perms;
+                            writable.set_readonly(false);
+                            let _ = fs::set_permissions(parent, writable);
+                        }
                     }
                 }
             }

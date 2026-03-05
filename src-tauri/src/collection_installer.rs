@@ -1001,17 +1001,17 @@ pub async fn install_collection(
         );
         let is_already = existing_mods.iter().any(|m| {
             if let Some(nexus_id) = entry.source.mod_id {
-                if m.nexus_mod_id == Some(nexus_id) {
-                    if entry.source.file_id.is_none() || m.nexus_file_id == entry.source.file_id {
-                        log::info!(
-                            "[pre-dl] '{}' matched existing mod '{}' by mod_id={} file_id={:?}",
-                            entry.name,
-                            m.name,
-                            nexus_id,
-                            m.nexus_file_id
-                        );
-                        return true;
-                    }
+                if m.nexus_mod_id == Some(nexus_id)
+                    && (entry.source.file_id.is_none() || m.nexus_file_id == entry.source.file_id)
+                {
+                    log::info!(
+                        "[pre-dl] '{}' matched existing mod '{}' by mod_id={} file_id={:?}",
+                        entry.name,
+                        m.name,
+                        nexus_id,
+                        m.nexus_file_id
+                    );
+                    return true;
                 }
             }
             if let Some(file_id) = entry.source.file_id {
@@ -1026,15 +1026,16 @@ pub async fn install_collection(
                 }
             }
             // Only fall back to name matching when there are no Nexus identifiers
-            if entry.source.mod_id.is_none() && entry.source.file_id.is_none() {
-                if m.name.eq_ignore_ascii_case(&entry.name) {
-                    log::info!(
-                        "[pre-dl] '{}' matched existing mod '{}' by name (no nexus IDs)",
-                        entry.name,
-                        m.name
-                    );
-                    return true;
-                }
+            if entry.source.mod_id.is_none()
+                && entry.source.file_id.is_none()
+                && m.name.eq_ignore_ascii_case(&entry.name)
+            {
+                log::info!(
+                    "[pre-dl] '{}' matched existing mod '{}' by name (no nexus IDs)",
+                    entry.name,
+                    m.name
+                );
+                return true;
             }
             false
         });
@@ -1114,12 +1115,11 @@ pub async fn install_collection(
                 let entry = &manifest.mods[mod_idx];
                 !current_mods_snapshot.iter().any(|m| {
                     if let Some(nexus_id) = entry.source.mod_id {
-                        if m.nexus_mod_id == Some(nexus_id) {
-                            if entry.source.file_id.is_none()
-                                || m.nexus_file_id == entry.source.file_id
-                            {
-                                return true;
-                            }
+                        if m.nexus_mod_id == Some(nexus_id)
+                            && (entry.source.file_id.is_none()
+                                || m.nexus_file_id == entry.source.file_id)
+                        {
+                            return true;
                         }
                     }
                     if let Some(file_id) = entry.source.file_id {
@@ -2029,19 +2029,18 @@ pub async fn install_collection(
         );
         let is_already = current_mods.iter().any(|m| {
             if let Some(nexus_id) = mod_entry.source.mod_id {
-                if m.nexus_mod_id == Some(nexus_id) {
-                    if mod_entry.source.file_id.is_none()
-                        || m.nexus_file_id == mod_entry.source.file_id
-                    {
-                        log::info!(
-                            "[checkpoint] '{}' matched existing '{}' by mod_id={} file_id={:?}",
-                            mod_name,
-                            m.name,
-                            nexus_id,
-                            m.nexus_file_id
-                        );
-                        return true;
-                    }
+                if m.nexus_mod_id == Some(nexus_id)
+                    && (mod_entry.source.file_id.is_none()
+                        || m.nexus_file_id == mod_entry.source.file_id)
+                {
+                    log::info!(
+                        "[checkpoint] '{}' matched existing '{}' by mod_id={} file_id={:?}",
+                        mod_name,
+                        m.name,
+                        nexus_id,
+                        m.nexus_file_id
+                    );
+                    return true;
                 }
             }
             if let Some(file_id) = mod_entry.source.file_id {
@@ -2061,12 +2060,11 @@ pub async fn install_collection(
             // that may not have been tagged).
             if let Some(existing) = current_mods.iter().find(|m| {
                 if let Some(nexus_id) = mod_entry.source.mod_id {
-                    if m.nexus_mod_id == Some(nexus_id) {
-                        if mod_entry.source.file_id.is_none()
-                            || m.nexus_file_id == mod_entry.source.file_id
-                        {
-                            return true;
-                        }
+                    if m.nexus_mod_id == Some(nexus_id)
+                        && (mod_entry.source.file_id.is_none()
+                            || m.nexus_file_id == mod_entry.source.file_id)
+                    {
+                        return true;
                     }
                 }
                 if let Some(file_id) = mod_entry.source.file_id {
@@ -2293,19 +2291,18 @@ pub async fn install_collection(
             );
             let is_already = current_mods.iter().any(|m| {
                 if let Some(nexus_id) = mod_entry.source.mod_id {
-                    if m.nexus_mod_id == Some(nexus_id) {
-                        if mod_entry.source.file_id.is_none()
-                            || m.nexus_file_id == mod_entry.source.file_id
-                        {
-                            log::info!(
-                                "[install] '{}' matched existing '{}' by mod_id={} file_id={:?}",
-                                mod_name,
-                                m.name,
-                                nexus_id,
-                                m.nexus_file_id
-                            );
-                            return true;
-                        }
+                    if m.nexus_mod_id == Some(nexus_id)
+                        && (mod_entry.source.file_id.is_none()
+                            || m.nexus_file_id == mod_entry.source.file_id)
+                    {
+                        log::info!(
+                            "[install] '{}' matched existing '{}' by mod_id={} file_id={:?}",
+                            mod_name,
+                            m.name,
+                            nexus_id,
+                            m.nexus_file_id
+                        );
+                        return true;
                     }
                 }
                 if let Some(file_id) = mod_entry.source.file_id {
@@ -2319,15 +2316,16 @@ pub async fn install_collection(
                         return true;
                     }
                 }
-                if mod_entry.source.mod_id.is_none() && mod_entry.source.file_id.is_none() {
-                    if m.name.eq_ignore_ascii_case(mod_name) {
-                        log::info!(
-                            "[install] '{}' matched existing '{}' by name (no nexus IDs)",
-                            mod_name,
-                            m.name
-                        );
-                        return true;
-                    }
+                if mod_entry.source.mod_id.is_none()
+                    && mod_entry.source.file_id.is_none()
+                    && m.name.eq_ignore_ascii_case(mod_name)
+                {
+                    log::info!(
+                        "[install] '{}' matched existing '{}' by name (no nexus IDs)",
+                        mod_name,
+                        m.name
+                    );
+                    return true;
                 }
                 false
             });
@@ -2336,12 +2334,11 @@ pub async fn install_collection(
                 log::info!("[install] SKIPPING '{}' — already installed", mod_name);
                 if let Some(existing) = current_mods.iter().find(|m| {
                     if let Some(nexus_id) = mod_entry.source.mod_id {
-                        if m.nexus_mod_id == Some(nexus_id) {
-                            if mod_entry.source.file_id.is_none()
-                                || m.nexus_file_id == mod_entry.source.file_id
-                            {
-                                return true;
-                            }
+                        if m.nexus_mod_id == Some(nexus_id)
+                            && (mod_entry.source.file_id.is_none()
+                                || m.nexus_file_id == mod_entry.source.file_id)
+                        {
+                            return true;
                         }
                     }
                     if let Some(file_id) = mod_entry.source.file_id {
@@ -2780,7 +2777,7 @@ pub async fn install_collection(
                     let dep_name = &manifest.mods[d].name;
                     let nexus_dep_id = manifest.mods[d].source.mod_id;
                     let _ = crate::mod_dependencies::add_dependency(
-                        &db,
+                        db,
                         game_id,
                         bottle_name,
                         src_id,
@@ -4171,10 +4168,7 @@ fn parse_fomod_choices(choices: &serde_json::Value) -> Option<HashMap<String, Ve
 
     // Check for NexusMods nested format: { "type": "fomod", "options": [...] }
     if obj.get("type").and_then(|v| v.as_str()) == Some("fomod") {
-        let options = match obj.get("options").and_then(|v| v.as_array()) {
-            Some(arr) => arr,
-            None => return None,
-        };
+        let options = obj.get("options").and_then(|v| v.as_array())?;
         let mut result = HashMap::new();
 
         for step in options {

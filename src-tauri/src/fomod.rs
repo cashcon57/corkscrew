@@ -105,22 +105,22 @@ impl ConditionBlock {
         let check_flag = |dep: &FlagDependency| ctx.flags.get(&dep.flag) == Some(&dep.value);
         let check_game = |dep: &GameDependency| {
             ctx.game_version
-                .map_or(true, |v| version_gte(v, &dep.version))
+                .is_none_or(|v| version_gte(v, &dep.version))
         };
         let check_file = |dep: &FileDependency| evaluate_file_dependency(dep, ctx.data_dir);
 
         match self.operator.as_str() {
             "Or" => {
-                self.flags.iter().any(|d| check_flag(d))
-                    || self.game_dependencies.iter().any(|d| check_game(d))
-                    || self.file_dependencies.iter().any(|d| check_file(d))
+                self.flags.iter().any(&check_flag)
+                    || self.game_dependencies.iter().any(&check_game)
+                    || self.file_dependencies.iter().any(&check_file)
                     || self.children.iter().any(|c| c.evaluate(ctx))
             }
             // Default to And
             _ => {
-                self.flags.iter().all(|d| check_flag(d))
-                    && self.game_dependencies.iter().all(|d| check_game(d))
-                    && self.file_dependencies.iter().all(|d| check_file(d))
+                self.flags.iter().all(check_flag)
+                    && self.game_dependencies.iter().all(check_game)
+                    && self.file_dependencies.iter().all(check_file)
                     && self.children.iter().all(|c| c.evaluate(ctx))
             }
         }

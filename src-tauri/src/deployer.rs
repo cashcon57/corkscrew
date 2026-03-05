@@ -31,10 +31,10 @@ use crate::platform;
 /// This is a fast path that doesn't require a baseline lookup.
 fn is_protected_extension(rel_path: &str) -> bool {
     let lower = rel_path.to_lowercase();
-    if !lower.contains('/') {
-        if lower.ends_with(".esm") || lower.ends_with(".bsa") || lower.ends_with(".ba2") {
-            return true;
-        }
+    if !lower.contains('/')
+        && (lower.ends_with(".esm") || lower.ends_with(".bsa") || lower.ends_with(".ba2"))
+    {
+        return true;
     }
     false
 }
@@ -182,6 +182,7 @@ pub fn deploy_mod(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn deploy_mod_inner(
     db: &ModDatabase,
     game_id: &str,
@@ -356,8 +357,8 @@ fn deploy_mod_inner(
             let done = deployed_count.fetch_add(1, Ordering::Relaxed) + 1;
             if let Some(cb) = &progress {
                 let total = files.len() as u64;
-                let interval = (total / 50).max(10).min(100);
-                if done as u64 % interval == 0 || done as u64 == total {
+                let interval = (total / 50).clamp(10, 100);
+                if (done as u64).is_multiple_of(interval) || done as u64 == total {
                     cb(done as u64, total);
                 }
             }
@@ -436,6 +437,7 @@ fn deploy_mod_inner(
 /// Deploy a mod atomically: if deployment fails partway through, roll back
 /// any partially deployed files so the game directory is not left in a
 /// broken state.
+#[allow(clippy::too_many_arguments)]
 pub fn deploy_mod_atomic(
     db: &ModDatabase,
     game_id: &str,
@@ -468,6 +470,7 @@ pub fn deploy_mod_atomic(
 }
 
 /// Like [`deploy_mod_atomic`] but reports per-file progress via a callback.
+#[allow(clippy::too_many_arguments)]
 pub fn deploy_mod_atomic_with_progress(
     db: &ModDatabase,
     game_id: &str,
@@ -548,6 +551,7 @@ pub fn undeploy_mod(
                 let perms = metadata.permissions();
                 if perms.readonly() {
                     let mut writable = perms;
+                    #[allow(clippy::permissions_set_readonly_false)]
                     writable.set_readonly(false);
                     let _ = fs::set_permissions(&file_path, writable);
                 }

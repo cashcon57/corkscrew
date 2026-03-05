@@ -150,6 +150,7 @@ impl DirectiveProcessor {
     /// Phase 1 directives write to unique output paths, so they can safely
     /// run in parallel. Phases 2 and 3 depend on Phase 1 outputs and MUST
     /// remain sequential.
+    #[allow(clippy::type_complexity)]
     pub fn process_all(
         &self,
         directives: &[WjDirective],

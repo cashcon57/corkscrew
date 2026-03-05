@@ -2505,6 +2505,7 @@ async fn delete_collection_cmd(
                         let perms = metadata.permissions();
                         if perms.readonly() {
                             let mut writable = perms;
+                            #[allow(clippy::permissions_set_readonly_false)]
                             writable.set_readonly(false);
                             let _ = std::fs::set_permissions(&file_path, writable);
                         }
@@ -2512,7 +2513,7 @@ async fn delete_collection_cmd(
                     let _ = std::fs::remove_file(&file_path);
                 }
                 let done = removed_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                if done % 5000 == 0 || done == path_total {
+                if done.is_multiple_of(5000) || done == path_total {
                     let _ = app.emit(
                         "uninstall-progress",
                         serde_json::json!({
@@ -2552,7 +2553,7 @@ async fn delete_collection_cmd(
             }
             // Sort deepest-first so child dirs are removed before parents
             let mut sorted: Vec<_> = parent_dirs.into_iter().collect();
-            sorted.sort_by(|a, b| b.components().count().cmp(&a.components().count()));
+            sorted.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
             for dir in sorted {
                 if dir.exists() {
                     let is_empty = std::fs::read_dir(&dir)
@@ -5848,8 +5849,8 @@ fn cli_list_mods(game_id: &str, bottle_name: &str, db: &Arc<ModDatabase>) {
         bottle_name
     );
     println!(
-        "{:<8} {:<50} {:<10} {:<10} {}",
-        "ID", "Name", "Enabled", "Files", "Staging"
+        "{:<8} {:<50} {:<10} {:<10} Staging",
+        "ID", "Name", "Enabled", "Files"
     );
     println!("{}", "-".repeat(120));
     for m in &mods {
@@ -6002,7 +6003,7 @@ fn cli_find_file(pattern: &str, game_id: &str, bottle_name: &str, db: &Arc<ModDa
                             .iter()
                             .any(|f| f.to_lowercase().contains(&pat))
                         {
-                            if found == 0 || true {
+                            if found == 0 {
                                 println!("  [mod {}] id={} (staged, not deployed)", m.name, m.id);
                             }
                             println!("    staging/{}", rel.display());

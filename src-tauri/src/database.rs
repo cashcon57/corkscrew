@@ -1688,9 +1688,11 @@ impl ModDatabase {
 
             let cat = if lower.contains("skse/plugins/") || lower.contains("skse\\plugins\\") {
                 "Framework"
-            } else if lower.contains("enbseries") || lower.starts_with("d3d") {
-                "Lighting & Weather"
-            } else if lower.contains("shaderfx") || lower.contains("reshade") {
+            } else if lower.contains("enbseries")
+                || lower.starts_with("d3d")
+                || lower.contains("shaderfx")
+                || lower.contains("reshade")
+            {
                 "Lighting & Weather"
             } else if lower.contains("textures/")
                 || lower.contains("textures\\")

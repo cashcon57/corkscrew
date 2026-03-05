@@ -1769,8 +1769,7 @@ pub fn list_disabled_wine_plugins(data_dir: &Path) -> Vec<(String, String)> {
     let mut result = Vec::new();
 
     for &(dll_name, reason) in WINE_INCOMPATIBLE_PLUGINS {
-        let disabled_path =
-            plugins_dir.join(format!("{}", dll_name.replace(".dll", ".dll.disabled")));
+        let disabled_path = plugins_dir.join(dll_name.replace(".dll", ".dll.disabled"));
         if disabled_path.exists() {
             result.push((dll_name.to_string(), reason.to_string()));
         }
@@ -1878,9 +1877,10 @@ const WINE_DISABLE_KEYS: &[&str] = &[
 ];
 
 /// Patch a single EngineFixes.toml for Wine compatibility:
-/// - Set all boolean [Fixes]/[Patches]/[MemoryManager]/[Warnings] keys to false
-/// - Set bDisableTBB = true in [Debug] (force CRT allocator instead of TBB)
-/// Returns Ok(true) if the file was modified, Ok(false) if already correct.
+///   - Set all boolean `[Fixes]`/`[Patches]`/`[MemoryManager]`/`[Warnings]` keys to false
+///   - Set `bDisableTBB = true` in `[Debug]` (force CRT allocator instead of TBB)
+///
+/// Returns `Ok(true)` if the file was modified, `Ok(false)` if already correct.
 fn patch_engine_fixes_toml(path: &Path) -> std::result::Result<bool, String> {
     let content =
         std::fs::read_to_string(path).map_err(|e| format!("read {}: {}", path.display(), e))?;

@@ -122,6 +122,7 @@ fn detect_macos_resolution(bottle: &Bottle) -> Result<(u32, u32), String> {
 ///
 /// On non-Retina displays these are the same value.
 #[cfg(target_os = "macos")]
+#[allow(clippy::type_complexity)]
 fn detect_macos_resolutions() -> Result<((u32, u32), (u32, u32)), String> {
     let output = Command::new("system_profiler")
         .args(["SPDisplaysDataType", "-json"])

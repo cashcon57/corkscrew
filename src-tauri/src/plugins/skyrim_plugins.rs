@@ -390,10 +390,9 @@ pub fn sync_plugins(
         }
 
         // ESM and ESL files are always loaded by the engine — force them enabled.
-        let is_master = key.ends_with(".esm") || key.ends_with(".esl");
         result.push(PluginEntry {
             filename: plugin_name.clone(),
-            enabled: if is_master { true } else { true }, // new plugins default enabled
+            enabled: true, // new plugins default enabled
         });
         added.insert(key);
     }

@@ -135,10 +135,11 @@ const MOD_FOLDER_NAMES: &[&str] = &[
 /// exist.  Returns the list of files that were extracted (absolute paths).
 ///
 /// Supported formats (matched by file extension):
-/// - `.zip`
-/// - `.7z`
+///   - `.zip`
+///   - `.7z`
+///
 /// Detect archive format from magic bytes (first 8 bytes of file).
-/// Returns "zip", "7z", "rar", or None if unrecognized.
+/// Returns `"zip"`, `"7z"`, `"rar"`, or `None` if unrecognized.
 pub(crate) fn detect_format_from_magic(path: &Path) -> Option<&'static str> {
     let mut buf = [0u8; 8];
     let mut file = std::fs::File::open(path).ok()?;
@@ -571,8 +572,8 @@ fn extract_zip_with_progress(
 
                     let done = files_done.fetch_add(1, Ordering::Relaxed) + 1;
                     // Throttle progress callbacks — emit every ~2% or every 10 files
-                    let interval = (total_files / 50).max(10).min(100);
-                    if done % interval == 0 || done == total_files {
+                    let interval = (total_files / 50).clamp(10, 100);
+                    if done.is_multiple_of(interval) || done == total_files {
                         progress(done, total_files);
                     }
 
