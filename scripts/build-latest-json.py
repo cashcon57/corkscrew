@@ -3,16 +3,15 @@
 
 Usage: python3 scripts/build-latest-json.py artifacts/ > latest.json
 
-Hybrid release: macOS built locally (release.sh), Linux built in CI.
-Expects artifact directories with this layout:
+All platforms built in CI. Expects artifact directories with this layout:
   artifacts/
-    macos-aarch64-apple-darwin/       (downloaded from draft GH release)
+    macos-aarch64-apple-darwin/
       Corkscrew_aarch64.app.tar.gz
       Corkscrew_aarch64.app.tar.gz.sig
-    macos-x86_64-apple-darwin/        (downloaded from draft GH release)
+    macos-x86_64-apple-darwin/
       Corkscrew_x86_64.app.tar.gz
       Corkscrew_x86_64.app.tar.gz.sig
-    linux-x86_64-unknown-linux-gnu/   (from CI build artifacts)
+    linux-x86_64-unknown-linux-gnu/
       Corkscrew-VERSION-Linux.AppImage.tar.gz + .sig  (or .AppImage + .sig)
 """
 

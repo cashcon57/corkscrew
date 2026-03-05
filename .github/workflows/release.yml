@@ -67,44 +67,76 @@ jobs:
           name: linux-x86_64-unknown-linux-gnu
           path: flat-artifacts/
 
+  build-macos:
+    name: Build macOS (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - arch: aarch64
+            target: aarch64-apple-darwin
+            runner: macos-14
+          - arch: x86_64
+            target: x86_64-apple-darwin
+            runner: macos-13
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version 2.10.0 --locked
+
+      - name: Build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: cargo tauri build --target ${{ matrix.target }}
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p flat-artifacts
+          BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle"
+          cp "$BUNDLE_DIR/macos/"*.app.tar.gz flat-artifacts/Corkscrew_${{ matrix.arch }}.app.tar.gz 2>/dev/null || true
+          cp "$BUNDLE_DIR/macos/"*.app.tar.gz.sig flat-artifacts/Corkscrew_${{ matrix.arch }}.app.tar.gz.sig 2>/dev/null || true
+          cp "$BUNDLE_DIR/dmg/"*.dmg flat-artifacts/ 2>/dev/null || true
+          echo "Collected artifacts:"
+          ls -lh flat-artifacts/
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.target }}
+          path: flat-artifacts/
+
   release:
     name: Publish Release
-    needs: build-linux
+    needs: [build-linux, build-macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download Linux CI artifacts
+      - name: Download all CI artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-
-      - name: Download macOS artifacts from release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          TAG=${GITHUB_REF#refs/tags/}
-          mkdir -p artifacts/macos-aarch64-apple-darwin artifacts/macos-x86_64-apple-darwin
-
-          echo "Downloading macOS updater artifacts from release $TAG..."
-
-          gh release download "$TAG" \
-            -p "Corkscrew_aarch64.app.tar.gz" \
-            -p "Corkscrew_aarch64.app.tar.gz.sig" \
-            -D artifacts/macos-aarch64-apple-darwin 2>/dev/null \
-            && echo "  ✓ macOS aarch64 updater artifacts downloaded" \
-            || echo "  ⚠ macOS aarch64 updater artifacts not found (release will be Linux-only)"
-
-          gh release download "$TAG" \
-            -p "Corkscrew_x86_64.app.tar.gz" \
-            -p "Corkscrew_x86_64.app.tar.gz.sig" \
-            -D artifacts/macos-x86_64-apple-darwin 2>/dev/null \
-            && echo "  ✓ macOS x86_64 updater artifacts downloaded" \
-            || echo "  ⚠ macOS x86_64 updater artifacts not found (release will be Linux-only)"
-
-          echo ""
-          echo "Artifact directories:"
-          ls -lhR artifacts/ 2>/dev/null || true
 
       - name: Rename Linux artifacts to friendly names
         run: |
@@ -124,19 +156,26 @@ jobs:
           done
           cd -
 
+      - name: Rename macOS DMGs to friendly names
+        run: |
+          VERSION=$(jq -r .version src-tauri/tauri.conf.json)
+          for dir in artifacts/macos-*; do
+            [ -d "$dir" ] || continue
+            for f in "$dir"/*.dmg; do
+              [ -f "$f" ] || continue
+              arch=$(basename "$dir" | sed 's/macos-\(.*\)-apple-darwin/\1/')
+              if [ "$arch" = "aarch64" ]; then
+                mv "$f" "$dir/Corkscrew-${VERSION}-macOS-Apple-Silicon.dmg"
+              elif [ "$arch" = "x86_64" ]; then
+                mv "$f" "$dir/Corkscrew-${VERSION}-macOS-Intel.dmg"
+              fi
+            done
+          done
+
       - name: Build latest.json for updater (all platforms)
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/build-latest-json.py artifacts/ > latest.json
-
-      - name: Remove macOS-only latest.json from release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          TAG=${GITHUB_REF#refs/tags/}
-          gh release delete-asset "$TAG" latest.json --repo "${{ github.repository }}" -y 2>/dev/null \
-            && echo "Replaced macOS-only latest.json" \
-            || echo "No existing latest.json to remove"
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
@@ -144,4 +183,6 @@ jobs:
           draft: false
           files: |
             artifacts/linux-x86_64-unknown-linux-gnu/*
+            artifacts/macos-aarch64-apple-darwin/*
+            artifacts/macos-x86_64-apple-darwin/*
             latest.json
