@@ -370,20 +370,30 @@ pub fn list_cached_versions(game_id: &str) -> Vec<CachedVersion> {
 /// Swap the game executable to a specific cached version.
 ///
 /// Copies the cached exe over the current game exe.
-pub fn swap_to_version(game_path: &Path, game_id: &str, target_version: &str) -> Result<DowngradeStatus> {
+pub fn swap_to_version(
+    game_path: &Path,
+    game_id: &str,
+    target_version: &str,
+) -> Result<DowngradeStatus> {
     // Find the cached version
     let cached = list_cached_versions(game_id);
-    let target = cached.iter().find(|c| c.version == target_version)
-        .ok_or_else(|| DowngraderError::Other(
-            format!("Version {} is not cached. Download it first.", target_version)
-        ))?;
+    let target = cached
+        .iter()
+        .find(|c| c.version == target_version)
+        .ok_or_else(|| {
+            DowngraderError::Other(format!(
+                "Version {} is not cached. Download it first.",
+                target_version
+            ))
+        })?;
 
     let exe_path = find_skyrim_exe(game_path)?;
     let cached_exe = Path::new(&target.exe_path);
 
     if !cached_exe.exists() {
         return Err(DowngraderError::Other(format!(
-            "Cached exe not found at: {}", target.exe_path
+            "Cached exe not found at: {}",
+            target.exe_path
         )));
     }
 
@@ -402,7 +412,8 @@ pub fn swap_to_version(game_path: &Path, game_id: &str, target_version: &str) ->
 pub fn import_depot_exe(depot_exe_path: &Path, game_id: &str) -> Result<CachedVersion> {
     if !depot_exe_path.exists() {
         return Err(DowngraderError::Other(format!(
-            "Depot exe not found at: {}", depot_exe_path.display()
+            "Depot exe not found at: {}",
+            depot_exe_path.display()
         )));
     }
 
@@ -431,7 +442,11 @@ pub fn import_depot_exe(depot_exe_path: &Path, game_id: &str) -> Result<CachedVe
         cached_at: now,
     };
 
-    info!("Imported depot exe as version {} at {}", version, dest.display());
+    info!(
+        "Imported depot exe as version {} at {}",
+        version,
+        dest.display()
+    );
     Ok(cached)
 }
 
@@ -497,26 +512,32 @@ pub fn check_depot_downloaded(steam_dir: &Path, app_id: u32, depot_id: u32) -> O
 pub fn get_depot_download_info(game_id: &str, bottle_path: &Path) -> Result<DepotDownloadInfo> {
     if game_id != "skyrimse" {
         return Err(DowngraderError::Other(
-            "Depot download is only supported for Skyrim SE".to_string()
+            "Depot download is only supported for Skyrim SE".to_string(),
         ));
     }
 
-    let steam_dir = find_steam_dir(bottle_path)
-        .ok_or_else(|| DowngraderError::Other(
-            "Steam directory not found in the bottle".to_string()
-        ))?;
+    let steam_dir = find_steam_dir(bottle_path).ok_or_else(|| {
+        DowngraderError::Other("Steam directory not found in the bottle".to_string())
+    })?;
 
     let expected_path = get_depot_download_path(&steam_dir, SKYRIM_APP_ID, SKYRIM_DEPOT_ID);
 
     Ok(DepotDownloadInfo {
-        command: format!("download_depot {} {} {}", SKYRIM_APP_ID, SKYRIM_DEPOT_ID, SKYRIM_SE_MANIFEST),
+        command: format!(
+            "download_depot {} {} {}",
+            SKYRIM_APP_ID, SKYRIM_DEPOT_ID, SKYRIM_SE_MANIFEST
+        ),
         steam_uri: "steam://open/console".to_string(),
         expected_path: expected_path.to_string_lossy().into_owned(),
     })
 }
 
 /// Full downgrade flow: cache current AE exe → import depot SE exe → swap.
-pub fn apply_depot_downgrade(game_path: &Path, depot_exe: &Path, game_id: &str) -> Result<DowngradeStatus> {
+pub fn apply_depot_downgrade(
+    game_path: &Path,
+    depot_exe: &Path,
+    game_id: &str,
+) -> Result<DowngradeStatus> {
     // Step 1: Cache current version before overwriting
     info!("Caching current game version before downgrade...");
     match cache_current_version(game_path, game_id) {

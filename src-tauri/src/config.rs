@@ -188,7 +188,9 @@ fn save_config_inner(config: &AppConfig) -> Result<()> {
         let _old_umask = unsafe { libc::umask(0o077) };
         let dir_result = fs::create_dir_all(parent);
         #[cfg(unix)]
-        unsafe { libc::umask(_old_umask); }
+        unsafe {
+            libc::umask(_old_umask);
+        }
         dir_result?;
     }
 

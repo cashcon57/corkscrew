@@ -609,7 +609,9 @@ mod tests {
 
     #[test]
     fn is_masterlist_fresh_missing_file() {
-        assert!(!is_masterlist_fresh(Path::new("/nonexistent/masterlist.yaml")));
+        assert!(!is_masterlist_fresh(Path::new(
+            "/nonexistent/masterlist.yaml"
+        )));
     }
 
     #[test]

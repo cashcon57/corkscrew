@@ -142,8 +142,7 @@ pub fn run_background_hashing(
         }
 
         // Resolve staging path
-        let staging_path =
-            staging::mod_staging_dir(game_id, bottle_name, m.id, &m.name);
+        let staging_path = staging::mod_staging_dir(game_id, bottle_name, m.id, &m.name);
         if !staging_path.exists() {
             continue; // Staging dir gone, skip
         }

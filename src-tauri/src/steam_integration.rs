@@ -65,7 +65,9 @@ pub fn detect_steam_installation() -> Option<SteamInfo> {
             }
 
             if is_flatpak() {
-                log::warn!("Running under Flatpak \u{2014} Steam paths may require portal permissions");
+                log::warn!(
+                    "Running under Flatpak \u{2014} Steam paths may require portal permissions"
+                );
             }
 
             return Some(SteamInfo {
@@ -130,8 +132,9 @@ pub fn steam_deck_warnings() -> Vec<String> {
         );
     }
     // General guidance for Steam Deck users
-    warnings
-        .push("Steam Deck detected: ensure download and staging directories are under /home/deck/".into());
+    warnings.push(
+        "Steam Deck detected: ensure download and staging directories are under /home/deck/".into(),
+    );
     warnings
 }
 

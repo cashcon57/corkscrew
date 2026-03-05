@@ -183,10 +183,10 @@ fn resolve_wine_binary(bottle: &Bottle) -> Result<WineCommand> {
             if bottle.name.is_empty()
                 || bottle.name.len() > 255
                 || bottle.name.starts_with('-')
-                || !bottle.name.chars().all(|c| {
-                    c.is_alphanumeric()
-                        || " :-_().,'!+#@".contains(c)
-                })
+                || !bottle
+                    .name
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || " :-_().,'!+#@".contains(c))
             {
                 return Err(LauncherError::Other(format!(
                     "Invalid bottle name: {}",
@@ -338,8 +338,8 @@ fn find_proton_wine(bottle: &Bottle) -> Option<PathBuf> {
 
     // Also check Flatpak Steam Proton path.
     if let Some(home) = dirs::home_dir() {
-        let flatpak_common = home
-            .join(".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common");
+        let flatpak_common =
+            home.join(".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common");
         if flatpak_common.is_dir() && !common_dirs.contains(&flatpak_common) {
             common_dirs.push(flatpak_common);
         }

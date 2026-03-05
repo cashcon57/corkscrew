@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use once_cell::sync::Lazy;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
 use std::collections::HashSet;
+use tauri::{AppHandle, Emitter};
 use tokio::sync::oneshot;
 use tokio::sync::{Notify, Semaphore};
 
@@ -57,11 +57,11 @@ fn drain_fomod_pending() {
 use crate::bottles;
 use crate::collections::{self, CollectionManifest, CollectionModEntry};
 use crate::config;
-use crate::database::{self, ModDatabase};
 use crate::conflict_resolver;
+use crate::database::{self, ModDatabase};
 use crate::deployer;
-use crate::downgrader;
 use crate::disk_budget;
+use crate::downgrader;
 use crate::download_queue::{DownloadQueue, DOWNLOAD_QUEUE_EVENT};
 use crate::fomod;
 use crate::games;
@@ -178,9 +178,7 @@ const MAX_EXTRACTION_RETRIES: u32 = 2;
 /// Quick-check that an archive file has valid headers before extraction.
 fn validate_archive(path: &Path) -> Result<(), String> {
     // Quick size check — files under 100 bytes are likely error pages, not archives
-    let file_len = std::fs::metadata(path)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let file_len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     if file_len > 0 && file_len < 100 {
         let content = std::fs::read_to_string(path).unwrap_or_default();
         return Err(format!(
@@ -197,8 +195,8 @@ fn validate_archive(path: &Path) -> Result<(), String> {
         .to_lowercase();
     match ext.as_str() {
         "zip" | "fomod" => {
-            let file = std::fs::File::open(path)
-                .map_err(|e| format!("Cannot open archive: {}", e))?;
+            let file =
+                std::fs::File::open(path).map_err(|e| format!("Cannot open archive: {}", e))?;
             match zip::ZipArchive::new(file) {
                 Ok(_) => Ok(()),
                 Err(e) => {
@@ -218,8 +216,8 @@ fn validate_archive(path: &Path) -> Result<(), String> {
         }
         "7z" => {
             // Just verify the file is readable and non-empty.
-            let meta = std::fs::metadata(path)
-                .map_err(|e| format!("Cannot read archive: {}", e))?;
+            let meta =
+                std::fs::metadata(path).map_err(|e| format!("Cannot read archive: {}", e))?;
             if meta.len() == 0 {
                 return Err("Archive is empty (0 bytes)".into());
             }
@@ -338,7 +336,10 @@ async fn download_mod_archive(
 
         match result {
             Ok(dl) => return Ok(dl),
-            Err(ref e) if is_transient_collection_error(e) && attempt + 1 < COLLECTION_DOWNLOAD_RETRIES => {
+            Err(ref e)
+                if is_transient_collection_error(e)
+                    && attempt + 1 < COLLECTION_DOWNLOAD_RETRIES =>
+            {
                 log::warn!("Transient download error for '{}': {:?}", mod_entry.name, e);
                 last_err = Some(result.unwrap_err());
                 continue;
@@ -766,11 +767,9 @@ pub async fn install_collection(
             let client = NexusClient::new(key.clone());
             client.is_premium().await
         }
-        oauth::AuthMethod::OAuth(tokens) => {
-            oauth::parse_user_info(&tokens.access_token)
-                .map(|u| u.is_premium)
-                .unwrap_or(false)
-        }
+        oauth::AuthMethod::OAuth(tokens) => oauth::parse_user_info(&tokens.access_token)
+            .map(|u| u.is_premium)
+            .unwrap_or(false),
         oauth::AuthMethod::None => false,
     };
 
@@ -857,7 +856,9 @@ pub async fn install_collection(
         if let Ok(status) = downgrader::detect_skyrim_version(game_path) {
             let detected = &status.current_version;
             let matches = manifest.game_versions.iter().any(|v| {
-                v == detected || v.starts_with(&format!("{}.", detected)) || detected.starts_with(&format!("{}.", v))
+                v == detected
+                    || v.starts_with(&format!("{}.", detected))
+                    || detected.starts_with(&format!("{}.", v))
             });
             if !matches {
                 log::warn!(
@@ -1002,21 +1003,36 @@ pub async fn install_collection(
             if let Some(nexus_id) = entry.source.mod_id {
                 if m.nexus_mod_id == Some(nexus_id) {
                     if entry.source.file_id.is_none() || m.nexus_file_id == entry.source.file_id {
-                        log::info!("[pre-dl] '{}' matched existing mod '{}' by mod_id={} file_id={:?}", entry.name, m.name, nexus_id, m.nexus_file_id);
+                        log::info!(
+                            "[pre-dl] '{}' matched existing mod '{}' by mod_id={} file_id={:?}",
+                            entry.name,
+                            m.name,
+                            nexus_id,
+                            m.nexus_file_id
+                        );
                         return true;
                     }
                 }
             }
             if let Some(file_id) = entry.source.file_id {
                 if m.nexus_file_id == Some(file_id) {
-                    log::info!("[pre-dl] '{}' matched existing mod '{}' by file_id={}", entry.name, m.name, file_id);
+                    log::info!(
+                        "[pre-dl] '{}' matched existing mod '{}' by file_id={}",
+                        entry.name,
+                        m.name,
+                        file_id
+                    );
                     return true;
                 }
             }
             // Only fall back to name matching when there are no Nexus identifiers
             if entry.source.mod_id.is_none() && entry.source.file_id.is_none() {
                 if m.name.eq_ignore_ascii_case(&entry.name) {
-                    log::info!("[pre-dl] '{}' matched existing mod '{}' by name (no nexus IDs)", entry.name, m.name);
+                    log::info!(
+                        "[pre-dl] '{}' matched existing mod '{}' by name (no nexus IDs)",
+                        entry.name,
+                        m.name
+                    );
                     return true;
                 }
             }
@@ -1099,13 +1115,17 @@ pub async fn install_collection(
                 !current_mods_snapshot.iter().any(|m| {
                     if let Some(nexus_id) = entry.source.mod_id {
                         if m.nexus_mod_id == Some(nexus_id) {
-                            if entry.source.file_id.is_none() || m.nexus_file_id == entry.source.file_id {
+                            if entry.source.file_id.is_none()
+                                || m.nexus_file_id == entry.source.file_id
+                            {
                                 return true;
                             }
                         }
                     }
                     if let Some(file_id) = entry.source.file_id {
-                        if m.nexus_file_id == Some(file_id) { return true; }
+                        if m.nexus_file_id == Some(file_id) {
+                            return true;
+                        }
                     }
                     if entry.source.mod_id.is_none() && entry.source.file_id.is_none() {
                         return m.name.eq_ignore_ascii_case(&entry.name);
@@ -1172,9 +1192,15 @@ pub async fn install_collection(
 
             if is_cancelled() {
                 // Mark extraction done so install loop doesn't hang
-                done_c.lock().unwrap_or_else(|e| e.into_inner()).insert(order_pos);
+                done_c
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(order_pos);
                 notify_c.notify_waiters();
-                return (order_pos, Err(InstallError::Failed("Cancelled".to_string())));
+                return (
+                    order_pos,
+                    Err(InstallError::Failed("Cancelled".to_string())),
+                );
             }
 
             let _ = app_h.emit(
@@ -1224,7 +1250,10 @@ pub async fn install_collection(
                         },
                     );
                     // Download failed — mark extraction as done (no archive to extract)
-                    done_c.lock().unwrap_or_else(|e| e.into_inner()).insert(order_pos);
+                    done_c
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(order_pos);
                     notify_c.notify_waiters();
                     return (order_pos, result);
                 }
@@ -1237,7 +1266,10 @@ pub async fn install_collection(
                             error: action.clone(),
                         },
                     );
-                    done_c.lock().unwrap_or_else(|e| e.into_inner()).insert(order_pos);
+                    done_c
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(order_pos);
                     notify_c.notify_waiters();
                     return (order_pos, result);
                 }
@@ -1249,14 +1281,15 @@ pub async fn install_collection(
                 if needs_ext.contains(&order_pos) && !is_cancelled() {
                     let mut archive = dl.archive_path.clone();
                     // Use actual file size on disk (more accurate than manifest file_size)
-                    let arc_size = std::fs::metadata(&archive)
-                        .map(|m| m.len())
-                        .unwrap_or_else(|_| {
-                            manifest_mods_c
-                                .get(mod_idx)
-                                .and_then(|m| m.source.file_size)
-                                .unwrap_or(0)
-                        });
+                    let arc_size =
+                        std::fs::metadata(&archive)
+                            .map(|m| m.len())
+                            .unwrap_or_else(|_| {
+                                manifest_mods_c
+                                    .get(mod_idx)
+                                    .and_then(|m| m.source.file_size)
+                                    .unwrap_or(0)
+                            });
 
                     let _ = app_h.emit(
                         INSTALL_PROGRESS_EVENT,
@@ -1272,8 +1305,8 @@ pub async fn install_collection(
                     if !is_cancelled() {
                         let extract_start = std::time::Instant::now();
                         let estimated_total = arc_size.saturating_mul(3);
-                        let temp_dir = std::env::temp_dir()
-                            .join(format!("corkscrew_extract_{}", order_pos));
+                        let temp_dir =
+                            std::env::temp_dir().join(format!("corkscrew_extract_{}", order_pos));
 
                         // Spawn dir-size poller for progress tracking
                         let poller_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1357,7 +1390,10 @@ pub async fn install_collection(
                                         duration_ms,
                                     },
                                 );
-                                map_c.lock().unwrap_or_else(|e| e.into_inner()).insert(order_pos, dir);
+                                map_c
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .insert(order_pos, dir);
                                 None // no error
                             }
                             Ok(Ok(Err(e))) => Some(e),
@@ -1375,7 +1411,11 @@ pub async fn install_collection(
                                 for attempt in 1..=MAX_EXTRACTION_RETRIES {
                                     log::warn!(
                                         "Extraction failed for mod {} ({}): {} — retry {}/{}",
-                                        order_pos, mod_name, last_error, attempt, MAX_EXTRACTION_RETRIES
+                                        order_pos,
+                                        mod_name,
+                                        last_error,
+                                        attempt,
+                                        MAX_EXTRACTION_RETRIES
                                     );
                                     let _ = app_h.emit(
                                         INSTALL_PROGRESS_EVENT,
@@ -1415,10 +1455,19 @@ pub async fn install_collection(
                                         },
                                     );
                                     let dl_result = download_mod_archive(
-                                        &app_h, &db_c, &queue_c, &entry, order_pos,
-                                        &game_slug_c, &download_dir_c, &auth_method_c,
-                                        &manifest_name_c, &game_id_c, &bottle_name_c,
-                                    ).await;
+                                        &app_h,
+                                        &db_c,
+                                        &queue_c,
+                                        &entry,
+                                        order_pos,
+                                        &game_slug_c,
+                                        &download_dir_c,
+                                        &auth_method_c,
+                                        &manifest_name_c,
+                                        &game_id_c,
+                                        &bottle_name_c,
+                                    )
+                                    .await;
 
                                     match dl_result {
                                         Ok(dl2) => {
@@ -1433,23 +1482,27 @@ pub async fn install_collection(
                                                 "corkscrew_extract_{}_retry{}",
                                                 order_pos, attempt
                                             ));
-                                            let retry_result = tokio::task::spawn_blocking(
-                                                move || {
+                                            let retry_result =
+                                                tokio::task::spawn_blocking(move || {
                                                     if retry_temp.exists() {
-                                                        let _ = std::fs::remove_dir_all(&retry_temp);
+                                                        let _ =
+                                                            std::fs::remove_dir_all(&retry_temp);
                                                     }
                                                     let _ = std::fs::create_dir_all(&retry_temp);
                                                     match crate::installer::extract_archive(
-                                                        &retry_archive, &retry_temp,
+                                                        &retry_archive,
+                                                        &retry_temp,
                                                     ) {
                                                         Ok(_) => Ok(retry_temp),
                                                         Err(e2) => {
-                                                            let _ = std::fs::remove_dir_all(&retry_temp);
+                                                            let _ = std::fs::remove_dir_all(
+                                                                &retry_temp,
+                                                            );
                                                             Err(e2.to_string())
                                                         }
                                                     }
-                                                },
-                                            ).await;
+                                                })
+                                                .await;
 
                                             match retry_result {
                                                 Ok(Ok(dir)) => {
@@ -1457,22 +1510,33 @@ pub async fn install_collection(
                                                         "Retry extraction succeeded for mod {} on attempt {}",
                                                         order_pos, attempt
                                                     );
-                                                    let extracted_size: u64 = walkdir::WalkDir::new(&dir)
-                                                        .into_iter()
-                                                        .filter_map(|e| e.ok())
-                                                        .filter(|e| e.file_type().is_file())
-                                                        .map(|e| e.metadata().map(|m| m.len()).unwrap_or(0))
-                                                        .sum();
+                                                    let extracted_size: u64 =
+                                                        walkdir::WalkDir::new(&dir)
+                                                            .into_iter()
+                                                            .filter_map(|e| e.ok())
+                                                            .filter(|e| e.file_type().is_file())
+                                                            .map(|e| {
+                                                                e.metadata()
+                                                                    .map(|m| m.len())
+                                                                    .unwrap_or(0)
+                                                            })
+                                                            .sum();
                                                     let _ = app_h.emit(
                                                         INSTALL_PROGRESS_EVENT,
                                                         InstallProgress::StagingModCompleted {
                                                             mod_index: order_pos,
                                                             mod_name: mod_name.clone(),
                                                             extracted_size,
-                                                            duration_ms: extract_start.elapsed().as_millis() as u64,
+                                                            duration_ms: extract_start
+                                                                .elapsed()
+                                                                .as_millis()
+                                                                as u64,
                                                         },
                                                     );
-                                                    map_c.lock().unwrap_or_else(|e| e.into_inner()).insert(order_pos, dir);
+                                                    map_c
+                                                        .lock()
+                                                        .unwrap_or_else(|e| e.into_inner())
+                                                        .insert(order_pos, dir);
                                                     succeeded = true;
                                                     break;
                                                 }
@@ -1496,7 +1560,9 @@ pub async fn install_collection(
                                 if !succeeded {
                                     log::error!(
                                         "All extraction attempts exhausted for mod {} ({}): {}",
-                                        order_pos, mod_name, last_error
+                                        order_pos,
+                                        mod_name,
+                                        last_error
                                     );
                                     let _ = app_h.emit(
                                         INSTALL_PROGRESS_EVENT,
@@ -1505,7 +1571,8 @@ pub async fn install_collection(
                                             mod_name: mod_name.clone(),
                                             error: format!(
                                                 "Extraction failed after {} attempts: {}",
-                                                MAX_EXTRACTION_RETRIES + 1, last_error
+                                                MAX_EXTRACTION_RETRIES + 1,
+                                                last_error
                                             ),
                                         },
                                     );
@@ -1527,7 +1594,10 @@ pub async fn install_collection(
             }
 
             // Always mark extraction as done and wake install loop
-            done_c.lock().unwrap_or_else(|e| e.into_inner()).insert(order_pos);
+            done_c
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(order_pos);
             notify_c.notify_waiters();
 
             (order_pos, result)
@@ -1593,9 +1663,7 @@ pub async fn install_collection(
         );
         let _ = app.emit(
             INSTALL_PROGRESS_EVENT,
-            InstallProgress::DownloadRetryStarted {
-                count: retry_count,
-            },
+            InstallProgress::DownloadRetryStarted { count: retry_count },
         );
 
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
@@ -1661,8 +1729,8 @@ pub async fn install_collection(
                         );
 
                         let estimated_total = arc_size.saturating_mul(3);
-                        let temp_dir = std::env::temp_dir()
-                            .join(format!("corkscrew_extract_{}", order_pos));
+                        let temp_dir =
+                            std::env::temp_dir().join(format!("corkscrew_extract_{}", order_pos));
 
                         let poller_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
                         let poller_stop_c = poller_stop.clone();
@@ -1742,7 +1810,10 @@ pub async fn install_collection(
                                         duration_ms,
                                     },
                                 );
-                                extracted_map.lock().unwrap_or_else(|e| e.into_inner()).insert(order_pos, dir);
+                                extracted_map
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .insert(order_pos, dir);
                             }
                             Ok(Ok(Err(e))) => {
                                 log::warn!("Retry extraction failed for mod {}: {}", order_pos, e);
@@ -1756,7 +1827,11 @@ pub async fn install_collection(
                                 );
                             }
                             Ok(Err(e)) => {
-                                log::warn!("Retry extraction panicked for mod {}: {}", order_pos, e);
+                                log::warn!(
+                                    "Retry extraction panicked for mod {}: {}",
+                                    order_pos,
+                                    e
+                                );
                                 let _ = app.emit(
                                     INSTALL_PROGRESS_EVENT,
                                     InstallProgress::StagingModFailed {
@@ -1779,7 +1854,10 @@ pub async fn install_collection(
                             }
                         }
 
-                        extraction_done.lock().unwrap_or_else(|e| e.into_inner()).insert(order_pos);
+                        extraction_done
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(order_pos);
                         extraction_notify.notify_waiters();
                     }
                 }
@@ -1795,7 +1873,10 @@ pub async fn install_collection(
                         },
                     );
                     // Mark extraction done for failed retries so install loop doesn't hang
-                    extraction_done.lock().unwrap_or_else(|e| e.into_inner()).insert(order_pos);
+                    extraction_done
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(order_pos);
                     extraction_notify.notify_waiters();
                 }
             }
@@ -1850,7 +1931,11 @@ pub async fn install_collection(
     for (i, &mod_idx) in install_order.iter().enumerate() {
         // Check for cancellation at the top of each iteration
         if is_cancelled() {
-            log::info!("Collection install cancelled by user at mod {}/{}", i, total_mods);
+            log::info!(
+                "Collection install cancelled by user at mod {}/{}",
+                i,
+                total_mods
+            );
             let _ = app.emit(
                 INSTALL_PROGRESS_EVENT,
                 InstallProgress::CollectionCompleted {
@@ -1908,9 +1993,15 @@ pub async fn install_collection(
         // Skip mods still extracting — defer to pass 2 so we don't stall
         // the entire install pipeline waiting for a few slow archives.
         if needs_extraction_set.contains(&i) {
-            let is_done = extraction_done.lock().unwrap_or_else(|e| e.into_inner()).contains(&i);
+            let is_done = extraction_done
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(&i);
             if !is_done {
-                log::info!("Deferring install of '{}' — extraction not done yet", mod_name);
+                log::info!(
+                    "Deferring install of '{}' — extraction not done yet",
+                    mod_name
+                );
                 deferred.push((i, mod_idx));
                 continue;
             }
@@ -1939,8 +2030,16 @@ pub async fn install_collection(
         let is_already = current_mods.iter().any(|m| {
             if let Some(nexus_id) = mod_entry.source.mod_id {
                 if m.nexus_mod_id == Some(nexus_id) {
-                    if mod_entry.source.file_id.is_none() || m.nexus_file_id == mod_entry.source.file_id {
-                        log::info!("[checkpoint] '{}' matched existing '{}' by mod_id={} file_id={:?}", mod_name, m.name, nexus_id, m.nexus_file_id);
+                    if mod_entry.source.file_id.is_none()
+                        || m.nexus_file_id == mod_entry.source.file_id
+                    {
+                        log::info!(
+                            "[checkpoint] '{}' matched existing '{}' by mod_id={} file_id={:?}",
+                            mod_name,
+                            m.name,
+                            nexus_id,
+                            m.nexus_file_id
+                        );
                         return true;
                     }
                 }
@@ -1963,13 +2062,17 @@ pub async fn install_collection(
             if let Some(existing) = current_mods.iter().find(|m| {
                 if let Some(nexus_id) = mod_entry.source.mod_id {
                     if m.nexus_mod_id == Some(nexus_id) {
-                        if mod_entry.source.file_id.is_none() || m.nexus_file_id == mod_entry.source.file_id {
+                        if mod_entry.source.file_id.is_none()
+                            || m.nexus_file_id == mod_entry.source.file_id
+                        {
                             return true;
                         }
                     }
                 }
                 if let Some(file_id) = mod_entry.source.file_id {
-                    if m.nexus_file_id == Some(file_id) { return true; }
+                    if m.nexus_file_id == Some(file_id) {
+                        return true;
+                    }
                 }
                 if mod_entry.source.mod_id.is_none() && mod_entry.source.file_id.is_none() {
                     return m.name.eq_ignore_ascii_case(mod_name);
@@ -2009,9 +2112,16 @@ pub async fn install_collection(
         let pre_ext = if needs_extraction_set.contains(&i) {
             loop {
                 // Check if extraction is done (success or failure)
-                if extraction_done.lock().unwrap_or_else(|e| e.into_inner()).contains(&i) {
+                if extraction_done
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains(&i)
+                {
                     // Take the extracted dir if extraction succeeded
-                    let dir = extracted_map.lock().unwrap_or_else(|e| e.into_inner()).remove(&i);
+                    let dir = extracted_map
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&i);
                     if let Some(ref d) = dir {
                         temp_guard.track(d.clone());
                     }
@@ -2140,8 +2250,15 @@ pub async fn install_collection(
             // Wait for extraction to complete (it should be done by now, but be safe)
             let pre_ext = if needs_extraction_set.contains(&i) {
                 loop {
-                    if extraction_done.lock().unwrap_or_else(|e| e.into_inner()).contains(&i) {
-                        let dir = extracted_map.lock().unwrap_or_else(|e| e.into_inner()).remove(&i);
+                    if extraction_done
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .contains(&i)
+                    {
+                        let dir = extracted_map
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .remove(&i);
                         if let Some(ref d) = dir {
                             temp_guard.track(d.clone());
                         }
@@ -2177,21 +2294,38 @@ pub async fn install_collection(
             let is_already = current_mods.iter().any(|m| {
                 if let Some(nexus_id) = mod_entry.source.mod_id {
                     if m.nexus_mod_id == Some(nexus_id) {
-                        if mod_entry.source.file_id.is_none() || m.nexus_file_id == mod_entry.source.file_id {
-                            log::info!("[install] '{}' matched existing '{}' by mod_id={} file_id={:?}", mod_name, m.name, nexus_id, m.nexus_file_id);
+                        if mod_entry.source.file_id.is_none()
+                            || m.nexus_file_id == mod_entry.source.file_id
+                        {
+                            log::info!(
+                                "[install] '{}' matched existing '{}' by mod_id={} file_id={:?}",
+                                mod_name,
+                                m.name,
+                                nexus_id,
+                                m.nexus_file_id
+                            );
                             return true;
                         }
                     }
                 }
                 if let Some(file_id) = mod_entry.source.file_id {
                     if m.nexus_file_id == Some(file_id) {
-                        log::info!("[install] '{}' matched existing '{}' by file_id={}", mod_name, m.name, file_id);
+                        log::info!(
+                            "[install] '{}' matched existing '{}' by file_id={}",
+                            mod_name,
+                            m.name,
+                            file_id
+                        );
                         return true;
                     }
                 }
                 if mod_entry.source.mod_id.is_none() && mod_entry.source.file_id.is_none() {
                     if m.name.eq_ignore_ascii_case(mod_name) {
-                        log::info!("[install] '{}' matched existing '{}' by name (no nexus IDs)", mod_name, m.name);
+                        log::info!(
+                            "[install] '{}' matched existing '{}' by name (no nexus IDs)",
+                            mod_name,
+                            m.name
+                        );
                         return true;
                     }
                 }
@@ -2203,13 +2337,17 @@ pub async fn install_collection(
                 if let Some(existing) = current_mods.iter().find(|m| {
                     if let Some(nexus_id) = mod_entry.source.mod_id {
                         if m.nexus_mod_id == Some(nexus_id) {
-                            if mod_entry.source.file_id.is_none() || m.nexus_file_id == mod_entry.source.file_id {
+                            if mod_entry.source.file_id.is_none()
+                                || m.nexus_file_id == mod_entry.source.file_id
+                            {
                                 return true;
                             }
                         }
                     }
                     if let Some(file_id) = mod_entry.source.file_id {
-                        if m.nexus_file_id == Some(file_id) { return true; }
+                        if m.nexus_file_id == Some(file_id) {
+                            return true;
+                        }
                     }
                     if mod_entry.source.mod_id.is_none() && mod_entry.source.file_id.is_none() {
                         return m.name.eq_ignore_ascii_case(mod_name);
@@ -2288,7 +2426,11 @@ pub async fn install_collection(
                         instructions: None,
                     });
                 }
-                Err(InstallError::UserAction { action, url, instructions }) => {
+                Err(InstallError::UserAction {
+                    action,
+                    url,
+                    instructions,
+                }) => {
                     let _ = app.emit(
                         INSTALL_PROGRESS_EVENT,
                         InstallProgress::UserActionRequired {
@@ -2436,7 +2578,11 @@ pub async fn install_collection(
             staging::staging_base_dir(game_id, bottle_name).display(),
         );
         // Try an emergency redeploy to fix the situation
-        log::info!("Attempting emergency redeploy for {}/{}", game_id, bottle_name);
+        log::info!(
+            "Attempting emergency redeploy for {}/{}",
+            game_id,
+            bottle_name
+        );
         match deployer::redeploy_all(db, game_id, bottle_name, &data_dir, &game_path) {
             Ok(result) => {
                 log::info!(
@@ -2487,12 +2633,8 @@ pub async fn install_collection(
                         };
                         for m in &suggestion.mods {
                             if m.mod_id != winner {
-                                let _ = db.add_conflict_rule(
-                                    game_id,
-                                    bottle_name,
-                                    winner,
-                                    m.mod_id,
-                                );
+                                let _ =
+                                    db.add_conflict_rule(game_id, bottle_name, winner, m.mod_id);
                             }
                         }
                     }
@@ -2507,7 +2649,8 @@ pub async fn install_collection(
                     );
                     // Redeploy if priorities changed
                     if result.priorities_changed > 0 {
-                        let _ = deployer::redeploy_all(db, game_id, bottle_name, &data_dir, &game_path);
+                        let _ =
+                            deployer::redeploy_all(db, game_id, bottle_name, &data_dir, &game_path);
                     }
                 }
                 Err(e) => {
@@ -2523,9 +2666,13 @@ pub async fn install_collection(
     // DLLs are incompatible with the game version and swap them for compatible
     // alternatives from other installed mods' staging directories.
     if game_id == "skyrimse" {
-        let skse_fixes = skse::fix_skse_plugin_conflicts(db, game_id, bottle_name, &data_dir, &game_path);
+        let skse_fixes =
+            skse::fix_skse_plugin_conflicts(db, game_id, bottle_name, &data_dir, &game_path);
         if skse_fixes > 0 {
-            log::info!("SKSE plugin fix: swapped {} incompatible DLL(s) for compatible alternatives", skse_fixes);
+            log::info!(
+                "SKSE plugin fix: swapped {} incompatible DLL(s) for compatible alternatives",
+                skse_fixes
+            );
         }
     }
 
@@ -2537,7 +2684,8 @@ pub async fn install_collection(
         }
 
         // Disable Wine-incompatible SKSE plugins (CrashLogger, etc.)
-        let wine_disabled = skse::disable_wine_incompatible_plugins(&data_dir, db, game_id, bottle_name);
+        let wine_disabled =
+            skse::disable_wine_incompatible_plugins(&data_dir, db, game_id, bottle_name);
         for (name, reason) in &wine_disabled {
             log::info!("Wine compat: disabled {} — {}", name, reason);
         }
@@ -2563,11 +2711,7 @@ pub async fn install_collection(
                 )),
             },
         );
-        let tweak_count = apply_collection_ini_tweaks(
-            &manifest.ini_tweaks,
-            &bottle,
-            game_id,
-        );
+        let tweak_count = apply_collection_ini_tweaks(&manifest.ini_tweaks, &bottle, game_id);
         if tweak_count > 0 {
             log::info!(
                 "Applied {} INI settings from {} collection tweaks",
@@ -2580,8 +2724,12 @@ pub async fn install_collection(
     // Wire up mod dependencies from collection mod_rules
     if !manifest.mod_rules.is_empty() && !mod_index_to_id.is_empty() {
         // Build lookup tables matching collections::resolve_install_order
-        let name_to_idx: HashMap<String, usize> = manifest.mods.iter().enumerate()
-            .map(|(i, m)| (m.name.to_lowercase(), i)).collect();
+        let name_to_idx: HashMap<String, usize> = manifest
+            .mods
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (m.name.to_lowercase(), i))
+            .collect();
         let mut md5_to_idx: HashMap<String, usize> = HashMap::new();
         for (i, m) in manifest.mods.iter().enumerate() {
             if let Some(ref md5) = m.source.md5 {
@@ -2590,16 +2738,24 @@ pub async fn install_collection(
         }
         let resolve_ref = |r: &collections::ModReference| -> Option<usize> {
             if let Some(ref md5) = r.file_md5 {
-                if let Some(&idx) = md5_to_idx.get(&md5.to_lowercase()) { return Some(idx); }
+                if let Some(&idx) = md5_to_idx.get(&md5.to_lowercase()) {
+                    return Some(idx);
+                }
             }
             if let Some(ref name) = r.logical_file_name {
-                if let Some(&idx) = name_to_idx.get(&name.to_lowercase()) { return Some(idx); }
+                if let Some(&idx) = name_to_idx.get(&name.to_lowercase()) {
+                    return Some(idx);
+                }
             }
             if let Some(ref hint) = r.id_hint {
-                if let Some(&idx) = name_to_idx.get(&hint.to_lowercase()) { return Some(idx); }
+                if let Some(&idx) = name_to_idx.get(&hint.to_lowercase()) {
+                    return Some(idx);
+                }
             }
             if let Some(ref tag) = r.tag {
-                if let Some(&idx) = name_to_idx.get(&tag.to_lowercase()) { return Some(idx); }
+                if let Some(&idx) = name_to_idx.get(&tag.to_lowercase()) {
+                    return Some(idx);
+                }
             }
             None
         };
@@ -2609,29 +2765,39 @@ pub async fn install_collection(
             let src_idx = resolve_ref(&rule.source);
             let dst_idx = resolve_ref(&rule.reference);
             if let (Some(s), Some(d)) = (src_idx, dst_idx) {
-                if s == d { continue; }
+                if s == d {
+                    continue;
+                }
                 let src_mod_id = mod_index_to_id.get(&s);
                 let dst_mod_id = mod_index_to_id.get(&d);
                 if let (Some(&src_id), Some(&dst_id)) = (src_mod_id, dst_mod_id) {
                     let relationship = match rule.rule_type.as_str() {
                         "requires" | "before" | "after" => "requires",
                         "conflicts" => "conflicts",
-                        "recommends" => continue,  // Don't track weak recommendations
+                        "recommends" => continue, // Don't track weak recommendations
                         _ => continue,
                     };
                     let dep_name = &manifest.mods[d].name;
                     let nexus_dep_id = manifest.mods[d].source.mod_id;
                     let _ = crate::mod_dependencies::add_dependency(
-                        &db, game_id, bottle_name,
-                        src_id, Some(dst_id), nexus_dep_id,
-                        dep_name, relationship,
+                        &db,
+                        game_id,
+                        bottle_name,
+                        src_id,
+                        Some(dst_id),
+                        nexus_dep_id,
+                        dep_name,
+                        relationship,
                     );
                     dep_count += 1;
                 }
             }
         }
         if dep_count > 0 {
-            log::info!("Wired {} dependency relationships from collection mod_rules", dep_count);
+            log::info!(
+                "Wired {} dependency relationships from collection mod_rules",
+                dep_count
+            );
         }
     }
 
@@ -2948,10 +3114,7 @@ async fn install_nexus_mod(
                     InstallProgress::StepChanged {
                         mod_index,
                         step: "cached".to_string(),
-                        detail: Some(format!(
-                            "Reusing cached download for '{}'",
-                            mod_entry.name
-                        )),
+                        detail: Some(format!("Reusing cached download for '{}'", mod_entry.name)),
                     },
                 );
 
@@ -3231,7 +3394,8 @@ async fn install_direct_mod(
                     .await?;
 
                     let source_type = classify_source_type(&mod_entry.source);
-                    let _ = db.set_mod_source(mod_id, &source_type, mod_entry.source.url.as_deref());
+                    let _ =
+                        db.set_mod_source(mod_id, &source_type, mod_entry.source.url.as_deref());
 
                     return Ok((mod_id, deployed_size));
                 } else {
@@ -3418,8 +3582,14 @@ async fn stage_and_deploy(
         tokio::task::spawn_blocking(move || {
             if let Some(extracted_dir) = pre_extracted {
                 // Fast path: skip SHA-256 hashing for collection installs
-                let result =
-                    staging::stage_mod_from_extracted_opts(&extracted_dir, &gid, &bn, mod_id, &mn, true);
+                let result = staging::stage_mod_from_extracted_opts(
+                    &extracted_dir,
+                    &gid,
+                    &bn,
+                    mod_id,
+                    &mn,
+                    true,
+                );
                 // Clean up pre-extracted temp dir
                 let _ = std::fs::remove_dir_all(&extracted_dir);
                 result
@@ -3444,7 +3614,10 @@ async fn stage_and_deploy(
         mod_name,
         staging_result.files.len(),
         staging_result.staging_path.display(),
-        mod_entry.choices.as_ref().map(|c| c.to_string().chars().take(200).collect::<String>())
+        mod_entry
+            .choices
+            .as_ref()
+            .map(|c| c.to_string().chars().take(200).collect::<String>())
     );
 
     // Check for MO2-style "Root" folder in staging. If present, the files
@@ -3522,142 +3695,178 @@ async fn stage_and_deploy(
     let game_version_ref = game_version.as_deref();
 
     // Handle FOMOD if present and manifest provides choices
-    let files_to_deploy =
-        if let Ok(Some(fomod_installer)) = fomod::parse_fomod(&staging_result.staging_path) {
-            log::info!(
+    let files_to_deploy = if let Ok(Some(fomod_installer)) =
+        fomod::parse_fomod(&staging_result.staging_path)
+    {
+        log::info!(
                 "[stage_deploy] FOMOD detected for '{}' — {} steps, {} conditionalFileInstalls, game_version={:?}, data_dir={}",
                 mod_name, fomod_installer.steps.len(),
                 fomod_installer.conditional_file_installs.len(),
                 game_version_ref, data_dir.display()
             );
-            if fomod_installer.module_dependencies.is_some() {
-                log::info!("[stage_deploy] FOMOD has moduleDependencies (top-level prerequisites)");
-            }
-            // Log step visibility with dependency info
-            for (i, step) in fomod_installer.steps.iter().enumerate() {
-                let vis_info = step.visible.as_ref().map_or("none".to_string(), |v| {
-                    format!(
-                        "op={}, flags={}, game_deps={}, file_deps={}, children={}",
-                        v.operator,
-                        v.flags.len(),
-                        v.game_dependencies.len(),
-                        v.file_dependencies.len(),
-                        v.children.len()
+        if fomod_installer.module_dependencies.is_some() {
+            log::info!("[stage_deploy] FOMOD has moduleDependencies (top-level prerequisites)");
+        }
+        // Log step visibility with dependency info
+        for (i, step) in fomod_installer.steps.iter().enumerate() {
+            let vis_info = step.visible.as_ref().map_or("none".to_string(), |v| {
+                format!(
+                    "op={}, flags={}, game_deps={}, file_deps={}, children={}",
+                    v.operator,
+                    v.flags.len(),
+                    v.game_dependencies.len(),
+                    v.file_dependencies.len(),
+                    v.children.len()
+                )
+            });
+            log::info!(
+                "[stage_deploy] FOMOD step {}: '{}' — visible=[{}], groups=[{}]",
+                i,
+                step.name,
+                vis_info,
+                step.groups
+                    .iter()
+                    .map(|g| g.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        let selections = if let Some(ref choices) = mod_entry.choices {
+            match parse_fomod_choices(choices) {
+                Some(parsed) => {
+                    log::info!(
+                        "[stage_deploy] FOMOD using COLLECTION AUTHOR choices for '{}': {} groups",
+                        mod_name,
+                        parsed.len()
+                    );
+                    for (group, opts) in &parsed {
+                        log::info!("[stage_deploy]   group '{}': [{}]", group, opts.join(", "));
+                    }
+                    parsed
+                }
+                None => {
+                    log::warn!(
+                        "FOMOD choices present but unparseable for '{}': {}",
+                        mod_name,
+                        choices,
+                    );
+                    fomod::get_default_selections(
+                        &fomod_installer,
+                        game_version_ref,
+                        Some(data_dir),
                     )
-                });
+                }
+            }
+        } else {
+            // No manifest choices — check saved recipe, then use defaults.
+            // Collection curators omit choices when defaults are correct;
+            // prompting the user would stall the entire pipeline.
+            if let Ok(Some(recipe)) = crate::fomod_recipes::get_recipe(db, mod_id) {
                 log::info!(
-                    "[stage_deploy] FOMOD step {}: '{}' — visible=[{}], groups=[{}]",
-                    i, step.name, vis_info,
-                    step.groups.iter().map(|g| g.name.as_str()).collect::<Vec<_>>().join(", ")
+                    "FOMOD auto-applying saved recipe ({} selections) for '{}'",
+                    recipe.selections.len(),
+                    mod_name
+                );
+                recipe.selections
+            } else {
+                log::info!(
+                    "FOMOD using defaults for '{}' — no choices in manifest, no saved recipe",
+                    mod_name
+                );
+                fomod::get_default_selections(&fomod_installer, game_version_ref, Some(data_dir))
+            }
+        };
+
+        // Check module-level prerequisites and warn if not met.
+        {
+            let flags = HashMap::new();
+            let ctx = fomod::FomodContext {
+                flags: &flags,
+                game_version: game_version_ref,
+                data_dir: Some(data_dir),
+                skse_version: None,
+            };
+            if let Some(warning) = fomod::check_module_dependencies(&fomod_installer, &ctx) {
+                log::warn!(
+                    "[stage_deploy] FOMOD module dependency warning for '{}': {}",
+                    mod_name,
+                    warning
                 );
             }
-            let selections = if let Some(ref choices) = mod_entry.choices {
-                match parse_fomod_choices(choices) {
-                    Some(parsed) => {
-                        log::info!(
-                            "[stage_deploy] FOMOD using COLLECTION AUTHOR choices for '{}': {} groups",
-                            mod_name,
-                            parsed.len()
-                        );
-                        for (group, opts) in &parsed {
-                            log::info!("[stage_deploy]   group '{}': [{}]", group, opts.join(", "));
-                        }
-                        parsed
-                    }
-                    None => {
-                        log::warn!(
-                            "FOMOD choices present but unparseable for '{}': {}",
-                            mod_name,
-                            choices,
-                        );
-                        fomod::get_default_selections(&fomod_installer, game_version_ref, Some(data_dir))
-                    }
-                }
-            } else {
-                // No manifest choices — check saved recipe, then use defaults.
-                // Collection curators omit choices when defaults are correct;
-                // prompting the user would stall the entire pipeline.
-                if let Ok(Some(recipe)) = crate::fomod_recipes::get_recipe(db, mod_id) {
-                    log::info!(
-                        "FOMOD auto-applying saved recipe ({} selections) for '{}'",
-                        recipe.selections.len(),
-                        mod_name
-                    );
-                    recipe.selections
-                } else {
-                    log::info!(
-                        "FOMOD using defaults for '{}' — no choices in manifest, no saved recipe",
-                        mod_name
-                    );
-                    fomod::get_default_selections(&fomod_installer, game_version_ref, Some(data_dir))
-                }
-            };
+        }
 
-            // Check module-level prerequisites and warn if not met.
-            {
-                let flags = HashMap::new();
-                let ctx = fomod::FomodContext {
-                    flags: &flags,
-                    game_version: game_version_ref,
-                    data_dir: Some(data_dir),
-                    skse_version: None,
-                };
-                if let Some(warning) = fomod::check_module_dependencies(&fomod_installer, &ctx) {
-                    log::warn!("[stage_deploy] FOMOD module dependency warning for '{}': {}", mod_name, warning);
-                }
-            }
-
-            let fomod_files = fomod::get_files_for_selections(&fomod_installer, &selections, game_version_ref, Some(data_dir));
-            log::info!(
-                "[stage_deploy] FOMOD selections for '{}': {} groups, {} files to install",
-                mod_name, selections.len(), fomod_files.len()
+        let fomod_files = fomod::get_files_for_selections(
+            &fomod_installer,
+            &selections,
+            game_version_ref,
+            Some(data_dir),
+        );
+        log::info!(
+            "[stage_deploy] FOMOD selections for '{}': {} groups, {} files to install",
+            mod_name,
+            selections.len(),
+            fomod_files.len()
+        );
+        for ff in &fomod_files {
+            log::debug!(
+                "[stage_deploy] FOMOD file: src={}, dst={}",
+                ff.source,
+                ff.destination
             );
-            for ff in &fomod_files {
-                log::debug!("[stage_deploy] FOMOD file: src={}, dst={}", ff.source, ff.destination);
-            }
-            // Log SKSE plugin DLLs specifically — these are the most
-            // version-sensitive files and the most common cause of CTDs
-            // when the wrong variant is selected.
-            for ff in &fomod_files {
-                let dst_lower = ff.destination.to_lowercase();
-                if dst_lower.contains("skse") && dst_lower.ends_with(".dll") {
-                    log::info!(
+        }
+        // Log SKSE plugin DLLs specifically — these are the most
+        // version-sensitive files and the most common cause of CTDs
+        // when the wrong variant is selected.
+        for ff in &fomod_files {
+            let dst_lower = ff.destination.to_lowercase();
+            if dst_lower.contains("skse") && dst_lower.ends_with(".dll") {
+                log::info!(
                         "[stage_deploy] SKSE plugin DLL selected for '{}': {} -> {} (game_version={:?})",
                         mod_name, ff.source, ff.destination, game_version_ref
                     );
-                }
             }
+        }
 
-            let result = apply_fomod_to_staging(&staging_result.staging_path, &fomod_files)
-                .unwrap_or_else(|| {
-                    // FOMOD produced no valid moves — fall back to all staged
-                    // files but filter out packaging junk.
-                    staging_result.files.iter()
-                        .filter(|f| !crate::installer::is_deploy_junk(Path::new(f)))
-                        .cloned()
-                        .collect()
-                });
-            log::info!(
-                "[stage_deploy] FOMOD applied for '{}': {} files after FOMOD filtering",
-                mod_name, result.len()
-            );
-            // Log files containing "po3" or "tweaks" for debugging
-            for f in &result {
-                let fl = f.to_lowercase();
-                if fl.contains("po3") || fl.contains("tweak") || fl.contains("fiss") {
-                    log::info!("[stage_deploy] FOMOD kept notable file: {}", f);
-                }
+        let result = apply_fomod_to_staging(&staging_result.staging_path, &fomod_files)
+            .unwrap_or_else(|| {
+                // FOMOD produced no valid moves — fall back to all staged
+                // files but filter out packaging junk.
+                staging_result
+                    .files
+                    .iter()
+                    .filter(|f| !crate::installer::is_deploy_junk(Path::new(f)))
+                    .cloned()
+                    .collect()
+            });
+        log::info!(
+            "[stage_deploy] FOMOD applied for '{}': {} files after FOMOD filtering",
+            mod_name,
+            result.len()
+        );
+        // Log files containing "po3" or "tweaks" for debugging
+        for f in &result {
+            let fl = f.to_lowercase();
+            if fl.contains("po3") || fl.contains("tweak") || fl.contains("fiss") {
+                log::info!("[stage_deploy] FOMOD kept notable file: {}", f);
             }
-            result
-        } else {
-            // No FOMOD — deploy all staged files, filtering packaging junk.
-            let files: Vec<String> = staging_result.files.iter()
-                .filter(|f| !crate::installer::is_deploy_junk(Path::new(f)))
-                .cloned()
-                .collect();
-            log::info!("[stage_deploy] No FOMOD for '{}' — deploying {} of {} staged files (junk filtered)", mod_name, files.len(), staging_result.files.len());
-            files
-        };
+        }
+        result
+    } else {
+        // No FOMOD — deploy all staged files, filtering packaging junk.
+        let files: Vec<String> = staging_result
+            .files
+            .iter()
+            .filter(|f| !crate::installer::is_deploy_junk(Path::new(f)))
+            .cloned()
+            .collect();
+        log::info!(
+            "[stage_deploy] No FOMOD for '{}' — deploying {} of {} staged files (junk filtered)",
+            mod_name,
+            files.len(),
+            staging_result.files.len()
+        );
+        files
+    };
 
     // Apply collection patches (BSDiff) if any
     if let Some(ref patches) = mod_entry.patches {
@@ -3708,7 +3917,10 @@ async fn stage_and_deploy(
                     if let Err(e) = patcher.apply(&source_data, &mut target_data) {
                         log::warn!(
                             "Failed to apply patch for {} (source CRC32={:08x}, size={}): {}",
-                            rel_path, source_crc, source_data.len(), e
+                            rel_path,
+                            source_crc,
+                            source_data.len(),
+                            e
                         );
                         patch_failures += 1;
                         continue;
@@ -3884,7 +4096,15 @@ async fn stage_and_deploy(
                 }
             };
             deployer::deploy_mod_atomic_with_progress(
-                &db_c, &gid, &bn, mod_id, &sp, &effective_dir, &files, &progress_cb, &gp,
+                &db_c,
+                &gid,
+                &bn,
+                mod_id,
+                &sp,
+                &effective_dir,
+                &files,
+                &progress_cb,
+                &gp,
             )
         })
         .await
@@ -3946,9 +4166,7 @@ async fn stage_and_deploy(
 ///   ]}
 /// ]}
 /// ```
-fn parse_fomod_choices(
-    choices: &serde_json::Value,
-) -> Option<HashMap<String, Vec<String>>> {
+fn parse_fomod_choices(choices: &serde_json::Value) -> Option<HashMap<String, Vec<String>>> {
     let obj = choices.as_object()?;
 
     // Check for NexusMods nested format: { "type": "fomod", "options": [...] }
@@ -4001,7 +4219,11 @@ fn parse_fomod_choices(
             result.insert(key.clone(), selections);
         }
     }
-    if result.is_empty() { None } else { Some(result) }
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
 }
 
 /// Merge FOMOD choices, patches, rules, and plugins from the downloaded
@@ -4037,7 +4259,11 @@ fn merge_bundle_into_manifest(
         } else {
             None
         }
-        .or_else(|| bundle_name_lookup.get(&mod_entry.name.to_lowercase()).copied());
+        .or_else(|| {
+            bundle_name_lookup
+                .get(&mod_entry.name.to_lowercase())
+                .copied()
+        });
 
         if bundle_entry.is_none() {
             unmatched.push(mod_entry.name.clone());
@@ -4181,7 +4407,11 @@ fn apply_fomod_to_staging(
         let dest_abs = layout_dir.join(dest_rel);
         if let Some(parent) = dest_abs.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
-                log::warn!("FOMOD layout: failed to create dir {}: {}", parent.display(), e);
+                log::warn!(
+                    "FOMOD layout: failed to create dir {}: {}",
+                    parent.display(),
+                    e
+                );
                 continue;
             }
         }
@@ -4283,10 +4513,7 @@ fn apply_collection_plugin_order(
             .filter_map(|e| {
                 let name = e.file_name().to_string_lossy().to_string();
                 let lower = name.to_lowercase();
-                if lower.ends_with(".esp")
-                    || lower.ends_with(".esm")
-                    || lower.ends_with(".esl")
-                {
+                if lower.ends_with(".esp") || lower.ends_with(".esm") || lower.ends_with(".esl") {
                     Some(lower)
                 } else {
                     None

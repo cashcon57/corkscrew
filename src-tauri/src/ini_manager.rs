@@ -998,7 +998,11 @@ mod tests {
             "1920"
         );
         assert_eq!(
-            sections.get("General").unwrap().get("bAlwaysActive").unwrap(),
+            sections
+                .get("General")
+                .unwrap()
+                .get("bAlwaysActive")
+                .unwrap(),
             "1"
         );
     }

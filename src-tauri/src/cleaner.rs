@@ -927,8 +927,7 @@ mod tests {
 
         // Even with no baseline, master files must survive
         let options = CleanOptions::default();
-        let result =
-            clean_game_directory(&db, "testgame", "Gaming", &data_dir, &options).unwrap();
+        let result = clean_game_directory(&db, "testgame", "Gaming", &data_dir, &options).unwrap();
 
         // extra.esp should be removed (it was added after snapshot)
         assert!(result.removed_files.contains(&"extra.esp".to_string()));
@@ -957,7 +956,10 @@ mod tests {
             .iter()
             .map(|f| f.relative_path.as_str())
             .collect();
-        assert!(!paths.contains(&"skyrim.esm"), "skyrim.esm should be recognized as stock");
+        assert!(
+            !paths.contains(&"skyrim.esm"),
+            "skyrim.esm should be recognized as stock"
+        );
         assert!(paths.contains(&"mod.esp"), "mod.esp should be non-stock");
     }
 }

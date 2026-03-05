@@ -641,13 +641,16 @@ impl ModDatabase {
             placeholders
         );
         let mut stmt = conn.prepare(&query)?;
-        let params: Vec<&dyn rusqlite::types::ToSql> =
-            mod_ids.iter().map(|id| id as &dyn rusqlite::types::ToSql).collect();
+        let params: Vec<&dyn rusqlite::types::ToSql> = mod_ids
+            .iter()
+            .map(|id| id as &dyn rusqlite::types::ToSql)
+            .collect();
         let paths: Vec<(String, String)> = stmt
             .query_map(params.as_slice(), |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    row.get::<_, String>(1).unwrap_or_else(|_| "data".to_string()),
+                    row.get::<_, String>(1)
+                        .unwrap_or_else(|_| "data".to_string()),
                 ))
             })?
             .filter_map(|r| r.ok())
@@ -658,8 +661,10 @@ impl ModDatabase {
             placeholders
         );
         let mut del_stmt = conn.prepare(&delete_query)?;
-        let del_params: Vec<&dyn rusqlite::types::ToSql> =
-            mod_ids.iter().map(|id| id as &dyn rusqlite::types::ToSql).collect();
+        let del_params: Vec<&dyn rusqlite::types::ToSql> = mod_ids
+            .iter()
+            .map(|id| id as &dyn rusqlite::types::ToSql)
+            .collect();
         del_stmt.execute(del_params.as_slice())?;
         Ok(paths)
     }
@@ -677,14 +682,18 @@ impl ModDatabase {
         ] {
             let q = format!("DELETE FROM {} WHERE mod_id IN ({})", table, placeholders);
             let mut stmt = conn.prepare(&q)?;
-            let p: Vec<&dyn rusqlite::types::ToSql> =
-                mod_ids.iter().map(|id| id as &dyn rusqlite::types::ToSql).collect();
+            let p: Vec<&dyn rusqlite::types::ToSql> = mod_ids
+                .iter()
+                .map(|id| id as &dyn rusqlite::types::ToSql)
+                .collect();
             let _ = stmt.execute(p.as_slice());
         }
         let q = format!("DELETE FROM installed_mods WHERE id IN ({})", placeholders);
         let mut stmt = conn.prepare(&q)?;
-        let p: Vec<&dyn rusqlite::types::ToSql> =
-            mod_ids.iter().map(|id| id as &dyn rusqlite::types::ToSql).collect();
+        let p: Vec<&dyn rusqlite::types::ToSql> = mod_ids
+            .iter()
+            .map(|id| id as &dyn rusqlite::types::ToSql)
+            .collect();
         let deleted = stmt.execute(p.as_slice())?;
         Ok(deleted)
     }
@@ -700,7 +709,8 @@ impl ModDatabase {
             .query_map(params![mod_id], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    row.get::<_, String>(1).unwrap_or_else(|_| "data".to_string()),
+                    row.get::<_, String>(1)
+                        .unwrap_or_else(|_| "data".to_string()),
                 ))
             })?
             .filter_map(|r| r.ok())
@@ -762,7 +772,9 @@ impl ModDatabase {
                 sha256: row.get(7)?,
                 deployed_at: row.get(8)?,
                 mod_name: row.get(9)?,
-                deploy_target: row.get::<_, String>(10).unwrap_or_else(|_| "data".to_string()),
+                deploy_target: row
+                    .get::<_, String>(10)
+                    .unwrap_or_else(|_| "data".to_string()),
             })
         })?;
 
@@ -803,7 +815,9 @@ impl ModDatabase {
                 sha256: row.get(7)?,
                 deployed_at: row.get(8)?,
                 mod_name: row.get(9)?,
-                deploy_target: row.get::<_, String>(10).unwrap_or_else(|_| "data".to_string()),
+                deploy_target: row
+                    .get::<_, String>(10)
+                    .unwrap_or_else(|_| "data".to_string()),
             })
         })?;
 
@@ -944,10 +958,7 @@ impl ModDatabase {
 
     /// Batch-fetch file hashes for multiple mods in a single query.
     /// Returns a map of `(mod_id, relative_path) -> sha256`.
-    pub fn get_file_hashes_bulk(
-        &self,
-        mod_ids: &[i64],
-    ) -> Result<HashMap<(i64, String), String>> {
+    pub fn get_file_hashes_bulk(&self, mod_ids: &[i64]) -> Result<HashMap<(i64, String), String>> {
         if mod_ids.is_empty() {
             return Ok(HashMap::new());
         }
@@ -962,8 +973,10 @@ impl ModDatabase {
         );
 
         let mut stmt = conn.prepare(&sql)?;
-        let params: Vec<&dyn rusqlite::ToSql> =
-            mod_ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+        let params: Vec<&dyn rusqlite::ToSql> = mod_ids
+            .iter()
+            .map(|id| id as &dyn rusqlite::ToSql)
+            .collect();
 
         let rows = stmt.query_map(params.as_slice(), |row| {
             let mod_id: i64 = row.get(0)?;
@@ -2676,12 +2689,34 @@ mod tests {
     #[test]
     fn test_get_deployment_manifest_map() {
         let (db, _tmp) = test_db();
-        let mod_id = db.add_mod("skyrimse", "Gaming", None, "Mod", "1.0", "m.zip", &[]).unwrap();
+        let mod_id = db
+            .add_mod("skyrimse", "Gaming", None, "Mod", "1.0", "m.zip", &[])
+            .unwrap();
 
-        db.add_deployment_entry("skyrimse", "Gaming", mod_id, "test.esp", "/staging/test.esp", "hardlink", None).unwrap();
-        db.add_deployment_entry("skyrimse", "Gaming", mod_id, "meshes/a.nif", "/staging/meshes/a.nif", "copy", None).unwrap();
+        db.add_deployment_entry(
+            "skyrimse",
+            "Gaming",
+            mod_id,
+            "test.esp",
+            "/staging/test.esp",
+            "hardlink",
+            None,
+        )
+        .unwrap();
+        db.add_deployment_entry(
+            "skyrimse",
+            "Gaming",
+            mod_id,
+            "meshes/a.nif",
+            "/staging/meshes/a.nif",
+            "copy",
+            None,
+        )
+        .unwrap();
 
-        let map = db.get_deployment_manifest_map("skyrimse", "Gaming").unwrap();
+        let map = db
+            .get_deployment_manifest_map("skyrimse", "Gaming")
+            .unwrap();
         assert_eq!(map.len(), 2);
         assert!(map.contains_key("test.esp"));
         assert!(map.contains_key("meshes/a.nif"));
@@ -2691,38 +2726,75 @@ mod tests {
     #[test]
     fn test_batch_add_deployment_entries_with_hashes() {
         let (db, _tmp) = test_db();
-        let mod_id = db.add_mod("skyrimse", "Gaming", None, "Mod", "1.0", "m.zip", &[]).unwrap();
+        let mod_id = db
+            .add_mod("skyrimse", "Gaming", None, "Mod", "1.0", "m.zip", &[])
+            .unwrap();
 
         let entries = vec![
-            ("skyrimse", "Gaming", mod_id, "file1.esp", "/staging/file1.esp", "hardlink", Some("abc123")),
-            ("skyrimse", "Gaming", mod_id, "file2.esp", "/staging/file2.esp", "copy", None),
+            (
+                "skyrimse",
+                "Gaming",
+                mod_id,
+                "file1.esp",
+                "/staging/file1.esp",
+                "hardlink",
+                Some("abc123"),
+            ),
+            (
+                "skyrimse",
+                "Gaming",
+                mod_id,
+                "file2.esp",
+                "/staging/file2.esp",
+                "copy",
+                None,
+            ),
         ];
         let entries_ref: Vec<(&str, &str, i64, &str, &str, &str, Option<&str>)> = entries
             .iter()
             .map(|(a, b, c, d, e, f, g)| (*a, *b, *c, *d, *e, *f, g.as_deref()))
             .collect();
-        db.batch_add_deployment_entries_with_hashes(&entries_ref).unwrap();
+        db.batch_add_deployment_entries_with_hashes(&entries_ref)
+            .unwrap();
 
         let manifest = db.get_deployment_manifest("skyrimse", "Gaming").unwrap();
         assert_eq!(manifest.len(), 2);
 
-        let file1 = manifest.iter().find(|e| e.relative_path == "file1.esp").unwrap();
+        let file1 = manifest
+            .iter()
+            .find(|e| e.relative_path == "file1.esp")
+            .unwrap();
         assert_eq!(file1.sha256.as_deref(), Some("abc123"));
 
-        let file2 = manifest.iter().find(|e| e.relative_path == "file2.esp").unwrap();
+        let file2 = manifest
+            .iter()
+            .find(|e| e.relative_path == "file2.esp")
+            .unwrap();
         assert!(file2.sha256.is_none());
     }
 
     #[test]
     fn test_batch_remove_deployment_entries() {
         let (db, _tmp) = test_db();
-        let mod_id = db.add_mod("skyrimse", "Gaming", None, "Mod", "1.0", "m.zip", &[]).unwrap();
+        let mod_id = db
+            .add_mod("skyrimse", "Gaming", None, "Mod", "1.0", "m.zip", &[])
+            .unwrap();
 
-        db.add_deployment_entry("skyrimse", "Gaming", mod_id, "a.esp", "/s/a.esp", "hardlink", None).unwrap();
-        db.add_deployment_entry("skyrimse", "Gaming", mod_id, "b.esp", "/s/b.esp", "hardlink", None).unwrap();
-        db.add_deployment_entry("skyrimse", "Gaming", mod_id, "c.esp", "/s/c.esp", "hardlink", None).unwrap();
+        db.add_deployment_entry(
+            "skyrimse", "Gaming", mod_id, "a.esp", "/s/a.esp", "hardlink", None,
+        )
+        .unwrap();
+        db.add_deployment_entry(
+            "skyrimse", "Gaming", mod_id, "b.esp", "/s/b.esp", "hardlink", None,
+        )
+        .unwrap();
+        db.add_deployment_entry(
+            "skyrimse", "Gaming", mod_id, "c.esp", "/s/c.esp", "hardlink", None,
+        )
+        .unwrap();
 
-        db.batch_remove_deployment_entries("skyrimse", "Gaming", &["a.esp", "c.esp"]).unwrap();
+        db.batch_remove_deployment_entries("skyrimse", "Gaming", &["a.esp", "c.esp"])
+            .unwrap();
 
         let manifest = db.get_deployment_manifest("skyrimse", "Gaming").unwrap();
         assert_eq!(manifest.len(), 1);
@@ -2732,14 +2804,23 @@ mod tests {
     #[test]
     fn test_get_file_hashes_bulk() {
         let (db, _tmp) = test_db();
-        let mod1 = db.add_mod("skyrimse", "Gaming", None, "Mod1", "1.0", "m1.zip", &[]).unwrap();
-        let mod2 = db.add_mod("skyrimse", "Gaming", None, "Mod2", "1.0", "m2.zip", &[]).unwrap();
+        let mod1 = db
+            .add_mod("skyrimse", "Gaming", None, "Mod1", "1.0", "m1.zip", &[])
+            .unwrap();
+        let mod2 = db
+            .add_mod("skyrimse", "Gaming", None, "Mod2", "1.0", "m2.zip", &[])
+            .unwrap();
 
-        db.store_file_hashes(mod1, &[("textures/sky.dds".into(), "hash_a".into(), 1024)]).unwrap();
-        db.store_file_hashes(mod2, &[
-            ("textures/sky.dds".into(), "hash_b".into(), 2048),
-            ("meshes/tree.nif".into(), "hash_c".into(), 512),
-        ]).unwrap();
+        db.store_file_hashes(mod1, &[("textures/sky.dds".into(), "hash_a".into(), 1024)])
+            .unwrap();
+        db.store_file_hashes(
+            mod2,
+            &[
+                ("textures/sky.dds".into(), "hash_b".into(), 2048),
+                ("meshes/tree.nif".into(), "hash_c".into(), 512),
+            ],
+        )
+        .unwrap();
 
         let hashes = db.get_file_hashes_bulk(&[mod1, mod2]).unwrap();
         assert_eq!(hashes.len(), 3);
@@ -2758,8 +2839,11 @@ mod tests {
     #[test]
     fn test_get_file_hashes_for_mods_aliases_bulk() {
         let (db, _tmp) = test_db();
-        let mod1 = db.add_mod("skyrimse", "Gaming", None, "Mod1", "1.0", "m1.zip", &[]).unwrap();
-        db.store_file_hashes(mod1, &[("test.esp".into(), "hash_x".into(), 100)]).unwrap();
+        let mod1 = db
+            .add_mod("skyrimse", "Gaming", None, "Mod1", "1.0", "m1.zip", &[])
+            .unwrap();
+        db.store_file_hashes(mod1, &[("test.esp".into(), "hash_x".into(), 100)])
+            .unwrap();
 
         // Both methods should return the same result
         let bulk = db.get_file_hashes_bulk(&[mod1]).unwrap();

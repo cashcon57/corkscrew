@@ -606,8 +606,8 @@ pub fn disable_wine_virtual_desktop(bottle: &Bottle) -> Result<(), String> {
         return Ok(()); // No registry file — nothing to fix
     }
 
-    let content = fs::read_to_string(&user_reg)
-        .map_err(|e| format!("Failed to read user.reg: {}", e))?;
+    let content =
+        fs::read_to_string(&user_reg).map_err(|e| format!("Failed to read user.reg: {}", e))?;
 
     let mut updated = content.clone();
 
@@ -615,7 +615,8 @@ pub fn disable_wine_virtual_desktop(bottle: &Bottle) -> Result<(), String> {
     updated = remove_registry_section(&updated, r#"[Software\\Wine\\Explorer\\Desktops]"#);
 
     // Remove any sub-sections like [Software\\Wine\\Explorer\\Desktops\Default]
-    updated = remove_registry_sections_matching(&updated, r#"[Software\\Wine\\Explorer\\Desktops\"#);
+    updated =
+        remove_registry_sections_matching(&updated, r#"[Software\\Wine\\Explorer\\Desktops\"#);
 
     // Remove the "Desktop" key from [Software\\Wine\\Explorer] which activates
     // the virtual desktop
@@ -787,8 +788,7 @@ fn set_registry_value(content: &mut String, section: &str, key: &str, value: &st
 pub fn fix_cursor_grab(bottle: &Bottle) -> Result<CursorFixResult, String> {
     let user_reg = bottle.path.join("user.reg");
     let mut content = if user_reg.exists() {
-        fs::read_to_string(&user_reg)
-            .map_err(|e| format!("Failed to read user.reg: {}", e))?
+        fs::read_to_string(&user_reg).map_err(|e| format!("Failed to read user.reg: {}", e))?
     } else {
         String::new()
     };
@@ -800,7 +800,12 @@ pub fn fix_cursor_grab(bottle: &Bottle) -> Result<CursorFixResult, String> {
     let di_section = "[Software\\\\Wine\\\\DirectInput]";
 
     // Mac Driver — exclusive display capture (macOS CrossOver)
-    set_registry_value(&mut content, mac_section, "CaptureDisplaysForFullscreen", "Y");
+    set_registry_value(
+        &mut content,
+        mac_section,
+        "CaptureDisplaysForFullscreen",
+        "Y",
+    );
 
     // X11 Driver — full cursor grab (Linux, or CrossOver X11 mode)
     set_registry_value(&mut content, x11_section, "DXGrab", "Y");
@@ -1000,7 +1005,9 @@ fMusicVolume=0.5
             Some((1920, 1080))
         );
         assert_eq!(
-            parse_xrandr_connected_line("HDMI-1 connected (normal left inverted right x axis y axis)"),
+            parse_xrandr_connected_line(
+                "HDMI-1 connected (normal left inverted right x axis y axis)"
+            ),
             None // No resolution shown = display not active
         );
     }
@@ -1070,10 +1077,8 @@ fMusicVolume=0.5
 
     #[test]
     fn remove_registry_section_removes_entire_section() {
-        let result = remove_registry_section(
-            SAMPLE_REGISTRY,
-            r#"[Software\\Wine\\Explorer\\Desktops]"#,
-        );
+        let result =
+            remove_registry_section(SAMPLE_REGISTRY, r#"[Software\\Wine\\Explorer\\Desktops]"#);
         assert!(!result.contains("Desktops"));
         assert!(!result.contains("1920x1080"));
         // Other sections remain
@@ -1083,11 +1088,8 @@ fMusicVolume=0.5
 
     #[test]
     fn remove_registry_key_removes_single_key() {
-        let result = remove_registry_key(
-            SAMPLE_REGISTRY,
-            r#"[Software\\Wine\\Explorer]"#,
-            "Desktop",
-        );
+        let result =
+            remove_registry_key(SAMPLE_REGISTRY, r#"[Software\\Wine\\Explorer]"#, "Desktop");
         assert!(!result.contains("\"Desktop\"=\"Default\""));
         // The section header remains
         assert!(result.contains("[Software\\\\Wine\\\\Explorer]"));
@@ -1118,14 +1120,9 @@ fMusicVolume=0.5
             "\"RetinaMode\"=\"Y\"\n",
         );
         // First remove main section, then sub-sections (mirrors disable_wine_virtual_desktop)
-        let result = remove_registry_section(
-            input,
-            r#"[Software\\Wine\\Explorer\\Desktops]"#,
-        );
-        let result = remove_registry_sections_matching(
-            &result,
-            r#"[Software\\Wine\\Explorer\\Desktops\"#,
-        );
+        let result = remove_registry_section(input, r#"[Software\\Wine\\Explorer\\Desktops]"#);
+        let result =
+            remove_registry_sections_matching(&result, r#"[Software\\Wine\\Explorer\\Desktops\"#);
         assert!(!result.contains("Desktops"));
         assert!(!result.contains("1024x768"));
         assert!(result.contains("Mac Driver"));

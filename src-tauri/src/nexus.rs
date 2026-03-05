@@ -84,7 +84,10 @@ pub fn parse_mod_files(files: &[serde_json::Value], default_mod_id: i64) -> Vec<
         .iter()
         .filter_map(|f| {
             Some(NexusModFile {
-                mod_id: f.get("mod_id").and_then(|v| v.as_i64()).unwrap_or(default_mod_id),
+                mod_id: f
+                    .get("mod_id")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(default_mod_id),
                 file_id: f.get("file_id")?.as_i64()?,
                 name: f.get("name")?.as_str().unwrap_or("").to_string(),
                 version: f.get("version")?.as_str().unwrap_or("").to_string(),
@@ -1290,7 +1293,22 @@ pub async fn graphql_search_mods_ext(
     min_endorsements: Option<i64>,
 ) -> Result<NexusSearchResult> {
     let headers = nexus_graphql_headers_ext(token, is_bearer);
-    graphql_search_mods_with_headers(headers, game_domain, search_text, sort_by, sort_dir, count, offset, include_adult, category_id, author, updated_since, min_downloads, min_endorsements).await
+    graphql_search_mods_with_headers(
+        headers,
+        game_domain,
+        search_text,
+        sort_by,
+        sort_dir,
+        count,
+        offset,
+        include_adult,
+        category_id,
+        author,
+        updated_since,
+        min_downloads,
+        min_endorsements,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1310,7 +1328,22 @@ pub async fn graphql_search_mods(
     min_endorsements: Option<i64>,
 ) -> Result<NexusSearchResult> {
     let headers = nexus_graphql_headers(api_key);
-    graphql_search_mods_with_headers(headers, game_domain, search_text, sort_by, sort_dir, count, offset, include_adult, category_id, author, updated_since, min_downloads, min_endorsements).await
+    graphql_search_mods_with_headers(
+        headers,
+        game_domain,
+        search_text,
+        sort_by,
+        sort_dir,
+        count,
+        offset,
+        include_adult,
+        category_id,
+        author,
+        updated_since,
+        min_downloads,
+        min_endorsements,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]

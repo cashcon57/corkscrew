@@ -974,7 +974,10 @@ pub fn parse_game_version_to_runtime(version_str: &str) -> Option<u32> {
     let major: u8 = parts[0].parse().ok()?;
     let minor: u8 = parts[1].parse().ok()?;
     // Build might have non-numeric suffix (e.g., "1170") — parse digits only
-    let build_str: String = parts[2].chars().take_while(|c| c.is_ascii_digit()).collect();
+    let build_str: String = parts[2]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
     match build_str.parse::<u16>() {
         Ok(build) => Some(((major as u32) << 24) | ((minor as u32) << 16) | ((build as u32) << 4)),
         Err(_) => {
@@ -982,7 +985,10 @@ pub fn parse_game_version_to_runtime(version_str: &str) -> Option<u32> {
             // the exe hash didn't match any known version but file size indicates AE.
             // Use 1.6.1170 as representative AE runtime for compat checks.
             if major == 1 && minor == 6 {
-                info!("parse_game_version_to_runtime: wildcard '{}' → treating as AE 1.6.1170", version_str);
+                info!(
+                    "parse_game_version_to_runtime: wildcard '{}' → treating as AE 1.6.1170",
+                    version_str
+                );
                 Some((1u32 << 24) | (6u32 << 16) | (1170u32 << 4))
             } else {
                 None
@@ -1011,8 +1017,7 @@ pub fn check_skse_dll_compat(dll_path: &Path, game_runtime_version: u32) -> Skse
     };
 
     // Try PE64 first (most SKSE plugins are 64-bit), fall back to PE32
-    let version_data = read_version_data_pe64(&bytes)
-        .or_else(|| read_version_data_pe32(&bytes));
+    let version_data = read_version_data_pe64(&bytes).or_else(|| read_version_data_pe32(&bytes));
 
     let data = match version_data {
         Some(d) => d,
@@ -1051,7 +1056,9 @@ pub fn check_skse_dll_compat(dll_path: &Path, game_runtime_version: u32) -> Skse
         // No versions listed and not version-independent — treat as unknown
         SksePluginCompat::NoVersionData
     } else {
-        SksePluginCompat::Incompatible { supports: supported }
+        SksePluginCompat::Incompatible {
+            supports: supported,
+        }
     }
 }
 
@@ -1063,7 +1070,11 @@ pub fn get_skse_plugin_name(dll_path: &Path) -> Option<String> {
         .ok()?
         .trim_end_matches('\0')
         .to_string();
-    if name.is_empty() { None } else { Some(name) }
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
 }
 
 /// Try to read SKSEPluginVersionData from a PE64 DLL.
@@ -1148,7 +1159,10 @@ pub fn scan_skse_plugins(data_dir: &Path, game_version: &str) -> SksePluginScanR
 
     // Check Address Library version
     let is_se = game_version.starts_with("1.5");
-    let se_lib = data_dir.join("SKSE").join("Plugins").join("versionlib-1-5-97-0.bin");
+    let se_lib = data_dir
+        .join("SKSE")
+        .join("Plugins")
+        .join("versionlib-1-5-97-0.bin");
     let has_se_lib = se_lib.exists();
 
     // Check for any AE address library file
@@ -1205,8 +1219,8 @@ pub fn scan_skse_plugins(data_dir: &Path, game_version: &str) -> SksePluginScanR
 
             match check_skse_dll_compat(dll_path, runtime) {
                 SksePluginCompat::Incompatible { supports } => {
-                    let plugin_name = get_skse_plugin_name(dll_path)
-                        .unwrap_or_else(|| dll_name.clone());
+                    let plugin_name =
+                        get_skse_plugin_name(dll_path).unwrap_or_else(|| dll_name.clone());
                     warnings.push(SksePluginWarning {
                         dll_name: dll_name.clone(),
                         warning: format!(
@@ -1227,7 +1241,10 @@ pub fn scan_skse_plugins(data_dir: &Path, game_version: &str) -> SksePluginScanR
 
     info!(
         "SKSE plugin scan: {} plugins, Address Library: {} (matches: {}), {} warnings",
-        total_plugins, address_library_version, address_library_matches, warnings.len()
+        total_plugins,
+        address_library_version,
+        address_library_matches,
+        warnings.len()
     );
 
     SksePluginScanResult {
@@ -1295,7 +1312,10 @@ pub fn fix_skse_plugin_conflicts(
     let runtime = match parse_game_version_to_runtime(&ds.current_version) {
         Some(v) => v,
         None => {
-            debug!("SKSE plugin fix: could not parse game version '{}'", ds.current_version);
+            debug!(
+                "SKSE plugin fix: could not parse game version '{}'",
+                ds.current_version
+            );
             return 0;
         }
     };
@@ -1314,7 +1334,10 @@ pub fn fix_skse_plugin_conflicts(
             .filter_map(|e| e.ok())
             .filter(|e| {
                 e.file_type().map(|ft| ft.is_file()).unwrap_or(false)
-                    && e.file_name().to_string_lossy().to_lowercase().ends_with(".dll")
+                    && e.file_name()
+                        .to_string_lossy()
+                        .to_lowercase()
+                        .ends_with(".dll")
             })
             .map(|e| e.path())
             .collect(),
@@ -1367,7 +1390,9 @@ pub fn fix_skse_plugin_conflicts(
                 } else {
                     // Look for a preferred alternative (AE-named or larger)
                     all_mods.iter().any(|m| {
-                        if Some(m.id) == current_owner_id || !m.enabled { return false; }
+                        if Some(m.id) == current_owner_id || !m.enabled {
+                            return false;
+                        }
                         let staging = match &m.staging_path {
                             Some(s) => PathBuf::from(s),
                             None => return false,
@@ -1376,12 +1401,17 @@ pub fn fix_skse_plugin_conflicts(
                         let alt_size = if let Ok(meta) = fs::metadata(&candidate) {
                             meta.len()
                         } else {
-                            find_file_case_insensitive(&staging.join("SKSE").join("Plugins"), &dll_name)
-                                .and_then(|p| fs::metadata(&p).ok())
-                                .map(|meta| meta.len())
-                                .unwrap_or(0)
+                            find_file_case_insensitive(
+                                &staging.join("SKSE").join("Plugins"),
+                                &dll_name,
+                            )
+                            .and_then(|p| fs::metadata(&p).ok())
+                            .map(|meta| meta.len())
+                            .unwrap_or(0)
                         };
-                        if alt_size == 0 || alt_size == deployed_size { return false; }
+                        if alt_size == 0 || alt_size == deployed_size {
+                            return false;
+                        }
 
                         // Swap only toward AE-preferred mods, or larger DLLs as tiebreaker
                         is_ae_preferred_mod_name(&m.name) || alt_size > deployed_size
@@ -1396,8 +1426,12 @@ pub fn fix_skse_plugin_conflicts(
         }
 
         let reason = match &compat {
-            SksePluginCompat::Incompatible { supports } => format!("incompatible (supports: {})", supports.join(", ")),
-            SksePluginCompat::VersionIndependent => "Address Library plugin with different-sized alternative available".to_string(),
+            SksePluginCompat::Incompatible { supports } => {
+                format!("incompatible (supports: {})", supports.join(", "))
+            }
+            SksePluginCompat::VersionIndependent => {
+                "Address Library plugin with different-sized alternative available".to_string()
+            }
             _ => "unknown".to_string(),
         };
 
@@ -1415,8 +1449,12 @@ pub fn fix_skse_plugin_conflicts(
         let mut best_is_ae_preferred = false;
 
         for m in &all_mods {
-            if Some(m.id) == current_owner_id { continue; }
-            if !m.enabled { continue; }
+            if Some(m.id) == current_owner_id {
+                continue;
+            }
+            if !m.enabled {
+                continue;
+            }
 
             let staging = match &m.staging_path {
                 Some(s) => PathBuf::from(s),
@@ -1452,8 +1490,11 @@ pub fn fix_skse_plugin_conflicts(
                     if alt_size != deployed_size && alt_size > 0 {
                         let alt_is_ae = is_ae_preferred_mod_name(&m.name);
                         if alt_is_ae || alt_size > deployed_size {
-                            let quality = format!("alternative build ({}KB vs deployed {}KB)",
-                                alt_size / 1024, deployed_size / 1024);
+                            let quality = format!(
+                                "alternative build ({}KB vs deployed {}KB)",
+                                alt_size / 1024,
+                                deployed_size / 1024
+                            );
                             // AE-named mods beat non-AE; among same tier, first wins
                             if best_candidate.is_none() || (alt_is_ae && !best_is_ae_preferred) {
                                 best_candidate = Some((candidate, m.id, quality));
@@ -1467,7 +1508,8 @@ pub fn fix_skse_plugin_conflicts(
         }
 
         if let Some((src_path, new_owner_id, quality)) = best_candidate {
-            let new_owner_name = all_mods.iter()
+            let new_owner_name = all_mods
+                .iter()
                 .find(|m| m.id == new_owner_id)
                 .map(|m| m.name.as_str())
                 .unwrap_or("unknown");
@@ -1478,18 +1520,32 @@ pub fn fix_skse_plugin_conflicts(
             );
 
             if let Err(e) = fs::remove_file(dll_path) {
-                warn!("SKSE plugin fix: failed to remove '{}': {}", dll_path.display(), e);
+                warn!(
+                    "SKSE plugin fix: failed to remove '{}': {}",
+                    dll_path.display(),
+                    e
+                );
                 continue;
             }
 
             if let Err(e) = fs::copy(&src_path, dll_path) {
-                warn!("SKSE plugin fix: failed to copy '{}' -> '{}': {}", src_path.display(), dll_path.display(), e);
+                warn!(
+                    "SKSE plugin fix: failed to copy '{}' -> '{}': {}",
+                    src_path.display(),
+                    dll_path.display(),
+                    e
+                );
                 continue;
             }
 
             let _ = db.add_deployment_entry(
-                game_id, bottle_name, new_owner_id, &rel_skse,
-                &src_path.to_string_lossy(), "copy", None,
+                game_id,
+                bottle_name,
+                new_owner_id,
+                &rel_skse,
+                &src_path.to_string_lossy(),
+                "copy",
+                None,
             );
 
             fixes += 1;
@@ -1543,7 +1599,10 @@ pub fn fix_engine_fixes_for_wine(
     let mut toml_paths: Vec<PathBuf> = Vec::new();
 
     // 1. Deployed copy
-    let deployed = data_dir.join("SKSE").join("Plugins").join("EngineFixes.toml");
+    let deployed = data_dir
+        .join("SKSE")
+        .join("Plugins")
+        .join("EngineFixes.toml");
     if deployed.exists() {
         toml_paths.push(deployed);
     }
@@ -1573,7 +1632,11 @@ pub fn fix_engine_fixes_for_wine(
                 debug!("EngineFixes Wine fix: already patched {}", path.display());
             }
             Err(e) => {
-                warn!("EngineFixes Wine fix: failed to patch {}: {}", path.display(), e);
+                warn!(
+                    "EngineFixes Wine fix: failed to patch {}: {}",
+                    path.display(),
+                    e
+                );
             }
         }
     }
@@ -1603,7 +1666,11 @@ fn disable_engine_fixes_preloader(
             let disabled = path.with_extension("dll.disabled");
             match fs::rename(path, &disabled) {
                 Ok(()) => info!("EngineFixes Wine fix: disabled {}", path.display()),
-                Err(e) => warn!("EngineFixes Wine fix: failed to disable {}: {}", path.display(), e),
+                Err(e) => warn!(
+                    "EngineFixes Wine fix: failed to disable {}: {}",
+                    path.display(),
+                    e
+                ),
             }
         }
     };
@@ -1614,7 +1681,12 @@ fn disable_engine_fixes_preloader(
         disable_dll(&game_root.join("d3dx9_42.dll"));
     }
     // Original SKSE plugin in Data/SKSE/Plugins/
-    disable_dll(&data_dir.join("SKSE").join("Plugins").join("EngineFixes.dll"));
+    disable_dll(
+        &data_dir
+            .join("SKSE")
+            .join("Plugins")
+            .join("EngineFixes.dll"),
+    );
 
     // 2. Staging copies — collections often include both files
     if let Ok(mods) = db.list_mods(game_id, bottle_name) {
@@ -1636,12 +1708,10 @@ fn disable_engine_fixes_preloader(
 
 /// SKSE plugins that are known to be incompatible with Wine and must be disabled.
 /// Each entry is (dll_name, reason) — the DLL is renamed to `.dll.disabled`.
-const WINE_INCOMPATIBLE_PLUGINS: &[(&str, &str)] = &[
-    (
-        "CrashLogger.dll",
-        "CrashLogger's VEH handler conflicts with Wine exception handling, causing CTDs",
-    ),
-];
+const WINE_INCOMPATIBLE_PLUGINS: &[(&str, &str)] = &[(
+    "CrashLogger.dll",
+    "CrashLogger's VEH handler conflicts with Wine exception handling, causing CTDs",
+)];
 
 /// Disable SKSE plugins that are known to be incompatible with Wine.
 ///
@@ -1674,7 +1744,10 @@ pub fn disable_wine_incompatible_plugins(
         if let Ok(mods) = db.list_mods(game_id, bottle_name) {
             for m in &mods {
                 if let Some(ref sp) = m.staging_path {
-                    let staged = PathBuf::from(sp).join("SKSE").join("Plugins").join(dll_name);
+                    let staged = PathBuf::from(sp)
+                        .join("SKSE")
+                        .join("Plugins")
+                        .join(dll_name);
                     if staged.exists() {
                         let target = staged.with_extension("dll.disabled");
                         if let Err(e) = fs::rename(&staged, &target) {
@@ -1696,10 +1769,8 @@ pub fn list_disabled_wine_plugins(data_dir: &Path) -> Vec<(String, String)> {
     let mut result = Vec::new();
 
     for &(dll_name, reason) in WINE_INCOMPATIBLE_PLUGINS {
-        let disabled_path = plugins_dir.join(format!(
-            "{}",
-            dll_name.replace(".dll", ".dll.disabled")
-        ));
+        let disabled_path =
+            plugins_dir.join(format!("{}", dll_name.replace(".dll", ".dll.disabled")));
         if disabled_path.exists() {
             result.push((dll_name.to_string(), reason.to_string()));
         }
@@ -1710,13 +1781,16 @@ pub fn list_disabled_wine_plugins(data_dir: &Path) -> Vec<(String, String)> {
 
 /// Re-enable a previously disabled Wine-incompatible plugin.
 /// Returns `Ok(true)` if restored, `Ok(false)` if the disabled file wasn't found.
-pub fn reenable_wine_plugin(
-    data_dir: &Path,
-    dll_name: &str,
-) -> std::result::Result<bool, String> {
+pub fn reenable_wine_plugin(data_dir: &Path, dll_name: &str) -> std::result::Result<bool, String> {
     // Validate it's a known plugin (prevent arbitrary file renames)
-    if !WINE_INCOMPATIBLE_PLUGINS.iter().any(|&(n, _)| n == dll_name) {
-        return Err(format!("'{}' is not a known Wine-incompatible plugin", dll_name));
+    if !WINE_INCOMPATIBLE_PLUGINS
+        .iter()
+        .any(|&(n, _)| n == dll_name)
+    {
+        return Err(format!(
+            "'{}' is not a known Wine-incompatible plugin",
+            dll_name
+        ));
     }
 
     let plugins_dir = data_dir.join("SKSE").join("Plugins");
@@ -1808,8 +1882,8 @@ const WINE_DISABLE_KEYS: &[&str] = &[
 /// - Set bDisableTBB = true in [Debug] (force CRT allocator instead of TBB)
 /// Returns Ok(true) if the file was modified, Ok(false) if already correct.
 fn patch_engine_fixes_toml(path: &Path) -> std::result::Result<bool, String> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("read {}: {}", path.display(), e))?;
+    let content =
+        std::fs::read_to_string(path).map_err(|e| format!("read {}: {}", path.display(), e))?;
 
     let mut new_content = content.clone();
     let mut changed = false;
@@ -1908,7 +1982,10 @@ pub async fn install_engine_fixes_wine(data_dir: &Path) -> Result<bool> {
     if plugins_dir.join(ENGINE_FIXES_WINE_DLL).exists() {
         if let Ok(deployed_tag) = fs::read_to_string(&version_file) {
             if deployed_tag.trim() == tag {
-                debug!("SSE Engine Fixes for Wine {} already deployed, skipping", tag);
+                debug!(
+                    "SSE Engine Fixes for Wine {} already deployed, skipping",
+                    tag
+                );
                 return Ok(false);
             }
             info!(
@@ -1917,11 +1994,17 @@ pub async fn install_engine_fixes_wine(data_dir: &Path) -> Result<bool> {
                 tag
             );
         } else {
-            info!("SSE Engine Fixes for Wine deployed without version marker, updating to {}", tag);
+            info!(
+                "SSE Engine Fixes for Wine deployed without version marker, updating to {}",
+                tag
+            );
         }
     }
 
-    info!("Downloading SSE Engine Fixes for Wine {} from GitHub...", tag);
+    info!(
+        "Downloading SSE Engine Fixes for Wine {} from GitHub...",
+        tag
+    );
 
     // Find the AE zip asset (SSEEngineFixesForWine-AE-1.6.1170.zip)
     let assets = release["assets"]
@@ -2003,7 +2086,10 @@ pub async fn install_engine_fixes_wine(data_dir: &Path) -> Result<bool> {
                     fs::copy(path, &dest)?;
                     info!("Deployed {} (default config)", ENGINE_FIXES_WINE_TOML);
                 } else {
-                    debug!("{} already exists, preserving user config", ENGINE_FIXES_WINE_TOML);
+                    debug!(
+                        "{} already exists, preserving user config",
+                        ENGINE_FIXES_WINE_TOML
+                    );
                 }
                 found_toml = true;
             }
@@ -2022,7 +2108,9 @@ pub async fn install_engine_fixes_wine(data_dir: &Path) -> Result<bool> {
     }
 
     if !found_toml {
-        warn!("SSEEngineFixesForWine.toml not found in release archive; DLL deployed without config");
+        warn!(
+            "SSEEngineFixesForWine.toml not found in release archive; DLL deployed without config"
+        );
     }
 
     // Write version marker for future update checks
@@ -2068,7 +2156,10 @@ pub fn install_engine_fixes_wine_blocking(data_dir: &Path) -> Result<bool> {
     if plugins_dir.join(ENGINE_FIXES_WINE_DLL).exists() {
         if let Ok(deployed_tag) = fs::read_to_string(&version_file) {
             if deployed_tag.trim() == tag {
-                debug!("SSE Engine Fixes for Wine {} already deployed, skipping", tag);
+                debug!(
+                    "SSE Engine Fixes for Wine {} already deployed, skipping",
+                    tag
+                );
                 return Ok(false);
             }
             info!(
@@ -2078,11 +2169,17 @@ pub fn install_engine_fixes_wine_blocking(data_dir: &Path) -> Result<bool> {
             );
         } else {
             // DLL exists but no version marker — legacy install, re-deploy to update
-            info!("SSE Engine Fixes for Wine deployed without version marker, updating to {}", tag);
+            info!(
+                "SSE Engine Fixes for Wine deployed without version marker, updating to {}",
+                tag
+            );
         }
     }
 
-    info!("Downloading SSE Engine Fixes for Wine {} from GitHub (blocking)...", tag);
+    info!(
+        "Downloading SSE Engine Fixes for Wine {} from GitHub (blocking)...",
+        tag
+    );
 
     let assets = release["assets"]
         .as_array()
@@ -2176,7 +2273,9 @@ pub fn install_engine_fixes_wine_blocking(data_dir: &Path) -> Result<bool> {
     }
 
     if !found_toml {
-        warn!("SSEEngineFixesForWine.toml not found in release archive; DLL deployed without config");
+        warn!(
+            "SSEEngineFixesForWine.toml not found in release archive; DLL deployed without config"
+        );
     }
 
     // Write version marker for future update checks
@@ -2593,7 +2692,10 @@ mod tests {
         let runtime = parse_game_version_to_runtime("1.6.1170").unwrap();
         let result = check_skse_dll_compat(&dll, runtime);
         // Should return NoVersionData (graceful) since it can't parse as PE
-        assert!(matches!(result, SksePluginCompat::NoVersionData | SksePluginCompat::ParseError(_)));
+        assert!(matches!(
+            result,
+            SksePluginCompat::NoVersionData | SksePluginCompat::ParseError(_)
+        ));
     }
 
     #[test]
@@ -2628,33 +2730,43 @@ mod tests {
         let se_dll = std::path::Path::new(
             "/Users/cashconway/Library/Application Support/CrossOver/Bottles/Steam/drive_c/\
              Program Files (x86)/Steam/steamapps/common/Skyrim Special Edition/Data/SKSE/Plugins/\
-             BehaviorDataInjector.dll"
+             BehaviorDataInjector.dll",
         );
         let ae_dll = std::path::Path::new(
             "/Users/cashconway/Library/Application Support/corkscrew/staging/skyrimse/Steam/\
-             28438_Behavior_Data_Injector_Universal_Support/SKSE/Plugins/BehaviorDataInjector.dll"
+             28438_Behavior_Data_Injector_Universal_Support/SKSE/Plugins/BehaviorDataInjector.dll",
         );
         if se_dll.exists() {
             let compat = check_skse_dll_compat(se_dll, ae_runtime);
             assert!(
                 matches!(compat, SksePluginCompat::VersionIndependent),
-                "SE BDI should be VersionIndependent (Address Library), got {:?}", compat
+                "SE BDI should be VersionIndependent (Address Library), got {:?}",
+                compat
             );
         }
         if ae_dll.exists() {
             let compat = check_skse_dll_compat(ae_dll, ae_runtime);
             assert!(
                 matches!(compat, SksePluginCompat::VersionIndependent),
-                "AE BDI should be VersionIndependent (Address Library), got {:?}", compat
+                "AE BDI should be VersionIndependent (Address Library), got {:?}",
+                compat
             );
             // Log file sizes — may or may not differ depending on mod versions
             if se_dll.exists() {
                 let se_size = fs::metadata(se_dll).unwrap().len();
                 let ae_size = fs::metadata(ae_dll).unwrap().len();
                 if se_size != ae_size {
-                    eprintln!("SE size: {}KB, AE size: {}KB (different — swap detection works)", se_size / 1024, ae_size / 1024);
+                    eprintln!(
+                        "SE size: {}KB, AE size: {}KB (different — swap detection works)",
+                        se_size / 1024,
+                        ae_size / 1024
+                    );
                 } else {
-                    eprintln!("SE size: {}KB, AE size: {}KB (same — swap relies on mod name heuristic)", se_size / 1024, ae_size / 1024);
+                    eprintln!(
+                        "SE size: {}KB, AE size: {}KB (same — swap relies on mod name heuristic)",
+                        se_size / 1024,
+                        ae_size / 1024
+                    );
                 }
             }
         }

@@ -360,9 +360,7 @@ impl WjDownloader {
         if let Err(e) = mega_client.download_node(file_node, async_writer).await {
             // Clean up partial file on download failure.
             let _ = tokio::fs::remove_file(&partial).await;
-            return Err(WjDownloadError::Other(format!(
-                "MEGA download failed: {e}"
-            )));
+            return Err(WjDownloadError::Other(format!("MEGA download failed: {e}")));
         }
 
         // Rename .partial -> final name, cleaning up on failure.
@@ -544,19 +542,19 @@ impl WjDownloader {
                         self.download_manual(app, name, url, prompt).await
                     }
                     WjArchiveState::LoversLab { url, .. } => {
-                        Err(WjDownloadError::UserActionRequired(
-                            format!("LoversLab downloads require manual action: {url}"),
-                        ))
+                        Err(WjDownloadError::UserActionRequired(format!(
+                            "LoversLab downloads require manual action: {url}"
+                        )))
                     }
                     WjArchiveState::VectorPlexus { url, .. } => {
-                        Err(WjDownloadError::UserActionRequired(
-                            format!("VectorPlexus downloads require manual action: {url}"),
-                        ))
+                        Err(WjDownloadError::UserActionRequired(format!(
+                            "VectorPlexus downloads require manual action: {url}"
+                        )))
                     }
                     WjArchiveState::TESAlliance { url, .. } => {
-                        Err(WjDownloadError::UserActionRequired(
-                            format!("TESAlliance downloads require manual action: {url}"),
-                        ))
+                        Err(WjDownloadError::UserActionRequired(format!(
+                            "TESAlliance downloads require manual action: {url}"
+                        )))
                     }
                     WjArchiveState::Bethesda { .. } => Err(WjDownloadError::Unsupported(
                         "Bethesda.net downloads are not supported".into(),
@@ -1016,11 +1014,14 @@ fn is_transient_error(e: &WjDownloadError) -> bool {
             // Classify HTTP status codes embedded in "HTTP NNN:" error strings
             // (from stream_download's manual status check).
             if msg.starts_with("HTTP ") {
-                let code_str = msg.trim_start_matches("HTTP ").split(':').next().unwrap_or("");
+                let code_str = msg
+                    .trim_start_matches("HTTP ")
+                    .split(':')
+                    .next()
+                    .unwrap_or("");
                 if let Ok(code) = code_str.parse::<u16>() {
                     return !matches!(code, 401 | 403 | 404 | 410 | 451)
-                        && (matches!(code, 408 | 429 | 500 | 502 | 503 | 504)
-                            || code >= 500);
+                        && (matches!(code, 408 | 429 | 500 | 502 | 503 | 504) || code >= 500);
                 }
             }
             // MEGA / other generic errors — treat as transient if network-related.

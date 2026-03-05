@@ -671,7 +671,8 @@ pub async fn install_wabbajack_modlist(
 
             match result {
                 Ok(Ok(_files)) => {
-                    let completed = bytes_completed.fetch_add(archive_size, Ordering::Relaxed) + archive_size;
+                    let completed =
+                        bytes_completed.fetch_add(archive_size, Ordering::Relaxed) + archive_size;
                     emit_progress(
                         &app_c,
                         &WjInstallProgressEvent::ExtractionProgress {
@@ -689,12 +690,7 @@ pub async fn install_wabbajack_modlist(
                             index: idx,
                         },
                     );
-                    log::info!(
-                        "Extracted archive {}/{}: {}",
-                        idx + 1,
-                        total,
-                        archive_name
-                    );
+                    log::info!("Extracted archive {}/{}: {}", idx + 1, total, archive_name);
                     (idx, hash_owned, Ok(extract_dest))
                 }
                 Ok(Err(e)) => {
@@ -798,21 +794,24 @@ pub async fn install_wabbajack_modlist(
         _ => 50,
     };
     let directive_result = processor
-        .process_all(&modlist.directives, &|current, total, phase, bytes_processed, total_bytes, current_file| {
-            if current % progress_interval == 0 || current == total {
-                emit_progress(
-                    &app_clone,
-                    &WjInstallProgressEvent::DirectiveProgress {
-                        current,
-                        total,
-                        directive_type: phase.to_string(),
-                        bytes_processed,
-                        total_bytes,
-                        current_file: current_file.to_string(),
-                    },
-                );
-            }
-        })
+        .process_all(
+            &modlist.directives,
+            &|current, total, phase, bytes_processed, total_bytes, current_file| {
+                if current % progress_interval == 0 || current == total {
+                    emit_progress(
+                        &app_clone,
+                        &WjInstallProgressEvent::DirectiveProgress {
+                            current,
+                            total,
+                            directive_type: phase.to_string(),
+                            bytes_processed,
+                            total_bytes,
+                            current_file: current_file.to_string(),
+                        },
+                    );
+                }
+            },
+        )
         .map_err(|e| {
             WjInstallError::Directive(format!(
                 "Directive processing failed for '{}' ({} directives): {}",
@@ -1117,7 +1116,10 @@ pub(crate) async fn install_wabbajack_modlist_cmd(
         // Clean up the cancel token now that the install is finished
         let st = app_clone.state::<crate::AppState>();
         st.wj_cancel_tokens.lock().unwrap().remove(&install_id);
-        log::info!("Cleaned up cancel token for wabbajack install {}", install_id);
+        log::info!(
+            "Cleaned up cancel token for wabbajack install {}",
+            install_id
+        );
     });
 
     Ok(install_id)
@@ -1188,7 +1190,10 @@ pub(crate) async fn cleanup_wabbajack_install(
         .remove(&install_id)
         .is_some();
     if removed {
-        log::info!("Explicitly cleaned up cancel token for install {}", install_id);
+        log::info!(
+            "Explicitly cleaned up cancel token for install {}",
+            install_id
+        );
     }
     Ok(())
 }

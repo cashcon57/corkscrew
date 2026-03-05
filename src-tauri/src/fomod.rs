@@ -141,7 +141,10 @@ fn evaluate_file_dependency(dep: &FileDependency, data_dir: Option<&Path>) -> bo
 
     // Reject path traversal attempts (e.g. "../../../etc/passwd")
     if !crate::staging::is_safe_relative_path(&rel_path) {
-        log::warn!("FOMOD file dependency has unsafe path, skipping: {}", rel_path);
+        log::warn!(
+            "FOMOD file dependency has unsafe path, skipping: {}",
+            rel_path
+        );
         return false;
     }
 
@@ -363,8 +366,12 @@ fn strip_data_prefix(path: &str) -> String {
 /// macOS / Linux.
 fn parse_file_element(tag: &quick_xml::events::BytesStart<'_>, is_folder: bool) -> FomodFile {
     // Normalise backslash → forward-slash (FOMOD XMLs from Windows use backslashes).
-    let source = get_attr(tag, "source").unwrap_or_default().replace('\\', "/");
-    let destination = get_attr(tag, "destination").unwrap_or_default().replace('\\', "/");
+    let source = get_attr(tag, "source")
+        .unwrap_or_default()
+        .replace('\\', "/");
+    let destination = get_attr(tag, "destination")
+        .unwrap_or_default()
+        .replace('\\', "/");
     // Strip "Data/" prefix from destination — we already deploy into Data/.
     let destination = strip_data_prefix(&destination);
     let priority = get_attr(tag, "priority")
@@ -433,8 +440,7 @@ fn parse_condition_block(
                     } else {
                         // Nested <dependencies> — recurse to create a child block
                         let op = get_attr(e, "operator").unwrap_or_else(|| "And".to_string());
-                        let child =
-                            parse_nested_condition_block(reader, buf, &op);
+                        let child = parse_nested_condition_block(reader, buf, &op);
                         if let Some(ref mut b) = block {
                             b.children.push(child);
                         }
@@ -678,8 +684,7 @@ fn parse_plugin(reader: &mut Reader<&[u8]>, buf: &mut Vec<u8>, name: String) -> 
                         depth -= 1;
                     }
                     b"dependencyType" => {
-                        let (default_type, patterns) =
-                            parse_dependency_type(reader, buf);
+                        let (default_type, patterns) = parse_dependency_type(reader, buf);
                         option.type_descriptor = default_type;
                         option.conditional_type_patterns = patterns;
                         // parse_dependency_type consumes the End event
@@ -1025,7 +1030,11 @@ fn resolve_case_insensitive(base: &Path, relative: &str) -> Option<std::path::Pa
         let entries = std::fs::read_dir(&current).ok()?;
         let mut found = false;
         for entry in entries.flatten() {
-            if entry.file_name().to_string_lossy().eq_ignore_ascii_case(component) {
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(component)
+            {
                 current = entry.path();
                 found = true;
                 break;
@@ -1133,13 +1142,13 @@ pub fn get_files_for_selections(
 
         for group in &step.groups {
             // Try exact match first, then case-insensitive lookup.
-            let selected_names = selections.get(&group.name)
-                .or_else(|| {
-                    let lower = group.name.to_lowercase();
-                    selections.iter()
-                        .find(|(k, _)| k.to_lowercase() == lower)
-                        .map(|(_, v)| v)
-                });
+            let selected_names = selections.get(&group.name).or_else(|| {
+                let lower = group.name.to_lowercase();
+                selections
+                    .iter()
+                    .find(|(k, _)| k.to_lowercase() == lower)
+                    .map(|(_, v)| v)
+            });
 
             if let Some(names) = selected_names {
                 for option in &group.options {
@@ -1207,10 +1216,7 @@ pub fn get_files_for_selections(
 ///
 /// Returns `None` if prerequisites are met or absent, or `Some(message)` if
 /// the user should be warned.
-pub fn check_module_dependencies(
-    installer: &FomodInstaller,
-    ctx: &FomodContext,
-) -> Option<String> {
+pub fn check_module_dependencies(installer: &FomodInstaller, ctx: &FomodContext) -> Option<String> {
     if let Some(ref deps) = installer.module_dependencies {
         if !deps.evaluate(ctx) {
             let mut details = Vec::new();
@@ -1279,7 +1285,8 @@ fn strip_xml_encoding_declaration(xml: &str) -> String {
 
     // Compute byte offsets within the original XML.
     let attr_start_in_xml = header_start + enc_offset;
-    let consumed_in_after_key = eq_pos + 1 + (after_key[eq_pos + 1..].len() - after_eq.len()) + value_end + 1;
+    let consumed_in_after_key =
+        eq_pos + 1 + (after_key[eq_pos + 1..].len() - after_eq.len()) + value_end + 1;
     let attr_end_in_xml = attr_start_in_xml + consumed_in_after_key;
 
     // Rebuild XML without the encoding attribute (also trim any trailing space).
@@ -1476,8 +1483,7 @@ fn parse_fomod_xml(xml: &str) -> Result<FomodInstaller> {
                     b"moduleDependencies" => {
                         // Top-level prerequisites — parse directly as a condition block.
                         let op = get_attr(e, "operator").unwrap_or_else(|| "And".to_string());
-                        let block =
-                            parse_nested_condition_block(&mut reader, &mut buf, &op);
+                        let block = parse_nested_condition_block(&mut reader, &mut buf, &op);
                         installer.module_dependencies = Some(block);
                     }
                     b"conditionalFileInstalls" => {
@@ -1565,8 +1571,7 @@ fn parse_conditional_file_installs(
                     }
                     b"dependencies" if in_pattern => {
                         let op = get_attr(e, "operator").unwrap_or_else(|| "And".to_string());
-                        current_condition =
-                            Some(parse_nested_condition_block(reader, buf, &op));
+                        current_condition = Some(parse_nested_condition_block(reader, buf, &op));
                         depth -= 1; // parse_nested consumed end tag
                     }
                     b"files" if in_pattern => {
@@ -1971,8 +1976,14 @@ mod tests {
         let block = ConditionBlock {
             operator: "And".to_string(),
             flags: vec![
-                FlagDependency { flag: "a".into(), value: "1".into() },
-                FlagDependency { flag: "b".into(), value: "2".into() },
+                FlagDependency {
+                    flag: "a".into(),
+                    value: "1".into(),
+                },
+                FlagDependency {
+                    flag: "b".into(),
+                    value: "2".into(),
+                },
             ],
             game_dependencies: vec![],
             file_dependencies: vec![],
@@ -1993,8 +2004,14 @@ mod tests {
         let block = ConditionBlock {
             operator: "Or".to_string(),
             flags: vec![
-                FlagDependency { flag: "a".into(), value: "1".into() },
-                FlagDependency { flag: "b".into(), value: "2".into() },
+                FlagDependency {
+                    flag: "a".into(),
+                    value: "1".into(),
+                },
+                FlagDependency {
+                    flag: "b".into(),
+                    value: "2".into(),
+                },
             ],
             game_dependencies: vec![],
             file_dependencies: vec![],
@@ -2030,11 +2047,23 @@ mod tests {
         assert!(version_gte("2.0.0", "1.99.99")); // major greater
         assert!(!version_gte("1.5.97", "1.6.0")); // minor less
         assert!(version_gte("1.6.1170", "1.6.640")); // patch greater
-        // Unknown AE version with "x" wildcard — must pass all AE thresholds
-        assert!(version_gte("1.6.x (Anniversary Edition, ~35.4 MB)", "1.5.97"));
-        assert!(version_gte("1.6.x (Anniversary Edition, ~35.4 MB)", "1.6.0"));
-        assert!(version_gte("1.6.x (Anniversary Edition, ~35.4 MB)", "1.6.640"));
-        assert!(version_gte("1.6.x (Anniversary Edition, ~35.4 MB)", "1.6.1170"));
+                                                     // Unknown AE version with "x" wildcard — must pass all AE thresholds
+        assert!(version_gte(
+            "1.6.x (Anniversary Edition, ~35.4 MB)",
+            "1.5.97"
+        ));
+        assert!(version_gte(
+            "1.6.x (Anniversary Edition, ~35.4 MB)",
+            "1.6.0"
+        ));
+        assert!(version_gte(
+            "1.6.x (Anniversary Edition, ~35.4 MB)",
+            "1.6.640"
+        ));
+        assert!(version_gte(
+            "1.6.x (Anniversary Edition, ~35.4 MB)",
+            "1.6.1170"
+        ));
     }
 
     #[test]
@@ -2042,7 +2071,9 @@ mod tests {
         let block = ConditionBlock {
             operator: "And".to_string(),
             flags: vec![],
-            game_dependencies: vec![GameDependency { version: "1.6.1130".into() }],
+            game_dependencies: vec![GameDependency {
+                version: "1.6.1130".into(),
+            }],
             file_dependencies: vec![],
             children: vec![],
         };
@@ -2056,8 +2087,13 @@ mod tests {
     fn condition_block_game_dependency_or_with_flags() {
         let block = ConditionBlock {
             operator: "Or".to_string(),
-            flags: vec![FlagDependency { flag: "useAE".into(), value: "true".into() }],
-            game_dependencies: vec![GameDependency { version: "1.6.0".into() }],
+            flags: vec![FlagDependency {
+                flag: "useAE".into(),
+                value: "true".into(),
+            }],
+            game_dependencies: vec![GameDependency {
+                version: "1.6.0".into(),
+            }],
             file_dependencies: vec![],
             children: vec![],
         };
@@ -2083,7 +2119,10 @@ mod tests {
             }
         }
         let selections = get_default_selections(&installer, None, None);
-        assert_eq!(selections.get("Textures"), Some(&vec!["High Res".to_string()]));
+        assert_eq!(
+            selections.get("Textures"),
+            Some(&vec!["High Res".to_string()])
+        );
         assert_eq!(selections.get("Extras"), Some(&vec![]));
     }
 
@@ -2467,7 +2506,10 @@ mod tests {
         let installer = parse_fomod_xml(xml).unwrap();
         assert_eq!(installer.conditional_file_installs.len(), 1);
         assert_eq!(installer.conditional_file_installs[0].files.len(), 1);
-        assert_eq!(installer.conditional_file_installs[0].files[0].source, "compat/skyui");
+        assert_eq!(
+            installer.conditional_file_installs[0].files[0].source,
+            "compat/skyui"
+        );
 
         // When "SkyUI" selected → flag set → conditional files included.
         let mut sel = HashMap::new();
@@ -2828,7 +2870,7 @@ mod tests {
         // Should fall back to default for SelectExactlyOne: "Recommended" = "High Res"
         assert!(sources.contains(&"core")); // required
         assert!(sources.contains(&"textures/high")); // default for SelectExactlyOne
-        // SelectAny "Extras" with no Required/Recommended → nothing selected
+                                                     // SelectAny "Extras" with no Required/Recommended → nothing selected
         assert!(!sources.contains(&"optional/enb.ini"));
     }
 

@@ -170,7 +170,16 @@ pub fn deploy_mod(
     data_dir: &Path,
     files: &[String],
 ) -> Result<DeployResult> {
-    deploy_mod_inner(db, game_id, bottle_name, mod_id, staging_path, data_dir, files, None)
+    deploy_mod_inner(
+        db,
+        game_id,
+        bottle_name,
+        mod_id,
+        staging_path,
+        data_dir,
+        files,
+        None,
+    )
 }
 
 fn deploy_mod_inner(
@@ -521,15 +530,16 @@ pub fn undeploy_mod(
         if deploy_target != "root"
             && is_vanilla_file_with_set(game_id, rel_path, vanilla_set.as_ref())
         {
-            warn!(
-                "SAFETY: Refusing to undeploy vanilla file: {}",
-                rel_path
-            );
+            warn!("SAFETY: Refusing to undeploy vanilla file: {}", rel_path);
             actually_removed.push(rel_path.clone()); // Clean manifest entry
             continue;
         }
 
-        let base = if deploy_target == "root" { game_path } else { data_dir };
+        let base = if deploy_target == "root" {
+            game_path
+        } else {
+            data_dir
+        };
         let file_path = base.join(rel_path);
 
         if file_path.exists() {
@@ -684,7 +694,11 @@ where
                 let mod_target = db
                     .get_deploy_target_for_mod(m.id)
                     .unwrap_or_else(|_| "data".to_string());
-                let effective_dir = if mod_target == "root" { game_path } else { data_dir };
+                let effective_dir = if mod_target == "root" {
+                    game_path
+                } else {
+                    data_dir
+                };
 
                 let file_count = files.len();
                 let result = deploy_mod(
@@ -755,7 +769,11 @@ pub fn purge_deployment(
             continue;
         }
 
-        let base = if entry.deploy_target == "root" { game_path } else { data_dir };
+        let base = if entry.deploy_target == "root" {
+            game_path
+        } else {
+            data_dir
+        };
         let file_path = base.join(&entry.relative_path);
         if file_path.exists() {
             if let Err(e) = fs::remove_file(&file_path) {
@@ -970,9 +988,7 @@ fn compute_desired_state(
             .map_err(|e| DeployerError::Other(e.to_string()))?;
 
         for rel_path in files {
-            let sha256 = hash_map
-                .get(&(m.id, rel_path.clone()))
-                .cloned();
+            let sha256 = hash_map.get(&(m.id, rel_path.clone())).cloned();
 
             // Last writer wins (highest priority, since sorted ascending)
             desired.insert(
@@ -1040,11 +1056,7 @@ fn compute_diff(
 /// Deploy a single file from staging to the game directory using hardlink-first
 /// strategy. Returns the deploy method used ("hardlink" or "copy"), or None on
 /// failure.
-fn deploy_single_file(
-    src: &Path,
-    dst: &Path,
-    can_hardlink: bool,
-) -> Option<&'static str> {
+fn deploy_single_file(src: &Path, dst: &Path, can_hardlink: bool) -> Option<&'static str> {
     if let Some(parent) = dst.parent() {
         if let Err(e) = fs::create_dir_all(parent) {
             warn!(
@@ -1126,7 +1138,10 @@ pub fn deploy_incremental(
     use rayon::prelude::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-    info!("Starting incremental deployment for {}/{}", game_id, bottle_name);
+    info!(
+        "Starting incremental deployment for {}/{}",
+        game_id, bottle_name
+    );
 
     // Step 1: Compute desired state
     let desired = compute_desired_state(db, game_id, bottle_name)?;
@@ -1200,8 +1215,7 @@ pub fn deploy_incremental(
     let added_count = AtomicUsize::new(0);
     let updated_count = AtomicUsize::new(0);
     let any_fallback = AtomicBool::new(!can_hardlink);
-    let verification_failures: std::sync::Mutex<Vec<String>> =
-        std::sync::Mutex::new(Vec::new());
+    let verification_failures: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
     // Step 5a: Remove files that should no longer be deployed
     let remove_paths: Vec<&str> = diff
@@ -1242,15 +1256,10 @@ pub fn deploy_incremental(
         .par_iter()
         .filter_map(|(old_entry, new_desired)| {
             let dst = data_dir.join(&new_desired.relative_path);
-            let src = new_desired
-                .staging_path
-                .join(&new_desired.relative_path);
+            let src = new_desired.staging_path.join(&new_desired.relative_path);
 
             if !src.exists() {
-                warn!(
-                    "Incremental update: source not found: {}",
-                    src.display()
-                );
+                warn!("Incremental update: source not found: {}", src.display());
                 return None;
             }
 
@@ -1268,34 +1277,30 @@ pub fn deploy_incremental(
                     ))
                 }
                 None => {
-                    verification_failures
-                        .lock()
-                        .unwrap()
-                        .push(format!(
-                            "update failed: {} (mod {} -> mod {})",
-                            new_desired.relative_path, old_entry.mod_id, new_desired.mod_id
-                        ));
+                    verification_failures.lock().unwrap().push(format!(
+                        "update failed: {} (mod {} -> mod {})",
+                        new_desired.relative_path, old_entry.mod_id, new_desired.mod_id
+                    ));
                     None
                 }
             }
         })
         .collect();
 
-    let update_entries: Vec<(&str, &str, i64, &str, &str, &str, Option<&str>)> =
-        update_owned
-            .iter()
-            .map(|(mod_id, rel_path, staging_path, sha256)| {
-                (
-                    game_id,
-                    bottle_name,
-                    *mod_id,
-                    rel_path.as_str(),
-                    staging_path.as_str(),
-                    if can_hardlink { "hardlink" } else { "copy" },
-                    sha256.as_deref(),
-                )
-            })
-            .collect();
+    let update_entries: Vec<(&str, &str, i64, &str, &str, &str, Option<&str>)> = update_owned
+        .iter()
+        .map(|(mod_id, rel_path, staging_path, sha256)| {
+            (
+                game_id,
+                bottle_name,
+                *mod_id,
+                rel_path.as_str(),
+                staging_path.as_str(),
+                if can_hardlink { "hardlink" } else { "copy" },
+                sha256.as_deref(),
+            )
+        })
+        .collect();
 
     if !update_entries.is_empty() {
         db.batch_add_deployment_entries_with_hashes(&update_entries)
@@ -1308,15 +1313,10 @@ pub fn deploy_incremental(
         .par_iter()
         .map(|desired_file| {
             let dst = data_dir.join(&desired_file.relative_path);
-            let src = desired_file
-                .staging_path
-                .join(&desired_file.relative_path);
+            let src = desired_file.staging_path.join(&desired_file.relative_path);
 
             if !src.exists() {
-                warn!(
-                    "Incremental add: source not found: {}",
-                    src.display()
-                );
+                warn!("Incremental add: source not found: {}", src.display());
                 return None;
             }
 
@@ -1337,10 +1337,7 @@ pub fn deploy_incremental(
                     verification_failures
                         .lock()
                         .unwrap()
-                        .push(format!(
-                            "add failed: {}",
-                            desired_file.relative_path
-                        ));
+                        .push(format!("add failed: {}", desired_file.relative_path));
                     None
                 }
             }
@@ -1351,17 +1348,18 @@ pub fn deploy_incremental(
     let add_entries: Vec<(&str, &str, i64, &str, &str, &str, Option<&str>)> = add_results
         .iter()
         .filter_map(|opt| {
-            opt.as_ref().map(|(mod_id, rel_path, staging_path, sha256)| {
-                (
-                    game_id,
-                    bottle_name,
-                    *mod_id,
-                    rel_path.as_str(),
-                    staging_path.as_str(),
-                    if can_hardlink { "hardlink" } else { "copy" },
-                    sha256.as_deref(),
-                )
-            })
+            opt.as_ref()
+                .map(|(mod_id, rel_path, staging_path, sha256)| {
+                    (
+                        game_id,
+                        bottle_name,
+                        *mod_id,
+                        rel_path.as_str(),
+                        staging_path.as_str(),
+                        if can_hardlink { "hardlink" } else { "copy" },
+                        sha256.as_deref(),
+                    )
+                })
         })
         .collect();
 
@@ -1414,8 +1412,8 @@ pub struct VerificationResult {
     pub mismatched_files: Vec<String>,
 }
 
-use serde::{Deserialize, Serialize};
 use crate::config::VerificationLevel;
+use serde::{Deserialize, Serialize};
 
 /// Verify deployed files against the deployment manifest's SHA-256 hashes.
 ///
@@ -1487,10 +1485,7 @@ pub fn verify_deployment(
                 }
             }
             Err(e) => {
-                warn!(
-                    "Failed to hash {}: {} — skipping",
-                    entry.relative_path, e
-                );
+                warn!("Failed to hash {}: {} — skipping", entry.relative_path, e);
             }
         }
     }
@@ -1592,7 +1587,8 @@ mod tests {
         .unwrap();
         assert!(data_dir.join("test.esp").exists());
 
-        let removed = undeploy_mod(&db, "skyrimse", "Gaming", mod_id, &data_dir, &data_dir).unwrap();
+        let removed =
+            undeploy_mod(&db, "skyrimse", "Gaming", mod_id, &data_dir, &data_dir).unwrap();
         assert_eq!(removed.len(), 1);
         assert!(!data_dir.join("test.esp").exists());
     }
@@ -1684,13 +1680,22 @@ mod tests {
     ) -> (i64, PathBuf) {
         let file_names: Vec<String> = files.iter().map(|(f, _)| f.to_string()).collect();
         let mod_id = db
-            .add_mod("skyrimse", "Gaming", None, name, "1.0", &format!("{name}.zip"), &file_names)
+            .add_mod(
+                "skyrimse",
+                "Gaming",
+                None,
+                name,
+                "1.0",
+                &format!("{name}.zip"),
+                &file_names,
+            )
             .unwrap();
         db.set_mod_priority(mod_id, priority).unwrap();
 
         let staging = staging_root.join(format!("skyrimse/Gaming/{mod_id}_{name}"));
         fs::create_dir_all(&staging).unwrap();
-        db.set_staging_path(mod_id, staging.to_str().unwrap()).unwrap();
+        db.set_staging_path(mod_id, staging.to_str().unwrap())
+            .unwrap();
 
         for (rel_path, content) in files {
             let full = staging.join(rel_path);
@@ -1701,7 +1706,10 @@ mod tests {
 
             // Also add file hash for realistic testing
             let hash = crate::platform::fast_hash(&full).unwrap();
-            let _ = db.store_file_hashes(mod_id, &[(rel_path.to_string(), hash, content.len() as u64)]);
+            let _ = db.store_file_hashes(
+                mod_id,
+                &[(rel_path.to_string(), hash, content.len() as u64)],
+            );
         }
 
         (mod_id, staging)
@@ -1713,14 +1721,23 @@ mod tests {
         let staging_root = _tmp.path().join("staging_root");
         fs::create_dir_all(&staging_root).unwrap();
 
-        add_test_mod(&db, &staging_root, "ModA", 0, &[
-            ("textures/sky.dds", b"sky texture data"),
-            ("meshes/tree.nif", b"tree mesh data"),
-        ]);
+        add_test_mod(
+            &db,
+            &staging_root,
+            "ModA",
+            0,
+            &[
+                ("textures/sky.dds", b"sky texture data"),
+                ("meshes/tree.nif", b"tree mesh data"),
+            ],
+        );
 
         // From empty → 100% new files → triggers >80% fallback to full redeploy
         let result = deploy_incremental(&db, "skyrimse", "Gaming", &data_dir, &data_dir).unwrap();
-        assert!(result.fallback_used, "Initial deploy from empty should use fallback");
+        assert!(
+            result.fallback_used,
+            "Initial deploy from empty should use fallback"
+        );
         assert!(data_dir.join("textures/sky.dds").exists());
         assert!(data_dir.join("meshes/tree.nif").exists());
     }
@@ -1732,20 +1749,30 @@ mod tests {
         fs::create_dir_all(&staging_root).unwrap();
 
         // Deploy first mod (uses fallback since it's from empty)
-        add_test_mod(&db, &staging_root, "ModA", 0, &[
-            ("textures/sky.dds", b"sky texture data"),
-            ("meshes/tree.nif", b"tree mesh data"),
-            ("sounds/fx.wav", b"sound data"),
-            ("data.esp", b"esp data"),
-            ("extra1.bsa", b"bsa data"),
-        ]);
+        add_test_mod(
+            &db,
+            &staging_root,
+            "ModA",
+            0,
+            &[
+                ("textures/sky.dds", b"sky texture data"),
+                ("meshes/tree.nif", b"tree mesh data"),
+                ("sounds/fx.wav", b"sound data"),
+                ("data.esp", b"esp data"),
+                ("extra1.bsa", b"bsa data"),
+            ],
+        );
         let r1 = deploy_incremental(&db, "skyrimse", "Gaming", &data_dir, &data_dir).unwrap();
         assert!(r1.fallback_used); // First deploy is full
 
         // Now add a small second mod — should be incremental (1 new file < 80%)
-        add_test_mod(&db, &staging_root, "ModB", 10, &[
-            ("new_plugin.esp", b"new esp data"),
-        ]);
+        add_test_mod(
+            &db,
+            &staging_root,
+            "ModB",
+            10,
+            &[("new_plugin.esp", b"new esp data")],
+        );
 
         let r2 = deploy_incremental(&db, "skyrimse", "Gaming", &data_dir, &data_dir).unwrap();
         // fallback_used tracks copy-vs-hardlink (expected true in test env), not full-vs-incremental
@@ -1764,15 +1791,25 @@ mod tests {
         fs::create_dir_all(&staging_root).unwrap();
 
         // First, deploy multiple mods so disabling one is < 80% change
-        add_test_mod(&db, &staging_root, "BaseA", 0, &[
-            ("base1.esp", b"base1"),
-            ("base2.esp", b"base2"),
-            ("base3.esp", b"base3"),
-            ("base4.esp", b"base4"),
-        ]);
-        let (mod_b, _) = add_test_mod(&db, &staging_root, "SmallMod", 5, &[
-            ("small.esp", b"esp data"),
-        ]);
+        add_test_mod(
+            &db,
+            &staging_root,
+            "BaseA",
+            0,
+            &[
+                ("base1.esp", b"base1"),
+                ("base2.esp", b"base2"),
+                ("base3.esp", b"base3"),
+                ("base4.esp", b"base4"),
+            ],
+        );
+        let (mod_b, _) = add_test_mod(
+            &db,
+            &staging_root,
+            "SmallMod",
+            5,
+            &[("small.esp", b"esp data")],
+        );
 
         // Initial deploy (fallback)
         deploy_incremental(&db, "skyrimse", "Gaming", &data_dir, &data_dir).unwrap();
@@ -1798,16 +1835,28 @@ mod tests {
         fs::create_dir_all(&staging_root).unwrap();
 
         // Create several unique files first to avoid >80% threshold
-        let (mod_a, _) = add_test_mod(&db, &staging_root, "ModA", 0, &[
-            ("shared.esp", b"content from A"),
-            ("unique_a1.txt", b"unique a1"),
-            ("unique_a2.txt", b"unique a2"),
-        ]);
-        let (_mod_b, _) = add_test_mod(&db, &staging_root, "ModB", 10, &[
-            ("shared.esp", b"content from B"),
-            ("unique_b1.txt", b"unique b1"),
-            ("unique_b2.txt", b"unique b2"),
-        ]);
+        let (mod_a, _) = add_test_mod(
+            &db,
+            &staging_root,
+            "ModA",
+            0,
+            &[
+                ("shared.esp", b"content from A"),
+                ("unique_a1.txt", b"unique a1"),
+                ("unique_a2.txt", b"unique a2"),
+            ],
+        );
+        let (_mod_b, _) = add_test_mod(
+            &db,
+            &staging_root,
+            "ModB",
+            10,
+            &[
+                ("shared.esp", b"content from B"),
+                ("unique_b1.txt", b"unique b1"),
+                ("unique_b2.txt", b"unique b2"),
+            ],
+        );
 
         // Initial deploy — ModB wins shared.esp (higher priority), fallback
         deploy_incremental(&db, "skyrimse", "Gaming", &data_dir, &data_dir).unwrap();
@@ -1834,9 +1883,7 @@ mod tests {
         let staging_root = _tmp.path().join("staging_root");
         fs::create_dir_all(&staging_root).unwrap();
 
-        add_test_mod(&db, &staging_root, "ModA", 0, &[
-            ("test.esp", b"data"),
-        ]);
+        add_test_mod(&db, &staging_root, "ModA", 0, &[("test.esp", b"data")]);
 
         // Deploy once (fallback since from empty)
         deploy_incremental(&db, "skyrimse", "Gaming", &data_dir, &data_dir).unwrap();
@@ -1866,8 +1913,12 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// Helper: deploy mods using full redeploy + manually record hashes in manifest
-    fn deploy_with_hashes(db: &ModDatabase, staging_root: &Path, data_dir: &Path,
-                          mods: &[(&str, i32, &[(&str, &[u8])])]) {
+    fn deploy_with_hashes(
+        db: &ModDatabase,
+        staging_root: &Path,
+        data_dir: &Path,
+        mods: &[(&str, i32, &[(&str, &[u8])])],
+    ) {
         for (name, priority, files) in mods {
             add_test_mod(db, staging_root, name, *priority, files);
         }
@@ -1881,10 +1932,16 @@ mod tests {
             if file_path.exists() {
                 let hash = crate::platform::fast_hash(&file_path).unwrap();
                 let entries = vec![(
-                    "skyrimse", "Gaming", entry.mod_id, entry.relative_path.as_str(),
-                    entry.staging_path.as_str(), entry.deploy_method.as_str(), Some(hash.as_str()),
+                    "skyrimse",
+                    "Gaming",
+                    entry.mod_id,
+                    entry.relative_path.as_str(),
+                    entry.staging_path.as_str(),
+                    entry.deploy_method.as_str(),
+                    Some(hash.as_str()),
                 )];
-                db.batch_add_deployment_entries_with_hashes(&entries).unwrap();
+                db.batch_add_deployment_entries_with_hashes(&entries)
+                    .unwrap();
             }
         }
     }
@@ -1894,8 +1951,12 @@ mod tests {
         let (db, _tmp, _, data_dir) = setup();
         let result = verify_deployment(
             &crate::config::VerificationLevel::Fast,
-            &db, "skyrimse", "Gaming", &data_dir,
-        ).unwrap();
+            &db,
+            "skyrimse",
+            "Gaming",
+            &data_dir,
+        )
+        .unwrap();
         assert_eq!(result.hash_checked, 0);
         assert_eq!(result.hash_mismatches, 0);
     }
@@ -1906,9 +1967,12 @@ mod tests {
         let staging_root = _tmp.path().join("staging_root");
         fs::create_dir_all(&staging_root).unwrap();
 
-        deploy_with_hashes(&db, &staging_root, &data_dir, &[
-            ("ModA", 0, &[("test.esp", b"original content")]),
-        ]);
+        deploy_with_hashes(
+            &db,
+            &staging_root,
+            &data_dir,
+            &[("ModA", 0, &[("test.esp", b"original content")])],
+        );
         assert!(data_dir.join("test.esp").exists());
 
         // Tamper with it
@@ -1917,8 +1981,12 @@ mod tests {
         // Paranoid verification should detect the mismatch
         let result = verify_deployment(
             &crate::config::VerificationLevel::Paranoid,
-            &db, "skyrimse", "Gaming", &data_dir,
-        ).unwrap();
+            &db,
+            "skyrimse",
+            "Gaming",
+            &data_dir,
+        )
+        .unwrap();
         assert_eq!(result.hash_checked, 1);
         assert_eq!(result.hash_mismatches, 1);
         assert!(result.mismatched_files.contains(&"test.esp".to_string()));
@@ -1930,14 +1998,21 @@ mod tests {
         let staging_root = _tmp.path().join("staging_root");
         fs::create_dir_all(&staging_root).unwrap();
 
-        deploy_with_hashes(&db, &staging_root, &data_dir, &[
-            ("ModA", 0, &[("test.esp", b"original content")]),
-        ]);
+        deploy_with_hashes(
+            &db,
+            &staging_root,
+            &data_dir,
+            &[("ModA", 0, &[("test.esp", b"original content")])],
+        );
 
         let result = verify_deployment(
             &crate::config::VerificationLevel::Paranoid,
-            &db, "skyrimse", "Gaming", &data_dir,
-        ).unwrap();
+            &db,
+            "skyrimse",
+            "Gaming",
+            &data_dir,
+        )
+        .unwrap();
         assert_eq!(result.hash_checked, 1);
         assert_eq!(result.hash_mismatches, 0);
     }
@@ -1956,17 +2031,26 @@ mod tests {
             })
             .collect();
 
-        deploy_with_hashes(&db, &staging_root, &data_dir, &[
-            ("BigMod", 0, &files),
-        ]);
+        deploy_with_hashes(&db, &staging_root, &data_dir, &[("BigMod", 0, &files)]);
 
         let result = verify_deployment(
             &crate::config::VerificationLevel::Balanced,
-            &db, "skyrimse", "Gaming", &data_dir,
-        ).unwrap();
+            &db,
+            "skyrimse",
+            "Gaming",
+            &data_dir,
+        )
+        .unwrap();
         // Should check only ~10% (every 10th file)
-        assert!(result.hash_checked <= 5, "Balanced should spot-check ~10%, got {}", result.hash_checked);
-        assert!(result.hash_checked >= 1, "Balanced should check at least 1 file");
+        assert!(
+            result.hash_checked <= 5,
+            "Balanced should spot-check ~10%, got {}",
+            result.hash_checked
+        );
+        assert!(
+            result.hash_checked >= 1,
+            "Balanced should check at least 1 file"
+        );
         assert_eq!(result.hash_mismatches, 0);
     }
 }

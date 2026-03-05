@@ -336,11 +336,9 @@ pub fn set_bottle_setting(bottle: &Bottle, key: &str, value: &str) -> Result<()>
     // Retina mode modifies user.reg, not cxbottle.conf — handle separately
     if key == "retina_enabled" {
         if value == "true" || value == "1" {
-            crate::wine_diagnostic::fix_retina_mode(bottle)
-                .map_err(BottleConfigError::Io)?;
+            crate::wine_diagnostic::fix_retina_mode(bottle).map_err(BottleConfigError::Io)?;
         } else {
-            crate::wine_diagnostic::disable_retina_mode(bottle)
-                .map_err(BottleConfigError::Io)?;
+            crate::wine_diagnostic::disable_retina_mode(bottle).map_err(BottleConfigError::Io)?;
         }
         return Ok(());
     }

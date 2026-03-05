@@ -299,11 +299,8 @@ fn try_clonefile(src: &Path, dst: &Path) -> io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
 
     extern "C" {
-        fn clonefile(
-            src: *const libc::c_char,
-            dst: *const libc::c_char,
-            flags: u32,
-        ) -> libc::c_int;
+        fn clonefile(src: *const libc::c_char, dst: *const libc::c_char, flags: u32)
+            -> libc::c_int;
     }
 
     let src_bytes = src.as_os_str().as_bytes();
@@ -444,8 +441,7 @@ mod tests {
         let dst = tmp.path().join("dst.txt");
         fs::write(&src, b"hello world").unwrap();
 
-        let (hash, size) =
-            fast_copy_and_hash(&src, &dst, FsCopyMethod::StandardCopy).unwrap();
+        let (hash, size) = fast_copy_and_hash(&src, &dst, FsCopyMethod::StandardCopy).unwrap();
         assert_eq!(fs::read(&dst).unwrap(), b"hello world");
         assert_eq!(size, 11);
         assert_eq!(

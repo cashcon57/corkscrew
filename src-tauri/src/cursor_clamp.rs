@@ -72,9 +72,7 @@ pub fn recover_dock_if_needed() {
             .status();
     }
 
-    let _ = std::process::Command::new("killall")
-        .arg("Dock")
-        .status();
+    let _ = std::process::Command::new("killall").arg("Dock").status();
     info!("cursor_clamp: cleaned up leftover state from previous version");
 }
 

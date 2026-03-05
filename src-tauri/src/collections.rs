@@ -818,8 +818,12 @@ pub async fn get_revisions(
                     .map(String::from),
                 changelog: None,
                 mod_count: mod_files,
-                download_size: rev.get("totalSize")
-                    .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok())))
+                download_size: rev
+                    .get("totalSize")
+                    .and_then(|v| {
+                        v.as_u64()
+                            .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+                    })
                     .unwrap_or(0),
             }
         })
@@ -1048,7 +1052,10 @@ pub fn parse_collection_bundle(bundle_path: &Path) -> Result<CollectionManifest,
 
         // Derive human-readable name from filename
         let file_name = path.rsplit('/').next().unwrap_or(path);
-        let name = file_name.strip_suffix(".ini").unwrap_or(file_name).to_string();
+        let name = file_name
+            .strip_suffix(".ini")
+            .unwrap_or(file_name)
+            .to_string();
 
         let settings = crate::ini_manager::parse_ini_string(&content);
         if settings.is_empty() {
@@ -1062,7 +1069,9 @@ pub fn parse_collection_bundle(bundle_path: &Path) -> Result<CollectionManifest,
             settings.len(),
             settings.values().map(|s| s.len()).sum::<usize>()
         );
-        manifest.ini_tweaks.push(CollectionIniTweak { name, settings });
+        manifest
+            .ini_tweaks
+            .push(CollectionIniTweak { name, settings });
     }
 
     if !manifest.ini_tweaks.is_empty() {
@@ -1226,7 +1235,12 @@ pub async fn fetch_collection_bundle(
             .get("download_links")
             .and_then(|v| v.as_array())
             .and_then(|arr| arr.first())
-            .and_then(|entry| entry.get("URI").or_else(|| entry.get("uri")).or_else(|| entry.get("url")))
+            .and_then(|entry| {
+                entry
+                    .get("URI")
+                    .or_else(|| entry.get("uri"))
+                    .or_else(|| entry.get("url"))
+            })
             .and_then(|v| v.as_str())
             // Fallback: singular field names
             .or_else(|| json.get("download_link").and_then(|v| v.as_str()))
@@ -1525,7 +1539,10 @@ fn parse_collection_node(node: &serde_json::Value) -> CollectionInfo {
 
     let download_size = latest_pub_rev
         .and_then(|r| r.get("totalSize"))
-        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok())))
+        .and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+        })
         .filter(|&s| s > 0);
 
     let updated_at = node

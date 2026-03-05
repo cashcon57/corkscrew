@@ -105,15 +105,15 @@ const MOD_FILE_EXTENSIONS: &[&str] = &[
     "esp", "esm", "esl", // plugin files
     "bsa", "ba2", // archives
     "nif", // meshes
-    "dds", "tga", // textures
-    "hkx", // animations
-    "pex", // compiled Papyrus scripts
-    "seq", // sequence files
-    "swf", // UI files
-    "fuz", // voice / lip-sync
-    "dll", // SKSE plugins
-    "bin", // SKSE address library data
-    "ini", // configuration files
+    "dds", "tga",  // textures
+    "hkx",  // animations
+    "pex",  // compiled Papyrus scripts
+    "seq",  // sequence files
+    "swf",  // UI files
+    "fuz",  // voice / lip-sync
+    "dll",  // SKSE plugins
+    "bin",  // SKSE address library data
+    "ini",  // configuration files
     "json", // mod config / MCM settings
 ];
 
@@ -335,7 +335,8 @@ pub fn extract_archive_with_progress(
             if let Some(detected) = detect_format_from_magic(archive_path) {
                 log::info!(
                     "Unknown extension '{}', magic bytes indicate {} — extracting",
-                    other, detected
+                    other,
+                    detected
                 );
                 progress(0, 1);
                 let result = match detected {
@@ -416,9 +417,9 @@ fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
     // the overhead of re-parsing the central directory per file.
     let num_threads = rayon::current_num_threads().max(1);
     let archive_path_owned = archive_path.to_path_buf();
-    let chunks: Vec<&[(usize, PathBuf)]> = file_entries.chunks(
-        (file_entries.len() / num_threads).max(1),
-    ).collect();
+    let chunks: Vec<&[(usize, PathBuf)]> = file_entries
+        .chunks((file_entries.len() / num_threads).max(1))
+        .collect();
 
     let results: Vec<Vec<std::result::Result<PathBuf, String>>> = chunks
         .par_iter()
@@ -427,24 +428,33 @@ fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
             let f = match fs::File::open(&archive_path_owned) {
                 Ok(file) => io::BufReader::with_capacity(EXTRACT_BUF_SIZE, file),
                 Err(e) => {
-                    return chunk.iter().map(|_| Err(format!("Open failed: {}", e))).collect();
+                    return chunk
+                        .iter()
+                        .map(|_| Err(format!("Open failed: {}", e)))
+                        .collect();
                 }
             };
             let mut arch = match ZipArchive::new(f) {
                 Ok(a) => a,
                 Err(e) => {
-                    return chunk.iter().map(|_| Err(format!("ZIP parse failed: {}", e))).collect();
+                    return chunk
+                        .iter()
+                        .map(|_| Err(format!("ZIP parse failed: {}", e)))
+                        .collect();
                 }
             };
-            chunk.iter().map(|(idx, out_path)| {
-                let mut entry = arch.by_index(*idx).map_err(|e| e.to_string())?;
-                let mut out_file = io::BufWriter::with_capacity(
-                    EXTRACT_BUF_SIZE,
-                    fs::File::create(out_path).map_err(|e| e.to_string())?,
-                );
-                io::copy(&mut entry, &mut out_file).map_err(|e| e.to_string())?;
-                Ok(out_path.clone())
-            }).collect()
+            chunk
+                .iter()
+                .map(|(idx, out_path)| {
+                    let mut entry = arch.by_index(*idx).map_err(|e| e.to_string())?;
+                    let mut out_file = io::BufWriter::with_capacity(
+                        EXTRACT_BUF_SIZE,
+                        fs::File::create(out_path).map_err(|e| e.to_string())?,
+                    );
+                    io::copy(&mut entry, &mut out_file).map_err(|e| e.to_string())?;
+                    Ok(out_path.clone())
+                })
+                .collect()
         })
         .collect();
 
@@ -524,8 +534,9 @@ fn extract_zip_with_progress(
 
     let num_threads = rayon::current_num_threads().max(1);
     let archive_path_owned = archive_path.to_path_buf();
-    let chunks: Vec<&[(usize, PathBuf)]> =
-        file_entries.chunks((file_entries.len() / num_threads).max(1)).collect();
+    let chunks: Vec<&[(usize, PathBuf)]> = file_entries
+        .chunks((file_entries.len() / num_threads).max(1))
+        .collect();
 
     let results: Vec<Vec<std::result::Result<PathBuf, String>>> = chunks
         .par_iter()
@@ -601,11 +612,7 @@ fn find_native_7z() -> Option<PathBuf> {
     let names = ["7zz", "7z", "7za"];
 
     // Well-known locations (Homebrew Apple Silicon, Homebrew Intel, Linux distro)
-    let prefixes: &[&str] = &[
-        "/opt/homebrew/bin",
-        "/usr/local/bin",
-        "/usr/bin",
-    ];
+    let prefixes: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"];
 
     for name in &names {
         for prefix in prefixes {
@@ -661,11 +668,7 @@ fn extract_7z(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
 }
 
 /// Extract using the native `7z` / `7zz` command-line tool.
-fn extract_7z_native(
-    bin: &Path,
-    archive_path: &Path,
-    dest_dir: &Path,
-) -> Result<Vec<PathBuf>> {
+fn extract_7z_native(bin: &Path, archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
     info!(
         "Extracting 7z with native binary {}: {} -> {}",
         bin.display(),
@@ -674,16 +677,14 @@ fn extract_7z_native(
     );
 
     let output = Command::new(bin)
-        .arg("x")                                         // eXtract with full paths
+        .arg("x") // eXtract with full paths
         .arg(archive_path)
-        .arg(format!("-o{}", dest_dir.display()))         // output directory
-        .arg("-y")                                        // assume Yes to all prompts
-        .arg("-bso0")                                     // suppress normal stdout
-        .arg("-bsp0")                                     // suppress progress stdout
+        .arg(format!("-o{}", dest_dir.display())) // output directory
+        .arg("-y") // assume Yes to all prompts
+        .arg("-bso0") // suppress normal stdout
+        .arg("-bsp0") // suppress progress stdout
         .output()
-        .map_err(|e| {
-            InstallerError::SevenZ(format!("Failed to run {}: {}", bin.display(), e))
-        })?;
+        .map_err(|e| InstallerError::SevenZ(format!("Failed to run {}: {}", bin.display(), e)))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -821,7 +822,10 @@ fn extract_rar(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
                 if canonical.starts_with(&canonical_dest) {
                     extracted.push(out_path);
                 } else {
-                    warn!("Removing RAR entry outside destination: {}", canonical.display());
+                    warn!(
+                        "Removing RAR entry outside destination: {}",
+                        canonical.display()
+                    );
                     let _ = fs::remove_file(&out_path);
                 }
             } else {
@@ -921,10 +925,8 @@ fn extract_tar<R: io::Read>(
             if let Some(parent) = out_path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            let mut out_file = io::BufWriter::with_capacity(
-                EXTRACT_BUF_SIZE,
-                fs::File::create(&out_path)?,
-            );
+            let mut out_file =
+                io::BufWriter::with_capacity(EXTRACT_BUF_SIZE, fs::File::create(&out_path)?);
             io::copy(&mut entry, &mut out_file)?;
             extracted.push(out_path);
         }

@@ -188,7 +188,14 @@ impl DirectiveProcessor {
             skipped += 1;
             bytes_processed.fetch_add(d.size().max(0) as u64, Ordering::Relaxed);
             let count = processed_counter.fetch_add(1, Ordering::Relaxed) + 1;
-            progress_callback(count, total, "ignored", bytes_processed.load(Ordering::Relaxed), total_bytes, d.to_path());
+            progress_callback(
+                count,
+                total,
+                "ignored",
+                bytes_processed.load(Ordering::Relaxed),
+                total_bytes,
+                d.to_path(),
+            );
         }
 
         // Phase 1: File production — parallel via rayon
@@ -217,7 +224,14 @@ impl DirectiveProcessor {
                 bytes_processed.fetch_add(d.size().max(0) as u64, Ordering::Relaxed);
                 let count = processed_counter.fetch_add(1, Ordering::Relaxed) + 1;
                 if count.is_multiple_of(10) || count == total {
-                    progress_callback(count, total, "files", bytes_processed.load(Ordering::Relaxed), total_bytes, d.to_path());
+                    progress_callback(
+                        count,
+                        total,
+                        "files",
+                        bytes_processed.load(Ordering::Relaxed),
+                        total_bytes,
+                        d.to_path(),
+                    );
                 }
             });
         });
@@ -236,7 +250,14 @@ impl DirectiveProcessor {
             }
             bytes_processed.fetch_add(d.size().max(0) as u64, Ordering::Relaxed);
             let count = processed_counter.fetch_add(1, Ordering::Relaxed) + 1;
-            progress_callback(count, total, "patches", bytes_processed.load(Ordering::Relaxed), total_bytes, d.to_path());
+            progress_callback(
+                count,
+                total,
+                "patches",
+                bytes_processed.load(Ordering::Relaxed),
+                total_bytes,
+                d.to_path(),
+            );
         }
 
         // Phase 3: BSA creation (sequential — consumes produced files)
@@ -251,7 +272,14 @@ impl DirectiveProcessor {
             }
             bytes_processed.fetch_add(d.size().max(0) as u64, Ordering::Relaxed);
             let count = processed_counter.fetch_add(1, Ordering::Relaxed) + 1;
-            progress_callback(count, total, "archives", bytes_processed.load(Ordering::Relaxed), total_bytes, d.to_path());
+            progress_callback(
+                count,
+                total,
+                "archives",
+                bytes_processed.load(Ordering::Relaxed),
+                total_bytes,
+                d.to_path(),
+            );
         }
 
         let processed = processed_counter.load(Ordering::Relaxed);
@@ -1015,7 +1043,10 @@ impl DirectiveProcessor {
     fn resolve_output_path(&self, to: &str) -> PathBuf {
         let normalized = normalize_wj_path(to);
         if !crate::staging::is_safe_relative_path(&normalized) {
-            log::warn!("WJ directive has unsafe output path, sanitizing: {}", normalized);
+            log::warn!(
+                "WJ directive has unsafe output path, sanitizing: {}",
+                normalized
+            );
             // Strip any dangerous components and use just the filename
             let safe = std::path::Path::new(&normalized)
                 .file_name()

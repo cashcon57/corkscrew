@@ -184,11 +184,7 @@ pub fn analyze_conflicts(
 
         // --- Checksum-based auto-resolution (highest priority) ---
         let mod_ids: Vec<i64> = conflict.mods.iter().map(|m| m.mod_id).collect();
-        let identical = check_identical_content(
-            &conflict.relative_path,
-            &mod_ids,
-            file_hashes,
-        );
+        let identical = check_identical_content(&conflict.relative_path, &mod_ids, file_hashes);
 
         match identical {
             IdenticalCheck::AllIdentical => {
@@ -581,7 +577,8 @@ mod tests {
             vec![(1, "Mod A", 1), (2, "Mod B", 2)],
         )];
 
-        let (results, _stats) = analyze_conflicts(&conflicts, &mods, Some(&loot_order), &empty_hashes());
+        let (results, _stats) =
+            analyze_conflicts(&conflicts, &mods, Some(&loot_order), &empty_hashes());
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].status, ConflictStatus::Suggested);
         assert_eq!(results[0].suggested_winner_id, 1); // A loads later in LOOT
@@ -660,14 +657,8 @@ mod tests {
         )];
 
         let mut hashes = HashMap::new();
-        hashes.insert(
-            (1, "textures/shared.dds".to_string()),
-            "aaaa".to_string(),
-        );
-        hashes.insert(
-            (2, "textures/shared.dds".to_string()),
-            "bbbb".to_string(),
-        );
+        hashes.insert((1, "textures/shared.dds".to_string()), "aaaa".to_string());
+        hashes.insert((2, "textures/shared.dds".to_string()), "bbbb".to_string());
 
         let (results, stats) = analyze_conflicts(&conflicts, &mods, None, &hashes);
         assert_eq!(results.len(), 1);
@@ -690,10 +681,7 @@ mod tests {
 
         // Only one mod has a hash — can't compare
         let mut hashes = HashMap::new();
-        hashes.insert(
-            (1, "textures/shared.dds".to_string()),
-            "aaaa".to_string(),
-        );
+        hashes.insert((1, "textures/shared.dds".to_string()), "aaaa".to_string());
 
         let (results, stats) = analyze_conflicts(&conflicts, &mods, None, &hashes);
         assert_eq!(results.len(), 1);
@@ -716,8 +704,14 @@ mod tests {
         // Mods 1 and 2 share a hash, mod 3 is different
         let mut hashes = HashMap::new();
         let same_hash = "aaaa";
-        hashes.insert((1, "textures/shared.dds".to_string()), same_hash.to_string());
-        hashes.insert((2, "textures/shared.dds".to_string()), same_hash.to_string());
+        hashes.insert(
+            (1, "textures/shared.dds".to_string()),
+            same_hash.to_string(),
+        );
+        hashes.insert(
+            (2, "textures/shared.dds".to_string()),
+            same_hash.to_string(),
+        );
         hashes.insert((3, "textures/shared.dds".to_string()), "bbbb".to_string());
 
         let (results, stats) = analyze_conflicts(&conflicts, &mods, None, &hashes);

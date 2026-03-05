@@ -674,7 +674,9 @@ pub fn save_tokens(tokens: &TokenPair) -> Result<(), OAuthError> {
         let _old_umask = unsafe { libc::umask(0o077) };
         let dir_result = fs::create_dir_all(parent);
         #[cfg(unix)]
-        unsafe { libc::umask(_old_umask); }
+        unsafe {
+            libc::umask(_old_umask);
+        }
         dir_result?;
     }
 
@@ -850,7 +852,9 @@ pub async fn get_auth_method_refreshed() -> AuthMethod {
         }
 
         // Refresh token is empty and access token is expired — clear and force re-auth.
-        eprintln!("[oauth] access token expired and no refresh token available, clearing stale tokens");
+        eprintln!(
+            "[oauth] access token expired and no refresh token available, clearing stale tokens"
+        );
         if let Err(clear_err) = clear_tokens() {
             eprintln!("[oauth] failed to clear stale tokens: {clear_err}");
         }

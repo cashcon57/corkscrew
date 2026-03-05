@@ -7,8 +7,8 @@ pub mod collection_installer;
 pub mod collections;
 pub mod config;
 pub mod conflict_resolver;
-pub mod cursor_clamp;
 pub mod crashlog;
+pub mod cursor_clamp;
 pub mod database;
 pub mod deployer;
 pub mod disk_budget;
@@ -61,8 +61,8 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use bottles::Bottle;
 use collections::{
-    CollectionDiff, CollectionInfo, CollectionManifest, CollectionRevision,
-    CollectionSearchResult, RevisionModsResult,
+    CollectionDiff, CollectionInfo, CollectionManifest, CollectionRevision, CollectionSearchResult,
+    RevisionModsResult,
 };
 use config::AppConfig;
 use crashlog::{CrashLogEntry, CrashReport};
@@ -126,7 +126,13 @@ fn auto_snapshot_before_destructive(
     bottle_name: &str,
     label: &str,
 ) {
-    match rollback::create_snapshot(db, game_id, bottle_name, label, Some("Auto-snapshot before destructive operation")) {
+    match rollback::create_snapshot(
+        db,
+        game_id,
+        bottle_name,
+        label,
+        Some("Auto-snapshot before destructive operation"),
+    ) {
         Ok(id) => log::info!("Auto-snapshot {} created: {}", id, label),
         Err(e) => log::warn!("Failed to create auto-snapshot '{}': {}", label, e),
     }
@@ -427,8 +433,15 @@ fn uninstall_mod(
     // Remove deployed files from game directory
     let removed = if installed_mod.staging_path.is_some() {
         // Staged mod: undeploy via deployment manifest
-        deployer::undeploy_mod(db, &game_id, &bottle_name, mod_id, &data_dir, &game.game_path)
-            .map_err(|e| e.to_string())?
+        deployer::undeploy_mod(
+            db,
+            &game_id,
+            &bottle_name,
+            mod_id,
+            &data_dir,
+            &game.game_path,
+        )
+        .map_err(|e| e.to_string())?
     } else {
         // Legacy mod: remove files directly
         installer::uninstall_mod_files(&data_dir, &installed_mod.installed_files)
@@ -492,8 +505,15 @@ fn toggle_mod(
             .map_err(|e| e.to_string())?;
         } else {
             // Undeploy (remove from game dir, keep staging intact)
-            deployer::undeploy_mod(db, &game_id, &bottle_name, mod_id, &data_dir, &game.game_path)
-                .map_err(|e| e.to_string())?;
+            deployer::undeploy_mod(
+                db,
+                &game_id,
+                &bottle_name,
+                mod_id,
+                &data_dir,
+                &game.game_path,
+            )
+            .map_err(|e| e.to_string())?;
         }
 
         // Sync Skyrim plugins if applicable
@@ -959,8 +979,7 @@ fn launch_game_cmd(
     // Otherwise, check for a custom default executable first.
     if !use_skse {
         let custom_exe =
-            executables::get_default_executable(&state.db, &game_id, &bottle_name)
-                .unwrap_or(None);
+            executables::get_default_executable(&state.db, &game_id, &bottle_name).unwrap_or(None);
 
         if let Some(custom) = custom_exe {
             let exe_path = PathBuf::from(&custom.exe_path);
@@ -1067,11 +1086,7 @@ fn launch_game_cmd(
         let active_versions: Option<Vec<String>> = collections
             .iter()
             .find(|(_, _, enabled)| *enabled > 0)
-            .and_then(|(name, _, _)| {
-                metadata_list
-                    .iter()
-                    .find(|m| m.collection_name == *name)
-            })
+            .and_then(|(name, _, _)| metadata_list.iter().find(|m| m.collection_name == *name))
             .and_then(|m| m.manifest_json.as_ref())
             .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
             .and_then(|v| v.get("gameVersions").cloned())
@@ -1148,27 +1163,38 @@ fn launch_game_cmd(
     if game_id == "skyrimse" {
         let data_dir = PathBuf::from(&game.data_dir);
         let skse_fixes = skse::fix_skse_plugin_conflicts(
-            &state.db, &game_id, &bottle_name, &data_dir, &game_path,
+            &state.db,
+            &game_id,
+            &bottle_name,
+            &data_dir,
+            &game_path,
         );
         if skse_fixes > 0 {
-            log::info!("Pre-launch: swapped {} incompatible SKSE plugin DLL(s)", skse_fixes);
+            log::info!(
+                "Pre-launch: swapped {} incompatible SKSE plugin DLL(s)",
+                skse_fixes
+            );
         }
 
         // EngineFixes Wine compatibility: disable all patches (they crash under Wine)
-        let ef_fixes = skse::fix_engine_fixes_for_wine(
-            &data_dir, &state.db, &game_id, &bottle_name,
-        );
+        let ef_fixes =
+            skse::fix_engine_fixes_for_wine(&data_dir, &state.db, &game_id, &bottle_name);
         if ef_fixes > 0 {
-            log::info!("Pre-launch: patched {} EngineFixes TOML(s) for Wine compatibility", ef_fixes);
+            log::info!(
+                "Pre-launch: patched {} EngineFixes TOML(s) for Wine compatibility",
+                ef_fixes
+            );
         }
 
         // Disable Wine-incompatible SKSE plugins (CrashLogger, etc.)
-        let wine_disabled = skse::disable_wine_incompatible_plugins(
-            &data_dir, &state.db, &game_id, &bottle_name,
-        );
+        let wine_disabled =
+            skse::disable_wine_incompatible_plugins(&data_dir, &state.db, &game_id, &bottle_name);
         if !wine_disabled.is_empty() {
             let names: Vec<&str> = wine_disabled.iter().map(|(n, _)| n.as_str()).collect();
-            log::info!("Pre-launch: disabled Wine-incompatible plugin(s): {}", names.join(", "));
+            log::info!(
+                "Pre-launch: disabled Wine-incompatible plugin(s): {}",
+                names.join(", ")
+            );
             let msg = format!(
                 "Disabled Wine-incompatible plugin(s): {}. See Settings > Game > Wine-Incompatible Plugins to manage.",
                 names.join(", ")
@@ -1180,7 +1206,10 @@ fn launch_game_cmd(
         match skse::install_engine_fixes_wine_blocking(&data_dir) {
             Ok(true) => log::info!("Pre-launch: auto-deployed SSE Engine Fixes for Wine"),
             Ok(false) => log::debug!("Pre-launch: SSE Engine Fixes for Wine already deployed"),
-            Err(e) => log::warn!("Pre-launch: could not auto-deploy SSE Engine Fixes for Wine: {}", e),
+            Err(e) => log::warn!(
+                "Pre-launch: could not auto-deploy SSE Engine Fixes for Wine: {}",
+                e
+            ),
         }
     }
 
@@ -1385,7 +1414,11 @@ fn fix_skse_plugins_cmd(
     let (_, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
     let game_path = PathBuf::from(&game.game_path);
     Ok(skse::fix_skse_plugin_conflicts(
-        &state.db, &game_id, &bottle_name, &data_dir, &game_path,
+        &state.db,
+        &game_id,
+        &bottle_name,
+        &data_dir,
+        &game_path,
     ))
 }
 
@@ -1395,7 +1428,9 @@ fn list_disabled_wine_plugins_cmd(
     game_id: String,
     bottle_name: String,
 ) -> Result<Vec<(String, String)>, String> {
-    if game_id != "skyrimse" { return Ok(vec![]); }
+    if game_id != "skyrimse" {
+        return Ok(vec![]);
+    }
     let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
     Ok(skse::list_disabled_wine_plugins(&data_dir))
 }
@@ -1407,7 +1442,9 @@ fn reenable_wine_plugin_cmd(
     bottle_name: String,
     dll_name: String,
 ) -> Result<bool, String> {
-    if game_id != "skyrimse" { return Ok(false); }
+    if game_id != "skyrimse" {
+        return Ok(false);
+    }
     let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
     skse::reenable_wine_plugin(&data_dir, &dll_name)
 }
@@ -1469,10 +1506,7 @@ fn start_depot_download(game_id: String) -> Result<bool, String> {
 }
 
 #[tauri::command]
-fn check_depot_ready(
-    game_id: String,
-    bottle_name: String,
-) -> Result<Option<String>, String> {
+fn check_depot_ready(game_id: String, bottle_name: String) -> Result<Option<String>, String> {
     let (bottle, _, _) = resolve_game(&game_id, &bottle_name)?;
     let steam_dir = downgrader::find_steam_dir(&bottle.path)
         .ok_or_else(|| "Steam directory not found in bottle".to_string())?;
@@ -1481,14 +1515,12 @@ fn check_depot_ready(
         &steam_dir,
         downgrader::SKYRIM_APP_ID,
         downgrader::SKYRIM_DEPOT_ID,
-    ).map(|p| p.to_string_lossy().into_owned()))
+    )
+    .map(|p| p.to_string_lossy().into_owned()))
 }
 
 #[tauri::command]
-fn apply_downgrade_cmd(
-    game_id: String,
-    bottle_name: String,
-) -> Result<DowngradeStatus, String> {
+fn apply_downgrade_cmd(game_id: String, bottle_name: String) -> Result<DowngradeStatus, String> {
     let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
     let game_path = PathBuf::from(&game.game_path);
     let steam_dir = downgrader::find_steam_dir(&bottle.path)
@@ -1498,10 +1530,12 @@ fn apply_downgrade_cmd(
         &steam_dir,
         downgrader::SKYRIM_APP_ID,
         downgrader::SKYRIM_DEPOT_ID,
-    ).ok_or_else(|| "Depot files not downloaded yet. Run download_depot in Steam console first.".to_string())?;
+    )
+    .ok_or_else(|| {
+        "Depot files not downloaded yet. Run download_depot in Steam console first.".to_string()
+    })?;
 
-    downgrader::apply_depot_downgrade(&game_path, &depot_exe, &game_id)
-        .map_err(|e| e.to_string())
+    downgrader::apply_depot_downgrade(&game_path, &depot_exe, &game_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1675,13 +1709,10 @@ fn analyze_conflicts_cmd(
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
         .collect();
-    let file_hashes = db
-        .get_file_hashes_bulk(&mod_ids)
-        .unwrap_or_default();
+    let file_hashes = db.get_file_hashes_bulk(&mod_ids).unwrap_or_default();
 
-    let (suggestions, identical_stats) = conflict_resolver::analyze_conflicts(
-        &conflicts, &mods, loot_ref, &file_hashes,
-    );
+    let (suggestions, identical_stats) =
+        conflict_resolver::analyze_conflicts(&conflicts, &mods, loot_ref, &file_hashes);
     Ok(AnalyzeConflictsResponse {
         suggestions,
         identical_stats,
@@ -1717,9 +1748,7 @@ fn resolve_all_conflicts_cmd(
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
         .collect();
-    let file_hashes = db
-        .get_file_hashes_bulk(&mod_ids)
-        .unwrap_or_default();
+    let file_hashes = db.get_file_hashes_bulk(&mod_ids).unwrap_or_default();
 
     let (suggestions, _identical_stats) =
         conflict_resolver::analyze_conflicts(&conflicts, &mods, loot_ref, &file_hashes);
@@ -1752,7 +1781,8 @@ fn resolve_all_conflicts_cmd(
     // Redeploy to apply new priorities if any changed.
     if result.priorities_changed > 0 {
         let (_bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
-        deployer::redeploy_all(db, &game_id, &bottle_name, &data_dir, &game.game_path).map_err(|e| e.to_string())?;
+        deployer::redeploy_all(db, &game_id, &bottle_name, &data_dir, &game.game_path)
+            .map_err(|e| e.to_string())?;
         if game_id == "skyrimse" {
             let bottle = resolve_bottle(&bottle_name)?;
             let _ = sync_plugins_for_game(&game, &bottle);
@@ -1810,7 +1840,8 @@ fn reorder_mods(
     let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
 
     // Redeploy to reflect new priority order
-    deployer::redeploy_all(db, &game_id, &bottle_name, &data_dir, &game.game_path).map_err(|e| e.to_string())?;
+    deployer::redeploy_all(db, &game_id, &bottle_name, &data_dir, &game.game_path)
+        .map_err(|e| e.to_string())?;
 
     // Sync plugins after redeploy
     if game_id == "skyrimse" {
@@ -1862,20 +1893,29 @@ fn redeploy_all_mods(
         let _ = sync_plugins_for_game(&game, &bottle);
         let ef = skse::fix_engine_fixes_for_wine(&data_dir, &state.db, &game_id, &bottle_name);
         if ef > 0 {
-            log::info!("Redeploy: patched {} EngineFixes TOML(s) for Wine compatibility", ef);
+            log::info!(
+                "Redeploy: patched {} EngineFixes TOML(s) for Wine compatibility",
+                ef
+            );
         }
         // Disable Wine-incompatible SKSE plugins
-        let wine_disabled = skse::disable_wine_incompatible_plugins(
-            &data_dir, &state.db, &game_id, &bottle_name,
-        );
+        let wine_disabled =
+            skse::disable_wine_incompatible_plugins(&data_dir, &state.db, &game_id, &bottle_name);
         for (name, reason) in &wine_disabled {
-            log::info!("Redeploy: disabled Wine-incompatible plugin {} — {}", name, reason);
+            log::info!(
+                "Redeploy: disabled Wine-incompatible plugin {} — {}",
+                name,
+                reason
+            );
         }
         // Auto-deploy SSE Engine Fixes for Wine on redeploy
         match skse::install_engine_fixes_wine_blocking(&data_dir) {
             Ok(true) => log::info!("Redeploy: auto-deployed SSE Engine Fixes for Wine"),
-            Ok(false) => {},
-            Err(e) => log::warn!("Redeploy: could not auto-deploy SSE Engine Fixes for Wine: {}", e),
+            Ok(false) => {}
+            Err(e) => log::warn!(
+                "Redeploy: could not auto-deploy SSE Engine Fixes for Wine: {}",
+                e
+            ),
         }
     }
 
@@ -1897,26 +1937,36 @@ fn deploy_incremental_cmd(
     let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
     let db = &state.db;
 
-    let result = deployer::deploy_incremental(db, &game_id, &bottle_name, &data_dir, &game.game_path)
-        .map_err(|e| e.to_string())?;
+    let result =
+        deployer::deploy_incremental(db, &game_id, &bottle_name, &data_dir, &game.game_path)
+            .map_err(|e| e.to_string())?;
 
     if game_id == "skyrimse" {
         let _ = sync_plugins_for_game(&game, &bottle);
         let ef = skse::fix_engine_fixes_for_wine(&data_dir, &state.db, &game_id, &bottle_name);
         if ef > 0 {
-            log::info!("Incremental deploy: patched {} EngineFixes TOML(s) for Wine compatibility", ef);
+            log::info!(
+                "Incremental deploy: patched {} EngineFixes TOML(s) for Wine compatibility",
+                ef
+            );
         }
         // Disable Wine-incompatible SKSE plugins
-        let wine_disabled = skse::disable_wine_incompatible_plugins(
-            &data_dir, &state.db, &game_id, &bottle_name,
-        );
+        let wine_disabled =
+            skse::disable_wine_incompatible_plugins(&data_dir, &state.db, &game_id, &bottle_name);
         for (name, reason) in &wine_disabled {
-            log::info!("Incremental deploy: disabled Wine-incompatible plugin {} — {}", name, reason);
+            log::info!(
+                "Incremental deploy: disabled Wine-incompatible plugin {} — {}",
+                name,
+                reason
+            );
         }
         match skse::install_engine_fixes_wine_blocking(&data_dir) {
             Ok(true) => log::info!("Incremental deploy: auto-deployed SSE Engine Fixes for Wine"),
-            Ok(false) => {},
-            Err(e) => log::warn!("Incremental deploy: could not auto-deploy SSE Engine Fixes for Wine: {}", e),
+            Ok(false) => {}
+            Err(e) => log::warn!(
+                "Incremental deploy: could not auto-deploy SSE Engine Fixes for Wine: {}",
+                e
+            ),
         }
     }
 
@@ -1942,7 +1992,9 @@ fn check_deployment_health(
         .map(|c| c.verification_level)
         .unwrap_or_default();
 
-    let mods = db.list_mods(&game_id, &bottle_name).map_err(|e| e.to_string())?;
+    let mods = db
+        .list_mods(&game_id, &bottle_name)
+        .map_err(|e| e.to_string())?;
     let manifest = db
         .get_deployment_manifest(&game_id, &bottle_name)
         .map_err(|e| e.to_string())?;
@@ -2013,14 +2065,9 @@ fn check_deployment_health(
     }
 
     // Hash verification (Balanced/Paranoid modes only)
-    let verification = deployer::verify_deployment(
-        &verification_level,
-        db,
-        &game_id,
-        &bottle_name,
-        &data_dir,
-    )
-    .map_err(|e| e.to_string())?;
+    let verification =
+        deployer::verify_deployment(&verification_level, db, &game_id, &bottle_name, &data_dir)
+            .map_err(|e| e.to_string())?;
 
     let healthy = staging_missing == 0
         && staging_empty == 0
@@ -2086,8 +2133,9 @@ fn purge_deployment_cmd(
 
     auto_snapshot_before_destructive(db, &game_id, &bottle_name, "Before purge deployment");
 
-    let removed = deployer::purge_deployment(db, &game_id, &bottle_name, &data_dir, &game.game_path)
-        .map_err(|e| e.to_string())?;
+    let removed =
+        deployer::purge_deployment(db, &game_id, &bottle_name, &data_dir, &game.game_path)
+            .map_err(|e| e.to_string())?;
 
     if game_id == "skyrimse" {
         let _ = sync_plugins_for_game(&game, &bottle);
@@ -2309,7 +2357,8 @@ fn switch_collection_cmd(
     let db = &state.db;
 
     // 1. Purge current deployment
-    deployer::purge_deployment(db, &game_id, &bottle_name, &data_dir, &game.game_path).map_err(|e| e.to_string())?;
+    deployer::purge_deployment(db, &game_id, &bottle_name, &data_dir, &game.game_path)
+        .map_err(|e| e.to_string())?;
 
     // 2. Disable all mods for this game/bottle
     {
@@ -2333,8 +2382,8 @@ fn switch_collection_cmd(
     }
 
     // 4. Redeploy
-    let result =
-        deployer::redeploy_all(db, &game_id, &bottle_name, &data_dir, &game.game_path).map_err(|e| e.to_string())?;
+    let result = deployer::redeploy_all(db, &game_id, &bottle_name, &data_dir, &game.game_path)
+        .map_err(|e| e.to_string())?;
 
     // 5. Sync plugins if Skyrim SE
     if game_id == "skyrimse" {
@@ -2434,39 +2483,47 @@ async fn delete_collection_cmd(
                 "step": "undeploying",
             }),
         );
-        let deployed_paths = db.bulk_remove_deployment_entries(&mod_ids).unwrap_or_default();
+        let deployed_paths = db
+            .bulk_remove_deployment_entries(&mod_ids)
+            .unwrap_or_default();
         let removed_count = std::sync::atomic::AtomicUsize::new(0);
         let path_total = deployed_paths.len();
         let game_path = game.game_path.clone();
         use rayon::prelude::*;
-        deployed_paths.par_iter().for_each(|(rel_path, deploy_target)| {
-            let base = if deploy_target == "root" { &game_path } else { &data_dir };
-            let file_path = base.join(rel_path);
-            if file_path.exists() {
-                // Make writable before deleting
-                if let Ok(metadata) = std::fs::metadata(&file_path) {
-                    let perms = metadata.permissions();
-                    if perms.readonly() {
-                        let mut writable = perms;
-                        writable.set_readonly(false);
-                        let _ = std::fs::set_permissions(&file_path, writable);
+        deployed_paths
+            .par_iter()
+            .for_each(|(rel_path, deploy_target)| {
+                let base = if deploy_target == "root" {
+                    &game_path
+                } else {
+                    &data_dir
+                };
+                let file_path = base.join(rel_path);
+                if file_path.exists() {
+                    // Make writable before deleting
+                    if let Ok(metadata) = std::fs::metadata(&file_path) {
+                        let perms = metadata.permissions();
+                        if perms.readonly() {
+                            let mut writable = perms;
+                            writable.set_readonly(false);
+                            let _ = std::fs::set_permissions(&file_path, writable);
+                        }
                     }
+                    let _ = std::fs::remove_file(&file_path);
                 }
-                let _ = std::fs::remove_file(&file_path);
-            }
-            let done = removed_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-            if done % 5000 == 0 || done == path_total {
-                let _ = app.emit(
-                    "uninstall-progress",
-                    serde_json::json!({
-                        "kind": "modUninstalling",
-                        "mod_index": 0,
-                        "mod_name": format!("Removing files ({}/{})", done, path_total),
-                        "step": "undeploying",
-                    }),
-                );
-            }
-        });
+                let done = removed_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                if done % 5000 == 0 || done == path_total {
+                    let _ = app.emit(
+                        "uninstall-progress",
+                        serde_json::json!({
+                            "kind": "modUninstalling",
+                            "mod_index": 0,
+                            "mod_name": format!("Removing files ({}/{})", done, path_total),
+                            "step": "undeploying",
+                        }),
+                    );
+                }
+            });
         log::info!(
             "Bulk-removed {} deployed files for {} collection mods",
             path_total,
@@ -2476,9 +2533,14 @@ async fn delete_collection_cmd(
         // Prune empty directories left behind after file removal.
         // Collect unique parent directories, sort deepest-first, and remove if empty.
         {
-            let mut parent_dirs: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
+            let mut parent_dirs: std::collections::BTreeSet<PathBuf> =
+                std::collections::BTreeSet::new();
             for (rel_path, deploy_target) in &deployed_paths {
-                let base = if deploy_target == "root" { &game_path } else { &data_dir };
+                let base = if deploy_target == "root" {
+                    &game_path
+                } else {
+                    &data_dir
+                };
                 let mut current = base.join(rel_path);
                 while let Some(parent) = current.parent() {
                     if parent == data_dir || parent == game_path {
@@ -2541,11 +2603,7 @@ async fn delete_collection_cmd(
             }
         }
         // Clean up all collection refs for this collection
-        let _ = db.remove_all_collection_download_refs(
-            &collection_name,
-            &game_id,
-            &bottle_name,
-        );
+        let _ = db.remove_all_collection_download_refs(&collection_name, &game_id, &bottle_name);
 
         // Phase 4: Bulk-remove all mods from DB
         let _ = app.emit(
@@ -2578,7 +2636,10 @@ async fn delete_collection_cmd(
         // mods were overwriting). Only needed if non-collection mods exist.
         let remaining_mods = db.list_mods(&game_id, &bottle_name).unwrap_or_default();
         if remaining_mods.iter().any(|m| m.enabled) {
-            log::info!("Redeploying {} remaining mods after collection removal", remaining_mods.len());
+            log::info!(
+                "Redeploying {} remaining mods after collection removal",
+                remaining_mods.len()
+            );
             let _ = deployer::redeploy_all(&db, &game_id, &bottle_name, &data_dir, &game.game_path);
         }
 
@@ -2602,9 +2663,7 @@ async fn delete_collection_cmd(
         }
 
         // Clean up install checkpoint so "Resume Install" prompt doesn't appear
-        if let Err(e) =
-            db.delete_collection_checkpoints(&collection_name, &game_id, &bottle_name)
-        {
+        if let Err(e) = db.delete_collection_checkpoints(&collection_name, &game_id, &bottle_name) {
             errors.push(format!("Failed to remove install checkpoint: {}", e));
         }
 
@@ -2643,7 +2702,9 @@ async fn delete_collection_cmd(
         );
 
         // Redeploy remaining mods to restore any files that were shadowed
-        if let Err(e) = deployer::redeploy_all(&db, &game_id, &bottle_name, &data_dir, &game.game_path) {
+        if let Err(e) =
+            deployer::redeploy_all(&db, &game_id, &bottle_name, &data_dir, &game.game_path)
+        {
             errors.push(format!("Failed to redeploy remaining mods: {}", e));
         }
 
@@ -2742,13 +2803,23 @@ async fn uninstall_wabbajack_modlist(
             }
 
             // Undeploy
-            if let Err(e) = deployer::undeploy_mod(&db, &game_id, &bottle_name, m.id, &data_dir, &game.game_path) {
+            if let Err(e) = deployer::undeploy_mod(
+                &db,
+                &game_id,
+                &bottle_name,
+                m.id,
+                &data_dir,
+                &game.game_path,
+            ) {
                 errors.push(format!("Failed to undeploy '{}': {}", m.name, e));
             }
 
             // Clean rollback staging
             if let Err(e) = rollback::cleanup_mod_version_staging(&db, m.id) {
-                errors.push(format!("Failed to clean rollback staging for '{}': {}", m.name, e));
+                errors.push(format!(
+                    "Failed to clean rollback staging for '{}': {}",
+                    m.name, e
+                ));
             }
 
             // Remove staging
@@ -2763,7 +2834,9 @@ async fn uninstall_wabbajack_modlist(
             // Handle download cleanup
             let download =
                 if let (Some(nmod_id), Some(nfile_id)) = (m.nexus_mod_id, m.nexus_file_id) {
-                    db.find_download_by_nexus_ids(nmod_id, nfile_id).ok().flatten()
+                    db.find_download_by_nexus_ids(nmod_id, nfile_id)
+                        .ok()
+                        .flatten()
                 } else {
                     None
                 }
@@ -2777,7 +2850,8 @@ async fn uninstall_wabbajack_modlist(
                 if delete_downloads && is_unique {
                     if let Err(e) = std::fs::remove_file(&dl.archive_path) {
                         if Path::new(&dl.archive_path).exists() {
-                            errors.push(format!("Failed to delete download for '{}': {}", m.name, e));
+                            errors
+                                .push(format!("Failed to delete download for '{}': {}", m.name, e));
                         }
                     } else {
                         downloads_removed += 1;
@@ -2786,9 +2860,15 @@ async fn uninstall_wabbajack_modlist(
                 }
 
                 if let Err(e) = db.remove_download_collection_ref(
-                    dl.id, &collection_name, &game_id, &bottle_name,
+                    dl.id,
+                    &collection_name,
+                    &game_id,
+                    &bottle_name,
                 ) {
-                    errors.push(format!("Failed to remove download ref for '{}': {}", m.name, e));
+                    errors.push(format!(
+                        "Failed to remove download ref for '{}': {}",
+                        m.name, e
+                    ));
                 }
             }
 
@@ -2823,11 +2903,19 @@ async fn uninstall_wabbajack_modlist(
         }
 
         // Redeploy remaining mods
-        let _ = app.emit("uninstall-progress", serde_json::json!({ "kind": "redeployStarted" }));
-        if let Err(e) = deployer::redeploy_all(&db, &game_id, &bottle_name, &data_dir, &game.game_path) {
+        let _ = app.emit(
+            "uninstall-progress",
+            serde_json::json!({ "kind": "redeployStarted" }),
+        );
+        if let Err(e) =
+            deployer::redeploy_all(&db, &game_id, &bottle_name, &data_dir, &game.game_path)
+        {
             errors.push(format!("Failed to redeploy remaining mods: {}", e));
         }
-        let _ = app.emit("uninstall-progress", serde_json::json!({ "kind": "redeployCompleted" }));
+        let _ = app.emit(
+            "uninstall-progress",
+            serde_json::json!({ "kind": "redeployCompleted" }),
+        );
 
         if game_id == "skyrimse" {
             let _ = sync_plugins_for_game(&game, &bottle);
@@ -2868,10 +2956,16 @@ async fn restore_mod_snapshot(
         let result = rollback::restore_snapshot(&db, snapshot_id, &game_id, &bottle_name)?;
 
         // Redeploy to apply the restored state
-        let _ = app.emit("deploy-progress", serde_json::json!({ "kind": "redeployStarted" }));
+        let _ = app.emit(
+            "deploy-progress",
+            serde_json::json!({ "kind": "redeployStarted" }),
+        );
         deployer::redeploy_all(&db, &game_id, &bottle_name, &data_dir, &game.game_path)
             .map_err(|e| format!("Failed to redeploy after snapshot restore: {}", e))?;
-        let _ = app.emit("deploy-progress", serde_json::json!({ "kind": "redeployCompleted" }));
+        let _ = app.emit(
+            "deploy-progress",
+            serde_json::json!({ "kind": "redeployCompleted" }),
+        );
 
         if game_id == "skyrimse" {
             let _ = sync_plugins_for_game(&game, &bottle);
@@ -2902,8 +2996,9 @@ async fn return_to_vanilla(
         auto_snapshot_before_destructive(&db, &game_id, &bottle_name, "Before return to vanilla");
 
         // 2. Purge deployment
-        let removed = deployer::purge_deployment(&db, &game_id, &bottle_name, &data_dir, &game.game_path)
-            .map_err(|e| e.to_string())?;
+        let removed =
+            deployer::purge_deployment(&db, &game_id, &bottle_name, &data_dir, &game.game_path)
+                .map_err(|e| e.to_string())?;
         let files_removed = removed.len();
 
         // 3. Disable all mods
@@ -4217,10 +4312,7 @@ fn sync_plugins_for_game(game: &DetectedGame, bottle: &Bottle) -> Result<(), Str
 /// Call this after a collection install (or any time Plugins.txt looks wrong)
 /// to ensure every plugin file in the Data directory is marked as enabled.
 #[tauri::command]
-fn sync_plugins_cmd(
-    game_id: String,
-    bottle_name: String,
-) -> Result<serde_json::Value, String> {
+fn sync_plugins_cmd(game_id: String, bottle_name: String) -> Result<serde_json::Value, String> {
     let (bottle, game, _data_dir) = resolve_game(&game_id, &bottle_name)?;
     sync_plugins_for_game(&game, &bottle)?;
     Ok(serde_json::json!({ "ok": true }))
@@ -5744,16 +5836,32 @@ fn cleanup_orphaned_temp_dirs() {
 fn cli_list_mods(game_id: &str, bottle_name: &str, db: &Arc<ModDatabase>) {
     let mods = match db.list_mods(game_id, bottle_name) {
         Ok(m) => m,
-        Err(e) => { eprintln!("[corkscrew] ERROR: {}", e); std::process::exit(1); }
+        Err(e) => {
+            eprintln!("[corkscrew] ERROR: {}", e);
+            std::process::exit(1);
+        }
     };
-    println!("[corkscrew] {} mods installed for {}:{}", mods.len(), game_id, bottle_name);
-    println!("{:<8} {:<50} {:<10} {:<10} {}", "ID", "Name", "Enabled", "Files", "Staging");
+    println!(
+        "[corkscrew] {} mods installed for {}:{}",
+        mods.len(),
+        game_id,
+        bottle_name
+    );
+    println!(
+        "{:<8} {:<50} {:<10} {:<10} {}",
+        "ID", "Name", "Enabled", "Files", "Staging"
+    );
     println!("{}", "-".repeat(120));
     for m in &mods {
         let staging = m.staging_path.as_deref().unwrap_or("(inline)");
-        println!("{:<8} {:<50} {:<10} {:<10} {}",
+        println!(
+            "{:<8} {:<50} {:<10} {:<10} {}",
             m.id,
-            if m.name.len() > 48 { format!("{}…", &m.name[..47]) } else { m.name.clone() },
+            if m.name.len() > 48 {
+                format!("{}…", &m.name[..47])
+            } else {
+                m.name.clone()
+            },
             if m.enabled { "yes" } else { "NO" },
             m.installed_files.len(),
             staging,
@@ -5765,25 +5873,52 @@ fn cli_list_mods(game_id: &str, bottle_name: &str, db: &Arc<ModDatabase>) {
 fn cli_search_mods(query: &str, game_id: &str, bottle_name: &str, db: &Arc<ModDatabase>) {
     let mods = match db.list_mods(game_id, bottle_name) {
         Ok(m) => m,
-        Err(e) => { eprintln!("[corkscrew] ERROR: {}", e); std::process::exit(1); }
+        Err(e) => {
+            eprintln!("[corkscrew] ERROR: {}", e);
+            std::process::exit(1);
+        }
     };
     let q = query.to_lowercase();
-    let matches: Vec<_> = mods.iter().filter(|m| m.name.to_lowercase().contains(&q)).collect();
-    println!("[corkscrew] {} match(es) for '{}' in {}:{}", matches.len(), query, game_id, bottle_name);
+    let matches: Vec<_> = mods
+        .iter()
+        .filter(|m| m.name.to_lowercase().contains(&q))
+        .collect();
+    println!(
+        "[corkscrew] {} match(es) for '{}' in {}:{}",
+        matches.len(),
+        query,
+        game_id,
+        bottle_name
+    );
     for m in matches {
         let staging = m.staging_path.as_deref().unwrap_or("(inline)");
-        println!("  ID={} name='{}' enabled={} files={} nexus_id={:?}",
-            m.id, m.name, m.enabled, m.installed_files.len(), m.nexus_mod_id);
+        println!(
+            "  ID={} name='{}' enabled={} files={} nexus_id={:?}",
+            m.id,
+            m.name,
+            m.enabled,
+            m.installed_files.len(),
+            m.nexus_mod_id
+        );
         println!("    staging: {}", staging);
         if !m.installed_files.is_empty() {
-            let plugins: Vec<_> = m.installed_files.iter()
+            let plugins: Vec<_> = m
+                .installed_files
+                .iter()
                 .filter(|f| {
                     let fl = f.to_lowercase();
                     fl.ends_with(".esp") || fl.ends_with(".esm") || fl.ends_with(".esl")
                 })
                 .collect();
             if !plugins.is_empty() {
-                println!("    plugin files: {}", plugins.iter().map(|p| p.as_str()).collect::<Vec<_>>().join(", "));
+                println!(
+                    "    plugin files: {}",
+                    plugins
+                        .iter()
+                        .map(|p| p.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
             }
         }
     }
@@ -5793,7 +5928,10 @@ fn cli_search_mods(query: &str, game_id: &str, bottle_name: &str, db: &Arc<ModDa
 fn cli_find_file(pattern: &str, game_id: &str, bottle_name: &str, db: &Arc<ModDatabase>) {
     let mods = match db.list_mods(game_id, bottle_name) {
         Ok(m) => m,
-        Err(e) => { eprintln!("[corkscrew] ERROR: {}", e); std::process::exit(1); }
+        Err(e) => {
+            eprintln!("[corkscrew] ERROR: {}", e);
+            std::process::exit(1);
+        }
     };
 
     // Also load current plugins state so we can flag deployed-but-inactive plugins
@@ -5802,7 +5940,8 @@ fn cli_find_file(pattern: &str, game_id: &str, bottle_name: &str, db: &Arc<ModDa
         match resolve_game(game_id, bottle_name) {
             Ok((bottle, game, _)) => {
                 let game_path = PathBuf::from(&game.game_path);
-                let pf = games::with_plugin(game_id, |p| p.get_plugins_file(&game_path, &bottle)).flatten();
+                let pf = games::with_plugin(game_id, |p| p.get_plugins_file(&game_path, &bottle))
+                    .flatten();
                 if let Some(pf) = pf {
                     plugins::skyrim_plugins::read_plugins_txt(&pf)
                         .unwrap_or_default()
@@ -5822,7 +5961,9 @@ fn cli_find_file(pattern: &str, game_id: &str, bottle_name: &str, db: &Arc<ModDa
 
     for m in &mods {
         // Check registered installed_files list
-        let file_matches: Vec<_> = m.installed_files.iter()
+        let file_matches: Vec<_> = m
+            .installed_files
+            .iter()
             .filter(|f| f.to_lowercase().contains(&pat))
             .collect();
 
@@ -5830,15 +5971,18 @@ fn cli_find_file(pattern: &str, game_id: &str, bottle_name: &str, db: &Arc<ModDa
             println!("  [mod {}] id={} enabled={}", m.name, m.id, m.enabled);
             for f in &file_matches {
                 let fl = f.to_lowercase();
-                let is_plugin = fl.ends_with(".esp") || fl.ends_with(".esm") || fl.ends_with(".esl");
+                let is_plugin =
+                    fl.ends_with(".esp") || fl.ends_with(".esm") || fl.ends_with(".esl");
                 let basename = f.rsplit(['/', '\\']).next().unwrap_or(f.as_str());
                 let active_note = if is_plugin {
                     match plugin_active.get(&basename.to_lowercase()) {
-                        Some(true)  => " [plugin: ACTIVE ✓]",
+                        Some(true) => " [plugin: ACTIVE ✓]",
                         Some(false) => " [plugin: INACTIVE ✗]",
-                        None        => " [plugin: not in plugins.txt]",
+                        None => " [plugin: not in plugins.txt]",
                     }
-                } else { "" };
+                } else {
+                    ""
+                };
                 println!("    {}{}", f, active_note);
                 found += 1;
             }
@@ -5853,7 +5997,11 @@ fn cli_find_file(pattern: &str, game_id: &str, bottle_name: &str, db: &Arc<ModDa
                     if name.contains(&pat) {
                         let rel = entry.path().strip_prefix(&staging).unwrap_or(entry.path());
                         // Only show if NOT already in installed_files
-                        if !m.installed_files.iter().any(|f| f.to_lowercase().contains(&pat)) {
+                        if !m
+                            .installed_files
+                            .iter()
+                            .any(|f| f.to_lowercase().contains(&pat))
+                        {
                             if found == 0 || true {
                                 println!("  [mod {}] id={} (staged, not deployed)", m.name, m.id);
                             }
@@ -5870,41 +6018,66 @@ fn cli_find_file(pattern: &str, game_id: &str, bottle_name: &str, db: &Arc<ModDa
 }
 
 /// Show plugin load order state: active/inactive/on-disk/stale.
-fn cli_check_plugins(game_id: &str, bottle_name: &str, inactive_only: bool, deployed_inactive_only: bool, db: &Arc<ModDatabase>) {
+fn cli_check_plugins(
+    game_id: &str,
+    bottle_name: &str,
+    inactive_only: bool,
+    deployed_inactive_only: bool,
+    db: &Arc<ModDatabase>,
+) {
     let (bottle, game, data_dir) = match resolve_game(game_id, bottle_name) {
         Ok(r) => r,
-        Err(e) => { eprintln!("[corkscrew] ERROR: {}", e); std::process::exit(1); }
+        Err(e) => {
+            eprintln!("[corkscrew] ERROR: {}", e);
+            std::process::exit(1);
+        }
     };
 
     let game_path = PathBuf::from(&game.game_path);
-    let pf = match games::with_plugin(game_id, |p| p.get_plugins_file(&game_path, &bottle)).flatten() {
-        Some(p) => p,
-        None => { eprintln!("[corkscrew] No plugins.txt path for game '{}'", game_id); std::process::exit(1); }
-    };
+    let pf =
+        match games::with_plugin(game_id, |p| p.get_plugins_file(&game_path, &bottle)).flatten() {
+            Some(p) => p,
+            None => {
+                eprintln!("[corkscrew] No plugins.txt path for game '{}'", game_id);
+                std::process::exit(1);
+            }
+        };
 
     println!("[corkscrew] plugins.txt: {}", pf.display());
     if let Ok(meta) = std::fs::metadata(&pf) {
         if let Ok(modified) = meta.modified() {
-            let secs = modified.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-            println!("[corkscrew] plugins.txt last modified: {} (unix {})", {
-                let dt = chrono::DateTime::<chrono::Local>::from(modified);
-                dt.format("%Y-%m-%d %H:%M:%S").to_string()
-            }, secs);
+            let secs = modified
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            println!(
+                "[corkscrew] plugins.txt last modified: {} (unix {})",
+                {
+                    let dt = chrono::DateTime::<chrono::Local>::from(modified);
+                    dt.format("%Y-%m-%d %H:%M:%S").to_string()
+                },
+                secs
+            );
         }
     }
 
     // Read plugins.txt
     let entries = match plugins::skyrim_plugins::read_plugins_txt(&pf) {
         Ok(e) => e,
-        Err(e) => { eprintln!("[corkscrew] ERROR reading plugins.txt: {}", e); std::process::exit(1); }
+        Err(e) => {
+            eprintln!("[corkscrew] ERROR reading plugins.txt: {}", e);
+            std::process::exit(1);
+        }
     };
 
     // Discover on-disk plugins
     let on_disk = plugins::skyrim_plugins::discover_plugins(&data_dir).unwrap_or_default();
-    let on_disk_lower: std::collections::HashSet<String> = on_disk.iter().map(|s| s.to_lowercase()).collect();
+    let on_disk_lower: std::collections::HashSet<String> =
+        on_disk.iter().map(|s| s.to_lowercase()).collect();
 
     // Build active set from plugins.txt
-    let in_txt_active: std::collections::HashMap<String, bool> = entries.iter()
+    let in_txt_active: std::collections::HashMap<String, bool> = entries
+        .iter()
         .map(|e| (e.filename.to_lowercase(), e.enabled))
         .collect();
 
@@ -5923,7 +6096,12 @@ fn cli_check_plugins(game_id: &str, bottle_name: &str, inactive_only: bool, depl
 
     let active_count = entries.iter().filter(|e| e.enabled).count();
     let inactive_count = entries.iter().filter(|e| !e.enabled).count();
-    println!("[corkscrew] plugins.txt: {} active, {} inactive, {} total entries", active_count, inactive_count, entries.len());
+    println!(
+        "[corkscrew] plugins.txt: {} active, {} inactive, {} total entries",
+        active_count,
+        inactive_count,
+        entries.len()
+    );
     println!("[corkscrew] on disk: {} plugin files", on_disk.len());
 
     // Find deployed-but-inactive: on disk AND in plugins.txt but NOT active
@@ -5938,32 +6116,49 @@ fn cli_check_plugins(game_id: &str, bottle_name: &str, inactive_only: bool, depl
     }
 
     // Find on-disk but not in plugins.txt at all
-    let not_in_txt: Vec<&str> = on_disk.iter()
+    let not_in_txt: Vec<&str> = on_disk
+        .iter()
         .filter(|p| !in_txt_active.contains_key(&p.to_lowercase()))
         .map(|p| p.as_str())
         .collect();
 
     // Find in plugins.txt but not on disk (stale)
-    let stale: Vec<_> = entries.iter()
+    let stale: Vec<_> = entries
+        .iter()
         .filter(|e| !on_disk_lower.contains(&e.filename.to_lowercase()))
         .collect();
 
     if deployed_inactive_only {
-        println!("\n[DEPLOYED BUT INACTIVE in plugins.txt] ({} plugins):", deployed_inactive.len());
+        println!(
+            "\n[DEPLOYED BUT INACTIVE in plugins.txt] ({} plugins):",
+            deployed_inactive.len()
+        );
         for p in &deployed_inactive {
-            let owner = plugin_owner.get(&p.to_lowercase()).map(|s| s.as_str()).unwrap_or("unknown mod");
+            let owner = plugin_owner
+                .get(&p.to_lowercase())
+                .map(|s| s.as_str())
+                .unwrap_or("unknown mod");
             println!("  {} ({})", p, owner);
         }
         return;
     }
 
-    println!("\n[DEPLOYED BUT INACTIVE in plugins.txt] ({} plugins):", deployed_inactive.len());
+    println!(
+        "\n[DEPLOYED BUT INACTIVE in plugins.txt] ({} plugins):",
+        deployed_inactive.len()
+    );
     for p in &deployed_inactive {
-        let owner = plugin_owner.get(&p.to_lowercase()).map(|s| s.as_str()).unwrap_or("unknown mod");
+        let owner = plugin_owner
+            .get(&p.to_lowercase())
+            .map(|s| s.as_str())
+            .unwrap_or("unknown mod");
         println!("  {} ({})", p, owner);
     }
 
-    println!("\n[ON DISK BUT NOT IN plugins.txt] ({} plugins):", not_in_txt.len());
+    println!(
+        "\n[ON DISK BUT NOT IN plugins.txt] ({} plugins):",
+        not_in_txt.len()
+    );
     for p in not_in_txt.iter().take(20) {
         println!("  {}", p);
     }
@@ -5971,23 +6166,43 @@ fn cli_check_plugins(game_id: &str, bottle_name: &str, inactive_only: bool, depl
         println!("  ... and {} more", not_in_txt.len() - 20);
     }
 
-    println!("\n[STALE: in plugins.txt but NOT on disk] ({} plugins):", stale.len());
+    println!(
+        "\n[STALE: in plugins.txt but NOT on disk] ({} plugins):",
+        stale.len()
+    );
     for e in stale.iter().take(20) {
-        println!("  {} ({})", e.filename, if e.enabled { "active" } else { "inactive" });
+        println!(
+            "  {} ({})",
+            e.filename,
+            if e.enabled { "active" } else { "inactive" }
+        );
     }
     if stale.len() > 20 {
         println!("  ... and {} more", stale.len() - 20);
     }
 
     if !inactive_only {
-        println!("\n[ALL INACTIVE in plugins.txt] ({} plugins, showing first 50):", inactive_count);
+        println!(
+            "\n[ALL INACTIVE in plugins.txt] ({} plugins, showing first 50):",
+            inactive_count
+        );
         let mut shown = 0;
         for e in entries.iter().filter(|e| !e.enabled) {
-            let on_disk_flag = if on_disk_lower.contains(&e.filename.to_lowercase()) { " [on-disk]" } else { " [missing]" };
-            let owner = plugin_owner.get(&e.filename.to_lowercase()).map(|s| format!(" ({})", s)).unwrap_or_default();
+            let on_disk_flag = if on_disk_lower.contains(&e.filename.to_lowercase()) {
+                " [on-disk]"
+            } else {
+                " [missing]"
+            };
+            let owner = plugin_owner
+                .get(&e.filename.to_lowercase())
+                .map(|s| format!(" ({})", s))
+                .unwrap_or_default();
             println!("  {}{}{}", e.filename, on_disk_flag, owner);
             shown += 1;
-            if shown >= 50 { println!("  ... and {} more inactive", inactive_count - shown); break; }
+            if shown >= 50 {
+                println!("  ... and {} more inactive", inactive_count - shown);
+                break;
+            }
         }
     }
 }
@@ -5996,11 +6211,20 @@ fn cli_check_plugins(game_id: &str, bottle_name: &str, inactive_only: bool, depl
 fn cli_sync_plugins(game_id: &str, bottle_name: &str) {
     let (bottle, game, _) = match resolve_game(game_id, bottle_name) {
         Ok(r) => r,
-        Err(e) => { eprintln!("[corkscrew] ERROR: {}", e); std::process::exit(1); }
+        Err(e) => {
+            eprintln!("[corkscrew] ERROR: {}", e);
+            std::process::exit(1);
+        }
     };
     match sync_plugins_for_game(&game, &bottle) {
-        Ok(()) => println!("[corkscrew] Plugin sync complete for {}:{}", game_id, bottle_name),
-        Err(e) => { eprintln!("[corkscrew] ERROR: sync failed: {}", e); std::process::exit(1); }
+        Ok(()) => println!(
+            "[corkscrew] Plugin sync complete for {}:{}",
+            game_id, bottle_name
+        ),
+        Err(e) => {
+            eprintln!("[corkscrew] ERROR: sync failed: {}", e);
+            std::process::exit(1);
+        }
     }
 }
 
@@ -6008,21 +6232,31 @@ fn cli_sync_plugins(game_id: &str, bottle_name: &str) {
 fn cli_mod_files(search: &str, game_id: &str, bottle_name: &str, db: &Arc<ModDatabase>) {
     let mods = match db.list_mods(game_id, bottle_name) {
         Ok(m) => m,
-        Err(e) => { eprintln!("[corkscrew] ERROR: {}", e); std::process::exit(1); }
+        Err(e) => {
+            eprintln!("[corkscrew] ERROR: {}", e);
+            std::process::exit(1);
+        }
     };
     let q = search.to_lowercase();
     let matched: Vec<_> = if let Ok(id) = search.parse::<i64>() {
         mods.iter().filter(|m| m.id == id).collect()
     } else {
-        mods.iter().filter(|m| m.name.to_lowercase().contains(&q)).collect()
+        mods.iter()
+            .filter(|m| m.name.to_lowercase().contains(&q))
+            .collect()
     };
     if matched.is_empty() {
         println!("[corkscrew] No mods found matching '{}'", search);
         return;
     }
     for m in matched {
-        println!("[mod {}] id={} enabled={} nexus_id={:?}", m.name, m.id, m.enabled, m.nexus_mod_id);
-        if let Some(sp) = &m.staging_path { println!("  staging: {}", sp); }
+        println!(
+            "[mod {}] id={} enabled={} nexus_id={:?}",
+            m.name, m.id, m.enabled, m.nexus_mod_id
+        );
+        if let Some(sp) = &m.staging_path {
+            println!("  staging: {}", sp);
+        }
         println!("  registered files ({}):", m.installed_files.len());
         for f in &m.installed_files {
             println!("    {}", f);
@@ -6035,7 +6269,12 @@ fn cli_mod_files(search: &str, game_id: &str, bottle_name: &str, db: &Arc<ModDat
                     .into_iter()
                     .flatten()
                     .filter(|e| e.file_type().is_file())
-                    .map(|e| e.path().strip_prefix(&staging).unwrap_or(e.path()).to_path_buf())
+                    .map(|e| {
+                        e.path()
+                            .strip_prefix(&staging)
+                            .unwrap_or(e.path())
+                            .to_path_buf()
+                    })
                     .collect();
                 println!("  staged files ({}):", staged.len());
                 for f in &staged {
@@ -6053,11 +6292,17 @@ fn cli_mod_files(search: &str, game_id: &str, bottle_name: &str, db: &Arc<ModDat
 /// Usage:  corkscrew --launch <game_id> <bottle_name> [--skse]
 /// Example: corkscrew --launch skyrimse Steam --skse
 fn cli_launch(game_id: &str, bottle_name: &str, use_skse: bool, db: &Arc<ModDatabase>) {
-    println!("[corkscrew] --launch mode: game={} bottle={} skse={}", game_id, bottle_name, use_skse);
+    println!(
+        "[corkscrew] --launch mode: game={} bottle={} skse={}",
+        game_id, bottle_name, use_skse
+    );
 
     let (bottle, game, _) = match resolve_game(game_id, bottle_name) {
         Ok(r) => r,
-        Err(e) => { eprintln!("[corkscrew] ERROR: {}", e); std::process::exit(1); }
+        Err(e) => {
+            eprintln!("[corkscrew] ERROR: {}", e);
+            std::process::exit(1);
+        }
     };
     let game_path = PathBuf::from(&game.game_path);
 
@@ -6065,19 +6310,31 @@ fn cli_launch(game_id: &str, bottle_name: &str, use_skse: bool, db: &Arc<ModData
         "skse64_loader.exe".to_string()
     } else {
         games::with_plugin(game_id, |plugin| {
-            plugin.executables().first().map(|s| s.to_string()).unwrap_or_default()
-        }).unwrap_or_default()
+            plugin
+                .executables()
+                .first()
+                .map(|s| s.to_string())
+                .unwrap_or_default()
+        })
+        .unwrap_or_default()
     };
 
     if exe_name.is_empty() {
-        eprintln!("[corkscrew] ERROR: No executable configured for game '{}'", game_id);
+        eprintln!(
+            "[corkscrew] ERROR: No executable configured for game '{}'",
+            game_id
+        );
         std::process::exit(1);
     }
 
     let exe_path = match launcher::find_executable(&game_path, &exe_name) {
         Some(p) => p,
         None => {
-            eprintln!("[corkscrew] ERROR: {} not found in {}", exe_name, game_path.display());
+            eprintln!(
+                "[corkscrew] ERROR: {} not found in {}",
+                exe_name,
+                game_path.display()
+            );
             std::process::exit(1);
         }
     };
@@ -6089,7 +6346,14 @@ fn cli_launch(game_id: &str, bottle_name: &str, use_skse: bool, db: &Arc<ModData
 
     if game_id == "skyrimse" && !fixes_disabled {
         match display_fix::auto_fix_display(&bottle) {
-            Ok(r) => { if r.fixed { println!("[corkscrew] Display fix applied: {}x{} fullscreen", r.applied.width, r.applied.height); } }
+            Ok(r) => {
+                if r.fixed {
+                    println!(
+                        "[corkscrew] Display fix applied: {}x{} fullscreen",
+                        r.applied.width, r.applied.height
+                    );
+                }
+            }
             Err(e) => eprintln!("[corkscrew] Warning: display fix failed: {}", e),
         }
     }
@@ -6099,21 +6363,27 @@ fn cli_launch(game_id: &str, bottle_name: &str, use_skse: bool, db: &Arc<ModData
     if game_id == "skyrimse" {
         let data_dir = PathBuf::from(&game.data_dir);
 
-        let fixes = skse::fix_skse_plugin_conflicts(db, game_id, bottle_name, &data_dir, &game_path);
-        if fixes > 0 { println!("[corkscrew] Fixed {} SKSE plugin DLL(s)", fixes); }
+        let fixes =
+            skse::fix_skse_plugin_conflicts(db, game_id, bottle_name, &data_dir, &game_path);
+        if fixes > 0 {
+            println!("[corkscrew] Fixed {} SKSE plugin DLL(s)", fixes);
+        }
 
         let ef = skse::fix_engine_fixes_for_wine(&data_dir, db, game_id, bottle_name);
-        if ef > 0 { println!("[corkscrew] Patched {} EngineFixes TOML(s) for Wine", ef); }
+        if ef > 0 {
+            println!("[corkscrew] Patched {} EngineFixes TOML(s) for Wine", ef);
+        }
 
-        let wine_disabled = skse::disable_wine_incompatible_plugins(&data_dir, db, game_id, bottle_name);
+        let wine_disabled =
+            skse::disable_wine_incompatible_plugins(&data_dir, db, game_id, bottle_name);
         for (name, _reason) in &wine_disabled {
             println!("[corkscrew] Disabled Wine-incompatible plugin: {}", name);
         }
 
         match skse::install_engine_fixes_wine_blocking(&data_dir) {
-            Ok(true)  => println!("[corkscrew] Deployed SSE Engine Fixes for Wine"),
+            Ok(true) => println!("[corkscrew] Deployed SSE Engine Fixes for Wine"),
             Ok(false) => println!("[corkscrew] SSE Engine Fixes for Wine already up to date"),
-            Err(e)    => eprintln!("[corkscrew] Warning: Engine Fixes deploy failed: {}", e),
+            Err(e) => eprintln!("[corkscrew] Warning: Engine Fixes deploy failed: {}", e),
         }
     }
 
@@ -6121,7 +6391,9 @@ fn cli_launch(game_id: &str, bottle_name: &str, use_skse: bool, db: &Arc<ModData
     match launcher::launch_game(&bottle, &exe_path, Some(&game_path)) {
         Ok(r) => {
             println!("[corkscrew] Launched OK (pid={:?})", r.pid);
-            if let Some(w) = r.warning { eprintln!("[corkscrew] Warning: {}", w); }
+            if let Some(w) = r.warning {
+                eprintln!("[corkscrew] Warning: {}", w);
+            }
         }
         Err(e) => {
             eprintln!("[corkscrew] ERROR: Launch failed: {}", e);
@@ -6204,9 +6476,9 @@ pub fn run() {
 
         // --launch <game_id> <bottle_name> [--skse]
         if let Some(pos) = args.iter().position(|a| a == "--launch") {
-            let game_id     = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("");
+            let game_id = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("");
             let bottle_name = args.get(pos + 2).map(|s| s.as_str()).unwrap_or("");
-            let use_skse    = args.iter().any(|a| a == "--skse");
+            let use_skse = args.iter().any(|a| a == "--skse");
             if game_id.is_empty() || bottle_name.is_empty() {
                 eprintln!("Usage: corkscrew --launch <game_id> <bottle_name> [--skse]");
                 eprintln!("  Example: corkscrew --launch skyrimse Steam --skse");
@@ -6218,7 +6490,7 @@ pub fn run() {
 
         // --list-mods <game_id> <bottle_name>
         if let Some(pos) = args.iter().position(|a| a == "--list-mods") {
-            let game_id     = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("");
+            let game_id = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("");
             let bottle_name = args.get(pos + 2).map(|s| s.as_str()).unwrap_or("");
             if game_id.is_empty() || bottle_name.is_empty() {
                 eprintln!("Usage: corkscrew --list-mods <game_id> <bottle_name>");
@@ -6230,8 +6502,8 @@ pub fn run() {
 
         // --search-mods <query> <game_id> <bottle_name>
         if let Some(pos) = args.iter().position(|a| a == "--search-mods") {
-            let query       = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("");
-            let game_id     = args.get(pos + 2).map(|s| s.as_str()).unwrap_or("");
+            let query = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("");
+            let game_id = args.get(pos + 2).map(|s| s.as_str()).unwrap_or("");
             let bottle_name = args.get(pos + 3).map(|s| s.as_str()).unwrap_or("");
             if query.is_empty() || game_id.is_empty() || bottle_name.is_empty() {
                 eprintln!("Usage: corkscrew --search-mods <query> <game_id> <bottle_name>");
@@ -6243,8 +6515,8 @@ pub fn run() {
 
         // --find-file <pattern> <game_id> <bottle_name>
         if let Some(pos) = args.iter().position(|a| a == "--find-file") {
-            let pattern     = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("");
-            let game_id     = args.get(pos + 2).map(|s| s.as_str()).unwrap_or("");
+            let pattern = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("");
+            let game_id = args.get(pos + 2).map(|s| s.as_str()).unwrap_or("");
             let bottle_name = args.get(pos + 3).map(|s| s.as_str()).unwrap_or("");
             if pattern.is_empty() || game_id.is_empty() || bottle_name.is_empty() {
                 eprintln!("Usage: corkscrew --find-file <pattern> <game_id> <bottle_name>");
@@ -6256,21 +6528,21 @@ pub fn run() {
 
         // --check-plugins <game_id> <bottle_name> [--inactive-only] [--deployed-inactive]
         if let Some(pos) = args.iter().position(|a| a == "--check-plugins") {
-            let game_id     = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("");
+            let game_id = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("");
             let bottle_name = args.get(pos + 2).map(|s| s.as_str()).unwrap_or("");
             if game_id.is_empty() || bottle_name.is_empty() {
                 eprintln!("Usage: corkscrew --check-plugins <game_id> <bottle_name> [--inactive-only] [--deployed-inactive]");
                 std::process::exit(1);
             }
-            let inactive_only        = args.iter().any(|a| a == "--inactive-only");
-            let deployed_inactive    = args.iter().any(|a| a == "--deployed-inactive");
+            let inactive_only = args.iter().any(|a| a == "--inactive-only");
+            let deployed_inactive = args.iter().any(|a| a == "--deployed-inactive");
             cli_check_plugins(game_id, bottle_name, inactive_only, deployed_inactive, &db);
             return;
         }
 
         // --sync-plugins <game_id> <bottle_name>
         if let Some(pos) = args.iter().position(|a| a == "--sync-plugins") {
-            let game_id     = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("");
+            let game_id = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("");
             let bottle_name = args.get(pos + 2).map(|s| s.as_str()).unwrap_or("");
             if game_id.is_empty() || bottle_name.is_empty() {
                 eprintln!("Usage: corkscrew --sync-plugins <game_id> <bottle_name>");
@@ -6282,8 +6554,8 @@ pub fn run() {
 
         // --mod-files <mod_id_or_name> <game_id> <bottle_name>
         if let Some(pos) = args.iter().position(|a| a == "--mod-files") {
-            let search      = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("");
-            let game_id     = args.get(pos + 2).map(|s| s.as_str()).unwrap_or("");
+            let search = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("");
+            let game_id = args.get(pos + 2).map(|s| s.as_str()).unwrap_or("");
             let bottle_name = args.get(pos + 3).map(|s| s.as_str()).unwrap_or("");
             if search.is_empty() || game_id.is_empty() || bottle_name.is_empty() {
                 eprintln!("Usage: corkscrew --mod-files <mod_id_or_name> <game_id> <bottle_name>");
@@ -6320,7 +6592,8 @@ pub fn run() {
         ));
     }
 
-    builder.manage({
+    builder
+        .manage({
             let queue = download_queue::DownloadQueue::new();
             // Restore persisted queue items from database
             match db.load_queue_items() {

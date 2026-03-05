@@ -352,7 +352,10 @@ pub fn stage_mod_from_extracted_opts(
 
     // Detect the optimal copy method once for the entire batch.
     let copy_method = platform::detect_copy_method(&data_root, &staging_dir);
-    debug!("Pre-extracted staging copy method: {:?} (skip_hash={})", copy_method, skip_hash);
+    debug!(
+        "Pre-extracted staging copy method: {:?} (skip_hash={})",
+        copy_method, skip_hash
+    );
 
     // Collect all file entries first, then process in parallel
     let entries: Vec<_> = WalkDir::new(&data_root)
@@ -458,9 +461,7 @@ pub fn stage_mod_extract_direct(
 
     // Move files from data_root → staging_dir (same filesystem = rename is instant).
     // We move each entry from data_root directly into staging_dir.
-    let entries_to_move: Vec<_> = fs::read_dir(&data_root)?
-        .filter_map(|e| e.ok())
-        .collect();
+    let entries_to_move: Vec<_> = fs::read_dir(&data_root)?.filter_map(|e| e.ok()).collect();
 
     for entry in &entries_to_move {
         let dest = staging_dir.join(entry.file_name());

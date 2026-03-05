@@ -550,7 +550,10 @@ pub fn restore_snapshot(
     // Load snapshot entries
     let entries = get_snapshot_states(db, snapshot_id)?;
     if entries.is_empty() {
-        return Err(format!("Snapshot {} has no entries or does not exist", snapshot_id));
+        return Err(format!(
+            "Snapshot {} has no entries or does not exist",
+            snapshot_id
+        ));
     }
 
     // Get current installed mods
@@ -872,8 +875,7 @@ mod tests {
         db.set_mod_priority(m2, 1).unwrap();
 
         // Create a snapshot with both enabled
-        let snap_id =
-            create_snapshot(&db, "skyrimse", "Gaming", "Good State", None).unwrap();
+        let snap_id = create_snapshot(&db, "skyrimse", "Gaming", "Good State", None).unwrap();
 
         // Now disable Mod A and change Mod B priority
         db.set_enabled(m1, false).unwrap();
@@ -904,8 +906,7 @@ mod tests {
 
         let m1 = insert_test_mod(&db, "Mod A");
 
-        let snap_id =
-            create_snapshot(&db, "skyrimse", "Gaming", "State", None).unwrap();
+        let snap_id = create_snapshot(&db, "skyrimse", "Gaming", "State", None).unwrap();
 
         // Remove the mod
         db.remove_mod(m1).unwrap();
