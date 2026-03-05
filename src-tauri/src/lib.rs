@@ -1144,6 +1144,7 @@ fn launch_game_cmd(
 
     // Pre-launch SKSE plugin DLL version fix — swap incompatible plugins
     // for compatible alternatives from other installed mods' staging dirs.
+    let mut wine_plugin_warning: Option<String> = None;
     if game_id == "skyrimse" {
         let data_dir = PathBuf::from(&game.data_dir);
         let skse_fixes = skse::fix_skse_plugin_conflicts(
@@ -1161,6 +1162,20 @@ fn launch_game_cmd(
             log::info!("Pre-launch: patched {} EngineFixes TOML(s) for Wine compatibility", ef_fixes);
         }
 
+        // Disable Wine-incompatible SKSE plugins (CrashLogger, etc.)
+        let wine_disabled = skse::disable_wine_incompatible_plugins(
+            &data_dir, &state.db, &game_id, &bottle_name,
+        );
+        if !wine_disabled.is_empty() {
+            let names: Vec<&str> = wine_disabled.iter().map(|(n, _)| n.as_str()).collect();
+            log::info!("Pre-launch: disabled Wine-incompatible plugin(s): {}", names.join(", "));
+            let msg = format!(
+                "Disabled Wine-incompatible plugin(s): {}. See Settings > Game > Wine-Incompatible Plugins to manage.",
+                names.join(", ")
+            );
+            wine_plugin_warning = Some(msg);
+        }
+
         // Auto-deploy SSE Engine Fixes for Wine (Wine-safe replacement)
         match skse::install_engine_fixes_wine_blocking(&data_dir) {
             Ok(true) => log::info!("Pre-launch: auto-deployed SSE Engine Fixes for Wine"),
@@ -1174,6 +1189,14 @@ fn launch_game_cmd(
 
     // Cursor fix is now handled by Wine registry keys (set in auto_fix_display
     // above via fix_cursor_grab). No runtime Dock/Hot Corner/event tap needed.
+
+    // Attach Wine-incompatible plugin warning
+    if let Some(w) = wine_plugin_warning {
+        result.warning = Some(match result.warning {
+            Some(existing) => format!("{}\n{}", existing, w),
+            None => w,
+        });
+    }
 
     // Attach any SKSE compatibility warning to the launch result
     if let Some(warning) = skse_warning {
@@ -1364,6 +1387,29 @@ fn fix_skse_plugins_cmd(
     Ok(skse::fix_skse_plugin_conflicts(
         &state.db, &game_id, &bottle_name, &data_dir, &game_path,
     ))
+}
+
+/// List SKSE plugins that have been auto-disabled for Wine compatibility.
+#[tauri::command]
+fn list_disabled_wine_plugins_cmd(
+    game_id: String,
+    bottle_name: String,
+) -> Result<Vec<(String, String)>, String> {
+    if game_id != "skyrimse" { return Ok(vec![]); }
+    let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
+    Ok(skse::list_disabled_wine_plugins(&data_dir))
+}
+
+/// Re-enable a Wine-incompatible plugin that was auto-disabled (user override).
+#[tauri::command]
+fn reenable_wine_plugin_cmd(
+    game_id: String,
+    bottle_name: String,
+    dll_name: String,
+) -> Result<bool, String> {
+    if game_id != "skyrimse" { return Ok(false); }
+    let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
+    skse::reenable_wine_plugin(&data_dir, &dll_name)
 }
 
 #[tauri::command]
@@ -1818,6 +1864,13 @@ fn redeploy_all_mods(
         if ef > 0 {
             log::info!("Redeploy: patched {} EngineFixes TOML(s) for Wine compatibility", ef);
         }
+        // Disable Wine-incompatible SKSE plugins
+        let wine_disabled = skse::disable_wine_incompatible_plugins(
+            &data_dir, &state.db, &game_id, &bottle_name,
+        );
+        for (name, reason) in &wine_disabled {
+            log::info!("Redeploy: disabled Wine-incompatible plugin {} — {}", name, reason);
+        }
         // Auto-deploy SSE Engine Fixes for Wine on redeploy
         match skse::install_engine_fixes_wine_blocking(&data_dir) {
             Ok(true) => log::info!("Redeploy: auto-deployed SSE Engine Fixes for Wine"),
@@ -1852,6 +1905,13 @@ fn deploy_incremental_cmd(
         let ef = skse::fix_engine_fixes_for_wine(&data_dir, &state.db, &game_id, &bottle_name);
         if ef > 0 {
             log::info!("Incremental deploy: patched {} EngineFixes TOML(s) for Wine compatibility", ef);
+        }
+        // Disable Wine-incompatible SKSE plugins
+        let wine_disabled = skse::disable_wine_incompatible_plugins(
+            &data_dir, &state.db, &game_id, &bottle_name,
+        );
+        for (name, reason) in &wine_disabled {
+            log::info!("Incremental deploy: disabled Wine-incompatible plugin {} — {}", name, reason);
         }
         match skse::install_engine_fixes_wine_blocking(&data_dir) {
             Ok(true) => log::info!("Incremental deploy: auto-deployed SSE Engine Fixes for Wine"),
@@ -6045,6 +6105,11 @@ fn cli_launch(game_id: &str, bottle_name: &str, use_skse: bool, db: &Arc<ModData
         let ef = skse::fix_engine_fixes_for_wine(&data_dir, db, game_id, bottle_name);
         if ef > 0 { println!("[corkscrew] Patched {} EngineFixes TOML(s) for Wine", ef); }
 
+        let wine_disabled = skse::disable_wine_incompatible_plugins(&data_dir, db, game_id, bottle_name);
+        for (name, _reason) in &wine_disabled {
+            println!("[corkscrew] Disabled Wine-incompatible plugin: {}", name);
+        }
+
         match skse::install_engine_fixes_wine_blocking(&data_dir) {
             Ok(true)  => println!("[corkscrew] Deployed SSE Engine Fixes for Wine"),
             Ok(false) => println!("[corkscrew] SSE Engine Fixes for Wine already up to date"),
@@ -6238,14 +6303,24 @@ pub fn run() {
     // Clean up stale corkscrew_extract_* temp dirs from collection installs
     cleanup_orphaned_temp_dirs();
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_liquid_glass::init())
-        .manage({
+        .plugin(tauri_plugin_liquid_glass::init());
+
+    #[cfg(debug_assertions)]
+    {
+        builder = builder.plugin(tauri_plugin_mcp::init_with_config(
+            tauri_plugin_mcp::PluginConfig::new("Corkscrew".to_string())
+                .start_socket_server(true)
+                .socket_path("/tmp/corkscrew-mcp.sock".into()),
+        ));
+    }
+
+    builder.manage({
             let queue = download_queue::DownloadQueue::new();
             // Restore persisted queue items from database
             match db.load_queue_items() {
@@ -6298,6 +6373,8 @@ pub fn run() {
             check_skse_compatibility_cmd,
             scan_skse_plugins_cmd,
             fix_skse_plugins_cmd,
+            list_disabled_wine_plugins_cmd,
+            reenable_wine_plugin_cmd,
             fix_skyrim_display,
             downgrade_skyrim,
             get_depot_download_command,

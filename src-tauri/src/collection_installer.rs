@@ -2536,6 +2536,12 @@ pub async fn install_collection(
             log::info!("EngineFixes Wine fix: patched {} TOML file(s)", ef_fixes);
         }
 
+        // Disable Wine-incompatible SKSE plugins (CrashLogger, etc.)
+        let wine_disabled = skse::disable_wine_incompatible_plugins(&data_dir, db, game_id, bottle_name);
+        for (name, reason) in &wine_disabled {
+            log::info!("Wine compat: disabled {} — {}", name, reason);
+        }
+
         // Auto-deploy SSE Engine Fixes for Wine (Wine-safe replacement)
         match skse::install_engine_fixes_wine(&data_dir).await {
             Ok(true) => log::info!("Auto-deployed SSE Engine Fixes for Wine"),

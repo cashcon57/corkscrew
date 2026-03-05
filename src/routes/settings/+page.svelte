@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
-  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, uninstallSkse, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, checkModToolUpdate, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads, checkSteamStatus, addToSteam, removeFromSteam, scanGameDirectory, cleanGameDirectory, checkSkyrimVersion, downgradeSkyrim, checkDeploymentHealth, redeployAllMods, getVerificationLevel, setVerificationLevel, getDepotDownloadCommand, startDepotDownload, checkDepotReady, applyDowngrade, listGameVersions, swapGameVersion } from "$lib/api";
+  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, uninstallSkse, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, checkModToolUpdate, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads, checkSteamStatus, addToSteam, removeFromSteam, scanGameDirectory, cleanGameDirectory, checkSkyrimVersion, downgradeSkyrim, checkDeploymentHealth, redeployAllMods, getVerificationLevel, setVerificationLevel, getDepotDownloadCommand, startDepotDownload, checkDepotReady, applyDowngrade, listGameVersions, swapGameVersion, listDisabledWinePlugins, reenableWinePlugin } from "$lib/api";
   import type { CleanReport, CleanResult, DowngradeStatus, DeploymentHealth, VerificationLevel, CachedVersion, DepotDownloadInfo } from "$lib/types";
   import type { SteamStatus } from "$lib/types";
   import { config, showError, showSuccess, selectedGame, skseStatus, currentPage, appVersion, updateReady, updateVersion, updateNotes, updateChecking, updateError, triggerUpdateCheck, controllerMode } from "$lib/stores";
@@ -64,6 +64,35 @@
     prevTab = settingsTab;
     settingsTab = tab;
     tabAnimKey++;
+  }
+
+  // Wine-incompatible plugins
+  let disabledWinePlugins = $state<[string, string][]>([]);
+  let togglingWinePlugin = $state<string | null>(null);
+
+  async function loadDisabledWinePlugins() {
+    if (!game) return;
+    try {
+      disabledWinePlugins = await listDisabledWinePlugins(game.game_id, game.bottle_name);
+    } catch {
+      disabledWinePlugins = [];
+    }
+  }
+
+  async function handleToggleWinePlugin(dllName: string, currentlyDisabled: boolean) {
+    if (!game) return;
+    togglingWinePlugin = dllName;
+    try {
+      if (currentlyDisabled) {
+        await reenableWinePlugin(game.game_id, game.bottle_name, dllName);
+        showSuccess(`Re-enabled ${dllName}. This may cause crashes under Wine.`);
+      }
+      await loadDisabledWinePlugins();
+    } catch (e) {
+      showError(`Failed to toggle ${dllName}: ${e}`);
+    } finally {
+      togglingWinePlugin = null;
+    }
   }
 
   // Game directory cleaner
@@ -278,6 +307,11 @@
         downgradeStatus = await checkSkyrimVersion(game.game_id, game.bottle_name);
         cachedVersions = await listGameVersions(game.game_id);
       } catch { /* ignore */ }
+    }
+
+    // Load disabled Wine-incompatible plugins
+    if (game && isSkyrim) {
+      await loadDisabledWinePlugins();
     }
 
     // Load verification level
@@ -1194,6 +1228,40 @@
           </div>
         </div>
       </div>
+    {/if}
+
+    <!-- Wine-Incompatible Plugins -->
+    {#if disabledWinePlugins.length > 0}
+    <div class="section">
+      <h2 class="section-title">Wine-Incompatible Plugins</h2>
+      <div class="section-card">
+        <div class="card-row" style="flex-direction: column; gap: 0.5rem;">
+          <p class="toggle-description" style="margin: 0;">
+            These SKSE plugins are automatically disabled because they conflict with Wine's exception handling and cause crashes.
+            Re-enabling them is <strong>not recommended</strong> and will likely cause CTDs.
+          </p>
+          {#each disabledWinePlugins as [dllName, reason]}
+            <div style="display: flex; align-items: center; gap: 0.75rem; padding: 0.5rem 0.75rem; background: var(--surface-1); border-radius: 6px;">
+              <div style="flex: 1;">
+                <span class="row-label" style="font-size: 0.85rem;">{dllName}</span>
+                <span class="toggle-description" style="display: block; font-size: 0.75rem; margin-top: 2px;">{reason}</span>
+              </div>
+              <span class="badge badge-yellow" style="font-size: 0.7rem;">Disabled</span>
+              <button
+                class="btn-ghost btn-sm"
+                style="font-size: 0.75rem; opacity: 0.7;"
+                onclick={() => handleToggleWinePlugin(dllName, true)}
+                disabled={togglingWinePlugin === dllName}
+                type="button"
+                title="Re-enable this plugin (not recommended — may cause crashes)"
+              >
+                {togglingWinePlugin === dllName ? "..." : "Re-enable (not recommended)"}
+              </button>
+            </div>
+          {/each}
+        </div>
+      </div>
+    </div>
     {/if}
   {/if}
 

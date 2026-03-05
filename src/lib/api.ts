@@ -284,6 +284,22 @@ export async function installSkseAuto(
   return invoke("install_skse_auto_cmd", { gameId, bottleName });
 }
 
+// Wine-incompatible plugin management
+export async function listDisabledWinePlugins(
+  gameId: string,
+  bottleName: string
+): Promise<[string, string][]> {
+  return invoke("list_disabled_wine_plugins_cmd", { gameId, bottleName });
+}
+
+export async function reenableWinePlugin(
+  gameId: string,
+  bottleName: string,
+  dllName: string
+): Promise<boolean> {
+  return invoke("reenable_wine_plugin_cmd", { gameId, bottleName, dllName });
+}
+
 // Display Fix
 export async function fixSkyrimDisplay(
   bottleName: string

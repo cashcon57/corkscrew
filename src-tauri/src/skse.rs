@@ -1630,6 +1630,109 @@ fn disable_engine_fixes_preloader(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Wine-incompatible SKSE plugin management
+// ---------------------------------------------------------------------------
+
+/// SKSE plugins that are known to be incompatible with Wine and must be disabled.
+/// Each entry is (dll_name, reason) — the DLL is renamed to `.dll.disabled`.
+const WINE_INCOMPATIBLE_PLUGINS: &[(&str, &str)] = &[
+    (
+        "CrashLogger.dll",
+        "CrashLogger's VEH handler conflicts with Wine exception handling, causing CTDs",
+    ),
+];
+
+/// Disable SKSE plugins that are known to be incompatible with Wine.
+///
+/// Returns a list of `(dll_name, reason)` for each plugin that was actually disabled
+/// during this call (i.e., plugins already disabled are not re-reported).
+pub fn disable_wine_incompatible_plugins(
+    data_dir: &Path,
+    db: &Arc<ModDatabase>,
+    game_id: &str,
+    bottle_name: &str,
+) -> Vec<(String, String)> {
+    let mut disabled = Vec::new();
+    let plugins_dir = data_dir.join("SKSE").join("Plugins");
+
+    for &(dll_name, reason) in WINE_INCOMPATIBLE_PLUGINS {
+        // 1. Deployed copy
+        let deployed = plugins_dir.join(dll_name);
+        if deployed.exists() {
+            let target = deployed.with_extension("dll.disabled");
+            match fs::rename(&deployed, &target) {
+                Ok(()) => {
+                    info!("Wine compat: disabled {} — {}", dll_name, reason);
+                    disabled.push((dll_name.to_string(), reason.to_string()));
+                }
+                Err(e) => warn!("Wine compat: failed to disable {}: {}", dll_name, e),
+            }
+        }
+
+        // 2. Staging copies — prevent redeploys from restoring them
+        if let Ok(mods) = db.list_mods(game_id, bottle_name) {
+            for m in &mods {
+                if let Some(ref sp) = m.staging_path {
+                    let staged = PathBuf::from(sp).join("SKSE").join("Plugins").join(dll_name);
+                    if staged.exists() {
+                        let target = staged.with_extension("dll.disabled");
+                        if let Err(e) = fs::rename(&staged, &target) {
+                            warn!("Wine compat: failed to disable staged {}: {}", dll_name, e);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    disabled
+}
+
+/// List all Wine-incompatible plugins that are currently disabled (`.dll.disabled`).
+/// Returns `(dll_name, reason)` pairs.
+pub fn list_disabled_wine_plugins(data_dir: &Path) -> Vec<(String, String)> {
+    let plugins_dir = data_dir.join("SKSE").join("Plugins");
+    let mut result = Vec::new();
+
+    for &(dll_name, reason) in WINE_INCOMPATIBLE_PLUGINS {
+        let disabled_path = plugins_dir.join(format!(
+            "{}",
+            dll_name.replace(".dll", ".dll.disabled")
+        ));
+        if disabled_path.exists() {
+            result.push((dll_name.to_string(), reason.to_string()));
+        }
+    }
+
+    result
+}
+
+/// Re-enable a previously disabled Wine-incompatible plugin.
+/// Returns `Ok(true)` if restored, `Ok(false)` if the disabled file wasn't found.
+pub fn reenable_wine_plugin(
+    data_dir: &Path,
+    dll_name: &str,
+) -> std::result::Result<bool, String> {
+    // Validate it's a known plugin (prevent arbitrary file renames)
+    if !WINE_INCOMPATIBLE_PLUGINS.iter().any(|&(n, _)| n == dll_name) {
+        return Err(format!("'{}' is not a known Wine-incompatible plugin", dll_name));
+    }
+
+    let plugins_dir = data_dir.join("SKSE").join("Plugins");
+    let disabled_path = plugins_dir.join(dll_name.replace(".dll", ".dll.disabled"));
+    let enabled_path = plugins_dir.join(dll_name);
+
+    if disabled_path.exists() {
+        fs::rename(&disabled_path, &enabled_path)
+            .map_err(|e| format!("Failed to re-enable {}: {}", dll_name, e))?;
+        info!("Wine compat: re-enabled {} (user override)", dll_name);
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 /// All boolean keys in EngineFixes.toml that must be set to `false` under Wine.
 /// Every [Fixes], [Patches], [MemoryManager], and [Warnings] boolean is included
 /// because Engine Fixes' hooking mechanism itself crashes under Wine.
