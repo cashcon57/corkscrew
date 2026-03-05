@@ -514,23 +514,4 @@
     line-height: 1.55;
   }
 
-  .loading-container {
-    display: flex;
-    justify-content: center;
-    padding: var(--space-12);
-  }
-
-  .spinner {
-    width: 28px;
-    height: 28px;
-  }
-
-  .spinner-ring {
-    width: 100%;
-    height: 100%;
-    border: 2.5px solid var(--separator);
-    border-top-color: var(--system-accent);
-    border-radius: 50%;
-    animation: spin 0.9s cubic-bezier(0.4, 0, 0.2, 1) infinite;
-  }
 </style>

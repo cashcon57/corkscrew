@@ -2659,12 +2659,6 @@
     font-size: 15px;
   }
 
-  :global(.controller-mode) input,
-  :global(.controller-mode) select {
-    min-height: 44px;
-    font-size: 15px;
-  }
-
   :global(.controller-mode) .nav-item {
     padding: var(--space-3) var(--space-4);
   }

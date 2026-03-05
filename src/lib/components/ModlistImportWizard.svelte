@@ -775,27 +775,6 @@
     color: var(--text-primary);
   }
 
-  .compat-warning {
-    display: flex;
-    align-items: flex-start;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
-    background: var(--yellow-subtle);
-    border-radius: var(--radius-sm);
-    color: var(--yellow);
-    font-size: 12px;
-    line-height: 1.4;
-  }
-
-  .compat-warning svg {
-    flex-shrink: 0;
-    margin-top: 1px;
-  }
-
-  .compat-warning strong {
-    font-weight: 600;
-  }
-
   /* ---- Step 2: Plan Summary ---- */
 
   .plan-loading {

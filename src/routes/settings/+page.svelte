@@ -2413,15 +2413,6 @@
     line-height: 1.5;
   }
 
-  .row-description a {
-    color: var(--system-accent);
-    text-decoration: none;
-  }
-
-  .row-description a:hover {
-    text-decoration: underline;
-  }
-
   /* --- Form controls --- */
 
   .row-control {

@@ -321,10 +321,12 @@
 
                   <!-- Option image thumbnail -->
                   {#if option.image}
-                    <button
+                    <div
                       class="option-thumbnail"
                       onclick={(e) => { e.stopPropagation(); previewImage = option.image; }}
-                      type="button"
+                      onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); previewImage = option.image; } }}
+                      role="button"
+                      tabindex="0"
                       aria-label="Preview image for {option.name}"
                     >
                       <img
@@ -340,7 +342,7 @@
                           <line x1="8" y1="11" x2="14" y2="11" />
                         </svg>
                       </div>
-                    </button>
+                    </div>
                   {/if}
                 </button>
               {/each}

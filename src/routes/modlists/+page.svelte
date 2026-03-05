@@ -1352,11 +1352,6 @@
     margin-top: var(--space-1);
   }
 
-  .header-stats {
-    display: flex;
-    gap: var(--space-3);
-  }
-
   .stat-pill {
     display: flex;
     align-items: baseline;
@@ -1465,20 +1460,6 @@
 
   .filter-select:focus {
     border-color: var(--system-accent);
-  }
-
-  .nsfw-toggle {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    font-size: 13px;
-    color: var(--text-secondary);
-    cursor: pointer;
-    white-space: nowrap;
-  }
-
-  .nsfw-toggle input {
-    accent-color: var(--system-accent);
   }
 
   .sort-group {

@@ -4291,20 +4291,6 @@
     border-color: var(--system-accent);
   }
 
-  .nsfw-toggle {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    font-size: 13px;
-    color: var(--text-secondary);
-    cursor: pointer;
-    white-space: nowrap;
-  }
-
-  .nsfw-toggle input {
-    accent-color: var(--system-accent);
-  }
-
   .sort-group {
     display: flex;
     align-items: center;
@@ -5038,58 +5024,6 @@
     transition: width 0.3s ease;
   }
 
-  .user-actions-list {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-    margin-top: var(--space-2);
-    padding: var(--space-3);
-    background: var(--surface);
-    border: 1px solid var(--separator);
-    border-radius: var(--radius);
-  }
-
-  .user-actions-title {
-    font-size: 12px;
-    font-weight: 600;
-    color: #FF9500;
-    margin-bottom: var(--space-1);
-  }
-
-  .user-action-item {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-3);
-    padding: var(--space-2) 0;
-    border-top: 1px solid var(--separator);
-  }
-
-  .user-action-item:first-of-type {
-    border-top: none;
-  }
-
-  .user-action-info {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    min-width: 0;
-  }
-
-  .user-action-mod {
-    font-size: 12px;
-    font-weight: 500;
-    color: var(--text-primary);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .user-action-instructions {
-    font-size: 11px;
-    color: var(--text-tertiary);
-  }
-
   .install-result-panel {
     flex: 1;
     display: flex;
@@ -5741,16 +5675,6 @@
   }
 
   /* ---- Collection Diff ---- */
-  .diff-panel {
-    margin-top: var(--space-3);
-    padding: var(--space-3);
-    background: var(--bg-tertiary);
-    border-radius: var(--radius-sm);
-    font-size: 12px;
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-  }
 
   .diff-error {
     color: var(--text-tertiary);

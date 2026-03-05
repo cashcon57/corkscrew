@@ -5750,16 +5750,6 @@
     margin-top: var(--space-2);
   }
 
-  .nexus-description-toggle summary {
-    font-size: 11px;
-    color: var(--accent, #d98f40);
-    cursor: pointer;
-    user-select: none;
-  }
-  .nexus-description-toggle summary:hover {
-    text-decoration: underline;
-  }
-
   .nexus-description {
     font-size: 12px;
     color: var(--text-secondary);
@@ -5772,12 +5762,6 @@
     border-radius: var(--radius-sm);
     word-break: break-word;
   }
-  .nexus-description img {
-    max-width: 100%;
-    height: auto;
-    border-radius: var(--radius-sm);
-  }
-
   .detail-tags {
     display: flex;
     flex-wrap: wrap;

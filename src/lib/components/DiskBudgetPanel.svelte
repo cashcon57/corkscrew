@@ -369,18 +369,6 @@
     background: var(--green);
   }
 
-  .fill-ok {
-    background: var(--green);
-  }
-
-  .fill-warning {
-    background: var(--yellow);
-  }
-
-  .fill-critical {
-    background: var(--red);
-  }
-
   .usage-bar-legend {
     display: flex;
     gap: var(--space-3);

@@ -17,6 +17,15 @@
   let mode = $state<"app" | "website">(defaultMode);
   let webviewActive = $state(false);
 
+  // Sync mode when the parent changes defaultMode (e.g. account connects)
+  let prevDefaultMode = defaultMode;
+  $effect(() => {
+    if (defaultMode !== prevDefaultMode) {
+      prevDefaultMode = defaultMode;
+      setMode(defaultMode);
+    }
+  });
+
   // Layout constants (match +layout.svelte)
   const APP_PADDING = 8;
   const GAP = 8;

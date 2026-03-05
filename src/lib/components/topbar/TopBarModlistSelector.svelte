@@ -204,11 +204,6 @@
     font-weight: 500;
   }
 
-  .topbar-selector-label.placeholder {
-    color: var(--text-tertiary);
-    font-weight: 400;
-  }
-
   .topbar-chevron {
     flex-shrink: 0;
     opacity: 0.4;
@@ -327,13 +322,6 @@
   .dropdown-delete-btn:hover {
     background: rgba(255, 59, 48, 0.15);
     color: var(--red);
-  }
-
-  .dropdown-empty {
-    padding: 12px 10px;
-    font-size: 12px;
-    color: var(--text-tertiary);
-    text-align: center;
   }
 
   .dropdown-footer {
