@@ -1663,14 +1663,18 @@ fn set_default_exe(
 // --- Deployment Management ---
 
 #[tauri::command]
-fn get_conflicts(
+async fn get_conflicts(
     game_id: String,
     bottle_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<FileConflict>, String> {
-    let db = &state.db;
-    db.find_all_conflicts(&game_id, &bottle_name)
-        .map_err(|e| e.to_string())
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        db.find_all_conflicts(&game_id, &bottle_name)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("Conflict detection task failed: {e}"))?
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -3669,13 +3673,17 @@ async fn check_mod_updates(
 // --- Mod Tools ---
 
 #[tauri::command]
-fn detect_mod_tools_cmd(
+async fn detect_mod_tools_cmd(
     game_id: String,
     bottle_name: String,
-    _state: State<AppState>,
+    _state: State<'_, AppState>,
 ) -> Result<Vec<mod_tools::ModTool>, String> {
     let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
-    Ok(mod_tools::detect_tools_for_game(&data_dir, &game_id))
+    tokio::task::spawn_blocking(move || {
+        mod_tools::detect_tools_for_game(&data_dir, &game_id)
+    })
+    .await
+    .map_err(|e| format!("Tool detection task failed: {e}"))
 }
 
 #[tauri::command]

@@ -217,9 +217,59 @@
   // Tools quick-launch
   let modTools = $state<ModTool[]>([]);
   let showToolsMenu = $state(false);
-  let showOverflowMenu = $state(false);
   let launchingToolId = $state<string | null>(null);
   let installedTools = $derived(modTools.filter(t => t.detected_path));
+
+  // Resizable column widths (px) — null means flex (1fr)
+  let colWidths = $state({
+    name: null as number | null,    // 1fr by default
+    category: 100,
+    origin: 68,
+    source: 110,
+    version: 72,
+    files: 48,
+    date: 90,
+    actions: 64,
+  });
+  let resizingCol = $state<string | null>(null);
+  let resizeStartX = 0;
+  let resizeStartW = 0;
+
+  function gridCols() {
+    const w = colWidths;
+    const name = w.name ? `${w.name}px` : 'minmax(0, 1fr)';
+    return `24px 28px 48px ${name} ${w.category}px ${w.origin}px ${w.source}px ${w.version}px ${w.files}px ${w.date}px ${w.actions}px`;
+  }
+
+  let gridTemplate = $derived(gridCols());
+
+  function onResizeStart(e: PointerEvent, col: string) {
+    e.preventDefault();
+    e.stopPropagation();
+    resizingCol = col;
+    resizeStartX = e.clientX;
+    const key = col as keyof typeof colWidths;
+    if (key === 'name') {
+      // Measure actual rendered width of the name column
+      const headerEl = (e.target as HTMLElement).closest('.table-header');
+      const nameCol = headerEl?.querySelector('.col-name') as HTMLElement | null;
+      resizeStartW = nameCol?.offsetWidth ?? 300;
+    } else {
+      resizeStartW = colWidths[key] as number;
+    }
+    const onMove = (ev: PointerEvent) => {
+      const delta = ev.clientX - resizeStartX;
+      const newW = Math.max(32, resizeStartW + delta);
+      colWidths[key] = newW;
+    };
+    const onUp = () => {
+      resizingCol = null;
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
 
   // Derived: set of mod IDs that have conflicts
   let conflictModIds = $derived((() => {
@@ -543,7 +593,10 @@
   });
 
   // Bulk selection derived and functions (after filteredMods is defined)
-  let selectAll = $derived(filteredMods.length > 0 && filteredMods.every(m => selectedModIds.has(m.id)));
+  let selectAll = $derived(
+    selectedModIds.size > 0 && filteredMods.length > 0 && selectedModIds.size >= filteredMods.length &&
+    filteredMods.every(m => selectedModIds.has(m.id))
+  );
 
   function toggleSelectAll() {
     if (selectAll) {
@@ -689,19 +742,21 @@
     const thisLoad = ++loadGeneration;
     loadingMods = true;
     try {
-      // Run all three queries in parallel instead of serially
-      const [mods, newConflicts, tools] = await Promise.all([
+      // Load mods first (fast DB query), then conflicts
+      const [mods, newConflicts] = await Promise.all([
         getInstalledMods(game.game_id, game.bottle_name),
         getConflicts(game.game_id, game.bottle_name).catch(() => [] as import('$lib/types').FileConflict[]),
-        detectModTools(game.game_id, game.bottle_name).catch(() => [] as import('$lib/types').ModTool[]),
       ]);
       // Only update state if this is still the latest load request
       if (thisLoad !== loadGeneration) return;
       installedMods.set(mods);
       conflicts = newConflicts;
-      modTools = tools;
       // Load endorsements in background (best-effort)
       loadEndorsements(game.nexus_slug);
+      // Load external tools in background — don't block the page
+      detectModTools(game.game_id, game.bottle_name)
+        .then(tools => { if (thisLoad === loadGeneration) modTools = tools; })
+        .catch(() => {});
     } catch (e: unknown) {
       if (thisLoad !== loadGeneration) return;
       showError(`Failed to load mods: ${e}`);
@@ -1862,7 +1917,7 @@
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<svelte:window onkeydown={handleKeydown} onclick={() => { showToolsMenu = false; showSkseMenu = false; showOverflowMenu = false; }} />
+<svelte:window onkeydown={handleKeydown} onclick={() => { showToolsMenu = false; showSkseMenu = false; }} />
 <div
   class="mods-page"
   class:drag-active={draggingOver}
@@ -2093,58 +2148,29 @@
           </span>
         {/if}
       {/if}
-      {#if installedTools.length > 0}
-        <div class="tools-dropdown-wrap">
-          <button
-            class="btn btn-ghost"
-            onclick={(e) => { e.stopPropagation(); showToolsMenu = !showToolsMenu; showSkseMenu = false; showOverflowMenu = false; }}
-            disabled={launchingToolId !== null}
-            title="Launch modding tools"
-          >
-            {#if launchingToolId}
-              <span class="spinner spinner-sm"></span>
-            {:else}
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
-              </svg>
-            {/if}
-            Tools
-            <svg width="8" height="8" viewBox="0 0 10 10" fill="currentColor"><path d="M2 3.5L5 7L8 3.5H2z" /></svg>
-          </button>
-          {#if showToolsMenu}
-            <div class="tools-dropdown">
-              {#each installedTools as tool (tool.id)}
-                <button
-                  class="dropdown-item"
-                  onclick={() => handleLaunchTool(tool.id)}
-                  disabled={launchingToolId === tool.id}
-                >
-                  <span class="tool-launch-name">{tool.name}</span>
-                  <span class="tool-launch-cat">{tool.category}</span>
-                </button>
-              {/each}
-              <div class="dropdown-divider"></div>
-              <button class="dropdown-item dropdown-item-muted" onclick={() => { showToolsMenu = false; currentPage.set("settings"); }}>
-                Manage Tools...
-              </button>
-            </div>
-          {/if}
-        </div>
-      {/if}
-
-      <!-- Overflow menu: Import, Export, Bisect, Open Folder -->
-      <div class="overflow-menu-wrap">
+      <div class="tools-dropdown-wrap">
         <button
-          class="btn btn-ghost btn-overflow"
-          onclick={(e) => { e.stopPropagation(); showOverflowMenu = !showOverflowMenu; showToolsMenu = false; showSkseMenu = false; }}
-          title="More actions"
-          aria-label="More actions"
-        >&#8230;</button>
-        {#if showOverflowMenu}
-          <div class="overflow-dropdown">
+          class="btn btn-ghost"
+          onclick={(e) => { e.stopPropagation(); showToolsMenu = !showToolsMenu; showSkseMenu = false; }}
+          disabled={launchingToolId !== null}
+          title="Tools"
+        >
+          {#if launchingToolId}
+            <span class="spinner spinner-sm"></span>
+          {:else}
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
+            </svg>
+          {/if}
+          Tools
+          <svg width="8" height="8" viewBox="0 0 10 10" fill="currentColor"><path d="M2 3.5L5 7L8 3.5H2z" /></svg>
+        </button>
+        {#if showToolsMenu}
+          <div class="tools-dropdown">
+            <div class="dropdown-section-label">Tools</div>
             <button
               class="dropdown-item"
-              onclick={() => { showOverflowMenu = false; showImportWizard = true; }}
+              onclick={() => { showToolsMenu = false; showImportWizard = true; }}
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
@@ -2155,7 +2181,7 @@
             </button>
             <button
               class="dropdown-item"
-              onclick={() => { showOverflowMenu = false; handleExport(); }}
+              onclick={() => { showToolsMenu = false; handleExport(); }}
               disabled={exporting || $installedMods.length === 0}
             >
               {#if exporting}
@@ -2173,7 +2199,7 @@
             {#if modStats.enabled >= 10}
               <button
                 class="dropdown-item"
-                onclick={() => { showOverflowMenu = false; showBisect = true; }}
+                onclick={() => { showToolsMenu = false; showBisect = true; }}
               >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <circle cx="11" cy="11" r="8" />
@@ -2186,12 +2212,30 @@
             {#if activeGame}
               <button
                 class="dropdown-item"
-                onclick={() => { showOverflowMenu = false; revealItemInDir(activeGame!.game_path); }}
+                onclick={() => { showToolsMenu = false; revealItemInDir(activeGame!.game_path); }}
               >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
                 </svg>
                 Open Folder
+              </button>
+            {/if}
+            {#if installedTools.length > 0}
+              <div class="dropdown-divider"></div>
+              <div class="dropdown-section-label">External Tools</div>
+              {#each installedTools as tool (tool.id)}
+                <button
+                  class="dropdown-item"
+                  onclick={() => handleLaunchTool(tool.id)}
+                  disabled={launchingToolId === tool.id}
+                >
+                  <span class="tool-launch-name">{tool.name}</span>
+                  <span class="tool-launch-cat">{tool.category}</span>
+                </button>
+              {/each}
+              <div class="dropdown-divider"></div>
+              <button class="dropdown-item dropdown-item-muted" onclick={() => { showToolsMenu = false; currentPage.set("settings"); }}>
+                Manage Tools...
               </button>
             {/if}
           </div>
@@ -2771,9 +2815,9 @@
     {:else}
       <div class="mod-layout" class:has-detail={detailMod !== null}>
       <div class="mod-table-container" class:reordering-active={reordering}>
-        <div class="mod-table">
+        <div class="mod-table" style="--grid-cols: {gridTemplate}">
           <!-- Sticky Header — click to sort -->
-          <div class="table-header">
+          <div class="table-header" class:resizing={resizingCol !== null}>
             <label class="col-check">
               <input type="checkbox" checked={selectAll} onchange={toggleSelectAll} />
             </label>
@@ -2784,32 +2828,45 @@
                 <circle cx="16" cy="12" r="3" />
               </svg>
             </span>
-            <button type="button" class="col-name sortable-header header-sep-right" onclick={() => toggleSort("name")}>
+            <button type="button" class="col-name sortable-header" onclick={() => toggleSort("name")}>
               Mod Name
               {#if sortBy === "name"}
                 <span class="sort-arrow">{sortDir === "asc" ? "\u25B2" : "\u25BC"}</span>
               {/if}
+              <span class="col-resize" onpointerdown={(e) => onResizeStart(e, 'name')} role="separator" aria-orientation="vertical"></span>
             </button>
-            <span class="col-category header-sep-right">Category</span>
-            <span class="col-origin header-sep-right">DL Origin</span>
-            <span class="col-source header-sep-right">Installed By</span>
-            <button type="button" class="col-version sortable-header header-sep-right" onclick={() => toggleSort("version")}>
+            <span class="col-category">
+              Category
+              <span class="col-resize" onpointerdown={(e) => onResizeStart(e, 'category')} role="separator" aria-orientation="vertical"></span>
+            </span>
+            <span class="col-origin">
+              DL Origin
+              <span class="col-resize" onpointerdown={(e) => onResizeStart(e, 'origin')} role="separator" aria-orientation="vertical"></span>
+            </span>
+            <span class="col-source">
+              Installed By
+              <span class="col-resize" onpointerdown={(e) => onResizeStart(e, 'source')} role="separator" aria-orientation="vertical"></span>
+            </span>
+            <button type="button" class="col-version sortable-header" onclick={() => toggleSort("version")}>
               Version
               {#if sortBy === "version"}
                 <span class="sort-arrow">{sortDir === "asc" ? "\u25B2" : "\u25BC"}</span>
               {/if}
+              <span class="col-resize" onpointerdown={(e) => onResizeStart(e, 'version')} role="separator" aria-orientation="vertical"></span>
             </button>
-            <button type="button" class="col-files sortable-header header-sep-right" onclick={() => toggleSort("files")}>
+            <button type="button" class="col-files sortable-header" onclick={() => toggleSort("files")}>
               Files
               {#if sortBy === "files"}
                 <span class="sort-arrow">{sortDir === "asc" ? "\u25B2" : "\u25BC"}</span>
               {/if}
+              <span class="col-resize" onpointerdown={(e) => onResizeStart(e, 'files')} role="separator" aria-orientation="vertical"></span>
             </button>
-            <button type="button" class="col-date sortable-header header-sep-right" onclick={() => toggleSort("date")}>
+            <button type="button" class="col-date sortable-header" onclick={() => toggleSort("date")}>
               Installed
               {#if sortBy === "date"}
                 <span class="sort-arrow">{sortDir === "asc" ? "\u25B2" : "\u25BC"}</span>
               {/if}
+              <span class="col-resize" onpointerdown={(e) => onResizeStart(e, 'date')} role="separator" aria-orientation="vertical"></span>
             </button>
             <span class="col-actions">Actions</span>
           </div>
@@ -4030,13 +4087,17 @@
 
   .table-header {
     display: grid;
-    grid-template-columns: 24px 28px 48px minmax(0, 1fr) 100px 68px 110px 72px 48px 90px 64px;
+    grid-template-columns: var(--grid-cols, 24px 28px 48px minmax(0, 1fr) 100px 68px 110px 72px 48px 90px 64px);
     padding: var(--space-2) var(--space-3);
     background: var(--bg-secondary);
     border-bottom: 1px solid var(--separator);
     position: sticky;
     top: 0;
     z-index: 2;
+  }
+
+  .table-header.resizing {
+    user-select: none;
   }
 
   .table-header span,
@@ -4051,9 +4112,6 @@
     letter-spacing: 0.04em;
   }
 
-  .header-sep-right {
-    border-right: 1px solid var(--separator);
-  }
 
   .sortable-header {
     cursor: pointer;
@@ -4081,6 +4139,45 @@
     color: var(--accent);
   }
 
+  /* Column resize handles */
+  .col-resize {
+    position: absolute;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    width: 6px;
+    cursor: col-resize;
+    z-index: 3;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .col-resize::after {
+    content: '';
+    width: 1px;
+    height: 60%;
+    background: var(--separator);
+    transition: background 0.15s ease, width 0.15s ease;
+    border-radius: 1px;
+  }
+
+  .col-resize:hover::after {
+    background: var(--accent);
+    width: 2px;
+  }
+
+  .table-header.resizing .col-resize::after {
+    background: var(--accent);
+    width: 2px;
+  }
+
+  /* Make header cells position:relative for the resize handle */
+  .table-header span,
+  .table-header button.sortable-header {
+    position: relative;
+  }
+
   .table-body {
     flex: 1;
     overflow-y: auto;
@@ -4088,7 +4185,7 @@
 
   .table-row {
     display: grid;
-    grid-template-columns: 24px 28px 48px minmax(0, 1fr) 100px 68px 110px 72px 48px 90px 64px;
+    grid-template-columns: var(--grid-cols, 24px 28px 48px minmax(0, 1fr) 100px 68px 110px 72px 48px 90px 64px);
     padding: var(--space-2) var(--space-3);
     align-items: center;
     font-size: 13px;
@@ -4102,9 +4199,8 @@
 
   /* Narrow window: hide Category, Origin, Source, Files, Date columns */
   @media (max-width: 1200px) {
-    .table-header,
-    .table-row {
-      grid-template-columns: 24px 28px 48px minmax(0, 1fr) 0px 0px 0px 64px 0px 0px 60px;
+    .mod-table {
+      --grid-cols: 24px 28px 48px minmax(0, 1fr) 0px 0px 0px 64px 0px 0px 60px !important;
     }
     .col-category,
     .col-origin,
@@ -4633,7 +4729,7 @@
   .tools-dropdown {
     position: absolute;
     top: 100%;
-    left: 0;
+    right: 0;
     margin-top: var(--space-1);
     background: var(--bg-elevated);
     border: 1px solid var(--separator-opaque);
@@ -4642,6 +4738,22 @@
     min-width: 220px;
     z-index: 100;
     overflow: hidden;
+  }
+
+  .tools-dropdown .dropdown-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .dropdown-section-label {
+    padding: var(--space-2) var(--space-3);
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    user-select: none;
   }
 
   .tool-launch-name {
@@ -4653,41 +4765,6 @@
     color: var(--text-tertiary);
     text-transform: uppercase;
     letter-spacing: 0.5px;
-  }
-
-  /* --- Overflow menu --- */
-
-  .overflow-menu-wrap {
-    position: relative;
-  }
-
-  .btn-overflow {
-    font-size: 18px;
-    font-weight: 700;
-    letter-spacing: 2px;
-    min-width: 36px;
-    padding: var(--space-1) var(--space-2);
-    line-height: 1;
-  }
-
-  .overflow-dropdown {
-    position: absolute;
-    top: 100%;
-    right: 0;
-    margin-top: var(--space-1);
-    background: var(--bg-elevated);
-    border: 1px solid var(--separator-opaque);
-    border-radius: var(--radius);
-    box-shadow: var(--shadow-lg);
-    min-width: 180px;
-    z-index: 100;
-    overflow: hidden;
-  }
-
-  .overflow-dropdown .dropdown-item {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
   }
 
   /* --- SKSE Banner --- */
