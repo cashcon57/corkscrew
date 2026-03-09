@@ -22,6 +22,8 @@
 
 <br>
 
+NOTE: Corkscrew currently only supports modlists with fewer that 600 plugins for automated install. This is an issue with Wine on MacOS. I am actively developing a version of SSEEngineFixes that will address this issue, and it will be included in the Corkscrew install and will automatically apply itself to your modlist. Right now, Corkscrew is confirmed working with Immersive & Pure/Adult. Should work with any modlist near that same size. It also works fine for fully custom managed mod installation, up to 600 plugins. I will update and release a new version when this is addressed. 
+
 Corkscrew installs, manages, and organizes mods for Windows games running through [CrossOver](https://www.codeweavers.com/crossover), [Moonshine](https://github.com/ybmeng/moonshine), [Lutris](https://lutris.net/), [Proton](https://github.com/ValveSoftware/Proton), and other Wine-based compatibility layers — no Windows VM required.
 
 It works by reading and writing directly to your Wine bottle's filesystem, the same way the game itself sees it. Your bottles, your mods, no middleman.
