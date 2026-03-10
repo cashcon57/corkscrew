@@ -56,6 +56,7 @@ pub struct InstalledMod {
     pub user_notes: Option<String>,
     pub user_tags: Vec<String>,
     pub auto_category: Option<String>,
+    pub collection_optional: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -265,6 +266,7 @@ impl ModDatabase {
             user_notes: row.get(15)?,
             user_tags,
             auto_category: row.get(17)?,
+            collection_optional: row.get::<_, i32>(19).unwrap_or(0) != 0,
         })
     }
 
@@ -272,7 +274,8 @@ impl ModDatabase {
     const SELECT_COLUMNS: &'static str = "id, game_id, bottle_name, nexus_mod_id, name, version, \
          archive_name, installed_files, installed_at, enabled, \
          nexus_file_id, source_url, staging_path, install_priority, \
-         collection_name, user_notes, user_tags, auto_category, source_type";
+         collection_name, user_notes, user_tags, auto_category, source_type, \
+         collection_optional";
 
     // -- public API ---------------------------------------------------------
 
@@ -500,6 +503,16 @@ impl ModDatabase {
         conn.execute(
             "UPDATE installed_mods SET collection_name = ?1 WHERE id = ?2",
             params![collection_name, mod_id],
+        )?;
+        Ok(())
+    }
+
+    /// Mark a mod as optional within its collection.
+    pub fn set_collection_optional(&self, mod_id: i64, optional: bool) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "UPDATE installed_mods SET collection_optional = ?1 WHERE id = ?2",
+            params![optional as i32, mod_id],
         )?;
         Ok(())
     }

@@ -19,7 +19,7 @@ pub enum MigrationError {
 pub type Result<T> = std::result::Result<T, MigrationError>;
 
 /// The current target schema version. Bump this when adding a new migration.
-const TARGET_VERSION: u32 = 14;
+const TARGET_VERSION: u32 = 15;
 
 /// Get the current schema version (0 if no version table exists).
 pub fn current_version(conn: &Connection) -> Result<u32> {
@@ -114,6 +114,11 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     if version == 13 {
         migrate_v13_to_v14(conn)?;
         version = 14;
+    }
+
+    if version == 14 {
+        migrate_v14_to_v15(conn)?;
+        version = 15;
     }
 
     let _ = version; // suppress unused warning when TARGET_VERSION == current
@@ -766,6 +771,74 @@ fn migrate_v13_to_v14(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// v14 → v15: Add `collection_optional` column to installed_mods.
+/// Tracks whether a mod was an optional pick in its parent collection.
+/// Backfills from stored manifest_json in collection_metadata.
+fn migrate_v14_to_v15(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+
+    // Add the column (INTEGER: 0 = required, 1 = optional)
+    tx.execute_batch(
+        "ALTER TABLE installed_mods
+            ADD COLUMN collection_optional INTEGER NOT NULL DEFAULT 0;",
+    )?;
+
+    // Backfill from stored collection manifests.
+    // For each collection with a manifest_json, parse it and mark matching
+    // installed mods as optional based on mod name matching.
+    {
+        let mut meta_stmt = tx.prepare(
+            "SELECT collection_name, game_id, bottle_name, manifest_json
+             FROM collection_metadata
+             WHERE manifest_json IS NOT NULL",
+        )?;
+        let rows: Vec<(String, String, String, String)> = meta_stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        for (coll_name, game_id, bottle_name, manifest_json) in &rows {
+            // Parse manifest to find optional mod names
+            if let Ok(manifest) = serde_json::from_str::<serde_json::Value>(manifest_json) {
+                if let Some(mods) = manifest.get("mods").and_then(|v| v.as_array()) {
+                    for m in mods {
+                        let is_optional = m
+                            .get("optional")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        if is_optional {
+                            if let Some(mod_name) = m.get("name").and_then(|v| v.as_str()) {
+                                // Mark matching installed mods as optional
+                                let _ = tx.execute(
+                                    "UPDATE installed_mods
+                                     SET collection_optional = 1
+                                     WHERE collection_name = ?1
+                                       AND game_id = ?2
+                                       AND bottle_name = ?3
+                                       AND name = ?4",
+                                    params![coll_name, game_id, bottle_name, mod_name],
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    tx.execute("UPDATE schema_version SET version = 15", [])?;
+    tx.commit()?;
+    log::info!("Migration 14 → 15 complete (collection_optional column + backfill)");
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -907,7 +980,7 @@ mod tests {
     fn v13_creates_deployment_manifest_index() {
         let conn = memory_db();
         migrate(&conn).unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 14);
+        assert_eq!(current_version(&conn).unwrap(), 15);
 
         // Verify the compound index exists
         let index_exists: bool = conn

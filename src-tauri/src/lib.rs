@@ -5211,6 +5211,44 @@ fn apply_ini_preset(
     ini_manager::apply_preset(&bottle, &game_id, preset).map_err(|e| e.to_string())
 }
 
+/// Read a text file from a mod's staging directory.
+/// `staging_path` is the mod's staging root, `relative_path` is the file within it.
+#[tauri::command]
+fn read_mod_file(staging_path: String, relative_path: String) -> Result<String, String> {
+    let full = Path::new(&staging_path).join(&relative_path);
+    if !full.exists() {
+        return Err(format!("File not found: {}", full.display()));
+    }
+    // Prevent directory traversal
+    let canon = full.canonicalize().map_err(|e| e.to_string())?;
+    let base = Path::new(&staging_path)
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    if !canon.starts_with(&base) {
+        return Err("Path traversal denied".into());
+    }
+    std::fs::read_to_string(&canon).map_err(|e| format!("Failed to read file: {}", e))
+}
+
+/// Write a text file in a mod's staging directory.
+#[tauri::command]
+fn write_mod_file(staging_path: String, relative_path: String, content: String) -> Result<(), String> {
+    let full = Path::new(&staging_path).join(&relative_path);
+    // Prevent directory traversal
+    let base = Path::new(&staging_path)
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    // For writes, parent must exist and resolved path must be under base
+    if let Some(parent) = full.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let canon = full.canonicalize().unwrap_or_else(|_| full.clone());
+    if !canon.starts_with(&base) {
+        return Err("Path traversal denied".into());
+    }
+    std::fs::write(&full, content).map_err(|e| format!("Failed to write file: {}", e))
+}
+
 // --- Wine Diagnostic Commands ---
 
 #[tauri::command]
@@ -6843,6 +6881,8 @@ pub fn run() {
             set_ini_setting,
             get_ini_presets,
             apply_ini_preset,
+            read_mod_file,
+            write_mod_file,
             // Wine Diagnostics
             run_wine_diagnostics,
             fix_wine_appdata,

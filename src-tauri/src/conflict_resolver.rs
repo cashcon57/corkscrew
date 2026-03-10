@@ -505,6 +505,7 @@ mod tests {
             user_tags: vec![],
             auto_category: None,
             source_type: "manual".into(),
+            collection_optional: false,
         }
     }
 

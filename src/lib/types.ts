@@ -37,6 +37,7 @@ export interface InstalledMod {
   user_notes: string | null;
   user_tags: string[];
   auto_category: string | null;
+  collection_optional: boolean;
 }
 
 export interface NotificationEntry {

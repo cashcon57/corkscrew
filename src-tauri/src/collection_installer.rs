@@ -2078,6 +2078,9 @@ pub async fn install_collection(
                 false
             }) {
                 let _ = db.set_collection_name(existing.id, &manifest.name);
+                if mod_entry.optional {
+                    let _ = db.set_collection_optional(existing.id, true);
+                }
             }
 
             let _ = app.emit(
@@ -2159,8 +2162,11 @@ pub async fn install_collection(
         match result {
             Ok((mod_id, deployed_size)) => {
                 let install_duration_ms = install_start.elapsed().as_millis() as u64;
-                // Tag this mod with the collection name
+                // Tag this mod with the collection name and optional status
                 let _ = db.set_collection_name(mod_id, &manifest.name);
+                if mod_entry.optional {
+                    let _ = db.set_collection_optional(mod_id, true);
+                }
 
                 let _ = app.emit(
                     INSTALL_PROGRESS_EVENT,
@@ -2352,6 +2358,9 @@ pub async fn install_collection(
                     false
                 }) {
                     let _ = db.set_collection_name(existing.id, &manifest.name);
+                    if mod_entry.optional {
+                        let _ = db.set_collection_optional(existing.id, true);
+                    }
                     mod_index_to_id.insert(mod_idx, existing.id);
                 }
                 let _ = app.emit(
@@ -2403,6 +2412,9 @@ pub async fn install_collection(
                     mod_index_to_id.insert(mod_idx, mod_id);
                     let install_duration_ms = install_start.elapsed().as_millis() as u64;
                     let _ = db.set_collection_name(mod_id, &manifest.name);
+                    if mod_entry.optional {
+                        let _ = db.set_collection_optional(mod_id, true);
+                    }
                     let _ = app.emit(
                         INSTALL_PROGRESS_EVENT,
                         InstallProgress::ModCompleted {

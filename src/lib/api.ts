@@ -1428,6 +1428,22 @@ export async function applyIniPreset(
   return invoke("apply_ini_preset", { gameId, bottleName, presetName });
 }
 
+// Mod file read/write (for inline INI editing)
+export async function readModFile(
+  stagingPath: string,
+  relativePath: string
+): Promise<string> {
+  return invoke("read_mod_file", { stagingPath, relativePath });
+}
+
+export async function writeModFile(
+  stagingPath: string,
+  relativePath: string,
+  content: string
+): Promise<void> {
+  return invoke("write_mod_file", { stagingPath, relativePath, content });
+}
+
 // Wine Diagnostics
 export async function runWineDiagnostics(
   gameId: string,

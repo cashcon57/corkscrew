@@ -149,6 +149,7 @@
 
   // Detail panel
   let detailMod = $state<InstalledMod | null>(null);
+  let detailScrollToIni = $state<string | null>(null);
 
   // Conflict panel state
   let showConflictPanel = $state(false);
@@ -606,11 +607,53 @@
     }
   }
 
+  let lastSelectedModId = $state<number | null>(null);
+
   function toggleSelectMod(id: number) {
     const next = new Set(selectedModIds);
     if (next.has(id)) next.delete(id);
     else next.add(id);
     selectedModIds = next;
+    lastSelectedModId = id;
+  }
+
+  /** Handle row click with shift/cmd modifier support for multi-select. */
+  function handleRowClick(e: MouseEvent, mod: InstalledMod, index: number) {
+    if (e.shiftKey && lastSelectedModId !== null) {
+      // Shift+click: range select from last selected to this mod
+      const allMods = viewMode === "flat" ? flatViewMods : filteredMods;
+      const lastIdx = allMods.findIndex(m => m.id === lastSelectedModId);
+      const curIdx = allMods.findIndex(m => m.id === mod.id);
+      if (lastIdx !== -1 && curIdx !== -1) {
+        const start = Math.min(lastIdx, curIdx);
+        const end = Math.max(lastIdx, curIdx);
+        const next = new Set(selectedModIds);
+        for (let i = start; i <= end; i++) {
+          next.add(allMods[i].id);
+        }
+        selectedModIds = next;
+      }
+    } else if (e.metaKey || e.ctrlKey) {
+      // Cmd/Ctrl+click: toggle individual selection without clearing others
+      toggleSelectMod(mod.id);
+    } else {
+      // Normal click: select this mod (add to selection) and open detail
+      const next = new Set(selectedModIds);
+      if (next.has(mod.id) && selectedModId === mod.id) {
+        // Clicking the already-active mod: deselect and close detail
+        next.delete(mod.id);
+        selectedModIds = next;
+        selectedModId = undefined;
+        detailMod = null;
+      } else {
+        next.add(mod.id);
+        selectedModIds = next;
+        selectedModId = mod.id;
+        detailMod = mod;
+      }
+      lastSelectedModId = mod.id;
+    }
+    focusedIndex = index;
   }
 
   let bulkOperating = $state<"enabling" | "disabling" | "uninstalling" | null>(null);
@@ -2905,20 +2948,23 @@
                   <span class="group-count">{groupMods.length}</span>
                 </button>
                 {#if !collapsedGroups.has(groupName)}
-                  {#each groupMods as mod, i (mod.id)}
+                  {@const requiredMods = groupMods.filter(m => !m.collection_optional)}
+                  {@const optionalMods = groupMods.filter(m => m.collection_optional)}
+                  {#each requiredMods as mod, i (mod.id)}
                     {@const globalIndex = filteredModIndex.get(mod.id) ?? 0}
                     <!-- Re-use the same row markup with global index for DnD -->
                     <div
                       class="table-row"
                       class:row-disabled={!mod.enabled}
                       class:row-selected={selectedModId === mod.id}
+                      class:row-checked={selectedModIds.has(mod.id)}
                       class:row-has-conflict={conflictModIds.has(mod.id)}
                       class:row-dragging={dragRowIndex === globalIndex}
                       class:row-drag-over={dragOverIndex === globalIndex && dragRowIndex !== null && dragRowIndex !== globalIndex}
                       class:row-drag-above={dragOverIndex === globalIndex && dragRowIndex !== null && dragRowIndex > globalIndex}
                       class:row-drag-below={dragOverIndex === globalIndex && dragRowIndex !== null && dragRowIndex < globalIndex}
                       draggable="true"
-                      onclick={() => { selectedModId = selectedModId === mod.id ? undefined : mod.id; detailMod = detailMod?.id === mod.id ? null : mod; }}
+                      onclick={(e) => handleRowClick(e, mod, globalIndex)}
                       ondragstart={(e) => handleRowDragStart(e, globalIndex)}
                       ondragover={(e) => handleRowDragOver(e, globalIndex)}
                       ondragend={handleRowDragEnd}
@@ -2948,6 +2994,65 @@
                       </span>
                     </div>
                   {/each}
+                  {#if optionalMods.length > 0}
+                    <button class="optional-separator" onclick={() => toggleGroup(`${groupName}__optional`)}>
+                      <svg
+                        class="group-chevron"
+                        class:expanded={!collapsedGroups.has(`${groupName}__optional`)}
+                        width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                      >
+                        <path d="M4 2l4 4-4 4" />
+                      </svg>
+                      <span class="optional-label">Optional</span>
+                      <span class="optional-count">{optionalMods.length}</span>
+                      <span class="optional-line"></span>
+                    </button>
+                    {#if !collapsedGroups.has(`${groupName}__optional`)}
+                      {#each optionalMods as mod, i (mod.id)}
+                        {@const globalIndex = filteredModIndex.get(mod.id) ?? 0}
+                        <div
+                          class="table-row row-optional"
+                          class:row-disabled={!mod.enabled}
+                          class:row-selected={selectedModId === mod.id}
+                          class:row-checked={selectedModIds.has(mod.id)}
+                          class:row-has-conflict={conflictModIds.has(mod.id)}
+                          class:row-dragging={dragRowIndex === globalIndex}
+                          class:row-drag-over={dragOverIndex === globalIndex && dragRowIndex !== null && dragRowIndex !== globalIndex}
+                          class:row-drag-above={dragOverIndex === globalIndex && dragRowIndex !== null && dragRowIndex > globalIndex}
+                          class:row-drag-below={dragOverIndex === globalIndex && dragRowIndex !== null && dragRowIndex < globalIndex}
+                          draggable="true"
+                          onclick={(e) => handleRowClick(e, mod, globalIndex)}
+                          ondragstart={(e) => handleRowDragStart(e, globalIndex)}
+                          ondragover={(e) => handleRowDragOver(e, globalIndex)}
+                          ondragend={handleRowDragEnd}
+                          ondrop={(e) => handleRowDrop(e, globalIndex)}
+                        >
+                          <label class="col-check" onclick={(e) => e.stopPropagation()}><input type="checkbox" checked={selectedModIds.has(mod.id)} onchange={() => toggleSelectMod(mod.id)} /></label>
+                          <span class="col-grip"><span class="drag-handle" title="Drag to reorder" aria-label="Drag to reorder {mod.name}"><svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><circle cx="4" cy="2.5" r="1" /><circle cx="8" cy="2.5" r="1" /><circle cx="4" cy="6" r="1" /><circle cx="8" cy="6" r="1" /><circle cx="4" cy="9.5" r="1" /><circle cx="8" cy="9.5" r="1" /></svg></span></span>
+                          <span class="col-toggle"><button class="toggle-switch" class:toggle-on={mod.enabled} class:toggle-busy={togglingMod === mod.id} onclick={() => handleToggle(mod)} title={mod.enabled ? "Disable mod" : "Enable mod"} aria-label="{mod.enabled ? 'Disable' : 'Enable'} {mod.name}" aria-pressed={mod.enabled} role="switch"><span class="toggle-track"><span class="toggle-thumb"></span></span></button></span>
+                          <span class="col-name"><span class="mod-name">{mod.name}</span>{#if conflictModIds.has(mod.id)}<span class="conflict-icon" title={getConflictTooltip(mod.id)}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg></span>{/if}{#if mod.user_notes}<span class="notes-icon" title={mod.user_notes}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /></svg></span>{/if}</span>
+                          <span class="col-category">{#if mod.auto_category}<span class="category-cell" style="color: {categoryColors[mod.auto_category] ?? '#6b7280'};" title={mod.auto_category}>{#if categoryIcons[mod.auto_category]}<svg class="category-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{@html categoryIcons[mod.auto_category]}</svg>{/if}<span class="category-label">{mod.auto_category}</span></span>{:else}<span class="text-muted">&mdash;</span>{/if}</span>
+                          <span class="col-origin">{#if mod.source_type === "nexus"}<span class="origin-label origin-nexus">Nexus</span>{:else if mod.source_type === "loverslab"}<span class="origin-label origin-loverslab">LoversLab</span>{:else if mod.source_type === "moddb"}<span class="origin-label origin-moddb">ModDB</span>{:else if mod.source_type === "curseforge"}<span class="origin-label origin-curseforge">CurseForge</span>{:else if mod.source_type === "direct"}<span class="origin-label origin-direct">Direct</span>{:else}<span class="origin-label origin-manual">Manual</span>{/if}{#if getModSourceUrl(mod)}<button class="origin-link-btn" title="Open mod page" onclick={(e) => { e.stopPropagation(); openUrl(getModSourceUrl(mod)!); }}><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></svg></button>{/if}</span>
+                          <span class="col-source">{#if mod.collection_name}<span class="source-label source-collection" title={mod.collection_name}>{mod.collection_name}</span>{:else}<span class="source-label source-user">User</span>{/if}</span>
+                          <span class="col-version"><span class="version-text">{mod.version || "\u2014"}</span>{#if updateMap.has(mod.id)}{@const update = updateMap.get(mod.id)!}<span class="update-badge" title={`Update available: v${update.latest_version}`}>Update</span>{/if}</span>
+                          <span class="col-files">{mod.installed_files.length}</span>
+                          <span class="col-date">{formatDate(mod.installed_at)}</span>
+                          <span class="col-actions">
+                            {#if confirmUninstall === mod.id}
+                              <div class="confirm-actions"><button class="btn btn-danger btn-sm" onclick={() => handleUninstall(mod.id)}>Yes</button><button class="btn btn-ghost btn-sm" onclick={() => (confirmUninstall = null)}>No</button></div>
+                            {:else}
+                              <div class="mod-action-group">
+                                <button class="mod-uninstall-btn" onclick={(e) => { e.stopPropagation(); confirmUninstall = mod.id; }} title="Uninstall mod"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg></button>
+                                <div class="mod-overflow-wrap">
+                                  <button class="mod-overflow-btn" onclick={(e) => { e.stopPropagation(); overflowMenuModId = overflowMenuModId === mod.id ? null : mod.id; }} title="More actions"><svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2" /><circle cx="12" cy="12" r="2" /><circle cx="12" cy="19" r="2" /></svg></button>
+                                </div>
+                              </div>
+                            {/if}
+                          </span>
+                        </div>
+                      {/each}
+                    {/if}
+                  {/if}
                 {/if}
               {/each}
             {:else}
@@ -2958,6 +3063,7 @@
                 class="table-row"
                 class:row-disabled={!mod.enabled}
                 class:row-selected={selectedModId === mod.id}
+                class:row-checked={selectedModIds.has(mod.id)}
                 class:row-focused={focusedIndex === i}
                 class:row-has-conflict={conflictModIds.has(mod.id)}
                 class:row-dragging={dragRowIndex === i}
@@ -2965,7 +3071,7 @@
                 class:row-drag-above={dragOverIndex === i && dragRowIndex !== null && dragRowIndex > i}
                 class:row-drag-below={dragOverIndex === i && dragRowIndex !== null && dragRowIndex < i}
                 draggable="true"
-                onclick={() => { focusedIndex = i; selectedModId = selectedModId === mod.id ? undefined : mod.id; detailMod = detailMod?.id === mod.id ? null : mod; }}
+                onclick={(e) => handleRowClick(e, mod, i)}
                 oncontextmenu={(e) => handleRowContextMenu(e, mod)}
                 ondragstart={(e) => handleRowDragStart(e, i)}
                 ondragover={(e) => handleRowDragOver(e, i)}
@@ -3193,12 +3299,13 @@
                 <span class="disabled-separator-line"></span>
               </button>
               {#if !disabledSectionCollapsed}
-                {#each disabledFilteredMods as mod (mod.id)}
+                {#each disabledFilteredMods as mod, di (mod.id)}
                   <div
                     class="table-row row-disabled"
                     class:row-selected={selectedModId === mod.id}
+                    class:row-checked={selectedModIds.has(mod.id)}
                     class:row-has-conflict={conflictModIds.has(mod.id)}
-                    onclick={() => { selectedModId = selectedModId === mod.id ? undefined : mod.id; detailMod = detailMod?.id === mod.id ? null : mod; }}
+                    onclick={(e) => handleRowClick(e, mod, -1 - di)}
                   >
                     <label class="col-check" onclick={(e) => e.stopPropagation()}>
                       <input type="checkbox" checked={selectedModIds.has(mod.id)} onchange={() => toggleSelectMod(mod.id)} />
@@ -3250,6 +3357,8 @@
           onabstain={handleAbstainMod}
           onreinstall={handleInstallOverMod}
           onreload={() => { const g = pickedGame ?? $selectedGame; if (g) loadMods(g); }}
+          onnavigatemod={(targetMod, iniFile) => { detailScrollToIni = iniFile ?? null; detailMod = targetMod; selectedModId = targetMod.id; if (iniFile) setTimeout(() => { detailScrollToIni = null; }, 2000); }}
+          scrollToIni={detailScrollToIni}
         />
       {/if}
       </div>
@@ -4067,6 +4176,8 @@
      ============================ */
   .mod-table-container {
     flex: 1;
+    display: flex;
+    flex-direction: column;
     overflow: hidden;
     border-radius: var(--radius-lg);
     background: var(--bg-primary);
@@ -4082,7 +4193,8 @@
   .mod-table {
     display: flex;
     flex-direction: column;
-    height: 100%;
+    flex: 1;
+    min-height: 0;
   }
 
   .table-header {
@@ -4091,8 +4203,7 @@
     padding: var(--space-2) var(--space-3);
     background: var(--bg-secondary);
     border-bottom: 1px solid var(--separator);
-    position: sticky;
-    top: 0;
+    flex-shrink: 0;
     z-index: 2;
   }
 
@@ -4100,8 +4211,8 @@
     user-select: none;
   }
 
-  .table-header span,
-  .table-header button {
+  .table-header > span,
+  .table-header > button {
     font-size: 11px;
     font-weight: 600;
     color: var(--text-secondary);
@@ -4139,8 +4250,16 @@
     color: var(--accent);
   }
 
-  /* Column resize handles */
-  .col-resize {
+  /* Make header cells position:relative for the resize handle */
+  .table-header > span,
+  .table-header > button.sortable-header {
+    position: relative;
+  }
+
+  /* Column resize handles — use .table-header .col-resize to beat
+     the .table-header span rule that would otherwise override
+     position/overflow with relative/hidden */
+  .table-header .col-resize {
     position: absolute;
     right: 0;
     top: 0;
@@ -4151,9 +4270,17 @@
     display: flex;
     align-items: center;
     justify-content: center;
+    overflow: visible;
+    text-overflow: clip;
+    white-space: normal;
+    font-size: inherit;
+    font-weight: inherit;
+    color: inherit;
+    text-transform: none;
+    letter-spacing: normal;
   }
 
-  .col-resize::after {
+  .table-header .col-resize::after {
     content: '';
     width: 1px;
     height: 60%;
@@ -4162,7 +4289,7 @@
     border-radius: 1px;
   }
 
-  .col-resize:hover::after {
+  .table-header .col-resize:hover::after {
     background: var(--accent);
     width: 2px;
   }
@@ -4172,14 +4299,9 @@
     width: 2px;
   }
 
-  /* Make header cells position:relative for the resize handle */
-  .table-header span,
-  .table-header button.sortable-header {
-    position: relative;
-  }
-
   .table-body {
     flex: 1;
+    min-height: 0;
     overflow-y: auto;
   }
 
@@ -5039,6 +5161,14 @@
     border-left: 2px solid var(--system-accent);
   }
 
+  .row-checked {
+    background: color-mix(in srgb, var(--system-accent) 5%, transparent);
+  }
+
+  .row-checked.row-selected {
+    background: color-mix(in srgb, var(--system-accent) 10%, transparent) !important;
+  }
+
   /* ============================
      Search & Filter Bar
      ============================ */
@@ -5682,321 +5812,52 @@
   }
 
   /* ============================
-     Detail Panel
+     Optional Mods Separator
      ============================ */
-  .mod-detail-panel {
-    width: 280px;
-    min-width: 240px;
-    max-width: 320px;
-    flex-shrink: 0;
-    border-radius: var(--radius-lg);
-    background: var(--bg-primary);
-    box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
+  .optional-separator {
     display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    overflow-y: auto;
-    animation: detailSlideIn 0.15s var(--ease-out);
-  }
-
-  @keyframes detailSlideIn {
-    from { opacity: 0; transform: translateX(8px); }
-    to { opacity: 1; transform: translateX(0); }
-  }
-
-  .detail-header {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
+    align-items: center;
     gap: var(--space-2);
-    padding: var(--space-4);
-    border-bottom: 1px solid var(--separator);
-  }
-
-  .detail-name {
-    font-size: 14px;
-    font-weight: 600;
-    color: var(--text-primary);
-    line-height: 1.35;
-    word-break: break-word;
-  }
-
-  .detail-close {
-    flex-shrink: 0;
-    padding: 4px;
-    border-radius: var(--radius-sm);
-    color: var(--text-tertiary);
-    cursor: pointer;
-    transition: all var(--duration-fast) var(--ease);
-  }
-
-  .detail-close:hover {
-    background: var(--surface-hover);
-    color: var(--text-primary);
-  }
-
-  .detail-body {
-    flex: 1;
-    overflow-y: auto;
-    padding: var(--space-4);
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-4);
-  }
-
-  .detail-meta {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
-  }
-
-  .detail-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: baseline;
-    padding: 3px 0;
-  }
-
-  .detail-label {
-    font-size: 12px;
-    color: var(--text-tertiary);
-    font-weight: 500;
-  }
-
-  .detail-value {
-    font-size: 12px;
-    color: var(--text-primary);
-    font-weight: 500;
-    text-align: right;
-    max-width: 60%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .detail-archive {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    color: var(--text-secondary);
-  }
-
-  .detail-link {
-    color: var(--accent);
-    text-decoration: none;
-  }
-
-  .detail-link:hover {
-    text-decoration: underline;
-  }
-
-  .detail-update-banner {
-    padding: var(--space-2) var(--space-3);
-    background: rgba(48, 209, 88, 0.1);
-    border: 1px solid rgba(48, 209, 88, 0.2);
-    border-radius: var(--radius-sm);
-  }
-
-  .detail-update-text {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--green);
-  }
-
-  .detail-section {
+    width: 100%;
+    padding: var(--space-1) var(--space-3) var(--space-1) calc(var(--space-3) + 24px);
+    background: color-mix(in srgb, var(--bg-secondary) 60%, transparent);
     border-top: 1px solid var(--separator);
-    padding-top: var(--space-3);
+    border-bottom: 1px solid var(--separator);
+    cursor: pointer;
+    text-align: left;
+    transition: background var(--duration-fast) var(--ease);
+    border-left: none;
+    border-right: none;
+    font-family: inherit;
   }
 
-  .detail-section-title {
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text-tertiary);
-    margin-bottom: var(--space-2);
+  .optional-separator:hover {
+    background: var(--surface-hover);
   }
 
-  .detail-conflict-list {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px;
-  }
-
-  .detail-conflict-badge {
-    font-size: 11px;
-    padding: 2px 6px;
-    background: rgba(255, 69, 58, 0.1);
-    color: var(--red);
-    border-radius: var(--radius-sm);
-    font-weight: 500;
-  }
-
-  /* Dependencies in detail panel */
-  .detail-dep-group {
-    margin-bottom: var(--space-2);
-  }
-  .detail-dep-group:last-child {
-    margin-bottom: 0;
-  }
-  .detail-dep-label {
-    display: block;
+  .optional-label {
     font-size: 10px;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    color: var(--text-tertiary);
-    margin-bottom: var(--space-1);
-  }
-  .detail-dep-list {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px;
-  }
-  .detail-dep-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    font-size: 11px;
-    padding: 2px 6px;
-    border-radius: var(--radius-sm);
-    font-weight: 500;
-    max-width: 200px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .dep-requires {
-    background: rgba(0, 122, 255, 0.1);
-    color: var(--system-accent);
-  }
-  .dep-conflicts {
-    background: rgba(255, 69, 58, 0.1);
-    color: var(--red);
-  }
-  .dep-patches {
-    background: rgba(255, 214, 10, 0.1);
-    color: var(--yellow);
-  }
-  .dep-rel-tag {
-    font-size: 9px;
-    font-weight: 700;
-    text-transform: uppercase;
-    opacity: 0.7;
-  }
-
-  /* NexusMods mod detail */
-  .nexus-detail-section {
-    border-top: 1px solid var(--border-subtle);
-    padding-top: var(--space-3);
-  }
-
-  .nexus-summary {
-    font-size: 12px;
-    color: var(--text-secondary);
-    line-height: 1.5;
-    margin: 0 0 var(--space-2) 0;
-  }
-
-  .nexus-stats {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--space-3);
-    margin-bottom: var(--space-2);
-  }
-
-  .nexus-stat {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    font-size: 11px;
-    color: var(--text-tertiary);
-  }
-  .nexus-stat svg {
-    opacity: 0.6;
-  }
-
-  .nexus-description-toggle {
-    margin-top: var(--space-2);
-  }
-
-  .nexus-description {
-    font-size: 12px;
-    color: var(--text-secondary);
-    line-height: 1.6;
-    max-height: 300px;
-    overflow-y: auto;
-    margin-top: var(--space-2);
-    padding: var(--space-2);
-    background: var(--surface-hover);
-    border-radius: var(--radius-sm);
-    word-break: break-word;
-  }
-  .detail-tags {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px;
-  }
-
-  .detail-tag {
-    font-size: 11px;
-    padding: 2px 8px;
-    background: var(--accent-subtle);
-    color: var(--accent);
-    border-radius: var(--radius-sm);
-    font-weight: 500;
-  }
-
-  .detail-empty {
-    font-size: 12px;
     color: var(--text-quaternary);
   }
 
-  .detail-notes-input {
-    width: 100%;
-    padding: var(--space-2);
-    background: var(--bg-base);
-    border: 1px solid var(--separator);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
-    font-size: 12px;
-    font-family: inherit;
-    resize: vertical;
+  .optional-count {
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--text-quaternary);
   }
 
-  .detail-notes-input:focus {
-    outline: none;
-    border-color: var(--accent);
+  .optional-line {
+    flex: 1;
+    height: 1px;
+    background: var(--separator);
+    margin-left: var(--space-2);
   }
 
-  .detail-notes-actions {
-    display: flex;
-    gap: var(--space-2);
-    margin-top: var(--space-2);
-  }
-
-  .detail-notes-display {
-    width: 100%;
-    text-align: left;
-    padding: var(--space-2);
-    font-size: 12px;
-    color: var(--text-secondary);
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-    transition: background var(--duration-fast) var(--ease);
-    white-space: pre-wrap;
-    word-break: break-word;
-    line-height: 1.5;
-  }
-
-  .detail-notes-display:hover {
-    background: var(--surface-hover);
-  }
-
-  .detail-actions {
-    display: flex;
-    gap: var(--space-2);
-    border-top: 1px solid var(--separator);
-    padding-top: var(--space-3);
+  .row-optional {
+    opacity: 0.75;
   }
 
   /* ============================
@@ -6431,34 +6292,4 @@
     gap: 8px;
   }
 
-  .endorse-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    font-size: 11px;
-    padding: 3px 8px;
-    border-radius: 4px;
-    background: var(--bg-tertiary);
-    color: var(--text-secondary);
-    border: 1px solid var(--border-primary);
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  .endorse-btn:hover {
-    background: var(--bg-primary);
-    color: var(--text-primary);
-  }
-
-  .endorse-btn.endorsed {
-    background: rgba(34, 197, 94, 0.15);
-    color: #22c55e;
-    border-color: rgba(34, 197, 94, 0.3);
-  }
-
-  .endorse-btn.endorsed:hover {
-    background: rgba(239, 68, 68, 0.15);
-    color: #ef4444;
-    border-color: rgba(239, 68, 68, 0.3);
-  }
 </style>
