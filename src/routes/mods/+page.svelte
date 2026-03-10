@@ -686,8 +686,7 @@
       await batchToggleMods(ids, activeGame.game_id, activeGame.bottle_name, false);
       selectedModIds = new Set();
       await loadMods(activeGame);
-        await refreshHealth(activeGame);
-      }
+      await refreshHealth(activeGame);
     } finally {
       bulkOperating = null;
     }
