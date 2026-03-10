@@ -4,7 +4,8 @@
 
 set -euo pipefail
 
-KEY_FILE="$HOME/.corkscrew-keys/corkscrew-signing-key-v3"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+KEY_FILE="$ROOT/.keys/updater-signing-key"
 
 if [[ ! -f "$KEY_FILE" ]]; then
   echo "ERROR: Signing key not found at $KEY_FILE"

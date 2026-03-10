@@ -160,6 +160,15 @@ export async function toggleMod(
   return invoke("toggle_mod", { modId, gameId, bottleName, enabled });
 }
 
+export async function batchToggleMods(
+  modIds: number[],
+  gameId: string,
+  bottleName: string,
+  enabled: boolean
+): Promise<number> {
+  return invoke("batch_toggle_mods", { modIds, gameId, bottleName, enabled });
+}
+
 // Plugins (Load Order)
 export async function getPluginOrder(
   gameId: string,

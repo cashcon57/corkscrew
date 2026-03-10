@@ -18,7 +18,7 @@ TAG="v$VERSION"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # --- Config ---
-KEY_FILE="$HOME/.corkscrew-keys/corkscrew-signing-key-v3"
+KEY_FILE="$ROOT/.keys/updater-signing-key"
 KEY_PASSWORD="corkscrew-updater-2024"
 REPO="cashcon57/corkscrew"
 

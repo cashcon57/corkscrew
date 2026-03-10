@@ -10,6 +10,7 @@
     installMod,
     uninstallMod,
     toggleMod,
+    batchToggleMods,
     launchGame,
     checkSkse,
     getSkseDownloadUrl,
@@ -621,7 +622,10 @@
   function handleRowClick(e: MouseEvent, mod: InstalledMod, index: number) {
     if (e.shiftKey && lastSelectedModId !== null) {
       // Shift+click: range select from last selected to this mod
-      const allMods = viewMode === "flat" ? flatViewMods : filteredMods;
+      e.preventDefault(); // Prevent text selection
+      const allMods = viewMode === "flat"
+        ? [...flatViewMods, ...disabledFilteredMods]
+        : filteredMods;
       const lastIdx = allMods.findIndex(m => m.id === lastSelectedModId);
       const curIdx = allMods.findIndex(m => m.id === mod.id);
       if (lastIdx !== -1 && curIdx !== -1) {
@@ -633,9 +637,11 @@
         }
         selectedModIds = next;
       }
+      lastSelectedModId = mod.id;
     } else if (e.metaKey || e.ctrlKey) {
       // Cmd/Ctrl+click: toggle individual selection without clearing others
       toggleSelectMod(mod.id);
+      lastSelectedModId = mod.id;
     } else {
       // Normal click: select this mod (add to selection) and open detail
       const next = new Set(selectedModIds);
@@ -659,36 +665,27 @@
   let bulkOperating = $state<"enabling" | "disabling" | "uninstalling" | null>(null);
 
   async function batchEnable() {
+    if (!activeGame) return;
     bulkOperating = "enabling";
     try {
-      for (const id of selectedModIds) {
-        const mod = $installedMods.find(m => m.id === id);
-        if (mod && !mod.enabled && activeGame) {
-          await toggleMod(id, activeGame.game_id, activeGame.bottle_name, true);
-        }
-      }
+      const ids = Array.from(selectedModIds);
+      await batchToggleMods(ids, activeGame.game_id, activeGame.bottle_name, true);
       selectedModIds = new Set();
-      if (activeGame) {
-        await loadMods(activeGame);
-        await refreshHealth(activeGame);
-      }
+      await loadMods(activeGame);
+      await refreshHealth(activeGame);
     } finally {
       bulkOperating = null;
     }
   }
 
   async function batchDisable() {
+    if (!activeGame) return;
     bulkOperating = "disabling";
     try {
-      for (const id of selectedModIds) {
-        const mod = $installedMods.find(m => m.id === id);
-        if (mod && mod.enabled && activeGame) {
-          await toggleMod(id, activeGame.game_id, activeGame.bottle_name, false);
-        }
-      }
+      const ids = Array.from(selectedModIds);
+      await batchToggleMods(ids, activeGame.game_id, activeGame.bottle_name, false);
       selectedModIds = new Set();
-      if (activeGame) {
-        await loadMods(activeGame);
+      await loadMods(activeGame);
         await refreshHealth(activeGame);
       }
     } finally {
@@ -5162,11 +5159,13 @@
   }
 
   .row-checked {
-    background: color-mix(in srgb, var(--system-accent) 5%, transparent);
+    background: color-mix(in srgb, var(--system-accent) 12%, transparent);
+    box-shadow: inset 2px 0 0 var(--system-accent);
   }
 
   .row-checked.row-selected {
-    background: color-mix(in srgb, var(--system-accent) 10%, transparent) !important;
+    background: color-mix(in srgb, var(--system-accent) 18%, transparent) !important;
+    box-shadow: inset 2px 0 0 var(--system-accent);
   }
 
   /* ============================

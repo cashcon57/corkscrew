@@ -527,6 +527,54 @@ fn toggle_mod(
 }
 
 #[tauri::command]
+fn batch_toggle_mods(
+    mod_ids: Vec<i64>,
+    game_id: String,
+    bottle_name: String,
+    enabled: bool,
+    state: State<AppState>,
+) -> Result<u32, String> {
+    let db = &state.db;
+    let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
+    let mut count = 0u32;
+
+    for mod_id in &mod_ids {
+        let installed_mod = match db.get_mod(*mod_id).map_err(|e| e.to_string())? {
+            Some(m) => m,
+            None => continue,
+        };
+
+        // Skip if already in desired state
+        if installed_mod.enabled == enabled {
+            continue;
+        }
+
+        db.set_enabled(*mod_id, enabled).map_err(|e| e.to_string())?;
+
+        if let Some(ref staging_path_str) = installed_mod.staging_path {
+            let staging_path = PathBuf::from(staging_path_str);
+            if enabled {
+                let files =
+                    staging::list_staging_files(&staging_path).map_err(|e| e.to_string())?;
+                deployer::deploy_mod(db, &game_id, &bottle_name, *mod_id, &staging_path, &data_dir, &files)
+                    .map_err(|e| e.to_string())?;
+            } else {
+                deployer::undeploy_mod(db, &game_id, &bottle_name, *mod_id, &data_dir, &game.game_path)
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        count += 1;
+    }
+
+    // Sync plugins once at the end
+    if game_id == "skyrimse" {
+        let _ = sync_plugins_for_game(&game, &bottle);
+    }
+
+    Ok(count)
+}
+
+#[tauri::command]
 fn get_plugin_order(game_id: String, bottle_name: String) -> Result<Vec<PluginEntry>, String> {
     if !plugins::skyrim_plugins::supports_plugin_order(&game_id) {
         return Ok(vec![]);
@@ -6676,6 +6724,7 @@ pub fn run() {
             install_mod_cmd,
             uninstall_mod,
             toggle_mod,
+            batch_toggle_mods,
             get_plugin_order,
             download_from_nexus,
             is_nexus_premium,

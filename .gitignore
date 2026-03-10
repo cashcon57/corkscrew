@@ -35,6 +35,9 @@ Thumbs.db
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 
+# Signing keys (private key stays local, never committed)
+.keys/updater-signing-key
+
 # Release artifacts
 latest.json
 *.sig
