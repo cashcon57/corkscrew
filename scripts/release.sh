@@ -83,6 +83,19 @@ export TAURI_SIGNING_PRIVATE_KEY
 TAURI_SIGNING_PRIVATE_KEY="$(cat "$KEY_FILE")"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$KEY_PASSWORD"
 
+# CRITICAL: Verify the signing key matches the pubkey in tauri.conf.json.
+# A mismatch means auto-update will silently fail for all users.
+EXPECTED_PUBKEY="dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDdBMzhEMDdFOUM4MDRBMDAKUldRQVNvQ2NmdEE0ZW1YWWdsZjFkMEdTTWxFeHd4Y1IwTHhaV1M5VmU4VEJGb3lWdDhIbGNkWWsK"
+CONF_PUBKEY=$(python3 -c "import json; print(json.load(open('$ROOT/src-tauri/tauri.conf.json'))['plugins']['updater']['pubkey'])")
+if [[ "$CONF_PUBKEY" != "$EXPECTED_PUBKEY" ]]; then
+  echo "FATAL: tauri.conf.json pubkey does NOT match expected key."
+  echo "  Expected: $EXPECTED_PUBKEY"
+  echo "  Got:      $CONF_PUBKEY"
+  echo "  DO NOT change the signing key or pubkey without a migration plan."
+  exit 1
+fi
+echo "Signing key verified against tauri.conf.json pubkey."
+
 # Apple code signing + notarization
 APPLE_CREDS="$HOME/.corkscrew-keys/apple-signing.env"
 if [[ -f "$APPLE_CREDS" ]]; then
