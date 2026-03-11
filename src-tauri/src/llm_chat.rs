@@ -234,33 +234,31 @@ pub fn get_chat_tools(tier: ModelCapabilityTier) -> Vec<ChatTool> {
 
     // ── Basic tier — all models ──────────────────────────────────────
     let mut tools = vec![
-        tool("list_mods", "List all installed mods with enabled/disabled status. Use filter to search by name.", serde_json::json!({
+        tool("list_mods", "List installed mods with status. Use filter to search.", serde_json::json!({
             "type": "object",
             "properties": {
-                "filter": { "type": "string", "description": "Optional search filter for mod names" }
+                "filter": { "type": "string", "description": "Search filter" }
             }
         })),
-        tool("enable_mod", "Enable a mod by name.", serde_json::json!({
+        tool("enable_mod", "Enable a mod.", serde_json::json!({
             "type": "object",
-            "properties": { "mod_name": { "type": "string", "description": "The name of the mod to enable" } },
+            "properties": { "mod_name": { "type": "string" } },
             "required": ["mod_name"]
         })),
-        tool("disable_mod", "Disable a mod by name.", serde_json::json!({
+        tool("disable_mod", "Disable a mod.", serde_json::json!({
             "type": "object",
-            "properties": { "mod_name": { "type": "string", "description": "The name of the mod to disable" } },
+            "properties": { "mod_name": { "type": "string" } },
             "required": ["mod_name"]
         })),
-        tool("get_mod_info", "Get detailed info about a mod (version, category, files, collection membership).", serde_json::json!({
+        tool("get_mod_info", "Get mod details (version, category, files).", serde_json::json!({
             "type": "object",
-            "properties": { "mod_name": { "type": "string", "description": "The mod name" } },
+            "properties": { "mod_name": { "type": "string" } },
             "required": ["mod_name"]
         })),
-        tool("get_deployment_status", "Get overview: enabled count, total count, deployment health.", no_params.clone()),
-        tool("web_search", "Search the web for information. Use this to research mods, find mod names, look up compatibility info, or answer questions you're unsure about. Returns top search results with titles and snippets.", serde_json::json!({
+        tool("get_deployment_status", "Get deployment overview.", no_params.clone()),
+        tool("web_search", "Search the web. Use for research, compatibility info, vague requests.", serde_json::json!({
             "type": "object",
-            "properties": {
-                "query": { "type": "string", "description": "The search query" }
-            },
+            "properties": { "query": { "type": "string" } },
             "required": ["query"]
         })),
     ];
@@ -268,64 +266,64 @@ pub fn get_chat_tools(tier: ModelCapabilityTier) -> Vec<ChatTool> {
     // ── Standard tier — 3-4B+ models ─────────────────────────────────
     if tier >= ModelCapabilityTier::Standard {
         tools.extend([
-            tool("get_load_order", "Get the current plugin (.esp/.esm) load order with enabled status.", no_params.clone()),
+            tool("get_load_order", "Get plugin load order.", no_params.clone()),
             tool("get_conflicts", "Get file conflicts between mods.", no_params.clone()),
-            tool("search_nexus", "Search NexusMods for mods by keyword. Returns mod names, IDs, download counts, and descriptions. Can include adult/NSFW mods if the user requests it.", serde_json::json!({
+            tool("search_nexus", "Search NexusMods for mods.", serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string", "description": "Search text (mod name, keyword, author)" },
-                    "sort_by": { "type": "string", "description": "Sort: total_downloads, latest_updated, endorsements. Default: total_downloads" },
-                    "include_adult": { "type": "boolean", "description": "Include adult/NSFW mods in results. Default: false" }
+                    "query": { "type": "string", "description": "Search text" },
+                    "sort_by": { "type": "string", "description": "total_downloads|latest_updated|endorsements" },
+                    "include_adult": { "type": "boolean" }
                 },
                 "required": ["query"]
             })),
-            tool("get_nexus_mod_detail", "Get detailed info about a NexusMods mod by its ID (description, requirements, files).", serde_json::json!({
+            tool("get_nexus_mod_detail", "Get NexusMods mod details by ID.", serde_json::json!({
                 "type": "object",
-                "properties": { "mod_id": { "type": "integer", "description": "NexusMods mod ID" } },
+                "properties": { "mod_id": { "type": "integer" } },
                 "required": ["mod_id"]
             })),
-            tool("get_nexus_mod_files", "List available files for a NexusMods mod (main files, optional files, updates).", serde_json::json!({
+            tool("get_nexus_mod_files", "List files for a NexusMods mod.", serde_json::json!({
                 "type": "object",
-                "properties": { "mod_id": { "type": "integer", "description": "NexusMods mod ID" } },
+                "properties": { "mod_id": { "type": "integer" } },
                 "required": ["mod_id"]
             })),
-            tool("check_mod_updates", "Check if any installed mods have updates available on NexusMods.", no_params.clone()),
-            tool("get_mod_recommendations", "Get mod recommendations based on what other users commonly install together with a given mod.", serde_json::json!({
+            tool("check_mod_updates", "Check for mod updates on NexusMods.", no_params.clone()),
+            tool("get_mod_recommendations", "Get commonly co-installed mods.", serde_json::json!({
                 "type": "object",
-                "properties": { "mod_name": { "type": "string", "description": "Name of a currently installed mod" } },
+                "properties": { "mod_name": { "type": "string" } },
                 "required": ["mod_name"]
             })),
-            tool("get_popular_companion_mods", "Get the most commonly co-installed mods across all users (popular combinations).", no_params.clone()),
+            tool("get_popular_companion_mods", "Get popular mod combinations.", no_params.clone()),
         ]);
     }
 
     // ── Advanced tier — 7B+ models ───────────────────────────────────
     if tier >= ModelCapabilityTier::Advanced {
         tools.extend([
-            tool("download_and_install_mod", "Download a mod from NexusMods and install it. Requires mod_id and file_id.", serde_json::json!({
+            tool("download_and_install_mod", "Download and install from NexusMods.", serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "mod_id": { "type": "integer", "description": "NexusMods mod ID" },
-                    "file_id": { "type": "integer", "description": "Specific file ID to download" }
+                    "mod_id": { "type": "integer" },
+                    "file_id": { "type": "integer" }
                 },
                 "required": ["mod_id", "file_id"]
             })),
-            tool("sort_load_order", "Auto-sort the plugin load order using LOOT rules.", no_params.clone()),
-            tool("get_crash_logs", "List recent crash logs for the game.", no_params.clone()),
-            tool("analyze_crash_log", "Analyze a crash log to identify the likely cause.", serde_json::json!({
+            tool("sort_load_order", "Auto-sort load order with LOOT.", no_params.clone()),
+            tool("get_crash_logs", "List recent crash logs.", no_params.clone()),
+            tool("analyze_crash_log", "Analyze a crash log.", serde_json::json!({
                 "type": "object",
-                "properties": { "log_path": { "type": "string", "description": "Path to the crash log file" } },
+                "properties": { "log_path": { "type": "string" } },
                 "required": ["log_path"]
             })),
-            tool("list_profiles", "List all mod profiles.", no_params.clone()),
-            tool("activate_profile", "Switch to a different mod profile.", serde_json::json!({
+            tool("list_profiles", "List mod profiles.", no_params.clone()),
+            tool("activate_profile", "Switch mod profile.", serde_json::json!({
                 "type": "object",
-                "properties": { "profile_name": { "type": "string", "description": "Name of the profile to activate" } },
+                "properties": { "profile_name": { "type": "string" } },
                 "required": ["profile_name"]
             })),
-            tool("run_preflight_check", "Run a preflight check before game launch (missing masters, Wine issues, SKSE status).", no_params.clone()),
-            tool("check_dependency_issues", "Check for missing mod dependencies and conflicts.", no_params.clone()),
-            tool("redeploy_mods", "Redeploy all mod files to the game directory (fixes broken links).", no_params.clone()),
+            tool("run_preflight_check", "Pre-launch check (missing masters, Wine issues, SKSE).", no_params.clone()),
+            tool("check_dependency_issues", "Check for missing dependencies.", no_params.clone()),
+            tool("redeploy_mods", "Redeploy mod files to game directory.", no_params.clone()),
         ]);
     }
 
@@ -355,36 +353,15 @@ pub fn build_chat_system_prompt(
     };
 
     format!(
-        r#"You are an expert Bethesda game modder built into Corkscrew, a mod manager for Wine/CrossOver on macOS and Linux. You have deep knowledge of {game_name} modding and direct tool access to the mod manager.
+        r#"You are a {game_name} modding expert in Corkscrew (mod manager for {platform}). Use tools to look things up — never guess mod names or IDs.
 
-Game: {game_name} | Platform: {platform} | Mods installed: {mod_count} | Page: {current_page}
-{page_hint}
+{mod_count} mods installed | Page: {current_page} | {page_hint}
 
-## Rules
-- You have web_search for general research and search_nexus for searching NexusMods directly. Use web_search when the user's request is vague or contextual ("that horse mod like Elden Ring"), then search_nexus to find the actual mod.
-- NEVER fabricate mod names, Nexus IDs, or URLs. Use search_nexus or web_search to verify before recommending.
-- ALWAYS check dependencies (get_nexus_mod_detail) before recommending an install. Warn about missing deps. Check if they're already installed (list_mods).
-- Use tools proactively — look things up rather than guessing.
-- Confirm what changed after any mod/load-order action.
-- Max 5 tool calls per response. Give a final answer, don't loop.
-- Be concise. One paragraph or bullet list, not essays.
+Rules: Use tools proactively. Verify with search_nexus before recommending. Check deps with get_nexus_mod_detail. Max 5 tool calls. Be concise.
 
-## Tool routing
-- Install request → search_nexus → get_nexus_mod_detail (check deps) → download_and_install_mod
-- Crash/CTD → get_crash_logs → analyze_crash_log → suggest fix
-- Conflicts → get_conflicts → explain winners and resolution
-- Load order issues → get_load_order → sort_load_order if needed
-- "What mods should I get?" → get_mod_recommendations or get_popular_companion_mods
-- Vague/contextual request → web_search to identify what they want → search_nexus to find it
-- General modding question → answer from knowledge; web_search or search_nexus to verify
+Routing: install → search_nexus → get_nexus_mod_detail → download_and_install_mod | crash → get_crash_logs → analyze | conflicts → get_conflicts | vague request → web_search → search_nexus
 
-## Modding knowledge
-- Load order: .esm masters first, .esl light plugins, then .esp. Patches load AFTER what they patch.
-- Conflicts: later-loading plugin wins record conflicts. Higher-priority mod wins file conflicts (textures/meshes).
-- Leveled lists: conflicts need a Bashed Patch (Wrye Bash) or merged patch.
-- Navmesh conflicts are usually game-breaking. Texture/mesh conflicts are cosmetic.
-- LOOT auto-sorts plugins. xEdit for manual conflict inspection.
-- Wine/CrossOver: .NET Script Framework and original SSE Engine Fixes crash under Wine. Corkscrew ships a Wine-compatible Engine Fixes fork. Some SKSE plugins with d3d hooks also fail."#,
+Modding: .esm first, .esl light, .esp last. Patches after patched plugin. Later plugin wins record conflicts. Higher-priority mod wins file conflicts. Navmesh conflicts = game-breaking. LOOT for auto-sort. Wine: .NET Script Framework and original SSE Engine Fixes crash — Corkscrew ships Wine-compatible fork."#,
         game_name = game_name,
         platform = platform,
         mod_count = mod_count,
@@ -519,17 +496,10 @@ where
             chat_send_ollama_streaming(model, messages, tools, num_ctx, max_tokens, on_token).await
         }
         LlmBackend::Mlx => {
-            // MLX LM server doesn't support native tool calling.
-            // Inject tools into system prompt and parse tool_call tags from output.
-            let msgs = inject_tools_into_messages(messages, tools);
-            let mut response = chat_send_openai_compat_streaming(backend.base_url(), model, &msgs, &[], max_tokens, on_token).await?;
-            log::debug!("[CHAT] MLX raw content_len={} before tool_call parsing", response.content.len());
-            let (clean_content, parsed_calls) = parse_tool_calls_from_text(&response.content);
-            response.content = clean_content;
-            if parsed_calls.is_some() {
-                response.tool_calls = parsed_calls;
-            }
-            Ok(response)
+            // MLX LM server supports native Qwen3 tool calling via its built-in
+            // qwen3_coder parser. Pass tools natively — the server handles
+            // <tool_call> parsing and returns structured tool_calls in the response.
+            chat_send_openai_compat_streaming(backend.base_url(), model, messages, tools, max_tokens, on_token).await
         }
     }
 }

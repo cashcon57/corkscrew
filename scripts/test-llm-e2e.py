@@ -31,50 +31,14 @@ FAIL = "\033[91m✗ FAIL\033[0m"
 WARN = "\033[93m⚠ WARN\033[0m"
 INFO = "\033[94mℹ INFO\033[0m"
 
-# Minimal system prompt matching Corkscrew's actual prompt
-SYSTEM_PROMPT = """You are an expert Bethesda game modder built into Corkscrew, a mod manager for Wine/CrossOver on macOS and Linux. You have deep knowledge of Skyrim Special Edition modding and direct tool access to the mod manager.
+# Compact system prompt matching Corkscrew's actual prompt (no tool injection — tools passed natively)
+SYSTEM_PROMPT = """You are a Skyrim Special Edition modding expert in Corkscrew (mod manager for Wine/CrossOver). Use tools to look things up — never guess mod names or IDs.
 
-Game: Skyrim Special Edition | Platform: macOS (Wine) | Mods installed: 42 | Page: Mods
+42 mods installed | Page: Mods | User is managing mods.
 
-## Rules
-- You have web_search for general research and search_nexus for searching NexusMods directly.
-- NEVER fabricate mod names, Nexus IDs, or URLs. Use search_nexus or web_search to verify.
-- Use tools proactively — look things up rather than guessing.
-- Max 5 tool calls per response. Give a final answer, don't loop.
-- Be concise.
+Rules: Use tools proactively. Verify with search_nexus before recommending. Check deps with get_nexus_mod_detail. Max 5 tool calls. Be concise.
 
-## Available tools
-You can call tools by writing a <tool_call> block. Format:
-<tool_call>
-{"name": "tool_name", "arguments": {"arg": "value"}}
-</tool_call>
-
-You may call multiple tools. Available tools:
-
-### search_nexus
-Search NexusMods for mods matching a query.
-Parameters: {"type":"object","properties":{"query":{"type":"string","description":"Search query"},"game":{"type":"string","description":"Game domain, default skyrimspecialedition"}},"required":["query"]}
-
-### web_search
-Search the web for information.
-Parameters: {"type":"object","properties":{"query":{"type":"string","description":"The search query"}},"required":["query"]}
-
-### list_mods
-List all installed mods with enabled/disabled status.
-Parameters: {"type":"object","properties":{"filter":{"type":"string","description":"Optional search filter"}}}
-
-### get_mod_info
-Get detailed info about a mod.
-Parameters: {"type":"object","properties":{"mod_name":{"type":"string","description":"The mod name"}},"required":["mod_name"]}
-
-### enable_mod
-Enable a mod by name.
-Parameters: {"type":"object","properties":{"mod_name":{"type":"string","description":"The name of the mod to enable"}},"required":["mod_name"]}
-
-### disable_mod
-Disable a mod by name.
-Parameters: {"type":"object","properties":{"mod_name":{"type":"string","description":"The name of the mod to disable"}},"required":["mod_name"]}
-"""
+Routing: install → search_nexus → get_nexus_mod_detail → download_and_install_mod | crash → get_crash_logs → analyze | conflicts → get_conflicts | vague → web_search → search_nexus"""
 
 TOOL_DEFINITIONS = [
     {
