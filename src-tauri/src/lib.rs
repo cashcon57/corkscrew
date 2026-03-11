@@ -6213,13 +6213,21 @@ async fn chat_send_message(
         response.content.len(),
         response.tool_calls.as_ref().map(|tc| tc.len()));
 
-    let mut tool_results = Vec::new();
+    let mut all_tool_results = Vec::new();
+    let mut current_response = response;
+    let max_tool_rounds = 3;
 
-    // Handle tool calls if any
-    if let Some(ref tool_calls) = response.tool_calls {
-        for tc in tool_calls {
-            log::info!("[CHAT] Executing tool: {} args={}", tc.function.name, tc.function.arguments);
-            // Emit tool status: running
+    for round in 0..max_tool_rounds {
+        // Check if this response has tool calls
+        let has_tool_calls = current_response.tool_calls.as_ref()
+            .map(|tc| !tc.is_empty()).unwrap_or(false);
+        if !has_tool_calls {
+            break;
+        }
+
+        let mut round_results = Vec::new();
+        for tc in current_response.tool_calls.as_ref().unwrap() {
+            log::info!("[CHAT] [round {}] Executing tool: {} args={}", round, tc.function.name, tc.function.arguments);
             let display = tool_display_name(&tc.function.name, &tc.function.arguments);
             let _ = app_handle.emit("chat-tool-status", serde_json::json!({
                 "tool_name": tc.function.name,
@@ -6227,35 +6235,57 @@ async fn chat_send_message(
                 "display_text": display,
             }));
 
-            let result = execute_tool(
-                &tc.function.name,
-                &tc.function.arguments,
-                &game_id,
-                &bottle_name,
-                &state,
-            )
-            .await;
-            log::info!("[CHAT] Tool result: success={} len={}", result.success, result.result.len());
+            // UI control tools are handled here (need app_handle for event emission)
+            let result = if tc.function.name == "navigate_ui" {
+                let page = tc.function.arguments.get("page").and_then(|p| p.as_str()).unwrap_or("mods");
+                let _ = app_handle.emit("chat-navigate", serde_json::json!({ "page": page }));
+                llm_chat::ToolResult {
+                    tool_name: "navigate_ui".into(),
+                    result: format!("Navigated to {} page.", page),
+                    success: true,
+                    display_name: format!("Navigating to {}", page),
+                    structured_data: None,
+                }
+            } else if tc.function.name == "open_nexus_mod" {
+                let mod_id = tc.function.arguments.get("mod_id").and_then(|i| i.as_i64()).unwrap_or(0);
+                let mod_name = tc.function.arguments.get("name").and_then(|n| n.as_str()).unwrap_or("mod");
+                let _ = app_handle.emit("chat-open-nexus-mod", serde_json::json!({
+                    "mod_id": mod_id,
+                    "name": mod_name,
+                }));
+                llm_chat::ToolResult {
+                    tool_name: "open_nexus_mod".into(),
+                    result: format!("Opened {} (ID: {}) in Corkscrew's Discover tab with images and install button.", mod_name, mod_id),
+                    success: true,
+                    display_name: format!("Opening {} in Discover", mod_name),
+                    structured_data: None,
+                }
+            } else {
+                execute_tool(
+                    &tc.function.name,
+                    &tc.function.arguments,
+                    &game_id,
+                    &bottle_name,
+                    &state,
+                )
+                .await
+            };
+            log::info!("[CHAT] [round {}] Tool result: success={} len={}", round, result.success, result.result.len());
 
-            // Emit tool status: complete
             let _ = app_handle.emit("chat-tool-status", serde_json::json!({
                 "tool_name": tc.function.name,
                 "status": "complete",
                 "display_text": display,
             }));
 
-            tool_results.push(result);
+            round_results.push(result);
         }
-    }
 
-    // Store assistant response and tool results in session
-    {
-        let mut session = state.chat_session.lock().await;
-        session.messages.push(response.clone());
-
-        // If there were tool calls, add tool results and get a follow-up response
-        if !tool_results.is_empty() {
-            for tr in &tool_results {
+        // Store assistant response + tool results in session
+        {
+            let mut session = state.chat_session.lock().await;
+            session.messages.push(current_response.clone());
+            for tr in &round_results {
                 session.messages.push(llm_chat::ChatMessage {
                     role: "tool".into(),
                     content: tr.result.clone(),
@@ -6264,11 +6294,10 @@ async fn chat_send_message(
                 });
             }
         }
-    }
+        all_tool_results.extend(round_results);
 
-    // If there were tool calls, get a follow-up response that summarizes the results
-    let final_response = if !tool_results.is_empty() {
-        log::info!("[CHAT] Making follow-up call with tool results");
+        // Get follow-up response WITH tools so model can chain calls
+        log::info!("[CHAT] Making follow-up call (round {})", round);
         let messages = {
             let session = state.chat_session.lock().await;
             log::info!("[CHAT] Session has {} messages for follow-up", session.messages.len());
@@ -6276,7 +6305,7 @@ async fn chat_send_message(
         };
         let handle2 = app_handle.clone();
         let followup = llm_chat::chat_send_streaming(
-            &backend, &model, &messages, &[], num_ctx, max_tokens,
+            &backend, &model, &messages, &tools, num_ctx, max_tokens,
             move |token, phase| {
                 let _ = handle2.emit("chat-stream-token", serde_json::json!({
                     "text": token,
@@ -6284,15 +6313,56 @@ async fn chat_send_message(
                 }));
             },
         ).await?;
-        log::info!("[CHAT] Follow-up response: content_len={}", followup.content.len());
+        log::info!("[CHAT] Follow-up response (round {}): content_len={} tool_calls={:?}",
+            round, followup.content.len(),
+            followup.tool_calls.as_ref().map(|tc| tc.len()));
+        current_response = followup;
+    }
+
+    // If we exhausted tool rounds and still have no content, force a text-only response
+    if !all_tool_results.is_empty() && current_response.content.trim().is_empty() {
+        log::info!("[CHAT] Forcing text-only follow-up (no content after {} tool rounds)", max_tool_rounds);
+        // Store the last tool-call response + its results
         {
             let mut session = state.chat_session.lock().await;
-            session.messages.push(followup.clone());
+            session.messages.push(current_response.clone());
+            // If there are pending tool calls, add a synthetic tool result
+            if let Some(ref tcs) = current_response.tool_calls {
+                for tc in tcs {
+                    session.messages.push(llm_chat::ChatMessage {
+                        role: "tool".into(),
+                        content: "Tool call limit reached. Please summarize what you found so far.".into(),
+                        tool_calls: None,
+                        mentioned_mods: None,
+                    });
+                }
+            }
         }
-        followup
-    } else {
-        response
-    };
+        let messages = {
+            let session = state.chat_session.lock().await;
+            session.messages.clone()
+        };
+        let handle3 = app_handle.clone();
+        let forced = llm_chat::chat_send_streaming(
+            &backend, &model, &messages, &[], num_ctx, max_tokens,
+            move |token, phase| {
+                let _ = handle3.emit("chat-stream-token", serde_json::json!({
+                    "text": token,
+                    "phase": phase,
+                }));
+            },
+        ).await?;
+        log::info!("[CHAT] Forced text response: content_len={}", forced.content.len());
+        current_response = forced;
+    }
+
+    // Store final response in session
+    {
+        let mut session = state.chat_session.lock().await;
+        session.messages.push(current_response.clone());
+    }
+    let final_response = current_response;
+    let tool_results = all_tool_results;
 
     // Scan for mentioned mods and attach to the final response
     let mut final_msg = final_response;
@@ -6420,7 +6490,7 @@ fn find_mod_by_name<'a>(mods: &'a [database::ModSummary], name: &str) -> Option<
 /// Web search via DuckDuckGo lite HTML (no API key needed).
 async fn web_search_ddg(query: &str) -> String {
     let client = match reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         .timeout(std::time::Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()
@@ -6429,9 +6499,9 @@ async fn web_search_ddg(query: &str) -> String {
         Err(e) => return format!("Search failed: {e}"),
     };
 
-    // Use DuckDuckGo lite — simpler HTML, easier to parse
-    let resp = match client.get("https://lite.duckduckgo.com/lite/")
-        .query(&[("q", query)])
+    // Use Brave Search (DuckDuckGo blocks programmatic access with CAPTCHAs)
+    let resp = match client.get("https://search.brave.com/search")
+        .query(&[("q", query), ("source", "web")])
         .send().await
     {
         Ok(r) => r,
@@ -6442,53 +6512,60 @@ async fn web_search_ddg(query: &str) -> String {
         Err(e) => return format!("Search failed: {e}"),
     };
 
-    // DDG lite format: results are in table rows.
-    // Links are in <a class="result-link" href="...">title</a>
-    // Snippets follow in a <td class="result-snippet">...</td>
+    // Brave Search: results have <a> tags with snippet-title spans
+    // Structure: <div class="snippet"> containing <a href="URL"> with nested <span class="snippet-title">Title</span>
+    // and <p class="snippet-description">Description</p>
     let mut results = Vec::new();
 
-    // Split by result-link anchors
-    let parts: Vec<&str> = html.split("class=\"result-link\"").collect();
+    fn strip_tags(s: &str) -> String {
+        let mut clean = String::new();
+        let mut in_tag = false;
+        for ch in s.chars() {
+            match ch {
+                '<' => in_tag = true,
+                '>' => in_tag = false,
+                _ if !in_tag => clean.push(ch),
+                _ => {}
+            }
+        }
+        clean.trim().to_string()
+    }
+
+    // Split by snippet blocks
+    let parts: Vec<&str> = html.split("class=\"snippet ").collect();
     for part in parts.iter().skip(1) {
         if results.len() >= 6 { break; }
 
-        // Extract URL from href="..."
+        // Extract URL from first href="https://..."
         let url = part.split("href=\"").nth(1)
             .and_then(|s| s.split('"').next())
             .unwrap_or("");
+        if url.is_empty() || !url.starts_with("http") { continue; }
 
-        // Extract title text (between > and </a>)
-        let title = part.split('>').nth(1)
-            .and_then(|s| s.split("</a>").next())
-            .unwrap_or("")
-            .trim();
-
-        // Extract snippet from result-snippet td
-        let snippet = if let Some(snip_pos) = part.find("result-snippet") {
-            let after = &part[snip_pos..];
-            // Get text content after the first >
+        // Extract title from snippet-title span
+        let title = if let Some(pos) = part.find("snippet-title") {
+            let after = &part[pos..];
             after.split('>').nth(1)
-                .and_then(|s| s.split("</td>").next())
-                .map(|s| {
-                    // Strip inner HTML tags
-                    let mut clean = String::new();
-                    let mut in_tag = false;
-                    for ch in s.chars() {
-                        match ch {
-                            '<' => in_tag = true,
-                            '>' => in_tag = false,
-                            _ if !in_tag => clean.push(ch),
-                            _ => {}
-                        }
-                    }
-                    clean.trim().to_string()
-                })
+                .and_then(|s| s.split("</span>").next())
+                .map(|s| strip_tags(s))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        // Extract description from snippet-description
+        let desc = if let Some(pos) = part.find("snippet-description") {
+            let after = &part[pos..];
+            after.split('>').nth(1)
+                .and_then(|s| s.split("</p>").next().or_else(|| s.split("</div>").next()))
+                .map(|s| strip_tags(s))
                 .unwrap_or_default()
         } else {
             String::new()
         };
 
         if !title.is_empty() {
+            let snippet = if desc.len() > 200 { format!("{}...", &desc[..200]) } else { desc };
             if snippet.is_empty() {
                 results.push(format!("• {} ({})", title, url));
             } else {
@@ -6535,6 +6612,14 @@ fn tool_display_name(tool_name: &str, args: &serde_json::Value) -> String {
         "check_mod_updates" => "Checking for mod updates...".into(),
         "run_preflight_check" => "Running preflight check...".into(),
         "redeploy_mods" => "Redeploying mods...".into(),
+        "navigate_ui" => {
+            let page = args.get("page").and_then(|p| p.as_str()).unwrap_or("page");
+            format!("Navigating to {}...", page)
+        }
+        "open_nexus_mod" => {
+            let name = args.get("name").and_then(|n| n.as_str()).unwrap_or("mod");
+            format!("Opening {} in Discover...", name)
+        }
         other => format!("Running {}...", other),
     }
 }
@@ -8376,8 +8461,17 @@ fn cli_launch(game_id: &str, bottle_name: &str, use_skse: bool, db: &Arc<ModData
 
 // --- App Entry Point ---
 
+fn kill_mlx_server() {
+    let _ = std::process::Command::new("pkill")
+        .args(["-f", "mlx_lm.server"])
+        .output();
+    log::info!("Killed MLX LM server if running");
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Kill any leftover MLX server from a previous crash/dev restart
+    kill_mlx_server();
     // Register game plugins (dedicated plugins first, then registry)
     plugins::skyrim_se::register();
     plugins::fallout4::register();
@@ -8886,12 +8980,11 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app_handle, event| {
-            if let tauri::RunEvent::Exit = event {
-                // Kill MLX LM server on app exit to free memory
-                let _ = std::process::Command::new("pkill")
-                    .args(["-f", "mlx_lm.server"])
-                    .output();
-                log::info!("App exiting — killed MLX LM server if running");
+            match event {
+                tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. } => {
+                    kill_mlx_server();
+                }
+                _ => {}
             }
         });
 }

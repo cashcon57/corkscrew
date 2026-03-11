@@ -234,6 +234,19 @@ pub fn get_chat_tools(tier: ModelCapabilityTier) -> Vec<ChatTool> {
 
     // ── Basic tier — all models ──────────────────────────────────────
     let mut tools = vec![
+        tool("navigate_ui", "Navigate Corkscrew's UI to a page. Pages: discover, mods, plugins, profiles, logs, settings, dashboard.", serde_json::json!({
+            "type": "object",
+            "properties": { "page": { "type": "string", "description": "Page name: discover, mods, plugins, profiles, logs, settings, dashboard" } },
+            "required": ["page"]
+        })),
+        tool("open_nexus_mod", "Open a NexusMods mod in Corkscrew's Discover tab with full detail view, images, and install button.", serde_json::json!({
+            "type": "object",
+            "properties": {
+                "mod_id": { "type": "integer", "description": "NexusMods mod ID" },
+                "name": { "type": "string", "description": "Mod name (for display)" }
+            },
+            "required": ["mod_id"]
+        })),
         tool("list_mods", "List installed mods with status. Use filter to search.", serde_json::json!({
             "type": "object",
             "properties": {
@@ -357,9 +370,11 @@ pub fn build_chat_system_prompt(
 
 {mod_count} mods installed | Page: {current_page} | {page_hint}
 
-Rules: Use tools proactively. Verify with search_nexus before recommending. Check deps with get_nexus_mod_detail. Max 5 tool calls. Be concise.
+Rules: Use tools proactively. Never guess — look it up. If search_nexus returns no results, ALWAYS fall back to web_search to find the mod name, then retry search_nexus. Max 5 tool calls. Be concise. You CONTROL Corkscrew's UI — use navigate_ui and open_nexus_mod to show things to the user directly.
+SAFETY: For ANY destructive or hard-to-reverse action (uninstall mod, delete files, disable plugins, change load order, reset settings), ALWAYS ask the user to confirm before proceeding. Never auto-execute destructive actions.
 
-Routing: install → search_nexus → get_nexus_mod_detail → download_and_install_mod | crash → get_crash_logs → analyze | conflicts → get_conflicts | vague request → web_search → search_nexus
+Routing: find mod → search_nexus → open_nexus_mod (to show it in Corkscrew UI with install button) | install → search_nexus → open_nexus_mod | crash → get_crash_logs → analyze | conflicts → get_conflicts | vague → web_search → search_nexus → open_nexus_mod
+When you find a mod the user wants, ALWAYS call open_nexus_mod to open it in Corkscrew's Discover tab where they can see images and install it.
 
 Modding: .esm first, .esl light, .esp last. Patches after patched plugin. Later plugin wins record conflicts. Higher-priority mod wins file conflicts. Navmesh conflicts = game-breaking. LOOT for auto-sort. Wine: .NET Script Framework and original SSE Engine Fixes crash — Corkscrew ships Wine-compatible fork."#,
         game_name = game_name,

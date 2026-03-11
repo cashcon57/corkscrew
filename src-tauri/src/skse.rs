@@ -1641,7 +1641,70 @@ pub fn fix_engine_fixes_for_wine(
         }
     }
 
+    // SkyrimSoulsRE doesn't recognise our Wine-fork DLL name
+    // (0_SSEEngineFixesForWine.dll) and shows a false "Engine Fixes not
+    // installed" warning dialog that blocks game startup.  Silence it.
+    patched += patch_skyrim_souls_re_ini(data_dir);
+
     patched
+}
+
+/// Patch `SkyrimSoulsRE.ini` to set `bHideEngineFixesWarning = true`.
+///
+/// Our Wine fork uses a different DLL name (`0_SSEEngineFixesForWine.dll`)
+/// which SkyrimSoulsRE doesn't recognise, causing a false warning dialog
+/// that blocks game startup.  Returns 1 if patched, 0 otherwise.
+fn patch_skyrim_souls_re_ini(data_dir: &Path) -> usize {
+    let ini_path = data_dir
+        .join("SKSE")
+        .join("Plugins")
+        .join("SkyrimSoulsRE.ini");
+
+    if !ini_path.exists() {
+        return 0;
+    }
+
+    let contents = match fs::read_to_string(&ini_path) {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(
+                "SkyrimSoulsRE fix: failed to read {}: {}",
+                ini_path.display(),
+                e
+            );
+            return 0;
+        }
+    };
+
+    let needle = "bHideEngineFixesWarning = false";
+    let replacement = "bHideEngineFixesWarning = true";
+
+    if !contents.contains(needle) {
+        debug!(
+            "SkyrimSoulsRE fix: already patched or key not found in {}",
+            ini_path.display()
+        );
+        return 0;
+    }
+
+    let patched = contents.replace(needle, replacement);
+    match fs::write(&ini_path, patched) {
+        Ok(()) => {
+            info!(
+                "SkyrimSoulsRE fix: set bHideEngineFixesWarning = true in {}",
+                ini_path.display()
+            );
+            1
+        }
+        Err(e) => {
+            warn!(
+                "SkyrimSoulsRE fix: failed to write {}: {}",
+                ini_path.display(),
+                e
+            );
+            0
+        }
+    }
 }
 
 /// Disable the original Engine Fixes files that are incompatible with Wine.

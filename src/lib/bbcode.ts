@@ -10,6 +10,9 @@ export function bbcodeToHtml(input: string): string {
 
   let html = input;
 
+  // Preserve raw HTML line breaks before escaping (NexusMods mixes HTML <br> with BBCode)
+  html = html.replace(/<br\s*\/?>/gi, "\n");
+
   // Escape HTML entities first (prevent XSS from raw HTML in BBCode)
   html = html
     .replace(/&/g, "&amp;")

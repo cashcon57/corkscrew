@@ -954,6 +954,9 @@
   });
 
   onMount(async () => {
+    // Listen for LLM "open this mod" events
+    window.addEventListener("corkscrew-open-nexus-mod", handleOpenNexusMod);
+
     await checkAccount();
     // Check for interrupted collection installs
     const game = $selectedGame;
@@ -994,7 +997,29 @@
     }
   });
 
+  // Listen for LLM-triggered "open this Nexus mod" events
+  function handleOpenNexusMod(e: Event) {
+    const { mod_id, name } = (e as CustomEvent).detail;
+    if (!mod_id) return;
+    // Switch to browse_mods tab and open the mod detail
+    activeTab = "browse_mods";
+    const stub: NexusModInfo = {
+      mod_id,
+      name: name || `Mod ${mod_id}`,
+      summary: "",
+      description: null,
+      author: "",
+      version: "",
+      endorsement_count: 0,
+      unique_downloads: 0,
+      picture_url: null,
+      adult_content: false,
+    };
+    openModDetail(stub);
+  }
+
   onDestroy(() => {
+    window.removeEventListener("corkscrew-open-nexus-mod", handleOpenNexusMod);
     statsBarObserver?.disconnect();
     if (collectionsSearchTimer) { clearTimeout(collectionsSearchTimer); collectionsSearchTimer = null; }
     if (collectionsAuthorTimer) { clearTimeout(collectionsAuthorTimer); collectionsAuthorTimer = null; }

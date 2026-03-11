@@ -2,6 +2,8 @@
   import { onDestroy } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import { selectedGame, showError, showSuccess, currentPage, installedMods } from "$lib/stores";
+  import { openUrl } from "@tauri-apps/plugin-opener";
+  import { goto } from "$app/navigation";
   import { getInstalledMods, startOllama, checkMlxStatus, installMlx, deleteModel, getCachedMlxModels } from "$lib/api";
   import type { LlmBackend } from "$lib/types";
   import {
@@ -17,7 +19,7 @@
     installOllama,
     getRecommendedModel,
   } from "$lib/api";
-  import type { ChatMessage, ChatState, OllamaModel, OllamaStatus, ChatResponse } from "$lib/types";
+  import type { ChatMessage, ChatState, OllamaModel, OllamaStatus, ChatResponse, MentionedMod } from "$lib/types";
 
   let {
     visible = false,
@@ -63,14 +65,62 @@
   let unlistenToolStatus: (() => void) | null = null;
   let toolStatusText = $state("");
 
+  // Tool call history for current response (shown inline like Claude web)
+  interface ToolCallEntry {
+    name: string;
+    displayText: string;
+    status: "running" | "complete";
+  }
+  let activeToolCalls = $state<ToolCallEntry[]>([]);
+  // Completed tool call sets, keyed by the index of the assistant message they precede
+  let completedToolSets = $state<Map<number, ToolCallEntry[]>>(new Map());
+  let expandedToolSets = $state<Set<number>>(new Set());
+
   listen<{ tool_name: string; status: string; display_text: string }>("chat-tool-status", (event) => {
     if (event.payload.status === "running") {
       streamPhase = "tools";
       toolStatusText = event.payload.display_text;
+      activeToolCalls = [...activeToolCalls, {
+        name: event.payload.tool_name,
+        displayText: event.payload.display_text,
+        status: "running",
+      }];
     } else if (event.payload.status === "complete") {
       toolStatusText = "";
+      activeToolCalls = activeToolCalls.map(tc =>
+        tc.name === event.payload.tool_name && tc.status === "running"
+          ? { ...tc, status: "complete" as const }
+          : tc
+      );
     }
   }).then((unlisten) => { unlistenToolStatus = unlisten; });
+
+  // Listen for LLM-triggered UI navigation
+  let unlistenNavigate: (() => void) | null = null;
+  let unlistenOpenMod: (() => void) | null = null;
+
+  listen<{ page: string }>("chat-navigate", (event) => {
+    const page = event.payload.page;
+    currentPage.set(page);
+    if (window.location.pathname !== "/") {
+      goto("/");
+    }
+  }).then((unlisten) => { unlistenNavigate = unlisten; });
+
+  listen<{ mod_id: number; name: string }>("chat-open-nexus-mod", (event) => {
+    const { mod_id, name } = event.payload;
+    // Navigate to Discover page and emit an event for the collections page to open the mod
+    currentPage.set("discover");
+    if (window.location.pathname !== "/") {
+      goto("/");
+    }
+    // Give the page time to mount, then emit the open-mod event
+    setTimeout(() => {
+      window.dispatchEvent(new CustomEvent("corkscrew-open-nexus-mod", {
+        detail: { mod_id, name },
+      }));
+    }, 300);
+  }).then((unlisten) => { unlistenOpenMod = unlisten; });
   // Queue of individual characters waiting to be revealed
   let charQueue: string[] = [];
   let charTimerId: ReturnType<typeof setTimeout> | null = null;
@@ -136,6 +186,8 @@
   onDestroy(() => {
     if (unlistenStream) unlistenStream();
     if (unlistenToolStatus) unlistenToolStatus();
+    if (unlistenNavigate) unlistenNavigate();
+    if (unlistenOpenMod) unlistenOpenMod();
     if (autoUnloadTimer) clearTimeout(autoUnloadTimer);
     if (charTimerId) clearTimeout(charTimerId);
     if (thinkingTimer) clearInterval(thinkingTimer);
@@ -145,13 +197,48 @@
   let currentPageName = $derived($currentPage || "Mods");
 
   // Display messages (skip system, skip empty assistant messages from tool-call-only turns)
+  // Display messages with original indices preserved (for tool call association)
   let displayMessages = $derived(
-    chatState?.messages.filter((m) => {
-      if (m.role === "system") return false;
-      if (m.role === "assistant" && !m.content?.trim()) return false;
-      return true;
-    }) ?? []
+    (chatState?.messages ?? []).reduce<Array<{ msg: ChatMessage; origIdx: number }>>((acc, m, i) => {
+      if (m.role === "system") return acc;
+      if (m.role === "tool") return acc;
+      if (m.role === "assistant" && !m.content?.trim()) return acc;
+      acc.push({ msg: m, origIdx: i });
+      return acc;
+    }, [])
   );
+
+  function toggleToolSet(idx: number) {
+    const s = new Set(expandedToolSets);
+    if (s.has(idx)) s.delete(idx); else s.add(idx);
+    expandedToolSets = s;
+  }
+
+  function nexusGameSlug(gameId: string): string {
+    const slugs: Record<string, string> = {
+      skyrimse: "skyrimspecialedition",
+      skyrim: "skyrim",
+      fallout4: "fallout4",
+      fallout76: "fallout76",
+      oblivion: "oblivion",
+      morrowind: "morrowind",
+      starfield: "starfield",
+    };
+    return slugs[gameId] ?? gameId;
+  }
+
+  function openModInCorkscrew(mod: MentionedMod) {
+    if (!mod.nexus_mod_id) return;
+    currentPage.set("discover");
+    if (window.location.pathname !== "/") {
+      goto("/");
+    }
+    setTimeout(() => {
+      window.dispatchEvent(new CustomEvent("corkscrew-open-nexus-mod", {
+        detail: { mod_id: mod.nexus_mod_id, name: mod.name },
+      }));
+    }, 300);
+  }
 
   $effect(() => {
     if (visible) {
@@ -333,6 +420,7 @@
     isStreaming = true;
     streamPhase = "idle";
     thinkingDots = 0;
+    activeToolCalls = [];
     resetAutoUnload();
 
     if (chatState) {
@@ -352,6 +440,17 @@
       settledText = "";
       recentTokens = [];
       chatState = await chatGetState();
+
+      // Save tool calls for this response (associate with the last assistant message index)
+      if (activeToolCalls.length > 0 && chatState) {
+        const lastAssistantIdx = chatState.messages.reduce((acc, m, i) =>
+          m.role === "assistant" && m.content?.trim() ? i : acc, -1);
+        if (lastAssistantIdx >= 0) {
+          const newMap = new Map(completedToolSets);
+          newMap.set(lastAssistantIdx, [...activeToolCalls]);
+          completedToolSets = newMap;
+        }
+      }
 
       // Detect empty response (model returned no content and no tool calls)
       const hasContent = resp.message?.content?.trim();
@@ -417,14 +516,35 @@
   /** Simple markdown-ish rendering for assistant messages: bold, bullet lists, code */
   function renderMarkdown(text: string): string {
     if (!text) return "";
-    return text.trim()
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-      .replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>')
-      .replace(/^[-•]\s+(.+)$/gm, '<span class="md-bullet">• $1</span>')
-      .replace(/^\d+\.\s+(.+)$/gm, '<span class="md-bullet">$&</span>');
+    let html = text.trim();
+    // Escape HTML
+    html = html.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    // Code blocks (``` ... ```)
+    html = html.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre class="md-codeblock"><code>$2</code></pre>');
+    // Headers
+    html = html.replace(/^### (.+)$/gm, '<strong class="md-h3">$1</strong>');
+    html = html.replace(/^## (.+)$/gm, '<strong class="md-h2">$1</strong>');
+    html = html.replace(/^# (.+)$/gm, '<strong class="md-h1">$1</strong>');
+    // Bold + italic
+    html = html.replace(/\*\*\*(.+?)\*\*\*/g, "<strong><em>$1</em></strong>");
+    html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+    html = html.replace(/\*(.+?)\*/g, "<em>$1</em>");
+    // Inline code
+    html = html.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>');
+    // Links [text](url)
+    html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a class="md-link" href="$2" target="_blank">$1</a>');
+    // Bare URLs
+    html = html.replace(/(?<!")https?:\/\/[^\s<)]+/g, '<a class="md-link" href="$&" target="_blank">$&</a>');
+    // Bullet lists
+    html = html.replace(/^[-•]\s+(.+)$/gm, '<span class="md-bullet">• $1</span>');
+    // Numbered lists
+    html = html.replace(/^\d+\.\s+(.+)$/gm, '<span class="md-bullet">$&</span>');
+    // Horizontal rules
+    html = html.replace(/^---+$/gm, '<hr class="md-hr">');
+    // Line breaks (preserve paragraph spacing)
+    html = html.replace(/\n\n/g, '<br><br>');
+    html = html.replace(/\n/g, '<br>');
+    return html;
   }
 </script>
 
@@ -512,7 +632,7 @@
                     </div>
                     <span class="model-meta">{model.size_display} &middot; {model.description}</span>
                   </div>
-                  <div class="model-actions">
+                  <div class="model-actions-group">
                     {#if isMlxModelCached(model.name)}
                       <button
                         class="model-btn model-btn-load"
@@ -520,6 +640,14 @@
                         onclick={() => handleLoadModel(model.name)}
                       >
                         {loadingModelName === model.name ? "Loading..." : "Load"}
+                      </button>
+                      <button
+                        class="model-btn-icon model-btn-danger-icon"
+                        disabled={deletingModel !== null}
+                        onclick={() => handleDeleteModel(model.name, "mlx")}
+                        title="Delete model files"
+                      >
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
                       </button>
                     {:else}
                       <button
@@ -614,7 +742,7 @@
                     </div>
                     <span class="model-meta">{model.size_display} &middot; {model.description}</span>
                   </div>
-                  <div class="model-actions">
+                  <div class="model-actions-group">
                     {#if installed}
                       <button
                         class="model-btn model-btn-load"
@@ -622,6 +750,14 @@
                         onclick={() => handleLoadModel(model.name)}
                       >
                         {loadingModelName === model.name ? "Loading..." : "Load"}
+                      </button>
+                      <button
+                        class="model-btn-icon model-btn-danger-icon"
+                        disabled={deletingModel !== null}
+                        onclick={() => handleDeleteModel(model.name, "ollama")}
+                        title="Delete model"
+                      >
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
                       </button>
                     {:else}
                       <button
@@ -642,13 +778,23 @@
                     <span class="model-name">{model.name}</span>
                     <span class="model-meta">{model.size_display}</span>
                   </div>
-                  <button
-                    class="model-btn model-btn-load"
-                    disabled={loading}
-                    onclick={() => handleLoadModel(model.name)}
-                  >
-                    {loadingModelName === model.name ? "Loading..." : "Load"}
-                  </button>
+                  <div class="model-actions-group">
+                    <button
+                      class="model-btn model-btn-load"
+                      disabled={loading}
+                      onclick={() => handleLoadModel(model.name)}
+                    >
+                      {loadingModelName === model.name ? "Loading..." : "Load"}
+                    </button>
+                    <button
+                      class="model-btn-icon model-btn-danger-icon"
+                      disabled={deletingModel !== null}
+                      onclick={() => handleDeleteModel(model.name, "ollama")}
+                      title="Delete model"
+                    >
+                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                    </button>
+                  </div>
                 </div>
               {/each}
               <!-- Custom model input -->
@@ -734,23 +880,133 @@
           </div>
         </div>
       {/if}
-      {#each displayMessages as msg}
+      {#each displayMessages as { msg, origIdx }}
+        <!-- Collapsible tool call summary (shown above assistant messages that used tools) -->
+        {#if msg.role === "assistant" && completedToolSets.has(origIdx)}
+          {@const tools = completedToolSets.get(origIdx)!}
+          {@const isExpanded = expandedToolSets.has(origIdx)}
+          <div class="chat-msg chat-msg-assistant">
+            <!-- svelte-ignore a11y_click_events_have_key_events -->
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <div class="tool-summary" onclick={() => toggleToolSet(origIdx)}>
+              <span class="tool-summary-icon">
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+              </span>
+              <span class="tool-summary-label">Used {tools.length} tool{tools.length !== 1 ? "s" : ""}</span>
+              <span class="tool-summary-chevron" class:expanded={isExpanded}>
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
+              </span>
+            </div>
+            {#if isExpanded}
+              <div class="tool-summary-details">
+                {#each tools as tc}
+                  <div class="tool-detail-row">
+                    <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="3" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>
+                    <span>{tc.displayText}</span>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          </div>
+        {/if}
         <div class="chat-msg chat-msg-{msg.role}">
           <div class="msg-bubble">
-            {#if msg.role === "tool"}
-              <pre class="tool-output">{msg.content}</pre>
-            {:else if msg.role === "assistant"}
+            {#if msg.role === "assistant"}
               <span class="msg-content">{@html renderMarkdown(msg.content)}</span>
             {:else}
               {msg.content}
             {/if}
           </div>
+          {#if msg.role === "assistant" && msg.mentioned_mods?.length}
+            <div class="mod-cards">
+              {#each msg.mentioned_mods as mod}
+                <button
+                  class="mod-card"
+                  class:mod-installed={mod.installed}
+                  onclick={() => mod.nexus_mod_id ? openModInCorkscrew(mod) : null}
+                  title={mod.nexus_mod_id ? `Open in Corkscrew (ID: ${mod.nexus_mod_id})` : mod.name}
+                  disabled={!mod.nexus_mod_id}
+                >
+                  {#if mod.picture_url}
+                    <img class="mod-card-img" src={mod.picture_url} alt="" />
+                  {/if}
+                  <div class="mod-card-body">
+                    <span class="mod-card-name">{mod.name}</span>
+                    <div class="mod-card-actions">
+                      {#if mod.installed}
+                        <span class="mod-card-badge mod-card-installed">Installed</span>
+                      {:else if mod.nexus_mod_id}
+                        <span class="mod-card-badge mod-card-nexus">View in Corkscrew</span>
+                      {/if}
+                    </div>
+                  </div>
+                </button>
+              {/each}
+            </div>
+            <!-- Quick action buttons for mentioned mods -->
+            {#if !sending && origIdx === displayMessages.length - 1}
+              {@const firstMod = msg.mentioned_mods.find((m: MentionedMod) => m.nexus_mod_id && !m.installed)}
+              {@const installedMod = msg.mentioned_mods.find((m: MentionedMod) => m.installed)}
+              {@const contentLower = (msg.content || "").toLowerCase()}
+              {@const isDestructivePrompt = /\b(uninstall|delete|remove|disable|are you sure)\b/.test(contentLower)}
+              <div class="quick-actions">
+                {#if isDestructivePrompt}
+                  <button class="quick-action quick-action-danger" onclick={() => { inputText = "Yes, proceed"; handleSend(); }}>
+                    Yes, proceed
+                  </button>
+                  <button class="quick-action" onclick={() => { inputText = "No, cancel"; handleSend(); }}>
+                    Cancel
+                  </button>
+                {:else}
+                  {#if firstMod?.nexus_mod_id}
+                    <button class="quick-action" onclick={() => { inputText = `Install ${firstMod.name}`; handleSend(); }}>
+                      Install {firstMod.name}
+                    </button>
+                    <button class="quick-action" onclick={() => openModInCorkscrew(firstMod)}>
+                      Open in Discover
+                    </button>
+                  {/if}
+                  {#if installedMod}
+                    <button class="quick-action" onclick={() => { inputText = `Tell me more about ${installedMod.name}`; handleSend(); }}>
+                      More about {installedMod.name}
+                    </button>
+                  {/if}
+                  <button class="quick-action" onclick={() => { inputText = "Find me something similar"; handleSend(); }}>
+                    Similar mods
+                  </button>
+                {/if}
+              </div>
+            {/if}
+          {/if}
         </div>
       {/each}
       {#if sending}
+        <!-- Tool call history (shown during and after tool execution) -->
+        {#if activeToolCalls.length > 0}
+          <div class="chat-msg chat-msg-assistant">
+            <div class="tool-calls-container">
+              {#each activeToolCalls as tc, i}
+                <div class="tool-call-entry" class:tool-complete={tc.status === "complete"}>
+                  <span class="tool-call-icon">
+                    {#if tc.status === "running"}
+                      <span class="tool-spinner"></span>
+                    {:else}
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>
+                    {/if}
+                  </span>
+                  <span class="tool-call-label">
+                    {#each tc.displayText.split("") as char, ci}
+                      <span class="tool-char" style="animation-delay: {ci * 15}ms">{char}</span>
+                    {/each}
+                  </span>
+                </div>
+              {/each}
+            </div>
+          </div>
+        {/if}
         {#if isStreaming && streamHasContent}
           <div class="chat-msg chat-msg-assistant">
-            <div class="msg-bubble streaming-bubble">{settledText}{#each recentTokens as token}<span class="stream-token">{token}</span>{/each}<span class="stream-cursor"></span></div>
+            <div class="msg-bubble streaming-bubble">{settledText}{#each recentTokens as token}<span class="stream-token">{token}</span>{/each}</div>
           </div>
         {:else if streamPhase === "thinking"}
           <div class="chat-msg chat-msg-assistant">
@@ -1108,6 +1364,28 @@
 
   .model-btn:hover:not(:disabled) { opacity: 0.8; }
 
+  .model-btn-icon {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 3px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.1s, opacity 0.1s;
+  }
+
+  .model-btn-icon:disabled { opacity: 0.3; cursor: not-allowed; }
+
+  .model-btn-danger-icon {
+    color: #ef4444;
+  }
+
+  .model-btn-danger-icon:hover:not(:disabled) {
+    background: color-mix(in srgb, #ef4444 15%, transparent);
+  }
+
   .custom-model-row {
     display: flex;
     align-items: center;
@@ -1202,11 +1480,11 @@
     border-radius: 10px;
     font-size: 13.5px;
     line-height: 1.55;
-    white-space: pre-wrap;
     word-break: break-word;
   }
 
   .chat-msg-user .msg-bubble {
+    white-space: pre-wrap;
     background: var(--accent);
     color: white;
     border-bottom-right-radius: 3px;
@@ -1413,4 +1691,304 @@
 
   .send-btn:disabled { opacity: 0.3; cursor: not-allowed; }
   .send-btn:hover:not(:disabled) { opacity: 0.85; }
+
+  /* ---- Tool call summary (collapsible, like Claude web) ---- */
+  .tool-summary {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 10px;
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--accent) 8%, var(--bg-base));
+    border: 1px solid color-mix(in srgb, var(--accent) 15%, transparent);
+    cursor: pointer;
+    transition: background 0.15s;
+    font-size: 11.5px;
+    color: var(--text-secondary);
+    user-select: none;
+  }
+
+  .tool-summary:hover {
+    background: color-mix(in srgb, var(--accent) 14%, var(--bg-base));
+  }
+
+  .tool-summary-icon {
+    display: flex;
+    align-items: center;
+    color: var(--accent);
+    flex-shrink: 0;
+  }
+
+  .tool-summary-label {
+    flex: 1;
+    font-weight: 500;
+  }
+
+  .tool-summary-chevron {
+    display: flex;
+    align-items: center;
+    color: var(--text-quaternary);
+    transition: transform 0.2s;
+  }
+
+  .tool-summary-chevron.expanded {
+    transform: rotate(180deg);
+  }
+
+  .tool-summary-details {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 4px 10px 6px 28px;
+    font-size: 11px;
+    color: var(--text-quaternary);
+  }
+
+  .tool-detail-row {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 1px 0;
+  }
+
+  /* ---- Tool call history (live, during streaming) ---- */
+  .tool-calls-container {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 6px 10px;
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--bg-base) 80%, transparent);
+    border: 1px solid var(--border);
+    border-bottom-left-radius: 3px;
+  }
+
+  .tool-call-entry {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11.5px;
+    color: var(--text-secondary);
+    padding: 2px 0;
+  }
+
+  .tool-call-entry.tool-complete {
+    color: var(--text-quaternary);
+  }
+
+  .tool-call-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+  }
+
+  .tool-call-icon svg {
+    color: var(--accent);
+  }
+
+  .tool-call-label {
+    font-style: italic;
+    display: inline-flex;
+    flex-wrap: wrap;
+  }
+
+  .tool-char {
+    animation: tool-char-in 0.4s ease-out forwards;
+    opacity: 0;
+  }
+
+  @keyframes tool-char-in {
+    0% { opacity: 0; text-shadow: 0 0 6px var(--accent); }
+    50% { opacity: 0.7; text-shadow: 0 0 3px color-mix(in srgb, var(--accent) 40%, transparent); }
+    100% { opacity: 1; text-shadow: none; }
+  }
+
+  .tool-spinner {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border: 1.5px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.6s linear infinite;
+  }
+
+  /* ---- Markdown styles ---- */
+  .msg-bubble :global(.md-h1) {
+    display: block;
+    font-size: 1.15em;
+    margin: 4px 0 2px;
+  }
+
+  .msg-bubble :global(.md-h2) {
+    display: block;
+    font-size: 1.05em;
+    margin: 4px 0 2px;
+  }
+
+  .msg-bubble :global(.md-h3) {
+    display: block;
+    font-size: 1em;
+    margin: 3px 0 1px;
+  }
+
+  .msg-bubble :global(.md-codeblock) {
+    background: color-mix(in srgb, var(--text) 6%, transparent);
+    border-radius: 6px;
+    padding: 6px 8px;
+    margin: 4px 0;
+    overflow-x: auto;
+    font-size: 0.85em;
+    line-height: 1.5;
+  }
+
+  .msg-bubble :global(.md-codeblock code) {
+    font-family: var(--font-mono, monospace);
+  }
+
+  .msg-bubble :global(.md-link) {
+    color: var(--accent);
+    text-decoration: none;
+  }
+
+  .msg-bubble :global(.md-link:hover) {
+    text-decoration: underline;
+  }
+
+  .msg-bubble :global(.md-hr) {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 6px 0;
+  }
+
+  .msg-bubble :global(em) {
+    font-style: italic;
+  }
+
+  /* ---- Mod cards (mentioned mods below assistant messages) ---- */
+  .mod-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 6px;
+  }
+
+  .mod-card {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--bg-base);
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--text-secondary);
+    transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+    text-align: left;
+    font-family: inherit;
+    padding: 0;
+  }
+
+  .mod-card:hover:not(:disabled) {
+    border-color: var(--accent);
+    box-shadow: 0 2px 8px color-mix(in srgb, var(--accent) 15%, transparent);
+  }
+
+  .mod-card:disabled {
+    cursor: default;
+    opacity: 0.7;
+  }
+
+  .mod-card-img {
+    width: 100%;
+    height: 80px;
+    object-fit: cover;
+    border-radius: 9px 9px 0 0;
+    display: block;
+  }
+
+  .mod-card-body {
+    padding: 6px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .mod-card-name {
+    font-weight: 600;
+    color: var(--text);
+    font-size: 12px;
+    line-height: 1.3;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .mod-card-actions {
+    display: flex;
+    gap: 4px;
+  }
+
+  .mod-card-badge {
+    font-size: 9px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 4px;
+    white-space: nowrap;
+  }
+
+  .mod-card-installed {
+    background: color-mix(in srgb, #22c55e 15%, transparent);
+    color: #22c55e;
+  }
+
+  .mod-card-nexus {
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    color: var(--accent);
+  }
+
+  .quick-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 6px;
+  }
+
+  .quick-action {
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    color: var(--accent);
+    border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+    border-radius: 16px;
+    padding: 5px 14px;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    font-family: inherit;
+    white-space: nowrap;
+  }
+
+  .quick-action:hover {
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    border-color: var(--accent);
+  }
+
+  .quick-action:active {
+    transform: scale(0.96);
+  }
+
+  .quick-action-danger {
+    background: color-mix(in srgb, #ef4444 10%, transparent);
+    color: #ef4444;
+    border-color: color-mix(in srgb, #ef4444 25%, transparent);
+  }
+
+  .quick-action-danger:hover {
+    background: color-mix(in srgb, #ef4444 20%, transparent);
+    border-color: #ef4444;
+  }
 </style>

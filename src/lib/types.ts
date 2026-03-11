@@ -1453,10 +1453,20 @@ export type ModelCapabilityTier = "basic" | "standard" | "advanced";
 
 // LLM Chat
 
+export interface MentionedMod {
+  name: string;
+  local_id?: number;
+  nexus_mod_id?: number;
+  enabled?: boolean;
+  installed: boolean;
+  picture_url?: string;
+}
+
 export interface ChatMessage {
   role: string;
   content: string;
   tool_calls?: ToolCallResponse[];
+  mentioned_mods?: MentionedMod[];
 }
 
 export interface ToolCallResponse {
