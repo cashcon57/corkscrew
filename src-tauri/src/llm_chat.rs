@@ -53,7 +53,7 @@ impl LlmBackend {
 pub fn mlx_model_name(model_name: &str) -> String {
     match model_name {
         // Map Ollama Qwen3 names → MLX Qwen3.5 equivalents (better tool calling on MLX)
-        "qwen3:32b" => "mlx-community/Qwen3.5-27B-4bit".into(),      // OP Mode: dense 27B
+        "qwen3:32b" => "mlx-community/Qwen3.5-27B-4bit".into(), // OP Mode: dense 27B
         "qwen3:30b-a3b" => "mlx-community/Qwen3.5-35B-A3B-4bit".into(), // MoE 35B
         "qwen3:8b" => "mlx-community/Qwen3.5-9B-4bit".into(),
         "qwen3:4b" => "mlx-community/Qwen3.5-4B-4bit".into(),
@@ -64,12 +64,24 @@ pub fn mlx_model_name(model_name: &str) -> String {
 
 /// Map an MLX model name back to a short display name.
 pub fn ollama_model_name(mlx_name: &str) -> String {
-    if mlx_name.contains("Qwen3.5-35B-A3B") { return "Qwen3.5 35B-A3B".into(); }
-    if mlx_name.contains("Qwen3.5-27B") { return "Qwen3.5 27B".into(); }
-    if mlx_name.contains("Qwen3.5-9B") { return "Qwen3.5 9B".into(); }
-    if mlx_name.contains("Qwen3.5-4B") { return "Qwen3.5 4B".into(); }
-    if mlx_name.contains("Qwen3.5-2B") { return "Qwen3.5 2B".into(); }
-    if mlx_name.contains("Qwen3-30B-A3B") { return "Qwen3 30B-A3B".into(); }
+    if mlx_name.contains("Qwen3.5-35B-A3B") {
+        return "Qwen3.5 35B-A3B".into();
+    }
+    if mlx_name.contains("Qwen3.5-27B") {
+        return "Qwen3.5 27B".into();
+    }
+    if mlx_name.contains("Qwen3.5-9B") {
+        return "Qwen3.5 9B".into();
+    }
+    if mlx_name.contains("Qwen3.5-4B") {
+        return "Qwen3.5 4B".into();
+    }
+    if mlx_name.contains("Qwen3.5-2B") {
+        return "Qwen3.5 2B".into();
+    }
+    if mlx_name.contains("Qwen3-30B-A3B") {
+        return "Qwen3 30B-A3B".into();
+    }
     mlx_name.to_string()
 }
 
@@ -313,30 +325,62 @@ pub fn get_chat_tools(tier: ModelCapabilityTier) -> Vec<ChatTool> {
     // ── Advanced tier — 7B+ models ───────────────────────────────────
     if tier >= ModelCapabilityTier::Advanced {
         tools.extend([
-            tool("download_and_install_mod", "Download and install from NexusMods.", serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "mod_id": { "type": "integer" },
-                    "file_id": { "type": "integer" }
-                },
-                "required": ["mod_id", "file_id"]
-            })),
-            tool("sort_load_order", "Auto-sort load order with LOOT.", no_params.clone()),
-            tool("get_crash_logs", "List recent crash logs.", no_params.clone()),
-            tool("analyze_crash_log", "Analyze a crash log.", serde_json::json!({
-                "type": "object",
-                "properties": { "log_path": { "type": "string" } },
-                "required": ["log_path"]
-            })),
+            tool(
+                "download_and_install_mod",
+                "Download and install from NexusMods.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "mod_id": { "type": "integer" },
+                        "file_id": { "type": "integer" }
+                    },
+                    "required": ["mod_id", "file_id"]
+                }),
+            ),
+            tool(
+                "sort_load_order",
+                "Auto-sort load order with LOOT.",
+                no_params.clone(),
+            ),
+            tool(
+                "get_crash_logs",
+                "List recent crash logs.",
+                no_params.clone(),
+            ),
+            tool(
+                "analyze_crash_log",
+                "Analyze a crash log.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": { "log_path": { "type": "string" } },
+                    "required": ["log_path"]
+                }),
+            ),
             tool("list_profiles", "List mod profiles.", no_params.clone()),
-            tool("activate_profile", "Switch mod profile.", serde_json::json!({
-                "type": "object",
-                "properties": { "profile_name": { "type": "string" } },
-                "required": ["profile_name"]
-            })),
-            tool("run_preflight_check", "Pre-launch check (missing masters, Wine issues, SKSE).", no_params.clone()),
-            tool("check_dependency_issues", "Check for missing dependencies.", no_params.clone()),
-            tool("redeploy_mods", "Redeploy mod files to game directory.", no_params.clone()),
+            tool(
+                "activate_profile",
+                "Switch mod profile.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": { "profile_name": { "type": "string" } },
+                    "required": ["profile_name"]
+                }),
+            ),
+            tool(
+                "run_preflight_check",
+                "Pre-launch check (missing masters, Wine issues, SKSE).",
+                no_params.clone(),
+            ),
+            tool(
+                "check_dependency_issues",
+                "Check for missing dependencies.",
+                no_params.clone(),
+            ),
+            tool(
+                "redeploy_mods",
+                "Redeploy mod files to game directory.",
+                no_params.clone(),
+            ),
         ]);
     }
 
@@ -417,8 +461,15 @@ fn parse_tool_calls_from_text(text: &str) -> (String, Option<Vec<ToolCallRespons
         if let Some(end) = clean_text[after_tag..].find("</tool_call>") {
             let json_str = clean_text[after_tag..after_tag + end].trim();
             if let Ok(obj) = serde_json::from_str::<serde_json::Value>(json_str) {
-                let name = obj.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
-                let arguments = obj.get("arguments").cloned().unwrap_or(serde_json::json!({}));
+                let name = obj
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let arguments = obj
+                    .get("arguments")
+                    .cloned()
+                    .unwrap_or(serde_json::json!({}));
                 if !name.is_empty() {
                     calls.push(ToolCallResponse {
                         function: ToolCallFunction { name, arguments },
@@ -472,7 +523,8 @@ pub async fn chat_send(
             // MLX LM server doesn't support native tool calling.
             // Inject tools into system prompt and parse tool_call tags from output.
             let msgs = inject_tools_into_messages(messages, tools);
-            let mut response = chat_send_openai_compat(backend.base_url(), model, &msgs, &[], max_tokens).await?;
+            let mut response =
+                chat_send_openai_compat(backend.base_url(), model, &msgs, &[], max_tokens).await?;
             let (clean_content, parsed_calls) = parse_tool_calls_from_text(&response.content);
             response.content = clean_content;
             if parsed_calls.is_some() {
@@ -514,7 +566,15 @@ where
             // MLX LM server supports native Qwen3 tool calling via its built-in
             // qwen3_coder parser. Pass tools natively — the server handles
             // <tool_call> parsing and returns structured tool_calls in the response.
-            chat_send_openai_compat_streaming(backend.base_url(), model, messages, tools, max_tokens, on_token).await
+            chat_send_openai_compat_streaming(
+                backend.base_url(),
+                model,
+                messages,
+                tools,
+                max_tokens,
+                on_token,
+            )
+            .await
         }
     }
 }
@@ -592,7 +652,9 @@ where
             let line = buffer[..newline_pos].to_string();
             buffer = buffer[newline_pos + 1..].to_string();
 
-            if line.trim().is_empty() { continue; }
+            if line.trim().is_empty() {
+                continue;
+            }
 
             if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&line) {
                 if let Some(msg) = obj.get("message") {
@@ -604,7 +666,9 @@ where
                     }
                     // Check for tool_calls in the final message
                     if let Some(tc) = msg.get("tool_calls") {
-                        if let Ok(calls) = serde_json::from_value::<Vec<ToolCallResponse>>(tc.clone()) {
+                        if let Ok(calls) =
+                            serde_json::from_value::<Vec<ToolCallResponse>>(tc.clone())
+                        {
                             if !calls.is_empty() {
                                 tool_calls = Some(calls);
                             }
@@ -671,16 +735,19 @@ where
     });
 
     if !tools.is_empty() {
-        let oai_tools: Vec<serde_json::Value> = tools.iter().map(|t| {
-            serde_json::json!({
-                "type": "function",
-                "function": {
-                    "name": t.function.name,
-                    "description": t.function.description,
-                    "parameters": t.function.parameters,
-                }
+        let oai_tools: Vec<serde_json::Value> = tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.function.name,
+                        "description": t.function.description,
+                        "parameters": t.function.parameters,
+                    }
+                })
             })
-        }).collect();
+            .collect();
         body["tools"] = serde_json::json!(oai_tools);
     }
 
@@ -697,20 +764,24 @@ where
     }
 
     let mut full_content = String::new();
-    let mut tool_calls_map: std::collections::HashMap<usize, (String, String)> = std::collections::HashMap::new();
+    let mut tool_calls_map: std::collections::HashMap<usize, (String, String)> =
+        std::collections::HashMap::new();
     let mut stream = resp.bytes_stream();
 
     use futures::StreamExt;
     let mut buffer = String::new();
     let mut chunk_count: usize = 0;
-    let mut parse_errors: usize = 0;
+    let mut _parse_errors: usize = 0;
 
     // Debug file logger for streaming
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| format!("Stream error: {e}"))?;
         let chunk_str = String::from_utf8_lossy(&chunk);
         if chunk_count == 0 {
-            log::debug!("[CHAT] SSE first chunk: {:?}", &chunk_str[..chunk_str.len().min(200)]);
+            log::debug!(
+                "[CHAT] SSE first chunk: {:?}",
+                &chunk_str[..chunk_str.len().min(200)]
+            );
         }
         chunk_count += 1;
         buffer.push_str(&chunk_str);
@@ -722,35 +793,52 @@ where
 
             for line in block.lines() {
                 let line = line.trim();
-                if line == "data: [DONE]" { continue; }
-                if line.starts_with(':') { continue; } // SSE comment (keepalive)
+                if line == "data: [DONE]" {
+                    continue;
+                }
+                if line.starts_with(':') {
+                    continue;
+                } // SSE comment (keepalive)
                 if let Some(json_str) = line.strip_prefix("data: ") {
                     if let Ok(obj) = serde_json::from_str::<serde_json::Value>(json_str) {
                         if let Some(choice) = obj.get("choices").and_then(|c| c.get(0)) {
                             if let Some(delta) = choice.get("delta") {
                                 // Reasoning/thinking token (Qwen3.5 etc.)
-                                if let Some(reasoning) = delta.get("reasoning").and_then(|r| r.as_str()) {
+                                if let Some(reasoning) =
+                                    delta.get("reasoning").and_then(|r| r.as_str())
+                                {
                                     if !reasoning.is_empty() {
                                         on_token(reasoning, StreamPhase::Thinking);
                                     }
                                 }
                                 // Content token
-                                if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
+                                if let Some(content) = delta.get("content").and_then(|c| c.as_str())
+                                {
                                     if !content.is_empty() {
                                         on_token(content, StreamPhase::Content);
                                         full_content.push_str(content);
                                     }
                                 }
                                 // Tool call chunks
-                                if let Some(tc_arr) = delta.get("tool_calls").and_then(|t| t.as_array()) {
+                                if let Some(tc_arr) =
+                                    delta.get("tool_calls").and_then(|t| t.as_array())
+                                {
                                     for tc in tc_arr {
-                                        let idx = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
-                                        let entry = tool_calls_map.entry(idx).or_insert_with(|| (String::new(), String::new()));
+                                        let idx =
+                                            tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0)
+                                                as usize;
+                                        let entry = tool_calls_map
+                                            .entry(idx)
+                                            .or_insert_with(|| (String::new(), String::new()));
                                         if let Some(func) = tc.get("function") {
-                                            if let Some(name) = func.get("name").and_then(|n| n.as_str()) {
+                                            if let Some(name) =
+                                                func.get("name").and_then(|n| n.as_str())
+                                            {
                                                 entry.0.push_str(name);
                                             }
-                                            if let Some(args) = func.get("arguments").and_then(|a| a.as_str()) {
+                                            if let Some(args) =
+                                                func.get("arguments").and_then(|a| a.as_str())
+                                            {
                                                 entry.1.push_str(args);
                                             }
                                         }
@@ -764,18 +852,29 @@ where
         }
     }
 
-    log::debug!("[CHAT] SSE stream done: chunks={} content_len={} buf_remaining={}", chunk_count, full_content.len(), buffer.len());
+    log::debug!(
+        "[CHAT] SSE stream done: chunks={} content_len={} buf_remaining={}",
+        chunk_count,
+        full_content.len(),
+        buffer.len()
+    );
 
     // Build tool_calls from accumulated map
     let tool_calls = if tool_calls_map.is_empty() {
         None
     } else {
-        let mut calls: Vec<(usize, ToolCallResponse)> = tool_calls_map.into_iter().map(|(idx, (name, args))| {
-            let arguments = serde_json::from_str(&args).unwrap_or(serde_json::json!({}));
-            (idx, ToolCallResponse {
-                function: ToolCallFunction { name, arguments },
+        let mut calls: Vec<(usize, ToolCallResponse)> = tool_calls_map
+            .into_iter()
+            .map(|(idx, (name, args))| {
+                let arguments = serde_json::from_str(&args).unwrap_or(serde_json::json!({}));
+                (
+                    idx,
+                    ToolCallResponse {
+                        function: ToolCallFunction { name, arguments },
+                    },
+                )
             })
-        }).collect();
+            .collect();
         calls.sort_by_key(|(idx, _)| *idx);
         Some(calls.into_iter().map(|(_, tc)| tc).collect())
     };
@@ -842,15 +941,26 @@ async fn chat_send_ollama(
     }
 
     let resp_body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-    log::debug!("Ollama response: {}", serde_json::to_string_pretty(&resp_body).unwrap_or_default());
+    log::debug!(
+        "Ollama response: {}",
+        serde_json::to_string_pretty(&resp_body).unwrap_or_default()
+    );
     let message = resp_body.get("message").ok_or("No message in response")?;
 
     Ok(ChatMessage {
-        role: message.get("role").and_then(|r| r.as_str()).unwrap_or("assistant").into(),
-        content: message.get("content").and_then(|c| c.as_str()).unwrap_or("").into(),
-        tool_calls: message.get("tool_calls").and_then(|tc| {
-            serde_json::from_value::<Vec<ToolCallResponse>>(tc.clone()).ok()
-        }),
+        role: message
+            .get("role")
+            .and_then(|r| r.as_str())
+            .unwrap_or("assistant")
+            .into(),
+        content: message
+            .get("content")
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .into(),
+        tool_calls: message
+            .get("tool_calls")
+            .and_then(|tc| serde_json::from_value::<Vec<ToolCallResponse>>(tc.clone()).ok()),
         mentioned_mods: None,
     })
 }
@@ -897,16 +1007,19 @@ async fn chat_send_openai_compat(
 
     if !tools.is_empty() {
         // Convert our tool format to OpenAI tool format
-        let oai_tools: Vec<serde_json::Value> = tools.iter().map(|t| {
-            serde_json::json!({
-                "type": "function",
-                "function": {
-                    "name": t.function.name,
-                    "description": t.function.description,
-                    "parameters": t.function.parameters,
-                }
+        let oai_tools: Vec<serde_json::Value> = tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.function.name,
+                        "description": t.function.description,
+                        "parameters": t.function.parameters,
+                    }
+                })
             })
-        }).collect();
+            .collect();
         body["tools"] = serde_json::json!(oai_tools);
     }
 
@@ -924,7 +1037,10 @@ async fn chat_send_openai_compat(
 
     let resp_body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
 
-    log::debug!("MLX response: {}", serde_json::to_string_pretty(&resp_body).unwrap_or_default());
+    log::debug!(
+        "MLX response: {}",
+        serde_json::to_string_pretty(&resp_body).unwrap_or_default()
+    );
 
     // OpenAI format: choices[0].message
     let message = resp_body
@@ -933,9 +1049,14 @@ async fn chat_send_openai_compat(
         .and_then(|c| c.get("message"))
         .ok_or("No message in response")?;
 
-    let role = message.get("role").and_then(|r| r.as_str()).unwrap_or("assistant").into();
+    let role = message
+        .get("role")
+        .and_then(|r| r.as_str())
+        .unwrap_or("assistant")
+        .into();
     // content can be null when tool_calls are present; handle both null and missing
-    let content: String = message.get("content")
+    let content: String = message
+        .get("content")
         .and_then(|c| c.as_str())
         .unwrap_or("")
         .into();
@@ -943,19 +1064,31 @@ async fn chat_send_openai_compat(
     // Parse tool_calls from OpenAI format back to our format
     let tool_calls = message.get("tool_calls").and_then(|tc| {
         let arr = tc.as_array()?;
-        let calls: Vec<ToolCallResponse> = arr.iter().filter_map(|call| {
-            let func = call.get("function")?;
-            let name = func.get("name")?.as_str()?.to_string();
-            let args_str = func.get("arguments")?.as_str().unwrap_or("{}");
-            let arguments = serde_json::from_str(args_str).unwrap_or(serde_json::json!({}));
-            Some(ToolCallResponse {
-                function: ToolCallFunction { name, arguments },
+        let calls: Vec<ToolCallResponse> = arr
+            .iter()
+            .filter_map(|call| {
+                let func = call.get("function")?;
+                let name = func.get("name")?.as_str()?.to_string();
+                let args_str = func.get("arguments")?.as_str().unwrap_or("{}");
+                let arguments = serde_json::from_str(args_str).unwrap_or(serde_json::json!({}));
+                Some(ToolCallResponse {
+                    function: ToolCallFunction { name, arguments },
+                })
             })
-        }).collect();
-        if calls.is_empty() { None } else { Some(calls) }
+            .collect();
+        if calls.is_empty() {
+            None
+        } else {
+            Some(calls)
+        }
     });
 
-    Ok(ChatMessage { role, content, tool_calls, mentioned_mods: None })
+    Ok(ChatMessage {
+        role,
+        content,
+        tool_calls,
+        mentioned_mods: None,
+    })
 }
 
 /// Load a model into memory.
@@ -1034,8 +1167,11 @@ pub async fn unload_model(backend: &LlmBackend, model: &str) -> Result<(), Strin
                     log::info!("Killed MLX LM server process");
                 }
                 Ok(o) => {
-                    log::warn!("pkill mlx_lm.server exited with {}: {}",
-                        o.status, String::from_utf8_lossy(&o.stderr));
+                    log::warn!(
+                        "pkill mlx_lm.server exited with {}: {}",
+                        o.status,
+                        String::from_utf8_lossy(&o.stderr)
+                    );
                 }
                 Err(e) => {
                     log::warn!("Failed to run pkill: {e}");
@@ -1158,11 +1294,16 @@ pub async fn start_mlx_server(model: &str) -> Result<(), String> {
         let python = mlx_python();
         tokio::process::Command::new(&python)
             .args([
-                "-m", "mlx_lm.server",
-                "--model", model,
-                "--port", "8080",
-                "--max-tokens", "4096",
-                "--chat-template-args", r#"{"enable_thinking":false}"#,
+                "-m",
+                "mlx_lm.server",
+                "--model",
+                model,
+                "--port",
+                "8080",
+                "--max-tokens",
+                "4096",
+                "--chat-template-args",
+                r#"{"enable_thinking":false}"#,
             ])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

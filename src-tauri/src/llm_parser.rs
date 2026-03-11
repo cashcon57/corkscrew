@@ -19,15 +19,23 @@ use crate::instruction_types::*;
 /// - Few-shot examples covering common patterns
 /// - Negative examples showing what NOT to output
 /// - No chain-of-thought — direct structured output only
-pub fn build_system_prompt(available_mods: &[String], platform: &str, game_version: &str) -> String {
+pub fn build_system_prompt(
+    available_mods: &[String],
+    platform: &str,
+    game_version: &str,
+) -> String {
     let mod_list = if available_mods.is_empty() {
         "No mod list available — use the exact mod names from the instructions.".to_string()
     } else {
         let mods: Vec<String> = available_mods.iter().take(200).cloned().collect();
-        format!("Available mods (use ONLY these exact names):\n{}", mods.join("\n"))
+        format!(
+            "Available mods (use ONLY these exact names):\n{}",
+            mods.join("\n")
+        )
     };
 
-    format!(r#"You are a mod collection instruction parser. Your ONLY job is to convert natural language collection author instructions into a JSON array of structured actions.
+    format!(
+        r#"You are a mod collection instruction parser. Your ONLY job is to convert natural language collection author instructions into a JSON array of structured actions.
 
 ## RULES — FOLLOW EXACTLY
 1. Output ONLY a JSON array. No explanation, no markdown, no preamble.
@@ -98,7 +106,8 @@ Output:
 - Do NOT output anything other than a JSON array
 - Do NOT guess mod names that aren't in the available list
 - Do NOT create actions for purely informational text (descriptions, credits, thank-yous)
-"#)
+"#
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -253,10 +262,7 @@ pub async fn check_ollama_status() -> OllamaStatus {
                 if let Some(models) = body.get("models").and_then(|m| m.as_array()) {
                     for model in models {
                         if let Some(name) = model.get("name").and_then(|n| n.as_str()) {
-                            let size = model
-                                .get("size")
-                                .and_then(|s| s.as_u64())
-                                .unwrap_or(0);
+                            let size = model.get("size").and_then(|s| s.as_u64()).unwrap_or(0);
                             installed_models.push(OllamaModel {
                                 name: name.to_string(),
                                 size_bytes: size,
@@ -464,14 +470,16 @@ pub fn available_cloud_providers() -> Vec<CloudProvider> {
         CloudProvider {
             name: "cerebras".into(),
             display_name: "Cerebras".into(),
-            description: "Llama 3.3 70B. Ultra-fast wafer-scale inference. OpenAI-compatible API.".into(),
+            description: "Llama 3.3 70B. Ultra-fast wafer-scale inference. OpenAI-compatible API."
+                .into(),
             requires_api_key: true,
             free_tier_info: "Free: 1M tokens/day, 30 req/min. No credit card.".into(),
         },
         CloudProvider {
             name: "groq".into(),
             display_name: "Groq".into(),
-            description: "Llama 3.3 70B. Sub-second inference, strict JSON schema enforcement.".into(),
+            description: "Llama 3.3 70B. Sub-second inference, strict JSON schema enforcement."
+                .into(),
             requires_api_key: true,
             free_tier_info: "Free: 30 req/min, ~500K tokens/day. No credit card.".into(),
         },
@@ -653,7 +661,10 @@ fn parse_llm_response(raw: &str, model: &str) -> Result<Vec<ConditionalAction>, 
             vec![obj]
         }
     } else {
-        return Err(format!("LLM output is not JSON: {}", &cleaned[..cleaned.len().min(100)]));
+        return Err(format!(
+            "LLM output is not JSON: {}",
+            &cleaned[..cleaned.len().min(100)]
+        ));
     };
 
     let mut actions = Vec::new();

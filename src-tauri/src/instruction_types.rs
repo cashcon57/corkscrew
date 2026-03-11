@@ -83,9 +83,13 @@ pub enum InstructionCondition {
     /// Only if another mod is NOT installed.
     ModNotInstalled { mod_name: String },
     /// Multiple conditions that all must be true.
-    All { conditions: Vec<InstructionCondition> },
+    All {
+        conditions: Vec<InstructionCondition>,
+    },
     /// Multiple conditions where at least one must be true.
-    Any { conditions: Vec<InstructionCondition> },
+    Any {
+        conditions: Vec<InstructionCondition>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -262,7 +266,8 @@ pub fn recommended_models() -> Vec<OllamaModel> {
             name: "qwen3:30b-a3b".into(),
             size_bytes: 18_000_000_000,
             size_display: "18 GB".into(),
-            description: "MoE — 30B total, only 3B activated. Runs fast, thinks big. Best on Ollama.".into(),
+            description:
+                "MoE — 30B total, only 3B activated. Runs fast, thinks big. Best on Ollama.".into(),
             expected_accuracy: 0.96,
             supports_tool_use: true,
             min_memory_bytes: 32_000_000_000,
@@ -271,7 +276,8 @@ pub fn recommended_models() -> Vec<OllamaModel> {
             name: "qwen3:8b".into(),
             size_bytes: 5_200_000_000,
             size_display: "5.2 GB".into(),
-            description: "Strong reasoning + reliable tool calling. Best dense model for Ollama.".into(),
+            description: "Strong reasoning + reliable tool calling. Best dense model for Ollama."
+                .into(),
             expected_accuracy: 0.88,
             supports_tool_use: true,
             min_memory_bytes: 16_000_000_000,
@@ -332,7 +338,10 @@ pub fn recommended_model_for_memory(total_memory_bytes: u64) -> String {
         }
     }
     // Fallback to smallest
-    models.last().map(|m| m.name.clone()).unwrap_or_else(|| "qwen3:1.7b".into())
+    models
+        .last()
+        .map(|m| m.name.clone())
+        .unwrap_or_else(|| "qwen3:1.7b".into())
 }
 
 // ---------------------------------------------------------------------------
@@ -398,7 +407,11 @@ impl ModelCapabilityTier {
         }
         if lower.contains("1.5b") || lower.contains("1b") || lower.contains("2b") {
             Self::Basic
-        } else if lower.contains("3b") || lower.contains("3.8b") || lower.contains("4b") || lower.contains("mini") {
+        } else if lower.contains("3b")
+            || lower.contains("3.8b")
+            || lower.contains("4b")
+            || lower.contains("mini")
+        {
             Self::Standard
         } else {
             Self::Advanced

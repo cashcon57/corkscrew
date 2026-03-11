@@ -104,12 +104,11 @@ pub fn save_cached(db: &ModDatabase, reg: &VortexGameRegistration, source_hash: 
 /// Check if we have a cached extension and its source hash matches.
 pub fn is_cache_fresh(db: &ModDatabase, game_id: &str, source_hash: &str) -> bool {
     let Ok(conn) = db.conn() else { return false };
-    let mut stmt = match conn
-        .prepare("SELECT source_hash FROM vortex_extensions WHERE game_id = ?1")
-    {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
+    let mut stmt =
+        match conn.prepare("SELECT source_hash FROM vortex_extensions WHERE game_id = ?1") {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
     stmt.query_row(params![game_id], |row| row.get::<_, String>(0))
         .map(|cached| cached == source_hash)
         .unwrap_or(false)
@@ -117,7 +116,9 @@ pub fn is_cache_fresh(db: &ModDatabase, game_id: &str, source_hash: &str) -> boo
 
 /// List all cached extension summaries.
 pub fn list_cached(db: &ModDatabase) -> Vec<ExtensionSummary> {
-    let Ok(conn) = db.conn() else { return Vec::new() };
+    let Ok(conn) = db.conn() else {
+        return Vec::new();
+    };
     let mut stmt = match conn.prepare(
         "SELECT game_id, name, is_stub, fetched_at, tools, mod_types FROM vortex_extensions ORDER BY name",
     ) {

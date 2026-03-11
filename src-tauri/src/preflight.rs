@@ -149,7 +149,9 @@ fn check_enabled_mods(db: &ModDatabase, game_id: &str, bottle_name: &str) -> Pre
 
 /// Verify that staging directories exist for all enabled mods.
 fn check_staging_dirs(db: &ModDatabase, game_id: &str, bottle_name: &str) -> PreflightCheck {
-    let mods = db.list_mods_summary(game_id, bottle_name).unwrap_or_default();
+    let mods = db
+        .list_mods_summary(game_id, bottle_name)
+        .unwrap_or_default();
     let mut missing = Vec::new();
 
     for m in mods.iter().filter(|m| m.enabled) {

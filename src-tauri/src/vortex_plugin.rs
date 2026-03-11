@@ -154,10 +154,7 @@ const STEAM_COMMON: &[&str] = &["Program Files (x86)", "Steam", "steamapps", "co
 /// 3. Epic Games paths
 fn find_game_in_bottle(bottle: &Bottle, reg: &VortexGameRegistration) -> Option<PathBuf> {
     // Determine directory name to search for in Steam
-    let steam_dir = reg
-        .steam_dir_name
-        .as_deref()
-        .unwrap_or(&reg.name);
+    let steam_dir = reg.steam_dir_name.as_deref().unwrap_or(&reg.name);
 
     // 1. Default Steam library
     if let Some(common) = bottle.find_path(STEAM_COMMON) {
@@ -297,7 +294,11 @@ fn parse_library_folders_vdf(steam_dir: &Path) -> Option<Vec<PathBuf>> {
             }
         }
     }
-    if paths.is_empty() { None } else { Some(paths) }
+    if paths.is_empty() {
+        None
+    } else {
+        Some(paths)
+    }
 }
 
 fn strip_vdf_key<'a>(line: &'a str, key: &str) -> Option<&'a str> {

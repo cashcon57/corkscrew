@@ -31,8 +31,7 @@ fn validate_single(
     installed_mods: &[crate::database::ModSummary],
 ) -> ValidatedAction {
     match &action.action {
-        InstructionAction::EnableMod { mod_name }
-        | InstructionAction::DisableMod { mod_name } => {
+        InstructionAction::EnableMod { mod_name } | InstructionAction::DisableMod { mod_name } => {
             // Check that the mod exists in the installed mod list
             let matched = find_mod_by_name(mod_name, installed_mods);
             match matched {
@@ -50,10 +49,7 @@ fn validate_single(
                     action: action.clone(),
                     status: ValidationStatus::Rejected,
                     resolved_mod_id: None,
-                    reason: Some(format!(
-                        "Mod '{}' not found in installed mods",
-                        mod_name
-                    )),
+                    reason: Some(format!("Mod '{}' not found in installed mods", mod_name)),
                 },
             }
         }
@@ -86,7 +82,12 @@ fn validate_single(
             }
         }
 
-        InstructionAction::SetIniSetting { file, section, key, value } => {
+        InstructionAction::SetIniSetting {
+            file,
+            section,
+            key,
+            value,
+        } => {
             // Validate the INI file name is a known game INI
             let valid_files = [
                 "skyrim.ini",
@@ -202,26 +203,42 @@ pub fn evaluate_condition(
             }
         }
 
-        InstructionCondition::DlcPresent { dlc_name } => {
-            _installed_dlcs.iter().any(|d| d.to_lowercase() == dlc_name.to_lowercase())
-        }
+        InstructionCondition::DlcPresent { dlc_name } => _installed_dlcs
+            .iter()
+            .any(|d| d.to_lowercase() == dlc_name.to_lowercase()),
 
         InstructionCondition::ModInstalled { mod_name } => {
             let lower = mod_name.to_lowercase();
-            installed_mod_names.iter().any(|m| m.to_lowercase() == lower)
+            installed_mod_names
+                .iter()
+                .any(|m| m.to_lowercase() == lower)
         }
 
         InstructionCondition::ModNotInstalled { mod_name } => {
             let lower = mod_name.to_lowercase();
-            !installed_mod_names.iter().any(|m| m.to_lowercase() == lower)
+            !installed_mod_names
+                .iter()
+                .any(|m| m.to_lowercase() == lower)
         }
 
-        InstructionCondition::All { conditions } => conditions
-            .iter()
-            .all(|c| evaluate_condition(c, game_version, platform, _installed_dlcs, installed_mod_names)),
+        InstructionCondition::All { conditions } => conditions.iter().all(|c| {
+            evaluate_condition(
+                c,
+                game_version,
+                platform,
+                _installed_dlcs,
+                installed_mod_names,
+            )
+        }),
 
-        InstructionCondition::Any { conditions } => conditions
-            .iter()
-            .any(|c| evaluate_condition(c, game_version, platform, _installed_dlcs, installed_mod_names)),
+        InstructionCondition::Any { conditions } => conditions.iter().any(|c| {
+            evaluate_condition(
+                c,
+                game_version,
+                platform,
+                _installed_dlcs,
+                installed_mod_names,
+            )
+        }),
     }
 }

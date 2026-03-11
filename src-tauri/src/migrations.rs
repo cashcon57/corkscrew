@@ -819,10 +819,8 @@ fn migrate_v14_to_v15(conn: &Connection) -> Result<()> {
             if let Ok(manifest) = serde_json::from_str::<serde_json::Value>(manifest_json) {
                 if let Some(mods) = manifest.get("mods").and_then(|v| v.as_array()) {
                     for m in mods {
-                        let is_optional = m
-                            .get("optional")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false);
+                        let is_optional =
+                            m.get("optional").and_then(|v| v.as_bool()).unwrap_or(false);
                         if is_optional {
                             if let Some(mod_name) = m.get("name").and_then(|v| v.as_str()) {
                                 // Mark matching installed mods as optional
@@ -857,12 +855,11 @@ fn migrate_v14_to_v15(conn: &Connection) -> Result<()> {
 fn migrate_v15_to_v16(conn: &Connection) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
 
-    crate::vortex_registry::create_table(&tx)
-        .map_err(|e| MigrationError::Failed {
-            from: 15,
-            to: 16,
-            reason: e.to_string(),
-        })?;
+    crate::vortex_registry::create_table(&tx).map_err(|e| MigrationError::Failed {
+        from: 15,
+        to: 16,
+        reason: e.to_string(),
+    })?;
 
     tx.execute("UPDATE schema_version SET version = 16", [])?;
     tx.commit()?;
@@ -1032,7 +1029,7 @@ mod tests {
     fn v13_creates_deployment_manifest_index() {
         let conn = memory_db();
         migrate(&conn).unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 16);
+        assert_eq!(current_version(&conn).unwrap(), 17);
 
         // Verify the compound index exists
         let index_exists: bool = conn

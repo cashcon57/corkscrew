@@ -1210,8 +1210,8 @@ impl ModDatabase {
                     .iter()
                     .map(|m| mod_collection.get(&m.mod_id).and_then(|c| c.as_deref()))
                     .collect();
-                let same_collection = collections.len() == 1
-                    && collections.iter().next().unwrap().is_some();
+                let same_collection =
+                    collections.len() == 1 && collections.iter().next().unwrap().is_some();
 
                 let winner_mod_id = mods_info
                     .iter()

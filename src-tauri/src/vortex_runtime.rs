@@ -9,9 +9,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use rquickjs::{
-    context::EvalOptions, Array, Context, Function, Object, Runtime, Value,
-};
+use rquickjs::{context::EvalOptions, Array, Context, Function, Object, Runtime, Value};
 
 use serde_json;
 
@@ -26,9 +24,7 @@ pub fn execute_extension(source: &ExtensionSource) -> Result<CapturedRegistratio
     // Install an interrupt handler that fires after a timeout.
     // This prevents malicious or buggy extensions from blocking forever.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    rt.set_interrupt_handler(Some(Box::new(move || {
-        std::time::Instant::now() > deadline
-    })));
+    rt.set_interrupt_handler(Some(Box::new(move || std::time::Instant::now() > deadline)));
 
     let ctx = Context::full(&rt).map_err(|e| format!("Failed to create JS context: {e}"))?;
 
@@ -63,7 +59,9 @@ pub fn execute_extension(source: &ExtensionSource) -> Result<CapturedRegistratio
             Ok(_) => {}
             Err(e) => {
                 // Try to get the JS exception stack trace for better diagnostics
-                let exception_detail = ctx.catch().as_exception()
+                let exception_detail = ctx
+                    .catch()
+                    .as_exception()
                     .and_then(|exc| {
                         let msg = exc.message().unwrap_or_default();
                         let stack = exc.stack().unwrap_or_default();
@@ -583,16 +581,18 @@ fn setup_vortex_context<'js>(
                 .replace("C:/game", ".");
 
             // Sanitize: reject paths that escape the game directory
-            let sanitized = if relative.contains("..") || relative.starts_with('/') || relative.contains(":\\") {
-                log::warn!(
-                    "Mod type '{}' returned unsafe path '{}', falling back to '.'",
-                    id,
+            let sanitized =
+                if relative.contains("..") || relative.starts_with('/') || relative.contains(":\\")
+                {
+                    log::warn!(
+                        "Mod type '{}' returned unsafe path '{}', falling back to '.'",
+                        id,
+                        relative
+                    );
+                    ".".to_string()
+                } else {
                     relative
-                );
-                ".".to_string()
-            } else {
-                relative
-            };
+                };
 
             log::info!("Registered mod type: {} -> {}", id, sanitized);
             cap.borrow_mut().mod_types.push(VortexModType {
@@ -732,9 +732,7 @@ fn setup_vortex_context<'js>(
     )
     .map_err(|e| format!("Failed to setup API mock: {e}"))?;
 
-    let api: Value = ctx
-        .eval("__vortex_api_mock")
-        .map_err(|e| e.to_string())?;
+    let api: Value = ctx.eval("__vortex_api_mock").map_err(|e| e.to_string())?;
     context_obj.set("api", api).map_err(|e| e.to_string())?;
 
     ctx.globals()
@@ -850,10 +848,7 @@ fn extract_string_or_fn<'js>(
     None
 }
 
-fn extract_store_ids(
-    environment: &serde_json::Value,
-    details: &serde_json::Value,
-) -> StoreIds {
+fn extract_store_ids(environment: &serde_json::Value, details: &serde_json::Value) -> StoreIds {
     let steam_from_env = environment
         .get("SteamAPPId")
         .and_then(|v| v.as_str())

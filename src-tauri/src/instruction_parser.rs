@@ -17,10 +17,7 @@ use crate::instruction_types::*;
 ///
 /// Returns parsed actions (confidence 1.0) and any lines that could not
 /// be deterministically parsed (for LLM or manual fallback).
-pub fn parse_instructions(
-    raw_text: &str,
-    available_mods: &[String],
-) -> ParsedInstructions {
+pub fn parse_instructions(raw_text: &str, available_mods: &[String]) -> ParsedInstructions {
     let lines = preprocess(raw_text);
     let mut actions = Vec::new();
     let mut unparsed = Vec::new();
@@ -79,7 +76,8 @@ fn preprocess(raw: &str) -> Vec<String> {
 fn strip_markdown(text: &str) -> String {
     static RE_BOLD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\*\*(.+?)\*\*").unwrap());
     static RE_ITALIC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\*(.+?)\*").unwrap());
-    static RE_LINK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[([^\]]+)\]\([^)]+\)").unwrap());
+    static RE_LINK: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\[([^\]]+)\]\([^)]+\)").unwrap());
     static RE_CODE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`([^`]+)`").unwrap());
     static RE_BULLET: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[-*•]\s+").unwrap());
 
@@ -97,8 +95,7 @@ fn strip_markdown(text: &str) -> String {
 
 fn try_parse_line(line: &str, available_mods: &[String]) -> Option<ConditionalAction> {
     // Try each matcher in order; first match wins.
-    None
-        .or_else(|| match_enable_all_optional(line))
+    None.or_else(|| match_enable_all_optional(line))
         .or_else(|| match_disable_all_optional(line))
         .or_else(|| match_enable_if(line, available_mods))
         .or_else(|| match_disable_if(line, available_mods))
@@ -113,9 +110,8 @@ fn try_parse_line(line: &str, available_mods: &[String]) -> Option<ConditionalAc
 // --- Enable/disable all optional ---
 
 fn match_enable_all_optional(line: &str) -> Option<ConditionalAction> {
-    static RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?i)enable\s+all\s+optional\b").unwrap()
-    });
+    static RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?i)enable\s+all\s+optional\b").unwrap());
 
     if !RE.is_match(line) {
         return None;
@@ -131,9 +127,8 @@ fn match_enable_all_optional(line: &str) -> Option<ConditionalAction> {
 }
 
 fn match_disable_all_optional(line: &str) -> Option<ConditionalAction> {
-    static RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?i)disable\s+all\s+optional\b").unwrap()
-    });
+    static RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?i)disable\s+all\s+optional\b").unwrap());
 
     if !RE.is_match(line) {
         return None;
@@ -200,9 +195,8 @@ fn match_disable_if(line: &str, available_mods: &[String]) -> Option<Conditional
 // --- Simple enable/disable (no condition) ---
 
 fn match_enable_disable_simple(line: &str, available_mods: &[String]) -> Option<ConditionalAction> {
-    static RE_ENABLE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r#"(?i)^(?:please\s+)?enable\s+['"]?(.+?)['"]?\s*$"#).unwrap()
-    });
+    static RE_ENABLE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r#"(?i)^(?:please\s+)?enable\s+['"]?(.+?)['"]?\s*$"#).unwrap());
     static RE_DISABLE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r#"(?i)^(?:please\s+)?disable\s+['"]?(.+?)['"]?\s*$"#).unwrap()
     });
@@ -298,7 +292,10 @@ fn match_load_order(line: &str) -> Option<ConditionalAction> {
         Regex::new(r"(?i)(?:load|place|put)\s+(\S+\.es[pml])\s+before\s+(\S+\.es[pml])").unwrap()
     });
     static RE_BOTTOM: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?i)(\S+\.es[pml])\s+(?:at\s+)?(?:the\s+)?bottom\s+(?:of\s+)?(?:the\s+)?load\s*order").unwrap()
+        Regex::new(
+            r"(?i)(\S+\.es[pml])\s+(?:at\s+)?(?:the\s+)?bottom\s+(?:of\s+)?(?:the\s+)?load\s*order",
+        )
+        .unwrap()
     });
 
     if let Some(caps) = RE_AFTER.captures(line) {
@@ -397,16 +394,23 @@ fn extract_condition(line: &str) -> InstructionCondition {
     let mut conditions: Vec<InstructionCondition> = Vec::new();
 
     // Game version conditions
-    if lower.contains("anniversary") || lower.contains(" ae ") || lower.contains(" ae,")
-        || lower.contains(" ae.") || lower.contains("(ae)") || lower.contains("1.6.")
+    if lower.contains("anniversary")
+        || lower.contains(" ae ")
+        || lower.contains(" ae,")
+        || lower.contains(" ae.")
+        || lower.contains("(ae)")
+        || lower.contains("1.6.")
         || lower.ends_with(" ae")
     {
         conditions.push(InstructionCondition::GameVersion {
             version: GameVersionMatch::Ae,
         });
     } else if (lower.contains("special edition") && !lower.contains("anniversary"))
-        || lower.contains(" se ") || lower.contains(" se,") || lower.contains("(se)")
-        || lower.contains("1.5.") || lower.ends_with(" se")
+        || lower.contains(" se ")
+        || lower.contains(" se,")
+        || lower.contains("(se)")
+        || lower.contains("1.5.")
+        || lower.ends_with(" se")
     {
         conditions.push(InstructionCondition::GameVersion {
             version: GameVersionMatch::Se,
@@ -469,7 +473,10 @@ fn fuzzy_match_mod(query: &str, available_mods: &[String]) -> Option<String> {
     let query_lower = query.to_lowercase();
 
     // Exact match (case-insensitive)
-    if let Some(exact) = available_mods.iter().find(|m| m.to_lowercase() == query_lower) {
+    if let Some(exact) = available_mods
+        .iter()
+        .find(|m| m.to_lowercase() == query_lower)
+    {
         return Some(exact.clone());
     }
 
@@ -536,9 +543,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
         curr[0] = i;
         for j in 1..=n {
             let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
-            curr[j] = (prev[j] + 1)
-                .min(curr[j - 1] + 1)
-                .min(prev[j - 1] + cost);
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
         }
         std::mem::swap(&mut prev, &mut curr);
     }
@@ -566,24 +571,23 @@ mod tests {
 
     #[test]
     fn test_enable_all_optional_ae() {
-        let result = parse_instructions(
-            "Enable all optional mods if you have AE",
-            &mods(),
-        );
+        let result = parse_instructions("Enable all optional mods if you have AE", &mods());
         assert_eq!(result.actions.len(), 1);
-        assert_eq!(result.actions[0].action, InstructionAction::EnableAllOptional);
+        assert_eq!(
+            result.actions[0].action,
+            InstructionAction::EnableAllOptional
+        );
         assert_eq!(
             result.actions[0].condition,
-            InstructionCondition::GameVersion { version: GameVersionMatch::Ae }
+            InstructionCondition::GameVersion {
+                version: GameVersionMatch::Ae
+            }
         );
     }
 
     #[test]
     fn test_disable_mod_wine() {
-        let result = parse_instructions(
-            "Disable Community Shaders if on Wine or Proton",
-            &mods(),
-        );
+        let result = parse_instructions("Disable Community Shaders if on Wine or Proton", &mods());
         assert_eq!(result.actions.len(), 1);
         match &result.actions[0].action {
             InstructionAction::DisableMod { mod_name } => {
@@ -595,13 +599,15 @@ mod tests {
 
     #[test]
     fn test_ini_setting() {
-        let result = parse_instructions(
-            "Set bFXAAEnabled=0 in SkyrimPrefs.ini [Display]",
-            &[],
-        );
+        let result = parse_instructions("Set bFXAAEnabled=0 in SkyrimPrefs.ini [Display]", &[]);
         assert_eq!(result.actions.len(), 1);
         match &result.actions[0].action {
-            InstructionAction::SetIniSetting { file, section, key, value } => {
+            InstructionAction::SetIniSetting {
+                file,
+                section,
+                key,
+                value,
+            } => {
                 assert_eq!(file, "SkyrimPrefs.ini");
                 assert_eq!(section, "Display");
                 assert_eq!(key, "bFXAAEnabled");

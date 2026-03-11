@@ -483,8 +483,15 @@ pub fn find_main_executable_public(game_path: &Path) -> Option<PathBuf> {
 /// Prefers .exe files in the root, skips crash reporters and launchers.
 fn find_main_executable(game_path: &Path) -> Option<PathBuf> {
     let skip_patterns = [
-        "crash", "report", "installer", "unins", "setup", "redis",
-        "vc_redist", "dxsetup", "dotnet",
+        "crash",
+        "report",
+        "installer",
+        "unins",
+        "setup",
+        "redis",
+        "vc_redist",
+        "dxsetup",
+        "dotnet",
     ];
 
     let Ok(entries) = fs::read_dir(game_path) else {
@@ -497,9 +504,7 @@ fn find_main_executable(game_path: &Path) -> Option<PathBuf> {
         if !name.ends_with(".exe") {
             continue;
         }
-        let skip = skip_patterns
-            .iter()
-            .any(|p| name.contains(p));
+        let skip = skip_patterns.iter().any(|p| name.contains(p));
         if skip {
             continue;
         }
@@ -520,13 +525,7 @@ fn find_main_executable(game_path: &Path) -> Option<PathBuf> {
 fn slugify_game_name(name: &str) -> String {
     name.to_lowercase()
         .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c
-            } else {
-                '-'
-            }
-        })
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect::<String>()
         .split('-')
         .filter(|s| !s.is_empty())
@@ -585,8 +584,13 @@ pub fn load_custom_games(db: &crate::database::ModDatabase) -> Vec<DetectedGame>
 }
 
 /// Save a custom game to the database.
-pub fn save_custom_game(db: &crate::database::ModDatabase, game: &CustomGame) -> Result<(), String> {
-    let conn = db.conn().map_err(|e| format!("No database connection: {e}"))?;
+pub fn save_custom_game(
+    db: &crate::database::ModDatabase,
+    game: &CustomGame,
+) -> Result<(), String> {
+    let conn = db
+        .conn()
+        .map_err(|e| format!("No database connection: {e}"))?;
     conn.execute(
         "INSERT OR REPLACE INTO custom_games (game_id, display_name, nexus_slug, game_path, exe_path, data_dir, bottle_name, bottle_path, steam_app_id)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
@@ -608,7 +612,9 @@ pub fn save_custom_game(db: &crate::database::ModDatabase, game: &CustomGame) ->
 
 /// Remove a custom game from the database.
 pub fn remove_custom_game(db: &crate::database::ModDatabase, game_id: &str) -> Result<(), String> {
-    let conn = db.conn().map_err(|e| format!("No database connection: {e}"))?;
+    let conn = db
+        .conn()
+        .map_err(|e| format!("No database connection: {e}"))?;
     conn.execute(
         "DELETE FROM custom_games WHERE game_id = ?1",
         rusqlite::params![game_id],

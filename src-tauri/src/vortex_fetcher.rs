@@ -13,10 +13,8 @@ use sha2::{Digest, Sha256};
 
 use crate::vortex_types::ExtensionSource;
 
-const GITHUB_RAW_BASE: &str =
-    "https://raw.githubusercontent.com/Nexus-Mods/vortex-games/master";
-const GITHUB_API_CONTENTS: &str =
-    "https://api.github.com/repos/Nexus-Mods/vortex-games/contents/";
+const GITHUB_RAW_BASE: &str = "https://raw.githubusercontent.com/Nexus-Mods/vortex-games/master";
+const GITHUB_API_CONTENTS: &str = "https://api.github.com/repos/Nexus-Mods/vortex-games/contents/";
 
 /// Validate a game ID to prevent path traversal and URL injection.
 ///
@@ -69,9 +67,9 @@ pub async fn fetch_extension(game_id: &str) -> Result<ExtensionSource, String> {
 
     // Try to fetch index.js
     let index_url = format!("{}/{}/index.js", GITHUB_RAW_BASE, dir_name);
-    let index_js = fetch_url(&index_url).await.map_err(|e| {
-        format!("Failed to fetch {}: {}", index_url, e)
-    })?;
+    let index_js = fetch_url(&index_url)
+        .await
+        .map_err(|e| format!("Failed to fetch {}: {}", index_url, e))?;
 
     // Try to fetch info.json (optional)
     let info_url = format!("{}/{}/info.json", GITHUB_RAW_BASE, dir_name);
@@ -135,9 +133,9 @@ pub async fn fetch_extra_file(game_id: &str, relative_path: &str) -> Result<Stri
     validate_filename(&filename)?;
 
     let url = format!("{}/{}/{}", GITHUB_RAW_BASE, dir_name, filename);
-    let content = fetch_url(&url).await.map_err(|e| {
-        format!("Failed to fetch extra file {}: {}", url, e)
-    })?;
+    let content = fetch_url(&url)
+        .await
+        .map_err(|e| format!("Failed to fetch extra file {}: {}", url, e))?;
 
     // Cache
     let game_cache = cache_dir().join(game_id);
@@ -202,9 +200,9 @@ pub async fn list_available_extensions() -> Result<Vec<String>, String> {
     }
 
     // Fetch directory listing from GitHub API
-    let body = fetch_url(GITHUB_API_CONTENTS).await.map_err(|e| {
-        format!("Failed to list extensions: {}", e)
-    })?;
+    let body = fetch_url(GITHUB_API_CONTENTS)
+        .await
+        .map_err(|e| format!("Failed to list extensions: {}", e))?;
 
     let entries: Vec<serde_json::Value> = serde_json::from_str(&body)
         .map_err(|e| format!("Failed to parse GitHub API response: {}", e))?;
