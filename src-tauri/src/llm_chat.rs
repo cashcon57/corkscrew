@@ -27,6 +27,7 @@ pub enum LlmBackend {
         provider: String,
         api_key: String,
     },
+    GeminiOAuth,
 }
 
 impl Default for LlmBackend {
@@ -46,6 +47,7 @@ impl LlmBackend {
                 "gemini" => "https://generativelanguage.googleapis.com/v1beta",
                 _ => "",
             },
+            Self::GeminiOAuth => "https://cloudcode-pa.googleapis.com",
         }
     }
 
@@ -59,11 +61,12 @@ impl LlmBackend {
                 "cerebras" => "Cerebras",
                 _ => "Cloud",
             },
+            Self::GeminiOAuth => "Gemini (Google)",
         }
     }
 
     pub fn is_cloud(&self) -> bool {
-        matches!(self, Self::Cloud { .. })
+        matches!(self, Self::Cloud { .. } | Self::GeminiOAuth)
     }
 }
 
@@ -173,6 +176,9 @@ pub struct ChatState {
     /// Cloud provider name if cloud backend is active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cloud_provider: Option<String>,
+    /// Google OAuth sign-in status (for GeminiOAuth backend).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub google_auth: Option<crate::google_oauth::GoogleAuthStatus>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -319,7 +325,7 @@ pub fn get_chat_tools(tier: ModelCapabilityTier) -> Vec<ChatTool> {
     if tier >= ModelCapabilityTier::Standard {
         tools.extend([
             tool("get_load_order", "Get plugin load order.", no_params.clone()),
-            tool("get_conflicts", "Get file conflicts between mods.", no_params.clone()),
+            tool("get_conflicts", "Get file conflicts between mods, grouped by mod pair with file types and categories.", no_params.clone()),
             tool("search_nexus", "Search NexusMods for mods.", serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -346,6 +352,9 @@ pub fn get_chat_tools(tier: ModelCapabilityTier) -> Vec<ChatTool> {
                 "required": ["mod_name"]
             })),
             tool("get_popular_companion_mods", "Get popular mod combinations.", no_params.clone()),
+            tool("get_mod_health",
+                "Calculate a health score for the current mod setup. Returns overall score (0-100), color rating (green/yellow/red), and a list of issues affecting the score.",
+                serde_json::json!({ "type": "object", "properties": {} })),
         ]);
     }
 
@@ -413,6 +422,33 @@ pub fn get_chat_tools(tier: ModelCapabilityTier) -> Vec<ChatTool> {
                 "Analyze installed mods and find compatibility patches they need. Lists mods, identifies likely conflict pairs (same category, known interactions), searches NexusMods for patches. Returns patch recommendations with install links.",
                 no_params.clone(),
             ),
+            tool(
+                "run_full_diagnostic",
+                "Run a comprehensive diagnostic on the mod setup. Combines preflight check, Wine compatibility scan, dependency validation, and conflict summary into one report. Use this as the first step when troubleshooting crashes or issues.",
+                no_params.clone(),
+            ),
+            tool(
+                "get_mod_requirements",
+                "Check what a NexusMods mod requires and whether dependencies are installed. Returns list of requirements with installed/missing status.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": { "mod_id": { "type": "integer", "description": "NexusMods mod ID to check requirements for" } },
+                    "required": ["mod_id"]
+                }),
+            ),
+            tool(
+                "batch_mod_operation",
+                "Enable or disable multiple mods at once based on a filter. Shows a preview of affected mods and asks for confirmation before executing. Filter by category, collection, name pattern, or optional status.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["enable", "disable"] },
+                        "filter_type": { "type": "string", "enum": ["category", "collection", "name_contains", "optional", "all_disabled", "all_enabled"] },
+                        "filter_value": { "type": "string", "description": "The filter value (category name, collection name, or search text). Not needed for optional/all_disabled/all_enabled." }
+                    },
+                    "required": ["action", "filter_type"]
+                }),
+            ),
         ]);
     }
 
@@ -455,12 +491,24 @@ pub fn build_chat_system_prompt(
 {mod_count} mods installed | Page: {current_page} | {page_hint}
 
 Rules: Use tools proactively. Never guess — look it up. If search_nexus returns no results, ALWAYS fall back to web_search to find the mod name, then retry search_nexus. Max 5 tool calls. Be concise. You CONTROL Corkscrew's UI — use navigate_ui and open_nexus_mod to show things to the user directly.
-SAFETY: For ANY destructive or hard-to-reverse action (uninstall mod, delete files, disable plugins, change load order, reset settings), ALWAYS ask the user to confirm before proceeding. Never auto-execute destructive actions.
+SAFETY: For ANY destructive or hard-to-reverse action (uninstall mod, delete files, disable plugins, change load order, reset settings), ALWAYS ask the user to confirm before proceeding. Never auto-execute destructive actions. For batch_mod_operation, ALWAYS tell the user what will be affected BEFORE calling the tool. Say "I'll disable X texture mods, shall I proceed?" and only call the tool after they confirm.
 
-Routing: find mod → search_nexus → open_nexus_mod (to show it in Corkscrew UI with install button) | install → search_nexus → open_nexus_mod | crash → get_crash_logs → analyze | conflicts → get_conflicts | patches needed → find_needed_patches → search_nexus for each group → open_nexus_mod for found patches | vague → web_search → search_nexus → open_nexus_mod
+Routing: find mod → search_nexus → open_nexus_mod (to show it in Corkscrew UI with install button) | install mod → get_mod_requirements first → if missing deps, show them via open_nexus_mod → then proceed with install | crash → get_crash_logs → analyze | conflicts → get_conflicts (returns grouped, categorized conflicts) → explain each in plain English: what the files do in-game, which mod wins, and whether the user should care | patches needed → find_needed_patches → search_nexus for each group → open_nexus_mod for found patches | batch operations ("disable all X", "enable my Y collection") → batch_mod_operation with appropriate filter | health check → get_mod_health → explain issues and suggest fixes | vague → web_search → search_nexus → open_nexus_mod
 When you find a mod the user wants, ALWAYS call open_nexus_mod to open it in Corkscrew's Discover tab where they can see images and install it.
 
-Modding: .esm first, .esl light, .esp last. Patches after patched plugin. Later plugin wins record conflicts. Higher-priority mod wins file conflicts. Navmesh conflicts = game-breaking. LOOT for auto-sort. Wine: .NET Script Framework and original SSE Engine Fixes crash — Corkscrew ships Wine-compatible fork.{wine_compat_section}"#,
+Modding: .esm first, .esl light, .esp last. Patches after patched plugin. Later plugin wins record conflicts. Higher-priority mod wins file conflicts. Navmesh conflicts = game-breaking. LOOT for auto-sort. Wine: .NET Script Framework and original SSE Engine Fixes crash — Corkscrew ships Wine-compatible fork.{wine_compat_section}
+
+Troubleshooting: When user reports crashes or issues, follow this flow:
+1. Ask WHEN it crashes: startup, main menu, loading save, new game, in-game (specific location or random)
+2. Based on timing:
+   - Startup/main menu → run_full_diagnostic, focus on Wine compat + SKSE + missing masters
+   - Loading save → check_dependency_issues, ask if mods changed since save was made
+   - New game → run_full_diagnostic, check for script-heavy mods + navmesh conflicts
+   - Specific location → get_conflicts, check city overhaul/area mods for that location
+   - Random/combat → analyze_crash_log if available, check combat/animation mods
+3. Narrow suspects to 3-5 specific mods before suggesting any disabling
+4. Never suggest "disable all mods" or binary search as first step
+5. If crash log available, always analyze it first with analyze_crash_log"#,
         game_name = game_name,
         platform = platform,
         mod_count = mod_count,
@@ -577,6 +625,9 @@ pub async fn chat_send(
             chat_send_cloud_streaming(provider, api_key, messages, tools, max_tokens, |_, _| {})
                 .await
         }
+        LlmBackend::GeminiOAuth => {
+            chat_send_gemini_oauth_streaming(messages, tools, max_tokens, |_, _| {}).await
+        }
     }
 }
 
@@ -624,6 +675,9 @@ where
         LlmBackend::Cloud { provider, api_key } => {
             chat_send_cloud_streaming(provider, api_key, messages, tools, max_tokens, on_token)
                 .await
+        }
+        LlmBackend::GeminiOAuth => {
+            chat_send_gemini_oauth_streaming(messages, tools, max_tokens, on_token).await
         }
     }
 }
@@ -957,7 +1011,7 @@ pub fn cloud_model_display(provider: &str) -> String {
     match provider {
         "groq" => "Llama 3.3 70B (Groq)".into(),
         "cerebras" => "Llama 3.3 70B (Cerebras)".into(),
-        "gemini" => "Gemini 2.5 Flash".into(),
+        "gemini" | "gemini_oauth" => "Gemini 2.5 Flash".into(),
         _ => format!("Cloud ({})", provider),
     }
 }
@@ -1439,6 +1493,137 @@ where
     })
 }
 
+/// Gemini OAuth streaming: uses Bearer token from Google OAuth instead of API key.
+/// Targets the Code Assist endpoint for per-user free quota.
+pub async fn chat_send_gemini_oauth_streaming<F>(
+    messages: &[ChatMessage],
+    tools: &[ChatTool],
+    max_tokens: u32,
+    on_token: F,
+) -> Result<ChatMessage, String>
+where
+    F: Fn(&str, StreamPhase) + Send + Sync + 'static,
+{
+    let access_token = crate::google_oauth::ensure_valid_token()
+        .await
+        .map_err(|e| format!("Google auth failed: {e}"))?;
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let model = "gemini-2.5-flash";
+    let (system_instruction, contents) = messages_to_gemini_format(messages);
+
+    let mut body = serde_json::json!({
+        "contents": contents,
+        "generationConfig": {
+            "temperature": 0.7,
+            "topP": 0.8,
+            "maxOutputTokens": max_tokens,
+        }
+    });
+
+    if let Some(ref sys) = system_instruction {
+        body["systemInstruction"] = serde_json::json!({
+            "parts": [{"text": sys}]
+        });
+    }
+
+    if !tools.is_empty() {
+        body["tools"] = tools_to_gemini_format(tools);
+    }
+
+    let url = format!(
+        "https://cloudcode-pa.googleapis.com/v1internal/models/{model}:streamGenerateContent?alt=sse"
+    );
+
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {access_token}"))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Gemini OAuth request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Gemini OAuth error: {text}"));
+    }
+
+    // Parse SSE stream — same format as standard Gemini API
+    let mut full_content = String::new();
+    let mut tool_calls: Vec<ToolCallResponse> = Vec::new();
+    let mut stream = resp.bytes_stream();
+
+    use futures::StreamExt;
+    let mut buffer = String::new();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("Stream error: {e}"))?;
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+        while let Some(data_end) = buffer.find("\n\n") {
+            let block = buffer[..data_end].to_string();
+            buffer = buffer[data_end + 2..].to_string();
+
+            for line in block.lines() {
+                let line = line.trim();
+                if line.starts_with(':') {
+                    continue;
+                }
+                if let Some(json_str) = line.strip_prefix("data: ") {
+                    if let Ok(obj) = serde_json::from_str::<serde_json::Value>(json_str) {
+                        if let Some(parts) = obj
+                            .pointer("/candidates/0/content/parts")
+                            .and_then(|p| p.as_array())
+                        {
+                            for part in parts {
+                                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                                    if !text.is_empty() {
+                                        on_token(text, StreamPhase::Content);
+                                        full_content.push_str(text);
+                                    }
+                                }
+                                if let Some(fc) = part.get("functionCall") {
+                                    let name = fc
+                                        .get("name")
+                                        .and_then(|n| n.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    let arguments = fc
+                                        .get("args")
+                                        .cloned()
+                                        .unwrap_or(serde_json::json!({}));
+                                    if !name.is_empty() {
+                                        tool_calls.push(ToolCallResponse {
+                                            function: ToolCallFunction { name, arguments },
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(ChatMessage {
+        role: "assistant".into(),
+        content: full_content,
+        tool_calls: if tool_calls.is_empty() {
+            None
+        } else {
+            Some(tool_calls)
+        },
+        mentioned_mods: None,
+        timestamp: None,
+    })
+}
+
 /// Ollama native API: POST /api/chat
 async fn chat_send_ollama(
     model: &str,
@@ -1648,7 +1833,7 @@ async fn chat_send_openai_compat(
 /// Load a model into memory.
 pub async fn load_model(backend: &LlmBackend, model: &str, num_ctx: u32) -> Result<(), String> {
     match backend {
-        LlmBackend::Cloud { .. } => {
+        LlmBackend::Cloud { .. } | LlmBackend::GeminiOAuth => {
             // Cloud backends don't need model loading — the model is served remotely.
             Ok(())
         }
@@ -1696,7 +1881,7 @@ pub async fn load_model(backend: &LlmBackend, model: &str, num_ctx: u32) -> Resu
 /// Unload a model from memory.
 pub async fn unload_model(backend: &LlmBackend, model: &str) -> Result<(), String> {
     match backend {
-        LlmBackend::Cloud { .. } => {
+        LlmBackend::Cloud { .. } | LlmBackend::GeminiOAuth => {
             // Cloud backends have nothing to unload.
             Ok(())
         }

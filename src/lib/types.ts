@@ -1468,13 +1468,20 @@ export interface ChatMessage {
   tool_calls?: ToolCallResponse[];
   mentioned_mods?: MentionedMod[];
   timestamp?: string;
+  structured_data?: Record<string, unknown>;
 }
 
 export interface ToolCallResponse {
   function: { name: string; arguments: Record<string, unknown> };
 }
 
-export type LlmBackend = "ollama" | "mlx" | "cloud";
+export interface GoogleAuthStatus {
+  signed_in: boolean;
+  email?: string;
+  name?: string;
+}
+
+export type LlmBackend = "ollama" | "mlx" | "cloud" | "gemini_oauth";
 
 export interface ChatState {
   model: string | null;
@@ -1483,6 +1490,7 @@ export interface ChatState {
   messages: ChatMessage[];
   available_models: OllamaModel[];
   cloud_provider?: string;
+  google_auth?: GoogleAuthStatus;
 }
 
 export interface ChatResponse {
@@ -1494,6 +1502,8 @@ export interface ToolResult {
   tool_name: string;
   result: string;
   success: boolean;
+  display_name?: string;
+  structured_data?: Record<string, unknown>;
 }
 
 export interface ChatStarter {

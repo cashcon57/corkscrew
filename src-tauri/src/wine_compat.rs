@@ -6,6 +6,25 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::database::ModSummary;
+
+/// Build wine compat input from a mod list. Extracts mod name, DLL signals,
+/// and nexus ID for each enabled mod. Shared helper to avoid copy-pasting
+/// the same mapping logic across tool handlers.
+pub fn build_compat_input(mods: &[ModSummary]) -> Vec<(String, Vec<String>, Option<i64>)> {
+    mods.iter()
+        .filter(|m| m.enabled)
+        .map(|m| {
+            let mut dlls = Vec::new();
+            if m.archive_name.to_lowercase().ends_with(".dll") {
+                dlls.push(m.archive_name.clone());
+            }
+            dlls.push(m.name.clone());
+            (m.name.clone(), dlls, m.nexus_mod_id)
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------

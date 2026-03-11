@@ -105,7 +105,7 @@ const BASE64URL_CHARS: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 /// Encode bytes to base64url without padding.
-fn base64url_encode(input: &[u8]) -> String {
+pub(crate) fn base64url_encode(input: &[u8]) -> String {
     let mut out = String::with_capacity((input.len() * 4).div_ceil(3));
     let mut i = 0;
     while i + 2 < input.len() {
@@ -197,7 +197,7 @@ fn base64url_decode(input: &str) -> Result<Vec<u8>, OAuthError> {
 // ---------------------------------------------------------------------------
 
 /// Generate `n` cryptographically random bytes using platform APIs.
-fn random_bytes(n: usize) -> Result<Vec<u8>, OAuthError> {
+pub(crate) fn random_bytes(n: usize) -> Result<Vec<u8>, OAuthError> {
     let mut buf = vec![0u8; n];
 
     #[cfg(unix)]
@@ -234,14 +234,14 @@ fn random_bytes(n: usize) -> Result<Vec<u8>, OAuthError> {
 // ---------------------------------------------------------------------------
 
 /// PKCE code verifier and challenge pair.
-struct PkceChallenge {
-    verifier: String,
-    challenge: String,
+pub(crate) struct PkceChallenge {
+    pub(crate) verifier: String,
+    pub(crate) challenge: String,
 }
 
 /// Generate a PKCE code verifier (43-128 characters, unreserved URI chars)
 /// and its S256 challenge.
-fn generate_pkce() -> Result<PkceChallenge, OAuthError> {
+pub(crate) fn generate_pkce() -> Result<PkceChallenge, OAuthError> {
     // Generate 32 random bytes -> base64url gives 43 chars (within 43-128).
     let bytes = random_bytes(32)?;
     let verifier = base64url_encode(&bytes);
@@ -260,7 +260,7 @@ fn generate_pkce() -> Result<PkceChallenge, OAuthError> {
 // Internal: generate random state parameter
 // ---------------------------------------------------------------------------
 
-fn generate_state() -> Result<String, OAuthError> {
+pub(crate) fn generate_state() -> Result<String, OAuthError> {
     let bytes = random_bytes(16)?;
     Ok(base64url_encode(&bytes))
 }
@@ -291,7 +291,7 @@ fn build_auth_url(
 // Minimal URL-encoding (only for build_auth_url helper)
 // ---------------------------------------------------------------------------
 
-mod urlencoding {
+pub(crate) mod urlencoding {
     /// Percent-encode a string for use in URL query parameters.
     pub fn encode(input: &str) -> String {
         let mut out = String::with_capacity(input.len() * 3);
@@ -315,7 +315,7 @@ mod urlencoding {
 // ---------------------------------------------------------------------------
 
 /// Open a URL in the user's default browser.
-fn open_browser(url: &str) -> Result<(), OAuthError> {
+pub(crate) fn open_browser(url: &str) -> Result<(), OAuthError> {
     #[cfg(target_os = "macos")]
     let cmd = "open";
 
@@ -338,10 +338,10 @@ fn open_browser(url: &str) -> Result<(), OAuthError> {
 // ---------------------------------------------------------------------------
 
 /// Result from the callback server: the authorization code received.
-struct CallbackResult {
-    code: String,
+pub(crate) struct CallbackResult {
+    pub(crate) code: String,
     #[allow(dead_code)]
-    state: String,
+    pub(crate) state: String,
 }
 
 /// Decode a percent-encoded (URL-encoded) string.
@@ -349,7 +349,7 @@ struct CallbackResult {
 /// Handles both standard percent-encoding (%XX) and form-encoding (+ as space).
 /// This is a proper implementation that avoids the double-decode bug where
 /// `%2B` -> `+` -> space when using chained `.replace()` calls.
-fn percent_decode(input: &str) -> String {
+pub(crate) fn percent_decode(input: &str) -> String {
     // First replace + with space (form encoding), then decode %XX sequences
     let input = input.replace('+', " ");
     let mut result = Vec::with_capacity(input.len());
@@ -370,7 +370,7 @@ fn percent_decode(input: &str) -> String {
 }
 
 /// Parse query parameters from a URL path string (e.g. "/callback?code=xxx&state=yyy").
-fn parse_query_params(path: &str) -> HashMap<String, String> {
+pub(crate) fn parse_query_params(path: &str) -> HashMap<String, String> {
     let mut params = HashMap::new();
 
     if let Some(query) = path.split('?').nth(1) {
@@ -387,7 +387,7 @@ fn parse_query_params(path: &str) -> HashMap<String, String> {
 
 /// Spin up a temporary HTTP server on a random port, wait for the OAuth
 /// callback, then return the authorization code.
-fn wait_for_callback(
+pub(crate) fn wait_for_callback(
     listener: &TcpListener,
     expected_state: &str,
 ) -> Result<CallbackResult, OAuthError> {

@@ -22,8 +22,11 @@
     getSystemMemory,
     installOllama,
     getRecommendedModel,
+    googleSignIn,
+    googleSignOut,
+    googleAuthStatus,
   } from "$lib/api";
-  import type { ChatMessage, ChatState, ChatStarter, NewCrashInfo, OllamaModel, OllamaStatus, ChatResponse, MentionedMod } from "$lib/types";
+  import type { ChatMessage, ChatState, ChatStarter, NewCrashInfo, OllamaModel, OllamaStatus, ChatResponse, MentionedMod, GoogleAuthStatus } from "$lib/types";
 
   let {
     visible = false,
@@ -60,10 +63,15 @@
   let cloudKeyValid = $state<boolean | null>(null);
   let cloudConnecting = $state(false);
 
+  // Google OAuth state
+  let googleAuth = $state<GoogleAuthStatus | null>(null);
+  let googleSigningIn = $state(false);
+  let googleConnecting = $state(false);
+
   // Cloud provider metadata
   const cloudProviders = [
+    { id: "gemini", name: "Google Gemini", model: "Gemini 2.5 Flash", free: "Free: 60 req/min, 1K req/day (Google sign-in)", url: "https://aistudio.google.com/apikey" },
     { id: "groq", name: "Groq", model: "Llama 3.3 70B", free: "Free: 30 req/min, ~500K tokens/day", url: "https://console.groq.com/keys" },
-    { id: "gemini", name: "Google Gemini", model: "Gemini 2.5 Flash", free: "Free: 10 req/min, 250 req/day", url: "https://aistudio.google.com/apikey" },
     { id: "cerebras", name: "Cerebras", model: "Llama 3.3 70B", free: "Free: 1M tokens/day, 30 req/min", url: "https://cloud.cerebras.ai/" },
   ];
 
@@ -351,7 +359,10 @@
       cachedMlxModels = mlxCached;
       // Restore backend from active session, otherwise keep default (mlx)
       if (state.loaded) {
-        if (state.cloud_provider) {
+        if (state.cloud_provider === "gemini_oauth") {
+          selectedBackend = "cloud";
+          cloudProvider = "gemini";
+        } else if (state.cloud_provider) {
           selectedBackend = "cloud";
         } else if (typeof state.backend === "string") {
           selectedBackend = state.backend as LlmBackend;
@@ -374,6 +385,14 @@
         historyCount = 0;
       }
       loadCloudConfig();
+      // Load Google auth status
+      try {
+        googleAuth = await googleAuthStatus();
+        if (googleAuth?.signed_in) {
+          // Default to Gemini when signed in with Google
+          cloudProvider = "gemini";
+        }
+      } catch { /* non-critical */ }
     } catch (e) {
       showError(`${e}`);
     }
@@ -445,6 +464,64 @@
       showError(`${e}`);
     } finally {
       cloudValidating = false;
+    }
+  }
+
+  async function handleGoogleSignIn() {
+    const game = $selectedGame;
+    if (!game) return;
+    googleSigningIn = true;
+    try {
+      const status = await googleSignIn();
+      googleAuth = status;
+      if (status.signed_in) {
+        // Auto-connect to Gemini via OAuth
+        googleConnecting = true;
+        try {
+          await chatLoadModel("gemini_oauth", game.game_id, game.bottle_name, currentPageName, "gemini_oauth");
+          chatState = await chatGetState();
+          showModelPicker = false;
+          resetAutoUnload();
+        } catch (e) {
+          showError(`Failed to connect to Gemini: ${e}`);
+        } finally {
+          googleConnecting = false;
+        }
+      }
+    } catch (e) {
+      showError(`Google sign-in failed: ${e}`);
+    } finally {
+      googleSigningIn = false;
+    }
+  }
+
+  async function handleGoogleSignOut() {
+    try {
+      await googleSignOut();
+      googleAuth = { signed_in: false };
+      // If currently using GeminiOAuth, unload
+      if (chatState?.cloud_provider === "gemini_oauth") {
+        await chatUnloadModel();
+        chatState = await chatGetState();
+      }
+    } catch (e) {
+      showError(`Sign-out failed: ${e}`);
+    }
+  }
+
+  async function handleGoogleConnect() {
+    const game = $selectedGame;
+    if (!game) return;
+    googleConnecting = true;
+    try {
+      await chatLoadModel("gemini_oauth", game.game_id, game.bottle_name, currentPageName, "gemini_oauth");
+      chatState = await chatGetState();
+      showModelPicker = false;
+      resetAutoUnload();
+    } catch (e) {
+      showError(`Failed to connect: ${e}`);
+    } finally {
+      googleConnecting = false;
     }
   }
 
@@ -605,6 +682,16 @@
           const mods = await getInstalledMods(game.game_id, game.bottle_name);
           installedMods.set(mods);
         } catch (_) { /* non-critical */ }
+      }
+
+      // Extract structured_data from tool results and attach to the last assistant message
+      const healthResult = resp.tool_results?.find(tr => tr.structured_data?.type === "health_score");
+      if (healthResult?.structured_data && chatState) {
+        const lastIdx = chatState.messages.length - 1;
+        if (lastIdx >= 0 && chatState.messages[lastIdx].role === "assistant") {
+          chatState.messages[lastIdx].structured_data = healthResult.structured_data;
+          chatState = { ...chatState };
+        }
       }
     } catch (e) {
       showError(`Chat error: ${e}`);
@@ -971,7 +1058,7 @@
           <!-- Cloud backend -->
           <div class="cloud-setup">
             <div class="cloud-notice">
-              Cloud mode sends your chat messages to the selected provider. Your API key is stored locally in this browser and never sent to Corkscrew servers.
+              Cloud mode sends your chat messages to the selected provider. Your data is sent directly to the provider — never through Corkscrew servers.
             </div>
 
             <div class="cloud-provider-select">
@@ -991,56 +1078,100 @@
               {#each cloudProviders.filter(p => p.id === cloudProvider) as activeProvider}
                 <div class="cloud-provider-info">
                   <span class="cloud-free-tier">{activeProvider.free}</span>
-                  <a class="cloud-get-key" href={activeProvider.url} onclick={(e) => { e.preventDefault(); openUrl(activeProvider.url); }}>
-                    Get free API key &rarr;
-                  </a>
+                  {#if cloudProvider !== "gemini"}
+                    <a class="cloud-get-key" href={activeProvider.url} onclick={(e) => { e.preventDefault(); openUrl(activeProvider.url); }}>
+                      Get free API key &rarr;
+                    </a>
+                  {/if}
                 </div>
               {/each}
             </div>
 
-            <div class="cloud-key-input">
-              <label class="cloud-label">API Key</label>
-              <div class="cloud-key-row">
-                <div class="cloud-key-field">
-                  <input
-                    type={cloudKeyVisible ? "text" : "password"}
-                    class="cloud-key-input-field"
-                    class:cloud-key-valid={cloudKeyValid === true}
-                    class:cloud-key-invalid={cloudKeyValid === false}
-                    placeholder="Paste your API key here"
-                    bind:value={cloudApiKey}
-                    onkeydown={(e) => { if (e.key === "Enter") handleCloudConnect(); }}
-                  />
-                  <button class="cloud-key-toggle" onclick={() => cloudKeyVisible = !cloudKeyVisible} title={cloudKeyVisible ? "Hide" : "Show"}>
-                    {cloudKeyVisible ? "Hide" : "Show"}
+            {#if cloudProvider === "gemini"}
+              <!-- Gemini: Google Sign-In (primary) -->
+              {#if googleAuth?.signed_in}
+                <div class="google-signed-in">
+                  <div class="google-user-info">
+                    <span class="google-email">{googleAuth.email ?? googleAuth.name ?? "Signed in"}</span>
+                    <button class="model-btn model-btn-secondary google-signout-btn" onclick={handleGoogleSignOut}>Sign out</button>
+                  </div>
+                  <div class="cloud-actions">
+                    <button
+                      class="model-btn model-btn-load cloud-connect-btn"
+                      disabled={googleConnecting}
+                      onclick={handleGoogleConnect}
+                    >
+                      {#if googleConnecting}
+                        <span class="mini-spinner"></span> Connecting...
+                      {:else}
+                        Start chatting
+                      {/if}
+                    </button>
+                  </div>
+                </div>
+              {:else}
+                <div class="google-signin-section">
+                  <button
+                    class="model-btn model-btn-load google-signin-btn"
+                    disabled={googleSigningIn}
+                    onclick={handleGoogleSignIn}
+                  >
+                    {#if googleSigningIn}
+                      <span class="mini-spinner"></span> Signing in...
+                    {:else}
+                      Sign in with Google
+                    {/if}
+                  </button>
+                  <span class="google-signin-hint">No API key needed — sign in with your Google account</span>
+                </div>
+              {/if}
+            {/if}
+
+            {#if cloudProvider !== "gemini" || (cloudProvider === "gemini" && !googleAuth?.signed_in)}
+              <div class="cloud-key-input">
+                <label class="cloud-label">{cloudProvider === "gemini" ? "Or use API key" : "API Key"}</label>
+                <div class="cloud-key-row">
+                  <div class="cloud-key-field">
+                    <input
+                      type={cloudKeyVisible ? "text" : "password"}
+                      class="cloud-key-input-field"
+                      class:cloud-key-valid={cloudKeyValid === true}
+                      class:cloud-key-invalid={cloudKeyValid === false}
+                      placeholder="Paste your API key here"
+                      bind:value={cloudApiKey}
+                      onkeydown={(e) => { if (e.key === "Enter") handleCloudConnect(); }}
+                    />
+                    <button class="cloud-key-toggle" onclick={() => cloudKeyVisible = !cloudKeyVisible} title={cloudKeyVisible ? "Hide" : "Show"}>
+                      {cloudKeyVisible ? "Hide" : "Show"}
+                    </button>
+                  </div>
+                  <button
+                    class="model-btn model-btn-secondary"
+                    disabled={!cloudApiKey.trim() || cloudValidating}
+                    onclick={handleValidateKey}
+                  >
+                    {cloudValidating ? "..." : "Validate"}
                   </button>
                 </div>
-                <button
-                  class="model-btn model-btn-secondary"
-                  disabled={!cloudApiKey.trim() || cloudValidating}
-                  onclick={handleValidateKey}
-                >
-                  {cloudValidating ? "..." : "Validate"}
-                </button>
               </div>
-            </div>
 
-            <div class="cloud-actions">
-              <button
-                class="model-btn model-btn-load cloud-connect-btn"
-                disabled={!cloudApiKey.trim() || cloudConnecting}
-                onclick={handleCloudConnect}
-              >
-                {#if cloudConnecting}
-                  <span class="mini-spinner"></span> Connecting...
-                {:else}
-                  Connect
+              <div class="cloud-actions">
+                <button
+                  class="model-btn model-btn-load cloud-connect-btn"
+                  disabled={!cloudApiKey.trim() || cloudConnecting}
+                  onclick={handleCloudConnect}
+                >
+                  {#if cloudConnecting}
+                    <span class="mini-spinner"></span> Connecting...
+                  {:else}
+                    Connect
+                  {/if}
+                </button>
+                {#if cloudApiKey.trim()}
+                  <button class="model-btn model-btn-secondary" onclick={clearCloudConfig}>Clear</button>
                 {/if}
-              </button>
-              {#if cloudApiKey.trim()}
-                <button class="model-btn model-btn-secondary" onclick={clearCloudConfig}>Clear</button>
-              {/if}
-            </div>
+              </div>
+            {/if}
           </div>
         {/if}
       </div>
@@ -1256,6 +1387,18 @@
                 {/if}
               </div>
             {/if}
+          {/if}
+          {#if msg.role === "assistant" && msg.structured_data?.type === "health_score"}
+            {@const hs = msg.structured_data}
+            <div class="health-score-card health-{hs.color}">
+              <div class="health-score-number">{hs.score}</div>
+              <div class="health-score-label">Mod Health</div>
+              {#if Array.isArray(hs.issues)}
+                {#each hs.issues as issue}
+                  <div class="health-issue">{issue.message} ({issue.points})</div>
+                {/each}
+              {/if}
+            </div>
           {/if}
         </div>
       {/each}
@@ -1578,6 +1721,76 @@
 
   .cloud-connect-btn {
     flex: 1;
+  }
+
+  /* Google Sign-In */
+  .google-signin-section {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 8px;
+  }
+
+  .google-signin-btn {
+    background: #4285f4 !important;
+    border-color: #4285f4 !important;
+    color: white !important;
+    font-weight: 500;
+  }
+  .google-signin-btn:hover:not(:disabled) {
+    background: #3367d6 !important;
+    border-color: #3367d6 !important;
+  }
+
+  .google-signin-hint {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    text-align: center;
+  }
+
+  .google-signed-in {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 8px;
+  }
+
+  .google-user-info {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 8px;
+    background: var(--bg-secondary);
+    border-radius: 6px;
+  }
+
+  .google-email {
+    font-size: 12px;
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .google-signout-btn {
+    font-size: 11px !important;
+    padding: 2px 8px !important;
+    flex-shrink: 0;
+  }
+
+  .api-key-fallback {
+    margin-top: 10px;
+  }
+
+  .api-key-fallback-toggle {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    cursor: pointer;
+    padding: 4px 0;
+  }
+  .api-key-fallback-toggle:hover {
+    color: var(--text-secondary);
   }
 
   /* ---- Setup / Model picker ---- */
@@ -2543,4 +2756,12 @@
     opacity: 0.7;
     font-style: italic;
   }
+
+  .health-score-card { padding: 12px; border-radius: 8px; margin: 8px 0; }
+  .health-green { background: rgba(34, 197, 94, 0.1); border-left: 3px solid #22c55e; }
+  .health-yellow { background: rgba(234, 179, 8, 0.1); border-left: 3px solid #eab308; }
+  .health-red { background: rgba(239, 68, 68, 0.1); border-left: 3px solid #ef4444; }
+  .health-score-number { font-size: 2em; font-weight: bold; }
+  .health-score-label { font-size: 0.8em; opacity: 0.7; text-transform: uppercase; }
+  .health-issue { font-size: 0.85em; margin-top: 4px; }
 </style>

@@ -522,7 +522,7 @@ pub fn clean_game_directory(
 // ---------------------------------------------------------------------------
 
 /// Categorize a file based on its extension/path.
-fn categorize_file(rel_path: &str) -> String {
+pub fn categorize_file(rel_path: &str) -> String {
     let lower = rel_path.to_lowercase();
 
     if is_enb_file(rel_path) {

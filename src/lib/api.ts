@@ -2015,6 +2015,20 @@ export async function chatCheckNewCrashes(
   return invoke("chat_check_new_crashes", { gameId, bottleName });
 }
 
+// ---- Google OAuth (Gemini) ----
+
+export async function googleSignIn(): Promise<import("./types").GoogleAuthStatus> {
+  return invoke("google_sign_in");
+}
+
+export async function googleSignOut(): Promise<void> {
+  return invoke("google_sign_out");
+}
+
+export async function googleAuthStatus(): Promise<import("./types").GoogleAuthStatus> {
+  return invoke("google_auth_status");
+}
+
 // ---- Vortex Extensions ----
 
 export async function vortexFetchExtension(gameId: string): Promise<import("./types").VortexGameRegistration> {
