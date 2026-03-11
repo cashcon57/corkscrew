@@ -1494,6 +1494,54 @@ export interface ToolResult {
   success: boolean;
 }
 
+// Vortex Extensions
+export interface VortexExtensionSummary {
+  game_id: string;
+  name: string;
+  version: string | null;
+  is_stub: boolean;
+  fetched_at: string;
+  tool_count: number;
+  mod_type_count: number;
+}
+
+export interface VortexGameRegistration {
+  id: string;
+  name: string;
+  executable: string;
+  required_files: string[];
+  query_mod_path: string;
+  merge_mods: boolean;
+  store_ids: {
+    steam_app_id: string | null;
+    gog_app_id: string | null;
+    epic_app_id: string | null;
+    xbox_id: string | null;
+  };
+  supported_tools: VortexTool[];
+  mod_types: VortexModType[];
+  is_stub: boolean;
+  steam_dir_name: string | null;
+}
+
+export interface VortexTool {
+  id: string;
+  name: string;
+  executable: string;
+  required_files: string[];
+  short_name: string | null;
+  relative: boolean;
+  exclusive: boolean;
+  default_primary: boolean;
+  parameters: string[];
+}
+
+export interface VortexModType {
+  id: string;
+  priority: number;
+  target_path: string;
+}
+
 // Steam Integration
 export interface SteamInfo {
   steam_root: string;

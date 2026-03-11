@@ -346,6 +346,278 @@ pub fn get_game_entry(game_id: &str) -> Option<&'static GameEntry> {
 }
 
 // ---------------------------------------------------------------------------
+// Steam appmanifest scanner — detects ALL installed Steam games
+// ---------------------------------------------------------------------------
+
+/// A Steam game discovered from an appmanifest ACF file.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SteamAppManifest {
+    pub app_id: String,
+    pub name: String,
+    pub install_dir: String,
+}
+
+/// Scan a bottle's steamapps directory for all appmanifest files.
+/// Returns games that are NOT already detected by registered plugins.
+pub fn detect_unregistered_steam_games(
+    bottle: &Bottle,
+    already_detected: &[DetectedGame],
+) -> Vec<DetectedGame> {
+    let steamapps = match bottle.find_path(&["Program Files (x86)", "Steam", "steamapps"]) {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+
+    let mut found = Vec::new();
+    let Ok(entries) = fs::read_dir(&steamapps) else {
+        return found;
+    };
+
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with("appmanifest_") || !name.ends_with(".acf") {
+            continue;
+        }
+
+        let manifest = match parse_appmanifest(&entry.path()) {
+            Some(m) => m,
+            None => continue,
+        };
+
+        // Skip if already detected by a registered plugin
+        if already_detected.iter().any(|g| {
+            // Match by Steam app ID in game_id or by install dir overlap
+            g.game_path
+                .to_string_lossy()
+                .to_lowercase()
+                .contains(&manifest.install_dir.to_lowercase())
+        }) {
+            continue;
+        }
+
+        // Resolve the actual game path
+        let common = steamapps.join("common");
+        let game_path = match find_child_case_insensitive(&common, &manifest.install_dir) {
+            Some(p) if p.is_dir() => p,
+            _ => continue,
+        };
+
+        // Find the first .exe in the game directory (heuristic)
+        let exe_path = find_main_executable(&game_path);
+
+        // Derive a game_id from the app name
+        let game_id = slugify_game_name(&manifest.name);
+
+        found.push(DetectedGame {
+            game_id: game_id.clone(),
+            display_name: manifest.name.clone(),
+            nexus_slug: game_id,
+            game_path: game_path.clone(),
+            exe_path,
+            data_dir: game_path,
+            bottle_name: bottle.name.clone(),
+            bottle_path: bottle.path.clone(),
+        });
+    }
+
+    found
+}
+
+/// Parse a Steam appmanifest ACF file to extract app ID, name, and install dir.
+fn parse_appmanifest(path: &Path) -> Option<SteamAppManifest> {
+    let content = fs::read_to_string(path).ok()?;
+    let app_id = extract_acf_value(&content, "appid")?;
+    let name = extract_acf_value(&content, "name")?;
+    let install_dir = extract_acf_value(&content, "installdir")?;
+
+    // Skip tools/configs (Steamworks Shared, Proton, etc.)
+    let state_flags = extract_acf_value(&content, "StateFlags")
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(0);
+    // StateFlags 4 = fully installed. Skip if 0 (invalid) or other states.
+    if state_flags == 0 {
+        return None;
+    }
+
+    // Skip known non-game entries
+    let lower_name = name.to_lowercase();
+    if lower_name.contains("steamworks")
+        || lower_name.contains("proton")
+        || lower_name.contains("steam linux runtime")
+        || lower_name.contains("steam controller")
+        || lower_name.contains("redistributable")
+        || lower_name.contains("directx")
+    {
+        return None;
+    }
+
+    Some(SteamAppManifest {
+        app_id,
+        name,
+        install_dir,
+    })
+}
+
+/// Extract a quoted value from a VDF/ACF key-value pair.
+fn extract_acf_value(content: &str, key: &str) -> Option<String> {
+    let key_pat = format!("\"{}\"", key);
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix(&key_pat) {
+            let val = rest.trim();
+            if val.starts_with('"') && val.len() >= 2 {
+                let end = val[1..].find('"').map(|i| i + 1)?;
+                return Some(val[1..end].to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Public wrapper for find_main_executable.
+pub fn find_main_executable_public(game_path: &Path) -> Option<PathBuf> {
+    find_main_executable(game_path)
+}
+
+/// Find the most likely main executable in a game directory.
+/// Prefers .exe files in the root, skips crash reporters and launchers.
+fn find_main_executable(game_path: &Path) -> Option<PathBuf> {
+    let skip_patterns = [
+        "crash", "report", "installer", "unins", "setup", "redis",
+        "vc_redist", "dxsetup", "dotnet",
+    ];
+
+    let Ok(entries) = fs::read_dir(game_path) else {
+        return None;
+    };
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_lowercase();
+        if !name.ends_with(".exe") {
+            continue;
+        }
+        let skip = skip_patterns
+            .iter()
+            .any(|p| name.contains(p));
+        if skip {
+            continue;
+        }
+        candidates.push(entry.path());
+    }
+
+    // Sort by size descending — the main exe is usually the largest
+    candidates.sort_by(|a, b| {
+        let sa = a.metadata().map(|m| m.len()).unwrap_or(0);
+        let sb = b.metadata().map(|m| m.len()).unwrap_or(0);
+        sb.cmp(&sa)
+    });
+
+    candidates.into_iter().next()
+}
+
+/// Convert a game name into a URL-safe slug for use as game_id.
+fn slugify_game_name(name: &str) -> String {
+    name.to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+// ---------------------------------------------------------------------------
+// Custom games (user-added, persisted in DB)
+// ---------------------------------------------------------------------------
+
+/// A custom game added by the user (stored in SQLite).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CustomGame {
+    pub game_id: String,
+    pub display_name: String,
+    pub nexus_slug: String,
+    pub game_path: String,
+    pub exe_path: Option<String>,
+    pub data_dir: String,
+    pub bottle_name: String,
+    pub bottle_path: String,
+    pub steam_app_id: Option<String>,
+}
+
+/// Load custom games from the database and return them as DetectedGame entries.
+pub fn load_custom_games(db: &crate::database::ModDatabase) -> Vec<DetectedGame> {
+    let conn = match db.conn() {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let mut stmt = match conn.prepare(
+        "SELECT game_id, display_name, nexus_slug, game_path, exe_path, data_dir, bottle_name, bottle_path FROM custom_games",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(), // Table might not exist yet
+    };
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(DetectedGame {
+                game_id: row.get(0)?,
+                display_name: row.get(1)?,
+                nexus_slug: row.get(2)?,
+                game_path: PathBuf::from(row.get::<_, String>(3)?),
+                exe_path: row.get::<_, Option<String>>(4)?.map(PathBuf::from),
+                data_dir: PathBuf::from(row.get::<_, String>(5)?),
+                bottle_name: row.get(6)?,
+                bottle_path: PathBuf::from(row.get::<_, String>(7)?),
+            })
+        })
+        .ok();
+    match rows {
+        Some(r) => r.flatten().collect(),
+        None => Vec::new(),
+    }
+}
+
+/// Save a custom game to the database.
+pub fn save_custom_game(db: &crate::database::ModDatabase, game: &CustomGame) -> Result<(), String> {
+    let conn = db.conn().map_err(|e| format!("No database connection: {e}"))?;
+    conn.execute(
+        "INSERT OR REPLACE INTO custom_games (game_id, display_name, nexus_slug, game_path, exe_path, data_dir, bottle_name, bottle_path, steam_app_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        rusqlite::params![
+            game.game_id,
+            game.display_name,
+            game.nexus_slug,
+            game.game_path,
+            game.exe_path,
+            game.data_dir,
+            game.bottle_name,
+            game.bottle_path,
+            game.steam_app_id,
+        ],
+    )
+    .map_err(|e| format!("Failed to save custom game: {e}"))?;
+    Ok(())
+}
+
+/// Remove a custom game from the database.
+pub fn remove_custom_game(db: &crate::database::ModDatabase, game_id: &str) -> Result<(), String> {
+    let conn = db.conn().map_err(|e| format!("No database connection: {e}"))?;
+    conn.execute(
+        "DELETE FROM custom_games WHERE game_id = ?1",
+        rusqlite::params![game_id],
+    )
+    .map_err(|e| format!("Failed to remove custom game: {e}"))?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

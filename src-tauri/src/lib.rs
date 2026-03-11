@@ -54,6 +54,11 @@ pub mod wabbajack_directives;
 pub mod wabbajack_downloader;
 pub mod wabbajack_installer;
 pub mod wabbajack_types;
+pub mod vortex_fetcher;
+pub mod vortex_plugin;
+pub mod vortex_registry;
+pub mod vortex_runtime;
+pub mod vortex_types;
 pub mod wine_diagnostic;
 
 use serde::{Deserialize, Serialize};
@@ -8342,6 +8347,402 @@ fn cli_mod_files(search: &str, game_id: &str, bottle_name: &str, db: &Arc<ModDat
     }
 }
 
+// --- CLI e2e test support commands ---
+
+/// List detected bottles as JSON.
+fn cli_list_bottles() {
+    let bottles = crate::bottles::detect_bottles();
+    let json: Vec<serde_json::Value> = bottles
+        .iter()
+        .map(|b| {
+            serde_json::json!({
+                "name": b.name,
+                "path": b.path.display().to_string(),
+                "engine": &b.source,
+                "exists": b.exists(),
+            })
+        })
+        .collect();
+    println!("{}", serde_json::to_string_pretty(&json).unwrap_or_default());
+}
+
+/// List detected games as JSON (includes auto-detected Steam games and custom games).
+fn cli_list_games(db: &Arc<ModDatabase>) {
+    let bottles = crate::bottles::detect_bottles();
+    let mut all_games: Vec<serde_json::Value> = Vec::new();
+    for bottle in &bottles {
+        let games = crate::games::detect_games(bottle);
+        for game in &games {
+            all_games.push(serde_json::json!({
+                "id": game.game_id,
+                "name": game.display_name,
+                "bottle": bottle.name,
+                "path": game.game_path.display().to_string(),
+                "executable": game.exe_path.as_ref().map(|p| p.display().to_string()),
+            }));
+        }
+    }
+    // Include custom games from DB
+    let custom = crate::game_registry::load_custom_games(db);
+    for game in &custom {
+        if !all_games.iter().any(|g| g["id"] == game.game_id) {
+            all_games.push(serde_json::json!({
+                "id": game.game_id,
+                "name": game.display_name,
+                "bottle": game.bottle_name,
+                "path": game.game_path.display().to_string(),
+                "executable": game.exe_path.as_ref().map(|p| p.display().to_string()),
+                "custom": true,
+            }));
+        }
+    }
+    println!("{}", serde_json::to_string_pretty(&all_games).unwrap_or_default());
+}
+
+/// Add a custom game to the database.
+fn cli_add_game(
+    game_id: &str,
+    name: &str,
+    bottle_name: &str,
+    game_path: &str,
+    exe_name: Option<&str>,
+    mod_dir: Option<&str>,
+    nexus_slug: Option<&str>,
+    steam_app_id: Option<&str>,
+    db: &Arc<ModDatabase>,
+) {
+    use crate::game_registry::{save_custom_game, CustomGame};
+
+    // Resolve the bottle to get its path
+    let bottle = match crate::bottles::find_bottle_by_name(bottle_name) {
+        Some(b) => b,
+        None => {
+            eprintln!("Error: Bottle '{}' not found", bottle_name);
+            std::process::exit(1);
+        }
+    };
+
+    // Resolve game path (could be absolute or relative to bottle's drive_c)
+    let full_game_path = if std::path::Path::new(game_path).is_absolute() {
+        std::path::PathBuf::from(game_path)
+    } else {
+        bottle.path.join("drive_c").join(game_path)
+    };
+
+    if !full_game_path.is_dir() {
+        eprintln!("Error: Game path '{}' does not exist", full_game_path.display());
+        std::process::exit(1);
+    }
+
+    // Find executable
+    let exe_path = if let Some(exe) = exe_name {
+        let p = full_game_path.join(exe);
+        if !p.exists() {
+            eprintln!("Warning: Executable '{}' not found at expected path", exe);
+        }
+        Some(p.display().to_string())
+    } else {
+        crate::game_registry::find_main_executable_public(&full_game_path)
+            .map(|p| p.display().to_string())
+    };
+
+    let data_dir = if let Some(md) = mod_dir {
+        full_game_path.join(md).display().to_string()
+    } else {
+        full_game_path.display().to_string()
+    };
+
+    let custom = CustomGame {
+        game_id: game_id.to_string(),
+        display_name: name.to_string(),
+        nexus_slug: nexus_slug.unwrap_or(game_id).to_string(),
+        game_path: full_game_path.display().to_string(),
+        exe_path,
+        data_dir,
+        bottle_name: bottle.name.clone(),
+        bottle_path: bottle.path.display().to_string(),
+        steam_app_id: steam_app_id.map(|s| s.to_string()),
+    };
+
+    match save_custom_game(db, &custom) {
+        Ok(()) => {
+            let output = serde_json::json!({
+                "ok": true,
+                "game_id": custom.game_id,
+                "display_name": custom.display_name,
+                "game_path": custom.game_path,
+                "exe_path": custom.exe_path,
+                "data_dir": custom.data_dir,
+                "bottle": custom.bottle_name,
+            });
+            println!("{}", serde_json::to_string_pretty(&output).unwrap_or_default());
+        }
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Remove a custom game from the database.
+fn cli_remove_game(game_id: &str, db: &Arc<ModDatabase>) {
+    match crate::game_registry::remove_custom_game(db, game_id) {
+        Ok(()) => println!("{{\"ok\":true,\"removed\":\"{}\"}}", game_id),
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Database statistics as JSON.
+fn cli_db_stats(game_id: &str, bottle_name: &str, db: &Arc<ModDatabase>) {
+    let (total_mods, enabled_mods) = db.get_mod_counts(game_id, bottle_name)
+        .unwrap_or((0, 0));
+    let disabled_mods = total_mods.saturating_sub(enabled_mods);
+    let deployment_count = db.get_deployment_count(game_id, bottle_name)
+        .unwrap_or(0);
+
+    let stats = serde_json::json!({
+        "game_id": game_id,
+        "bottle_name": bottle_name,
+        "total_mods": total_mods,
+        "enabled_mods": enabled_mods,
+        "disabled_mods": disabled_mods,
+        "deployed_files": deployment_count,
+    });
+    println!("{}", serde_json::to_string_pretty(&stats).unwrap_or_default());
+}
+
+/// SQLite integrity check.
+fn cli_db_integrity(db: &Arc<ModDatabase>) {
+    let conn = match db.conn() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{{\"ok\":false,\"error\":\"{}\"}}", e);
+            std::process::exit(1);
+        }
+    };
+
+    // PRAGMA integrity_check
+    let integrity: String = conn
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .unwrap_or_else(|e| format!("error: {}", e));
+
+    // Count tables
+    let table_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+
+    // List tables
+    let mut stmt = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+        .unwrap();
+    let tables: Vec<String> = stmt
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect();
+
+    // Check schema version
+    let schema_version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap_or(0);
+
+    let ok = integrity == "ok";
+    let result = serde_json::json!({
+        "ok": ok,
+        "integrity_check": integrity,
+        "table_count": table_count,
+        "tables": tables,
+        "schema_version": schema_version,
+    });
+    println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default());
+    if !ok {
+        std::process::exit(1);
+    }
+}
+
+/// List cached Vortex extensions as JSON.
+fn cli_vortex_list(db: &Arc<ModDatabase>) {
+    let summaries = crate::vortex_registry::list_cached(db);
+    let json: Vec<serde_json::Value> = summaries
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "game_id": s.game_id,
+                "name": s.name,
+                "is_stub": s.is_stub,
+                "fetched_at": s.fetched_at,
+                "tool_count": s.tool_count,
+                "mod_type_count": s.mod_type_count,
+            })
+        })
+        .collect();
+    println!("{}", serde_json::to_string_pretty(&json).unwrap_or_default());
+}
+
+/// Check deployment health — verify staged files exist on disk.
+fn cli_deployment_health(game_id: &str, bottle_name: &str, db: &Arc<ModDatabase>) {
+    let mods = match db.list_mods(game_id, bottle_name) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("{{\"ok\":false,\"error\":\"{}\"}}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let mut total_mods = 0;
+    let mut mods_with_staging = 0;
+    let mut staging_exists = 0;
+    let mut staging_missing = 0;
+    let mut missing_dirs: Vec<String> = Vec::new();
+
+    for m in &mods {
+        total_mods += 1;
+        if let Some(ref path) = m.staging_path {
+            mods_with_staging += 1;
+            if std::path::Path::new(path).exists() {
+                staging_exists += 1;
+            } else {
+                staging_missing += 1;
+                if missing_dirs.len() < 20 {
+                    missing_dirs.push(format!("{}:{}", m.id, m.name));
+                }
+            }
+        }
+    }
+
+    let ok = staging_missing == 0;
+    let result = serde_json::json!({
+        "ok": ok,
+        "total_mods": total_mods,
+        "mods_with_staging": mods_with_staging,
+        "staging_exists": staging_exists,
+        "staging_missing": staging_missing,
+        "missing_examples": missing_dirs,
+    });
+    println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default());
+    if !ok {
+        std::process::exit(1);
+    }
+}
+
+/// List profiles as JSON.
+fn cli_list_profiles(game_id: &str, bottle_name: &str, db: &Arc<ModDatabase>) {
+    let conn = match db.conn() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{{\"error\":\"{}\"}}", e);
+            std::process::exit(1);
+        }
+    };
+    let mut stmt = match conn.prepare(
+        "SELECT id, name, is_active FROM profiles WHERE game_id = ?1 AND bottle_name = ?2 ORDER BY name",
+    ) {
+        Ok(s) => s,
+        Err(_) => {
+            // profiles table may not exist
+            println!("[]");
+            return;
+        }
+    };
+    let profiles: Vec<serde_json::Value> = stmt
+        .query_map(rusqlite::params![game_id, bottle_name], |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, i64>(0)?,
+                "name": row.get::<_, String>(1)?,
+                "is_active": row.get::<_, i32>(2)? != 0,
+            }))
+        })
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect();
+    println!("{}", serde_json::to_string_pretty(&profiles).unwrap_or_default());
+}
+
+/// Fetch + execute a Vortex extension and report results as JSON.
+fn cli_vortex_test(game_id: &str) {
+    if let Err(e) = vortex_fetcher::validate_game_id(game_id) {
+        eprintln!("{{\"ok\":false,\"error\":\"{}\"}}", e);
+        std::process::exit(1);
+    }
+
+    // Use a tokio runtime for the async fetch
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+    let source = match rt.block_on(vortex_fetcher::fetch_extension(game_id)) {
+        Ok(s) => s,
+        Err(e) => {
+            let result = serde_json::json!({
+                "ok": false,
+                "phase": "fetch",
+                "error": e,
+            });
+            println!("{}", serde_json::to_string_pretty(&result).unwrap());
+            std::process::exit(1);
+        }
+    };
+
+    println!("[vortex-test] Fetched {}: {} bytes index.js, hash={}",
+        game_id, source.index_js.len(), source.source_hash);
+
+    // Execute in QuickJS
+    let captured = match vortex_runtime::execute_extension(&source) {
+        Ok(c) => c,
+        Err(e) => {
+            let result = serde_json::json!({
+                "ok": false,
+                "phase": "execute",
+                "error": e,
+                "source_bytes": source.index_js.len(),
+            });
+            println!("{}", serde_json::to_string_pretty(&result).unwrap());
+            std::process::exit(1);
+        }
+    };
+
+    // Report what was captured
+    let game = captured.game.as_ref();
+    let result = serde_json::json!({
+        "ok": game.is_some(),
+        "game": game.map(|g| serde_json::json!({
+            "id": g.id,
+            "name": g.name,
+            "executable": g.executable,
+            "query_mod_path": g.query_mod_path,
+            "merge_mods": g.merge_mods,
+            "required_files": g.required_files,
+            "is_stub": g.is_stub,
+            "steam_app_id": g.store_ids.steam_app_id,
+            "gog_app_id": g.store_ids.gog_app_id,
+            "epic_app_id": g.store_ids.epic_app_id,
+            "xbox_id": g.store_ids.xbox_id,
+            "steam_dir_name": g.steam_dir_name,
+            "tool_count": g.supported_tools.len(),
+            "tools": g.supported_tools.iter().map(|t| serde_json::json!({
+                "id": t.id,
+                "name": t.name,
+                "executable": t.executable,
+            })).collect::<Vec<_>>(),
+        })),
+        "mod_types": captured.mod_types.iter().map(|mt| serde_json::json!({
+            "id": mt.id,
+            "priority": mt.priority,
+            "target_path": mt.target_path,
+        })).collect::<Vec<serde_json::Value>>(),
+        "installers": captured.installers.iter().map(|i| serde_json::json!({
+            "id": i.id,
+            "priority": i.priority,
+        })).collect::<Vec<serde_json::Value>>(),
+    });
+
+    println!("{}", serde_json::to_string_pretty(&result).unwrap());
+}
+
 // --- CLI headless launch ---
 
 /// Run the full pre-launch pipeline and spawn the game without opening the UI.
@@ -8459,6 +8860,66 @@ fn cli_launch(game_id: &str, bottle_name: &str, use_skse: bool, db: &Arc<ModData
     }
 }
 
+// --- Vortex Extension Commands ---
+
+#[tauri::command]
+async fn vortex_fetch_extension(
+    game_id: String,
+    state: State<'_, AppState>,
+) -> Result<vortex_types::VortexGameRegistration, String> {
+    let db = state.db.clone();
+    vortex_registry::fetch_and_register(&db, &game_id).await
+}
+
+#[tauri::command]
+async fn vortex_refresh_extension(
+    game_id: String,
+    state: State<'_, AppState>,
+) -> Result<vortex_types::VortexGameRegistration, String> {
+    let db = state.db.clone();
+    vortex_registry::refresh_extension(&db, &game_id).await
+}
+
+#[tauri::command]
+async fn vortex_list_cached_extensions(
+    state: State<'_, AppState>,
+) -> Result<Vec<vortex_types::ExtensionSummary>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || Ok(vortex_registry::list_cached(&db)))
+        .await
+        .map_err(|e| format!("Task failed: {e}"))?
+}
+
+#[tauri::command]
+async fn vortex_list_available_extensions() -> Result<Vec<String>, String> {
+    vortex_fetcher::list_available_extensions().await
+}
+
+#[tauri::command]
+async fn vortex_delete_cached_extension(
+    game_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        vortex_registry::delete_cached(&db, &game_id);
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
+#[tauri::command]
+async fn vortex_get_extension_detail(
+    game_id: String,
+    state: State<'_, AppState>,
+) -> Result<Option<vortex_types::VortexGameRegistration>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || Ok(vortex_registry::load_cached(&db, &game_id)))
+        .await
+        .map_err(|e| format!("Task failed: {e}"))?
+}
+
 // --- App Entry Point ---
 
 fn kill_mlx_server() {
@@ -8480,6 +8941,9 @@ pub fn run() {
     // Initialize database
     let db_path = config::db_path();
     let db = Arc::new(ModDatabase::new(&db_path).expect("Failed to initialize mod database"));
+
+    // Register any previously-cached Vortex extensions as game plugins
+    vortex_registry::register_all_cached(&db);
 
     // Initialize additional schemas
     executables::init_schema(&db).expect("Failed to initialize executables schema");
@@ -8628,6 +9092,142 @@ pub fn run() {
                 std::process::exit(1);
             }
             cli_mod_files(search, game_id, bottle_name, &db);
+            return;
+        }
+
+        // --list-bottles  (JSON array of detected bottles)
+        if args.iter().any(|a| a == "--list-bottles") {
+            cli_list_bottles();
+            return;
+        }
+
+        // --list-games  (JSON array of detected games across all bottles)
+        if args.iter().any(|a| a == "--list-games") {
+            cli_list_games(&db);
+            return;
+        }
+
+        // --db-stats <game_id> <bottle_name>  (JSON object with database statistics)
+        if let Some(pos) = args.iter().position(|a| a == "--db-stats") {
+            let game_id = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("");
+            let bottle_name = args.get(pos + 2).map(|s| s.as_str()).unwrap_or("");
+            if game_id.is_empty() || bottle_name.is_empty() {
+                eprintln!("Usage: corkscrew --db-stats <game_id> <bottle_name>");
+                std::process::exit(1);
+            }
+            cli_db_stats(game_id, bottle_name, &db);
+            return;
+        }
+
+        // --db-integrity  (run SQLite integrity check + schema validation)
+        if args.iter().any(|a| a == "--db-integrity") {
+            cli_db_integrity(&db);
+            return;
+        }
+
+        // --vortex-list  (JSON array of cached vortex extensions)
+        if args.iter().any(|a| a == "--vortex-list") {
+            cli_vortex_list(&db);
+            return;
+        }
+
+        // --deployment-health <game_id> <bottle_name>  (check deployment integrity)
+        if let Some(pos) = args.iter().position(|a| a == "--deployment-health") {
+            let game_id = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("");
+            let bottle_name = args.get(pos + 2).map(|s| s.as_str()).unwrap_or("");
+            if game_id.is_empty() || bottle_name.is_empty() {
+                eprintln!("Usage: corkscrew --deployment-health <game_id> <bottle_name>");
+                std::process::exit(1);
+            }
+            cli_deployment_health(game_id, bottle_name, &db);
+            return;
+        }
+
+        // --list-profiles <game_id> <bottle_name>  (JSON array of profiles)
+        if let Some(pos) = args.iter().position(|a| a == "--list-profiles") {
+            let game_id = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("");
+            let bottle_name = args.get(pos + 2).map(|s| s.as_str()).unwrap_or("");
+            if game_id.is_empty() || bottle_name.is_empty() {
+                eprintln!("Usage: corkscrew --list-profiles <game_id> <bottle_name>");
+                std::process::exit(1);
+            }
+            cli_list_profiles(game_id, bottle_name, &db);
+            return;
+        }
+
+        // --add-game <game_id> <name> <bottle> <path> [--exe <name>] [--mod-dir <dir>] [--nexus <slug>] [--steam-id <id>]
+        if let Some(pos) = args.iter().position(|a| a == "--add-game") {
+            let game_id = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("");
+            let name = args.get(pos + 2).map(|s| s.as_str()).unwrap_or("");
+            let bottle = args.get(pos + 3).map(|s| s.as_str()).unwrap_or("");
+            let path = args.get(pos + 4).map(|s| s.as_str()).unwrap_or("");
+            if game_id.is_empty() || name.is_empty() || bottle.is_empty() || path.is_empty() {
+                eprintln!("Usage: corkscrew --add-game <game_id> <name> <bottle> <path>");
+                eprintln!("  Options: --exe <name> --mod-dir <dir> --nexus <slug> --steam-id <id>");
+                eprintln!("  Example: corkscrew --add-game re-requiem \"Resident Evil Requiem\" Steam \"Program Files (x86)/Steam/steamapps/common/RESIDENT EVIL requiem BIOHAZARD requiem\" --exe re9.exe");
+                std::process::exit(1);
+            }
+            let exe = args.iter().position(|a| a == "--exe").and_then(|i| args.get(i + 1)).map(|s| s.as_str());
+            let mod_dir = args.iter().position(|a| a == "--mod-dir").and_then(|i| args.get(i + 1)).map(|s| s.as_str());
+            let nexus = args.iter().position(|a| a == "--nexus").and_then(|i| args.get(i + 1)).map(|s| s.as_str());
+            let steam_id = args.iter().position(|a| a == "--steam-id").and_then(|i| args.get(i + 1)).map(|s| s.as_str());
+            cli_add_game(game_id, name, bottle, path, exe, mod_dir, nexus, steam_id, &db);
+            return;
+        }
+
+        // --remove-game <game_id>
+        if let Some(pos) = args.iter().position(|a| a == "--remove-game") {
+            let game_id = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("");
+            if game_id.is_empty() {
+                eprintln!("Usage: corkscrew --remove-game <game_id>");
+                std::process::exit(1);
+            }
+            cli_remove_game(game_id, &db);
+            return;
+        }
+
+        // --vortex-test <game_id>  (fetch + execute a Vortex extension, report results as JSON)
+        if let Some(pos) = args.iter().position(|a| a == "--vortex-test") {
+            let game_id = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("");
+            if game_id.is_empty() {
+                eprintln!("Usage: corkscrew --vortex-test <game_id>");
+                eprintln!("  Example: corkscrew --vortex-test skyrimse");
+                std::process::exit(1);
+            }
+            cli_vortex_test(game_id);
+            return;
+        }
+
+        // --version  (print version and exit)
+        if args.iter().any(|a| a == "--version") {
+            println!("{}", env!("CARGO_PKG_VERSION"));
+            return;
+        }
+
+        // --help  (print usage and exit)
+        if args.iter().any(|a| a == "--help" || a == "-h") {
+            println!("Corkscrew — Mod Manager for Wine/CrossOver/Proton");
+            println!("Version: {}", env!("CARGO_PKG_VERSION"));
+            println!();
+            println!("USAGE:");
+            println!("  corkscrew                                    Launch GUI");
+            println!("  corkscrew --launch <game> <bottle> [--skse]  Launch game headless");
+            println!("  corkscrew --list-mods <game> <bottle>        List installed mods");
+            println!("  corkscrew --search-mods <q> <game> <bottle>  Search mods by name");
+            println!("  corkscrew --find-file <pat> <game> <bottle>  Find file across mods");
+            println!("  corkscrew --check-plugins <game> <bottle>    Analyze plugin state");
+            println!("  corkscrew --sync-plugins <game> <bottle>     Sync plugin state");
+            println!("  corkscrew --mod-files <id> <game> <bottle>   Show mod's files");
+            println!("  corkscrew --list-bottles                     List detected bottles (JSON)");
+            println!("  corkscrew --list-games                       List detected games (JSON)");
+            println!("  corkscrew --db-stats <game> <bottle>         Database statistics (JSON)");
+            println!("  corkscrew --db-integrity                     SQLite integrity check");
+            println!("  corkscrew --vortex-list                      List cached Vortex extensions (JSON)");
+            println!("  corkscrew --deployment-health <game> <bottle> Check deployment integrity");
+            println!("  corkscrew --list-profiles <game> <bottle>    List profiles (JSON)");
+            println!("  corkscrew --add-game <id> <name> <bottle> <path>  Add custom game");
+            println!("  corkscrew --remove-game <id>                 Remove custom game");
+            println!("  corkscrew --version                          Print version");
             return;
         }
     }
@@ -8976,6 +9576,12 @@ pub fn run() {
             delete_model,
             chat_send_message,
             chat_clear_history,
+            vortex_fetch_extension,
+            vortex_refresh_extension,
+            vortex_list_cached_extensions,
+            vortex_list_available_extensions,
+            vortex_delete_cached_extension,
+            vortex_get_extension_detail,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

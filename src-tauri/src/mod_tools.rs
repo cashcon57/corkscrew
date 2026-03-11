@@ -396,10 +396,51 @@ struct GitHubAsset {
 /// Returns the tools relevant to the specified game. Shared tools (Wrye Bash,
 /// BethINI, CAO) appear for all supported games.
 fn builtin_tools_for_game(game_id: &str) -> Vec<ModTool> {
-    match game_id {
+    let mut tools = match game_id {
         "skyrimse" => skyrim_se_tools(),
         "fallout4" => fallout4_tools(),
         _ => vec![],
+    };
+
+    // Merge tools from Vortex extensions (if this game has a Vortex plugin).
+    if let Some(vortex_tools) = crate::games::with_plugin(game_id, |p| p.vortex_tools()) {
+        for vt in &vortex_tools {
+            // Skip tools that already exist in the builtin list (by id or exe name).
+            if !tools.iter().any(|t| {
+                t.id == vt.id
+                    || t.exe_names
+                        .iter()
+                        .any(|e| e.eq_ignore_ascii_case(&vt.executable))
+            }) {
+                tools.push(vortex_tool_to_mod_tool(vt));
+            }
+        }
+    }
+
+    tools
+}
+
+/// Convert a Vortex extension tool definition into a [`ModTool`].
+fn vortex_tool_to_mod_tool(vt: &crate::vortex_types::VortexTool) -> ModTool {
+    ModTool {
+        id: vt.id.clone(),
+        name: vt.name.clone(),
+        description: format!("{} (from Vortex extension)", vt.name),
+        exe_names: vec![vt.executable.clone()],
+        detected_path: None,
+        requires_wine: true,
+        category: "Extension Tool".into(),
+        can_auto_install: false,
+        github_repo: None,
+        nexus_mod_id: None,
+        nexus_game_slug: None,
+        download_url: None,
+        license: "Unknown".into(),
+        wine_notes: None,
+        wine_compat: "unknown".into(),
+        recommended_alternative: None,
+        recommended_ini_edits: vec![],
+        support_url: None,
     }
 }
 

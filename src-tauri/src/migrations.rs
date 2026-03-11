@@ -19,7 +19,7 @@ pub enum MigrationError {
 pub type Result<T> = std::result::Result<T, MigrationError>;
 
 /// The current target schema version. Bump this when adding a new migration.
-const TARGET_VERSION: u32 = 15;
+const TARGET_VERSION: u32 = 17;
 
 /// Get the current schema version (0 if no version table exists).
 pub fn current_version(conn: &Connection) -> Result<u32> {
@@ -119,6 +119,16 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     if version == 14 {
         migrate_v14_to_v15(conn)?;
         version = 15;
+    }
+
+    if version == 15 {
+        migrate_v15_to_v16(conn)?;
+        version = 16;
+    }
+
+    if version == 16 {
+        migrate_v16_to_v17(conn)?;
+        version = 17;
     }
 
     let _ = version; // suppress unused warning when TARGET_VERSION == current
@@ -843,6 +853,48 @@ fn migrate_v14_to_v15(conn: &Connection) -> Result<()> {
 // Tests
 // ---------------------------------------------------------------------------
 
+/// Migration 15 → 16: Vortex extension cache table.
+fn migrate_v15_to_v16(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+
+    crate::vortex_registry::create_table(&tx)
+        .map_err(|e| MigrationError::Failed {
+            from: 15,
+            to: 16,
+            reason: e.to_string(),
+        })?;
+
+    tx.execute("UPDATE schema_version SET version = 16", [])?;
+    tx.commit()?;
+    log::info!("Migration 15 → 16 complete (vortex extension cache)");
+    Ok(())
+}
+
+/// Migration 16 → 17: Custom games table for user-added games.
+fn migrate_v16_to_v17(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS custom_games (
+            game_id TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            nexus_slug TEXT NOT NULL DEFAULT '',
+            game_path TEXT NOT NULL,
+            exe_path TEXT,
+            data_dir TEXT NOT NULL,
+            bottle_name TEXT NOT NULL,
+            bottle_path TEXT NOT NULL,
+            steam_app_id TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );",
+    )?;
+
+    tx.execute("UPDATE schema_version SET version = 17", [])?;
+    tx.commit()?;
+    log::info!("Migration 16 → 17 complete (custom games table)");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -980,7 +1032,7 @@ mod tests {
     fn v13_creates_deployment_manifest_index() {
         let conn = memory_db();
         migrate(&conn).unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 15);
+        assert_eq!(current_version(&conn).unwrap(), 16);
 
         // Verify the compound index exists
         let index_exists: bool = conn

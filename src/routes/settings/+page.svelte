@@ -1,10 +1,10 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, uninstallSkse, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, checkModToolUpdate, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads, checkSteamStatus, addToSteam, removeFromSteam, scanGameDirectory, cleanGameDirectory, checkSkyrimVersion, downgradeSkyrim, checkDeploymentHealth, redeployAllMods, getVerificationLevel, setVerificationLevel, getDepotDownloadCommand, startDepotDownload, checkDepotReady, applyDowngrade, listGameVersions, swapGameVersion, listDisabledWinePlugins, reenableWinePlugin } from "$lib/api";
+  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, uninstallSkse, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, checkModToolUpdate, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads, checkSteamStatus, addToSteam, removeFromSteam, scanGameDirectory, cleanGameDirectory, checkSkyrimVersion, downgradeSkyrim, checkDeploymentHealth, redeployAllMods, getVerificationLevel, setVerificationLevel, getDepotDownloadCommand, startDepotDownload, checkDepotReady, applyDowngrade, listGameVersions, swapGameVersion, listDisabledWinePlugins, reenableWinePlugin, vortexListCachedExtensions, vortexFetchExtension, vortexRefreshExtension, vortexDeleteCachedExtension, vortexListAvailableExtensions, vortexGetExtensionDetail } from "$lib/api";
   import type { CleanReport, CleanResult, DowngradeStatus, DeploymentHealth, VerificationLevel, CachedVersion, DepotDownloadInfo } from "$lib/types";
   import type { SteamStatus } from "$lib/types";
   import { config, showError, showSuccess, selectedGame, skseStatus, currentPage, appVersion, updateReady, updateVersion, updateNotes, updateChecking, updateError, triggerUpdateCheck, controllerMode } from "$lib/stores";
-  import type { AppConfig, ModTool, PlatformInfo, ToolInstallProgress, ToolUpdateInfo } from "$lib/types";
+  import type { AppConfig, ModTool, PlatformInfo, ToolInstallProgress, ToolUpdateInfo, VortexExtensionSummary, VortexGameRegistration } from "$lib/types";
   import { listen } from "@tauri-apps/api/event";
   import ThemeToggle from "$lib/components/ThemeToggle.svelte";
   import SettingsAuthSection from "./settings-auth-section.svelte";
@@ -55,6 +55,89 @@
   let showArchiveList = $state(false);
   let downloadsStats = $state<{ total_size_bytes: number; archive_count: number; directory: string } | null>(null);
 
+  // Vortex Extensions
+  let vortexExtensions = $state<VortexExtensionSummary[]>([]);
+  let loadingVortexExtensions = $state(false);
+  let availableVortexGames = $state<string[]>([]);
+  let loadingAvailableGames = $state(false);
+  let fetchingExtension = $state<string | null>(null);
+  let refreshingExtension = $state<string | null>(null);
+  let deletingExtension = $state<string | null>(null);
+  let vortexAddGameId = $state("");
+  let vortexDetailGame = $state<VortexGameRegistration | null>(null);
+  let showVortexDetail = $state(false);
+
+  async function loadVortexExtensions() {
+    loadingVortexExtensions = true;
+    try {
+      vortexExtensions = await vortexListCachedExtensions();
+    } catch (e: any) {
+      showError("Failed to load extensions: " + e);
+    } finally {
+      loadingVortexExtensions = false;
+    }
+  }
+
+  async function loadAvailableVortexGames() {
+    loadingAvailableGames = true;
+    try {
+      availableVortexGames = await vortexListAvailableExtensions();
+    } catch (e: any) {
+      showError("Failed to list available extensions: " + e);
+    } finally {
+      loadingAvailableGames = false;
+    }
+  }
+
+  async function handleFetchExtension(gameId: string) {
+    fetchingExtension = gameId;
+    try {
+      await vortexFetchExtension(gameId);
+      showSuccess(`Extension for "${gameId}" fetched successfully`);
+      await loadVortexExtensions();
+      vortexAddGameId = "";
+    } catch (e: any) {
+      showError("Failed to fetch extension: " + e);
+    } finally {
+      fetchingExtension = null;
+    }
+  }
+
+  async function handleRefreshExtension(gameId: string) {
+    refreshingExtension = gameId;
+    try {
+      await vortexRefreshExtension(gameId);
+      showSuccess(`Extension for "${gameId}" refreshed`);
+      await loadVortexExtensions();
+    } catch (e: any) {
+      showError("Failed to refresh extension: " + e);
+    } finally {
+      refreshingExtension = null;
+    }
+  }
+
+  async function handleDeleteExtension(gameId: string) {
+    deletingExtension = gameId;
+    try {
+      await vortexDeleteCachedExtension(gameId);
+      showSuccess(`Extension for "${gameId}" removed`);
+      await loadVortexExtensions();
+    } catch (e: any) {
+      showError("Failed to delete extension: " + e);
+    } finally {
+      deletingExtension = null;
+    }
+  }
+
+  async function handleShowDetail(gameId: string) {
+    try {
+      vortexDetailGame = await vortexGetExtensionDetail(gameId);
+      showVortexDetail = true;
+    } catch (e: any) {
+      showError("Failed to load extension details: " + e);
+    }
+  }
+
   // Settings tabs
   let settingsTab = $state<"general" | "game" | "system">("general");
   let tabVisible = $state(true);
@@ -69,6 +152,7 @@
     "moddingTools",
     "iniSettings",
     "wineDiagnostics",
+    "vortexExtensions",
   ]));
 
   function toggleSection(section: string) {
@@ -1998,6 +2082,174 @@
     </div>
   {/if}
 
+  <!-- Vortex Game Extensions -->
+  <div class="section">
+    <button class="section-title section-title-collapsible" onclick={() => { toggleSection('vortexExtensions'); if (!collapsedSections.has('vortexExtensions')) loadVortexExtensions(); }}>
+      <span class="section-chevron">{collapsedSections.has('vortexExtensions') ? '\u25B8' : '\u25BE'}</span>
+      Game Extensions
+    </button>
+    {#if !collapsedSections.has('vortexExtensions')}
+    <p class="section-description">Vortex-compatible game extensions provide automatic game detection, mod type routing, and tool metadata for additional games.</p>
+
+    <!-- Add extension -->
+    <div class="section-card">
+      <div class="card-row">
+        <label class="row-label" for="vortex-game-id">Add Game Extension</label>
+        <div class="row-control">
+          <div class="input-with-actions">
+            <input
+              id="vortex-game-id"
+              type="text"
+              bind:value={vortexAddGameId}
+              placeholder="e.g. witcher3, baldursgate3, stardewvalley"
+              class="settings-input"
+              onkeydown={(e) => { if (e.key === 'Enter' && vortexAddGameId.trim()) handleFetchExtension(vortexAddGameId.trim()); }}
+            />
+            <button
+              class="btn-primary btn-sm"
+              onclick={() => handleFetchExtension(vortexAddGameId.trim())}
+              disabled={!vortexAddGameId.trim() || fetchingExtension !== null}
+              type="button"
+            >
+              {fetchingExtension === vortexAddGameId.trim() ? "Fetching..." : "Add"}
+            </button>
+            <button
+              class="btn-secondary btn-sm"
+              onclick={loadAvailableVortexGames}
+              disabled={loadingAvailableGames}
+              type="button"
+              title="Browse available game extensions"
+            >
+              {loadingAvailableGames ? "Loading..." : "Browse"}
+            </button>
+          </div>
+        </div>
+      </div>
+      {#if availableVortexGames.length > 0}
+      <div class="card-divider"></div>
+      <div class="card-row">
+        <div class="vortex-available-games">
+          <span class="row-label">{availableVortexGames.length} extensions available</span>
+          <div class="vortex-game-tags">
+            {#each availableVortexGames.slice(0, 50) as gid (gid)}
+              <button
+                class="vortex-game-tag"
+                onclick={() => { vortexAddGameId = gid; }}
+                type="button"
+                title="Click to select"
+              >
+                {gid}
+              </button>
+            {/each}
+            {#if availableVortexGames.length > 50}
+              <span class="vortex-game-tag vortex-game-tag-more">+{availableVortexGames.length - 50} more</span>
+            {/if}
+          </div>
+        </div>
+      </div>
+      {/if}
+    </div>
+
+    <!-- Cached extensions list -->
+    {#if loadingVortexExtensions}
+      <div class="section-card">
+        <div class="card-row"><span class="tool-description">Loading extensions...</span></div>
+      </div>
+    {:else if vortexExtensions.length === 0}
+      <div class="section-card">
+        <div class="card-row"><span class="tool-description">No game extensions installed. Add one above to enable support for additional games.</span></div>
+      </div>
+    {:else}
+      <div class="section-card">
+        {#each vortexExtensions as ext, i (ext.game_id)}
+          {#if i > 0}<div class="card-divider"></div>{/if}
+          <div class="card-row tool-row">
+            <div class="tool-info">
+              <div class="tool-name-row">
+                <span class="row-label">{ext.name}</span>
+                {#if ext.is_stub}
+                  <span class="badge badge-muted">Stub</span>
+                {/if}
+              </div>
+              <span class="tool-description">
+                {ext.game_id}
+                {#if ext.tool_count > 0} &middot; {ext.tool_count} tool{ext.tool_count !== 1 ? 's' : ''}{/if}
+                {#if ext.mod_type_count > 0} &middot; {ext.mod_type_count} mod type{ext.mod_type_count !== 1 ? 's' : ''}{/if}
+              </span>
+            </div>
+            <div class="tool-action">
+              <button
+                class="btn-ghost btn-sm"
+                onclick={() => handleShowDetail(ext.game_id)}
+                type="button"
+                title="View details"
+              >
+                Details
+              </button>
+              <button
+                class="btn-secondary btn-sm"
+                onclick={() => handleRefreshExtension(ext.game_id)}
+                disabled={refreshingExtension === ext.game_id}
+                type="button"
+                title="Re-fetch from GitHub"
+              >
+                {refreshingExtension === ext.game_id ? "..." : "Refresh"}
+              </button>
+              <button
+                class="btn-danger btn-sm"
+                onclick={() => handleDeleteExtension(ext.game_id)}
+                disabled={deletingExtension === ext.game_id}
+                type="button"
+              >
+                {deletingExtension === ext.game_id ? "..." : "Remove"}
+              </button>
+            </div>
+          </div>
+        {/each}
+      </div>
+    {/if}
+
+    <!-- Detail modal -->
+    {#if showVortexDetail && vortexDetailGame}
+    <div class="vortex-detail-overlay" onclick={() => showVortexDetail = false} onkeydown={(e) => { if (e.key === 'Escape') showVortexDetail = false; }} role="dialog" tabindex="-1">
+      <div class="vortex-detail-panel" onclick={(e) => e.stopPropagation()} role="document">
+        <div class="vortex-detail-header">
+          <h3>{vortexDetailGame.name}</h3>
+          <button class="btn-ghost btn-sm" onclick={() => showVortexDetail = false} type="button">Close</button>
+        </div>
+        <div class="vortex-detail-body">
+          <div class="vortex-detail-row"><span class="vortex-detail-label">Game ID</span><span>{vortexDetailGame.id}</span></div>
+          <div class="vortex-detail-row"><span class="vortex-detail-label">Executable</span><span>{vortexDetailGame.executable || 'N/A'}</span></div>
+          <div class="vortex-detail-row"><span class="vortex-detail-label">Mod Path</span><span>{vortexDetailGame.query_mod_path || '.'}</span></div>
+          <div class="vortex-detail-row"><span class="vortex-detail-label">Merge Mods</span><span>{vortexDetailGame.merge_mods ? 'Yes' : 'No'}</span></div>
+          {#if vortexDetailGame.store_ids.steam_app_id}
+            <div class="vortex-detail-row"><span class="vortex-detail-label">Steam App ID</span><span>{vortexDetailGame.store_ids.steam_app_id}</span></div>
+          {/if}
+          {#if vortexDetailGame.store_ids.gog_app_id}
+            <div class="vortex-detail-row"><span class="vortex-detail-label">GOG App ID</span><span>{vortexDetailGame.store_ids.gog_app_id}</span></div>
+          {/if}
+          {#if vortexDetailGame.required_files.length > 0}
+            <div class="vortex-detail-row"><span class="vortex-detail-label">Required Files</span><span>{vortexDetailGame.required_files.join(', ')}</span></div>
+          {/if}
+          {#if vortexDetailGame.supported_tools.length > 0}
+            <div class="vortex-detail-section">Tools ({vortexDetailGame.supported_tools.length})</div>
+            {#each vortexDetailGame.supported_tools as tool (tool.id)}
+              <div class="vortex-detail-row vortex-detail-nested"><span class="vortex-detail-label">{tool.name}</span><span>{tool.executable}</span></div>
+            {/each}
+          {/if}
+          {#if vortexDetailGame.mod_types.length > 0}
+            <div class="vortex-detail-section">Mod Types ({vortexDetailGame.mod_types.length})</div>
+            {#each vortexDetailGame.mod_types as mt (mt.id)}
+              <div class="vortex-detail-row vortex-detail-nested"><span class="vortex-detail-label">{mt.id}</span><span>{mt.target_path || '.'}</span></div>
+            {/each}
+          {/if}
+        </div>
+      </div>
+    </div>
+    {/if}
+    {/if}
+  </div>
+
   </div>
   {/if}
   <!-- ============ SYSTEM TAB ============ -->
@@ -3605,5 +3857,142 @@
 
   .compat-bad {
     background: var(--red, #ff453a);
+  }
+
+  /* Vortex Extensions */
+  .section-description {
+    color: var(--text-secondary, #8e8e93);
+    font-size: 12px;
+    margin: 0 0 8px 0;
+    line-height: 1.4;
+  }
+
+  .vortex-available-games {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    width: 100%;
+  }
+
+  .vortex-game-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    max-height: 160px;
+    overflow-y: auto;
+  }
+
+  .vortex-game-tag {
+    background: var(--bg-tertiary, #3a3a3c);
+    border: 1px solid var(--border, #48484a);
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 11px;
+    color: var(--text-secondary, #8e8e93);
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+
+  .vortex-game-tag:hover {
+    background: var(--bg-hover, #48484a);
+    color: var(--text-primary, #fff);
+  }
+
+  .vortex-game-tag-more {
+    cursor: default;
+    opacity: 0.6;
+  }
+
+  .vortex-detail-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
+
+  .vortex-detail-panel {
+    background: var(--bg-secondary, #2c2c2e);
+    border: 1px solid var(--border, #48484a);
+    border-radius: 12px;
+    width: 480px;
+    max-height: 80vh;
+    overflow-y: auto;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+  }
+
+  .vortex-detail-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border, #48484a);
+  }
+
+  .vortex-detail-header h3 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 600;
+  }
+
+  .vortex-detail-body {
+    padding: 12px 20px 20px;
+  }
+
+  .vortex-detail-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    padding: 6px 0;
+    font-size: 13px;
+    border-bottom: 1px solid var(--border-subtle, rgba(255,255,255,0.05));
+  }
+
+  .vortex-detail-nested {
+    padding-left: 12px;
+  }
+
+  .vortex-detail-label {
+    color: var(--text-secondary, #8e8e93);
+    min-width: 120px;
+    flex-shrink: 0;
+  }
+
+  .vortex-detail-section {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary, #8e8e93);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-top: 12px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--border, #48484a);
+  }
+
+  .badge-muted {
+    background: var(--bg-tertiary, #3a3a3c);
+    color: var(--text-secondary, #8e8e93);
+  }
+
+  .btn-danger {
+    background: var(--red, #ff453a);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+
+  .btn-danger:hover {
+    opacity: 0.85;
+  }
+
+  .btn-danger:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 </style>

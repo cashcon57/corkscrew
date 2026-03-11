@@ -1,6 +1,6 @@
 [package]
 name = "corkscrew"
-version = "0.9.34"
+version = "0.9.35"
 description = "A mod manager for CrossOver/Wine games on macOS and Linux"
 authors = ["cashconway"]
 edition = "2021"
@@ -109,6 +109,9 @@ image_dds = { version = "0.7", features = ["ddsfile", "image"] }
 
 # PE parsing (SKSE plugin version detection)
 pelite = "0.10"
+
+# Embedded JS engine (Vortex extension execution)
+rquickjs = { version = "0.10", features = ["futures", "parallel", "loader", "macro", "rust-alloc"] }
 
 # UUID generation (FOMOD correlation IDs)
 uuid = { version = "1", features = ["v4"] }

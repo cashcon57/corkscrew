@@ -778,22 +778,29 @@
   async function handleStartUpdate() {
     if (!updateObject) return;
     updateDownloading = true;
+    updateProgress = 0;
+    console.log("[updater] Starting download+install, version:", updateObject.version);
+    console.log("[updater] Current app location:", window.location.href);
     try {
       await updateObject.downloadAndInstall((progress: any) => {
-        if (progress.event === "Started" && progress.data.contentLength) {
+        if (progress.event === "Started") {
+          console.log("[updater] Download started, contentLength:", progress.data?.contentLength);
           updateDownloading = true;
         } else if (progress.event === "Progress") {
           updateProgress += progress.data.chunkLength;
         } else if (progress.event === "Finished") {
+          console.log("[updater] Download finished, total bytes:", updateProgress);
           updateReady = true;
           updateDownloading = false;
           updateReadyStore.set(true);
         }
       });
+      console.log("[updater] downloadAndInstall() resolved successfully — update should be applied");
       updateReady = true;
       updateDownloading = false;
       updateReadyStore.set(true);
     } catch (e) {
+      console.error("[updater] downloadAndInstall() FAILED:", e);
       updateDownloading = false;
       updateErrorStore.set(String(e));
     }
@@ -809,7 +816,13 @@
   setUpdateCheckFn(checkForUpdates);
 
   async function handleRelaunch() {
-    await relaunch();
+    console.log("[updater] Relaunching app...");
+    try {
+      await relaunch();
+    } catch (e) {
+      console.error("[updater] Relaunch failed:", e);
+      updateErrorStore.set(`Relaunch failed: ${e}. Try quitting and reopening manually.`);
+    }
   }
 
   function navigate(page: string) {

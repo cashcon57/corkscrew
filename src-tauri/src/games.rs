@@ -50,6 +50,21 @@ pub trait GamePlugin: Send + Sync {
     fn get_saves_dir(&self, _game_path: &Path, _bottle: &Bottle) -> Option<PathBuf> {
         None // Default: game doesn't have a known saves directory
     }
+
+    /// Return Vortex-sourced tool definitions, if this plugin was loaded from
+    /// a Vortex extension. Non-Vortex plugins return an empty list.
+    fn vortex_tools(&self) -> Vec<crate::vortex_types::VortexTool> {
+        vec![]
+    }
+
+    /// Return Vortex-registered mod types for this game.
+    ///
+    /// Each mod type maps a type ID (e.g. `"w3modRoot"`) to a target path
+    /// relative to the game directory. Used by the collection installer to
+    /// route mods to the correct subdirectory.
+    fn vortex_mod_types(&self) -> Vec<crate::vortex_types::VortexModType> {
+        vec![]
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -105,6 +120,9 @@ pub fn register_plugin(plugin: Box<dyn GamePlugin + Send + Sync>) {
 }
 
 /// Scan a single bottle for all recognized games.
+///
+/// Runs registered game plugins first, then scans Steam appmanifest files
+/// to pick up any installed games that lack a dedicated plugin or registry entry.
 pub fn detect_games(bottle: &Bottle) -> Vec<DetectedGame> {
     let plugins = registry().lock().unwrap_or_else(|e| e.into_inner());
     let mut found = Vec::new();
@@ -113,18 +131,39 @@ pub fn detect_games(bottle: &Bottle) -> Vec<DetectedGame> {
             found.push(detected);
         }
     }
+    drop(plugins); // release lock before scanning appmanifests
+
+    // Discover any Steam games not covered by registered plugins
+    let unregistered = crate::game_registry::detect_unregistered_steam_games(bottle, &found);
+    found.extend(unregistered);
+
     found
 }
 
 /// Scan **all** discoverable bottles for all recognized games.
 pub fn detect_all_games() -> Vec<DetectedGame> {
-    // Import the bottle detection function from the sibling module.
     use crate::bottles::detect_bottles;
 
     let mut found = Vec::new();
     for bottle in detect_bottles() {
         found.extend(detect_games(&bottle));
     }
+    found
+}
+
+/// Scan all bottles and include custom (user-added) games from the database.
+pub fn detect_all_games_with_custom(db: &crate::database::ModDatabase) -> Vec<DetectedGame> {
+    let mut found = detect_all_games();
+
+    // Add custom games from DB
+    let custom = crate::game_registry::load_custom_games(db);
+    for cg in custom {
+        // Don't duplicate if auto-detection already found it
+        if !found.iter().any(|g| g.game_id == cg.game_id) {
+            found.push(cg);
+        }
+    }
+
     found
 }
 

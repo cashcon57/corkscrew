@@ -4075,6 +4075,8 @@ async fn stage_and_deploy(
         let sp = staging_result.staging_path.clone();
         let effective_dir = if is_root {
             game_path.to_path_buf()
+        } else if let Some(vortex_dir) = resolve_vortex_mod_type(game_id, mod_entry, game_path) {
+            vortex_dir
         } else {
             data_dir.to_path_buf()
         };
@@ -4329,6 +4331,56 @@ fn merge_bundle_into_manifest(
     }
 
     merged
+}
+
+/// Check if a mod's type matches a Vortex-registered mod type and return
+/// the corresponding deployment directory.
+fn resolve_vortex_mod_type(
+    game_id: &str,
+    mod_entry: &CollectionModEntry,
+    game_path: &Path,
+) -> Option<PathBuf> {
+    let mod_type_id = mod_entry
+        .mod_type
+        .as_deref()
+        .or_else(|| mod_entry.details.as_ref()?.get("type")?.as_str())?;
+
+    let mod_types = crate::games::with_plugin(game_id, |p| p.vortex_mod_types())?;
+
+    let matched = mod_types.iter().find(|mt| mt.id == mod_type_id)?;
+
+    if matched.target_path.is_empty() || matched.target_path == "." {
+        return None; // Default path, let normal routing handle it
+    }
+
+    // Safety: reject paths that could escape the game directory
+    if matched.target_path.contains("..") || matched.target_path.starts_with('/') {
+        log::warn!(
+            "Vortex mod type '{}' has unsafe target_path '{}', ignoring",
+            mod_type_id,
+            matched.target_path
+        );
+        return None;
+    }
+
+    let target = game_path.join(&matched.target_path);
+
+    // Double-check the resolved path is still under game_path
+    if !target.starts_with(game_path) {
+        log::warn!(
+            "Vortex mod type '{}' resolved to path outside game directory: {}",
+            mod_type_id,
+            target.display()
+        );
+        return None;
+    }
+
+    log::info!(
+        "Vortex mod type '{}' routing to: {}",
+        mod_type_id,
+        target.display()
+    );
+    Some(target)
 }
 
 /// Check if a path component is safe (no traversal or absolute paths).

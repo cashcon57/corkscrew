@@ -1990,6 +1990,32 @@ export async function chatClearHistory(): Promise<void> {
   return invoke("chat_clear_history");
 }
 
+// ---- Vortex Extensions ----
+
+export async function vortexFetchExtension(gameId: string): Promise<import("./types").VortexGameRegistration> {
+  return invoke("vortex_fetch_extension", { gameId });
+}
+
+export async function vortexRefreshExtension(gameId: string): Promise<import("./types").VortexGameRegistration> {
+  return invoke("vortex_refresh_extension", { gameId });
+}
+
+export async function vortexListCachedExtensions(): Promise<import("./types").VortexExtensionSummary[]> {
+  return invoke("vortex_list_cached_extensions");
+}
+
+export async function vortexListAvailableExtensions(): Promise<string[]> {
+  return invoke("vortex_list_available_extensions");
+}
+
+export async function vortexDeleteCachedExtension(gameId: string): Promise<void> {
+  return invoke("vortex_delete_cached_extension", { gameId });
+}
+
+export async function vortexGetExtensionDetail(gameId: string): Promise<import("./types").VortexGameRegistration | null> {
+  return invoke("vortex_get_extension_detail", { gameId });
+}
+
 // ---- FOMOD in Collection Install ----
 
 export async function submitFomodChoices(
