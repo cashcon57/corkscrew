@@ -29,18 +29,17 @@ Corkscrew has been **tested extensively with Skyrim Special Edition** on macOS (
 
 ### Tested & Working (Skyrim SE)
 - Full mod lifecycle: install from archive, stage, deploy via hardlinks, toggle on/off, uninstall
-- **NexusMods Collections** — 559-mod collection installed end-to-end (premium: fully automated; free: guided manual download). FOMOD replay, binary patches, INI tweaks, plugin sync, delta updates.
+- **NexusMods Collections** — Small-to-medium collections work. [Immersive & Pure](https://next.nexusmods.com/skyrimspecialedition/collections/vaakhi) by Canliberk is the reference tested collection (premium: fully automated; free: guided manual download). FOMOD replay, binary patches, INI tweaks, plugin sync, delta updates.
 - **Plugin load order** — LOOT-powered sorting via [libloot](https://github.com/loot/libloot), drag-and-drop reorder, custom rules
 - **SKSE auto-install** — Detects your game version, downloads the right SKSE build from GitHub
 - **[SSE Engine Fixes for Wine](https://github.com/corkscrewmodding/SSEEngineFixesForWine)** — Auto-deployed before every launch (see [below](#sse-engine-fixes-for-wine))
-- **1700+ plugin modlists** reaching main menu (Gate to Sovngarde scale)
 - NXM protocol handling (click "Download with Mod Manager" on Nexus → mod appears in Corkscrew)
 - Profiles, crash log analysis, INI editor with presets, mod tools management
 - NexusMods OAuth sign-in + API key fallback
 
-### In Progress
-- **Wabbajack modlists** — The full pipeline is built (multi-source downloads, BSDiff patching, BSA packing, directive processing), but game file source extraction is incomplete. Complex modlists that use vanilla game files as patch sources will partially fail. This is the main blocker for v1.0.
-- **Large NexusMods Collections** — Tested up to 559 mods. Larger collections (1000+) haven't been stress-tested yet.
+### Known Issues
+- **Large modlists don't work yet.** Gate to Sovngarde (1700+ plugins) installs and reaches main menu but freezes on New Game due to hash table corruption in Skyrim's engine under Wine. **This is the current bottleneck** — we are actively iterating on [SSE Engine Fixes for Wine](https://github.com/corkscrewmodding/SSEEngineFixesForWine) to solve this. Smaller modlists like [Immersive & Pure](https://next.nexusmods.com/skyrimspecialedition/collections/vaakhi) work end-to-end including New Game and gameplay.
+- **Wabbajack modlists** — The install pipeline is built (multi-source downloads, BSDiff patching, BSA packing, directive processing), but game file source extraction is incomplete. Complex modlists that depend on vanilla game files as patch sources will partially fail. This is the other main blocker for v1.0.
 
 ### Untested
 - **Every game except Skyrim SE.** 80+ games are auto-detected and support basic mod deployment, but only Skyrim SE and Fallout 4 have full-featured plugins (load order, LOOT, script extender, INI presets, crash logs). We haven't verified the mod workflow end-to-end for other games yet.
@@ -193,7 +192,7 @@ Before every Skyrim SE launch on Wine, Corkscrew automatically:
 3. Auto-updates the DLL when a new release is available
 4. Preserves user config (`SSEEngineFixesForWine.toml`) across updates
 
-This enables 1700+ plugin modlists to load under Wine, reaching main menu in ~2 minutes with 287K forms.
+This enables large modlists to load under Wine — 1700+ plugin lists reach main menu in ~2 minutes with 287K forms. However, very large modlists (Gate to Sovngarde scale) currently freeze on New Game due to hash table corruption in Skyrim's engine under Wine. Fixing this is active work.
 
 ---
 
