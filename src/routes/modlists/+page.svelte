@@ -697,6 +697,14 @@
 </script>
 
 <div class="modlists-page">
+  <div class="wj-experimental-banner">
+    <span class="wj-exp-icon">&#9888;</span>
+    <div class="wj-exp-text">
+      <strong>Experimental</strong> &mdash; Wabbajack modlist installation on Wine is untested for most lists and may not work.
+      Small lists are more likely to succeed. Large modlists (500+ archives) are known to have issues.
+    </div>
+  </div>
+
   {#if pendingWjInstall}
     <div class="resume-banner">
       <div class="resume-info">
@@ -775,6 +783,24 @@
             <span class="detail-stat-label">Files</span>
           </div>
         </div>
+
+        {#if selectedModlist.archive_count > 300}
+          <div class="wj-size-warning wj-size-error">
+            <span class="wj-warn-icon">&#9888;</span>
+            <div>
+              <strong>This modlist will most likely not work.</strong>
+              Large modlists ({selectedModlist.archive_count} archives) are known to cause crashes or freezes under Wine.
+              Proceed only if you're willing to troubleshoot.
+            </div>
+          </div>
+        {:else if selectedModlist.archive_count > 150}
+          <div class="wj-size-warning">
+            <span class="wj-warn-icon">&#9888;</span>
+            <div>
+              <strong>Large modlist</strong> &mdash; Lists of this size ({selectedModlist.archive_count} archives) are untested and may not work under Wine.
+            </div>
+          </div>
+        {/if}
 
         <!-- Description -->
         {#if selectedModlist.description}
@@ -951,6 +977,24 @@
                   <span class="directive-count">{count.toLocaleString()}</span>
                 </div>
               {/each}
+            </div>
+          </div>
+        {/if}
+
+        {#if parsedModlist.archive_count > 300}
+          <div class="wj-size-warning wj-size-error">
+            <span class="wj-warn-icon">&#9888;</span>
+            <div>
+              <strong>This modlist will most likely not work.</strong>
+              Large modlists ({parsedModlist.archive_count} archives) are known to cause crashes or freezes under Wine.
+              Proceed only if you're willing to troubleshoot.
+            </div>
+          </div>
+        {:else if parsedModlist.archive_count > 150}
+          <div class="wj-size-warning">
+            <span class="wj-warn-icon">&#9888;</span>
+            <div>
+              <strong>Large modlist</strong> &mdash; Lists of this size ({parsedModlist.archive_count} archives) are untested and may not work under Wine.
             </div>
           </div>
         {/if}
@@ -1328,6 +1372,57 @@
 <style>
   .modlists-page {
     padding: var(--space-2) 0 var(--space-12) 0;
+  }
+
+  .wj-experimental-banner {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    margin: 0 var(--space-6) var(--space-4) var(--space-6);
+    background: color-mix(in srgb, var(--warning) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--warning) 30%, transparent);
+    border-radius: var(--radius-lg);
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+    line-height: 1.5;
+  }
+  .wj-exp-icon {
+    font-size: 1.1rem;
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+  .wj-exp-text strong {
+    color: var(--text-primary);
+  }
+
+  .wj-size-warning {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    margin-bottom: var(--space-4);
+    background: color-mix(in srgb, var(--warning) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--warning) 25%, transparent);
+    border-radius: var(--radius-lg);
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+    line-height: 1.5;
+  }
+  .wj-size-warning strong {
+    color: var(--warning);
+  }
+  .wj-size-warning.wj-size-error {
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
+    border-color: color-mix(in srgb, var(--danger) 30%, transparent);
+  }
+  .wj-size-warning.wj-size-error strong {
+    color: var(--danger);
+  }
+  .wj-warn-icon {
+    font-size: 1.1rem;
+    flex-shrink: 0;
+    margin-top: 1px;
   }
 
   .page-header {
