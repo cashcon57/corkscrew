@@ -506,6 +506,7 @@ mod tests {
             auto_category: None,
             source_type: "manual".into(),
             collection_optional: false,
+            file_count: 0,
         }
     }
 
@@ -522,6 +523,7 @@ mod tests {
                 })
                 .collect(),
             winner_mod_id: winner,
+            same_collection: false,
         }
     }
 

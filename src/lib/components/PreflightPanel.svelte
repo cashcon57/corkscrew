@@ -208,18 +208,15 @@
   /* ---- Panel Container ---- */
 
   .preflight-panel {
-    background: var(--bg-grouped-secondary);
-    border-radius: var(--radius-lg);
+    background: transparent;
     overflow: hidden;
-    box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
   }
 
   /* ---- Header ---- */
 
   .preflight-header {
-    padding: var(--space-3) var(--space-4);
+    padding: var(--space-2) var(--space-4);
     border-bottom: 1px solid var(--separator);
-    background: var(--surface-subtle);
   }
 
   .preflight-title-row {

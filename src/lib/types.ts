@@ -28,7 +28,34 @@ export interface InstalledMod {
   name: string;
   version: string;
   archive_name: string;
+  /** Full file list — only present when loaded via getInstalledMods (detail view). */
   installed_files: string[];
+  /** File count — always present (from summary or computed from installed_files). */
+  file_count: number;
+  installed_at: string;
+  enabled: boolean;
+  staging_path: string | null;
+  install_priority: number;
+  collection_name: string | null;
+  user_notes: string | null;
+  user_tags: string[];
+  auto_category: string | null;
+  collection_optional: boolean;
+}
+
+/** Lightweight mod info for list views — file_count instead of full file list. */
+export interface ModSummary {
+  id: number;
+  game_id: string;
+  bottle_name: string;
+  nexus_mod_id: number | null;
+  nexus_file_id: number | null;
+  source_url: string | null;
+  source_type: ModSourceType;
+  name: string;
+  version: string;
+  archive_name: string;
+  file_count: number;
   installed_at: string;
   enabled: boolean;
   staging_path: string | null;
@@ -180,6 +207,8 @@ export interface FileConflict {
   relative_path: string;
   mods: ConflictModInfo[];
   winner_mod_id: number;
+  /** True when all conflicting mods belong to the same collection. */
+  same_collection: boolean;
 }
 
 export interface ConflictModInfo {
@@ -662,6 +691,7 @@ export interface CollectionMod {
 export interface RevisionModsResult {
   mods: CollectionMod[];
   game_versions: string[];
+  install_instructions: string | null;
 }
 
 export interface CollectionManifest {
@@ -1326,6 +1356,132 @@ export interface WabbajackInstallStatus {
   total_directives: number;
   completed_directives: number;
   error_message: string | null;
+}
+
+// Instruction Parsing System
+
+export type InstructionAction =
+  | { type: "enable_mod"; mod_name: string }
+  | { type: "disable_mod"; mod_name: string }
+  | { type: "enable_all_optional" }
+  | { type: "disable_all_optional" }
+  | { type: "set_fomod_choice"; mod_name: string; step: string | null; group: string | null; option: string }
+  | { type: "set_ini_setting"; file: string; section: string; key: string; value: string }
+  | { type: "set_load_order"; plugin: string; position: LoadOrderPosition }
+  | { type: "manual_step"; description: string; url: string | null };
+
+export type LoadOrderPosition =
+  | { type: "after"; reference: string }
+  | { type: "before"; reference: string }
+  | { type: "bottom" }
+  | { type: "top" };
+
+export type InstructionCondition =
+  | { type: "always" }
+  | { type: "game_version"; version: GameVersionMatch }
+  | { type: "platform"; platform: PlatformMatch }
+  | { type: "dlc_present"; dlc_name: string }
+  | { type: "mod_installed"; mod_name: string }
+  | { type: "mod_not_installed"; mod_name: string }
+  | { type: "all"; conditions: InstructionCondition[] }
+  | { type: "any"; conditions: InstructionCondition[] };
+
+export type GameVersionMatch = "ae" | "se" | { pattern: string };
+export type PlatformMatch = "wine" | "proton" | "wine_or_proton" | "native";
+
+export interface ConditionalAction {
+  action: InstructionAction;
+  condition: InstructionCondition;
+  source_text: string;
+  confidence: number;
+}
+
+export interface ParsedInstructions {
+  actions: ConditionalAction[];
+  unparsed_lines: string[];
+  source: ParseSource;
+  fully_parsed: boolean;
+}
+
+export type ParseSource =
+  | { type: "deterministic" }
+  | { type: "local_llm"; model: string }
+  | { type: "cloud_llm"; provider: string }
+  | { type: "manual" };
+
+export interface ValidatedAction {
+  action: ConditionalAction;
+  status: "valid" | "needs_confirmation" | "rejected";
+  resolved_mod_id: number | null;
+  reason: string | null;
+}
+
+export type LlmPreference = "none" | "local" | "cloud";
+
+export interface LlmConfig {
+  preference: LlmPreference;
+  local_model: string | null;
+  cloud_provider: string | null;
+  cloud_api_key: string | null;
+}
+
+export interface OllamaStatus {
+  installed: boolean;
+  running: boolean;
+  available_models: OllamaModel[];
+}
+
+export interface OllamaModel {
+  name: string;
+  size_bytes: number;
+  size_display: string;
+  description: string;
+  expected_accuracy: number;
+  supports_tool_use: boolean;
+  min_memory_bytes: number;
+}
+
+export interface CloudProvider {
+  name: string;
+  display_name: string;
+  description: string;
+  requires_api_key: boolean;
+  free_tier_info: string;
+}
+
+export type ModelCapabilityTier = "basic" | "standard" | "advanced";
+
+// LLM Chat
+
+export interface ChatMessage {
+  role: string;
+  content: string;
+  tool_calls?: ToolCallResponse[];
+}
+
+export interface ToolCallResponse {
+  function: { name: string; arguments: Record<string, unknown> };
+}
+
+export type LlmBackend = "ollama" | "mlx";
+
+export interface ChatState {
+  model: string | null;
+  backend: LlmBackend;
+  loaded: boolean;
+  messages: ChatMessage[];
+  available_models: OllamaModel[];
+}
+
+export interface ChatResponse {
+  message: ChatMessage;
+  tool_results: ToolResult[];
+}
+
+export interface ToolResult {
+  tool_name: string;
+  result: string;
+  success: boolean;
 }
 
 // Steam Integration

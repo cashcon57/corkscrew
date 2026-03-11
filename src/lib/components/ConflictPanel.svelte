@@ -22,10 +22,14 @@
 
   const game = $derived($selectedGame);
 
+  // Split into real conflicts and collection overlaps
+  const realConflicts = $derived(conflicts.filter(c => !c.same_collection));
+  const collectionOverlaps = $derived(conflicts.filter(c => c.same_collection));
   const totalConflicts = $derived(conflicts.length);
+  let overlapsExpanded = $state(false);
   const involvedMods = $derived.by(() => {
     const modIds = new Set<number>();
-    for (const c of conflicts) {
+    for (const c of realConflicts) {
       for (const m of c.mods) {
         modIds.add(m.mod_id);
       }
@@ -149,7 +153,12 @@
     <div class="panel-header">
       <div class="panel-title-row">
         <h3 class="panel-title">File Conflicts</h3>
-        <span class="conflict-count-badge">{totalConflicts}</span>
+        {#if realConflicts.length > 0}
+          <span class="conflict-count-badge">{realConflicts.length}</span>
+        {/if}
+        {#if collectionOverlaps.length > 0}
+          <span class="overlap-count-badge">{collectionOverlaps.length} overlaps</span>
+        {/if}
         {#if onclose}
           <button class="panel-close" onclick={onclose} aria-label="Close panel" type="button">
             <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
@@ -159,9 +168,13 @@
           </button>
         {/if}
       </div>
-      {#if totalConflicts > 0}
+      {#if realConflicts.length > 0}
         <p class="panel-summary">
-          {totalConflicts} file{totalConflicts !== 1 ? "s" : ""} have conflicts across {involvedMods} mod{involvedMods !== 1 ? "s" : ""}
+          {realConflicts.length} file{realConflicts.length !== 1 ? "s" : ""} have conflicts across {involvedMods} mod{involvedMods !== 1 ? "s" : ""}
+        </p>
+      {:else if collectionOverlaps.length > 0}
+        <p class="panel-summary">
+          No unresolved conflicts. {collectionOverlaps.length} file{collectionOverlaps.length !== 1 ? "s" : ""} overlap within collections.
         </p>
       {/if}
     </div>
@@ -215,76 +228,91 @@
       </div>
     {:else}
       <div class="conflict-list">
-        {#each conflicts as conflict (conflict.relative_path)}
-          <div class="conflict-group">
-            <button
-              class="conflict-row"
-              onclick={() => togglePath(conflict.relative_path)}
-              aria-expanded={isExpanded(conflict.relative_path)}
-              type="button"
-            >
-              <svg
-                class="row-chevron"
-                class:row-chevron-open={isExpanded(conflict.relative_path)}
-                width="10"
-                height="10"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2.5"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              >
-                <polyline points="6 9 12 15 18 9" />
-              </svg>
-              <span class="conflict-path" title={conflict.relative_path}>
-                {truncatePath(conflict.relative_path)}
-              </span>
-              <span class="conflict-mod-count">
-                {conflict.mods.length} mod{conflict.mods.length !== 1 ? "s" : ""}
-              </span>
-            </button>
-
-            {#if isExpanded(conflict.relative_path)}
-              <div class="conflict-detail">
-                {#each conflict.mods.sort((a, b) => a.priority - b.priority) as mod (mod.mod_id)}
-                  <div
-                    class="mod-priority-row"
-                    class:mod-winner={mod.mod_id === conflict.winner_mod_id}
-                    class:mod-drag-over={dragOverModId === mod.mod_id && dragOverPath === conflict.relative_path}
-                    draggable="true"
-                    ondragstart={(e) => handleDragStart(e, mod.mod_id, conflict.relative_path)}
-                    ondragover={(e) => handleDragOver(e, mod.mod_id)}
-                    ondragleave={handleDragLeave}
-                    ondrop={(e) => handleDrop(e, mod.mod_id, conflict)}
-                    ondragend={handleDragEnd}
-                    role="listitem"
-                  >
-                    <span class="drag-handle" aria-label="Drag to reorder">
-                      <svg width="8" height="12" viewBox="0 0 8 12" fill="currentColor">
-                        <circle cx="2" cy="2" r="1" />
-                        <circle cx="6" cy="2" r="1" />
-                        <circle cx="2" cy="6" r="1" />
-                        <circle cx="6" cy="6" r="1" />
-                        <circle cx="2" cy="10" r="1" />
-                        <circle cx="6" cy="10" r="1" />
-                      </svg>
-                    </span>
-                    <span class="mod-priority-num">{mod.priority}</span>
-                    <span class="mod-priority-name">{mod.mod_name}</span>
-                    {#if mod.mod_id === conflict.winner_mod_id}
-                      <span class="winner-badge" title="This mod's file wins">
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                          <path d="M20 6L9 17l-5-5" />
-                        </svg>
-                      </span>
-                    {/if}
-                  </div>
-                {/each}
-              </div>
-            {/if}
+        <!-- Needs Review: real cross-collection conflicts -->
+        {#if realConflicts.length > 0}
+          <div class="section-header section-header-red">
+            <span class="section-label">Needs Review</span>
+            <span class="section-count-badge section-count-red">{realConflicts.length}</span>
           </div>
-        {/each}
+          {#each realConflicts as conflict (conflict.relative_path)}
+            <div class="conflict-group">
+              <button
+                class="conflict-row"
+                onclick={() => togglePath(conflict.relative_path)}
+                aria-expanded={isExpanded(conflict.relative_path)}
+                type="button"
+              >
+                <svg class="row-chevron" class:row-chevron-open={isExpanded(conflict.relative_path)} width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9" /></svg>
+                <span class="conflict-path" title={conflict.relative_path}>{truncatePath(conflict.relative_path)}</span>
+                <span class="conflict-mod-count">{conflict.mods.length} mod{conflict.mods.length !== 1 ? "s" : ""}</span>
+              </button>
+              {#if isExpanded(conflict.relative_path)}
+                <div class="conflict-detail">
+                  {#each conflict.mods.sort((a, b) => a.priority - b.priority) as mod (mod.mod_id)}
+                    <div
+                      class="mod-priority-row"
+                      class:mod-winner={mod.mod_id === conflict.winner_mod_id}
+                      class:mod-drag-over={dragOverModId === mod.mod_id && dragOverPath === conflict.relative_path}
+                      draggable="true"
+                      ondragstart={(e) => handleDragStart(e, mod.mod_id, conflict.relative_path)}
+                      ondragover={(e) => handleDragOver(e, mod.mod_id)}
+                      ondragleave={handleDragLeave}
+                      ondrop={(e) => handleDrop(e, mod.mod_id, conflict)}
+                      ondragend={handleDragEnd}
+                      role="listitem"
+                    >
+                      <span class="drag-handle" aria-label="Drag to reorder"><svg width="8" height="12" viewBox="0 0 8 12" fill="currentColor"><circle cx="2" cy="2" r="1" /><circle cx="6" cy="2" r="1" /><circle cx="2" cy="6" r="1" /><circle cx="6" cy="6" r="1" /><circle cx="2" cy="10" r="1" /><circle cx="6" cy="10" r="1" /></svg></span>
+                      <span class="mod-priority-num">{mod.priority}</span>
+                      <span class="mod-priority-name">{mod.mod_name}</span>
+                      {#if mod.mod_id === conflict.winner_mod_id}
+                        <span class="winner-badge" title="This mod's file wins"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5" /></svg></span>
+                      {/if}
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+          {/each}
+        {/if}
+
+        <!-- Collection Overlaps: same-collection file overlaps (collapsed by default) -->
+        {#if collectionOverlaps.length > 0}
+          <button class="section-header section-header-muted" onclick={() => overlapsExpanded = !overlapsExpanded} type="button">
+            <svg class="row-chevron" class:row-chevron-open={overlapsExpanded} width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9" /></svg>
+            <span class="section-label">Collection Overlaps</span>
+            <span class="section-count-badge section-count-muted">{collectionOverlaps.length}</span>
+            <span class="section-hint">Author-ordered priority</span>
+          </button>
+          {#if overlapsExpanded}
+            {#each collectionOverlaps as conflict (conflict.relative_path)}
+              <div class="conflict-group conflict-group-muted">
+                <button
+                  class="conflict-row"
+                  onclick={() => togglePath(conflict.relative_path)}
+                  aria-expanded={isExpanded(conflict.relative_path)}
+                  type="button"
+                >
+                  <svg class="row-chevron" class:row-chevron-open={isExpanded(conflict.relative_path)} width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9" /></svg>
+                  <span class="conflict-path" title={conflict.relative_path}>{truncatePath(conflict.relative_path)}</span>
+                  <span class="conflict-mod-count">{conflict.mods.length} mod{conflict.mods.length !== 1 ? "s" : ""}</span>
+                </button>
+                {#if isExpanded(conflict.relative_path)}
+                  <div class="conflict-detail">
+                    {#each conflict.mods.sort((a, b) => a.priority - b.priority) as mod (mod.mod_id)}
+                      <div class="mod-priority-row" class:mod-winner={mod.mod_id === conflict.winner_mod_id} role="listitem">
+                        <span class="mod-priority-num">{mod.priority}</span>
+                        <span class="mod-priority-name">{mod.mod_name}</span>
+                        {#if mod.mod_id === conflict.winner_mod_id}
+                          <span class="winner-badge" title="This mod's file wins"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5" /></svg></span>
+                        {/if}
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
+              </div>
+            {/each}
+          {/if}
+        {/if}
       </div>
     {/if}
   </div>
@@ -335,6 +363,20 @@
     font-weight: 700;
     color: var(--red);
     background: var(--red-subtle);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .overlap-count-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 20px;
+    padding: 0 6px;
+    border-radius: 100px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    background: var(--surface-hover);
     font-variant-numeric: tabular-nums;
   }
 
@@ -487,6 +529,82 @@
 
   .conflict-group:last-child {
     border-bottom: none;
+  }
+
+  .conflict-group-muted {
+    opacity: 0.7;
+  }
+
+  .conflict-group-muted:hover {
+    opacity: 1;
+  }
+
+  /* ---- Section Headers ---- */
+
+  .section-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-5);
+    border-bottom: 1px solid var(--separator);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    width: 100%;
+    text-align: left;
+  }
+
+  .section-header-red {
+    color: var(--red);
+    background: color-mix(in srgb, var(--red) 4%, transparent);
+  }
+
+  .section-header-muted {
+    color: var(--text-tertiary);
+    background: var(--surface-hover);
+    cursor: pointer;
+    transition: background var(--duration-fast) var(--ease);
+  }
+
+  .section-header-muted:hover {
+    background: var(--surface-active);
+  }
+
+  .section-label {
+    flex-shrink: 0;
+  }
+
+  .section-count-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    height: 16px;
+    padding: 0 4px;
+    border-radius: 100px;
+    font-size: 10px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .section-count-red {
+    color: var(--red);
+    background: var(--red-subtle);
+  }
+
+  .section-count-muted {
+    color: var(--text-tertiary);
+    background: var(--separator);
+  }
+
+  .section-hint {
+    margin-left: auto;
+    font-weight: 400;
+    font-size: 10px;
+    text-transform: none;
+    letter-spacing: 0;
+    opacity: 0.7;
   }
 
   .conflict-row {

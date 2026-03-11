@@ -207,6 +207,7 @@ pub struct GameVersionRef {
 pub struct RevisionModsResult {
     pub mods: Vec<CollectionMod>,
     pub game_versions: Vec<String>,
+    pub install_instructions: Option<String>,
 }
 
 /// An INI tweak bundled with a collection.
@@ -602,6 +603,7 @@ query CollectionRevisions($slug: String!, $viewAdultContent: Boolean) {
 const GET_REVISION_MODS_QUERY: &str = r#"
 query RevisionMods($slug: String!, $revision: Int, $viewAdultContent: Boolean) {
     collectionRevision(slug: $slug, revision: $revision, viewAdultContent: $viewAdultContent) {
+        installInstructions
         gameVersions { id reference }
         modFiles {
             fileId optional
@@ -977,9 +979,16 @@ pub async fn get_revision_mods(
         }
     }
 
+    let install_instructions = revision_node
+        .get("installInstructions")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+
     Ok(RevisionModsResult {
         mods,
         game_versions,
+        install_instructions,
     })
 }
 

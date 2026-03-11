@@ -168,19 +168,15 @@
   /* ---- Section Card ---- */
 
   .section-card {
-    background: var(--surface);
-    border: 1px solid var(--separator);
-    border-radius: var(--radius-lg);
+    background: transparent;
     overflow: hidden;
-    box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
   }
 
   .card-header {
     display: flex;
     align-items: center;
     gap: var(--space-2);
-    padding: var(--space-3) var(--space-4);
-    background: var(--surface-subtle);
+    padding: var(--space-2) var(--space-4);
     border-bottom: 1px solid var(--separator);
   }
 

@@ -22,13 +22,13 @@
 
 <br>
 
-NOTE: Corkscrew currently only supports modlists with fewer that 600 plugins for automated install. This is an issue with Wine on MacOS. I am actively developing a version of SSEEngineFixes that will address this issue, and it will be included in the Corkscrew install and will automatically apply itself to your modlist. Right now, Corkscrew is confirmed working with Immersive & Pure/Adult. Should work with any modlist near that same size. It also works fine for fully custom managed mod installation, up to 600 plugins. I will update and release a new version when this is addressed. 
+Corkscrew is confirmed working with modlists of **1700+ plugins** (including Gate To Sovngarde) thanks to [SSE Engine Fixes for Wine](https://github.com/corkscrewmodding/SSEEngineFixesForWine), which is auto-deployed before every launch.
 
 Corkscrew installs, manages, and organizes mods for Windows games running through [CrossOver](https://www.codeweavers.com/crossover), [Moonshine](https://github.com/ybmeng/moonshine), [Lutris](https://lutris.net/), [Proton](https://github.com/ValveSoftware/Proton), and other Wine-based compatibility layers — no Windows VM required.
 
 It works by reading and writing directly to your Wine bottle's filesystem, the same way the game itself sees it. Your bottles, your mods, no middleman.
 
-> **v0.9** — NexusMods Collections install end-to-end (559 mods, FOMOD replay, binary patches, INI tweaks, plugin sync, delta updates), Wabbajack modlist pipeline (full directive processing, BSA/BA2 packing, multi-source downloads), OAuth sign-in, LOOT sorting, profiles, crash log analysis, auto-updater, SSE Engine Fixes for Wine auto-deploy, SKSE plugin compatibility engine, and Apple Developer code signing.
+> **v0.9** — NexusMods Collections (1700+ plugins, FOMOD replay, binary patches, INI tweaks, plugin sync, delta updates), Wabbajack modlists (full directive processing, multi-source downloads), built-in AI mod assistant (local LLM with tool use), OAuth sign-in, LOOT sorting, profiles, crash log analysis, auto-updater, SSE Engine Fixes for Wine auto-deploy, SKSE plugin compatibility engine, CLI tools, and Apple Developer code signing.
 
 ---
 
@@ -48,7 +48,9 @@ It works by reading and writing directly to your Wine bottle's filesystem, the s
   - [Wabbajack Modlists](#wabbajack-modlists)
   - [Crash Log Analysis](#crash-log-analysis)
   - [Game Launching & Tools](#game-launching--tools)
+  - [AI Mod Assistant](#ai-mod-assistant)
   - [Platform & UI](#platform--ui)
+  - [CLI Tools](#cli-tools)
 - [Supported Platforms](#supported-platforms)
   - [Bottle Sources](#bottle-sources)
   - [Games](#games)
@@ -266,6 +268,27 @@ Corkscrew includes an in-app auto-updater. When a new version is published on Gi
 - **Game file integrity** — Take snapshots of your game directory to detect modified, unknown, or missing files later.
 - **Bottle configuration** — View and modify Wine bottle settings (Windows version, MSync, MetalFX, DXMT, environment variables) directly from Corkscrew.
 
+### AI Mod Assistant
+- **Built-in local LLM** — Chat with an AI assistant that can interact with your mod setup directly. Powered by [Ollama](https://ollama.com/) running locally on your machine — no cloud, no account required, fully private.
+- **Automatic Ollama management** — Corkscrew auto-starts Ollama when you open the assistant, installs it if missing (platform-aware), and auto-unloads models after 5 minutes of inactivity to free memory.
+- **Memory-aware model selection** — Recommends the best model for your system's unified memory (Apple Silicon) or available RAM. Models range from 1.5 GB (2B params) to 18 GB (30B MoE).
+- **Qwen 3.5 models** — Ships with recommendations for the Qwen 3.5 family (March 2026), which leads the BFCL-V4 tool calling benchmark at every size class. Native MCP support.
+- **20+ tool actions** — The AI can directly:
+  - List, enable, disable, and inspect mods
+  - Search NexusMods (including NSFW mods via API, respecting rate limits)
+  - View mod details, files, and dependencies on NexusMods
+  - Check for mod updates
+  - Get mod recommendations based on your install
+  - View and sort plugin load order (LOOT)
+  - Detect file conflicts and dependency issues
+  - Run pre-flight checks
+  - Analyze crash logs
+  - List and switch mod profiles
+  - Redeploy mods
+- **Context-aware** — The assistant knows which game you're modding, how many mods you have installed, and which page of the UI you're on. It dynamically fetches the latest Corkscrew documentation to stay current.
+- **Reactive UI** — When the AI enables/disables mods, sorts plugins, or switches profiles, the main UI updates automatically to reflect the changes.
+- **Capability tiers** — Smaller models get a focused set of read-only tools; larger models unlock destructive operations like install, sort, and profile switching.
+
 ### Platform & UI
 - **Automatic bottle detection** — Finds CrossOver, Whisky, Moonshine, Heroic, Mythic, Lutris, Proton, Bottles, and native Wine prefixes.
 - **Game scanning** — Discovers 80+ supported titles across all bottles via Steam and GOG path scanning.
@@ -276,6 +299,36 @@ Corkscrew includes an in-app auto-updater. When a new version is published on Gi
 - **SteamOS / Steam Deck integration** — Auto-detect Steam Deck hardware, register Corkscrew as a non-Steam game in Steam library, create `.desktop` entry with NXM protocol handler, and auto-enable controller mode on Deck.
 - **Cross-platform** — Native app for both macOS and Linux (SteamOS, Fedora, Ubuntu).
 - **In-app auto-updater** — Check for and install signed updates directly from within Corkscrew. View multi-version changelogs, dismiss updates per-version, and choose when to install. Shows a success toast when an update was applied on restart.
+
+### CLI Tools
+
+Corkscrew includes a command-line interface for headless operation, scripting, and debugging. All CLI commands operate on the same SQLite database as the GUI.
+
+```bash
+# Launch a game (with optional SKSE)
+corkscrew --launch <game_id> <bottle_name> [--skse]
+corkscrew --launch skyrimse Steam --skse
+
+# List installed mods
+corkscrew --list-mods <game_id> <bottle_name>
+
+# Search installed mods by name
+corkscrew --search-mods <query> <game_id> <bottle_name>
+
+# Find a file across all installed mods
+corkscrew --find-file <pattern> <game_id> <bottle_name>
+
+# Check plugin load order (with optional filters)
+corkscrew --check-plugins <game_id> <bottle_name> [--inactive-only] [--deployed-inactive]
+
+# Sync plugins.txt with deployed plugin files
+corkscrew --sync-plugins <game_id> <bottle_name>
+
+# List files in a specific mod
+corkscrew --mod-files <mod_name> <game_id> <bottle_name>
+```
+
+Game IDs match the NexusMods domain (e.g., `skyrimse`, `fallout4`, `oblivion`). Bottle names match the Wine bottle source (e.g., `Steam`, `CrossOver`, `Whisky`).
 
 ---
 
@@ -400,6 +453,8 @@ Key workflows tested end-to-end:
 - Per-profile game save backup/restore
 - Pre-install game directory cleanup
 - Apple Developer code signing and notarization
+- AI mod assistant with local LLM (20+ tools, context-aware, NexusMods search)
+- CLI tools for headless mod management and scripting
 
 ### Known Limitations
 
@@ -411,6 +466,7 @@ Key workflows tested end-to-end:
 ### Roadmap
 
 **Near-term:**
+- MLX backend for AI assistant (Apple Silicon native, ~2x faster than Ollama)
 - Enhanced game plugins for more Bethesda titles (Oblivion, Fallout 3, Fallout NV, Starfield, Morrowind)
 - Per-game tool configuration for non-Bethesda games
 - Wabbajack game file source extraction (vanilla files as patch sources)
@@ -419,7 +475,7 @@ Key workflows tested end-to-end:
 - Enhanced dependency visualization with tree view (currently list-based)
 - Install simulation / dry-run preview (currently preflight validation only)
 - Download bandwidth throttling
-- Resizable table columns with persistent widths
+- LoversLab mod source integration
 
 **Long-term:**
 - Flatpak distribution
@@ -466,6 +522,7 @@ src/                          Svelte frontend
 │       ├── IniManagerPanel.svelte   INI file editor with presets
 │       ├── WineDiagnosticsPanel.svelte Wine bottle health diagnostics
 │       ├── WebViewToggle.svelte     In-App / Website toggle with native webview
+│       ├── LlmChat.svelte          AI mod assistant chat panel (Ollama integration)
 │       └── mods/
 │           ├── ModTableHeader.svelte    Sortable column headers
 │           ├── ModTableRow.svelte       Single mod row with hover actions
@@ -488,7 +545,7 @@ src/                          Svelte frontend
 └── app.css                   Design system (tokens, themes, vibrancy, animations)
 
 src-tauri/src/                Rust backend (~53 modules, 706 tests)
-├── lib.rs              Tauri command handlers (~224 IPC commands)
+├── lib.rs              Tauri command handlers (~249 IPC commands) + CLI subcommands
 ├── bottles.rs          Bottle detection (9 sources, macOS + Linux)
 ├── bottle_config.rs    Wine bottle settings (MSync, MetalFX, env vars)
 ├── games.rs            Game detection framework + plugin registry
@@ -522,6 +579,8 @@ src-tauri/src/                Rust backend (~53 modules, 706 tests)
 ├── conflict_resolver.rs Automated conflict resolution heuristics
 ├── progress.rs         Install progress event types (Tauri event system)
 ├── rollback.rs         Mod version rollback + snapshot management + snapshot restore
+├── llm_chat.rs         Local LLM chat engine (Ollama API, tool calling, system prompt)
+├── llm_parser.rs       LLM instruction parsing for collection instructions
 ├── modlist_io.rs       Modlist export/import + diff comparison
 ├── executables.rs      Custom executable management
 ├── config.rs           JSON configuration (dirs crate for platform paths)

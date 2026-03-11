@@ -30,6 +30,7 @@
 
   async function loadProfiles() {
     if (!game) return;
+    const t0 = performance.now();
     loading = true;
     try {
       profiles = await listProfiles(game.game_id, game.bottle_name);
@@ -37,6 +38,7 @@
       showError(`Failed to load profiles: ${e}`);
     } finally {
       loading = false;
+      console.log(`[perf] loadProfiles: ${(performance.now() - t0).toFixed(0)}ms (${profiles.length} profiles)`);
     }
   }
 

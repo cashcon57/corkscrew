@@ -7,6 +7,8 @@
   import FomodWizard from "$lib/components/FomodWizard.svelte";
   import {
     getInstalledMods,
+    getInstalledModsSummary,
+    getModDetail,
     installMod,
     uninstallMod,
     toggleMod,
@@ -36,6 +38,7 @@
     resolveAllConflicts,
     recordConflictWinner,
     onDeployProgress,
+    onBulkOperationProgress,
     backfillCategories,
     exportModlist,
     detectFomod,
@@ -273,12 +276,29 @@
     window.addEventListener('pointerup', onUp);
   }
 
-  // Derived: set of mod IDs that have conflicts
+  // Split conflicts into real (cross-collection) and collection overlaps
+  let realConflicts = $derived(conflicts.filter(c => !c.same_collection));
+  let collectionOverlaps = $derived(conflicts.filter(c => c.same_collection));
+
+  // Derived: set of mod IDs with REAL conflicts (cross-collection)
   let conflictModIds = $derived((() => {
     const ids = new Set<number>();
-    for (const conflict of conflicts) {
+    for (const conflict of realConflicts) {
       for (const mod of conflict.mods) {
         ids.add(mod.mod_id);
+      }
+    }
+    return ids;
+  })());
+
+  // Derived: set of mod IDs with collection overlaps only (no real conflicts)
+  let overlapModIds = $derived((() => {
+    const ids = new Set<number>();
+    for (const conflict of collectionOverlaps) {
+      for (const mod of conflict.mods) {
+        if (!conflictModIds.has(mod.mod_id)) {
+          ids.add(mod.mod_id);
+        }
       }
     }
     return ids;
@@ -334,6 +354,7 @@
   onDestroy(() => {
     if (installUnlisten) { installUnlisten(); installUnlisten = null; }
     if (deployUnlisten) { deployUnlisten(); deployUnlisten = null; }
+    if (bulkProgressUnlisten) { bulkProgressUnlisten(); bulkProgressUnlisten = null; }
   });
 
   // View mode state
@@ -382,7 +403,7 @@
           primary = compareVersions(a.version || "0", b.version || "0");
           return dir * primary || a.name.localeCompare(b.name);
         case "files":
-          primary = a.installed_files.length - b.installed_files.length;
+          primary = a.file_count - b.file_count;
           return dir * primary || a.name.localeCompare(b.name);
         default:
           primary = a.install_priority - b.install_priority;
@@ -480,8 +501,8 @@
       if (priorityOp === ">" && m.install_priority <= priorityN) return false;
       if (priorityOp === "<" && m.install_priority >= priorityN) return false;
       // Facet: files
-      if (filesOp === ">" && m.installed_files.length <= filesN) return false;
-      if (filesOp === "<" && m.installed_files.length >= filesN) return false;
+      if (filesOp === ">" && m.file_count <= filesN) return false;
+      if (filesOp === "<" && m.file_count >= filesN) return false;
       // Free text search across name, tags, notes, collection, category
       if (q !== null &&
         !m.name.toLowerCase().includes(q) &&
@@ -535,6 +556,7 @@
       enabled,
       disabled: $installedMods.length - enabled,
       conflicts: conflictModIds.size,
+      overlaps: overlapModIds.size,
       updates: modUpdates.length,
     };
   })());
@@ -561,8 +583,29 @@
 
   // Virtual scrolling derived — uses enabledFilteredMods in flat view to exclude disabled mods
   let flatViewMods = $derived(viewMode === "flat" ? enabledFilteredMods : filteredMods);
+
+  type FlatViewItem =
+    | { type: "mod"; mod: InstalledMod }
+    | { type: "disabled-separator" }
+    | { type: "disabled-mod"; mod: InstalledMod; disabledIndex: number };
+
+  /** Unified flat view list: enabled mods + separator + disabled mods (if expanded). */
+  let flatViewItems = $derived((() => {
+    if (viewMode !== "flat") return [] as FlatViewItem[];
+    const items: FlatViewItem[] = enabledFilteredMods.map(mod => ({ type: "mod" as const, mod }));
+    if (disabledFilteredMods.length > 0) {
+      items.push({ type: "disabled-separator" as const });
+      if (!disabledSectionCollapsed) {
+        disabledFilteredMods.forEach((mod, i) => {
+          items.push({ type: "disabled-mod" as const, mod, disabledIndex: i });
+        });
+      }
+    }
+    return items;
+  })());
+
   let visibleRange = $derived((() => {
-    const totalItems = flatViewMods.length;
+    const totalItems = viewMode === "flat" ? flatViewItems.length : flatViewMods.length;
     if (totalItems === 0) return { start: 0, end: 0, paddingTop: 0, paddingBottom: 0 };
     const startRaw = Math.floor(scrollTop / ROW_HEIGHT) - SCROLL_BUFFER;
     const visibleCount = Math.ceil(containerHeight / ROW_HEIGHT) + SCROLL_BUFFER * 2;
@@ -608,72 +651,100 @@
     }
   }
 
-  let lastSelectedModId = $state<number | null>(null);
+  // Anchor point for shift-click range selection (the first non-shift click).
+  // This stays fixed until the user clicks without shift.
+  let selectionAnchorId = $state<number | null>(null);
 
-  function toggleSelectMod(id: number) {
-    const next = new Set(selectedModIds);
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
-    selectedModIds = next;
-    lastSelectedModId = id;
-  }
-
-  /** Handle row click with shift/cmd modifier support for multi-select. */
-  function handleRowClick(e: MouseEvent, mod: InstalledMod, index: number) {
-    if (e.shiftKey && lastSelectedModId !== null) {
-      // Shift+click: range select from last selected to this mod
-      e.preventDefault(); // Prevent text selection
+  function toggleSelectMod(id: number, e?: MouseEvent) {
+    if (e?.shiftKey && selectionAnchorId !== null) {
+      // Shift+click: select the entire range from anchor to this item.
+      // Does NOT toggle — always adds the full range (standard file manager behavior).
       const allMods = viewMode === "flat"
         ? [...flatViewMods, ...disabledFilteredMods]
         : filteredMods;
-      const lastIdx = allMods.findIndex(m => m.id === lastSelectedModId);
-      const curIdx = allMods.findIndex(m => m.id === mod.id);
-      if (lastIdx !== -1 && curIdx !== -1) {
-        const start = Math.min(lastIdx, curIdx);
-        const end = Math.max(lastIdx, curIdx);
+      const anchorIdx = allMods.findIndex(m => m.id === selectionAnchorId);
+      const curIdx = allMods.findIndex(m => m.id === id);
+      if (anchorIdx !== -1 && curIdx !== -1) {
+        const start = Math.min(anchorIdx, curIdx);
+        const end = Math.max(anchorIdx, curIdx);
         const next = new Set(selectedModIds);
         for (let i = start; i <= end; i++) {
           next.add(allMods[i].id);
         }
         selectedModIds = next;
       }
-      lastSelectedModId = mod.id;
-    } else if (e.metaKey || e.ctrlKey) {
-      // Cmd/Ctrl+click: toggle individual selection without clearing others
-      toggleSelectMod(mod.id);
-      lastSelectedModId = mod.id;
+      // Don't update the anchor — it stays on the original click point
+      // so the user can shift-click again to adjust the range.
     } else {
-      // Normal click: select this mod (add to selection) and open detail
+      // Normal click: toggle this single item and set it as the new anchor.
       const next = new Set(selectedModIds);
-      if (next.has(mod.id) && selectedModId === mod.id) {
-        // Clicking the already-active mod: deselect and close detail
-        next.delete(mod.id);
-        selectedModIds = next;
-        selectedModId = undefined;
-        detailMod = null;
-      } else {
-        next.add(mod.id);
-        selectedModIds = next;
-        selectedModId = mod.id;
-        detailMod = mod;
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      selectedModIds = next;
+      selectionAnchorId = id;
+    }
+  }
+
+  /** Handle row click — opens detail panel and lazy-loads full mod data. */
+  let detailLoadingId = $state<number | null>(null);
+  function handleRowClick(e: MouseEvent, mod: InstalledMod, index: number) {
+    if (selectedModId === mod.id) {
+      selectedModId = undefined;
+      detailMod = null;
+      detailLoadingId = null;
+    } else {
+      selectedModId = mod.id;
+      detailMod = mod; // Show immediately with summary data
+      // Lazy-load full details (installed_files etc.) in background
+      if (mod.installed_files.length === 0 && mod.file_count > 0) {
+        detailLoadingId = mod.id;
+        getModDetail(mod.id)
+          .then(fullMod => {
+            if (selectedModId === mod.id) {
+              detailMod = fullMod;
+            }
+          })
+          .catch(() => {}) // Graceful — detail panel works with summary
+          .finally(() => { if (detailLoadingId === mod.id) detailLoadingId = null; });
       }
-      lastSelectedModId = mod.id;
     }
     focusedIndex = index;
   }
 
   let bulkOperating = $state<"enabling" | "disabling" | "uninstalling" | null>(null);
+  let bulkProgress = $state<{ phase: string; current: number; total: number; message: string } | null>(null);
+  let bulkProgressUnlisten: (() => void) | null = null;
+
+  async function startBulkListener() {
+    bulkProgress = null;
+    bulkProgressUnlisten = await onBulkOperationProgress((p) => {
+      bulkProgress = p;
+    });
+  }
+
+  function stopBulkListener() {
+    if (bulkProgressUnlisten) { bulkProgressUnlisten(); bulkProgressUnlisten = null; }
+    bulkProgress = null;
+  }
 
   async function batchEnable() {
     if (!activeGame) return;
     bulkOperating = "enabling";
+    await startBulkListener();
     try {
       const ids = Array.from(selectedModIds);
-      await batchToggleMods(ids, activeGame.game_id, activeGame.bottle_name, true);
+      const result = await batchToggleMods(ids, activeGame.game_id, activeGame.bottle_name, true);
       selectedModIds = new Set();
       await loadMods(activeGame);
       await refreshHealth(activeGame);
+      const count = parseInt(result, 10);
+      if (count > 0) showSuccess(`Enabled ${count} mod${count === 1 ? "" : "s"}`);
+    } catch (e) {
+      await loadMods(activeGame);
+      await refreshHealth(activeGame);
+      showError(`${e}`);
     } finally {
+      stopBulkListener();
       bulkOperating = null;
     }
   }
@@ -681,13 +752,21 @@
   async function batchDisable() {
     if (!activeGame) return;
     bulkOperating = "disabling";
+    await startBulkListener();
     try {
       const ids = Array.from(selectedModIds);
-      await batchToggleMods(ids, activeGame.game_id, activeGame.bottle_name, false);
+      const result = await batchToggleMods(ids, activeGame.game_id, activeGame.bottle_name, false);
       selectedModIds = new Set();
       await loadMods(activeGame);
       await refreshHealth(activeGame);
+      const count = parseInt(result, 10);
+      if (count > 0) showSuccess(`Disabled ${count} mod${count === 1 ? "" : "s"}`);
+    } catch (e) {
+      await loadMods(activeGame);
+      await refreshHealth(activeGame);
+      showError(`${e}`);
     } finally {
+      stopBulkListener();
       bulkOperating = null;
     }
   }
@@ -732,6 +811,73 @@
     return groups;
   })());
 
+  type CollectionItem =
+    | { type: "group-header"; groupName: string; count: number }
+    | { type: "enabled-separator"; groupName: string; count: number }
+    | { type: "optional-separator"; groupName: string; count: number }
+    | { type: "disabled-separator"; groupName: string; count: number }
+    | { type: "mod"; mod: InstalledMod; optional: boolean };
+
+  /** Flatten collection groups into a single virtual-scrollable array.
+   *  Each group: Enabled (required) → Optional (enabled optional) → Disabled */
+  let collectionFlatItems = $derived((() => {
+    if (!groupedMods) return [] as CollectionItem[];
+    const items: CollectionItem[] = [];
+    for (const [groupName, groupMods] of groupedMods.entries()) {
+      items.push({ type: "group-header", groupName, count: groupMods.length });
+      if (!collapsedGroups.has(groupName)) {
+        const enabledRequired = groupMods.filter(m => m.enabled && !m.collection_optional);
+        const enabledOptional = groupMods.filter(m => m.enabled && m.collection_optional);
+        const disabled = groupMods.filter(m => !m.enabled);
+
+        // Enabled (required) section
+        if (enabledRequired.length > 0) {
+          items.push({ type: "enabled-separator", groupName, count: enabledRequired.length });
+          if (!collapsedGroups.has(`${groupName}__enabled`)) {
+            for (const mod of enabledRequired) {
+              items.push({ type: "mod", mod, optional: false });
+            }
+          }
+        }
+        // Optional (enabled) section
+        if (enabledOptional.length > 0) {
+          items.push({ type: "optional-separator", groupName, count: enabledOptional.length });
+          if (!collapsedGroups.has(`${groupName}__optional`)) {
+            for (const mod of enabledOptional) {
+              items.push({ type: "mod", mod, optional: true });
+            }
+          }
+        }
+        // Disabled section
+        if (disabled.length > 0) {
+          items.push({ type: "disabled-separator", groupName, count: disabled.length });
+          if (!collapsedGroups.has(`${groupName}__disabled`)) {
+            for (const mod of disabled) {
+              items.push({ type: "mod", mod, optional: false });
+            }
+          }
+        }
+      }
+    }
+    return items;
+  })());
+
+  /** Virtual scrolling range for collection view (defined after collectionFlatItems). */
+  let collectionVisibleRange = $derived((() => {
+    const totalItems = collectionFlatItems.length;
+    if (totalItems === 0) return { start: 0, end: 0, paddingTop: 0, paddingBottom: 0 };
+    const startRaw = Math.floor(scrollTop / ROW_HEIGHT) - SCROLL_BUFFER;
+    const visibleCount = Math.ceil(containerHeight / ROW_HEIGHT) + SCROLL_BUFFER * 2;
+    const start = Math.max(0, startRaw);
+    const end = Math.min(totalItems, start + visibleCount);
+    return {
+      start,
+      end,
+      paddingTop: start * ROW_HEIGHT,
+      paddingBottom: Math.max(0, (totalItems - end) * ROW_HEIGHT),
+    };
+  })());
+
   function toggleGroup(name: string) {
     const next = new Set(collapsedGroups);
     if (next.has(name)) next.delete(name);
@@ -739,10 +885,45 @@
     collapsedGroups = next;
   }
 
+  /** Get mod IDs belonging to a collection section (enabled/optional/disabled). */
+  function getSectionModIds(groupName: string, section: "enabled" | "optional" | "disabled"): number[] {
+    if (!groupedMods) return [];
+    const groupMods = groupedMods.get(groupName);
+    if (!groupMods) return [];
+    if (section === "enabled") return groupMods.filter(m => m.enabled && !m.collection_optional).map(m => m.id);
+    if (section === "optional") return groupMods.filter(m => m.enabled && m.collection_optional).map(m => m.id);
+    return groupMods.filter(m => !m.enabled).map(m => m.id);
+  }
+
+  /** Check if all mods in a section are selected. */
+  function isSectionAllSelected(groupName: string, section: "enabled" | "optional" | "disabled"): boolean {
+    const ids = getSectionModIds(groupName, section);
+    return ids.length > 0 && ids.every(id => selectedModIds.has(id));
+  }
+
+  /** Toggle selection of all mods in a collection section. */
+  function toggleSectionSelect(groupName: string, section: "enabled" | "optional" | "disabled") {
+    const ids = getSectionModIds(groupName, section);
+    const allSelected = isSectionAllSelected(groupName, section);
+    const next = new Set(selectedModIds);
+    for (const id of ids) {
+      if (allSelected) next.delete(id);
+      else next.add(id);
+    }
+    selectedModIds = next;
+  }
+
   const activeGame = $derived(pickedGame ?? $selectedGame);
 
   // Track the current load to avoid stale race conditions
   let loadGeneration = 0;
+  // Track which game's data is currently cached to skip redundant reloads.
+  // Initialized from the store — if mods are already loaded, we know the cache is warm.
+  let cachedGameKey = $state<string | null>(
+    $installedMods.length > 0 && $selectedGame
+      ? `${$selectedGame.game_id}:${$selectedGame.bottle_name}`
+      : null
+  );
 
   // Restore search + banners from sessionStorage when game changes
   $effect(() => {
@@ -756,8 +937,29 @@
       dismissedBanners = savedBanners ? new Set(JSON.parse(savedBanners)) : new Set();
       // Clear selection
       selectedModIds = new Set();
-      // Load mods and deployment stats in parallel
-      Promise.all([loadMods(activeGame), refreshHealth(activeGame)]);
+      // Only reload if the game changed — skip if returning to the same page
+      const gameKey = `${activeGame.game_id}:${activeGame.bottle_name}`;
+      if (cachedGameKey !== gameKey) {
+        const t0 = performance.now();
+        // Try disk cache first for instant display
+        const cached = loadModCache(activeGame);
+        if (cached && cached.length > 0) {
+          installedMods.set(cached);
+          cachedGameKey = gameKey;
+          loadingMods = false;
+          console.log(`[perf] disk cache hit: ${(performance.now() - t0).toFixed(0)}ms (${cached.length} mods)`);
+          // Hot-load fresh data in background without showing spinner
+          loadMods(activeGame, false);
+          refreshHealth(activeGame);
+        } else {
+          console.log(`[perf] disk cache miss — loading from DB`);
+          // Load mods first (fast), health in parallel
+          loadMods(activeGame);
+          refreshHealth(activeGame);
+        }
+      } else {
+        console.log(`[perf] page revisit — using RAM cache`);
+      }
     }
   });
 
@@ -777,22 +979,71 @@
     }
   });
 
-  async function loadMods(game: DetectedGame) {
-    const thisLoad = ++loadGeneration;
-    loadingMods = true;
+  // ---- Persistent mod cache (localStorage) --------------------------------
+  // Saves mod summaries to disk so the list appears instantly on next launch.
+  // Fresh data is fetched in the background and merged.
+
+  function modCacheKey(game: DetectedGame): string {
+    return `corkscrew-mods-cache:${game.game_id}:${game.bottle_name}`;
+  }
+
+  function saveModCache(game: DetectedGame, mods: InstalledMod[]) {
     try {
-      // Load mods first (fast DB query), then conflicts
-      const [mods, newConflicts] = await Promise.all([
-        getInstalledMods(game.game_id, game.bottle_name),
-        getConflicts(game.game_id, game.bottle_name).catch(() => [] as import('$lib/types').FileConflict[]),
-      ]);
-      // Only update state if this is still the latest load request
+      localStorage.setItem(modCacheKey(game), JSON.stringify(mods));
+    } catch {
+      // localStorage full or unavailable — non-critical
+    }
+  }
+
+  function loadModCache(game: DetectedGame): InstalledMod[] | null {
+    try {
+      const raw = localStorage.getItem(modCacheKey(game));
+      if (!raw) return null;
+      return JSON.parse(raw) as InstalledMod[];
+    } catch {
+      return null;
+    }
+  }
+
+  // Debounced conflict loading — avoids re-running expensive conflict
+  // detection on every rapid toggle/deploy.
+  let conflictDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  function debouncedLoadConflicts(game: DetectedGame) {
+    if (conflictDebounceTimer) clearTimeout(conflictDebounceTimer);
+    conflictDebounceTimer = setTimeout(async () => {
+      try {
+        conflicts = await getConflicts(game.game_id, game.bottle_name);
+      } catch {
+        // Non-critical — keep existing conflict data
+      }
+    }, 500);
+  }
+
+  async function loadMods(game: DetectedGame, showSpinner = true) {
+    const thisLoad = ++loadGeneration;
+    const t0 = performance.now();
+    // Only show spinner if we have NO data at all (first ever load, no cache)
+    if (showSpinner && $installedMods.length === 0) loadingMods = true;
+    try {
+      const mods = await getInstalledModsSummary(game.game_id, game.bottle_name);
+      const t1 = performance.now();
+      console.log(`[perf] getInstalledModsSummary: ${(t1 - t0).toFixed(0)}ms (${mods.length} mods)`);
       if (thisLoad !== loadGeneration) return;
       installedMods.set(mods);
-      conflicts = newConflicts;
-      // Load endorsements in background (best-effort)
+      cachedGameKey = `${game.game_id}:${game.bottle_name}`;
+      saveModCache(game, mods);
+      loadingMods = false;
+      // Background: conflicts
+      const tc0 = performance.now();
+      getConflicts(game.game_id, game.bottle_name)
+        .then(c => {
+          console.log(`[perf] getConflicts: ${(performance.now() - tc0).toFixed(0)}ms (${c.length} conflicts)`);
+          if (thisLoad === loadGeneration) conflicts = c;
+        })
+        .catch(() => {});
+      // Background: endorsements
       loadEndorsements(game.nexus_slug);
-      // Load external tools in background — don't block the page
+      // Background: tools
       detectModTools(game.game_id, game.bottle_name)
         .then(tools => { if (thisLoad === loadGeneration) modTools = tools; })
         .catch(() => {});
@@ -802,6 +1053,7 @@
     } finally {
       if (thisLoad === loadGeneration) {
         loadingMods = false;
+        console.log(`[perf] loadMods total: ${(performance.now() - t0).toFixed(0)}ms`);
       }
     }
   }
@@ -1684,13 +1936,14 @@
   }
 
   async function refreshHealth(game: DetectedGame) {
+    const t0 = performance.now();
     try {
-      // Use lightweight stats (skips expensive find_all_conflicts — conflicts
-      // are already loaded by loadMods → getConflicts)
       const stats = await getDeploymentStats(game.game_id, game.bottle_name);
       deployHealth = { ...stats, conflict_count: conflicts.length };
     } catch {
       deployHealth = null;
+    } finally {
+      console.log(`[perf] refreshHealth: ${(performance.now() - t0).toFixed(0)}ms`);
     }
   }
 
@@ -2587,13 +2840,19 @@
         {/if}
 
         <!-- Proactive Issue Banners -->
-        {#if conflictModIds.size > 0 && !dismissedBanners.has("conflicts")}
-          <div class="issue-banner issue-banner-yellow">
+        {#if (conflictModIds.size > 0 || overlapModIds.size > 0) && !dismissedBanners.has("conflicts")}
+          <div class="issue-banner {conflictModIds.size > 0 ? 'issue-banner-yellow' : 'issue-banner-muted'}">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
               <line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
             </svg>
-            <span>You have {conflictModIds.size} mod{conflictModIds.size === 1 ? "" : "s"} with unresolved file conflicts</span>
+            <span>
+              {#if conflictModIds.size > 0}
+                {conflictModIds.size} mod{conflictModIds.size === 1 ? "" : "s"} with unresolved conflicts{#if overlapModIds.size > 0}<span class="banner-overlap-note"> · {overlapModIds.size} collection overlap{overlapModIds.size === 1 ? "" : "s"}</span>{/if}
+              {:else}
+                {overlapModIds.size} collection overlap{overlapModIds.size === 1 ? "" : "s"} (author-ordered)
+              {/if}
+            </span>
             <button class="banner-action" onclick={() => { showConflictPanel = true; }}>View Conflicts</button>
             <button class="banner-action" onclick={() => { showConflictMap = true; }}>View Map</button>
             <button class="banner-dismiss" onclick={() => dismissBanner("conflicts")}>
@@ -2621,17 +2880,35 @@
         <!-- Bulk Action Bar -->
         {#if selectedModIds.size > 0}
           <div class="bulk-action-bar">
-            <span class="bulk-count">{selectedModIds.size} selected</span>
-            <button class="btn btn-sm btn-secondary" disabled={bulkOperating !== null} onclick={batchEnable}>
-              {bulkOperating === "enabling" ? "Enabling..." : "Enable All"}
-            </button>
-            <button class="btn btn-sm btn-secondary" disabled={bulkOperating !== null} onclick={batchDisable}>
-              {bulkOperating === "disabling" ? "Disabling..." : "Disable All"}
-            </button>
-            <button class="btn btn-sm btn-ghost-danger" disabled={bulkOperating !== null} onclick={batchUninstall}>
-              {bulkOperating === "uninstalling" ? "Uninstalling..." : "Uninstall"}
-            </button>
-            <button class="btn btn-sm btn-ghost" disabled={bulkOperating !== null} onclick={() => selectedModIds = new Set()}>Clear</button>
+            {#if bulkOperating && bulkProgress}
+              <div class="bulk-progress">
+                <div class="bulk-progress-header">
+                  <span class="bulk-progress-label">{bulkProgress.message}</span>
+                  {#if bulkProgress.phase === "toggle"}
+                    <span class="bulk-progress-count">{bulkProgress.current}/{bulkProgress.total}</span>
+                  {/if}
+                </div>
+                <div class="bulk-progress-bar">
+                  <div
+                    class="bulk-progress-fill"
+                    class:indeterminate={bulkProgress.phase === "redeploy" || bulkProgress.phase === "plugins"}
+                    style="width: {bulkProgress.phase === 'toggle' ? (bulkProgress.current / bulkProgress.total) * 100 : 100}%"
+                  ></div>
+                </div>
+              </div>
+            {:else}
+              <span class="bulk-count">{selectedModIds.size} selected</span>
+              <button class="btn btn-sm btn-secondary" disabled={bulkOperating !== null} onclick={batchEnable}>
+                {bulkOperating === "enabling" ? "Enabling..." : "Enable All"}
+              </button>
+              <button class="btn btn-sm btn-secondary" disabled={bulkOperating !== null} onclick={batchDisable}>
+                {bulkOperating === "disabling" ? "Disabling..." : "Disable All"}
+              </button>
+              <button class="btn btn-sm btn-ghost-danger" disabled={bulkOperating !== null} onclick={batchUninstall}>
+                {bulkOperating === "uninstalling" ? "Uninstalling..." : "Uninstall"}
+              </button>
+              <button class="btn btn-sm btn-ghost" disabled={bulkOperating !== null} onclick={() => selectedModIds = new Set()}>Clear</button>
+            {/if}
           </div>
         {/if}
 
@@ -2756,6 +3033,9 @@
           {#if modStats.conflicts > 0}
             <span class="stat-badge stat-conflicts">{modStats.conflicts} Conflicts</span>
           {/if}
+          {#if modStats.overlaps > 0}
+            <span class="stat-badge stat-overlaps">{modStats.overlaps} Overlaps</span>
+          {/if}
           {#if modStats.updates > 0}
             <span class="stat-badge stat-updates">{modStats.updates} Updates</span>
           {/if}
@@ -2857,9 +3137,7 @@
         <div class="mod-table" style="--grid-cols: {gridTemplate}">
           <!-- Sticky Header — click to sort -->
           <div class="table-header" class:resizing={resizingCol !== null}>
-            <label class="col-check">
-              <input type="checkbox" checked={selectAll} onchange={toggleSelectAll} />
-            </label>
+            <span class="col-check" role="checkbox" aria-checked={selectAll} onclick={toggleSelectAll}><span class="check-box" class:check-box-checked={selectAll}>{#if selectAll}<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12" /></svg>{/if}</span></span>
             <span class="col-grip" title="Drag to reorder"></span>
             <span class="col-toggle header-sep-right">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity: 0.5" aria-hidden="true">
@@ -2931,129 +3209,197 @@
                 ontoggle={handleToggle}
               />
             {:else if viewMode === "collection" && groupedMods}
-              {#each [...groupedMods.entries()] as [groupName, groupMods] (groupName)}
-                <button class="group-header" onclick={() => toggleGroup(groupName)}>
+              <div style="height: {collectionVisibleRange.paddingTop}px;" aria-hidden="true"></div>
+              {#each collectionFlatItems.slice(collectionVisibleRange.start, collectionVisibleRange.end) as item, sliceIdx (collectionVisibleRange.start + sliceIdx)}
+                {#if item.type === "group-header"}
+                  <button class="group-header" onclick={() => toggleGroup(item.groupName)}>
+                    <svg
+                      class="group-chevron"
+                      class:expanded={!collapsedGroups.has(item.groupName)}
+                      width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                    >
+                      <path d="M4 2l4 4-4 4" />
+                    </svg>
+                    <span class="group-name">{item.groupName}</span>
+                    <span class="group-count">{item.count}</span>
+                  </button>
+                {:else if item.type === "enabled-separator"}
+                  <div class="section-separator enabled-separator">
+                    <label class="section-check" onclick={(e) => e.stopPropagation()}>
+                      <input type="checkbox" checked={isSectionAllSelected(item.groupName, "enabled")} onchange={() => toggleSectionSelect(item.groupName, "enabled")} />
+                    </label>
+                    <button class="section-separator-btn" onclick={() => toggleGroup(`${item.groupName}__enabled`)}>
+                      <svg class="group-chevron" class:expanded={!collapsedGroups.has(`${item.groupName}__enabled`)} width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2l4 4-4 4" /></svg>
+                      <span class="optional-label">Enabled</span>
+                      <span class="optional-count">{item.count}</span>
+                      <span class="optional-line"></span>
+                    </button>
+                  </div>
+                {:else if item.type === "optional-separator"}
+                  <div class="section-separator optional-separator-wrap">
+                    <label class="section-check" onclick={(e) => e.stopPropagation()}>
+                      <input type="checkbox" checked={isSectionAllSelected(item.groupName, "optional")} onchange={() => toggleSectionSelect(item.groupName, "optional")} />
+                    </label>
+                    <button class="section-separator-btn" onclick={() => toggleGroup(`${item.groupName}__optional`)}>
+                      <svg class="group-chevron" class:expanded={!collapsedGroups.has(`${item.groupName}__optional`)} width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2l4 4-4 4" /></svg>
+                      <span class="optional-label">Optional</span>
+                      <span class="optional-count">{item.count}</span>
+                      <span class="optional-line"></span>
+                    </button>
+                  </div>
+                {:else if item.type === "disabled-separator"}
+                  <div class="section-separator disabled-separator-wrap">
+                    <label class="section-check" onclick={(e) => e.stopPropagation()}>
+                      <input type="checkbox" checked={isSectionAllSelected(item.groupName, "disabled")} onchange={() => toggleSectionSelect(item.groupName, "disabled")} />
+                    </label>
+                    <button class="section-separator-btn" onclick={() => toggleGroup(`${item.groupName}__disabled`)}>
+                      <svg class="group-chevron" class:expanded={!collapsedGroups.has(`${item.groupName}__disabled`)} width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2l4 4-4 4" /></svg>
+                      <span class="disabled-separator-label">Disabled</span>
+                      <span class="group-count">{item.count}</span>
+                      <span class="disabled-separator-line"></span>
+                    </button>
+                  </div>
+                {:else}
+                  {@const mod = item.mod}
+                  {@const globalIndex = filteredModIndex.get(mod.id) ?? 0}
+                  <div
+                    class="table-row"
+                    class:row-optional={item.optional}
+                    class:row-disabled={!mod.enabled}
+                    class:row-selected={selectedModId === mod.id}
+                    class:row-checked={selectedModIds.has(mod.id)}
+                    class:row-has-conflict={conflictModIds.has(mod.id)}
+                    class:row-dragging={dragRowIndex === globalIndex}
+                    class:row-drag-over={dragOverIndex === globalIndex && dragRowIndex !== null && dragRowIndex !== globalIndex}
+                    class:row-drag-above={dragOverIndex === globalIndex && dragRowIndex !== null && dragRowIndex > globalIndex}
+                    class:row-drag-below={dragOverIndex === globalIndex && dragRowIndex !== null && dragRowIndex < globalIndex}
+                    draggable="true"
+                    onclick={(e) => handleRowClick(e, mod, globalIndex)}
+                    ondragstart={(e) => handleRowDragStart(e, globalIndex)}
+                    ondragover={(e) => handleRowDragOver(e, globalIndex)}
+                    ondragend={handleRowDragEnd}
+                    ondrop={(e) => handleRowDrop(e, globalIndex)}
+                  >
+                    <span class="col-check" role="checkbox" aria-checked={selectedModIds.has(mod.id)} onclick={(e) => { e.stopPropagation(); toggleSelectMod(mod.id, e); }}><span class="check-box" class:check-box-checked={selectedModIds.has(mod.id)}>{#if selectedModIds.has(mod.id)}<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12" /></svg>{/if}</span></span>
+                    <span class="col-grip"><span class="drag-handle" title="Drag to reorder" aria-label="Drag to reorder {mod.name}"><svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><circle cx="4" cy="2.5" r="1" /><circle cx="8" cy="2.5" r="1" /><circle cx="4" cy="6" r="1" /><circle cx="8" cy="6" r="1" /><circle cx="4" cy="9.5" r="1" /><circle cx="8" cy="9.5" r="1" /></svg></span></span>
+                    <span class="col-toggle"><button class="toggle-switch" class:toggle-on={mod.enabled} class:toggle-busy={togglingMod === mod.id} onclick={() => handleToggle(mod)} title={mod.enabled ? "Disable mod" : "Enable mod"} aria-label="{mod.enabled ? 'Disable' : 'Enable'} {mod.name}" aria-pressed={mod.enabled} role="switch"><span class="toggle-track"><span class="toggle-thumb"></span></span></button></span>
+                    <span class="col-name"><span class="mod-name">{mod.name}</span>{#if conflictModIds.has(mod.id)}<span class="conflict-icon" title={getConflictTooltip(mod.id)}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg></span>{:else if overlapModIds.has(mod.id)}<span class="overlap-icon" title={getConflictTooltip(mod.id)}><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="5" /></svg></span>{/if}{#if mod.user_notes}<span class="notes-icon" title={mod.user_notes}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /></svg></span>{/if}</span>
+                    <span class="col-category">{#if mod.auto_category}<span class="category-cell" style="color: {categoryColors[mod.auto_category] ?? '#6b7280'};" title={mod.auto_category}>{#if categoryIcons[mod.auto_category]}<svg class="category-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{@html categoryIcons[mod.auto_category]}</svg>{/if}<span class="category-label">{mod.auto_category}</span></span>{:else}<span class="text-muted">&mdash;</span>{/if}</span>
+                    <span class="col-origin">{#if mod.source_type === "nexus"}<span class="origin-label origin-nexus">Nexus</span>{:else if mod.source_type === "loverslab"}<span class="origin-label origin-loverslab">LoversLab</span>{:else if mod.source_type === "moddb"}<span class="origin-label origin-moddb">ModDB</span>{:else if mod.source_type === "curseforge"}<span class="origin-label origin-curseforge">CurseForge</span>{:else if mod.source_type === "direct"}<span class="origin-label origin-direct">Direct</span>{:else}<span class="origin-label origin-manual">Manual</span>{/if}{#if getModSourceUrl(mod)}<button class="origin-link-btn" title="Open mod page" onclick={(e) => { e.stopPropagation(); openUrl(getModSourceUrl(mod)!); }}><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></svg></button>{/if}</span>
+                    <span class="col-source">{#if mod.collection_name}<span class="source-label source-collection" title={mod.collection_name}>{mod.collection_name}</span>{:else}<span class="source-label source-user">User</span>{/if}</span>
+                    <span class="col-version"><span class="version-text">{mod.version || "\u2014"}</span>{#if updateMap.has(mod.id)}{@const update = updateMap.get(mod.id)!}<span class="update-badge" title={`Update available: v${update.latest_version}`}>Update</span>{/if}</span>
+                    <span class="col-files">{mod.file_count}</span>
+                    <span class="col-date">{formatDate(mod.installed_at)}</span>
+                    <span class="col-actions">
+                      {#if confirmUninstall === mod.id}
+                        <div class="confirm-actions"><button class="btn btn-danger btn-sm" onclick={() => handleUninstall(mod.id)}>Yes</button><button class="btn btn-ghost btn-sm" onclick={() => (confirmUninstall = null)}>No</button></div>
+                      {:else}
+                        <div class="mod-action-group">
+                          <button class="mod-uninstall-btn" onclick={(e) => { e.stopPropagation(); confirmUninstall = mod.id; }} title="Uninstall mod"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg></button>
+                          <div class="mod-overflow-wrap">
+                            <button class="mod-overflow-btn" onclick={(e) => { e.stopPropagation(); overflowMenuModId = overflowMenuModId === mod.id ? null : mod.id; }} title="More actions"><svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2" /><circle cx="12" cy="12" r="2" /><circle cx="12" cy="19" r="2" /></svg></button>
+                            {#if overflowMenuModId === mod.id}
+                              <div class="mod-overflow-menu">
+                                <button class="overflow-item" onclick={(e) => { e.stopPropagation(); overflowMenuModId = null; handleInstallOverMod(mod); }}>
+                                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+                                  </svg>
+                                  Reinstall
+                                </button>
+                                {#if mod.nexus_mod_id}
+                                  <button class="overflow-item" onclick={(e) => { e.stopPropagation(); overflowMenuModId = null; handleCheckSingleUpdate(mod); }}>
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                      <circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" />
+                                    </svg>
+                                    Check for Update
+                                  </button>
+                                  {#if endorsements.get(mod.nexus_mod_id!) === "Endorsed"}
+                                    <button class="overflow-item" onclick={(e) => { e.stopPropagation(); overflowMenuModId = null; handleAbstainMod(mod.id, mod.nexus_mod_id!); }} disabled={endorsingModId === mod.id}>
+                                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3zm7-13h2.67A2.31 2.31 0 0 1 22 4v7a2.31 2.31 0 0 1-2.33 2H17" />
+                                      </svg>
+                                      Remove Endorsement
+                                    </button>
+                                  {:else}
+                                    <button class="overflow-item" onclick={(e) => { e.stopPropagation(); overflowMenuModId = null; handleEndorseMod(mod.id, mod.nexus_mod_id!, mod.version); }} disabled={endorsingModId === mod.id}>
+                                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3" />
+                                      </svg>
+                                      Endorse Mod
+                                    </button>
+                                  {/if}
+                                  <button class="overflow-item" onclick={(e) => { e.stopPropagation(); overflowMenuModId = null; openUrl(`https://www.nexusmods.com/skyrimspecialedition/mods/${mod.nexus_mod_id}`); }}>
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" />
+                                    </svg>
+                                    Open on Nexus
+                                  </button>
+                                {/if}
+                                {#if mod.staging_path}
+                                  <button class="overflow-item" onclick={(e) => { e.stopPropagation(); overflowMenuModId = null; handleReconfigureFomod(mod); }}>
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                      <circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                                    </svg>
+                                    Reconfigure FOMOD
+                                  </button>
+                                {/if}
+                              </div>
+                            {/if}
+                          </div>
+                        </div>
+                      {/if}
+                    </span>
+                  </div>
+                {/if}
+              {/each}
+              <div style="height: {collectionVisibleRange.paddingBottom}px;" aria-hidden="true"></div>
+            {:else}
+            <div style="height: {visibleRange.paddingTop}px;" aria-hidden="true"></div>
+            {#each flatViewItems.slice(visibleRange.start, visibleRange.end) as item, sliceIdx (visibleRange.start + sliceIdx)}
+              {#if item.type === "disabled-separator"}
+                <button class="disabled-separator" onclick={() => disabledSectionCollapsed = !disabledSectionCollapsed}>
                   <svg
                     class="group-chevron"
-                    class:expanded={!collapsedGroups.has(groupName)}
+                    class:expanded={!disabledSectionCollapsed}
                     width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
                   >
                     <path d="M4 2l4 4-4 4" />
                   </svg>
-                  <span class="group-name">{groupName}</span>
-                  <span class="group-count">{groupMods.length}</span>
+                  <span class="disabled-separator-label">Disabled</span>
+                  <span class="group-count">{disabledFilteredMods.length}</span>
+                  <span class="disabled-separator-line"></span>
                 </button>
-                {#if !collapsedGroups.has(groupName)}
-                  {@const requiredMods = groupMods.filter(m => !m.collection_optional)}
-                  {@const optionalMods = groupMods.filter(m => m.collection_optional)}
-                  {#each requiredMods as mod, i (mod.id)}
-                    {@const globalIndex = filteredModIndex.get(mod.id) ?? 0}
-                    <!-- Re-use the same row markup with global index for DnD -->
-                    <div
-                      class="table-row"
-                      class:row-disabled={!mod.enabled}
-                      class:row-selected={selectedModId === mod.id}
-                      class:row-checked={selectedModIds.has(mod.id)}
-                      class:row-has-conflict={conflictModIds.has(mod.id)}
-                      class:row-dragging={dragRowIndex === globalIndex}
-                      class:row-drag-over={dragOverIndex === globalIndex && dragRowIndex !== null && dragRowIndex !== globalIndex}
-                      class:row-drag-above={dragOverIndex === globalIndex && dragRowIndex !== null && dragRowIndex > globalIndex}
-                      class:row-drag-below={dragOverIndex === globalIndex && dragRowIndex !== null && dragRowIndex < globalIndex}
-                      draggable="true"
-                      onclick={(e) => handleRowClick(e, mod, globalIndex)}
-                      ondragstart={(e) => handleRowDragStart(e, globalIndex)}
-                      ondragover={(e) => handleRowDragOver(e, globalIndex)}
-                      ondragend={handleRowDragEnd}
-                      ondrop={(e) => handleRowDrop(e, globalIndex)}
-                    >
-                      <label class="col-check" onclick={(e) => e.stopPropagation()}><input type="checkbox" checked={selectedModIds.has(mod.id)} onchange={() => toggleSelectMod(mod.id)} /></label>
-                      <span class="col-grip"><span class="drag-handle" title="Drag to reorder" aria-label="Drag to reorder {mod.name}"><svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><circle cx="4" cy="2.5" r="1" /><circle cx="8" cy="2.5" r="1" /><circle cx="4" cy="6" r="1" /><circle cx="8" cy="6" r="1" /><circle cx="4" cy="9.5" r="1" /><circle cx="8" cy="9.5" r="1" /></svg></span></span>
-                      <span class="col-toggle"><button class="toggle-switch" class:toggle-on={mod.enabled} class:toggle-busy={togglingMod === mod.id} onclick={() => handleToggle(mod)} title={mod.enabled ? "Disable mod" : "Enable mod"} aria-label="{mod.enabled ? 'Disable' : 'Enable'} {mod.name}" aria-pressed={mod.enabled} role="switch"><span class="toggle-track"><span class="toggle-thumb"></span></span></button></span>
-                      <span class="col-name"><span class="mod-name">{mod.name}</span>{#if conflictModIds.has(mod.id)}<span class="conflict-icon" title={getConflictTooltip(mod.id)}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg></span>{/if}{#if mod.user_notes}<span class="notes-icon" title={mod.user_notes}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /></svg></span>{/if}</span>
-                      <span class="col-category">{#if mod.auto_category}<span class="category-cell" style="color: {categoryColors[mod.auto_category] ?? '#6b7280'};" title={mod.auto_category}>{#if categoryIcons[mod.auto_category]}<svg class="category-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{@html categoryIcons[mod.auto_category]}</svg>{/if}<span class="category-label">{mod.auto_category}</span></span>{:else}<span class="text-muted">&mdash;</span>{/if}</span>
-                      <span class="col-origin">{#if mod.source_type === "nexus"}<span class="origin-label origin-nexus">Nexus</span>{:else if mod.source_type === "loverslab"}<span class="origin-label origin-loverslab">LoversLab</span>{:else if mod.source_type === "moddb"}<span class="origin-label origin-moddb">ModDB</span>{:else if mod.source_type === "curseforge"}<span class="origin-label origin-curseforge">CurseForge</span>{:else if mod.source_type === "direct"}<span class="origin-label origin-direct">Direct</span>{:else}<span class="origin-label origin-manual">Manual</span>{/if}{#if getModSourceUrl(mod)}<button class="origin-link-btn" title="Open mod page" onclick={(e) => { e.stopPropagation(); openUrl(getModSourceUrl(mod)!); }}><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></svg></button>{/if}</span>
-                      <span class="col-source">{#if mod.collection_name}<span class="source-label source-collection" title={mod.collection_name}>{mod.collection_name}</span>{:else}<span class="source-label source-user">User</span>{/if}</span>
-                      <span class="col-version"><span class="version-text">{mod.version || "\u2014"}</span>{#if updateMap.has(mod.id)}{@const update = updateMap.get(mod.id)!}<span class="update-badge" title={`Update available: v${update.latest_version}`}>Update</span>{/if}</span>
-                      <span class="col-files">{mod.installed_files.length}</span>
-                      <span class="col-date">{formatDate(mod.installed_at)}</span>
-                      <span class="col-actions">
-                        {#if confirmUninstall === mod.id}
-                          <div class="confirm-actions"><button class="btn btn-danger btn-sm" onclick={() => handleUninstall(mod.id)}>Yes</button><button class="btn btn-ghost btn-sm" onclick={() => (confirmUninstall = null)}>No</button></div>
-                        {:else}
-                          <div class="mod-action-group">
-                            <button class="mod-uninstall-btn" onclick={(e) => { e.stopPropagation(); confirmUninstall = mod.id; }} title="Uninstall mod"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg></button>
-                            <div class="mod-overflow-wrap">
-                              <button class="mod-overflow-btn" onclick={(e) => { e.stopPropagation(); overflowMenuModId = overflowMenuModId === mod.id ? null : mod.id; }} title="More actions"><svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2" /><circle cx="12" cy="12" r="2" /><circle cx="12" cy="19" r="2" /></svg></button>
-                            </div>
-                          </div>
-                        {/if}
-                      </span>
-                    </div>
-                  {/each}
-                  {#if optionalMods.length > 0}
-                    <button class="optional-separator" onclick={() => toggleGroup(`${groupName}__optional`)}>
-                      <svg
-                        class="group-chevron"
-                        class:expanded={!collapsedGroups.has(`${groupName}__optional`)}
-                        width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
-                      >
-                        <path d="M4 2l4 4-4 4" />
-                      </svg>
-                      <span class="optional-label">Optional</span>
-                      <span class="optional-count">{optionalMods.length}</span>
-                      <span class="optional-line"></span>
-                    </button>
-                    {#if !collapsedGroups.has(`${groupName}__optional`)}
-                      {#each optionalMods as mod, i (mod.id)}
-                        {@const globalIndex = filteredModIndex.get(mod.id) ?? 0}
-                        <div
-                          class="table-row row-optional"
-                          class:row-disabled={!mod.enabled}
-                          class:row-selected={selectedModId === mod.id}
-                          class:row-checked={selectedModIds.has(mod.id)}
-                          class:row-has-conflict={conflictModIds.has(mod.id)}
-                          class:row-dragging={dragRowIndex === globalIndex}
-                          class:row-drag-over={dragOverIndex === globalIndex && dragRowIndex !== null && dragRowIndex !== globalIndex}
-                          class:row-drag-above={dragOverIndex === globalIndex && dragRowIndex !== null && dragRowIndex > globalIndex}
-                          class:row-drag-below={dragOverIndex === globalIndex && dragRowIndex !== null && dragRowIndex < globalIndex}
-                          draggable="true"
-                          onclick={(e) => handleRowClick(e, mod, globalIndex)}
-                          ondragstart={(e) => handleRowDragStart(e, globalIndex)}
-                          ondragover={(e) => handleRowDragOver(e, globalIndex)}
-                          ondragend={handleRowDragEnd}
-                          ondrop={(e) => handleRowDrop(e, globalIndex)}
-                        >
-                          <label class="col-check" onclick={(e) => e.stopPropagation()}><input type="checkbox" checked={selectedModIds.has(mod.id)} onchange={() => toggleSelectMod(mod.id)} /></label>
-                          <span class="col-grip"><span class="drag-handle" title="Drag to reorder" aria-label="Drag to reorder {mod.name}"><svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><circle cx="4" cy="2.5" r="1" /><circle cx="8" cy="2.5" r="1" /><circle cx="4" cy="6" r="1" /><circle cx="8" cy="6" r="1" /><circle cx="4" cy="9.5" r="1" /><circle cx="8" cy="9.5" r="1" /></svg></span></span>
-                          <span class="col-toggle"><button class="toggle-switch" class:toggle-on={mod.enabled} class:toggle-busy={togglingMod === mod.id} onclick={() => handleToggle(mod)} title={mod.enabled ? "Disable mod" : "Enable mod"} aria-label="{mod.enabled ? 'Disable' : 'Enable'} {mod.name}" aria-pressed={mod.enabled} role="switch"><span class="toggle-track"><span class="toggle-thumb"></span></span></button></span>
-                          <span class="col-name"><span class="mod-name">{mod.name}</span>{#if conflictModIds.has(mod.id)}<span class="conflict-icon" title={getConflictTooltip(mod.id)}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg></span>{/if}{#if mod.user_notes}<span class="notes-icon" title={mod.user_notes}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /></svg></span>{/if}</span>
-                          <span class="col-category">{#if mod.auto_category}<span class="category-cell" style="color: {categoryColors[mod.auto_category] ?? '#6b7280'};" title={mod.auto_category}>{#if categoryIcons[mod.auto_category]}<svg class="category-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{@html categoryIcons[mod.auto_category]}</svg>{/if}<span class="category-label">{mod.auto_category}</span></span>{:else}<span class="text-muted">&mdash;</span>{/if}</span>
-                          <span class="col-origin">{#if mod.source_type === "nexus"}<span class="origin-label origin-nexus">Nexus</span>{:else if mod.source_type === "loverslab"}<span class="origin-label origin-loverslab">LoversLab</span>{:else if mod.source_type === "moddb"}<span class="origin-label origin-moddb">ModDB</span>{:else if mod.source_type === "curseforge"}<span class="origin-label origin-curseforge">CurseForge</span>{:else if mod.source_type === "direct"}<span class="origin-label origin-direct">Direct</span>{:else}<span class="origin-label origin-manual">Manual</span>{/if}{#if getModSourceUrl(mod)}<button class="origin-link-btn" title="Open mod page" onclick={(e) => { e.stopPropagation(); openUrl(getModSourceUrl(mod)!); }}><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></svg></button>{/if}</span>
-                          <span class="col-source">{#if mod.collection_name}<span class="source-label source-collection" title={mod.collection_name}>{mod.collection_name}</span>{:else}<span class="source-label source-user">User</span>{/if}</span>
-                          <span class="col-version"><span class="version-text">{mod.version || "\u2014"}</span>{#if updateMap.has(mod.id)}{@const update = updateMap.get(mod.id)!}<span class="update-badge" title={`Update available: v${update.latest_version}`}>Update</span>{/if}</span>
-                          <span class="col-files">{mod.installed_files.length}</span>
-                          <span class="col-date">{formatDate(mod.installed_at)}</span>
-                          <span class="col-actions">
-                            {#if confirmUninstall === mod.id}
-                              <div class="confirm-actions"><button class="btn btn-danger btn-sm" onclick={() => handleUninstall(mod.id)}>Yes</button><button class="btn btn-ghost btn-sm" onclick={() => (confirmUninstall = null)}>No</button></div>
-                            {:else}
-                              <div class="mod-action-group">
-                                <button class="mod-uninstall-btn" onclick={(e) => { e.stopPropagation(); confirmUninstall = mod.id; }} title="Uninstall mod"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg></button>
-                                <div class="mod-overflow-wrap">
-                                  <button class="mod-overflow-btn" onclick={(e) => { e.stopPropagation(); overflowMenuModId = overflowMenuModId === mod.id ? null : mod.id; }} title="More actions"><svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2" /><circle cx="12" cy="12" r="2" /><circle cx="12" cy="19" r="2" /></svg></button>
-                                </div>
-                              </div>
-                            {/if}
-                          </span>
-                        </div>
-                      {/each}
+              {:else if item.type === "disabled-mod"}
+                {@const mod = item.mod}
+                <div
+                  class="table-row row-disabled"
+                  class:row-selected={selectedModId === mod.id}
+                  class:row-checked={selectedModIds.has(mod.id)}
+                  class:row-has-conflict={conflictModIds.has(mod.id)}
+                  onclick={(e) => handleRowClick(e, mod, -1 - item.disabledIndex)}
+                >
+                  <span class="col-check" role="checkbox" aria-checked={selectedModIds.has(mod.id)} onclick={(e) => { e.stopPropagation(); toggleSelectMod(mod.id, e); }}><span class="check-box" class:check-box-checked={selectedModIds.has(mod.id)}>{#if selectedModIds.has(mod.id)}<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12" /></svg>{/if}</span></span>
+                  <span class="col-grip"></span>
+                  <span class="col-toggle"><button class="toggle-switch" class:toggle-on={mod.enabled} class:toggle-busy={togglingMod === mod.id} onclick={() => handleToggle(mod)} title="Enable mod" aria-label="Enable {mod.name}" aria-pressed={mod.enabled} role="switch"><span class="toggle-track"><span class="toggle-thumb"></span></span></button></span>
+                  <span class="col-name"><span class="mod-name">{mod.name}</span></span>
+                  <span class="col-category">{#if mod.auto_category}<span class="category-cell" style="color: {categoryColors[mod.auto_category] ?? '#6b7280'};" title={mod.auto_category}>{#if categoryIcons[mod.auto_category]}<svg class="category-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{@html categoryIcons[mod.auto_category]}</svg>{/if}<span class="category-label">{mod.auto_category}</span></span>{:else}<span class="text-muted">&mdash;</span>{/if}</span>
+                  <span class="col-origin">{#if mod.source_type === "nexus"}<span class="origin-label origin-nexus">Nexus</span>{:else}<span class="origin-label origin-manual">Manual</span>{/if}</span>
+                  <span class="col-source">{#if mod.collection_name}<span class="source-label source-collection" title={mod.collection_name}>{mod.collection_name}</span>{:else}<span class="source-label source-user">User</span>{/if}</span>
+                  <span class="col-version"><span class="version-text">{mod.version || "\u2014"}</span></span>
+                  <span class="col-files">{mod.file_count}</span>
+                  <span class="col-date">{formatDate(mod.installed_at)}</span>
+                  <span class="col-actions">
+                    {#if confirmUninstall === mod.id}
+                      <div class="confirm-actions"><button class="btn btn-danger btn-sm" onclick={() => handleUninstall(mod.id)}>Yes</button><button class="btn btn-ghost btn-sm" onclick={() => (confirmUninstall = null)}>No</button></div>
+                    {:else}
+                      <div class="mod-action-group">
+                        <button class="mod-uninstall-btn" onclick={(e) => { e.stopPropagation(); confirmUninstall = mod.id; }} title="Uninstall mod"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg></button>
+                      </div>
                     {/if}
-                  {/if}
-                {/if}
-              {/each}
-            {:else}
-            <div style="height: {visibleRange.paddingTop}px;" aria-hidden="true"></div>
-            {#each flatViewMods.slice(visibleRange.start, visibleRange.end) as mod, sliceIdx (mod.id)}
+                  </span>
+                </div>
+              {:else}
+              {@const mod = item.mod}
               {@const i = visibleRange.start + sliceIdx}
               <div
                 class="table-row"
@@ -3075,9 +3421,7 @@
                 ondrop={(e) => handleRowDrop(e, i)}
               >
                 <!-- Bulk Select Checkbox -->
-                <label class="col-check" onclick={(e) => e.stopPropagation()}>
-                  <input type="checkbox" checked={selectedModIds.has(mod.id)} onchange={() => toggleSelectMod(mod.id)} />
-                </label>
+                <span class="col-check" role="checkbox" aria-checked={selectedModIds.has(mod.id)} onclick={(e) => { e.stopPropagation(); toggleSelectMod(mod.id, e); }}><span class="check-box" class:check-box-checked={selectedModIds.has(mod.id)}>{#if selectedModIds.has(mod.id)}<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12" /></svg>{/if}</span></span>
 
                 <!-- Drag Handle -->
                 <span class="col-grip">
@@ -3122,6 +3466,10 @@
                         <line x1="12" y1="9" x2="12" y2="13" />
                         <line x1="12" y1="17" x2="12.01" y2="17" />
                       </svg>
+                    </span>
+                  {:else if overlapModIds.has(mod.id)}
+                    <span class="overlap-icon" title={getConflictTooltip(mod.id)}>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="5" /></svg>
                     </span>
                   {/if}
                   {#if mod.user_notes}
@@ -3186,7 +3534,7 @@
 
                 <!-- File Count -->
                 <span class="col-files">
-                  {mod.installed_files.length}
+                  {mod.file_count}
                 </span>
 
                 <!-- Date -->
@@ -3277,57 +3625,9 @@
                   {/if}
                 </span>
               </div>
+              {/if}
             {/each}
             <div style="height: {visibleRange.paddingBottom}px;" aria-hidden="true"></div>
-
-            <!-- Disabled Mods Separator -->
-            {#if disabledFilteredMods.length > 0 && viewMode === "flat"}
-              <button class="disabled-separator" onclick={() => disabledSectionCollapsed = !disabledSectionCollapsed}>
-                <svg
-                  class="group-chevron"
-                  class:expanded={!disabledSectionCollapsed}
-                  width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
-                >
-                  <path d="M4 2l4 4-4 4" />
-                </svg>
-                <span class="disabled-separator-label">Disabled</span>
-                <span class="group-count">{disabledFilteredMods.length}</span>
-                <span class="disabled-separator-line"></span>
-              </button>
-              {#if !disabledSectionCollapsed}
-                {#each disabledFilteredMods as mod, di (mod.id)}
-                  <div
-                    class="table-row row-disabled"
-                    class:row-selected={selectedModId === mod.id}
-                    class:row-checked={selectedModIds.has(mod.id)}
-                    class:row-has-conflict={conflictModIds.has(mod.id)}
-                    onclick={(e) => handleRowClick(e, mod, -1 - di)}
-                  >
-                    <label class="col-check" onclick={(e) => e.stopPropagation()}>
-                      <input type="checkbox" checked={selectedModIds.has(mod.id)} onchange={() => toggleSelectMod(mod.id)} />
-                    </label>
-                    <span class="col-grip"></span>
-                    <span class="col-toggle"><button class="toggle-switch" class:toggle-on={mod.enabled} class:toggle-busy={togglingMod === mod.id} onclick={() => handleToggle(mod)} title="Enable mod" aria-label="Enable {mod.name}" aria-pressed={mod.enabled} role="switch"><span class="toggle-track"><span class="toggle-thumb"></span></span></button></span>
-                    <span class="col-name"><span class="mod-name">{mod.name}</span></span>
-                    <span class="col-category">{#if mod.auto_category}<span class="category-cell" style="color: {categoryColors[mod.auto_category] ?? '#6b7280'};" title={mod.auto_category}>{#if categoryIcons[mod.auto_category]}<svg class="category-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{@html categoryIcons[mod.auto_category]}</svg>{/if}<span class="category-label">{mod.auto_category}</span></span>{:else}<span class="text-muted">&mdash;</span>{/if}</span>
-                    <span class="col-origin">{#if mod.source_type === "nexus"}<span class="origin-label origin-nexus">Nexus</span>{:else}<span class="origin-label origin-manual">Manual</span>{/if}</span>
-                    <span class="col-source">{#if mod.collection_name}<span class="source-label source-collection" title={mod.collection_name}>{mod.collection_name}</span>{:else}<span class="source-label source-user">User</span>{/if}</span>
-                    <span class="col-version"><span class="version-text">{mod.version || "\u2014"}</span></span>
-                    <span class="col-files">{mod.installed_files.length}</span>
-                    <span class="col-date">{formatDate(mod.installed_at)}</span>
-                    <span class="col-actions">
-                      {#if confirmUninstall === mod.id}
-                        <div class="confirm-actions"><button class="btn btn-danger btn-sm" onclick={() => handleUninstall(mod.id)}>Yes</button><button class="btn btn-ghost btn-sm" onclick={() => (confirmUninstall = null)}>No</button></div>
-                      {:else}
-                        <div class="mod-action-group">
-                          <button class="mod-uninstall-btn" onclick={(e) => { e.stopPropagation(); confirmUninstall = mod.id; }} title="Uninstall mod"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg></button>
-                        </div>
-                      {/if}
-                    </span>
-                  </div>
-                {/each}
-              {/if}
-            {/if}
             {/if}
           </div>
         </div>
@@ -3405,57 +3705,69 @@
 
         <!-- Pre-flight Checks -->
         {#if activeGame}
-          <button class="panel-section-toggle" onclick={() => showPreflightPanel = !showPreflightPanel}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-            </svg>
-            <span>Pre-Deployment Checks</span>
-            <svg class="section-chevron" class:open={showPreflightPanel} width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M3 4.5L6 7.5L9 4.5" />
-            </svg>
-          </button>
-          {#if showPreflightPanel}
-            <PreflightPanel gameId={activeGame.game_id} bottleName={activeGame.bottle_name} />
-          {/if}
+          <div class="collapsible-section" class:section-open={showPreflightPanel}>
+            <button class="panel-section-toggle" onclick={() => showPreflightPanel = !showPreflightPanel}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+              </svg>
+              <span>Pre-Deployment Checks</span>
+              <svg class="section-chevron" class:open={showPreflightPanel} width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 4.5L6 7.5L9 4.5" />
+              </svg>
+            </button>
+            {#if showPreflightPanel}
+              <div class="collapsible-content">
+                <PreflightPanel gameId={activeGame.game_id} bottleName={activeGame.bottle_name} />
+              </div>
+            {/if}
+          </div>
         {/if}
 
         <!-- Dependencies -->
-        <button class="panel-section-toggle" onclick={() => showDependencyPanel = !showDependencyPanel}>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="18" cy="5" r="3" />
-            <circle cx="6" cy="12" r="3" />
-            <circle cx="18" cy="19" r="3" />
-            <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
-            <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
-          </svg>
-          <span>Dependencies</span>
-          <svg class="section-chevron" class:open={showDependencyPanel} width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M3 4.5L6 7.5L9 4.5" />
-          </svg>
-        </button>
-        {#if showDependencyPanel && activeGame}
-          <DependencyPanel
-            gameId={activeGame.game_id}
-            bottleName={activeGame.bottle_name}
-            mods={$installedMods}
-            {selectedModId}
-          />
-        {/if}
+        <div class="collapsible-section" class:section-open={showDependencyPanel}>
+          <button class="panel-section-toggle" onclick={() => showDependencyPanel = !showDependencyPanel}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="18" cy="5" r="3" />
+              <circle cx="6" cy="12" r="3" />
+              <circle cx="18" cy="19" r="3" />
+              <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
+              <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
+            </svg>
+            <span>Dependencies</span>
+            <svg class="section-chevron" class:open={showDependencyPanel} width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 4.5L6 7.5L9 4.5" />
+            </svg>
+          </button>
+          {#if showDependencyPanel && activeGame}
+            <div class="collapsible-content">
+              <DependencyPanel
+                gameId={activeGame.game_id}
+                bottleName={activeGame.bottle_name}
+                mods={$installedMods}
+                {selectedModId}
+              />
+            </div>
+          {/if}
+        </div>
 
         <!-- Session History -->
-        <button class="panel-section-toggle" onclick={() => showSessionPanel = !showSessionPanel}>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="10" />
-            <polyline points="12 6 12 12 16 14" />
-          </svg>
-          <span>Session History</span>
-          <svg class="section-chevron" class:open={showSessionPanel} width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M3 4.5L6 7.5L9 4.5" />
-          </svg>
-        </button>
-        {#if showSessionPanel && activeGame}
-          <SessionHistoryPanel gameId={activeGame.game_id} bottleName={activeGame.bottle_name} />
-        {/if}
+        <div class="collapsible-section" class:section-open={showSessionPanel}>
+          <button class="panel-section-toggle" onclick={() => showSessionPanel = !showSessionPanel}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10" />
+              <polyline points="12 6 12 12 16 14" />
+            </svg>
+            <span>Session History</span>
+            <svg class="section-chevron" class:open={showSessionPanel} width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 4.5L6 7.5L9 4.5" />
+            </svg>
+          </button>
+          {#if showSessionPanel && activeGame}
+            <div class="collapsible-content">
+              <SessionHistoryPanel gameId={activeGame.game_id} bottleName={activeGame.bottle_name} />
+            </div>
+          {/if}
+        </div>
       </div><!-- end content-sidebar -->
     {/if}
     </div><!-- end content-grid -->
@@ -4304,7 +4616,7 @@
   .table-row {
     display: grid;
     grid-template-columns: var(--grid-cols, 24px 28px 48px minmax(0, 1fr) 100px 68px 110px 72px 48px 90px 64px);
-    padding: var(--space-2) var(--space-3);
+    padding: 0 var(--space-3);
     align-items: center;
     font-size: 13px;
     height: 36px;
@@ -4491,6 +4803,21 @@
 
   .conflict-icon:hover {
     color: #ffcc00;
+  }
+
+  .overlap-icon {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-quaternary);
+    opacity: 0.6;
+    cursor: help;
+  }
+
+  .overlap-icon:hover {
+    opacity: 1;
+    color: var(--text-tertiary);
   }
 
   /* ============================
@@ -5108,6 +5435,13 @@
   /* ============================
      Panel Section Toggles
      ============================ */
+  .collapsible-section {
+    border: 1px solid var(--separator);
+    border-radius: var(--radius);
+    overflow: hidden;
+    background: var(--surface);
+  }
+
   .panel-section-toggle {
     display: flex;
     align-items: center;
@@ -5115,13 +5449,17 @@
     width: 100%;
     padding: var(--space-2) var(--space-4);
     background: var(--surface);
-    border: 1px solid var(--separator);
-    border-radius: var(--radius);
+    border: none;
+    border-radius: 0;
     cursor: pointer;
     font-size: 13px;
     font-weight: 600;
     color: var(--text-secondary);
     transition: background var(--duration-fast) var(--ease);
+  }
+
+  .section-open > .panel-section-toggle {
+    border-bottom: 1px solid var(--separator);
   }
 
   .panel-section-toggle:hover {
@@ -5137,6 +5475,10 @@
   .panel-section-toggle > span {
     flex: 1;
     text-align: left;
+  }
+
+  .collapsible-content {
+    background: var(--surface);
   }
 
   .section-chevron {
@@ -5305,6 +5647,11 @@
   .stat-conflicts {
     background: color-mix(in srgb, #f59e0b 12%, transparent);
     color: #f59e0b;
+  }
+
+  .stat-overlaps {
+    background: color-mix(in srgb, var(--text-quaternary) 8%, transparent);
+    color: var(--text-tertiary);
   }
 
   .stat-updates {
@@ -5858,6 +6205,44 @@
     opacity: 0.75;
   }
 
+  .section-separator {
+    display: flex;
+    align-items: center;
+    background: color-mix(in srgb, var(--bg-secondary) 60%, transparent);
+    border-top: 1px solid var(--separator);
+    border-bottom: 1px solid var(--separator);
+  }
+
+  .section-check {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 0 0 var(--space-3);
+    cursor: pointer;
+  }
+
+  .section-check input[type="checkbox"] {
+    cursor: pointer;
+  }
+
+  .section-separator-btn {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex: 1;
+    padding: var(--space-1) var(--space-3) var(--space-1) var(--space-2);
+    background: none;
+    border: none;
+    cursor: pointer;
+    text-align: left;
+    font-family: inherit;
+    transition: background var(--duration-fast) var(--ease);
+  }
+
+  .section-separator-btn:hover {
+    background: var(--surface-hover);
+  }
+
   /* ============================
      Context Menu
      ============================ */
@@ -6153,11 +6538,22 @@
     cursor: pointer;
   }
 
-  .col-check input[type="checkbox"] {
-    width: 14px;
-    height: 14px;
-    accent-color: var(--system-accent);
-    cursor: pointer;
+  .check-box {
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
+    border: 1.5px solid var(--separator-opaque, rgba(255,255,255,0.2));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background var(--duration-fast, 0.1s) ease, border-color var(--duration-fast, 0.1s) ease;
+    flex-shrink: 0;
+  }
+
+  .check-box-checked {
+    background: var(--system-accent, #007aff);
+    border-color: var(--system-accent, #007aff);
+    color: white;
   }
 
   /* Proactive Issue Banners */
@@ -6179,6 +6575,16 @@
     background: var(--yellow-subtle);
     color: var(--yellow);
     border: 1px solid rgba(255, 214, 10, 0.2);
+  }
+
+  .issue-banner-muted {
+    background: var(--surface-hover);
+    color: var(--text-tertiary);
+    border: 1px solid var(--separator);
+  }
+
+  .banner-overlap-note {
+    opacity: 0.7;
   }
 
   .issue-banner-blue {
@@ -6224,6 +6630,60 @@
     border: 1px solid rgba(10, 132, 255, 0.2);
     border-radius: var(--radius-sm);
     margin-bottom: var(--space-2);
+  }
+
+  .bulk-progress {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .bulk-progress-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .bulk-progress-label {
+    font-size: 12px;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .bulk-progress-count {
+    font-size: 11px;
+    color: var(--text-muted);
+    flex-shrink: 0;
+  }
+
+  .bulk-progress-bar {
+    width: 100%;
+    height: 4px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .bulk-progress-fill {
+    height: 100%;
+    background: var(--system-accent);
+    border-radius: 2px;
+    transition: width 0.15s ease;
+  }
+
+  .bulk-progress-fill.indeterminate {
+    width: 100% !important;
+    animation: indeterminate 1.5s ease-in-out infinite;
+    background: linear-gradient(90deg, var(--system-accent) 0%, rgba(10, 132, 255, 0.4) 50%, var(--system-accent) 100%);
+    background-size: 200% 100%;
+  }
+
+  @keyframes indeterminate {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
   }
 
   .bulk-count {

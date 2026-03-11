@@ -75,6 +75,7 @@
   });
 
   async function loadPlugins(game: DetectedGame) {
+    const t0 = performance.now();
     loading = true;
     warnings = [];
     sortMessage = null;
@@ -85,6 +86,7 @@
       plugins = [];
     } finally {
       loading = false;
+      console.log(`[perf] loadPlugins: ${(performance.now() - t0).toFixed(0)}ms (${plugins.length} plugins)`);
     }
   }
 

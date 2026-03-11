@@ -113,7 +113,7 @@
     {/if}
   </span>
 
-  <span class="col-files">{mod.installed_files.length}</span>
+  <span class="col-files">{mod.file_count}</span>
 
   <span class="col-date">{new Date(mod.installed_at).toLocaleDateString()}</span>
 

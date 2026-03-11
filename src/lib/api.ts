@@ -118,7 +118,29 @@ export async function getInstalledMods(
   gameId: string,
   bottleName: string
 ): Promise<InstalledMod[]> {
-  return invoke("get_installed_mods", { gameId, bottleName });
+  const mods: InstalledMod[] = await invoke("get_installed_mods", { gameId, bottleName });
+  // Backfill file_count from array length for full loads
+  for (const m of mods) m.file_count = m.installed_files.length;
+  return mods;
+}
+
+/** Fast summary load — returns mods with file_count but empty installed_files. */
+export async function getInstalledModsSummary(
+  gameId: string,
+  bottleName: string
+): Promise<InstalledMod[]> {
+  const summaries: import("$lib/types").ModSummary[] = await invoke("get_installed_mods_summary", { gameId, bottleName });
+  return summaries.map(s => ({
+    ...s,
+    installed_files: [],
+  }));
+}
+
+/** Fetch a single mod's full details (including installed_files) for the detail panel. */
+export async function getModDetail(modId: number): Promise<InstalledMod> {
+  const mod: InstalledMod = await invoke("get_mod_detail", { modId });
+  mod.file_count = mod.installed_files.length;
+  return mod;
 }
 
 export async function installMod(
@@ -165,7 +187,7 @@ export async function batchToggleMods(
   gameId: string,
   bottleName: string,
   enabled: boolean
-): Promise<number> {
+): Promise<string> {
   return invoke("batch_toggle_mods", { modIds, gameId, bottleName, enabled });
 }
 
@@ -1820,6 +1842,152 @@ export async function removeFromSteam(): Promise<void> {
 
 export async function isSteamDeck(): Promise<boolean> {
   return invoke("is_steam_deck");
+}
+
+// ---- Bulk Operation Progress ----
+
+export interface BulkOperationProgress {
+  phase: "toggle" | "redeploy" | "plugins" | "done";
+  current: number;
+  total: number;
+  message: string;
+}
+
+export function onBulkOperationProgress(
+  callback: (progress: BulkOperationProgress) => void
+): Promise<UnlistenFn> {
+  return listen<BulkOperationProgress>("bulk-operation-progress", (e) =>
+    callback(e.payload)
+  );
+}
+
+// ---- Instruction Parsing ----
+
+export async function parseInstructions(
+  instructions: string,
+  modNames: string[]
+): Promise<import("./types").ParsedInstructions> {
+  return invoke("parse_instructions_cmd", { instructions, modNames });
+}
+
+export async function parseInstructionsLlm(
+  instructions: string,
+  modNames: string[],
+  model: string,
+  platform: string,
+  gameVersion: string
+): Promise<import("./types").ConditionalAction[]> {
+  return invoke("parse_instructions_llm_cmd", { instructions, modNames, model, platform, gameVersion });
+}
+
+export async function parseInstructionsCloud(
+  instructions: string,
+  modNames: string[],
+  provider: string,
+  apiKey: string,
+  platform: string,
+  gameVersion: string
+): Promise<import("./types").ConditionalAction[]> {
+  return invoke("parse_instructions_cloud_cmd", { instructions, modNames, provider, apiKey, platform, gameVersion });
+}
+
+export async function validateInstructionActions(
+  actions: import("./types").ConditionalAction[],
+  gameId: string,
+  bottleName: string
+): Promise<import("./types").ValidatedAction[]> {
+  return invoke("validate_instruction_actions_cmd", { actions, gameId, bottleName });
+}
+
+export async function checkOllamaStatus(): Promise<import("./types").OllamaStatus> {
+  return invoke("check_ollama_status_cmd");
+}
+
+export function getRecommendedModels(): Promise<import("./types").OllamaModel[]> {
+  return invoke("get_recommended_models");
+}
+
+export function getCloudProviders(): Promise<import("./types").CloudProvider[]> {
+  return invoke("get_cloud_providers");
+}
+
+export async function pullOllamaModel(modelName: string): Promise<void> {
+  return invoke("pull_ollama_model_cmd", { modelName });
+}
+
+export async function deleteOllamaModel(modelName: string): Promise<void> {
+  return invoke("delete_ollama_model_cmd", { modelName });
+}
+
+export async function unloadOllamaModel(modelName: string): Promise<void> {
+  return invoke("unload_ollama_model_cmd", { modelName });
+}
+
+// ---- System Info ----
+
+export async function getSystemMemory(): Promise<number> {
+  return invoke("get_system_memory");
+}
+
+export async function installOllama(): Promise<string> {
+  return invoke("install_ollama");
+}
+
+export async function startOllama(): Promise<string> {
+  return invoke("start_ollama");
+}
+
+export async function checkMlxStatus(): Promise<boolean> {
+  return invoke("check_mlx_status");
+}
+
+export async function installMlx(): Promise<string> {
+  return invoke("install_mlx");
+}
+
+export async function getRecommendedModel(): Promise<string> {
+  return invoke("get_recommended_model");
+}
+
+// ---- LLM Chat ----
+
+export async function chatGetState(): Promise<import("./types").ChatState> {
+  return invoke("chat_get_state");
+}
+
+export async function chatLoadModel(
+  modelName: string,
+  gameId: string,
+  bottleName: string,
+  currentPage?: string,
+  backend?: string
+): Promise<void> {
+  return invoke("chat_load_model", { modelName, gameId, bottleName, currentPage, backend });
+}
+
+export async function chatUnloadModel(): Promise<void> {
+  return invoke("chat_unload_model");
+}
+
+export async function getCachedMlxModels(): Promise<string[]> {
+  return invoke("get_cached_mlx_models");
+}
+
+export async function deleteModel(modelName: string, backend?: string): Promise<string> {
+  return invoke("delete_model", { modelName, backend });
+}
+
+export async function chatSendMessage(
+  message: string,
+  gameId: string,
+  bottleName: string,
+  currentPage?: string
+): Promise<import("./types").ChatResponse> {
+  return invoke("chat_send_message", { message, gameId, bottleName, currentPage });
+}
+
+export async function chatClearHistory(): Promise<void> {
+  return invoke("chat_clear_history");
 }
 
 // ---- FOMOD in Collection Install ----

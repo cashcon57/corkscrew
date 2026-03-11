@@ -24,6 +24,7 @@
   import { GamepadManager } from "$lib/gamepad";
   import type { GamepadAction } from "$lib/gamepad";
   import { getNotificationCount, logNotification } from "$lib/api";
+  import LlmChat from "$lib/components/LlmChat.svelte";
 
   const navItems = [
     { id: "discover", label: "Discover" },
@@ -133,6 +134,28 @@
   let updateProgress = $state(0);
   let updateReady = $state(false);
   let showUpdateBanner = $state(false);
+  let showChat = $state(false);
+  let sidebarWidth = $state(300);
+  let resizing = $state(false);
+
+  function onResizeStart(e: MouseEvent) {
+    e.preventDefault();
+    resizing = true;
+    const startX = e.clientX;
+    const startW = sidebarWidth;
+
+    function onMove(ev: MouseEvent) {
+      sidebarWidth = Math.min(480, Math.max(200, startW + (ev.clientX - startX)));
+    }
+    function onUp() {
+      resizing = false;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
+
   let updateNotesExpanded = $state(false);
   let updateObject = $state<any>(null); // Holds the Tauri Update object
   let multiVersionChangelog = $state<Array<{ version: string; body: string; date: string }>>([]);
@@ -841,7 +864,7 @@
 </script>
 
 <div class="app-shell" class:controller-mode={$controllerMode}>
-  <nav class="sidebar" class:collapsed={$sidebarCollapsed}>
+  <nav class="sidebar" class:collapsed={$sidebarCollapsed} class:resizing style={!$sidebarCollapsed ? `width:${sidebarWidth}px;min-width:${sidebarWidth}px` : ''}>
     <!-- Traffic light zone (macOS window controls sit here) -->
     <div class="sidebar-traffic-zone" data-tauri-drag-region></div>
 
@@ -1002,6 +1025,11 @@
       </div>
     {/if}
 
+    <!-- Inline chat panel — fills remaining sidebar space -->
+    {#if showChat && !$sidebarCollapsed}
+      <LlmChat visible={showChat} onclose={() => showChat = false} />
+    {/if}
+
     <div class="sidebar-footer">
       <!-- Collapse toggle -->
       <button
@@ -1154,9 +1182,26 @@
               Updating...
             </span>
           {/if}
+
+          <!-- Chat button -->
+          <button
+            class="chat-toggle-btn"
+            class:chat-active={showChat}
+            onclick={() => showChat = !showChat}
+            title={showChat ? "Close AI Chat" : "Open AI Chat"}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+            </svg>
+          </button>
         </div>
       {/if}
     </div>
+    <!-- Resize handle -->
+    {#if !$sidebarCollapsed}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="sidebar-resize-handle" onmousedown={onResizeStart}></div>
+    {/if}
   </nav>
 
   <div class="content-column">
@@ -1500,8 +1545,8 @@
   /* --- Sidebar --- */
 
   .sidebar {
-    width: 220px;
-    min-width: 220px;
+    width: 300px;
+    min-width: 300px;
     background: color-mix(in srgb, var(--bg-grouped) 75%, transparent);
     backdrop-filter: blur(24px) saturate(1.3);
     -webkit-backdrop-filter: blur(24px) saturate(1.3);
@@ -1512,6 +1557,27 @@
     position: relative;
     transition: width 0.2s var(--ease), min-width 0.2s var(--ease);
     border: 0.5px solid rgba(255, 255, 255, 0.06);
+  }
+
+  .sidebar.resizing {
+    transition: none;
+    user-select: none;
+  }
+
+  .sidebar-resize-handle {
+    position: absolute;
+    top: 0;
+    right: -4px;
+    width: 8px;
+    height: 100%;
+    cursor: col-resize;
+    z-index: 20;
+  }
+
+  .sidebar-resize-handle:hover,
+  .sidebar-resize-handle:active {
+    background: color-mix(in srgb, var(--accent) 30%, transparent);
+    border-radius: 4px;
   }
 
   .sidebar.collapsed {
@@ -1750,6 +1816,29 @@
     align-items: center;
     gap: 6px;
     min-height: 24px;
+  }
+
+  .chat-toggle-btn {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    border: none;
+    background: transparent;
+    color: var(--text-quaternary);
+    cursor: pointer;
+    transition: color 0.2s ease, background 0.2s ease;
+  }
+  .chat-toggle-btn:hover {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+  }
+  .chat-toggle-btn.chat-active {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
   }
 
   .sidebar-version {

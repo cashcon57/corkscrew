@@ -121,9 +121,7 @@ fn check_disk_space(game_id: &str, bottle_name: &str, game_data_dir: &Path) -> P
 
 /// Check that there are enabled mods to deploy.
 fn check_enabled_mods(db: &ModDatabase, game_id: &str, bottle_name: &str) -> PreflightCheck {
-    let mods = db.list_mods(game_id, bottle_name).unwrap_or_default();
-    let enabled = mods.iter().filter(|m| m.enabled).count();
-    let total = mods.len();
+    let (total, enabled) = db.get_mod_counts(game_id, bottle_name).unwrap_or((0, 0));
 
     if enabled == 0 && total > 0 {
         PreflightCheck {
@@ -151,7 +149,7 @@ fn check_enabled_mods(db: &ModDatabase, game_id: &str, bottle_name: &str) -> Pre
 
 /// Verify that staging directories exist for all enabled mods.
 fn check_staging_dirs(db: &ModDatabase, game_id: &str, bottle_name: &str) -> PreflightCheck {
-    let mods = db.list_mods(game_id, bottle_name).unwrap_or_default();
+    let mods = db.list_mods_summary(game_id, bottle_name).unwrap_or_default();
     let mut missing = Vec::new();
 
     for m in mods.iter().filter(|m| m.enabled) {

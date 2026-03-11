@@ -48,6 +48,33 @@ pub struct InstalledMod {
     pub version: String,
     pub archive_name: String,
     pub installed_files: Vec<String>,
+    pub file_count: usize,
+    pub installed_at: String,
+    pub enabled: bool,
+    pub staging_path: Option<String>,
+    pub install_priority: i32,
+    pub collection_name: Option<String>,
+    pub user_notes: Option<String>,
+    pub user_tags: Vec<String>,
+    pub auto_category: Option<String>,
+    pub collection_optional: bool,
+}
+
+/// Lightweight mod summary for list views — omits `installed_files` to avoid
+/// serializing hundreds of thousands of file paths across 1900+ mods.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModSummary {
+    pub id: i64,
+    pub game_id: String,
+    pub bottle_name: String,
+    pub nexus_mod_id: Option<i64>,
+    pub nexus_file_id: Option<i64>,
+    pub source_url: Option<String>,
+    pub source_type: String,
+    pub name: String,
+    pub version: String,
+    pub archive_name: String,
+    pub file_count: usize,
     pub installed_at: String,
     pub enabled: bool,
     pub staging_path: Option<String>,
@@ -136,6 +163,9 @@ pub struct FileConflict {
     pub relative_path: String,
     pub mods: Vec<ConflictModInfo>,
     pub winner_mod_id: i64,
+    /// True when ALL conflicting mods belong to the same collection.
+    /// These are "expected" overlaps resolved by the collection author's priority order.
+    pub same_collection: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -257,7 +287,56 @@ impl ModDatabase {
             name: row.get(4)?,
             version: row.get(5)?,
             archive_name: row.get(6)?,
+            file_count: installed_files.len(),
             installed_files,
+            installed_at: row.get(8)?,
+            enabled: enabled_int != 0,
+            staging_path: row.get(12)?,
+            install_priority: row.get(13)?,
+            collection_name: row.get(14)?,
+            user_notes: row.get(15)?,
+            user_tags,
+            auto_category: row.get(17)?,
+            collection_optional: row.get::<_, i32>(19).unwrap_or(0) != 0,
+        })
+    }
+
+    /// Build a `ModSummary` from the current row — same column order as
+    /// [`Self::SELECT_COLUMNS`] but counts files instead of parsing the JSON array.
+    fn row_to_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<ModSummary> {
+        let files_json: String = row.get(7)?;
+        // Fast count: count commas in the JSON array + 1, or 0 for "[]"
+        let file_count = if files_json.len() <= 2 {
+            0
+        } else {
+            files_json.matches(',').count() + 1
+        };
+        let enabled_int: i64 = row.get(9)?;
+
+        let tags_json: Option<String> = row.get(16)?;
+        let user_tags: Vec<String> = tags_json
+            .map(|s| {
+                serde_json::from_str(&s).unwrap_or_else(|e| {
+                    log::warn!("Failed to parse user_tags JSON: {}", e);
+                    Vec::new()
+                })
+            })
+            .unwrap_or_default();
+
+        Ok(ModSummary {
+            id: row.get(0)?,
+            game_id: row.get(1)?,
+            bottle_name: row.get(2)?,
+            nexus_mod_id: row.get(3)?,
+            nexus_file_id: row.get(10)?,
+            source_url: row.get(11)?,
+            source_type: row
+                .get::<_, Option<String>>(18)?
+                .unwrap_or_else(|| "manual".to_string()),
+            name: row.get(4)?,
+            version: row.get(5)?,
+            archive_name: row.get(6)?,
+            file_count,
             installed_at: row.get(8)?,
             enabled: enabled_int != 0,
             staging_path: row.get(12)?,
@@ -385,6 +464,54 @@ impl ModDatabase {
             mods.push(row?);
         }
         Ok(mods)
+    }
+
+    /// Fast summary list — same as `list_mods` but returns `ModSummary` with
+    /// `file_count` instead of the full `installed_files` array.
+    pub fn list_mods_summary(&self, game_id: &str, bottle_name: &str) -> Result<Vec<ModSummary>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM installed_mods \
+             WHERE game_id = ?1 AND bottle_name = ?2 \
+             ORDER BY installed_at DESC",
+            Self::SELECT_COLUMNS,
+        ))?;
+
+        let rows = stmt.query_map(params![game_id, bottle_name], Self::row_to_summary)?;
+
+        let mut mods = Vec::new();
+        for row in rows {
+            mods.push(row?);
+        }
+        Ok(mods)
+    }
+
+    /// Ultra-lightweight mod counts — just `SELECT COUNT(*)` queries, no row
+    /// deserialization at all.  Returns `(total_mods, total_enabled)`.
+    pub fn get_mod_counts(&self, game_id: &str, bottle_name: &str) -> Result<(usize, usize)> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let total: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM installed_mods WHERE game_id = ?1 AND bottle_name = ?2",
+            params![game_id, bottle_name],
+            |row| row.get(0),
+        )?;
+        let enabled: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM installed_mods WHERE game_id = ?1 AND bottle_name = ?2 AND enabled = 1",
+            params![game_id, bottle_name],
+            |row| row.get(0),
+        )?;
+        Ok((total as usize, enabled as usize))
+    }
+
+    /// Lightweight deployment manifest count — avoids deserializing all rows.
+    pub fn get_deployment_count(&self, game_id: &str, bottle_name: &str) -> Result<usize> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM deployment_manifest WHERE game_id = ?1 AND bottle_name = ?2",
+            params![game_id, bottle_name],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
     }
 
     /// Return a map of **file path -> mod id** for every file installed by
@@ -1042,13 +1169,21 @@ impl ModDatabase {
     // -- Conflicts ----------------------------------------------------------
 
     /// Find all file conflicts for a game/bottle.
-    /// Returns files where multiple enabled mods want the same path.
+    /// Tags each conflict with `same_collection` when all involved mods share
+    /// the same collection — these are expected overlaps managed by the author.
     pub fn find_all_conflicts(
         &self,
         game_id: &str,
         bottle_name: &str,
     ) -> Result<Vec<FileConflict>> {
         let mods = self.list_mods(game_id, bottle_name)?;
+
+        // Build mod_id → collection_name lookup
+        let mod_collection: HashMap<i64, Option<String>> = mods
+            .iter()
+            .map(|m| (m.id, m.collection_name.clone()))
+            .collect();
+
         let mut file_to_mods: HashMap<String, Vec<ConflictModInfo>> = HashMap::new();
 
         for m in &mods {
@@ -1070,7 +1205,14 @@ impl ModDatabase {
         let mut conflicts = Vec::new();
         for (path, mods_info) in file_to_mods {
             if mods_info.len() > 1 {
-                // Winner is the mod with highest priority
+                // Determine same_collection: all mods share one non-null collection name
+                let collections: HashSet<Option<&str>> = mods_info
+                    .iter()
+                    .map(|m| mod_collection.get(&m.mod_id).and_then(|c| c.as_deref()))
+                    .collect();
+                let same_collection = collections.len() == 1
+                    && collections.iter().next().unwrap().is_some();
+
                 let winner_mod_id = mods_info
                     .iter()
                     .max_by_key(|m| m.priority)
@@ -1081,6 +1223,7 @@ impl ModDatabase {
                     relative_path: path,
                     mods: mods_info,
                     winner_mod_id,
+                    same_collection,
                 });
             }
         }
@@ -1089,7 +1232,6 @@ impl ModDatabase {
         let resolved = self.get_resolved_pairs(game_id, bottle_name)?;
         if !resolved.is_empty() {
             conflicts.retain(|c| {
-                // A conflict is resolved if every loser has a rule with the winner
                 !c.mods
                     .iter()
                     .filter(|m| m.mod_id != c.winner_mod_id)

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy, untrack } from "svelte";
   import { goto } from "$app/navigation";
+  import InstructionParser from "$lib/components/InstructionParser.svelte";
   import { selectedGame, showError, showSuccess, collectionInstallStatus, collectionUninstallStatus } from "$lib/stores";
   import type { CollectionUninstallStatus } from "$lib/stores";
   import type { UninstallProgressEvent } from "$lib/types";
@@ -495,6 +496,8 @@
   let installing = $state(false);
   let installResult = $state<{ installed: number; already_installed: number; skipped: number; failed: number; details: { name: string; status: string; error: string | null; url: string | null; instructions: string | null }[] } | null>(null);
   let renderedDescription = $state("");
+  let renderedInstallInstructions = $state("");
+  let rawInstallInstructions = $state("");
   let userActions = $state<Array<{mod_name: string, action: string, url: string | null, instructions: string | null}>>([]);
 
   // Pre-grouped install result details to avoid inline .filter() in template
@@ -1203,6 +1206,8 @@
   async function viewCollectionDetail(collection: CollectionInfo) {
     loadingDetail = true;
     renderedDescription = "";
+    renderedInstallInstructions = "";
+    rawInstallInstructions = "";
     detailCacheInfo = null;
     try {
       const [detail, modsResult] = await Promise.all([
@@ -1217,6 +1222,15 @@
       if (detail.description) {
         const html = await marked.parse(detail.description);
         renderedDescription = DOMPurify.sanitize(html);
+      }
+
+      // Store raw + rendered install instructions
+      rawInstallInstructions = modsResult.install_instructions ?? "";
+      if (modsResult.install_instructions) {
+        const html = await marked.parse(modsResult.install_instructions);
+        renderedInstallInstructions = DOMPurify.sanitize(html);
+      } else {
+        renderedInstallInstructions = "";
       }
 
       // Compute cache percentage for this collection
@@ -1290,7 +1304,7 @@
       })),
       modRules: [],
       plugins: [],
-      installInstructions: null,
+      installInstructions: renderedInstallInstructions ? renderedInstallInstructions : null,
       slug: selectedCollection.slug ?? null,
       image_url: selectedCollection.image_url ?? null,
       revision: selectedCollection.latest_revision ?? null,
@@ -1581,6 +1595,8 @@
     selectedCollection = null;
     selectedMods = [];
     renderedDescription = "";
+    renderedInstallInstructions = "";
+    rawInstallInstructions = "";
   }
 
   // Logarithmic slider mapping: 0-100 slider → 0 to 500 GB
@@ -2234,6 +2250,20 @@
             </svg>
             Install Collection
           </button>
+        {/if}
+
+        <!-- Install Instructions (parsed with action checklist) -->
+        {#if rawInstallInstructions}
+          <div class="detail-section install-instructions-section">
+            <InstructionParser
+              rawInstructions={rawInstallInstructions}
+              modNames={selectedMods.map(m => m.name)}
+              gameId={$selectedGame?.game_id ?? ""}
+              bottleName={$selectedGame?.bottle_name ?? ""}
+              platform="wine"
+              gameVersion=""
+            />
+          </div>
         {/if}
 
         <!-- Description -->
@@ -4858,6 +4888,22 @@
     display: flex;
     align-items: center;
     gap: var(--space-2);
+  }
+
+  .install-instructions-section {
+    background: color-mix(in srgb, var(--accent-blue) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent-blue) 25%, transparent);
+    border-radius: var(--radius-md);
+    padding: var(--space-3);
+  }
+
+  .install-instructions-section .detail-section-title {
+    color: var(--accent-blue);
+  }
+
+  .install-instructions-content {
+    font-size: 13px;
+    line-height: 1.6;
   }
 
   .title-count {

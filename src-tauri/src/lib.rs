@@ -22,8 +22,13 @@ pub mod game_registry;
 pub mod games;
 pub mod ini_manager;
 pub mod installer;
+pub mod instruction_parser;
+pub mod instruction_types;
+pub mod instruction_validator;
 pub mod integrity;
 pub mod launcher;
+pub mod llm_parser;
+pub mod llm_chat;
 pub mod loot;
 pub mod loot_rules;
 pub mod migrations;
@@ -91,6 +96,8 @@ struct AppState {
         std::sync::Mutex<std::collections::HashMap<i64, Arc<std::sync::atomic::AtomicBool>>>,
     /// LRU cache for parsed FOMOD installers, keyed by archive SHA-256 hash.
     fomod_cache: Arc<RwLock<LruCache<String, FomodInstaller>>>,
+    /// Chat session for local LLM interaction.
+    chat_session: llm_chat::SharedChatSession,
     /// Session-level flag: once we verify the LOOT masterlist is fresh for the
     /// current game, we skip further freshness checks until the game changes
     /// or the user force-refreshes.
@@ -161,24 +168,30 @@ async fn nexus_api_key_or_token() -> Result<(String, bool), String> {
 // --- Tauri Commands ---
 
 #[tauri::command]
-fn get_bottles() -> Result<Vec<Bottle>, String> {
-    Ok(bottles::detect_bottles())
+async fn get_bottles() -> Result<Vec<Bottle>, String> {
+    tokio::task::spawn_blocking(move || {
+        Ok(bottles::detect_bottles())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn get_games(bottle_name: Option<String>) -> Result<Vec<DetectedGame>, String> {
-    match bottle_name {
-        Some(name) => {
-            let bottle = resolve_bottle(&name)?;
-            Ok(games::detect_games(&bottle))
+async fn get_games(bottle_name: Option<String>) -> Result<Vec<DetectedGame>, String> {
+    tokio::task::spawn_blocking(move || {
+        match bottle_name {
+            Some(name) => {
+                let bottle = resolve_bottle(&name)?;
+                Ok(games::detect_games(&bottle))
+            }
+            None => Ok(games::detect_all_games()),
         }
-        None => Ok(games::detect_all_games()),
-    }
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn get_all_games() -> Result<Vec<DetectedGame>, String> {
-    Ok(games::detect_all_games())
+async fn get_all_games() -> Result<Vec<DetectedGame>, String> {
+    tokio::task::spawn_blocking(move || {
+        Ok(games::detect_all_games())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -187,40 +200,77 @@ fn list_supported_games() -> Result<Vec<game_registry::SupportedGame>, String> {
 }
 
 #[tauri::command]
-fn get_bottle_settings(bottle_name: String) -> Result<bottle_config::BottleSettings, String> {
-    let bottle = resolve_bottle(&bottle_name)?;
-    bottle_config::get_bottle_settings(&bottle).map_err(|e| e.to_string())
+async fn get_bottle_settings(bottle_name: String) -> Result<bottle_config::BottleSettings, String> {
+    tokio::task::spawn_blocking(move || {
+        let bottle = resolve_bottle(&bottle_name)?;
+        bottle_config::get_bottle_settings(&bottle).map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn get_bottle_setting_defs(
+async fn get_bottle_setting_defs(
     bottle_name: String,
 ) -> Result<Vec<bottle_config::BottleSettingDef>, String> {
-    let bottle = resolve_bottle(&bottle_name)?;
-    let settings = bottle_config::get_bottle_settings(&bottle).map_err(|e| e.to_string())?;
-    Ok(bottle_config::get_setting_definitions(&settings))
+    tokio::task::spawn_blocking(move || {
+        let bottle = resolve_bottle(&bottle_name)?;
+        let settings = bottle_config::get_bottle_settings(&bottle).map_err(|e| e.to_string())?;
+        Ok(bottle_config::get_setting_definitions(&settings))
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn set_bottle_setting(bottle_name: String, key: String, value: String) -> Result<(), String> {
-    let bottle = resolve_bottle(&bottle_name)?;
-    bottle_config::set_bottle_setting(&bottle, &key, &value).map_err(|e| e.to_string())
+async fn set_bottle_setting(bottle_name: String, key: String, value: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let bottle = resolve_bottle(&bottle_name)?;
+        bottle_config::set_bottle_setting(&bottle, &key, &value).map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn get_installed_mods(
+async fn get_installed_mods(
     game_id: String,
     bottle_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<InstalledMod>, String> {
-    let db = &state.db;
-    db.list_mods(&game_id, &bottle_name)
-        .map_err(|e| e.to_string())
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        db.list_mods(&game_id, &bottle_name)
+            .map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
+}
+
+#[tauri::command]
+async fn get_installed_mods_summary(
+    game_id: String,
+    bottle_name: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<database::ModSummary>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        db.list_mods_summary(&game_id, &bottle_name)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("Summary task failed: {e}"))?
+}
+
+/// Fetch a single mod's full details (including installed_files) for the detail panel.
+#[tauri::command]
+async fn get_mod_detail(
+    mod_id: i64,
+    state: State<'_, AppState>,
+) -> Result<InstalledMod, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        db.get_mod(mod_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Mod {} not found", mod_id))
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
-fn install_mod_cmd(
+async fn install_mod_cmd(
     app: AppHandle,
     archive_path: String,
     game_id: String,
@@ -230,370 +280,473 @@ fn install_mod_cmd(
     source_type: Option<String>,
     source_url: Option<String>,
     nexus_mod_id: Option<i64>,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<InstalledMod, String> {
-    use progress::{InstallProgress, INSTALL_PROGRESS_EVENT};
+    let db = state.db.clone();
+    let app = app.clone();
+    tokio::task::spawn_blocking(move || {
+        use progress::{InstallProgress, INSTALL_PROGRESS_EVENT};
 
-    let archive = PathBuf::from(&archive_path);
-    if !archive.exists() {
-        return Err(format!("Archive not found: {}", archive_path));
-    }
+        let archive = PathBuf::from(&archive_path);
+        if !archive.exists() {
+            return Err(format!("Archive not found: {}", archive_path));
+        }
 
-    let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
-    let name = mod_name.unwrap_or_else(|| {
-        archive
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "Unknown Mod".to_string())
-    });
-    let version = mod_version.unwrap_or_default();
+        let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
+        let name = mod_name.unwrap_or_else(|| {
+            archive
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "Unknown Mod".to_string())
+        });
+        let version = mod_version.unwrap_or_default();
 
-    // Emit: mod started
-    let _ = app.emit(
-        INSTALL_PROGRESS_EVENT,
-        InstallProgress::ModStarted {
-            mod_index: 0,
-            total_mods: 1,
-            mod_name: name.clone(),
-        },
-    );
+        // Emit: mod started
+        let _ = app.emit(
+            INSTALL_PROGRESS_EVENT,
+            InstallProgress::ModStarted {
+                mod_index: 0,
+                total_mods: 1,
+                mod_name: name.clone(),
+            },
+        );
 
-    // Step 1: Reserve DB record
-    let _ = app.emit(
-        INSTALL_PROGRESS_EVENT,
-        InstallProgress::StepChanged {
-            mod_index: 0,
-            step: "preparing".to_string(),
-            detail: Some("Reserving database entry...".to_string()),
-        },
-    );
+        // Step 1: Reserve DB record
+        let _ = app.emit(
+            INSTALL_PROGRESS_EVENT,
+            InstallProgress::StepChanged {
+                mod_index: 0,
+                step: "preparing".to_string(),
+                detail: Some("Reserving database entry...".to_string()),
+            },
+        );
 
-    let db = &state.db;
+        let next_priority = db
+            .get_next_priority(&game_id, &bottle_name)
+            .map_err(|e| e.to_string())?;
+        let mod_id = db
+            .add_mod(
+                &game_id,
+                &bottle_name,
+                nexus_mod_id,
+                &name,
+                &version,
+                &archive_path,
+                &[],
+            )
+            .map_err(|e| {
+                let _ = app.emit(
+                    INSTALL_PROGRESS_EVENT,
+                    InstallProgress::ModFailed {
+                        mod_index: 0,
+                        mod_name: name.clone(),
+                        error: e.to_string(),
+                    },
+                );
+                e.to_string()
+            })?;
+        db.set_mod_priority(mod_id, next_priority)
+            .map_err(|e| e.to_string())?;
 
-    let next_priority = db
-        .get_next_priority(&game_id, &bottle_name)
-        .map_err(|e| e.to_string())?;
-    let mod_id = db
-        .add_mod(
+        // Step 2: Extract and stage
+        let _ = app.emit(
+            INSTALL_PROGRESS_EVENT,
+            InstallProgress::StepChanged {
+                mod_index: 0,
+                step: "extracting".to_string(),
+                detail: Some(format!(
+                    "Extracting {}...",
+                    archive.file_name().unwrap_or_default().to_string_lossy()
+                )),
+            },
+        );
+
+        let staging_result = match staging::stage_mod(&archive, &game_id, &bottle_name, mod_id, &name) {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = db.remove_mod(mod_id);
+                let _ = app.emit(
+                    INSTALL_PROGRESS_EVENT,
+                    InstallProgress::ModFailed {
+                        mod_index: 0,
+                        mod_name: name.clone(),
+                        error: format!("Staging failed: {}", e),
+                    },
+                );
+                return Err(format!("Staging failed: {}", e));
+            }
+        };
+
+        // Step 3: Update DB with staging info
+        let _ = app.emit(
+            INSTALL_PROGRESS_EVENT,
+            InstallProgress::StepChanged {
+                mod_index: 0,
+                step: "registering".to_string(),
+                detail: Some(format!("Recording {} files...", staging_result.files.len())),
+            },
+        );
+
+        db.set_staging_path(mod_id, &staging_result.staging_path.to_string_lossy())
+            .map_err(|e| e.to_string())?;
+        db.update_installed_files(mod_id, &staging_result.files)
+            .map_err(|e| e.to_string())?;
+        db.store_file_hashes(mod_id, &staging_result.hashes)
+            .map_err(|e| e.to_string())?;
+
+        // Step 4: Deploy from staging to game dir
+        let _ = app.emit(
+            INSTALL_PROGRESS_EVENT,
+            InstallProgress::StepChanged {
+                mod_index: 0,
+                step: "deploying".to_string(),
+                detail: Some("Creating hardlinks to game directory...".to_string()),
+            },
+        );
+
+        if let Err(e) = deployer::deploy_mod(
+            &db,
             &game_id,
             &bottle_name,
-            nexus_mod_id,
-            &name,
-            &version,
-            &archive_path,
-            &[],
-        )
-        .map_err(|e| {
-            let _ = app.emit(
-                INSTALL_PROGRESS_EVENT,
-                InstallProgress::ModFailed {
-                    mod_index: 0,
-                    mod_name: name.clone(),
-                    error: e.to_string(),
-                },
-            );
-            e.to_string()
-        })?;
-    db.set_mod_priority(mod_id, next_priority)
-        .map_err(|e| e.to_string())?;
-
-    // Step 2: Extract and stage
-    let _ = app.emit(
-        INSTALL_PROGRESS_EVENT,
-        InstallProgress::StepChanged {
-            mod_index: 0,
-            step: "extracting".to_string(),
-            detail: Some(format!(
-                "Extracting {}...",
-                archive.file_name().unwrap_or_default().to_string_lossy()
-            )),
-        },
-    );
-
-    let staging_result = match staging::stage_mod(&archive, &game_id, &bottle_name, mod_id, &name) {
-        Ok(r) => r,
-        Err(e) => {
+            mod_id,
+            &staging_result.staging_path,
+            &data_dir,
+            &staging_result.files,
+        ) {
+            let _ = staging::remove_staging(&staging_result.staging_path);
             let _ = db.remove_mod(mod_id);
             let _ = app.emit(
                 INSTALL_PROGRESS_EVENT,
                 InstallProgress::ModFailed {
                     mod_index: 0,
                     mod_name: name.clone(),
-                    error: format!("Staging failed: {}", e),
+                    error: format!("Deploy failed: {}", e),
                 },
             );
-            return Err(format!("Staging failed: {}", e));
+            return Err(format!("Deploy failed: {}", e));
         }
-    };
 
-    // Step 3: Update DB with staging info
-    let _ = app.emit(
-        INSTALL_PROGRESS_EVENT,
-        InstallProgress::StepChanged {
-            mod_index: 0,
-            step: "registering".to_string(),
-            detail: Some(format!("Recording {} files...", staging_result.files.len())),
-        },
-    );
+        // Step 5: Sync plugins
+        if game_id == "skyrimse" {
+            let _ = app.emit(
+                INSTALL_PROGRESS_EVENT,
+                InstallProgress::StepChanged {
+                    mod_index: 0,
+                    step: "syncing-plugins".to_string(),
+                    detail: Some("Syncing plugin load order...".to_string()),
+                },
+            );
+            let _ = sync_plugins_for_game(&game, &bottle);
+        }
 
-    db.set_staging_path(mod_id, &staging_result.staging_path.to_string_lossy())
-        .map_err(|e| e.to_string())?;
-    db.update_installed_files(mod_id, &staging_result.files)
-        .map_err(|e| e.to_string())?;
-    db.store_file_hashes(mod_id, &staging_result.hashes)
-        .map_err(|e| e.to_string())?;
+        // Set source type if provided
+        if let Some(ref st) = source_type {
+            let _ = db.set_mod_source(mod_id, st, source_url.as_deref());
+        }
 
-    // Step 4: Deploy from staging to game dir
-    let _ = app.emit(
-        INSTALL_PROGRESS_EVENT,
-        InstallProgress::StepChanged {
-            mod_index: 0,
-            step: "deploying".to_string(),
-            detail: Some("Creating hardlinks to game directory...".to_string()),
-        },
-    );
-
-    if let Err(e) = deployer::deploy_mod(
-        db,
-        &game_id,
-        &bottle_name,
-        mod_id,
-        &staging_result.staging_path,
-        &data_dir,
-        &staging_result.files,
-    ) {
-        let _ = staging::remove_staging(&staging_result.staging_path);
-        let _ = db.remove_mod(mod_id);
+        // Emit: mod completed
         let _ = app.emit(
             INSTALL_PROGRESS_EVENT,
-            InstallProgress::ModFailed {
+            InstallProgress::ModCompleted {
                 mod_index: 0,
-                mod_name: name.clone(),
-                error: format!("Deploy failed: {}", e),
-            },
-        );
-        return Err(format!("Deploy failed: {}", e));
-    }
-
-    // Step 5: Sync plugins
-    if game_id == "skyrimse" {
-        let _ = app.emit(
-            INSTALL_PROGRESS_EVENT,
-            InstallProgress::StepChanged {
-                mod_index: 0,
-                step: "syncing-plugins".to_string(),
-                detail: Some("Syncing plugin load order...".to_string()),
-            },
-        );
-        let _ = sync_plugins_for_game(&game, &bottle);
-    }
-
-    // Set source type if provided
-    if let Some(ref st) = source_type {
-        let _ = db.set_mod_source(mod_id, st, source_url.as_deref());
-    }
-
-    // Emit: mod completed
-    let _ = app.emit(
-        INSTALL_PROGRESS_EVENT,
-        InstallProgress::ModCompleted {
-            mod_index: 0,
-            mod_name: name,
-            mod_id,
-            deployed_size: 0,
-            duration_ms: 0,
-        },
-    );
-
-    db.get_mod(mod_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Failed to retrieve installed mod".to_string())
-}
-
-#[tauri::command]
-fn uninstall_mod(
-    mod_id: i64,
-    game_id: String,
-    bottle_name: String,
-    state: State<AppState>,
-) -> Result<Vec<String>, String> {
-    let db = &state.db;
-
-    let installed_mod = db
-        .get_mod(mod_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Mod with ID {} not found", mod_id))?;
-
-    let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
-
-    // Disable the mod first so restore_next_winner won't re-deploy its files
-    // during undeploy (it checks m.enabled when finding candidates).
-    let _ = db.set_enabled(mod_id, false);
-
-    // Remove deployed files from game directory
-    let removed = if installed_mod.staging_path.is_some() {
-        // Staged mod: undeploy via deployment manifest
-        deployer::undeploy_mod(
-            db,
-            &game_id,
-            &bottle_name,
-            mod_id,
-            &data_dir,
-            &game.game_path,
-        )
-        .map_err(|e| e.to_string())?
-    } else {
-        // Legacy mod: remove files directly
-        installer::uninstall_mod_files(&data_dir, &installed_mod.installed_files)
-            .map_err(|e| e.to_string())?
-    };
-
-    // Clean orphaned rollback staging directories before DB removal
-    let _ = rollback::cleanup_mod_version_staging(db, mod_id);
-
-    // Remove staging directory if it exists
-    if let Some(ref staging_path) = installed_mod.staging_path {
-        let _ = staging::remove_staging(Path::new(staging_path));
-    }
-
-    // Remove from database (cascades to deployment_manifest, file_hashes; cleans profile_mods)
-    db.remove_mod(mod_id).map_err(|e| e.to_string())?;
-
-    // Sync Skyrim plugins if applicable
-    if game_id == "skyrimse" {
-        let _ = sync_plugins_for_game(&game, &bottle);
-    }
-
-    Ok(removed)
-}
-
-#[tauri::command]
-fn toggle_mod(
-    mod_id: i64,
-    game_id: String,
-    bottle_name: String,
-    enabled: bool,
-    state: State<AppState>,
-) -> Result<(), String> {
-    let db = &state.db;
-
-    let installed_mod = db
-        .get_mod(mod_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Mod with ID {} not found", mod_id))?;
-
-    // Update DB flag
-    db.set_enabled(mod_id, enabled).map_err(|e| e.to_string())?;
-
-    // For staged mods, actually deploy/undeploy files
-    if let Some(ref staging_path_str) = installed_mod.staging_path {
-        let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
-        let staging_path = PathBuf::from(staging_path_str);
-
-        if enabled {
-            // Re-deploy from staging
-            let files = staging::list_staging_files(&staging_path).map_err(|e| e.to_string())?;
-            deployer::deploy_mod(
-                db,
-                &game_id,
-                &bottle_name,
+                mod_name: name,
                 mod_id,
-                &staging_path,
-                &data_dir,
-                &files,
-            )
-            .map_err(|e| e.to_string())?;
-        } else {
-            // Undeploy (remove from game dir, keep staging intact)
+                deployed_size: 0,
+                duration_ms: 0,
+            },
+        );
+
+        db.get_mod(mod_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Failed to retrieve installed mod".to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
+}
+
+#[tauri::command]
+async fn uninstall_mod(
+    mod_id: i64,
+    game_id: String,
+    bottle_name: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let installed_mod = db
+            .get_mod(mod_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Mod with ID {} not found", mod_id))?;
+
+        let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
+
+        // Disable the mod first so restore_next_winner won't re-deploy its files
+        // during undeploy (it checks m.enabled when finding candidates).
+        let _ = db.set_enabled(mod_id, false);
+
+        // Remove deployed files from game directory
+        let removed = if installed_mod.staging_path.is_some() {
+            // Staged mod: undeploy via deployment manifest
             deployer::undeploy_mod(
-                db,
+                &db,
                 &game_id,
                 &bottle_name,
                 mod_id,
                 &data_dir,
                 &game.game_path,
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?
+        } else {
+            // Legacy mod: remove files directly
+            installer::uninstall_mod_files(&data_dir, &installed_mod.installed_files)
+                .map_err(|e| e.to_string())?
+        };
+
+        // Clean orphaned rollback staging directories before DB removal
+        let _ = rollback::cleanup_mod_version_staging(&db, mod_id);
+
+        // Remove staging directory if it exists
+        if let Some(ref staging_path) = installed_mod.staging_path {
+            let _ = staging::remove_staging(Path::new(staging_path));
         }
+
+        // Remove from database (cascades to deployment_manifest, file_hashes; cleans profile_mods)
+        db.remove_mod(mod_id).map_err(|e| e.to_string())?;
 
         // Sync Skyrim plugins if applicable
         if game_id == "skyrimse" {
             let _ = sync_plugins_for_game(&game, &bottle);
         }
-    }
-    // Legacy mods (no staging_path): only the DB flag changes
 
-    Ok(())
+        Ok(removed)
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn batch_toggle_mods(
+async fn toggle_mod(
+    mod_id: i64,
+    game_id: String,
+    bottle_name: String,
+    enabled: bool,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let installed_mod = db
+            .get_mod(mod_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Mod with ID {} not found", mod_id))?;
+
+        // Update DB flag
+        db.set_enabled(mod_id, enabled).map_err(|e| e.to_string())?;
+
+        // For staged mods, actually deploy/undeploy files
+        if let Some(ref staging_path_str) = installed_mod.staging_path {
+            let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
+            let staging_path = PathBuf::from(staging_path_str);
+
+            if enabled {
+                // Re-deploy from staging
+                let files = staging::list_staging_files(&staging_path).map_err(|e| e.to_string())?;
+                deployer::deploy_mod(
+                    &db,
+                    &game_id,
+                    &bottle_name,
+                    mod_id,
+                    &staging_path,
+                    &data_dir,
+                    &files,
+                )
+                .map_err(|e| e.to_string())?;
+            } else {
+                // Undeploy (remove from game dir, keep staging intact)
+                deployer::undeploy_mod(
+                    &db,
+                    &game_id,
+                    &bottle_name,
+                    mod_id,
+                    &data_dir,
+                    &game.game_path,
+                )
+                .map_err(|e| e.to_string())?;
+            }
+
+            // Sync Skyrim plugins if applicable
+            if game_id == "skyrimse" {
+                let _ = sync_plugins_for_game(&game, &bottle);
+            }
+        }
+        // Legacy mods (no staging_path): only the DB flag changes
+
+        Ok(())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
+}
+
+/// Batch enable/disable mods. For bulk operations (>=5 mods), updates all DB
+/// flags first then does a single `redeploy_all` pass instead of per-mod
+/// deploy/undeploy — dramatically faster for large batches.
+#[tauri::command]
+async fn batch_toggle_mods(
     mod_ids: Vec<i64>,
     game_id: String,
     bottle_name: String,
     enabled: bool,
-    state: State<AppState>,
-) -> Result<u32, String> {
-    let db = &state.db;
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
     let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
-    let mut count = 0u32;
 
-    for mod_id in &mod_ids {
-        let installed_mod = match db.get_mod(*mod_id).map_err(|e| e.to_string())? {
-            Some(m) => m,
-            None => continue,
-        };
+    let total = mod_ids.len();
+    let action = if enabled { "Enabling" } else { "Disabling" };
 
-        // Skip if already in desired state
-        if installed_mod.enabled == enabled {
-            continue;
+    const BATCH_REDEPLOY_THRESHOLD: usize = 5;
+
+    if mod_ids.len() >= BATCH_REDEPLOY_THRESHOLD {
+        // Fast path: batch DB updates then single redeploy_all
+        let mut toggled: Vec<(i64, String)> = Vec::new();
+        let mut errors: Vec<String> = Vec::new();
+
+        for (i, mod_id) in mod_ids.iter().enumerate() {
+            let installed_mod = match db.get_mod(*mod_id) {
+                Ok(Some(m)) => m,
+                Ok(None) => continue,
+                Err(e) => { errors.push(format!("mod {}: {}", mod_id, e)); continue; }
+            };
+            let _ = app.emit("bulk-operation-progress", serde_json::json!({
+                "phase": "toggle",
+                "current": i + 1,
+                "total": total,
+                "message": format!("{} {}", action, &installed_mod.name),
+            }));
+            if installed_mod.enabled == enabled { continue; }
+            if let Err(e) = db.set_enabled(*mod_id, enabled) {
+                errors.push(format!("{}: {}", installed_mod.name, e));
+                continue;
+            }
+            toggled.push((*mod_id, installed_mod.name.clone()));
         }
 
-        db.set_enabled(*mod_id, enabled).map_err(|e| e.to_string())?;
-
-        if let Some(ref staging_path_str) = installed_mod.staging_path {
-            let staging_path = PathBuf::from(staging_path_str);
-            if enabled {
-                let files =
-                    staging::list_staging_files(&staging_path).map_err(|e| e.to_string())?;
-                deployer::deploy_mod(db, &game_id, &bottle_name, *mod_id, &staging_path, &data_dir, &files)
-                    .map_err(|e| e.to_string())?;
-            } else {
-                deployer::undeploy_mod(db, &game_id, &bottle_name, *mod_id, &data_dir, &game.game_path)
-                    .map_err(|e| e.to_string())?;
+        if !toggled.is_empty() {
+            let _ = app.emit("bulk-operation-progress", serde_json::json!({
+                "phase": "redeploy",
+                "current": 0,
+                "total": 1,
+                "message": format!("Redeploying {} mods...", toggled.len()),
+            }));
+            // Single redeploy pass for all enabled mods
+            if let Err(e) = deployer::redeploy_all(&db, &game_id, &bottle_name, &data_dir, &game.game_path) {
+                // Revert all DB flags on failure
+                for (mod_id, _) in &toggled {
+                    let _ = db.set_enabled(*mod_id, !enabled);
+                }
+                return Err(format!("Redeploy failed after toggling {} mods: {}", toggled.len(), e));
             }
         }
-        count += 1;
-    }
 
-    // Sync plugins once at the end
-    if game_id == "skyrimse" {
-        let _ = sync_plugins_for_game(&game, &bottle);
-    }
+        if game_id == "skyrimse" {
+            let _ = app.emit("bulk-operation-progress", serde_json::json!({
+                "phase": "plugins",
+                "current": 0,
+                "total": 1,
+                "message": "Syncing plugins.txt...",
+            }));
+            let _ = sync_plugins_for_game(&game, &bottle);
+        }
 
-    Ok(count)
+        let count = toggled.len();
+        let _ = app.emit("bulk-operation-progress", serde_json::json!({
+            "phase": "done",
+            "current": count,
+            "total": count,
+            "message": format!("{} {} mod{}", action, count, if count == 1 { "" } else { "s" }),
+        }));
+        if errors.is_empty() {
+            Ok(format!("{}", count))
+        } else {
+            Err(format!("{} succeeded, {} failed: {}", count, errors.len(), errors.join("; ")))
+        }
+    } else {
+        // Small batch: per-mod deploy/undeploy (preserves granular error reporting)
+        let mut count = 0u32;
+        let mut errors: Vec<String> = Vec::new();
+
+        for mod_id in &mod_ids {
+            let installed_mod = match db.get_mod(*mod_id) {
+                Ok(Some(m)) => m,
+                Ok(None) => continue,
+                Err(e) => { errors.push(format!("mod {}: {}", mod_id, e)); continue; }
+            };
+            if installed_mod.enabled == enabled { continue; }
+
+            if let Err(e) = db.set_enabled(*mod_id, enabled) {
+                errors.push(format!("{}: {}", installed_mod.name, e));
+                continue;
+            }
+
+            if let Some(ref staging_path_str) = installed_mod.staging_path {
+                let staging_path = PathBuf::from(staging_path_str);
+                let result: Result<(), String> = if enabled {
+                    staging::list_staging_files(&staging_path)
+                        .map_err(|e| e.to_string())
+                        .and_then(|files| {
+                            deployer::deploy_mod(&db, &game_id, &bottle_name, *mod_id, &staging_path, &data_dir, &files)
+                                .map(|_| ())
+                                .map_err(|e| e.to_string())
+                        })
+                } else {
+                    deployer::undeploy_mod(&db, &game_id, &bottle_name, *mod_id, &data_dir, &game.game_path)
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
+                };
+                if let Err(e) = result {
+                    let _ = db.set_enabled(*mod_id, !enabled);
+                    errors.push(format!("{}: {}", installed_mod.name, e));
+                    continue;
+                }
+            }
+            count += 1;
+        }
+
+        if game_id == "skyrimse" {
+            let _ = sync_plugins_for_game(&game, &bottle);
+        }
+
+        if errors.is_empty() {
+            Ok(format!("{}", count))
+        } else {
+            Err(format!("{} succeeded, {} failed: {}", count, errors.len(), errors.join("; ")))
+        }
+    }
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn get_plugin_order(game_id: String, bottle_name: String) -> Result<Vec<PluginEntry>, String> {
-    if !plugins::skyrim_plugins::supports_plugin_order(&game_id) {
-        return Ok(vec![]);
-    }
+async fn get_plugin_order(game_id: String, bottle_name: String) -> Result<Vec<PluginEntry>, String> {
+    tokio::task::spawn_blocking(move || {
+        if !plugins::skyrim_plugins::supports_plugin_order(&game_id) {
+            return Ok(vec![]);
+        }
 
-    let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
+        let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
 
-    // Get plugins file path via the plugin
-    let plugins_file = games::with_plugin(&game_id, |plugin| {
-        plugin.get_plugins_file(Path::new(&game.game_path), &bottle)
-    })
-    .flatten()
-    .ok_or_else(|| "Could not determine plugins file location".to_string())?;
+        // Auto-sync plugins.txt with deployed files before reading.
+        // This ensures all deployed plugins are marked enabled and stale
+        // entries for removed plugins are cleaned up.
+        sync_plugins_for_game(&game, &bottle)?;
 
-    if !plugins_file.exists() {
-        return Ok(vec![]);
-    }
+        // Get plugins file path via the plugin
+        let plugins_file = games::with_plugin(&game_id, |plugin| {
+            plugin.get_plugins_file(Path::new(&game.game_path), &bottle)
+        })
+        .flatten()
+        .ok_or_else(|| "Could not determine plugins file location".to_string())?;
 
-    plugins::skyrim_plugins::read_plugins_txt(&plugins_file).map_err(|e| e.to_string())
+        if !plugins_file.exists() {
+            return Ok(vec![]);
+        }
+
+        plugins::skyrim_plugins::read_plugins_txt(&plugins_file).map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -739,19 +892,24 @@ async fn is_nexus_premium() -> Result<bool, String> {
 }
 
 #[tauri::command]
-fn get_config() -> Result<AppConfig, String> {
-    config::get_config().map_err(|e| e.to_string())
+async fn get_config() -> Result<AppConfig, String> {
+    tokio::task::spawn_blocking(move || {
+        config::get_config().map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn set_config_value(key: String, value: String) -> Result<(), String> {
-    config::set_config_value(&key, &value).map_err(|e| e.to_string())
+async fn set_config_value(key: String, value: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        config::set_config_value(&key, &value).map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 // --- Download Archive Management ---
 
 #[tauri::command]
-fn list_download_archives() -> Result<Vec<serde_json::Value>, String> {
+async fn list_download_archives() -> Result<Vec<serde_json::Value>, String> {
+    tokio::task::spawn_blocking(move || {
     let cfg = config::get_config().map_err(|e| e.to_string())?;
     let dir = cfg
         .download_dir
@@ -802,10 +960,12 @@ fn list_download_archives() -> Result<Vec<serde_json::Value>, String> {
     });
 
     Ok(archives)
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn delete_download_archive(path: String) -> Result<(), String> {
+async fn delete_download_archive(path: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
     let archive_path = PathBuf::from(&path);
     if !archive_path.exists() {
         return Err("File not found".to_string());
@@ -830,10 +990,12 @@ fn delete_download_archive(path: String) -> Result<(), String> {
         return Err("Path is not a regular file".to_string());
     }
     std::fs::remove_file(&canonical_archive).map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn get_downloads_stats() -> Result<serde_json::Value, String> {
+async fn get_downloads_stats() -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || {
     let cfg = config::get_config().map_err(|e| e.to_string())?;
     let dir = cfg
         .download_dir
@@ -872,10 +1034,12 @@ fn get_downloads_stats() -> Result<serde_json::Value, String> {
         "archive_count": count,
         "directory": dir.to_string_lossy(),
     }))
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn clear_all_download_archives() -> Result<u64, String> {
+async fn clear_all_download_archives() -> Result<u64, String> {
+    tokio::task::spawn_blocking(move || {
     let cfg = config::get_config().map_err(|e| e.to_string())?;
     let dir = cfg
         .download_dir
@@ -904,6 +1068,7 @@ fn clear_all_download_archives() -> Result<u64, String> {
     }
 
     Ok(deleted)
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 /// Fetch a transparent game logo PNG from Steam CDN and cache it locally.
@@ -1014,12 +1179,14 @@ fn base64_encode(input: &[u8]) -> String {
 }
 
 #[tauri::command]
-fn launch_game_cmd(
+async fn launch_game_cmd(
     game_id: String,
     bottle_name: String,
     use_skse: bool,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<LaunchResult, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
     let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
     let game_path = PathBuf::from(&game.game_path);
 
@@ -1027,7 +1194,7 @@ fn launch_game_cmd(
     // Otherwise, check for a custom default executable first.
     if !use_skse {
         let custom_exe =
-            executables::get_default_executable(&state.db, &game_id, &bottle_name).unwrap_or(None);
+            executables::get_default_executable(&db, &game_id, &bottle_name).unwrap_or(None);
 
         if let Some(custom) = custom_exe {
             let exe_path = PathBuf::from(&custom.exe_path);
@@ -1122,12 +1289,10 @@ fn launch_game_cmd(
 
     // Pre-launch version guard — check active collection's target version
     if let Some(ref downgrade_status) = detected_version {
-        let collections = state
-            .db
+        let collections = db
             .list_installed_collections(&game_id, &bottle_name)
             .unwrap_or_default();
-        let metadata_list = state
-            .db
+        let metadata_list = db
             .list_collection_metadata(&game_id, &bottle_name)
             .unwrap_or_default();
 
@@ -1211,7 +1376,7 @@ fn launch_game_cmd(
     if game_id == "skyrimse" {
         let data_dir = PathBuf::from(&game.data_dir);
         let skse_fixes = skse::fix_skse_plugin_conflicts(
-            &state.db,
+            &db,
             &game_id,
             &bottle_name,
             &data_dir,
@@ -1226,7 +1391,7 @@ fn launch_game_cmd(
 
         // EngineFixes Wine compatibility: disable all patches (they crash under Wine)
         let ef_fixes =
-            skse::fix_engine_fixes_for_wine(&data_dir, &state.db, &game_id, &bottle_name);
+            skse::fix_engine_fixes_for_wine(&data_dir, &db, &game_id, &bottle_name);
         if ef_fixes > 0 {
             log::info!(
                 "Pre-launch: patched {} EngineFixes TOML(s) for Wine compatibility",
@@ -1236,7 +1401,7 @@ fn launch_game_cmd(
 
         // Disable Wine-incompatible SKSE plugins (CrashLogger, etc.)
         let wine_disabled =
-            skse::disable_wine_incompatible_plugins(&data_dir, &state.db, &game_id, &bottle_name);
+            skse::disable_wine_incompatible_plugins(&data_dir, &db, &game_id, &bottle_name);
         if !wine_disabled.is_empty() {
             let names: Vec<&str> = wine_disabled.iter().map(|(n, _)| n.as_str()).collect();
             log::info!(
@@ -1281,10 +1446,12 @@ fn launch_game_cmd(
     }
 
     Ok(result)
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn check_skse(game_id: String, bottle_name: String) -> Result<SkseStatus, String> {
+async fn check_skse(game_id: String, bottle_name: String) -> Result<SkseStatus, String> {
+    tokio::task::spawn_blocking(move || {
     if game_id != "skyrimse" {
         return Ok(SkseStatus {
             installed: false,
@@ -1300,6 +1467,7 @@ fn check_skse(game_id: String, bottle_name: String) -> Result<SkseStatus, String
     status.use_skse = skse::get_skse_preference(&game_id, &bottle_name);
 
     Ok(status)
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -1308,33 +1476,36 @@ fn get_skse_download_url() -> String {
 }
 
 #[tauri::command]
-fn install_skse_from_archive_cmd(
+async fn install_skse_from_archive_cmd(
     game_id: String,
     bottle_name: String,
     archive_path: String,
 ) -> Result<SkseStatus, String> {
-    if game_id != "skyrimse" {
-        return Err("SKSE is only available for Skyrim Special Edition".to_string());
-    }
+    tokio::task::spawn_blocking(move || {
+        if game_id != "skyrimse" {
+            return Err("SKSE is only available for Skyrim Special Edition".to_string());
+        }
 
-    let (_, game, _) = resolve_game(&game_id, &bottle_name)?;
-    let game_path = PathBuf::from(&game.game_path);
-    let archive = PathBuf::from(&archive_path);
+        let (_, game, _) = resolve_game(&game_id, &bottle_name)?;
+        let game_path = PathBuf::from(&game.game_path);
+        let archive = PathBuf::from(&archive_path);
 
-    let mut status =
-        skse::install_skse_from_archive(&game_path, &archive).map_err(|e| e.to_string())?;
+        let mut status =
+            skse::install_skse_from_archive(&game_path, &archive).map_err(|e| e.to_string())?;
 
-    // Auto-enable SKSE after successful installation
-    if status.installed {
-        let _ = skse::set_skse_preference(&game_id, &bottle_name, true);
-        status.use_skse = true;
-    }
+        // Auto-enable SKSE after successful installation
+        if status.installed {
+            let _ = skse::set_skse_preference(&game_id, &bottle_name, true);
+            status.use_skse = true;
+        }
 
-    Ok(status)
+        Ok(status)
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn uninstall_skse_cmd(game_id: String, bottle_name: String) -> Result<SkseStatus, String> {
+async fn uninstall_skse_cmd(game_id: String, bottle_name: String) -> Result<SkseStatus, String> {
+    tokio::task::spawn_blocking(move || {
     if game_id != "skyrimse" {
         return Err("SKSE is only available for Skyrim Special Edition".to_string());
     }
@@ -1351,65 +1522,74 @@ fn uninstall_skse_cmd(game_id: String, bottle_name: String) -> Result<SkseStatus
     }
 
     Ok(status)
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn set_skse_preference_cmd(
+async fn set_skse_preference_cmd(
     game_id: String,
     bottle_name: String,
     enabled: bool,
 ) -> Result<(), String> {
-    skse::set_skse_preference(&game_id, &bottle_name, enabled).map_err(|e| e.to_string())
+    tokio::task::spawn_blocking(move || {
+        skse::set_skse_preference(&game_id, &bottle_name, enabled).map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn check_skyrim_version(game_id: String, bottle_name: String) -> Result<DowngradeStatus, String> {
-    if game_id != "skyrimse" {
-        return Err("Version check is only available for Skyrim SE".to_string());
-    }
+async fn check_skyrim_version(game_id: String, bottle_name: String) -> Result<DowngradeStatus, String> {
+    tokio::task::spawn_blocking(move || {
+        if game_id != "skyrimse" {
+            return Err("Version check is only available for Skyrim SE".to_string());
+        }
 
-    let (_, game, _) = resolve_game(&game_id, &bottle_name)?;
-    downgrader::detect_skyrim_version(Path::new(&game.game_path)).map_err(|e| e.to_string())
+        let (_, game, _) = resolve_game(&game_id, &bottle_name)?;
+        downgrader::detect_skyrim_version(Path::new(&game.game_path)).map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn check_skse_compatibility_cmd(
+async fn check_skse_compatibility_cmd(
     game_id: String,
     bottle_name: String,
 ) -> Result<skse::SkseCompatibility, String> {
-    if game_id != "skyrimse" {
-        return Err("SKSE compatibility check is only for Skyrim SE".into());
-    }
+    tokio::task::spawn_blocking(move || {
+        if game_id != "skyrimse" {
+            return Err("SKSE compatibility check is only for Skyrim SE".into());
+        }
 
-    let (_, game, _) = resolve_game(&game_id, &bottle_name)?;
-    let game_path = PathBuf::from(&game.game_path);
-    let skse_status = skse::detect_skse(&game_path);
-    let downgrade_status =
-        downgrader::detect_skyrim_version(&game_path).map_err(|e| e.to_string())?;
+        let (_, game, _) = resolve_game(&game_id, &bottle_name)?;
+        let game_path = PathBuf::from(&game.game_path);
+        let skse_status = skse::detect_skse(&game_path);
+        let downgrade_status =
+            downgrader::detect_skyrim_version(&game_path).map_err(|e| e.to_string())?;
 
-    Ok(skse::check_skse_compatibility(
-        &skse_status,
-        &downgrade_status,
-    ))
+        Ok(skse::check_skse_compatibility(
+            &skse_status,
+            &downgrade_status,
+        ))
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn get_skse_builds(
+async fn get_skse_builds(
     game_id: String,
     bottle_name: String,
 ) -> Result<skse::SkseAvailableBuilds, String> {
-    if game_id != "skyrimse" {
-        return Err("SKSE is only available for Skyrim Special Edition".into());
-    }
+    tokio::task::spawn_blocking(move || {
+        if game_id != "skyrimse" {
+            return Err("SKSE is only available for Skyrim Special Edition".into());
+        }
 
-    let (_, game, _) = resolve_game(&game_id, &bottle_name)?;
-    let game_path = PathBuf::from(&game.game_path);
-    let downgrade_status =
-        downgrader::detect_skyrim_version(&game_path).map_err(|e| e.to_string())?;
+        let (_, game, _) = resolve_game(&game_id, &bottle_name)?;
+        let game_path = PathBuf::from(&game.game_path);
+        let downgrade_status =
+            downgrader::detect_skyrim_version(&game_path).map_err(|e| e.to_string())?;
 
-    Ok(skse::get_available_skse_builds(
-        &downgrade_status.current_version,
-    ))
+        Ok(skse::get_available_skse_builds(
+            &downgrade_status.current_version,
+        ))
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -1436,71 +1616,82 @@ async fn install_skse_auto_cmd(game_id: String, bottle_name: String) -> Result<S
 }
 
 #[tauri::command]
-fn scan_skse_plugins_cmd(
+async fn scan_skse_plugins_cmd(
     game_id: String,
     bottle_name: String,
 ) -> Result<skse::SksePluginScanResult, String> {
-    if game_id != "skyrimse" {
-        return Err("SKSE plugin scan is only available for Skyrim SE".into());
-    }
+    tokio::task::spawn_blocking(move || {
+        if game_id != "skyrimse" {
+            return Err("SKSE plugin scan is only available for Skyrim SE".into());
+        }
 
-    let (_, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
-    let game_path = PathBuf::from(&game.game_path);
-    let version = downgrader::detect_skyrim_version(&game_path)
-        .map(|s| s.current_version)
-        .unwrap_or_else(|_| "unknown".to_string());
+        let (_, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
+        let game_path = PathBuf::from(&game.game_path);
+        let version = downgrader::detect_skyrim_version(&game_path)
+            .map(|s| s.current_version)
+            .unwrap_or_else(|_| "unknown".to_string());
 
-    Ok(skse::scan_skse_plugins(&data_dir, &version))
+        Ok(skse::scan_skse_plugins(&data_dir, &version))
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn fix_skse_plugins_cmd(
+async fn fix_skse_plugins_cmd(
     game_id: String,
     bottle_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<usize, String> {
-    let (_, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
-    let game_path = PathBuf::from(&game.game_path);
-    Ok(skse::fix_skse_plugin_conflicts(
-        &state.db,
-        &game_id,
-        &bottle_name,
-        &data_dir,
-        &game_path,
-    ))
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let (_, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
+        let game_path = PathBuf::from(&game.game_path);
+        Ok(skse::fix_skse_plugin_conflicts(
+            &db,
+            &game_id,
+            &bottle_name,
+            &data_dir,
+            &game_path,
+        ))
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 /// List SKSE plugins that have been auto-disabled for Wine compatibility.
 #[tauri::command]
-fn list_disabled_wine_plugins_cmd(
+async fn list_disabled_wine_plugins_cmd(
     game_id: String,
     bottle_name: String,
 ) -> Result<Vec<(String, String)>, String> {
-    if game_id != "skyrimse" {
-        return Ok(vec![]);
-    }
-    let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
-    Ok(skse::list_disabled_wine_plugins(&data_dir))
+    tokio::task::spawn_blocking(move || {
+        if game_id != "skyrimse" {
+            return Ok(vec![]);
+        }
+        let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
+        Ok(skse::list_disabled_wine_plugins(&data_dir))
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 /// Re-enable a Wine-incompatible plugin that was auto-disabled (user override).
 #[tauri::command]
-fn reenable_wine_plugin_cmd(
+async fn reenable_wine_plugin_cmd(
     game_id: String,
     bottle_name: String,
     dll_name: String,
 ) -> Result<bool, String> {
-    if game_id != "skyrimse" {
-        return Ok(false);
-    }
-    let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
-    skse::reenable_wine_plugin(&data_dir, &dll_name)
+    tokio::task::spawn_blocking(move || {
+        if game_id != "skyrimse" {
+            return Ok(false);
+        }
+        let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
+        skse::reenable_wine_plugin(&data_dir, &dll_name)
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn fix_skyrim_display(bottle_name: String) -> Result<display_fix::DisplayFixResult, String> {
-    let bottle = resolve_bottle(&bottle_name)?;
-    display_fix::auto_fix_display(&bottle)
+async fn fix_skyrim_display(bottle_name: String) -> Result<display_fix::DisplayFixResult, String> {
+    tokio::task::spawn_blocking(move || {
+        let bottle = resolve_bottle(&bottle_name)?;
+        display_fix::auto_fix_display(&bottle)
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -1537,58 +1728,68 @@ async fn downgrade_skyrim(
 }
 
 #[tauri::command]
-fn get_depot_download_command(
+async fn get_depot_download_command(
     game_id: String,
     bottle_name: String,
 ) -> Result<downgrader::DepotDownloadInfo, String> {
-    let (bottle, _, _) = resolve_game(&game_id, &bottle_name)?;
-    downgrader::get_depot_download_info(&game_id, &bottle.path).map_err(|e| e.to_string())
+    tokio::task::spawn_blocking(move || {
+        let (bottle, _, _) = resolve_game(&game_id, &bottle_name)?;
+        downgrader::get_depot_download_info(&game_id, &bottle.path).map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn start_depot_download(game_id: String) -> Result<bool, String> {
-    if game_id != "skyrimse" {
-        return Err("Depot download only supported for Skyrim SE".into());
-    }
-    downgrader::send_depot_command_to_steam()
+async fn start_depot_download(game_id: String) -> Result<bool, String> {
+    tokio::task::spawn_blocking(move || {
+        if game_id != "skyrimse" {
+            return Err("Depot download only supported for Skyrim SE".into());
+        }
+        downgrader::send_depot_command_to_steam()
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn check_depot_ready(game_id: String, bottle_name: String) -> Result<Option<String>, String> {
-    let (bottle, _, _) = resolve_game(&game_id, &bottle_name)?;
-    let steam_dir = downgrader::find_steam_dir(&bottle.path)
-        .ok_or_else(|| "Steam directory not found in bottle".to_string())?;
+async fn check_depot_ready(game_id: String, bottle_name: String) -> Result<Option<String>, String> {
+    tokio::task::spawn_blocking(move || {
+        let (bottle, _, _) = resolve_game(&game_id, &bottle_name)?;
+        let steam_dir = downgrader::find_steam_dir(&bottle.path)
+            .ok_or_else(|| "Steam directory not found in bottle".to_string())?;
 
-    Ok(downgrader::check_depot_downloaded(
-        &steam_dir,
-        downgrader::SKYRIM_APP_ID,
-        downgrader::SKYRIM_DEPOT_ID,
-    )
-    .map(|p| p.to_string_lossy().into_owned()))
+        Ok(downgrader::check_depot_downloaded(
+            &steam_dir,
+            downgrader::SKYRIM_APP_ID,
+            downgrader::SKYRIM_DEPOT_ID,
+        )
+        .map(|p| p.to_string_lossy().into_owned()))
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn apply_downgrade_cmd(game_id: String, bottle_name: String) -> Result<DowngradeStatus, String> {
-    let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
-    let game_path = PathBuf::from(&game.game_path);
-    let steam_dir = downgrader::find_steam_dir(&bottle.path)
-        .ok_or_else(|| "Steam directory not found in bottle".to_string())?;
+async fn apply_downgrade_cmd(game_id: String, bottle_name: String) -> Result<DowngradeStatus, String> {
+    tokio::task::spawn_blocking(move || {
+        let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
+        let game_path = PathBuf::from(&game.game_path);
+        let steam_dir = downgrader::find_steam_dir(&bottle.path)
+            .ok_or_else(|| "Steam directory not found in bottle".to_string())?;
 
-    let depot_exe = downgrader::check_depot_downloaded(
-        &steam_dir,
-        downgrader::SKYRIM_APP_ID,
-        downgrader::SKYRIM_DEPOT_ID,
-    )
-    .ok_or_else(|| {
-        "Depot files not downloaded yet. Run download_depot in Steam console first.".to_string()
-    })?;
+        let depot_exe = downgrader::check_depot_downloaded(
+            &steam_dir,
+            downgrader::SKYRIM_APP_ID,
+            downgrader::SKYRIM_DEPOT_ID,
+        )
+        .ok_or_else(|| {
+            "Depot files not downloaded yet. Run download_depot in Steam console first.".to_string()
+        })?;
 
-    downgrader::apply_depot_downgrade(&game_path, &depot_exe, &game_id).map_err(|e| e.to_string())
+        downgrader::apply_depot_downgrade(&game_path, &depot_exe, &game_id).map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn list_game_versions(game_id: String) -> Result<Vec<downgrader::CachedVersion>, String> {
-    Ok(downgrader::list_cached_versions(&game_id))
+async fn list_game_versions(game_id: String) -> Result<Vec<downgrader::CachedVersion>, String> {
+    tokio::task::spawn_blocking(move || {
+        Ok(downgrader::list_cached_versions(&game_id))
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -1657,55 +1858,63 @@ fn set_vibrancy(window: tauri::Window, material: String) -> Result<(), String> {
 // --- Custom Executables ---
 
 #[tauri::command]
-fn add_custom_exe(
+async fn add_custom_exe(
     game_id: String,
     bottle_name: String,
     name: String,
     exe_path: String,
     working_dir: Option<String>,
     args: Option<String>,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<i64, String> {
-    let db = &state.db;
-    executables::add_executable(
-        db,
-        &game_id,
-        &bottle_name,
-        &name,
-        &exe_path,
-        working_dir.as_deref(),
-        args.as_deref(),
-    )
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        executables::add_executable(
+            &db,
+            &game_id,
+            &bottle_name,
+            &name,
+            &exe_path,
+            working_dir.as_deref(),
+            args.as_deref(),
+        )
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn remove_custom_exe(exe_id: i64, state: State<AppState>) -> Result<(), String> {
-    let db = &state.db;
-    executables::remove_executable(db, exe_id)
+async fn remove_custom_exe(exe_id: i64, state: State<'_, AppState>) -> Result<(), String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        executables::remove_executable(&db, exe_id)
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn list_custom_exes(
+async fn list_custom_exes(
     game_id: String,
     bottle_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<CustomExecutable>, String> {
-    let db = &state.db;
-    executables::list_executables(db, &game_id, &bottle_name)
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        executables::list_executables(&db, &game_id, &bottle_name)
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn set_default_exe(
+async fn set_default_exe(
     game_id: String,
     bottle_name: String,
     exe_id: Option<i64>,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let db = &state.db;
-    match exe_id {
-        Some(id) => executables::set_default_executable(db, &game_id, &bottle_name, id),
-        None => executables::clear_default_executable(db, &game_id, &bottle_name),
-    }
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        match exe_id {
+            Some(id) => executables::set_default_executable(&db, &game_id, &bottle_name, id),
+            None => executables::clear_default_executable(&db, &game_id, &bottle_name),
+        }
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 // --- Deployment Management ---
@@ -1732,12 +1941,13 @@ struct AnalyzeConflictsResponse {
 }
 
 #[tauri::command]
-fn analyze_conflicts_cmd(
+async fn analyze_conflicts_cmd(
     game_id: String,
     bottle_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<AnalyzeConflictsResponse, String> {
-    let db = &state.db;
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
     let conflicts = db
         .find_all_conflicts(&game_id, &bottle_name)
         .map_err(|e| e.to_string())?;
@@ -1769,15 +1979,17 @@ fn analyze_conflicts_cmd(
         suggestions,
         identical_stats,
     })
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn resolve_all_conflicts_cmd(
+async fn resolve_all_conflicts_cmd(
     game_id: String,
     bottle_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<conflict_resolver::ResolutionResult, String> {
-    let db = &state.db;
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
     let conflicts = db
         .find_all_conflicts(&game_id, &bottle_name)
         .map_err(|e| e.to_string())?;
@@ -1804,7 +2016,7 @@ fn resolve_all_conflicts_cmd(
 
     let (suggestions, _identical_stats) =
         conflict_resolver::analyze_conflicts(&conflicts, &mods, loot_ref, &file_hashes);
-    let result = conflict_resolver::apply_suggestions(db, &game_id, &bottle_name, &suggestions)?;
+    let result = conflict_resolver::apply_suggestions(&db, &game_id, &bottle_name, &suggestions)?;
 
     // Record conflict rules for resolved conflicts so they disappear from the list.
     for suggestion in &suggestions {
@@ -1833,7 +2045,7 @@ fn resolve_all_conflicts_cmd(
     // Redeploy to apply new priorities if any changed.
     if result.priorities_changed > 0 {
         let (_bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
-        deployer::redeploy_all(db, &game_id, &bottle_name, &data_dir, &game.game_path)
+        deployer::redeploy_all(&db, &game_id, &bottle_name, &data_dir, &game.game_path)
             .map_err(|e| e.to_string())?;
         if game_id == "skyrimse" {
             let bottle = resolve_bottle(&bottle_name)?;
@@ -1842,80 +2054,91 @@ fn resolve_all_conflicts_cmd(
     }
 
     Ok(result)
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn record_conflict_winner(
+async fn record_conflict_winner(
     game_id: String,
     bottle_name: String,
     winner_mod_id: i64,
     loser_mod_ids: Vec<i64>,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let db = &state.db;
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
     for loser_id in loser_mod_ids {
         db.add_conflict_rule(&game_id, &bottle_name, winner_mod_id, loser_id)
             .map_err(|e| e.to_string())?;
     }
     Ok(())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn get_deployment_manifest_cmd(
+async fn get_deployment_manifest_cmd(
     game_id: String,
     bottle_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<DeploymentEntry>, String> {
-    let db = &state.db;
-    db.get_deployment_manifest(&game_id, &bottle_name)
-        .map_err(|e| e.to_string())
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        db.get_deployment_manifest(&game_id, &bottle_name)
+            .map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn set_mod_priority(mod_id: i64, priority: i32, state: State<AppState>) -> Result<(), String> {
-    let db = &state.db;
-    db.set_mod_priority(mod_id, priority)
-        .map_err(|e| e.to_string())
+async fn set_mod_priority(mod_id: i64, priority: i32, state: State<'_, AppState>) -> Result<(), String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        db.set_mod_priority(mod_id, priority)
+            .map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn reorder_mods(
+async fn reorder_mods(
     game_id: String,
     bottle_name: String,
     ordered_mod_ids: Vec<i64>,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let db = &state.db;
-    db.reorder_priorities(&game_id, &bottle_name, &ordered_mod_ids)
-        .map_err(|e| e.to_string())?;
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        db.reorder_priorities(&game_id, &bottle_name, &ordered_mod_ids)
+            .map_err(|e| e.to_string())?;
 
-    let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
+        let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
 
-    // Redeploy to reflect new priority order
-    deployer::redeploy_all(db, &game_id, &bottle_name, &data_dir, &game.game_path)
-        .map_err(|e| e.to_string())?;
+        // Redeploy to reflect new priority order
+        deployer::redeploy_all(&db, &game_id, &bottle_name, &data_dir, &game.game_path)
+            .map_err(|e| e.to_string())?;
 
-    // Sync plugins after redeploy
-    if game_id == "skyrimse" {
-        let _ = sync_plugins_for_game(&game, &bottle);
-    }
+        // Sync plugins after redeploy
+        if game_id == "skyrimse" {
+            let _ = sync_plugins_for_game(&game, &bottle);
+        }
 
-    Ok(())
+        Ok(())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn redeploy_all_mods(
+async fn redeploy_all_mods(
     app: AppHandle,
     game_id: String,
     bottle_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
+    let db = state.db.clone();
+    let app = app.clone();
+    tokio::task::spawn_blocking(move || {
     let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
-    let db = &state.db;
 
     let app_clone = app.clone();
     let result = deployer::redeploy_all_with_progress(
-        db,
+        &db,
         &game_id,
         &bottle_name,
         &data_dir,
@@ -1943,7 +2166,7 @@ fn redeploy_all_mods(
 
     if game_id == "skyrimse" {
         let _ = sync_plugins_for_game(&game, &bottle);
-        let ef = skse::fix_engine_fixes_for_wine(&data_dir, &state.db, &game_id, &bottle_name);
+        let ef = skse::fix_engine_fixes_for_wine(&data_dir, &db, &game_id, &bottle_name);
         if ef > 0 {
             log::info!(
                 "Redeploy: patched {} EngineFixes TOML(s) for Wine compatibility",
@@ -1952,7 +2175,7 @@ fn redeploy_all_mods(
         }
         // Disable Wine-incompatible SKSE plugins
         let wine_disabled =
-            skse::disable_wine_incompatible_plugins(&data_dir, &state.db, &game_id, &bottle_name);
+            skse::disable_wine_incompatible_plugins(&data_dir, &db, &game_id, &bottle_name);
         for (name, reason) in &wine_disabled {
             log::info!(
                 "Redeploy: disabled Wine-incompatible plugin {} — {}",
@@ -1976,26 +2199,28 @@ fn redeploy_all_mods(
         "skipped_count": result.skipped_count,
         "fallback_used": result.fallback_used,
     }))
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 /// Incremental deployment: compute diff and apply only changes.
 /// Falls back to full redeploy if >80% of files would change.
 #[tauri::command]
-fn deploy_incremental_cmd(
+async fn deploy_incremental_cmd(
     game_id: String,
     bottle_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<deployer::IncrementalDeployResult, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
     let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
-    let db = &state.db;
 
     let result =
-        deployer::deploy_incremental(db, &game_id, &bottle_name, &data_dir, &game.game_path)
+        deployer::deploy_incremental(&db, &game_id, &bottle_name, &data_dir, &game.game_path)
             .map_err(|e| e.to_string())?;
 
     if game_id == "skyrimse" {
         let _ = sync_plugins_for_game(&game, &bottle);
-        let ef = skse::fix_engine_fixes_for_wine(&data_dir, &state.db, &game_id, &bottle_name);
+        let ef = skse::fix_engine_fixes_for_wine(&data_dir, &db, &game_id, &bottle_name);
         if ef > 0 {
             log::info!(
                 "Incremental deploy: patched {} EngineFixes TOML(s) for Wine compatibility",
@@ -2004,7 +2229,7 @@ fn deploy_incremental_cmd(
         }
         // Disable Wine-incompatible SKSE plugins
         let wine_disabled =
-            skse::disable_wine_incompatible_plugins(&data_dir, &state.db, &game_id, &bottle_name);
+            skse::disable_wine_incompatible_plugins(&data_dir, &db, &game_id, &bottle_name);
         for (name, reason) in &wine_disabled {
             log::info!(
                 "Incremental deploy: disabled Wine-incompatible plugin {} — {}",
@@ -2023,6 +2248,7 @@ fn deploy_incremental_cmd(
     }
 
     Ok(result)
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 /// Check deployment health: verify mods have staging dirs and deployed files.
@@ -2031,13 +2257,14 @@ fn deploy_incremental_cmd(
 /// - Balanced: existence + spot-check 10% of files by SHA-256
 /// - Paranoid: existence + full SHA-256 verification of every file
 #[tauri::command]
-fn check_deployment_health(
+async fn check_deployment_health(
     game_id: String,
     bottle_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
     let (_bottle, _game, data_dir) = resolve_game(&game_id, &bottle_name)?;
-    let db = &state.db;
 
     // Read verification level from config
     let verification_level = config::get_config()
@@ -2118,7 +2345,7 @@ fn check_deployment_health(
 
     // Hash verification (Balanced/Paranoid modes only)
     let verification =
-        deployer::verify_deployment(&verification_level, db, &game_id, &bottle_name, &data_dir)
+        deployer::verify_deployment(&verification_level, &db, &game_id, &bottle_name, &data_dir)
             .map_err(|e| e.to_string())?;
 
     let healthy = staging_missing == 0
@@ -2154,165 +2381,174 @@ fn check_deployment_health(
         "hash_skipped_no_record": verification.hash_skipped_no_record,
         "mismatched_files": verification.mismatched_files,
     }))
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 /// Get the current verification level from config.
 #[tauri::command]
-fn get_verification_level() -> Result<String, String> {
-    let cfg = config::get_config().map_err(|e| e.to_string())?;
-    let level = match cfg.verification_level {
-        config::VerificationLevel::Fast => "Fast",
-        config::VerificationLevel::Balanced => "Balanced",
-        config::VerificationLevel::Paranoid => "Paranoid",
-    };
-    Ok(level.to_string())
+async fn get_verification_level() -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let cfg = config::get_config().map_err(|e| e.to_string())?;
+        let level = match cfg.verification_level {
+            config::VerificationLevel::Fast => "Fast",
+            config::VerificationLevel::Balanced => "Balanced",
+            config::VerificationLevel::Paranoid => "Paranoid",
+        };
+        Ok(level.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 /// Set the verification level in config.
 #[tauri::command]
-fn set_verification_level(level: String) -> Result<(), String> {
-    config::set_config_value("verification_level", &level).map_err(|e| e.to_string())
+async fn set_verification_level(level: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        config::set_config_value("verification_level", &level).map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn purge_deployment_cmd(
+async fn purge_deployment_cmd(
     game_id: String,
     bottle_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<String>, String> {
-    let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
-    let db = &state.db;
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
 
-    auto_snapshot_before_destructive(db, &game_id, &bottle_name, "Before purge deployment");
+        auto_snapshot_before_destructive(&db, &game_id, &bottle_name, "Before purge deployment");
 
-    let removed =
-        deployer::purge_deployment(db, &game_id, &bottle_name, &data_dir, &game.game_path)
-            .map_err(|e| e.to_string())?;
+        let removed =
+            deployer::purge_deployment(&db, &game_id, &bottle_name, &data_dir, &game.game_path)
+                .map_err(|e| e.to_string())?;
 
-    if game_id == "skyrimse" {
-        let _ = sync_plugins_for_game(&game, &bottle);
-    }
+        if game_id == "skyrimse" {
+            let _ = sync_plugins_for_game(&game, &bottle);
+        }
 
-    Ok(removed)
+        Ok(removed)
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn verify_mod_integrity(mod_id: i64, state: State<AppState>) -> Result<Vec<String>, String> {
-    let db = &state.db;
+async fn verify_mod_integrity(mod_id: i64, state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let installed_mod = db
+            .get_mod(mod_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Mod with ID {} not found", mod_id))?;
 
-    let installed_mod = db
-        .get_mod(mod_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Mod with ID {} not found", mod_id))?;
+        let staging_path = installed_mod
+            .staging_path
+            .as_ref()
+            .ok_or_else(|| "Legacy mod — no staging data for integrity check".to_string())?;
 
-    let staging_path = installed_mod
-        .staging_path
-        .as_ref()
-        .ok_or_else(|| "Legacy mod — no staging data for integrity check".to_string())?;
-
-    let hashes = db.get_file_hashes(mod_id).map_err(|e| e.to_string())?;
-    staging::verify_staging_integrity(Path::new(staging_path), &hashes).map_err(|e| e.to_string())
+        let hashes = db.get_file_hashes(mod_id).map_err(|e| e.to_string())?;
+        staging::verify_staging_integrity(Path::new(staging_path), &hashes).map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 // --- Deployment Health ---
 
 #[tauri::command]
-fn get_deployment_health(
+async fn get_deployment_health(
     game_id: String,
     bottle_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
-    let db = &state.db;
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let manifest = db
+            .get_deployment_manifest(&game_id, &bottle_name)
+            .map_err(|e| e.to_string())?;
+        let mods = db
+            .list_mods(&game_id, &bottle_name)
+            .map_err(|e| e.to_string())?;
+        let conflicts = db
+            .find_all_conflicts(&game_id, &bottle_name)
+            .map_err(|e| e.to_string())?;
 
-    let manifest = db
-        .get_deployment_manifest(&game_id, &bottle_name)
-        .map_err(|e| e.to_string())?;
-    let mods = db
-        .list_mods(&game_id, &bottle_name)
-        .map_err(|e| e.to_string())?;
-    let conflicts = db
-        .find_all_conflicts(&game_id, &bottle_name)
-        .map_err(|e| e.to_string())?;
+        let total_mods = mods.len();
+        let total_enabled = mods.iter().filter(|m| m.enabled).count();
+        let is_deployed = !manifest.is_empty();
+        let total_deployed = manifest.len();
+        let conflict_count = conflicts.len();
 
-    let total_mods = mods.len();
-    let total_enabled = mods.iter().filter(|m| m.enabled).count();
-    let is_deployed = !manifest.is_empty();
-    let total_deployed = manifest.len();
-    let conflict_count = conflicts.len();
-
-    let deploy_method = if is_deployed {
-        match resolve_game(&game_id, &bottle_name) {
-            Ok((_, _, data_dir)) => {
-                // Test actual staging→data_dir filesystem match (not same-dir)
-                let staging_root = staging::staging_base_dir(&game_id, &bottle_name);
-                if deployer::same_filesystem(&staging_root, &data_dir) {
-                    "hardlink"
-                } else {
-                    "copy"
+        let deploy_method = if is_deployed {
+            match resolve_game(&game_id, &bottle_name) {
+                Ok((_, _, data_dir)) => {
+                    let staging_root = staging::staging_base_dir(&game_id, &bottle_name);
+                    if deployer::same_filesystem(&staging_root, &data_dir) {
+                        "hardlink"
+                    } else {
+                        "copy"
+                    }
                 }
+                Err(_) => "unknown",
             }
-            Err(_) => "unknown",
-        }
-    } else {
-        "none"
-    };
+        } else {
+            "none"
+        };
 
-    Ok(serde_json::json!({
-        "total_deployed": total_deployed,
-        "total_enabled": total_enabled,
-        "total_mods": total_mods,
-        "conflict_count": conflict_count,
-        "deploy_method": deploy_method,
-        "is_deployed": is_deployed,
-    }))
+        Ok(serde_json::json!({
+            "total_deployed": total_deployed,
+            "total_enabled": total_enabled,
+            "total_mods": total_mods,
+            "conflict_count": conflict_count,
+            "deploy_method": deploy_method,
+            "is_deployed": is_deployed,
+        }))
+    })
+    .await
+    .map_err(|e| format!("Health task failed: {e}"))?
 }
 
 /// Lightweight deployment stats without the expensive `find_all_conflicts()` call.
 /// The frontend already loads conflicts separately via `get_conflicts`, so this
 /// avoids computing them twice.  Used after mod toggle and for sidebar stats.
 #[tauri::command]
-fn get_deployment_stats(
+async fn get_deployment_stats(
     game_id: String,
     bottle_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
-    let db = &state.db;
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let (total_mods, total_enabled) = db
+            .get_mod_counts(&game_id, &bottle_name)
+            .map_err(|e| e.to_string())?;
+        let total_deployed = db
+            .get_deployment_count(&game_id, &bottle_name)
+            .map_err(|e| e.to_string())?;
+        let is_deployed = total_deployed > 0;
 
-    let manifest = db
-        .get_deployment_manifest(&game_id, &bottle_name)
-        .map_err(|e| e.to_string())?;
-    let mods = db
-        .list_mods(&game_id, &bottle_name)
-        .map_err(|e| e.to_string())?;
-
-    let total_mods = mods.len();
-    let total_enabled = mods.iter().filter(|m| m.enabled).count();
-    let is_deployed = !manifest.is_empty();
-    let total_deployed = manifest.len();
-
-    let deploy_method = if is_deployed {
-        match resolve_game(&game_id, &bottle_name) {
-            Ok((_, _, data_dir)) => {
-                let staging_root = staging::staging_base_dir(&game_id, &bottle_name);
-                if deployer::same_filesystem(&staging_root, &data_dir) {
-                    "hardlink"
-                } else {
-                    "copy"
+        let deploy_method = if is_deployed {
+            match resolve_game(&game_id, &bottle_name) {
+                Ok((_, _, data_dir)) => {
+                    let staging_root = staging::staging_base_dir(&game_id, &bottle_name);
+                    if deployer::same_filesystem(&staging_root, &data_dir) {
+                        "hardlink"
+                    } else {
+                        "copy"
+                    }
                 }
+                Err(_) => "unknown",
             }
-            Err(_) => "unknown",
-        }
-    } else {
-        "none"
-    };
+        } else {
+            "none"
+        };
 
-    Ok(serde_json::json!({
-        "total_deployed": total_deployed,
-        "total_enabled": total_enabled,
-        "total_mods": total_mods,
-        "deploy_method": deploy_method,
-        "is_deployed": is_deployed,
-    }))
+        Ok(serde_json::json!({
+            "total_deployed": total_deployed,
+            "total_enabled": total_enabled,
+            "total_mods": total_mods,
+            "deploy_method": deploy_method,
+            "is_deployed": is_deployed,
+        }))
+    })
+    .await
+    .map_err(|e| format!("Stats task failed: {e}"))?
 }
 
 // --- Background Hashing ---
@@ -2346,12 +2582,13 @@ fn cancel_background_hashing() {
 // --- Collection Management ---
 
 #[tauri::command]
-fn list_installed_collections_cmd(
+async fn list_installed_collections_cmd(
     game_id: String,
     bottle_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<CollectionSummary>, String> {
-    let db = &state.db;
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
     let collections = db
         .list_installed_collections(&game_id, &bottle_name)
         .map_err(|e| e.to_string())?;
@@ -2384,32 +2621,35 @@ fn list_installed_collections_cmd(
             }
         })
         .collect())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn set_mod_collection_name_cmd(
+async fn set_mod_collection_name_cmd(
     mod_id: i64,
     collection_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<(), String> {
-    state
-        .db
-        .set_collection_name(mod_id, &collection_name)
-        .map_err(|e| e.to_string())
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        db.set_collection_name(mod_id, &collection_name)
+            .map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn switch_collection_cmd(
+async fn switch_collection_cmd(
     game_id: String,
     bottle_name: String,
     collection_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
     let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
-    let db = &state.db;
 
     // 1. Purge current deployment
-    deployer::purge_deployment(db, &game_id, &bottle_name, &data_dir, &game.game_path)
+    deployer::purge_deployment(&db, &game_id, &bottle_name, &data_dir, &game.game_path)
         .map_err(|e| e.to_string())?;
 
     // 2. Disable all mods for this game/bottle
@@ -2434,7 +2674,7 @@ fn switch_collection_cmd(
     }
 
     // 4. Redeploy
-    let result = deployer::redeploy_all(db, &game_id, &bottle_name, &data_dir, &game.game_path)
+    let result = deployer::redeploy_all(&db, &game_id, &bottle_name, &data_dir, &game.game_path)
         .map_err(|e| e.to_string())?;
 
     // 5. Sync plugins if Skyrim SE
@@ -2446,19 +2686,21 @@ fn switch_collection_cmd(
         "deployed_count": result.deployed_count,
         "active_collection": collection_name,
     }))
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn collection_download_size_cmd(
+async fn collection_download_size_cmd(
     game_id: String,
     bottle_name: String,
     collection_name: String,
     state: State<'_, AppState>,
 ) -> Result<i64, String> {
-    state
-        .db
-        .collection_unique_download_size(&game_id, &bottle_name, &collection_name)
-        .map_err(|e| e.to_string())
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        db.collection_unique_download_size(&game_id, &bottle_name, &collection_name)
+            .map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -3158,90 +3400,108 @@ async fn get_collection_diff_cmd(
 // --- Notes & Tags ---
 
 #[tauri::command]
-fn set_mod_notes(mod_id: i64, notes: Option<String>, state: State<AppState>) -> Result<(), String> {
-    let db = &state.db;
-    db.set_user_notes(mod_id, notes.as_deref())
-        .map_err(|e| e.to_string())
+async fn set_mod_notes(mod_id: i64, notes: Option<String>, state: State<'_, AppState>) -> Result<(), String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        db.set_user_notes(mod_id, notes.as_deref())
+            .map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn set_mod_source(
+async fn set_mod_source(
     mod_id: i64,
     source_type: String,
     source_url: Option<String>,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let db = &state.db;
-    db.set_mod_source(mod_id, &source_type, source_url.as_deref())
-        .map_err(|e| e.to_string())
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        db.set_mod_source(mod_id, &source_type, source_url.as_deref())
+            .map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn set_mod_tags(mod_id: i64, tags: Vec<String>, state: State<AppState>) -> Result<(), String> {
-    let db = &state.db;
-    db.set_user_tags(mod_id, &tags).map_err(|e| e.to_string())
+async fn set_mod_tags(mod_id: i64, tags: Vec<String>, state: State<'_, AppState>) -> Result<(), String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        db.set_user_tags(mod_id, &tags).map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn get_all_tags(
+async fn get_all_tags(
     game_id: String,
     bottle_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<String>, String> {
-    let db = &state.db;
-    db.get_all_user_tags(&game_id, &bottle_name)
-        .map_err(|e| e.to_string())
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        db.get_all_user_tags(&game_id, &bottle_name)
+            .map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 // --- Auto-category ---
 
 #[tauri::command]
-fn backfill_categories(
+async fn backfill_categories(
     game_id: String,
     bottle_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<usize, String> {
-    let db = &state.db;
-    // Also backfill source_type for legacy mods with nexus_mod_id but source_type="manual"
-    let _ = db.backfill_source_types(&game_id, &bottle_name);
-    db.backfill_categories(&game_id, &bottle_name)
-        .map_err(|e| e.to_string())
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        // Also backfill source_type for legacy mods with nexus_mod_id but source_type="manual"
+        let _ = db.backfill_source_types(&game_id, &bottle_name);
+        db.backfill_categories(&game_id, &bottle_name)
+            .map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 // --- Notification Log ---
 
 #[tauri::command]
-fn get_notification_log(
+async fn get_notification_log(
     limit: Option<usize>,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<database::NotificationEntry>, String> {
-    let db = &state.db;
-    db.get_notifications(limit.unwrap_or(50))
-        .map_err(|e| e.to_string())
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        db.get_notifications(limit.unwrap_or(50))
+            .map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn clear_notification_log(state: State<AppState>) -> Result<(), String> {
-    let db = &state.db;
-    db.clear_notifications().map_err(|e| e.to_string())
+async fn clear_notification_log(state: State<'_, AppState>) -> Result<(), String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        db.clear_notifications().map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn log_notification(
+async fn log_notification(
     level: String,
     message: String,
     detail: Option<String>,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let db = &state.db;
-    db.log_notification(&level, &message, detail.as_deref())
-        .map_err(|e| e.to_string())
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        db.log_notification(&level, &message, detail.as_deref())
+            .map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn get_notification_count(state: State<AppState>) -> Result<usize, String> {
-    let db = &state.db;
-    db.notification_count().map_err(|e| e.to_string())
+async fn get_notification_count(state: State<'_, AppState>) -> Result<usize, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        db.notification_count().map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 // --- Download Queue ---
@@ -3257,8 +3517,11 @@ fn get_download_queue_counts(state: State<AppState>) -> download_queue::QueueCou
 }
 
 #[tauri::command]
-fn retry_download(id: u64, state: State<AppState>) -> Result<bool, String> {
-    Ok(state.download_queue.mark_for_retry(id))
+async fn retry_download(id: u64, state: State<'_, AppState>) -> Result<bool, String> {
+    let queue = state.download_queue.clone();
+    tokio::task::spawn_blocking(move || {
+        Ok(queue.mark_for_retry(id))
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -3352,204 +3615,172 @@ async fn force_refresh_loot_masterlist(
 }
 
 #[tauri::command]
-fn reorder_plugins_cmd(
+async fn reorder_plugins_cmd(
     game_id: String,
     bottle_name: String,
     ordered_plugins: Vec<String>,
 ) -> Result<Vec<PluginEntry>, String> {
-    let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
+    tokio::task::spawn_blocking(move || {
+        let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
 
-    let plugins_file = games::with_plugin(&game_id, |plugin| {
-        plugin.get_plugins_file(Path::new(&game.game_path), &bottle)
-    })
-    .flatten()
-    .ok_or_else(|| "Could not determine plugins file location".to_string())?;
+        let plugins_file = games::with_plugin(&game_id, |plugin| {
+            plugin.get_plugins_file(Path::new(&game.game_path), &bottle)
+        })
+        .flatten()
+        .ok_or_else(|| "Could not determine plugins file location".to_string())?;
 
-    let loadorder_file = plugins_file
-        .parent()
-        .map(|p| p.join("loadorder.txt"))
-        .unwrap_or_else(|| plugins_file.with_file_name("loadorder.txt"));
+        let loadorder_file = plugins_file
+            .parent()
+            .map(|p| p.join("loadorder.txt"))
+            .unwrap_or_else(|| plugins_file.with_file_name("loadorder.txt"));
 
-    plugins::skyrim_plugins::reorder_plugins(&plugins_file, &loadorder_file, &ordered_plugins)
-        .map_err(|e| e.to_string())
+        plugins::skyrim_plugins::reorder_plugins(&plugins_file, &loadorder_file, &ordered_plugins)
+            .map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn toggle_plugin_cmd(
+async fn toggle_plugin_cmd(
     game_id: String,
     bottle_name: String,
     plugin_name: String,
     enabled: bool,
 ) -> Result<Vec<PluginEntry>, String> {
-    let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
+    tokio::task::spawn_blocking(move || {
+        let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
 
-    let plugins_file = games::with_plugin(&game_id, |plugin| {
-        plugin.get_plugins_file(Path::new(&game.game_path), &bottle)
-    })
-    .flatten()
-    .ok_or_else(|| "Could not determine plugins file location".to_string())?;
+        let plugins_file = games::with_plugin(&game_id, |plugin| {
+            plugin.get_plugins_file(Path::new(&game.game_path), &bottle)
+        })
+        .flatten()
+        .ok_or_else(|| "Could not determine plugins file location".to_string())?;
 
-    let loadorder_file = plugins_file
-        .parent()
-        .map(|p| p.join("loadorder.txt"))
-        .unwrap_or_else(|| plugins_file.with_file_name("loadorder.txt"));
+        let loadorder_file = plugins_file
+            .parent()
+            .map(|p| p.join("loadorder.txt"))
+            .unwrap_or_else(|| plugins_file.with_file_name("loadorder.txt"));
 
-    plugins::skyrim_plugins::toggle_plugin(&plugins_file, &loadorder_file, &plugin_name, enabled)
-        .map_err(|e| e.to_string())
+        plugins::skyrim_plugins::toggle_plugin(&plugins_file, &loadorder_file, &plugin_name, enabled)
+            .map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn move_plugin_cmd(
+async fn move_plugin_cmd(
     game_id: String,
     bottle_name: String,
     plugin_name: String,
     new_index: usize,
 ) -> Result<Vec<PluginEntry>, String> {
-    let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
+    tokio::task::spawn_blocking(move || {
+        let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
 
-    let plugins_file = games::with_plugin(&game_id, |plugin| {
-        plugin.get_plugins_file(Path::new(&game.game_path), &bottle)
-    })
-    .flatten()
-    .ok_or_else(|| "Could not determine plugins file location".to_string())?;
+        let plugins_file = games::with_plugin(&game_id, |plugin| {
+            plugin.get_plugins_file(Path::new(&game.game_path), &bottle)
+        })
+        .flatten()
+        .ok_or_else(|| "Could not determine plugins file location".to_string())?;
 
-    let loadorder_file = plugins_file
-        .parent()
-        .map(|p| p.join("loadorder.txt"))
-        .unwrap_or_else(|| plugins_file.with_file_name("loadorder.txt"));
+        let loadorder_file = plugins_file
+            .parent()
+            .map(|p| p.join("loadorder.txt"))
+            .unwrap_or_else(|| plugins_file.with_file_name("loadorder.txt"));
 
-    plugins::skyrim_plugins::move_plugin(&plugins_file, &loadorder_file, &plugin_name, new_index)
-        .map_err(|e| e.to_string())
+        plugins::skyrim_plugins::move_plugin(&plugins_file, &loadorder_file, &plugin_name, new_index)
+            .map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn get_plugin_messages(
+async fn get_plugin_messages(
     game_id: String,
     bottle_name: String,
     plugin_name: String,
 ) -> Result<Vec<PluginWarning>, String> {
-    let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
+    tokio::task::spawn_blocking(move || {
+        let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
 
-    let game_path = PathBuf::from(&game.game_path);
-    let local_path = loot::local_game_path(&bottle, &game_id)
-        .ok_or_else(|| format!("Cannot determine local path for game '{}'", game_id))?;
+        let game_path = PathBuf::from(&game.game_path);
+        let local_path = loot::local_game_path(&bottle, &game_id)
+            .ok_or_else(|| format!("Cannot determine local path for game '{}'", game_id))?;
 
-    loot::get_plugin_messages(&game_id, &game_path, &data_dir, &local_path, &plugin_name)
-        .map_err(|e| e.to_string())
+        loot::get_plugin_messages(&game_id, &game_path, &data_dir, &local_path, &plugin_name)
+            .map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 // --- Profiles ---
 
 #[tauri::command]
-fn list_profiles_cmd(
+async fn list_profiles_cmd(
     game_id: String,
     bottle_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<Profile>, String> {
-    let db = &state.db;
-    profiles::list_profiles(db, &game_id, &bottle_name).map_err(|e| e.to_string())
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        profiles::list_profiles(&db, &game_id, &bottle_name).map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn create_profile_cmd(
+async fn create_profile_cmd(
     game_id: String,
     bottle_name: String,
     name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<i64, String> {
-    let db = &state.db;
-    profiles::create_profile(db, &game_id, &bottle_name, &name).map_err(|e| e.to_string())
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        profiles::create_profile(&db, &game_id, &bottle_name, &name).map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn delete_profile_cmd(profile_id: i64, state: State<AppState>) -> Result<(), String> {
-    let db = &state.db;
-    profiles::delete_profile(db, profile_id).map_err(|e| e.to_string())
+async fn delete_profile_cmd(profile_id: i64, state: State<'_, AppState>) -> Result<(), String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        profiles::delete_profile(&db, profile_id).map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn deactivate_profile_cmd(
+async fn deactivate_profile_cmd(
     game_id: String,
     bottle_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let db = &state.db;
-    profiles::deactivate_profile(db, &game_id, &bottle_name).map_err(|e| e.to_string())
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        profiles::deactivate_profile(&db, &game_id, &bottle_name).map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn rename_profile_cmd(
+async fn rename_profile_cmd(
     profile_id: i64,
     new_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let db = &state.db;
-    profiles::rename_profile(db, profile_id, &new_name).map_err(|e| e.to_string())
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        profiles::rename_profile(&db, profile_id, &new_name).map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn save_profile_snapshot(
+async fn save_profile_snapshot(
     profile_id: i64,
     game_id: String,
     bottle_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let db = &state.db;
-
-    // Determine plugins file path (for Bethesda games with plugin load order)
-    let plugins_file = if plugins::skyrim_plugins::supports_plugin_order(&game_id) {
-        let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
-
-        games::with_plugin(&game_id, |plugin| {
-            plugin.get_plugins_file(Path::new(&game.game_path), &bottle)
-        })
-        .flatten()
-    } else {
-        None
-    };
-
-    profiles::snapshot_current_state(
-        db,
-        profile_id,
-        &game_id,
-        &bottle_name,
-        plugins_file.as_deref(),
-    )
-    .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn activate_profile(
-    profile_id: i64,
-    game_id: String,
-    bottle_name: String,
-    state: State<AppState>,
-) -> Result<(), String> {
-    let db = &state.db;
-
-    // Look up the game
-    let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
-
-    // Check if per-profile saves is enabled
-    let saves_enabled = config::get_config_value("profile_saves_enabled")
-        .ok()
-        .flatten()
-        .map(|v| v == "true")
-        .unwrap_or(false);
-
-    // Resolve saves directory for the game
-    let saves_dir = if saves_enabled {
-        games::with_plugin(&game_id, |plugin| {
-            plugin.get_saves_dir(Path::new(&game.game_path), &bottle)
-        })
-        .flatten()
-    } else {
-        None
-    };
-
-    // 1. Save current state to the currently active profile (if any)
-    if let Ok(Some(current_active)) = profiles::get_active_profile(db, &game_id, &bottle_name) {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        // Determine plugins file path (for Bethesda games with plugin load order)
         let plugins_file = if plugins::skyrim_plugins::supports_plugin_order(&game_id) {
+            let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
+
             games::with_plugin(&game_id, |plugin| {
                 plugin.get_plugins_file(Path::new(&game.game_path), &bottle)
             })
@@ -3558,118 +3789,176 @@ fn activate_profile(
             None
         };
 
-        let _ = profiles::snapshot_current_state(
-            db,
-            current_active.id,
+        profiles::snapshot_current_state(
+            &db,
+            profile_id,
             &game_id,
             &bottle_name,
             plugins_file.as_deref(),
-        );
+        )
+        .map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
+}
 
-        // Backup current saves for the outgoing profile
-        if let Some(ref sd) = saves_dir {
-            let _ = profiles::backup_saves(current_active.id, &game_id, &bottle_name, sd);
-        }
-    }
+#[tauri::command]
+async fn activate_profile(
+    profile_id: i64,
+    game_id: String,
+    bottle_name: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        // Look up the game
+        let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
 
-    // 2. Purge current deployment
-    let _ = deployer::purge_deployment(db, &game_id, &bottle_name, &data_dir, &game.game_path);
+        // Check if per-profile saves is enabled
+        let saves_enabled = config::get_config_value("profile_saves_enabled")
+            .ok()
+            .flatten()
+            .map(|v| v == "true")
+            .unwrap_or(false);
 
-    // 3. Load target profile state
-    let mod_states = profiles::get_mod_states(db, profile_id).map_err(|e| e.to_string())?;
+        // Resolve saves directory for the game
+        let saves_dir = if saves_enabled {
+            games::with_plugin(&game_id, |plugin| {
+                plugin.get_saves_dir(Path::new(&game.game_path), &bottle)
+            })
+            .flatten()
+        } else {
+            None
+        };
 
-    // 4. Apply mod enabled states and priorities
-    for ms in &mod_states {
-        let _ = db.set_enabled(ms.mod_id, ms.enabled);
-        let _ = db.set_mod_priority(ms.mod_id, ms.priority);
-    }
-
-    // 5. Redeploy enabled mods
-    let _ = deployer::redeploy_all(db, &game_id, &bottle_name, &data_dir, &game.game_path);
-
-    // 6. Restore saves for the incoming profile
-    if let Some(ref sd) = saves_dir {
-        let _ = profiles::restore_saves(profile_id, &game_id, &bottle_name, sd);
-    }
-
-    // 7. Apply plugin states
-    let plugin_states = profiles::get_plugin_states(db, profile_id).map_err(|e| e.to_string())?;
-
-    if !plugin_states.is_empty() && plugins::skyrim_plugins::supports_plugin_order(&game_id) {
-        let plugins_file = games::with_plugin(&game_id, |plugin| {
-            plugin.get_plugins_file(Path::new(&game.game_path), &bottle)
-        })
-        .flatten();
-
-        if let Some(pf) = plugins_file {
-            let loadorder_file = pf
-                .parent()
-                .map(|p| p.join("loadorder.txt"))
-                .unwrap_or_else(|| pf.with_file_name("loadorder.txt"));
-
-            let entries: Vec<PluginEntry> = plugin_states
-                .iter()
-                .map(|ps| PluginEntry {
-                    filename: ps.plugin_filename.clone(),
-                    enabled: ps.enabled,
+        // 1. Save current state to the currently active profile (if any)
+        if let Ok(Some(current_active)) = profiles::get_active_profile(&db, &game_id, &bottle_name) {
+            let plugins_file = if plugins::skyrim_plugins::supports_plugin_order(&game_id) {
+                games::with_plugin(&game_id, |plugin| {
+                    plugin.get_plugins_file(Path::new(&game.game_path), &bottle)
                 })
-                .collect();
+                .flatten()
+            } else {
+                None
+            };
 
-            let _ = plugins::skyrim_plugins::apply_load_order(&pf, &loadorder_file, &entries);
+            let _ = profiles::snapshot_current_state(
+                &db,
+                current_active.id,
+                &game_id,
+                &bottle_name,
+                plugins_file.as_deref(),
+            );
+
+            // Backup current saves for the outgoing profile
+            if let Some(ref sd) = saves_dir {
+                let _ = profiles::backup_saves(current_active.id, &game_id, &bottle_name, sd);
+            }
         }
-    }
 
-    // 8. Sync plugins to ensure plugins.txt matches on-disk state
-    let _ = sync_plugins_for_game(&game, &bottle);
+        // 2. Purge current deployment
+        let _ = deployer::purge_deployment(&db, &game_id, &bottle_name, &data_dir, &game.game_path);
 
-    // 9. Mark profile as active
-    profiles::set_active_profile(db, &game_id, &bottle_name, profile_id)
-        .map_err(|e| e.to_string())?;
+        // 3. Load target profile state
+        let mod_states = profiles::get_mod_states(&db, profile_id).map_err(|e| e.to_string())?;
 
-    Ok(())
+        // 4. Apply mod enabled states and priorities
+        for ms in &mod_states {
+            let _ = db.set_enabled(ms.mod_id, ms.enabled);
+            let _ = db.set_mod_priority(ms.mod_id, ms.priority);
+        }
+
+        // 5. Redeploy enabled mods
+        let _ = deployer::redeploy_all(&db, &game_id, &bottle_name, &data_dir, &game.game_path);
+
+        // 6. Restore saves for the incoming profile
+        if let Some(ref sd) = saves_dir {
+            let _ = profiles::restore_saves(profile_id, &game_id, &bottle_name, sd);
+        }
+
+        // 7. Apply plugin states
+        let plugin_states = profiles::get_plugin_states(&db, profile_id).map_err(|e| e.to_string())?;
+
+        if !plugin_states.is_empty() && plugins::skyrim_plugins::supports_plugin_order(&game_id) {
+            let plugins_file = games::with_plugin(&game_id, |plugin| {
+                plugin.get_plugins_file(Path::new(&game.game_path), &bottle)
+            })
+            .flatten();
+
+            if let Some(pf) = plugins_file {
+                let loadorder_file = pf
+                    .parent()
+                    .map(|p| p.join("loadorder.txt"))
+                    .unwrap_or_else(|| pf.with_file_name("loadorder.txt"));
+
+                let entries: Vec<PluginEntry> = plugin_states
+                    .iter()
+                    .map(|ps| PluginEntry {
+                        filename: ps.plugin_filename.clone(),
+                        enabled: ps.enabled,
+                    })
+                    .collect();
+
+                let _ = plugins::skyrim_plugins::apply_load_order(&pf, &loadorder_file, &entries);
+            }
+        }
+
+        // 8. Sync plugins to ensure plugins.txt matches on-disk state
+        let _ = sync_plugins_for_game(&game, &bottle);
+
+        // 9. Mark profile as active
+        profiles::set_active_profile(&db, &game_id, &bottle_name, profile_id)
+            .map_err(|e| e.to_string())?;
+
+        Ok(())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn get_profile_save_info(
+async fn get_profile_save_info(
     profile_id: i64,
     game_id: String,
     bottle_name: String,
-) -> profiles::ProfileSaveInfo {
-    profiles::get_profile_save_info(profile_id, &game_id, &bottle_name)
+) -> Result<profiles::ProfileSaveInfo, String> {
+    tokio::task::spawn_blocking(move || {
+        Ok(profiles::get_profile_save_info(profile_id, &game_id, &bottle_name))
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn backup_profile_saves(
+async fn backup_profile_saves(
     profile_id: i64,
     game_id: String,
     bottle_name: String,
 ) -> Result<usize, String> {
-    let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
-    let saves_dir = games::with_plugin(&game_id, |plugin| {
-        plugin.get_saves_dir(Path::new(&game.game_path), &bottle)
-    })
-    .flatten()
-    .ok_or("Game does not have a known saves directory")?;
+    tokio::task::spawn_blocking(move || {
+        let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
+        let saves_dir = games::with_plugin(&game_id, |plugin| {
+            plugin.get_saves_dir(Path::new(&game.game_path), &bottle)
+        })
+        .flatten()
+        .ok_or("Game does not have a known saves directory")?;
 
-    profiles::backup_saves(profile_id, &game_id, &bottle_name, &saves_dir)
-        .map_err(|e| e.to_string())
+        profiles::backup_saves(profile_id, &game_id, &bottle_name, &saves_dir)
+            .map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn restore_profile_saves(
+async fn restore_profile_saves(
     profile_id: i64,
     game_id: String,
     bottle_name: String,
 ) -> Result<usize, String> {
-    let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
-    let saves_dir = games::with_plugin(&game_id, |plugin| {
-        plugin.get_saves_dir(Path::new(&game.game_path), &bottle)
-    })
-    .flatten()
-    .ok_or("Game does not have a known saves directory")?;
+    tokio::task::spawn_blocking(move || {
+        let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
+        let saves_dir = games::with_plugin(&game_id, |plugin| {
+            plugin.get_saves_dir(Path::new(&game.game_path), &bottle)
+        })
+        .flatten()
+        .ok_or("Game does not have a known saves directory")?;
 
-    profiles::restore_saves(profile_id, &game_id, &bottle_name, &saves_dir)
-        .map_err(|e| e.to_string())
+        profiles::restore_saves(profile_id, &game_id, &bottle_name, &saves_dir)
+            .map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 // --- Update Checking ---
@@ -3748,41 +4037,46 @@ async fn install_mod_tool(
 }
 
 #[tauri::command]
-fn uninstall_mod_tool(
+async fn uninstall_mod_tool(
     tool_id: String,
     game_id: String,
     bottle_name: String,
     detected_path: Option<String>,
 ) -> Result<(), String> {
-    let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
-    mod_tools::uninstall_tool(&tool_id, &data_dir, detected_path.as_deref())
-        .map_err(|e| e.to_string())
+    tokio::task::spawn_blocking(move || {
+        let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
+        mod_tools::uninstall_tool(&tool_id, &data_dir, detected_path.as_deref())
+            .map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn launch_mod_tool(
+async fn launch_mod_tool(
     tool_id: String,
     game_id: String,
     bottle_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<LaunchResult, String> {
-    let (bottle, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
-    let tools = mod_tools::detect_tools_for_game(&data_dir, &game_id);
-    let tool = tools
-        .iter()
-        .find(|t| t.id == tool_id)
-        .ok_or_else(|| format!("Tool '{}' not found", tool_id))?;
-    let exe_path = tool
-        .detected_path
-        .as_ref()
-        .ok_or_else(|| format!("Tool '{}' is not installed", tool_id))?;
-    mod_tools::launch_tool_with_logging(
-        Path::new(exe_path),
-        &bottle,
-        &tool_id,
-        &tool.name,
-        &state.db,
-    )
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let (bottle, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
+        let tools = mod_tools::detect_tools_for_game(&data_dir, &game_id);
+        let tool = tools
+            .iter()
+            .find(|t| t.id == tool_id)
+            .ok_or_else(|| format!("Tool '{}' not found", tool_id))?;
+        let exe_path = tool
+            .detected_path
+            .as_ref()
+            .ok_or_else(|| format!("Tool '{}' is not installed", tool_id))?;
+        mod_tools::launch_tool_with_logging(
+            Path::new(exe_path),
+            &bottle,
+            &tool_id,
+            &tool.name,
+            &db,
+        )
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -3811,43 +4105,49 @@ async fn check_mod_tool_update(
 }
 
 #[tauri::command]
-fn apply_tool_ini_edits_cmd(
+async fn apply_tool_ini_edits_cmd(
     tool_id: String,
     game_id: String,
     bottle_name: String,
 ) -> Result<usize, String> {
-    let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
-    mod_tools::apply_tool_ini_edits(&tool_id, &data_dir).map_err(|e| e.to_string())
+    tokio::task::spawn_blocking(move || {
+        let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
+        mod_tools::apply_tool_ini_edits(&tool_id, &data_dir).map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 // --- Tool Requirement Detection ---
 
 #[tauri::command]
-fn detect_collection_tools(
+async fn detect_collection_tools(
     manifest_json: String,
     game_id: String,
     bottle_name: String,
 ) -> Result<Vec<mod_tools::RequiredTool>, String> {
-    let manifest: collections::CollectionManifest = serde_json::from_str(&manifest_json)
-        .map_err(|e| format!("Invalid manifest JSON: {}", e))?;
-    let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
-    Ok(mod_tools::detect_required_tools_collection(
-        &manifest, &data_dir,
-    ))
+    tokio::task::spawn_blocking(move || {
+        let manifest: collections::CollectionManifest = serde_json::from_str(&manifest_json)
+            .map_err(|e| format!("Invalid manifest JSON: {}", e))?;
+        let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
+        Ok(mod_tools::detect_required_tools_collection(
+            &manifest, &data_dir,
+        ))
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn detect_wabbajack_tools(
+async fn detect_wabbajack_tools(
     wj_path: String,
     game_id: String,
     bottle_name: String,
 ) -> Result<Vec<mod_tools::RequiredTool>, String> {
-    let parsed = wabbajack::parse_wabbajack_file(std::path::Path::new(&wj_path))
-        .map_err(|e| format!("Failed to parse .wabbajack: {}", e))?;
-    let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
-    Ok(mod_tools::detect_required_tools_wabbajack(
-        &parsed, &data_dir,
-    ))
+    tokio::task::spawn_blocking(move || {
+        let parsed = wabbajack::parse_wabbajack_file(std::path::Path::new(&wj_path))
+            .map_err(|e| format!("Failed to parse .wabbajack: {}", e))?;
+        let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
+        Ok(mod_tools::detect_required_tools_wabbajack(
+            &parsed, &data_dir,
+        ))
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 // --- Platform Detection ---
@@ -4001,43 +4301,50 @@ fn get_optimal_download_threads() -> usize {
 // --- FOMOD ---
 
 #[tauri::command]
-fn detect_fomod(
+async fn detect_fomod(
     staging_path: String,
     archive_hash: Option<String>,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Option<FomodInstaller>, String> {
-    let path = PathBuf::from(&staging_path);
-    // Use archive SHA-256 hash as cache key if provided, otherwise fall back
-    // to the staging path itself (still deterministic per-archive).
-    let cache_key = archive_hash.unwrap_or_else(|| staging_path.clone());
-    let mut installer = fomod::parse_fomod_cached(&state.fomod_cache, &cache_key, &path)
-        .map_err(|e| e.to_string())?;
-    // Resolve relative image paths to absolute so the frontend can serve them
-    // via the Tauri asset: protocol.
-    if let Some(ref mut inst) = installer {
-        fomod::resolve_image_paths(inst, &path);
-    }
-    Ok(installer)
+    let fomod_cache = state.fomod_cache.clone();
+    tokio::task::spawn_blocking(move || {
+        let path = PathBuf::from(&staging_path);
+        // Use archive SHA-256 hash as cache key if provided, otherwise fall back
+        // to the staging path itself (still deterministic per-archive).
+        let cache_key = archive_hash.unwrap_or_else(|| staging_path.clone());
+        let mut installer = fomod::parse_fomod_cached(&fomod_cache, &cache_key, &path)
+            .map_err(|e| e.to_string())?;
+        // Resolve relative image paths to absolute so the frontend can serve them
+        // via the Tauri asset: protocol.
+        if let Some(ref mut inst) = installer {
+            fomod::resolve_image_paths(inst, &path);
+        }
+        Ok(installer)
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn get_fomod_defaults(
+async fn get_fomod_defaults(
     installer: FomodInstaller,
 ) -> Result<std::collections::HashMap<String, Vec<String>>, String> {
-    Ok(fomod::get_default_selections(&installer, None, None))
+    tokio::task::spawn_blocking(move || {
+        Ok(fomod::get_default_selections(&installer, None, None))
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn get_fomod_files(
+async fn get_fomod_files(
     installer: FomodInstaller,
     selections: std::collections::HashMap<String, Vec<String>>,
 ) -> Result<Vec<fomod::FomodFile>, String> {
-    Ok(fomod::get_files_for_selections(
-        &installer,
-        &selections,
-        None,
-        None,
-    ))
+    tokio::task::spawn_blocking(move || {
+        Ok(fomod::get_files_for_selections(
+            &installer,
+            &selections,
+            None,
+            None,
+        ))
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 // --- DLC Detection ---
@@ -4082,175 +4389,184 @@ struct DlcInfo {
 }
 
 #[tauri::command]
-fn check_dlc_status(game_id: String, bottle_name: String) -> Result<DlcStatus, String> {
-    let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
+async fn check_dlc_status(game_id: String, bottle_name: String) -> Result<DlcStatus, String> {
+    tokio::task::spawn_blocking(move || {
+        let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
 
-    let dlc_files: &[(&str, &str)] = match game_id.as_str() {
-        "skyrimse" => SKYRIM_SE_DLC_FILES,
-        "fallout4" => FALLOUT4_DLC_FILES,
-        _ => {
-            return Ok(DlcStatus {
-                all_present: true,
-                dlcs: vec![],
-                game_initialized: true,
-            })
+        let dlc_files: &[(&str, &str)] = match game_id.as_str() {
+            "skyrimse" => SKYRIM_SE_DLC_FILES,
+            "fallout4" => FALLOUT4_DLC_FILES,
+            _ => {
+                return Ok(DlcStatus {
+                    all_present: true,
+                    dlcs: vec![],
+                    game_initialized: true,
+                })
+            }
+        };
+
+        // Check if base game is initialized
+        let base_esm = match game_id.as_str() {
+            "skyrimse" => "Skyrim.esm",
+            "fallout4" => "Fallout4.esm",
+            _ => "",
+        };
+        let game_initialized = if base_esm.is_empty() {
+            true
+        } else {
+            data_dir.join(base_esm).exists()
+        };
+
+        // Group by DLC name and check each file
+        let mut dlc_map: std::collections::BTreeMap<String, Vec<(String, bool)>> =
+            std::collections::BTreeMap::new();
+        for (filename, dlc_name) in dlc_files {
+            let present = data_dir.join(filename).exists();
+            dlc_map
+                .entry(dlc_name.to_string())
+                .or_default()
+                .push((filename.to_string(), present));
         }
-    };
 
-    // Check if base game is initialized
-    let base_esm = match game_id.as_str() {
-        "skyrimse" => "Skyrim.esm",
-        "fallout4" => "Fallout4.esm",
-        _ => "",
-    };
-    let game_initialized = if base_esm.is_empty() {
-        true
-    } else {
-        data_dir.join(base_esm).exists()
-    };
-
-    // Group by DLC name and check each file
-    let mut dlc_map: std::collections::BTreeMap<String, Vec<(String, bool)>> =
-        std::collections::BTreeMap::new();
-    for (filename, dlc_name) in dlc_files {
-        let present = data_dir.join(filename).exists();
-        dlc_map
-            .entry(dlc_name.to_string())
-            .or_default()
-            .push((filename.to_string(), present));
-    }
-
-    let mut dlcs = Vec::new();
-    let mut all_present = true;
-    for (name, files) in &dlc_map {
-        let missing: Vec<String> = files
-            .iter()
-            .filter(|(_, p)| !p)
-            .map(|(f, _)| f.clone())
-            .collect();
-        let present = missing.is_empty();
-        if !present {
-            all_present = false;
+        let mut dlcs = Vec::new();
+        let mut all_present = true;
+        for (name, files) in &dlc_map {
+            let missing: Vec<String> = files
+                .iter()
+                .filter(|(_, p)| !p)
+                .map(|(f, _)| f.clone())
+                .collect();
+            let present = missing.is_empty();
+            if !present {
+                all_present = false;
+            }
+            dlcs.push(DlcInfo {
+                name: name.clone(),
+                present,
+                missing_files: missing,
+            });
         }
-        dlcs.push(DlcInfo {
-            name: name.clone(),
-            present,
-            missing_files: missing,
-        });
-    }
 
-    Ok(DlcStatus {
-        all_present,
-        dlcs,
-        game_initialized,
-    })
+        Ok(DlcStatus {
+            all_present,
+            dlcs,
+            game_initialized,
+        })
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 // --- Integrity ---
 
 #[tauri::command]
-fn create_game_snapshot(
+async fn create_game_snapshot(
     game_id: String,
     bottle_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<usize, String> {
-    let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
-    let db = &state.db;
-
-    integrity::create_game_snapshot(db, &game_id, &bottle_name, &data_dir)
-        .map_err(|e| e.to_string())
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
+        integrity::create_game_snapshot(&db, &game_id, &bottle_name, &data_dir)
+            .map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn check_game_integrity(
+async fn check_game_integrity(
     game_id: String,
     bottle_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<IntegrityReport, String> {
-    let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
-    let db = &state.db;
-
-    integrity::check_game_integrity(db, &game_id, &bottle_name, &data_dir)
-        .map_err(|e| e.to_string())
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
+        integrity::check_game_integrity(&db, &game_id, &bottle_name, &data_dir)
+            .map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn has_game_snapshot(
+async fn has_game_snapshot(
     game_id: String,
     bottle_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<bool, String> {
-    let db = &state.db;
-    integrity::has_snapshot(db, &game_id, &bottle_name).map_err(|e| e.to_string())
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        integrity::has_snapshot(&db, &game_id, &bottle_name).map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 // --- Game Directory Cleaner ---
 
 #[tauri::command]
-fn scan_game_directory(
+async fn scan_game_directory(
     game_id: String,
     bottle_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<cleaner::CleanReport, String> {
-    let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
-    let db = &state.db;
-
-    cleaner::scan_game_directory(db, &game_id, &bottle_name, &data_dir).map_err(|e| e.to_string())
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
+        cleaner::scan_game_directory(&db, &game_id, &bottle_name, &data_dir).map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn clean_game_directory(
+async fn clean_game_directory(
     game_id: String,
     bottle_name: String,
     options: cleaner::CleanOptions,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<cleaner::CleanResult, String> {
-    let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
-    let db = &state.db;
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
 
-    if !options.dry_run {
-        auto_snapshot_before_destructive(db, &game_id, &bottle_name, "Before clean game directory");
-    }
+        if !options.dry_run {
+            auto_snapshot_before_destructive(&db, &game_id, &bottle_name, "Before clean game directory");
+        }
 
-    let result = cleaner::clean_game_directory(db, &game_id, &bottle_name, &data_dir, &options)
-        .map_err(|e| e.to_string())?;
+        let result = cleaner::clean_game_directory(&db, &game_id, &bottle_name, &data_dir, &options)
+            .map_err(|e| e.to_string())?;
 
-    // After a full clean (not orphans-only), reset plugins.txt to vanilla state
-    // so the load order doesn't show stale entries for removed plugins
-    if !options.dry_run && !options.orphans_only && !result.removed_files.is_empty() {
-        if let Some(plugins_file) = games::with_plugin(&game_id, |plugin| {
-            plugin.get_plugins_file(Path::new(&game.game_path), &bottle)
-        })
-        .flatten()
-        {
-            // Build vanilla plugin list from stock ESMs still on disk
-            let vanilla_entries: Vec<plugins::skyrim_plugins::PluginEntry> =
-                plugins::skyrim_plugins::get_implicit_plugins(&game_id)
-                    .iter()
-                    .filter(|name| data_dir.join(name).exists())
-                    .map(|name| plugins::skyrim_plugins::PluginEntry {
-                        filename: name.to_string(),
-                        enabled: true,
-                    })
-                    .collect();
-            let _ = plugins::skyrim_plugins::write_plugins_txt(&plugins_file, &vanilla_entries);
-            log::info!(
-                "Reset plugins.txt to {} vanilla entries after clean",
-                vanilla_entries.len()
-            );
+        // After a full clean (not orphans-only), reset plugins.txt to vanilla state
+        // so the load order doesn't show stale entries for removed plugins
+        if !options.dry_run && !options.orphans_only && !result.removed_files.is_empty() {
+            if let Some(plugins_file) = games::with_plugin(&game_id, |plugin| {
+                plugin.get_plugins_file(Path::new(&game.game_path), &bottle)
+            })
+            .flatten()
+            {
+                // Build vanilla plugin list from stock ESMs still on disk
+                let vanilla_entries: Vec<plugins::skyrim_plugins::PluginEntry> =
+                    plugins::skyrim_plugins::get_implicit_plugins(&game_id)
+                        .iter()
+                        .filter(|name| data_dir.join(name).exists())
+                        .map(|name| plugins::skyrim_plugins::PluginEntry {
+                            filename: name.to_string(),
+                            enabled: true,
+                        })
+                        .collect();
+                let _ = plugins::skyrim_plugins::write_plugins_txt(&plugins_file, &vanilla_entries);
+                log::info!(
+                    "Reset plugins.txt to {} vanilla entries after clean",
+                    vanilla_entries.len()
+                );
 
-            // Also reset loadorder.txt if it exists alongside plugins.txt
-            if let Some(parent) = plugins_file.parent() {
-                let loadorder_file = parent.join("loadorder.txt");
-                if loadorder_file.exists() {
-                    let _ = std::fs::remove_file(&loadorder_file);
-                    log::info!("Removed stale loadorder.txt after clean");
+                // Also reset loadorder.txt if it exists alongside plugins.txt
+                if let Some(parent) = plugins_file.parent() {
+                    let loadorder_file = parent.join("loadorder.txt");
+                    if loadorder_file.exists() {
+                        let _ = std::fs::remove_file(&loadorder_file);
+                        log::info!("Removed stale loadorder.txt after clean");
+                    }
                 }
             }
         }
-    }
 
-    Ok(result)
+        Ok(result)
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 // --- Wabbajack Modlists ---
@@ -4261,8 +4577,10 @@ async fn get_wabbajack_modlists() -> Result<Vec<ModlistSummary>, String> {
 }
 
 #[tauri::command]
-fn parse_wabbajack_file(file_path: String) -> Result<ParsedModlist, String> {
-    wabbajack::parse_wabbajack_file(std::path::Path::new(&file_path))
+async fn parse_wabbajack_file(file_path: String) -> Result<ParsedModlist, String> {
+    tokio::task::spawn_blocking(move || {
+        wabbajack::parse_wabbajack_file(std::path::Path::new(&file_path))
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -4369,10 +4687,12 @@ fn sync_plugins_for_game(game: &DetectedGame, bottle: &Bottle) -> Result<(), Str
 /// Call this after a collection install (or any time Plugins.txt looks wrong)
 /// to ensure every plugin file in the Data directory is marked as enabled.
 #[tauri::command]
-fn sync_plugins_cmd(game_id: String, bottle_name: String) -> Result<serde_json::Value, String> {
-    let (bottle, game, _data_dir) = resolve_game(&game_id, &bottle_name)?;
-    sync_plugins_for_game(&game, &bottle)?;
-    Ok(serde_json::json!({ "ok": true }))
+async fn sync_plugins_cmd(game_id: String, bottle_name: String) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || {
+        let (bottle, game, _data_dir) = resolve_game(&game_id, &bottle_name)?;
+        sync_plugins_for_game(&game, &bottle)?;
+        Ok(serde_json::json!({ "ok": true }))
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 // --- Nexus SSO ---
@@ -4416,41 +4736,51 @@ async fn refresh_nexus_tokens(
 }
 
 #[tauri::command]
-fn save_oauth_tokens(tokens: TokenPair) -> Result<(), String> {
-    oauth::save_tokens(&tokens).map_err(|e| e.to_string())
+async fn save_oauth_tokens(tokens: TokenPair) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        oauth::save_tokens(&tokens).map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn load_oauth_tokens() -> Result<Option<TokenPair>, String> {
-    oauth::load_tokens().map_err(|e| e.to_string())
+async fn load_oauth_tokens() -> Result<Option<TokenPair>, String> {
+    tokio::task::spawn_blocking(move || {
+        oauth::load_tokens().map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn clear_oauth_tokens() -> Result<(), String> {
-    oauth::clear_tokens().map_err(|e| e.to_string())
+async fn clear_oauth_tokens() -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        oauth::clear_tokens().map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn get_nexus_user_info(access_token: String) -> Result<NexusUserInfo, String> {
-    oauth::parse_user_info(&access_token).map_err(|e| e.to_string())
+async fn get_nexus_user_info(access_token: String) -> Result<NexusUserInfo, String> {
+    tokio::task::spawn_blocking(move || {
+        oauth::parse_user_info(&access_token).map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn get_auth_method_cmd() -> Result<serde_json::Value, String> {
-    let method = oauth::get_auth_method();
-    match method {
-        oauth::AuthMethod::OAuth(ref tokens) => Ok(serde_json::json!({
-            "type": "oauth",
-            "expires_at": tokens.expires_at,
-        })),
-        oauth::AuthMethod::ApiKey(ref key) => Ok(serde_json::json!({
-            "type": "api_key",
-            "key_prefix": &key[..key.len().min(8)],
-        })),
-        oauth::AuthMethod::None => Ok(serde_json::json!({
-            "type": "none",
-        })),
-    }
+async fn get_auth_method_cmd() -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || {
+        let method = oauth::get_auth_method();
+        match method {
+            oauth::AuthMethod::OAuth(ref tokens) => Ok(serde_json::json!({
+                "type": "oauth",
+                "expires_at": tokens.expires_at,
+            })),
+            oauth::AuthMethod::ApiKey(ref key) => Ok(serde_json::json!({
+                "type": "api_key",
+                "key_prefix": &key[..key.len().min(8)],
+            })),
+            oauth::AuthMethod::None => Ok(serde_json::json!({
+                "type": "none",
+            })),
+        }
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -4512,20 +4842,24 @@ async fn get_nexus_account_status() -> Result<serde_json::Value, String> {
 // --- Crash Logs ---
 
 #[tauri::command]
-fn find_crash_logs_cmd(game_id: String, bottle_name: String) -> Result<Vec<CrashLogEntry>, String> {
-    let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
+async fn find_crash_logs_cmd(game_id: String, bottle_name: String) -> Result<Vec<CrashLogEntry>, String> {
+    tokio::task::spawn_blocking(move || {
+        let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
 
-    let game_path = PathBuf::from(&game.game_path);
-    Ok(crashlog::find_crash_logs(
-        &game_path,
-        &bottle.path,
-        &game_id,
-    ))
+        let game_path = PathBuf::from(&game.game_path);
+        Ok(crashlog::find_crash_logs(
+            &game_path,
+            &bottle.path,
+            &game_id,
+        ))
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn analyze_crash_log_cmd(log_path: String) -> Result<CrashReport, String> {
-    crashlog::analyze_crash_log(Path::new(&log_path)).map_err(|e| e.to_string())
+async fn analyze_crash_log_cmd(log_path: String) -> Result<CrashReport, String> {
+    tokio::task::spawn_blocking(move || {
+        crashlog::analyze_crash_log(Path::new(&log_path)).map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 // --- Collections ---
@@ -4755,8 +5089,10 @@ async fn get_collection_mods(slug: String, revision: u32) -> Result<RevisionMods
 }
 
 #[tauri::command]
-fn parse_collection_bundle_cmd(bundle_path: String) -> Result<CollectionManifest, String> {
-    collections::parse_collection_bundle(Path::new(&bundle_path)).map_err(|e| e.to_string())
+async fn parse_collection_bundle_cmd(bundle_path: String) -> Result<CollectionManifest, String> {
+    tokio::task::spawn_blocking(move || {
+        collections::parse_collection_bundle(Path::new(&bundle_path)).map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -4794,11 +5130,13 @@ async fn cancel_collection_install_cmd() -> Result<(), String> {
 }
 
 #[tauri::command]
-fn submit_fomod_choices(
+async fn submit_fomod_choices(
     correlation_id: String,
     selections: std::collections::HashMap<String, Vec<String>>,
 ) -> Result<(), String> {
-    collection_installer::submit_fomod_choices(&correlation_id, selections)
+    tokio::task::spawn_blocking(move || {
+        collection_installer::submit_fomod_choices(&correlation_id, selections)
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 // --- Collection Install Resume ---
@@ -4946,414 +5284,1884 @@ async fn pin_game_version(
 // --- Plugin Load Order Rules ---
 
 #[tauri::command]
-fn add_plugin_rule(
+async fn add_plugin_rule(
     game_id: String,
     bottle_name: String,
     plugin_name: String,
     rule_type: loot_rules::PluginRuleType,
     reference_plugin: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<i64, String> {
-    let db = &state.db;
-    loot_rules::add_rule(
-        db,
-        &game_id,
-        &bottle_name,
-        &plugin_name,
-        rule_type,
-        &reference_plugin,
-    )
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        loot_rules::add_rule(
+            &db,
+            &game_id,
+            &bottle_name,
+            &plugin_name,
+            rule_type,
+            &reference_plugin,
+        )
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn remove_plugin_rule(rule_id: i64, state: State<AppState>) -> Result<(), String> {
-    let db = &state.db;
-    loot_rules::remove_rule(db, rule_id)
+async fn remove_plugin_rule(rule_id: i64, state: State<'_, AppState>) -> Result<(), String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        loot_rules::remove_rule(&db, rule_id)
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn list_plugin_rules(
+async fn list_plugin_rules(
     game_id: String,
     bottle_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<PluginRule>, String> {
-    let db = &state.db;
-    loot_rules::list_rules(db, &game_id, &bottle_name)
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        loot_rules::list_rules(&db, &game_id, &bottle_name)
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn clear_plugin_rules(
+async fn clear_plugin_rules(
     game_id: String,
     bottle_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let db = &state.db;
-    loot_rules::clear_rules(db, &game_id, &bottle_name)
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        loot_rules::clear_rules(&db, &game_id, &bottle_name)
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 // --- Mod Rollback & Snapshots ---
 
 #[tauri::command]
-fn save_mod_version_cmd(
+async fn save_mod_version_cmd(
     mod_id: i64,
     version: String,
     staging_path: String,
     archive_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<i64, String> {
-    let db = &state.db;
-    rollback::save_mod_version(db, mod_id, &version, &staging_path, &archive_name)
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        rollback::save_mod_version(&db, mod_id, &version, &staging_path, &archive_name)
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn list_mod_versions_cmd(mod_id: i64, state: State<AppState>) -> Result<Vec<ModVersion>, String> {
-    let db = &state.db;
-    rollback::list_mod_versions(db, mod_id)
+async fn list_mod_versions_cmd(mod_id: i64, state: State<'_, AppState>) -> Result<Vec<ModVersion>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        rollback::list_mod_versions(&db, mod_id)
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn rollback_mod_version(
+async fn rollback_mod_version(
     mod_id: i64,
     version_id: i64,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<ModVersion, String> {
-    let db = &state.db;
-    rollback::rollback_to_version(db, mod_id, version_id)
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        rollback::rollback_to_version(&db, mod_id, version_id)
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn cleanup_mod_versions(
+async fn cleanup_mod_versions(
     mod_id: i64,
     keep_count: usize,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<usize, String> {
-    let db = &state.db;
-    rollback::cleanup_old_versions(db, mod_id, keep_count)
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        rollback::cleanup_old_versions(&db, mod_id, keep_count)
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn create_mod_snapshot(
+async fn create_mod_snapshot(
     game_id: String,
     bottle_name: String,
     name: String,
     description: Option<String>,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<i64, String> {
-    let db = &state.db;
-    rollback::create_snapshot(db, &game_id, &bottle_name, &name, description.as_deref())
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        rollback::create_snapshot(&db, &game_id, &bottle_name, &name, description.as_deref())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn list_mod_snapshots(
+async fn list_mod_snapshots(
     game_id: String,
     bottle_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<ModSnapshot>, String> {
-    let db = &state.db;
-    rollback::list_snapshots(db, &game_id, &bottle_name)
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        rollback::list_snapshots(&db, &game_id, &bottle_name)
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn delete_mod_snapshot(snapshot_id: i64, state: State<AppState>) -> Result<(), String> {
-    let db = &state.db;
-    rollback::delete_snapshot(db, snapshot_id)
+async fn delete_mod_snapshot(snapshot_id: i64, state: State<'_, AppState>) -> Result<(), String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        rollback::delete_snapshot(&db, snapshot_id)
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 // --- Modlist Export/Import ---
 
 #[tauri::command]
-fn export_modlist_cmd(
+async fn export_modlist_cmd(
     game_id: String,
     bottle_name: String,
     output_path: String,
     notes: Option<String>,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let db = &state.db;
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        // Get current plugin order if applicable
+        let plugin_entries = get_current_plugins(&game_id, &bottle_name);
 
-    // Get current plugin order if applicable
-    let plugin_entries = get_current_plugins(&game_id, &bottle_name);
-
-    let modlist = modlist_io::export_modlist(
-        db,
-        &game_id,
-        &bottle_name,
-        &plugin_entries,
-        notes.as_deref(),
-    )
-    .map_err(|e| e.to_string())?;
-
-    let path = PathBuf::from(&output_path);
-    modlist_io::write_modlist_file(&modlist, &path).map_err(|e| e.to_string())?;
-
-    Ok(output_path)
-}
-
-#[tauri::command]
-fn import_modlist_plan(
-    file_path: String,
-    game_id: String,
-    bottle_name: String,
-    state: State<AppState>,
-) -> Result<ImportPlan, String> {
-    let modlist =
-        modlist_io::read_modlist_file(Path::new(&file_path)).map_err(|e| e.to_string())?;
-    modlist_io::validate_modlist(&modlist, &game_id).map_err(|e| e.to_string())?;
-
-    let db = &state.db;
-    modlist_io::plan_import(db, &modlist, &game_id, &bottle_name).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn diff_modlists_cmd(
-    file_path: String,
-    game_id: String,
-    bottle_name: String,
-    state: State<AppState>,
-) -> Result<ModlistDiff, String> {
-    let imported =
-        modlist_io::read_modlist_file(Path::new(&file_path)).map_err(|e| e.to_string())?;
-
-    let db = &state.db;
-    let plugin_entries = get_current_plugins(&game_id, &bottle_name);
-
-    let current = modlist_io::export_modlist(db, &game_id, &bottle_name, &plugin_entries, None)
+        let modlist = modlist_io::export_modlist(
+            &db,
+            &game_id,
+            &bottle_name,
+            &plugin_entries,
+            notes.as_deref(),
+        )
         .map_err(|e| e.to_string())?;
 
-    Ok(modlist_io::diff_modlists(&current, &imported))
+        let path = PathBuf::from(&output_path);
+        modlist_io::write_modlist_file(&modlist, &path).map_err(|e| e.to_string())?;
+
+        Ok(output_path)
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn execute_modlist_import(
+async fn import_modlist_plan(
     file_path: String,
     game_id: String,
     bottle_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
+) -> Result<ImportPlan, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let modlist =
+            modlist_io::read_modlist_file(Path::new(&file_path)).map_err(|e| e.to_string())?;
+        modlist_io::validate_modlist(&modlist, &game_id).map_err(|e| e.to_string())?;
+
+        modlist_io::plan_import(&db, &modlist, &game_id, &bottle_name).map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
+}
+
+#[tauri::command]
+async fn diff_modlists_cmd(
+    file_path: String,
+    game_id: String,
+    bottle_name: String,
+    state: State<'_, AppState>,
+) -> Result<ModlistDiff, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let imported =
+            modlist_io::read_modlist_file(Path::new(&file_path)).map_err(|e| e.to_string())?;
+
+        let plugin_entries = get_current_plugins(&game_id, &bottle_name);
+
+        let current = modlist_io::export_modlist(&db, &game_id, &bottle_name, &plugin_entries, None)
+            .map_err(|e| e.to_string())?;
+
+        Ok(modlist_io::diff_modlists(&current, &imported))
+    }).await.map_err(|e| format!("Task failed: {e}"))?
+}
+
+#[tauri::command]
+async fn execute_modlist_import(
+    file_path: String,
+    game_id: String,
+    bottle_name: String,
+    state: State<'_, AppState>,
 ) -> Result<modlist_io::ImportResult, String> {
-    let imported =
-        modlist_io::read_modlist_file(Path::new(&file_path)).map_err(|e| e.to_string())?;
-    let db = &state.db;
-    modlist_io::execute_import(db, &imported, &game_id, &bottle_name).map_err(|e| e.to_string())
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let imported =
+            modlist_io::read_modlist_file(Path::new(&file_path)).map_err(|e| e.to_string())?;
+        modlist_io::execute_import(&db, &imported, &game_id, &bottle_name).map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 // --- Disk Budget Commands ---
 
 #[tauri::command]
-fn get_disk_budget(
+async fn get_disk_budget(
     game_id: String,
     bottle_name: String,
 ) -> Result<disk_budget::DiskBudget, String> {
-    let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
-    Ok(disk_budget::compute_budget(
-        &game_id,
-        &bottle_name,
-        &data_dir,
-    ))
+    tokio::task::spawn_blocking(move || {
+        let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
+        Ok(disk_budget::compute_budget(
+            &game_id,
+            &bottle_name,
+            &data_dir,
+        ))
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn estimate_install_impact_cmd(
+async fn estimate_install_impact_cmd(
     archive_size: u64,
     game_id: String,
     bottle_name: String,
 ) -> Result<disk_budget::InstallImpact, String> {
-    let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
-    Ok(disk_budget::estimate_install_impact(
-        archive_size,
-        &data_dir,
-    ))
+    tokio::task::spawn_blocking(move || {
+        let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
+        Ok(disk_budget::estimate_install_impact(
+            archive_size,
+            &data_dir,
+        ))
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn get_available_disk_space_cmd(path: String) -> Result<u64, String> {
-    Ok(disk_budget::available_space(std::path::Path::new(&path)))
+async fn get_available_disk_space_cmd(path: String) -> Result<u64, String> {
+    tokio::task::spawn_blocking(move || {
+        Ok(disk_budget::available_space(std::path::Path::new(&path)))
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 // --- Staging Info Commands ---
 
 #[tauri::command]
-fn get_staging_info(game_id: String, bottle_name: String) -> Result<serde_json::Value, String> {
-    let staging_root = staging::staging_root();
-    let staging_dir = staging::staging_base_dir(&game_id, &bottle_name);
+async fn get_staging_info(game_id: String, bottle_name: String) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || {
+        let staging_root = staging::staging_root();
+        let staging_dir = staging::staging_base_dir(&game_id, &bottle_name);
 
-    let (hardlinks_supported, data_dir_str) = match resolve_game(&game_id, &bottle_name) {
-        Ok((_, _, data_dir)) => (
-            deployer::same_filesystem(&staging_dir, &data_dir),
-            data_dir.to_string_lossy().to_string(),
-        ),
-        Err(_) => (false, String::new()),
-    };
+        let (hardlinks_supported, data_dir_str) = match resolve_game(&game_id, &bottle_name) {
+            Ok((_, _, data_dir)) => (
+                deployer::same_filesystem(&staging_dir, &data_dir),
+                data_dir.to_string_lossy().to_string(),
+            ),
+            Err(_) => (false, String::new()),
+        };
 
-    let config = config::get_config().map_err(|e| e.to_string())?;
-    let is_custom = config.staging_dir.is_some();
+        let config = config::get_config().map_err(|e| e.to_string())?;
+        let is_custom = config.staging_dir.is_some();
 
-    Ok(serde_json::json!({
-        "staging_root": staging_root.to_string_lossy(),
-        "staging_dir": staging_dir.to_string_lossy(),
-        "data_dir": data_dir_str,
-        "hardlinks_supported": hardlinks_supported,
-        "is_custom_path": is_custom,
-    }))
+        Ok(serde_json::json!({
+            "staging_root": staging_root.to_string_lossy(),
+            "staging_dir": staging_dir.to_string_lossy(),
+            "data_dir": data_dir_str,
+            "hardlinks_supported": hardlinks_supported,
+            "is_custom_path": is_custom,
+        }))
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn set_staging_directory(path: Option<String>) -> Result<(), String> {
-    match path {
-        Some(ref p) if !p.is_empty() => {
-            // Validate path exists or can be created
-            let path_buf = std::path::PathBuf::from(p);
-            if !path_buf.exists() {
-                std::fs::create_dir_all(&path_buf)
-                    .map_err(|e| format!("Cannot create staging directory '{}': {}", p, e))?;
+async fn set_staging_directory(path: Option<String>) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        match path {
+            Some(ref p) if !p.is_empty() => {
+                // Validate path exists or can be created
+                let path_buf = std::path::PathBuf::from(p);
+                if !path_buf.exists() {
+                    std::fs::create_dir_all(&path_buf)
+                        .map_err(|e| format!("Cannot create staging directory '{}': {}", p, e))?;
+                }
+                config::set_config_value("staging_dir", p).map_err(|e| e.to_string())
             }
-            config::set_config_value("staging_dir", p).map_err(|e| e.to_string())
+            _ => {
+                // Clear override — revert to default
+                let mut cfg = config::get_config().map_err(|e| e.to_string())?;
+                cfg.staging_dir = None;
+                config::save_config(&cfg).map_err(|e| e.to_string())
+            }
         }
-        _ => {
-            // Clear override — revert to default
-            let mut cfg = config::get_config().map_err(|e| e.to_string())?;
-            cfg.staging_dir = None;
-            config::save_config(&cfg).map_err(|e| e.to_string())
-        }
-    }
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 // --- INI Manager Commands ---
 
 #[tauri::command]
-fn get_ini_settings(
+async fn get_ini_settings(
     game_id: String,
     bottle_name: String,
 ) -> Result<Vec<ini_manager::IniFile>, String> {
-    let bottle = resolve_bottle(&bottle_name)?;
-    Ok(ini_manager::read_all_ini(&bottle, &game_id))
+    tokio::task::spawn_blocking(move || {
+        let bottle = resolve_bottle(&bottle_name)?;
+        Ok(ini_manager::read_all_ini(&bottle, &game_id))
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn set_ini_setting(
+async fn set_ini_setting(
     file_path: String,
     section: String,
     key: String,
     value: String,
 ) -> Result<(), String> {
-    ini_manager::set_setting(Path::new(&file_path), &section, &key, &value)
-        .map_err(|e| e.to_string())
+    tokio::task::spawn_blocking(move || {
+        ini_manager::set_setting(Path::new(&file_path), &section, &key, &value)
+            .map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn get_ini_presets(game_id: String) -> Vec<ini_manager::IniPreset> {
-    ini_manager::builtin_presets(&game_id)
+async fn get_ini_presets(game_id: String) -> Result<Vec<ini_manager::IniPreset>, String> {
+    tokio::task::spawn_blocking(move || {
+        Ok(ini_manager::builtin_presets(&game_id))
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn apply_ini_preset(
+async fn apply_ini_preset(
     game_id: String,
     bottle_name: String,
     preset_name: String,
 ) -> Result<usize, String> {
-    let bottle = resolve_bottle(&bottle_name)?;
-    let presets = ini_manager::builtin_presets(&game_id);
-    let preset = presets
-        .iter()
-        .find(|p| p.name == preset_name)
-        .ok_or_else(|| format!("Preset '{}' not found", preset_name))?;
-    ini_manager::apply_preset(&bottle, &game_id, preset).map_err(|e| e.to_string())
+    tokio::task::spawn_blocking(move || {
+        let bottle = resolve_bottle(&bottle_name)?;
+        let presets = ini_manager::builtin_presets(&game_id);
+        let preset = presets
+            .iter()
+            .find(|p| p.name == preset_name)
+            .ok_or_else(|| format!("Preset '{}' not found", preset_name))?;
+        ini_manager::apply_preset(&bottle, &game_id, preset).map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 /// Read a text file from a mod's staging directory.
 /// `staging_path` is the mod's staging root, `relative_path` is the file within it.
 #[tauri::command]
-fn read_mod_file(staging_path: String, relative_path: String) -> Result<String, String> {
-    let full = Path::new(&staging_path).join(&relative_path);
-    if !full.exists() {
-        return Err(format!("File not found: {}", full.display()));
-    }
-    // Prevent directory traversal
-    let canon = full.canonicalize().map_err(|e| e.to_string())?;
-    let base = Path::new(&staging_path)
-        .canonicalize()
-        .map_err(|e| e.to_string())?;
-    if !canon.starts_with(&base) {
-        return Err("Path traversal denied".into());
-    }
-    std::fs::read_to_string(&canon).map_err(|e| format!("Failed to read file: {}", e))
+async fn read_mod_file(staging_path: String, relative_path: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let full = Path::new(&staging_path).join(&relative_path);
+        if !full.exists() {
+            return Err(format!("File not found: {}", full.display()));
+        }
+        // Prevent directory traversal
+        let canon = full.canonicalize().map_err(|e| e.to_string())?;
+        let base = Path::new(&staging_path)
+            .canonicalize()
+            .map_err(|e| e.to_string())?;
+        if !canon.starts_with(&base) {
+            return Err("Path traversal denied".into());
+        }
+        std::fs::read_to_string(&canon).map_err(|e| format!("Failed to read file: {}", e))
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 /// Write a text file in a mod's staging directory.
 #[tauri::command]
-fn write_mod_file(staging_path: String, relative_path: String, content: String) -> Result<(), String> {
-    let full = Path::new(&staging_path).join(&relative_path);
-    // Prevent directory traversal
-    let base = Path::new(&staging_path)
-        .canonicalize()
+async fn write_mod_file(staging_path: String, relative_path: String, content: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let full = Path::new(&staging_path).join(&relative_path);
+        // Prevent directory traversal
+        let base = Path::new(&staging_path)
+            .canonicalize()
+            .map_err(|e| e.to_string())?;
+        // For writes, parent must exist and resolved path must be under base
+        if let Some(parent) = full.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let canon = full.canonicalize().unwrap_or_else(|_| full.clone());
+        if !canon.starts_with(&base) {
+            return Err("Path traversal denied".into());
+        }
+        std::fs::write(&full, content).map_err(|e| format!("Failed to write file: {}", e))
+    }).await.map_err(|e| format!("Task failed: {e}"))?
+}
+
+// --- Instruction Parsing (Collection Author Instructions) ---
+
+/// Parse collection instructions using the deterministic (Tier 1) parser.
+#[tauri::command]
+async fn parse_instructions_cmd(
+    instructions: String,
+    mod_names: Vec<String>,
+) -> Result<instruction_types::ParsedInstructions, String> {
+    tokio::task::spawn_blocking(move || {
+        Ok(instruction_parser::parse_instructions(&instructions, &mod_names))
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
+/// Parse instructions using a local Ollama model (Tier 2a).
+#[tauri::command]
+async fn parse_instructions_llm_cmd(
+    instructions: String,
+    mod_names: Vec<String>,
+    model: String,
+    platform: String,
+    game_version: String,
+) -> Result<Vec<instruction_types::ConditionalAction>, String> {
+    llm_parser::parse_with_ollama(&model, &instructions, &mod_names, &platform, &game_version).await
+}
+
+/// Parse instructions using a cloud LLM (Tier 2a — cloud).
+#[tauri::command]
+async fn parse_instructions_cloud_cmd(
+    instructions: String,
+    mod_names: Vec<String>,
+    provider: String,
+    api_key: String,
+    platform: String,
+    game_version: String,
+) -> Result<Vec<instruction_types::ConditionalAction>, String> {
+    match provider.as_str() {
+        "groq" => llm_parser::parse_with_groq(&api_key, &instructions, &mod_names, &platform, &game_version).await,
+        "cerebras" => llm_parser::parse_with_cerebras(&api_key, &instructions, &mod_names, &platform, &game_version).await,
+        "gemini" => llm_parser::parse_with_gemini(&api_key, &instructions, &mod_names, &platform, &game_version).await,
+        _ => Err(format!("Unknown cloud provider: {provider}")),
+    }
+}
+
+/// Validate parsed actions against the actual installed mod list.
+#[tauri::command]
+async fn validate_instruction_actions_cmd(
+    actions: Vec<instruction_types::ConditionalAction>,
+    game_id: String,
+    bottle_name: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<instruction_types::ValidatedAction>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        Ok(instruction_validator::validate_actions(&actions, &db, &game_id, &bottle_name))
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
+/// Check Ollama status (installed, running, available models).
+#[tauri::command]
+async fn check_ollama_status_cmd() -> Result<instruction_types::OllamaStatus, String> {
+    Ok(llm_parser::check_ollama_status().await)
+}
+
+/// Get the list of recommended local models.
+#[tauri::command]
+fn get_recommended_models() -> Vec<instruction_types::OllamaModel> {
+    instruction_types::recommended_models()
+}
+
+/// Get available cloud LLM providers.
+#[tauri::command]
+fn get_cloud_providers() -> Vec<llm_parser::CloudProvider> {
+    llm_parser::available_cloud_providers()
+}
+
+/// Download (pull) a model via Ollama.
+#[tauri::command]
+async fn pull_ollama_model_cmd(model_name: String) -> Result<(), String> {
+    llm_parser::pull_ollama_model(&model_name).await
+}
+
+/// Delete a model from Ollama (removes from disk).
+#[tauri::command]
+async fn delete_ollama_model_cmd(model_name: String) -> Result<(), String> {
+    llm_parser::delete_ollama_model(&model_name).await
+}
+
+/// Unload a model from Ollama's memory (keeps on disk).
+#[tauri::command]
+async fn unload_ollama_model_cmd(model_name: String) -> Result<(), String> {
+    llm_parser::unload_ollama_model(&model_name).await
+}
+
+// --- System Info ---
+
+/// Get total system memory in bytes (unified memory on Apple Silicon).
+#[tauri::command]
+fn get_system_memory() -> Result<u64, String> {
+    #[cfg(target_os = "macos")]
+    {
+        unsafe {
+            let mut size: u64 = 0;
+            let mut len = std::mem::size_of::<u64>();
+            let mib = [libc::CTL_HW, libc::HW_MEMSIZE];
+            let ret = libc::sysctl(
+                mib.as_ptr() as *mut _,
+                2,
+                &mut size as *mut u64 as *mut _,
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            );
+            if ret == 0 {
+                Ok(size)
+            } else {
+                Err("Failed to query system memory".into())
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::fs;
+        let meminfo = fs::read_to_string("/proc/meminfo")
+            .map_err(|e| format!("Failed to read /proc/meminfo: {e}"))?;
+        for line in meminfo.lines() {
+            if line.starts_with("MemTotal:") {
+                let kb: u64 = line
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|s| s.parse().ok())
+                    .ok_or("Failed to parse MemTotal")?;
+                return Ok(kb * 1024);
+            }
+        }
+        Err("MemTotal not found in /proc/meminfo".into())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        Err("System memory detection not supported on this platform".into())
+    }
+}
+
+/// Install Ollama. On Linux, runs the official install script.
+/// On macOS, opens the download page (Ollama ships as a .app bundle).
+#[tauri::command]
+async fn install_ollama() -> Result<String, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let output = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("curl -fsSL https://ollama.com/install.sh | sh")
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run install script: {e}"))?;
+
+        if output.status.success() {
+            Ok("Ollama installed successfully. It should now be running.".into())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(format!("Install failed: {stderr}"))
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // macOS: Ollama is a native .app — open the download page
+        let _ = std::process::Command::new("open")
+            .arg("https://ollama.com/download/mac")
+            .spawn();
+        Ok("Opening Ollama download page. Install the app, then return here.".into())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        Err("Automatic Ollama install not supported on this platform".into())
+    }
+}
+
+/// Start Ollama headlessly (serve mode) if not already running.
+#[tauri::command]
+async fn start_ollama() -> Result<String, String> {
+    // Check if already running
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
         .map_err(|e| e.to_string())?;
-    // For writes, parent must exist and resolved path must be under base
-    if let Some(parent) = full.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+
+    if let Ok(resp) = client.get("http://localhost:11434/api/tags").send().await {
+        if resp.status().is_success() {
+            return Ok("Ollama is already running.".into());
+        }
     }
-    let canon = full.canonicalize().unwrap_or_else(|_| full.clone());
-    if !canon.starts_with(&base) {
-        return Err("Path traversal denied".into());
+
+    // Try to start ollama serve in background
+    #[cfg(target_os = "macos")]
+    {
+        // Try CLI first (if installed via homebrew or ollama cli is in PATH)
+        let result = tokio::process::Command::new("ollama")
+            .arg("serve")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+
+        if result.is_err() {
+            // Fallback: try launching the .app which also starts the server
+            let _ = std::process::Command::new("open")
+                .arg("-a")
+                .arg("Ollama")
+                .arg("--background")
+                .spawn();
+        }
     }
-    std::fs::write(&full, content).map_err(|e| format!("Failed to write file: {}", e))
+
+    #[cfg(target_os = "linux")]
+    {
+        let _ = tokio::process::Command::new("ollama")
+            .arg("serve")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+
+    // Wait briefly for it to start
+    for _ in 0..10 {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        if let Ok(resp) = client.get("http://localhost:11434/api/tags").send().await {
+            if resp.status().is_success() {
+                return Ok("Ollama started successfully.".into());
+            }
+        }
+    }
+
+    Err("Could not start Ollama. Please install and launch it manually.".into())
+}
+
+/// Check if MLX LM (Apple's MLX inference library) is installed.
+#[tauri::command]
+async fn check_mlx_status() -> Result<bool, String> {
+    Ok(llm_chat::check_mlx_status().await)
+}
+
+/// Install MLX LM into a dedicated venv (~/.corkscrew/mlx-venv/).
+#[tauri::command]
+async fn install_mlx() -> Result<String, String> {
+    llm_chat::install_mlx().await
+}
+
+/// Get the recommended model name based on system memory.
+#[tauri::command]
+fn get_recommended_model() -> Result<String, String> {
+    let mem = get_system_memory()?;
+    Ok(instruction_types::recommended_model_for_memory(mem))
+}
+
+// --- LLM Chat Commands ---
+
+/// Get the current chat session state.
+#[tauri::command]
+async fn chat_get_state(
+    state: State<'_, AppState>,
+) -> Result<llm_chat::ChatState, String> {
+    let session = state.chat_session.lock().await;
+    let ollama_status = llm_parser::check_ollama_status().await;
+    Ok(llm_chat::ChatState {
+        model: session.model.clone(),
+        backend: session.backend.clone(),
+        loaded: session.model.is_some(),
+        messages: session.messages.clone(),
+        available_models: ollama_status.available_models
+            .into_iter()
+            .map(|m| instruction_types::OllamaModel {
+                name: m.name,
+                size_bytes: m.size_bytes,
+                size_display: m.size_display,
+                description: m.description,
+                expected_accuracy: m.expected_accuracy,
+                supports_tool_use: m.supports_tool_use,
+                min_memory_bytes: 0,
+            })
+            .collect(),
+    })
+}
+
+
+
+/// Resolve game display name from game_id.
+fn game_display_name(game_id: &str) -> &str {
+    match game_id {
+        "skyrimse" => "Skyrim Special Edition",
+        "skyrim" => "Skyrim",
+        "fallout4" => "Fallout 4",
+        "fallout3" => "Fallout 3",
+        "falloutnv" => "Fallout: New Vegas",
+        "oblivion" => "The Elder Scrolls IV: Oblivion",
+        "morrowind" => "Morrowind",
+        "starfield" => "Starfield",
+        other => other,
+    }
+}
+
+/// Load a model for chat and initialize the session.
+#[tauri::command]
+async fn chat_load_model(
+    model_name: String,
+    game_id: String,
+    bottle_name: String,
+    current_page: Option<String>,
+    backend: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let backend_enum = match backend.as_deref() {
+        Some("mlx") => llm_chat::LlmBackend::Mlx,
+        _ => llm_chat::LlmBackend::Ollama,
+    };
+
+    // Resolve model name for the backend
+    let resolved_model = match &backend_enum {
+        llm_chat::LlmBackend::Mlx => llm_chat::mlx_model_name(&model_name),
+        llm_chat::LlmBackend::Ollama => model_name.clone(),
+    };
+
+    // Start the MLX server if needed
+    if backend_enum == llm_chat::LlmBackend::Mlx {
+        llm_chat::start_mlx_server(&resolved_model).await?;
+    }
+
+    // Compute context config based on system memory
+    let mem_bytes = get_system_memory().unwrap_or(16_000_000_000);
+    let num_ctx = instruction_types::context_size_for_memory(mem_bytes);
+
+    // Load the model
+    llm_chat::load_model(&backend_enum, &resolved_model, num_ctx).await?;
+
+    let db = state.db.clone();
+    let gid = game_id.clone();
+    let bn = bottle_name.clone();
+    let mod_count = tokio::task::spawn_blocking(move || {
+        db.list_mods_summary(&gid, &bn)
+            .map(|m| m.len())
+            .unwrap_or(0)
+    })
+    .await
+    .unwrap_or(0);
+
+    let game_name = game_display_name(&game_id);
+    let page = current_page.as_deref().unwrap_or("Mods");
+
+    let mut session = state.chat_session.lock().await;
+    session.model = Some(resolved_model.clone());
+    session.backend = backend_enum;
+    session.messages.clear();
+    session.touch();
+
+    // Add system message
+    let system = llm_chat::build_chat_system_prompt(
+        game_name,
+        mod_count,
+        "Wine/CrossOver",
+        page,
+        None,
+    );
+    session.messages.push(llm_chat::ChatMessage {
+        role: "system".into(),
+        content: system,
+        tool_calls: None,
+        mentioned_mods: None,
+    });
+
+    Ok(())
+}
+
+/// Unload the chat model and clear the session.
+#[tauri::command]
+async fn chat_unload_model(
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let mut session = state.chat_session.lock().await;
+    if let Some(ref model) = session.model {
+        let _ = llm_chat::unload_model(&session.backend, model).await;
+    }
+    session.model = None;
+    session.messages.clear();
+    Ok(())
+}
+
+/// Check which MLX models are already cached locally in ~/.cache/huggingface/hub/.
+#[tauri::command]
+async fn get_cached_mlx_models() -> Vec<String> {
+    let mut cached = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        let hub_dir = home.join(".cache/huggingface/hub");
+        if let Ok(entries) = std::fs::read_dir(&hub_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with("models--") && entry.path().is_dir() {
+                    // Convert "models--org--name" back to "org/name"
+                    let model_id = name.strip_prefix("models--").unwrap_or(&name).replace("--", "/");
+                    cached.push(model_id);
+                }
+            }
+        }
+    }
+    cached
+}
+
+/// Delete a model from disk (Ollama: API delete, MLX: remove HuggingFace cache).
+#[tauri::command]
+async fn delete_model(
+    model_name: String,
+    backend: Option<String>,
+) -> Result<String, String> {
+    match backend.as_deref() {
+        Some("mlx") => {
+            // MLX models cached in ~/.cache/huggingface/hub/models--<org>--<name>
+            let sanitized = model_name.replace("/", "--");
+            if let Some(home) = dirs::home_dir() {
+                let cache_dir = home.join(".cache/huggingface/hub").join(format!("models--{sanitized}"));
+                if cache_dir.exists() {
+                    tokio::fs::remove_dir_all(&cache_dir).await
+                        .map_err(|e| format!("Failed to delete: {e}"))?;
+                    Ok(format!("Deleted {model_name} from MLX cache."))
+                } else {
+                    Err(format!("Cache directory not found for {model_name}"))
+                }
+            } else {
+                Err("Cannot determine home directory.".into())
+            }
+        }
+        _ => {
+            // Ollama: DELETE /api/delete
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .map_err(|e| e.to_string())?;
+            let resp = client
+                .delete("http://localhost:11434/api/delete")
+                .json(&serde_json::json!({ "name": model_name }))
+                .send()
+                .await
+                .map_err(|e| format!("Failed to delete model: {e}"))?;
+            if resp.status().is_success() {
+                Ok(format!("Deleted {model_name} from Ollama."))
+            } else {
+                let text = resp.text().await.unwrap_or_default();
+                Err(format!("Ollama delete failed: {text}"))
+            }
+        }
+    }
+}
+
+/// Send a user message and get the assistant response.
+/// Handles tool calls automatically (one round).
+#[tauri::command]
+async fn chat_send_message(
+    message: String,
+    game_id: String,
+    bottle_name: String,
+    current_page: Option<String>,
+    state: State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+) -> Result<llm_chat::ChatResponse, String> {
+    let (model, backend, tier, messages) = {
+        let mut session = state.chat_session.lock().await;
+        session.touch();
+        let model = session.model.clone().ok_or("No model loaded")?;
+        let backend = session.backend.clone();
+        let tier = instruction_types::ModelCapabilityTier::from_model_name(&model);
+
+        // Update system prompt with current page context if it changed
+        if let Some(ref page) = current_page {
+            if let Some(system_msg) = session.messages.first_mut() {
+                if system_msg.role == "system" && !system_msg.content.contains(&format!("Page: {page}")) {
+                    // Rebuild system prompt with updated page
+                    let db = state.db.clone();
+                    let gid = game_id.clone();
+                    let bn = bottle_name.clone();
+                    let mod_count = db.list_mods_summary(&gid, &bn)
+                        .map(|m| m.len())
+                        .unwrap_or(0);
+                    system_msg.content = llm_chat::build_chat_system_prompt(
+                        game_display_name(&game_id),
+                        mod_count,
+                        "Wine/CrossOver",
+                        page,
+                        None,
+                    );
+                }
+            }
+        }
+
+        // Add user message
+        session.messages.push(llm_chat::ChatMessage {
+            role: "user".into(),
+            content: message,
+            tool_calls: None,
+            mentioned_mods: None,
+        });
+
+        (model, backend, tier, session.messages.clone())
+    };
+
+    let tools = llm_chat::get_chat_tools(tier);
+
+    // Compute context config based on system memory
+    let mem_bytes = get_system_memory().unwrap_or(16_000_000_000);
+    let num_ctx = instruction_types::context_size_for_memory(mem_bytes);
+    let max_tokens = instruction_types::max_response_tokens(num_ctx);
+
+    // Get LLM response with streaming
+    log::info!("[CHAT] Sending to {:?} model={}", backend, model);
+    let handle = app_handle.clone();
+    let response = llm_chat::chat_send_streaming(
+        &backend, &model, &messages, &tools, num_ctx, max_tokens,
+        move |token, phase| {
+            let _ = handle.emit("chat-stream-token", serde_json::json!({
+                "text": token,
+                "phase": phase,
+            }));
+        },
+    ).await?;
+
+    log::info!("[CHAT] Response: content_len={} tool_calls={:?}",
+        response.content.len(),
+        response.tool_calls.as_ref().map(|tc| tc.len()));
+
+    let mut tool_results = Vec::new();
+
+    // Handle tool calls if any
+    if let Some(ref tool_calls) = response.tool_calls {
+        for tc in tool_calls {
+            log::info!("[CHAT] Executing tool: {} args={}", tc.function.name, tc.function.arguments);
+            // Emit tool status: running
+            let display = tool_display_name(&tc.function.name, &tc.function.arguments);
+            let _ = app_handle.emit("chat-tool-status", serde_json::json!({
+                "tool_name": tc.function.name,
+                "status": "running",
+                "display_text": display,
+            }));
+
+            let result = execute_tool(
+                &tc.function.name,
+                &tc.function.arguments,
+                &game_id,
+                &bottle_name,
+                &state,
+            )
+            .await;
+            log::info!("[CHAT] Tool result: success={} len={}", result.success, result.result.len());
+
+            // Emit tool status: complete
+            let _ = app_handle.emit("chat-tool-status", serde_json::json!({
+                "tool_name": tc.function.name,
+                "status": "complete",
+                "display_text": display,
+            }));
+
+            tool_results.push(result);
+        }
+    }
+
+    // Store assistant response and tool results in session
+    {
+        let mut session = state.chat_session.lock().await;
+        session.messages.push(response.clone());
+
+        // If there were tool calls, add tool results and get a follow-up response
+        if !tool_results.is_empty() {
+            for tr in &tool_results {
+                session.messages.push(llm_chat::ChatMessage {
+                    role: "tool".into(),
+                    content: tr.result.clone(),
+                    tool_calls: None,
+                    mentioned_mods: None,
+                });
+            }
+        }
+    }
+
+    // If there were tool calls, get a follow-up response that summarizes the results
+    let final_response = if !tool_results.is_empty() {
+        log::info!("[CHAT] Making follow-up call with tool results");
+        let messages = {
+            let session = state.chat_session.lock().await;
+            log::info!("[CHAT] Session has {} messages for follow-up", session.messages.len());
+            session.messages.clone()
+        };
+        let handle2 = app_handle.clone();
+        let followup = llm_chat::chat_send_streaming(
+            &backend, &model, &messages, &[], num_ctx, max_tokens,
+            move |token, phase| {
+                let _ = handle2.emit("chat-stream-token", serde_json::json!({
+                    "text": token,
+                    "phase": phase,
+                }));
+            },
+        ).await?;
+        log::info!("[CHAT] Follow-up response: content_len={}", followup.content.len());
+        {
+            let mut session = state.chat_session.lock().await;
+            session.messages.push(followup.clone());
+        }
+        followup
+    } else {
+        response
+    };
+
+    // Scan for mentioned mods and attach to the final response
+    let mut final_msg = final_response;
+    let mentioned = scan_mentioned_mods(&final_msg.content, &tool_results, &game_id, &bottle_name, &state).await;
+    if !mentioned.is_empty() {
+        final_msg.mentioned_mods = Some(mentioned);
+    }
+
+    Ok(llm_chat::ChatResponse {
+        message: final_msg,
+        tool_results,
+        needs_confirmation: false,
+        pending_tool_calls: None,
+    })
+}
+
+/// Clear chat history but keep model loaded.
+#[tauri::command]
+async fn chat_clear_history(
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let mut session = state.chat_session.lock().await;
+    // Keep system message, clear the rest
+    if let Some(system) = session.messages.first().cloned() {
+        session.messages.clear();
+        if system.role == "system" {
+            session.messages.push(system);
+        }
+    }
+    Ok(())
+}
+
+/// Get contextual conversation starters based on game state.
+#[tauri::command]
+async fn chat_get_starters(
+    game_id: String,
+    bottle_name: String,
+    current_page: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<llm_chat::ChatStarter>, String> {
+    let db = state.db.clone();
+    let gid = game_id.clone();
+    let bn = bottle_name.clone();
+
+    let (mod_count, _enabled_count, disabled_count, has_conflicts) =
+        tokio::task::spawn_blocking(move || {
+            let mods = db.list_mods_summary(&gid, &bn).unwrap_or_default();
+            let enabled = mods.iter().filter(|m| m.enabled).count();
+            let disabled = mods.len() - enabled;
+            let conflicts = db.find_all_conflicts(&gid, &bn).map(|c| !c.is_empty()).unwrap_or(false);
+            (mods.len(), enabled, disabled, conflicts)
+        })
+        .await
+        .unwrap_or((0, 0, 0, false));
+
+    let mut starters = Vec::new();
+    let page = current_page.as_deref().unwrap_or("Mods");
+
+    if has_conflicts {
+        starters.push(llm_chat::ChatStarter {
+            label: "Explain my mod conflicts".into(),
+            prompt: "Check my mod conflicts and explain what's happening. Are any of them serious?".into(),
+        });
+    }
+
+    if disabled_count > 5 {
+        starters.push(llm_chat::ChatStarter {
+            label: format!("{} mods are disabled", disabled_count),
+            prompt: "I have a lot of disabled mods. Can you review them and tell me which ones I might want to enable?".into(),
+        });
+    }
+
+    match page {
+        "Load Order" => {
+            starters.push(llm_chat::ChatStarter {
+                label: "Check my load order".into(),
+                prompt: "Is my load order correct? Are there any issues I should fix?".into(),
+            });
+        }
+        "Crash Logs" => {
+            starters.push(llm_chat::ChatStarter {
+                label: "Analyze my latest crash".into(),
+                prompt: "Check my crash logs and analyze the most recent crash.".into(),
+            });
+        }
+        "Discover" => {
+            starters.push(llm_chat::ChatStarter {
+                label: "Recommend mods for me".into(),
+                prompt: "Based on my installed mods, what would you recommend I add?".into(),
+            });
+        }
+        _ => {}
+    }
+
+    if mod_count > 0 {
+        starters.push(llm_chat::ChatStarter {
+            label: format!("Overview of my {} mods", mod_count),
+            prompt: "Give me an overview of my mod setup. How many mods do I have, any issues?".into(),
+        });
+    }
+
+    if starters.len() < 3 {
+        starters.push(llm_chat::ChatStarter {
+            label: "Find me a mod".into(),
+            prompt: "Help me find a good mod. What kind of mods are you looking for?".into(),
+        });
+    }
+
+    starters.truncate(4);
+    Ok(starters)
+}
+
+/// Helper: fuzzy-find a mod by name from the summary list.
+fn find_mod_by_name<'a>(mods: &'a [database::ModSummary], name: &str) -> Option<&'a database::ModSummary> {
+    let lower = name.to_lowercase();
+    mods.iter().find(|m| m.name.to_lowercase() == lower)
+        .or_else(|| {
+            let matches: Vec<_> = mods.iter()
+                .filter(|m| m.name.to_lowercase().contains(&lower))
+                .collect();
+            if matches.len() == 1 { Some(matches[0]) } else { None }
+        })
+}
+
+/// Web search via DuckDuckGo lite HTML (no API key needed).
+async fn web_search_ddg(query: &str) -> String {
+    let client = match reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+        .timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return format!("Search failed: {e}"),
+    };
+
+    // Use DuckDuckGo lite — simpler HTML, easier to parse
+    let resp = match client.get("https://lite.duckduckgo.com/lite/")
+        .query(&[("q", query)])
+        .send().await
+    {
+        Ok(r) => r,
+        Err(e) => return format!("Search failed: {e}"),
+    };
+    let html = match resp.text().await {
+        Ok(t) => t,
+        Err(e) => return format!("Search failed: {e}"),
+    };
+
+    // DDG lite format: results are in table rows.
+    // Links are in <a class="result-link" href="...">title</a>
+    // Snippets follow in a <td class="result-snippet">...</td>
+    let mut results = Vec::new();
+
+    // Split by result-link anchors
+    let parts: Vec<&str> = html.split("class=\"result-link\"").collect();
+    for part in parts.iter().skip(1) {
+        if results.len() >= 6 { break; }
+
+        // Extract URL from href="..."
+        let url = part.split("href=\"").nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap_or("");
+
+        // Extract title text (between > and </a>)
+        let title = part.split('>').nth(1)
+            .and_then(|s| s.split("</a>").next())
+            .unwrap_or("")
+            .trim();
+
+        // Extract snippet from result-snippet td
+        let snippet = if let Some(snip_pos) = part.find("result-snippet") {
+            let after = &part[snip_pos..];
+            // Get text content after the first >
+            after.split('>').nth(1)
+                .and_then(|s| s.split("</td>").next())
+                .map(|s| {
+                    // Strip inner HTML tags
+                    let mut clean = String::new();
+                    let mut in_tag = false;
+                    for ch in s.chars() {
+                        match ch {
+                            '<' => in_tag = true,
+                            '>' => in_tag = false,
+                            _ if !in_tag => clean.push(ch),
+                            _ => {}
+                        }
+                    }
+                    clean.trim().to_string()
+                })
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        if !title.is_empty() {
+            if snippet.is_empty() {
+                results.push(format!("• {} ({})", title, url));
+            } else {
+                results.push(format!("• {} ({})\n  {}", title, url, snippet));
+            }
+        }
+    }
+
+    if results.is_empty() {
+        format!("No web results found for \"{}\".", query)
+    } else {
+        format!("Web results for \"{}\":\n{}", query, results.join("\n"))
+    }
+}
+
+/// Human-friendly display name for a tool while it's running.
+fn tool_display_name(tool_name: &str, args: &serde_json::Value) -> String {
+    match tool_name {
+        "search_nexus" => {
+            let q = args.get("query").and_then(|q| q.as_str()).unwrap_or("mods");
+            format!("Searching NexusMods for \"{}\"...", q)
+        }
+        "web_search" => {
+            let q = args.get("query").and_then(|q| q.as_str()).unwrap_or("...");
+            format!("Searching the web for \"{}\"...", q)
+        }
+        "list_mods" => "Listing installed mods...".into(),
+        "get_load_order" => "Checking load order...".into(),
+        "get_conflicts" => "Checking mod conflicts...".into(),
+        "get_mod_info" => {
+            let n = args.get("mod_name").and_then(|n| n.as_str()).unwrap_or("mod");
+            format!("Getting info for \"{}\"...", n)
+        }
+        "get_nexus_mod_detail" => "Fetching mod details from NexusMods...".into(),
+        "get_nexus_mod_files" => "Fetching available files...".into(),
+        "download_and_install_mod" => "Downloading and installing mod...".into(),
+        "sort_load_order" => "Sorting load order...".into(),
+        "get_crash_logs" => "Checking crash logs...".into(),
+        "analyze_crash_log" => "Analyzing crash log...".into(),
+        "enable_mod" | "disable_mod" => {
+            let n = args.get("mod_name").and_then(|n| n.as_str()).unwrap_or("mod");
+            format!("{} \"{}\"...", if tool_name == "enable_mod" { "Enabling" } else { "Disabling" }, n)
+        }
+        "check_mod_updates" => "Checking for mod updates...".into(),
+        "run_preflight_check" => "Running preflight check...".into(),
+        "redeploy_mods" => "Redeploying mods...".into(),
+        other => format!("Running {}...", other),
+    }
+}
+
+/// Tool result display name for collapsible headers.
+fn tool_result_display_name(tool_name: &str, result: &str) -> String {
+    match tool_name {
+        "list_mods" => {
+            let count = result.split('\n').next().unwrap_or("").to_string();
+            format!("Listed mods ({})", count.split(' ').next().unwrap_or("?"))
+        }
+        "search_nexus" => {
+            let count = result.split('\n').next().unwrap_or("").to_string();
+            format!("NexusMods search ({})", count.split(' ').next().unwrap_or("?"))
+        }
+        "web_search" => "Web search results".into(),
+        "get_load_order" => "Load order".into(),
+        "get_conflicts" => "File conflicts".into(),
+        "get_mod_info" => "Mod details".into(),
+        "get_nexus_mod_detail" => "NexusMods details".into(),
+        "get_nexus_mod_files" => "Available files".into(),
+        "get_crash_logs" => "Crash logs".into(),
+        "analyze_crash_log" => "Crash analysis".into(),
+        "enable_mod" | "disable_mod" => result.lines().next().unwrap_or("Done").to_string(),
+        other => format!("{} result", other),
+    }
+}
+
+/// Scan assistant response and tool results for mod references, cross-reference with installed mods.
+async fn scan_mentioned_mods(
+    content: &str,
+    tool_results: &[llm_chat::ToolResult],
+    game_id: &str,
+    bottle_name: &str,
+    state: &State<'_, AppState>,
+) -> Vec<llm_chat::MentionedMod> {
+    let db = state.db.clone();
+    let gid = game_id.to_string();
+    let bn = bottle_name.to_string();
+
+    let mods = match tokio::task::spawn_blocking(move || {
+        db.list_mods_summary(&gid, &bn).unwrap_or_default()
+    }).await {
+        Ok(m) => m,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut mentioned = Vec::new();
+    let content_lower = content.to_lowercase();
+
+    // Check installed mods against response text
+    for m in &mods {
+        let name_lower = m.name.to_lowercase();
+        if name_lower.len() > 3 && content_lower.contains(&name_lower) {
+            mentioned.push(llm_chat::MentionedMod {
+                name: m.name.clone(),
+                local_id: Some(m.id),
+                nexus_mod_id: m.nexus_mod_id,
+                enabled: Some(m.enabled),
+                installed: true,
+                picture_url: None,
+            });
+        }
+    }
+
+    // Check tool results for Nexus mod IDs (from structured_data)
+    for tr in tool_results {
+        if let Some(ref data) = tr.structured_data {
+            if let Some(mods_arr) = data.as_array() {
+                for nexus_mod in mods_arr {
+                    let name = nexus_mod.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                    let mod_id = nexus_mod.get("mod_id").and_then(|i| i.as_i64());
+                    let pic = nexus_mod.get("picture_url").and_then(|p| p.as_str()).map(String::from);
+                    if !name.is_empty() && !mentioned.iter().any(|m| m.name.eq_ignore_ascii_case(name)) {
+                        let is_installed = mods.iter().any(|m| m.name.eq_ignore_ascii_case(name));
+                        let local = mods.iter().find(|m| m.name.eq_ignore_ascii_case(name));
+                        mentioned.push(llm_chat::MentionedMod {
+                            name: name.to_string(),
+                            local_id: local.map(|m| m.id),
+                            nexus_mod_id: mod_id,
+                            enabled: local.map(|m| m.enabled),
+                            installed: is_installed,
+                            picture_url: pic,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Limit to avoid overwhelming the UI
+    mentioned.truncate(10);
+    mentioned
+}
+
+/// Execute a tool call from the LLM.
+async fn execute_tool(
+    name: &str,
+    args: &serde_json::Value,
+    game_id: &str,
+    bottle_name: &str,
+    state: &State<'_, AppState>,
+) -> llm_chat::ToolResult {
+    let db = state.db.clone();
+    let gid = game_id.to_string();
+    let bn = bottle_name.to_string();
+
+    let mut structured_data: Option<serde_json::Value> = None;
+
+    let (result, success) = match name {
+        // ── Basic: mod list & toggle ─────────────────────────────────
+        "list_mods" => {
+            let filter = args.get("filter").and_then(|f| f.as_str()).unwrap_or("").to_lowercase();
+            let r = tokio::task::spawn_blocking(move || {
+                let mods = db.list_mods_summary(&gid, &bn).unwrap_or_default();
+                let filtered: Vec<_> = if filter.is_empty() {
+                    mods.iter().collect()
+                } else {
+                    mods.iter().filter(|m| m.name.to_lowercase().contains(&filter)).collect()
+                };
+                let lines: Vec<String> = filtered.iter()
+                    .map(|m| format!("{} [{}]", m.name, if m.enabled { "enabled" } else { "disabled" }))
+                    .collect();
+                format!("{} mods found:\n{}", filtered.len(), lines.join("\n"))
+            }).await.unwrap_or_else(|e| format!("Error: {e}"));
+            (r, true)
+        }
+
+        "enable_mod" | "disable_mod" => {
+            let mod_name = args.get("mod_name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+            let enable = name == "enable_mod";
+            let r = tokio::task::spawn_blocking(move || {
+                let mods = db.list_mods_summary(&gid, &bn).unwrap_or_default();
+                match find_mod_by_name(&mods, &mod_name) {
+                    Some(m) => match db.set_enabled(m.id, enable) {
+                        Ok(_) => format!("{} \"{}\"", if enable { "Enabled" } else { "Disabled" }, m.name),
+                        Err(e) => format!("Failed: {e}"),
+                    },
+                    None => format!("Mod \"{}\" not found", mod_name),
+                }
+            }).await.unwrap_or_else(|e| format!("Error: {e}"));
+            (r, true)
+        }
+
+        "get_mod_info" => {
+            let mod_name = args.get("mod_name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+            let r = tokio::task::spawn_blocking(move || {
+                let mods = db.list_mods_summary(&gid, &bn).unwrap_or_default();
+                match find_mod_by_name(&mods, &mod_name) {
+                    Some(m) => format!(
+                        "Name: {}\nEnabled: {}\nVersion: {}\nFiles: {}\nCategory: {}\nCollection: {}\nOptional: {}\nNexus ID: {}",
+                        m.name, m.enabled, m.version, m.file_count,
+                        m.auto_category.as_deref().unwrap_or("uncategorized"),
+                        m.collection_name.as_deref().unwrap_or("none"),
+                        m.collection_optional,
+                        m.nexus_mod_id.map_or("none".to_string(), |id| id.to_string()),
+                    ),
+                    None => format!("Mod \"{}\" not found", mod_name),
+                }
+            }).await.unwrap_or_else(|e| format!("Error: {e}"));
+            (r, true)
+        }
+
+        "get_deployment_status" => {
+            let r = tokio::task::spawn_blocking(move || {
+                let mods = db.list_mods_summary(&gid, &bn).unwrap_or_default();
+                let enabled = mods.iter().filter(|m| m.enabled).count();
+                let collections: std::collections::HashSet<_> = mods.iter()
+                    .filter_map(|m| m.collection_name.as_deref())
+                    .collect();
+                format!("{} enabled / {} total mods, {} collections", enabled, mods.len(), collections.len())
+            }).await.unwrap_or_else(|e| format!("Error: {e}"));
+            (r, true)
+        }
+
+        // ── Standard: load order, conflicts, Nexus search ────────────
+        "get_load_order" => {
+            let r = match get_plugin_order(gid.clone(), bn.clone()).await {
+                Ok(plugins) => {
+                    let lines: Vec<String> = plugins.iter().enumerate()
+                        .map(|(i, p)| format!("{:3}. {} [{}]", i, p.filename, if p.enabled { "active" } else { "inactive" }))
+                        .collect();
+                    format!("{} plugins:\n{}", plugins.len(), lines.join("\n"))
+                }
+                Err(e) => format!("Error: {e}"),
+            };
+            (r, true)
+        }
+
+        "get_conflicts" => {
+            let db2 = state.db.clone();
+            let gid2 = gid.clone();
+            let bn2 = bn.clone();
+            let r = tokio::task::spawn_blocking(move || {
+                match db2.find_all_conflicts(&gid2, &bn2).map_err(|e| e.to_string()) {
+                    Ok(conflicts) => {
+                        if conflicts.is_empty() {
+                            "No file conflicts detected.".into()
+                        } else {
+                            let lines: Vec<String> = conflicts.iter().take(20)
+                                .map(|c| {
+                                    let mod_names: Vec<&str> = c.mods.iter().map(|m| m.mod_name.as_str()).collect();
+                                    format!("{}: {}", c.relative_path, mod_names.join(" vs "))
+                                })
+                                .collect();
+                            let extra = if conflicts.len() > 20 { format!("\n...and {} more", conflicts.len() - 20) } else { String::new() };
+                            format!("{} conflicts:\n{}{}", conflicts.len(), lines.join("\n"), extra)
+                        }
+                    }
+                    Err(e) => format!("Error: {e}"),
+                }
+            }).await.unwrap_or_else(|e| format!("Error: {e}"));
+            (r, true)
+        }
+
+        "web_search" => {
+            let query = args.get("query").and_then(|q| q.as_str()).unwrap_or("").to_string();
+            let r = web_search_ddg(&query).await;
+            (r, true)
+        }
+
+        "search_nexus" => {
+            let query = args.get("query").and_then(|q| q.as_str()).unwrap_or("").to_string();
+            // Map LLM-friendly sort names to NexusMods GraphQL field names
+            let sort = args.get("sort_by").and_then(|s| s.as_str()).map(|s| {
+                match s {
+                    "total_downloads" | "downloads" => "downloads",
+                    "latest_updated" | "updated" => "updatedAt",
+                    "endorsements" | "endorsement_count" => "endorsements",
+                    other => other,
+                }.to_string()
+            });
+            let include_adult = args.get("include_adult").and_then(|v| v.as_bool()).unwrap_or(false);
+            let game_slug = nexus_game_slug(&gid);
+            let r = match search_nexus_mods_cmd(
+                game_slug, Some(query), sort, None, 10, 0,
+                include_adult, None, None, None, None, None,
+            ).await {
+                Ok(result) => {
+                    // Build structured data for rich mod cards
+                    let cards: Vec<serde_json::Value> = result.mods.iter().map(|m| {
+                        serde_json::json!({
+                            "mod_id": m.mod_id,
+                            "name": m.name,
+                            "summary": m.summary,
+                            "author": m.author,
+                            "picture_url": m.picture_url,
+                            "unique_downloads": m.unique_downloads,
+                            "endorsements": m.endorsement_count,
+                        })
+                    }).collect();
+                    if !cards.is_empty() {
+                        structured_data = Some(serde_json::json!(cards));
+                    }
+                    let lines: Vec<String> = result.mods.iter()
+                        .map(|m| format!("[{}] {} — {} downloads — {}", m.mod_id, m.name,
+                            m.unique_downloads,
+                            m.summary.chars().take(80).collect::<String>()))
+                        .collect();
+                    if lines.is_empty() {
+                        "No mods found matching that search.".into()
+                    } else {
+                        format!("{} results:\n{}", lines.len(), lines.join("\n"))
+                    }
+                }
+                Err(e) => format!("Search error: {e}"),
+            };
+            (r, true)
+        }
+
+        "get_nexus_mod_detail" => {
+            let mod_id = args.get("mod_id").and_then(|v| v.as_i64()).unwrap_or(0);
+            let game_slug = nexus_game_slug(&gid);
+            let r = match get_nexus_mod_detail(game_slug, mod_id).await {
+                Ok(info) => format!(
+                    "Name: {}\nAuthor: {}\nVersion: {}\nDownloads: {}\nEndorsements: {}\nSummary: {}\nDescription: {}",
+                    info.name,
+                    info.author,
+                    info.version,
+                    info.unique_downloads,
+                    info.endorsement_count,
+                    info.summary,
+                    info.description.as_deref().unwrap_or("").chars().take(500).collect::<String>(),
+                ),
+                Err(e) => format!("Error: {e}"),
+            };
+            (r, true)
+        }
+
+        "get_nexus_mod_files" => {
+            let mod_id = args.get("mod_id").and_then(|v| v.as_i64()).unwrap_or(0);
+            let game_slug = nexus_game_slug(&gid);
+            let r = match get_nexus_mod_files(game_slug, mod_id).await {
+                Ok(files) => {
+                    let lines: Vec<String> = files.iter()
+                        .map(|f| format!("[{}] {} ({} KB)", f.file_id, f.name, f.size_kb))
+                        .collect();
+                    format!("{} files:\n{}", lines.len(), lines.join("\n"))
+                }
+                Err(e) => format!("Error: {e}"),
+            };
+            (r, true)
+        }
+
+        "check_mod_updates" => {
+            let db2 = state.db.clone();
+            let gid2 = gid.clone();
+            let bn2 = bn.clone();
+            let r = match tokio::task::spawn_blocking(move || {
+                let mods = db2.list_mods_summary(&gid2, &bn2).map_err(|e| e.to_string())?;
+                let nexus_mods: Vec<_> = mods.iter()
+                    .filter_map(|m| m.nexus_mod_id.map(|nid| (m.name.clone(), m.version.clone(), nid)))
+                    .collect();
+                Ok::<_, String>(nexus_mods)
+            }).await {
+                Ok(Ok(nexus_mods)) => {
+                    if nexus_mods.is_empty() {
+                        "No mods with Nexus IDs to check.".into()
+                    } else {
+                        format!("{} mods have Nexus IDs. Use get_nexus_mod_detail to check individual mod versions.", nexus_mods.len())
+                    }
+                }
+                Ok(Err(e)) => format!("Error: {e}"),
+                Err(e) => format!("Error: {e}"),
+            };
+            (r, true)
+        }
+
+        "get_mod_recommendations" => {
+            let mod_name = args.get("mod_name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+            let r = tokio::task::spawn_blocking({
+                let db2 = db.clone();
+                let gid2 = gid.clone();
+                let bn2 = bn.clone();
+                move || {
+                    let mods = db2.list_mods_summary(&gid2, &bn2).unwrap_or_default();
+                    match find_mod_by_name(&mods, &mod_name) {
+                        Some(m) => {
+                            match get_mod_recommendations_sync(&db2, &gid2, &bn2, m.id) {
+                                Ok(recs) => {
+                                    if recs.is_empty() {
+                                        format!("No recommendations found for \"{}\"", m.name)
+                                    } else {
+                                        let lines: Vec<String> = recs.iter().take(10)
+                                            .map(|r| format!("{} (score: {})", r.0, r.1))
+                                            .collect();
+                                        format!("Recommended with \"{}\":\n{}", m.name, lines.join("\n"))
+                                    }
+                                }
+                                Err(e) => format!("Error: {e}"),
+                            }
+                        }
+                        None => format!("Mod \"{}\" not found", mod_name),
+                    }
+                }
+            }).await.unwrap_or_else(|e| format!("Error: {e}"));
+            (r, true)
+        }
+
+        "get_popular_companion_mods" => {
+            let r = tokio::task::spawn_blocking(move || {
+                match mod_recommendations::get_popular_mods(&db, &gid, &bn) {
+                    Ok(popular) => {
+                        let lines: Vec<String> = popular.iter().take(15)
+                            .map(|(name, _nexus_id, count)| format!("{} (installed by {} users)", name, count))
+                            .collect();
+                        if lines.is_empty() { "No popularity data available.".into() }
+                        else { format!("Popular mods:\n{}", lines.join("\n")) }
+                    }
+                    Err(e) => format!("Error: {e}"),
+                }
+            }).await.unwrap_or_else(|e| format!("Error: {e}"));
+            (r, true)
+        }
+
+        // ── Advanced: install, sort, crash analysis, profiles ─────────
+        "download_and_install_mod" => {
+            let mod_id = args.get("mod_id").and_then(|v| v.as_i64()).unwrap_or(0);
+            let file_id = args.get("file_id").and_then(|v| v.as_i64()).unwrap_or(0);
+            (format!("To install mod {} (file {}), please use the Downloads tab in the UI. I can help you find the right mod and file ID using search_nexus and get_nexus_mod_files.", mod_id, file_id), true)
+        }
+
+        "sort_load_order" => {
+            let r = match sort_plugins_loot(gid.clone(), bn.clone()).await {
+                Ok(result) => {
+                    format!("Load order sorted. {} plugins reordered, {} warnings.",
+                        result.plugins_moved, result.warnings.len())
+                }
+                Err(e) => format!("Sort failed: {e}"),
+            };
+            (r, true)
+        }
+
+        "get_crash_logs" => {
+            let r = match find_crash_logs_cmd(gid.clone(), bn.clone()).await {
+                Ok(logs) => {
+                    if logs.is_empty() {
+                        "No crash logs found.".into()
+                    } else {
+                        let lines: Vec<String> = logs.iter().take(5)
+                            .map(|l| format!("{}: {} — {}", l.timestamp, l.filename, l.summary))
+                            .collect();
+                        format!("{} crash logs found:\n{}", logs.len(), lines.join("\n"))
+                    }
+                }
+                Err(e) => format!("Error: {e}"),
+            };
+            (r, true)
+        }
+
+        "analyze_crash_log" => {
+            let log_path = args.get("log_path").and_then(|p| p.as_str()).unwrap_or("").to_string();
+            let r = match analyze_crash_log_cmd(log_path).await {
+                Ok(report) => {
+                    let diagnoses: Vec<String> = report.diagnosis.iter()
+                        .map(|d| format!("  - {}: {}", d.title, d.description))
+                        .collect();
+                    format!(
+                        "Crash Analysis:\nModule: {}\nPlugins involved: {}\nDiagnosis:\n{}",
+                        report.module_name,
+                        if report.involved_plugins.is_empty() { "none".into() } else { report.involved_plugins.join(", ") },
+                        if diagnoses.is_empty() { "  No specific diagnosis.".into() } else { diagnoses.join("\n") },
+                    )
+                }
+                Err(e) => format!("Analysis failed: {e}"),
+            };
+            (r, true)
+        }
+
+        "list_profiles" => {
+            let db2 = state.db.clone();
+            let gid2 = gid.clone();
+            let bn2 = bn.clone();
+            let r = tokio::task::spawn_blocking(move || {
+                match profiles::list_profiles(&db2, &gid2, &bn2) {
+                    Ok(profs) => {
+                        let lines: Vec<String> = profs.iter()
+                            .map(|p| format!("{}{}", p.name, if p.is_active { " (active)" } else { "" }))
+                            .collect();
+                        if lines.is_empty() { "No profiles created.".into() }
+                        else { format!("{} profiles:\n{}", lines.len(), lines.join("\n")) }
+                    }
+                    Err(e) => format!("Error: {e}"),
+                }
+            }).await.unwrap_or_else(|e| format!("Error: {e}"));
+            (r, true)
+        }
+
+        "activate_profile" => {
+            let profile_name = args.get("profile_name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+            let db2 = state.db.clone();
+            let gid2 = gid.clone();
+            let bn2 = bn.clone();
+            let r = tokio::task::spawn_blocking(move || {
+                let profs = profiles::list_profiles(&db2, &gid2, &bn2).map_err(|e| e.to_string())?;
+                let lower = profile_name.to_lowercase();
+                match profs.iter().find(|p| p.name.to_lowercase() == lower) {
+                    Some(p) => {
+                        profiles::set_active_profile(&db2, &gid2, &bn2, p.id).map_err(|e| e.to_string())?;
+                        Ok(format!("Activated profile \"{}\"", p.name))
+                    }
+                    None => Ok(format!("Profile \"{}\" not found", profile_name)),
+                }
+            }).await.unwrap_or_else(|e| Ok(format!("Error: {e}"))).unwrap_or_else(|e: String| format!("Error: {e}"));
+            (r, true)
+        }
+
+        "run_preflight_check" => {
+            let db2 = state.db.clone();
+            let gid2 = gid.clone();
+            let bn2 = bn.clone();
+            let r = tokio::task::spawn_blocking(move || {
+                let (bottle, _, data_dir) = resolve_game(&gid2, &bn2)?;
+                let result = preflight::run_preflight(&db2, &bottle, &gid2, &bn2, &data_dir);
+                let mut lines = Vec::new();
+                lines.push(format!("{} passed, {} failed, {} warnings",
+                    result.passed, result.failed, result.warnings));
+                if result.can_proceed {
+                    lines.push("Can proceed with launch.".into());
+                } else {
+                    lines.push("Issues must be resolved before launch.".into());
+                }
+                for check in &result.checks {
+                    lines.push(format!("  [{:?}] {}: {}", check.status, check.name, check.message));
+                }
+                Ok::<String, String>(lines.join("\n"))
+            }).await.unwrap_or_else(|e| Ok(format!("Error: {e}"))).unwrap_or_else(|e| format!("Error: {e}"));
+            (r, true)
+        }
+
+        "check_dependency_issues" => {
+            let db2 = state.db.clone();
+            let gid2 = gid.clone();
+            let bn2 = bn.clone();
+            let r = tokio::task::spawn_blocking(move || {
+                match mod_dependencies::check_dependency_issues(&db2, &gid2, &bn2) {
+                    Ok(issues) => {
+                        if issues.is_empty() {
+                            "No dependency issues found.".into()
+                        } else {
+                            let lines: Vec<String> = issues.iter().take(15)
+                                .map(|i| format!("{}: {}", i.mod_name, i.message))
+                                .collect();
+                            format!("{} issues:\n{}", issues.len(), lines.join("\n"))
+                        }
+                    }
+                    Err(e) => format!("Error: {e}"),
+                }
+            }).await.unwrap_or_else(|e| format!("Error: {e}"));
+            (r, true)
+        }
+
+        "redeploy_mods" => {
+            let db2 = state.db.clone();
+            let gid2 = gid.clone();
+            let bn2 = bn.clone();
+            let r = tokio::task::spawn_blocking(move || {
+                let (_bottle, game, data_dir) = resolve_game(&gid2, &bn2)?;
+                let game_path = game.game_path.clone();
+                match deployer::redeploy_all(&db2, &gid2, &bn2, &data_dir, &game_path) {
+                    Ok(result) => Ok(format!("Redeployment complete: {} files deployed, {} skipped",
+                        result.deployed_count, result.skipped_count)),
+                    Err(e) => Err(format!("Redeploy failed: {e}")),
+                }
+            }).await.unwrap_or_else(|e| Ok(format!("Error: {e}"))).unwrap_or_else(|e| e);
+            (r, true)
+        }
+
+        _ => (format!("Unknown tool: {name}"), false),
+    };
+
+    let display_name = tool_result_display_name(name, &result);
+    llm_chat::ToolResult {
+        tool_name: name.into(),
+        result,
+        success,
+        display_name,
+        structured_data,
+    }
+}
+
+/// Map game_id to NexusMods game slug.
+fn nexus_game_slug(game_id: &str) -> String {
+    match game_id {
+        "skyrimse" | "skyrimspecialedition" => "skyrimspecialedition".into(),
+        "skyrim" => "skyrim".into(),
+        "fallout4" => "fallout4".into(),
+        "starfield" => "starfield".into(),
+        "oblivion" => "oblivion".into(),
+        "morrowind" => "morrowind".into(),
+        other => other.to_string(),
+    }
+}
+
+/// Sync wrapper for mod recommendations (used from spawn_blocking).
+fn get_mod_recommendations_sync(
+    db: &std::sync::Arc<database::ModDatabase>,
+    game_id: &str,
+    bottle_name: &str,
+    _mod_id: i64,
+) -> Result<Vec<(String, i64, usize)>, String> {
+    mod_recommendations::get_popular_mods(db, game_id, bottle_name)
 }
 
 // --- Wine Diagnostic Commands ---
 
 #[tauri::command]
-fn run_wine_diagnostics(
+async fn run_wine_diagnostics(
     game_id: String,
     bottle_name: String,
 ) -> Result<wine_diagnostic::DiagnosticResult, String> {
-    let bottle = resolve_bottle(&bottle_name)?;
-    Ok(wine_diagnostic::run_diagnostics(&bottle, &game_id))
+    tokio::task::spawn_blocking(move || {
+        let bottle = resolve_bottle(&bottle_name)?;
+        Ok(wine_diagnostic::run_diagnostics(&bottle, &game_id))
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn fix_wine_appdata(bottle_name: String) -> Result<(), String> {
-    let bottle = resolve_bottle(&bottle_name)?;
-    wine_diagnostic::fix_appdata(&bottle).map_err(|e| e.to_string())
+async fn fix_wine_appdata(bottle_name: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let bottle = resolve_bottle(&bottle_name)?;
+        wine_diagnostic::fix_appdata(&bottle).map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn fix_wine_dll_override(
+async fn fix_wine_dll_override(
     bottle_name: String,
     dll_name: String,
     override_type: String,
 ) -> Result<(), String> {
-    let bottle = resolve_bottle(&bottle_name)?;
-    wine_diagnostic::fix_dll_override(&bottle, &dll_name, &override_type).map_err(|e| e.to_string())
+    tokio::task::spawn_blocking(move || {
+        let bottle = resolve_bottle(&bottle_name)?;
+        wine_diagnostic::fix_dll_override(&bottle, &dll_name, &override_type).map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn fix_wine_retina_mode(bottle_name: String) -> Result<(), String> {
-    let bottle = resolve_bottle(&bottle_name)?;
-    wine_diagnostic::fix_retina_mode(&bottle).map_err(|e| e.to_string())
+async fn fix_wine_retina_mode(bottle_name: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let bottle = resolve_bottle(&bottle_name)?;
+        wine_diagnostic::fix_retina_mode(&bottle).map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 // --- Pre-flight Commands ---
 
 #[tauri::command]
-fn run_preflight_check(
+async fn run_preflight_check(
     game_id: String,
     bottle_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<preflight::PreflightResult, String> {
     let (bottle, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
-    let db = &state.db;
-    Ok(preflight::run_preflight(
-        db,
-        &bottle,
-        &game_id,
-        &bottle_name,
-        &data_dir,
-    ))
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        Ok(preflight::run_preflight(&db, &bottle, &game_id, &bottle_name, &data_dir))
+    })
+    .await
+    .map_err(|e| format!("Preflight task failed: {e}"))?
 }
 
 // --- Mod Dependency Commands ---
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
-fn add_mod_dependency(
+async fn add_mod_dependency(
     game_id: String,
     bottle_name: String,
     mod_id: i64,
@@ -5361,179 +7169,237 @@ fn add_mod_dependency(
     nexus_dep_id: Option<i64>,
     dep_name: String,
     relationship: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<i64, String> {
-    mod_dependencies::add_dependency(
-        &state.db,
-        &game_id,
-        &bottle_name,
-        mod_id,
-        depends_on_id,
-        nexus_dep_id,
-        &dep_name,
-        &relationship,
-    )
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        mod_dependencies::add_dependency(
+            &db,
+            &game_id,
+            &bottle_name,
+            mod_id,
+            depends_on_id,
+            nexus_dep_id,
+            &dep_name,
+            &relationship,
+        )
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn remove_mod_dependency(dep_id: i64, state: State<AppState>) -> Result<(), String> {
-    mod_dependencies::remove_dependency(&state.db, dep_id)
+async fn remove_mod_dependency(dep_id: i64, state: State<'_, AppState>) -> Result<(), String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        mod_dependencies::remove_dependency(&db, dep_id)
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn get_mod_dependencies(
+async fn get_mod_dependencies(
     mod_id: i64,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<mod_dependencies::ModDependency>, String> {
-    mod_dependencies::get_dependencies(&state.db, mod_id)
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        mod_dependencies::get_dependencies(&db, mod_id)
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn get_mod_dependents(
+async fn get_mod_dependents(
     mod_id: i64,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<mod_dependencies::ModDependency>, String> {
-    mod_dependencies::get_dependents(&state.db, mod_id)
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        mod_dependencies::get_dependents(&db, mod_id)
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn check_dependency_issues(
+async fn check_dependency_issues(
     game_id: String,
     bottle_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<mod_dependencies::DependencyIssue>, String> {
-    mod_dependencies::check_dependency_issues(&state.db, &game_id, &bottle_name)
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        mod_dependencies::check_dependency_issues(&db, &game_id, &bottle_name)
+    })
+    .await
+    .map_err(|e| format!("Dependency check task failed: {e}"))?
 }
 
 // --- Mod Recommendation Commands ---
 
 #[tauri::command]
-fn get_mod_recommendations(
+async fn get_mod_recommendations(
     game_id: String,
     bottle_name: String,
     target_mod_id: i64,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<mod_recommendations::RecommendationResult, String> {
-    mod_recommendations::get_recommendations(&state.db, &game_id, &bottle_name, target_mod_id)
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        mod_recommendations::get_recommendations(&db, &game_id, &bottle_name, target_mod_id)
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn get_popular_mods(
+async fn get_popular_mods(
     game_id: String,
     bottle_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<(String, i64, usize)>, String> {
-    mod_recommendations::get_popular_mods(&state.db, &game_id, &bottle_name)
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        mod_recommendations::get_popular_mods(&db, &game_id, &bottle_name)
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 // --- Session Tracker Commands ---
 
 #[tauri::command]
-fn start_game_session(
+async fn start_game_session(
     game_id: String,
     bottle_name: String,
     profile_name: Option<String>,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<i64, String> {
-    session_tracker::start_session(&state.db, &game_id, &bottle_name, profile_name.as_deref())
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        session_tracker::start_session(&db, &game_id, &bottle_name, profile_name.as_deref())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn end_game_session(
+async fn end_game_session(
     session_id: i64,
     clean_exit: bool,
     crash_log_path: Option<String>,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<(), String> {
-    session_tracker::end_session(&state.db, session_id, clean_exit, crash_log_path.as_deref())
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        session_tracker::end_session(&db, session_id, clean_exit, crash_log_path.as_deref())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn record_session_mod_change(
+async fn record_session_mod_change(
     session_id: i64,
     mod_id: Option<i64>,
     mod_name: String,
     change_type: String,
     detail: Option<String>,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<i64, String> {
-    session_tracker::record_mod_change(
-        &state.db,
-        session_id,
-        mod_id,
-        &mod_name,
-        &change_type,
-        detail.as_deref(),
-    )
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        session_tracker::record_mod_change(
+            &db,
+            session_id,
+            mod_id,
+            &mod_name,
+            &change_type,
+            detail.as_deref(),
+        )
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn get_session_history(
+async fn get_session_history(
     game_id: String,
     bottle_name: String,
     limit: Option<usize>,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<session_tracker::GameSession>, String> {
-    session_tracker::get_session_history(&state.db, &game_id, &bottle_name, limit.unwrap_or(20))
+    let db = state.db.clone();
+    let lim = limit.unwrap_or(20);
+    tokio::task::spawn_blocking(move || {
+        session_tracker::get_session_history(&db, &game_id, &bottle_name, lim)
+    })
+    .await
+    .map_err(|e| format!("Session history task failed: {e}"))?
 }
 
 #[tauri::command]
-fn get_stability_summary(
+async fn get_stability_summary(
     game_id: String,
     bottle_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<session_tracker::StabilitySummary, String> {
-    session_tracker::get_stability_summary(&state.db, &game_id, &bottle_name)
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        session_tracker::get_stability_summary(&db, &game_id, &bottle_name)
+    })
+    .await
+    .map_err(|e| format!("Stability summary task failed: {e}"))?
 }
 
 // --- FOMOD Recipe Commands ---
 
 #[tauri::command]
-fn save_fomod_recipe(
+async fn save_fomod_recipe(
     mod_id: i64,
     mod_name: String,
     installer_hash: Option<String>,
     selections: std::collections::HashMap<String, Vec<String>>,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<i64, String> {
-    fomod_recipes::save_recipe(
-        &state.db,
-        mod_id,
-        &mod_name,
-        installer_hash.as_deref(),
-        &selections,
-    )
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        fomod_recipes::save_recipe(
+            &db,
+            mod_id,
+            &mod_name,
+            installer_hash.as_deref(),
+            &selections,
+        )
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn get_fomod_recipe(
+async fn get_fomod_recipe(
     mod_id: i64,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Option<fomod_recipes::FomodRecipe>, String> {
-    fomod_recipes::get_recipe(&state.db, mod_id)
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        fomod_recipes::get_recipe(&db, mod_id)
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn list_fomod_recipes(
+async fn list_fomod_recipes(
     game_id: String,
     bottle_name: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<fomod_recipes::FomodRecipe>, String> {
-    fomod_recipes::list_recipes(&state.db, &game_id, &bottle_name)
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        fomod_recipes::list_recipes(&db, &game_id, &bottle_name)
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn delete_fomod_recipe(mod_id: i64, state: State<AppState>) -> Result<(), String> {
-    fomod_recipes::delete_recipe(&state.db, mod_id)
+async fn delete_fomod_recipe(mod_id: i64, state: State<'_, AppState>) -> Result<(), String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        fomod_recipes::delete_recipe(&db, mod_id)
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn has_compatible_fomod_recipe(
+async fn has_compatible_fomod_recipe(
     mod_id: i64,
     current_hash: Option<String>,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<bool, String> {
-    fomod_recipes::has_compatible_recipe(&state.db, mod_id, current_hash.as_deref())
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        fomod_recipes::has_compatible_recipe(&db, mod_id, current_hash.as_deref())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 // --- Browser WebView Management ---
@@ -5823,38 +7689,47 @@ async fn download_and_install_nexus_mod(
 // --- Download Cache Check ---
 
 #[tauri::command]
-fn check_cached_files(
+async fn check_cached_files(
     mod_file_pairs: Vec<(i64, i64)>,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<(i64, i64)>, String> {
-    state
-        .db
-        .batch_check_cached_files(&mod_file_pairs)
-        .map_err(|e| e.to_string())
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        db.batch_check_cached_files(&mod_file_pairs)
+            .map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 // --- Steam Integration ---
 
 #[tauri::command]
-fn detect_steam() -> Option<steam_integration::SteamInfo> {
-    steam_integration::detect_steam_installation()
+async fn detect_steam() -> Option<steam_integration::SteamInfo> {
+    tokio::task::spawn_blocking(move || {
+        steam_integration::detect_steam_installation()
+    }).await.ok().flatten()
 }
 
 #[tauri::command]
-fn check_steam_status() -> steam_integration::SteamStatus {
-    steam_integration::get_steam_status()
+async fn check_steam_status() -> Result<steam_integration::SteamStatus, String> {
+    tokio::task::spawn_blocking(move || {
+        steam_integration::get_steam_status()
+    }).await.map_err(|e| format!("Task failed: {e}"))
 }
 
 #[tauri::command]
-fn add_to_steam() -> Result<steam_integration::SteamStatus, String> {
-    steam_integration::setup_steam_integration().map_err(|e| e.to_string())
+async fn add_to_steam() -> Result<steam_integration::SteamStatus, String> {
+    tokio::task::spawn_blocking(move || {
+        steam_integration::setup_steam_integration().map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-fn remove_from_steam() -> Result<(), String> {
-    let info = steam_integration::detect_steam_installation()
-        .ok_or_else(|| "Steam not found".to_string())?;
-    steam_integration::remove_from_steam(&info).map_err(|e| e.to_string())
+async fn remove_from_steam() -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let info = steam_integration::detect_steam_installation()
+            .ok_or_else(|| "Steam not found".to_string())?;
+        steam_integration::remove_from_steam(&info).map_err(|e| e.to_string())
+    }).await.map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -5863,8 +7738,10 @@ fn is_steam_deck() -> bool {
 }
 
 #[tauri::command]
-fn steam_deck_warnings() -> Vec<String> {
-    steam_integration::steam_deck_warnings()
+async fn steam_deck_warnings() -> Result<Vec<String>, String> {
+    tokio::task::spawn_blocking(move || {
+        steam_integration::steam_deck_warnings()
+    }).await.map_err(|e| format!("Task failed: {e}"))
 }
 
 // --- Startup Cleanup ---
@@ -6710,6 +8587,7 @@ pub fn run() {
                 wj_cancel_tokens: std::sync::Mutex::new(std::collections::HashMap::new()),
                 fomod_cache: Arc::new(fomod::new_fomod_cache()),
                 loot_masterlist_checked: Arc::new(AtomicBool::new(false)),
+                chat_session: llm_chat::create_shared_session(),
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -6721,6 +8599,8 @@ pub fn run() {
             get_bottle_setting_defs,
             set_bottle_setting,
             get_installed_mods,
+            get_installed_mods_summary,
+            get_mod_detail,
             install_mod_cmd,
             uninstall_mod,
             toggle_mod,
@@ -6977,8 +8857,41 @@ pub fn run() {
             remove_from_steam,
             is_steam_deck,
             steam_deck_warnings,
+            // Instruction parsing (LLM)
+            parse_instructions_cmd,
+            parse_instructions_llm_cmd,
+            parse_instructions_cloud_cmd,
+            validate_instruction_actions_cmd,
+            check_ollama_status_cmd,
+            get_recommended_models,
+            get_cloud_providers,
+            pull_ollama_model_cmd,
+            delete_ollama_model_cmd,
+            unload_ollama_model_cmd,
+            get_system_memory,
+            install_ollama,
+            start_ollama,
+            check_mlx_status,
+            install_mlx,
+            get_recommended_model,
+            chat_get_state,
+            chat_get_starters,
+            chat_load_model,
+            chat_unload_model,
+            get_cached_mlx_models,
+            delete_model,
+            chat_send_message,
+            chat_clear_history,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|_app_handle, _event| {});
+        .run(|_app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                // Kill MLX LM server on app exit to free memory
+                let _ = std::process::Command::new("pkill")
+                    .args(["-f", "mlx_lm.server"])
+                    .output();
+                log::info!("App exiting — killed MLX LM server if running");
+            }
+        });
 }

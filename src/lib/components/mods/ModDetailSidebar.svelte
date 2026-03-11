@@ -53,7 +53,7 @@
       </div>
       <div class="detail-row">
         <span class="detail-label">Files</span>
-        <span class="detail-value">{mod.installed_files.length}</span>
+        <span class="detail-value">{mod.file_count}</span>
       </div>
       <div class="detail-row">
         <span class="detail-label">Priority</span>

@@ -89,6 +89,9 @@ libc = "0.2"
 # LRU cache (FOMOD parsing)
 lru = "0.12"
 
+# Regex (instruction parser)
+regex = "1"
+
 # Wabbajack install pipeline
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 base64 = "0.22"

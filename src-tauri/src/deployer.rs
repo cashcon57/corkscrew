@@ -235,6 +235,7 @@ fn deploy_mod_inner(
     let deployed_count = AtomicUsize::new(0);
     let skipped_count = AtomicUsize::new(0);
     let missing_count = AtomicUsize::new(0);
+    let junk_count = AtomicUsize::new(0);
     let fallback_used = AtomicBool::new(false);
     let staging_str = staging_path.to_string_lossy().to_string();
 
@@ -252,6 +253,7 @@ fn deploy_mod_inner(
             // Defense-in-depth: skip packaging junk (fomod/, meta.ini, etc.)
             if crate::installer::is_deploy_junk(std::path::Path::new(rel_path)) {
                 debug!("Deploy: skipping junk file: {}", rel_path);
+                junk_count.fetch_add(1, Ordering::Relaxed);
                 return None;
             }
 
@@ -406,25 +408,25 @@ fn deploy_mod_inner(
         mod_id, final_deployed, final_skipped, final_missing, final_fallback
     );
 
-    // If we expected to deploy files but none succeeded, something is wrong
-    if final_deployed == 0 && !files.is_empty() {
+    let final_junk = junk_count.load(Ordering::Relaxed);
+
+    // If we expected to deploy files but none succeeded, warn but don't error.
+    // This can happen legitimately: FOMOD reconfiguration, stale staging, or
+    // mods consisting entirely of metadata files (meta.ini, fomod/, etc.).
+    let deployable = files.len().saturating_sub(final_junk);
+    if final_deployed == 0 && deployable > 0 {
         warn!(
-            "Deploy mod {}: 0 of {} files deployed! staging_path={}, data_dir={}, exists=({}, {})",
+            "Deploy mod {}: 0 of {} deployable files deployed (junk={}, missing={}) \
+             staging_path={}, data_dir={}, exists=({}, {})",
             mod_id,
-            files.len(),
+            deployable,
+            final_junk,
+            final_missing,
             staging_path.display(),
             data_dir.display(),
             staging_path.exists(),
             data_dir.exists(),
         );
-        return Err(DeployerError::Other(format!(
-            "0 of {} files deployed — staging may be missing or paths may not match \
-             (staging exists: {}, data_dir exists: {}, missing: {})",
-            files.len(),
-            staging_path.exists(),
-            data_dir.exists(),
-            final_missing,
-        )));
     }
 
     Ok(DeployResult {

@@ -275,8 +275,8 @@ html, body {
 /* --- Scrollbars (thin, overlay, Apple-style) --- */
 
 ::-webkit-scrollbar {
-  width: 7px;
-  height: 7px;
+  width: 12px;
+  height: 12px;
 }
 
 ::-webkit-scrollbar-track {
