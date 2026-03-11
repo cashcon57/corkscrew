@@ -113,10 +113,29 @@ jobs:
       - name: Collect artifacts
         run: |
           mkdir -p flat-artifacts
+          VERSION=$(jq -r .version src-tauri/tauri.conf.json)
           BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle"
-          cp "$BUNDLE_DIR/macos/"*.app.tar.gz flat-artifacts/Corkscrew_${{ matrix.arch }}.app.tar.gz 2>/dev/null || true
-          cp "$BUNDLE_DIR/macos/"*.app.tar.gz.sig flat-artifacts/Corkscrew_${{ matrix.arch }}.app.tar.gz.sig 2>/dev/null || true
-          cp "$BUNDLE_DIR/dmg/"*.dmg flat-artifacts/ 2>/dev/null || true
+
+          # Map arch to friendly name
+          if [ "${{ matrix.arch }}" = "aarch64" ]; then
+            FRIENDLY="Apple-Silicon"
+          else
+            FRIENDLY="Intel"
+          fi
+
+          # Updater bundles (.app.tar.gz + sig)
+          for f in "$BUNDLE_DIR/macos/"*.app.tar.gz; do
+            [ -f "$f" ] && cp "$f" "flat-artifacts/Corkscrew-${VERSION}-macOS-${FRIENDLY}.app.tar.gz"
+          done
+          for f in "$BUNDLE_DIR/macos/"*.app.tar.gz.sig; do
+            [ -f "$f" ] && cp "$f" "flat-artifacts/Corkscrew-${VERSION}-macOS-${FRIENDLY}.app.tar.gz.sig"
+          done
+
+          # DMG installer
+          for f in "$BUNDLE_DIR/dmg/"*.dmg; do
+            [ -f "$f" ] && cp "$f" "flat-artifacts/Corkscrew-${VERSION}-macOS-${FRIENDLY}.dmg"
+          done
+
           echo "Collected artifacts:"
           ls -lh flat-artifacts/
 
@@ -156,21 +175,8 @@ jobs:
           done
           cd -
 
-      - name: Rename macOS DMGs to friendly names
-        run: |
-          VERSION=$(jq -r .version src-tauri/tauri.conf.json)
-          for dir in artifacts/macos-*; do
-            [ -d "$dir" ] || continue
-            for f in "$dir"/*.dmg; do
-              [ -f "$f" ] || continue
-              arch=$(basename "$dir" | sed 's/macos-\(.*\)-apple-darwin/\1/')
-              if [ "$arch" = "aarch64" ]; then
-                mv "$f" "$dir/Corkscrew-${VERSION}-macOS-Apple-Silicon.dmg"
-              elif [ "$arch" = "x86_64" ]; then
-                mv "$f" "$dir/Corkscrew-${VERSION}-macOS-Intel.dmg"
-              fi
-            done
-          done
+      - name: List all downloaded artifacts
+        run: find artifacts/ -type f | sort
 
       - name: Build latest.json for updater (all platforms)
         env:

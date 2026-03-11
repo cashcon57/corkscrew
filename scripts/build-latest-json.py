@@ -6,11 +6,11 @@ Usage: python3 scripts/build-latest-json.py artifacts/ > latest.json
 All platforms built in CI. Expects artifact directories with this layout:
   artifacts/
     macos-aarch64-apple-darwin/
-      Corkscrew_aarch64.app.tar.gz
-      Corkscrew_aarch64.app.tar.gz.sig
+      Corkscrew-VERSION-macOS-Apple-Silicon.app.tar.gz + .sig
+      Corkscrew-VERSION-macOS-Apple-Silicon.dmg
     macos-x86_64-apple-darwin/
-      Corkscrew_x86_64.app.tar.gz
-      Corkscrew_x86_64.app.tar.gz.sig
+      Corkscrew-VERSION-macOS-Intel.app.tar.gz + .sig
+      Corkscrew-VERSION-macOS-Intel.dmg
     linux-x86_64-unknown-linux-gnu/
       Corkscrew-VERSION-Linux.AppImage.tar.gz + .sig  (or .AppImage + .sig)
 """
