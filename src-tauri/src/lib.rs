@@ -59,6 +59,9 @@ pub mod wabbajack_directives;
 pub mod wabbajack_downloader;
 pub mod wabbajack_installer;
 pub mod wabbajack_types;
+pub mod wine_compat;
+pub mod app_updates;
+pub mod self_update;
 pub mod wine_diagnostic;
 
 use serde::{Deserialize, Serialize};
@@ -75,7 +78,7 @@ use collections::{
     RevisionModsResult,
 };
 use config::AppConfig;
-use crashlog::{CrashLogEntry, CrashReport};
+use crashlog::{CrashLogEntry, CrashReport, NewCrashInfo};
 use database::{CollectionSummary, DeploymentEntry, FileConflict, InstalledMod, ModDatabase};
 use downgrader::DowngradeStatus;
 use executables::CustomExecutable;
@@ -5148,6 +5151,20 @@ async fn analyze_crash_log_cmd(log_path: String) -> Result<CrashReport, String> 
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
+/// Check for new (unseen) crash logs since the last check.
+#[tauri::command]
+async fn chat_check_new_crashes(
+    game_id: String,
+    bottle_name: String,
+) -> Result<NewCrashInfo, String> {
+    tokio::task::spawn_blocking(move || {
+        let bottle = resolve_bottle(&bottle_name)?;
+        Ok(crashlog::check_new_crashes(&PathBuf::from(&bottle.path), &game_id))
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
 // --- Collections ---
 
 #[tauri::command]
@@ -6320,6 +6337,11 @@ fn get_recommended_model() -> Result<String, String> {
 async fn chat_get_state(state: State<'_, AppState>) -> Result<llm_chat::ChatState, String> {
     let session = state.chat_session.lock().await;
     let ollama_status = llm_parser::check_ollama_status().await;
+    let cloud_provider = if let llm_chat::LlmBackend::Cloud { ref provider, .. } = session.backend {
+        Some(provider.clone())
+    } else {
+        None
+    };
     Ok(llm_chat::ChatState {
         model: session.model.clone(),
         backend: session.backend.clone(),
@@ -6338,6 +6360,7 @@ async fn chat_get_state(state: State<'_, AppState>) -> Result<llm_chat::ChatStat
                 min_memory_bytes: 0,
             })
             .collect(),
+        cloud_provider,
     })
 }
 
@@ -6364,9 +6387,16 @@ async fn chat_load_model(
     bottle_name: String,
     current_page: Option<String>,
     backend: Option<String>,
+    cloud_provider: Option<String>,
+    cloud_api_key: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let backend_enum = match backend.as_deref() {
+        Some("cloud") => {
+            let provider = cloud_provider.ok_or("cloud_provider is required for cloud backend")?;
+            let api_key = cloud_api_key.ok_or("cloud_api_key is required for cloud backend")?;
+            llm_chat::LlmBackend::Cloud { provider, api_key }
+        }
         Some("mlx") => llm_chat::LlmBackend::Mlx,
         _ => llm_chat::LlmBackend::Ollama,
     };
@@ -6375,6 +6405,7 @@ async fn chat_load_model(
     let resolved_model = match &backend_enum {
         llm_chat::LlmBackend::Mlx => llm_chat::mlx_model_name(&model_name),
         llm_chat::LlmBackend::Ollama => model_name.clone(),
+        llm_chat::LlmBackend::Cloud { ref provider, .. } => llm_chat::cloud_model_display(provider),
     };
 
     // Start the MLX server if needed
@@ -6386,19 +6417,42 @@ async fn chat_load_model(
     let mem_bytes = get_system_memory().unwrap_or(16_000_000_000);
     let num_ctx = instruction_types::context_size_for_memory(mem_bytes);
 
-    // Load the model
+    // Load the model (no-op for cloud)
     llm_chat::load_model(&backend_enum, &resolved_model, num_ctx).await?;
 
     let db = state.db.clone();
     let gid = game_id.clone();
     let bn = bottle_name.clone();
-    let mod_count = tokio::task::spawn_blocking(move || {
-        db.list_mods_summary(&gid, &bn)
-            .map(|m| m.len())
-            .unwrap_or(0)
+    let (mod_count, wine_warnings_text) = tokio::task::spawn_blocking(move || {
+        let mods = db.list_mods_summary(&gid, &bn).unwrap_or_default();
+        let mod_count = mods.len();
+
+        // Run Wine compat check on all installed mods
+        let compat_input: Vec<(String, Vec<String>, Option<i64>)> = mods
+            .iter()
+            .filter(|m| m.enabled)
+            .map(|m| {
+                // Extract DLL names from archive name and mod name (lightweight —
+                // we don't load full file lists here to keep it fast).
+                let mut dlls = Vec::new();
+                if m.archive_name.to_lowercase().ends_with(".dll") {
+                    dlls.push(m.archive_name.clone());
+                }
+                // Also use mod name as a matching signal.
+                dlls.push(m.name.clone());
+                (m.name.clone(), dlls, m.nexus_mod_id)
+            })
+            .collect();
+        let warnings = wine_compat::check_all_mods_wine_compat(&compat_input);
+        let warnings_text = if warnings.is_empty() {
+            None
+        } else {
+            Some(wine_compat::format_warnings_report(&warnings))
+        };
+        (mod_count, warnings_text)
     })
     .await
-    .unwrap_or(0);
+    .unwrap_or((0, None));
 
     let game_name = game_display_name(&game_id);
     let page = current_page.as_deref().unwrap_or("Mods");
@@ -6410,14 +6464,37 @@ async fn chat_load_model(
     session.touch();
 
     // Add system message
-    let system =
-        llm_chat::build_chat_system_prompt(game_name, mod_count, "Wine/CrossOver", page, None);
+    let system = llm_chat::build_chat_system_prompt(
+        game_name,
+        mod_count,
+        "Wine/CrossOver",
+        page,
+        None,
+        wine_warnings_text.as_deref(),
+    );
     session.messages.push(llm_chat::ChatMessage {
         role: "system".into(),
         content: system,
         tool_calls: None,
         mentioned_mods: None,
+        timestamp: None,
     });
+
+    // Restore recent chat history from DB
+    {
+        let db = state.db.clone();
+        let gid = game_id.clone();
+        let bn = bottle_name.clone();
+        let history = tokio::task::spawn_blocking(move || {
+            db.load_chat_history(&gid, &bn, 50).unwrap_or_default()
+        })
+        .await
+        .unwrap_or_default();
+        if !history.is_empty() {
+            log::info!("[CHAT] Restored {} messages from history", history.len());
+            session.messages.extend(history);
+        }
+    }
 
     Ok(())
 }
@@ -6526,31 +6603,60 @@ async fn chat_send_message(
                 if system_msg.role == "system"
                     && !system_msg.content.contains(&format!("Page: {page}"))
                 {
-                    // Rebuild system prompt with updated page
+                    // Rebuild system prompt with updated page + wine compat
                     let db = state.db.clone();
                     let gid = game_id.clone();
                     let bn = bottle_name.clone();
-                    let mod_count = db
-                        .list_mods_summary(&gid, &bn)
-                        .map(|m| m.len())
-                        .unwrap_or(0);
+                    let mods_list = db.list_mods_summary(&gid, &bn).unwrap_or_default();
+                    let mod_count = mods_list.len();
+                    let compat_input: Vec<(String, Vec<String>, Option<i64>)> = mods_list
+                        .iter()
+                        .filter(|m| m.enabled)
+                        .map(|m| {
+                            let mut dlls = Vec::new();
+                            if m.archive_name.to_lowercase().ends_with(".dll") {
+                                dlls.push(m.archive_name.clone());
+                            }
+                            dlls.push(m.name.clone());
+                            (m.name.clone(), dlls, m.nexus_mod_id)
+                        })
+                        .collect();
+                    let warnings = wine_compat::check_all_mods_wine_compat(&compat_input);
+                    let warnings_text = if warnings.is_empty() {
+                        None
+                    } else {
+                        Some(wine_compat::format_warnings_report(&warnings))
+                    };
                     system_msg.content = llm_chat::build_chat_system_prompt(
                         game_display_name(&game_id),
                         mod_count,
                         "Wine/CrossOver",
                         page,
                         None,
+                        warnings_text.as_deref(),
                     );
                 }
             }
         }
 
         // Add user message
-        session.messages.push(llm_chat::ChatMessage {
+        let user_msg = llm_chat::ChatMessage {
             role: "user".into(),
             content: message,
             tool_calls: None,
             mentioned_mods: None,
+            timestamp: None,
+        };
+        session.messages.push(user_msg.clone());
+
+        // Persist user message to DB
+        let db = state.db.clone();
+        let gid = game_id.clone();
+        let bn = bottle_name.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Err(e) = db.save_chat_message(&gid, &bn, &user_msg) {
+                log::warn!("[CHAT] Failed to save user message: {e}");
+            }
         });
 
         (model, backend, tier, session.messages.clone())
@@ -6593,7 +6699,7 @@ async fn chat_send_message(
 
     let mut all_tool_results = Vec::new();
     let mut current_response = response;
-    let max_tool_rounds = 3;
+    let max_tool_rounds = 5;
 
     for round in 0..max_tool_rounds {
         // Check if this response has tool calls
@@ -6706,6 +6812,7 @@ async fn chat_send_message(
                     content: tr.result.clone(),
                     tool_calls: None,
                     mentioned_mods: None,
+                    timestamp: None,
                 });
             }
         }
@@ -6761,13 +6868,14 @@ async fn chat_send_message(
             session.messages.push(current_response.clone());
             // If there are pending tool calls, add a synthetic tool result
             if let Some(ref tcs) = current_response.tool_calls {
-                for tc in tcs {
+                for _tc in tcs {
                     session.messages.push(llm_chat::ChatMessage {
                         role: "tool".into(),
                         content: "Tool call limit reached. Please summarize what you found so far."
                             .into(),
                         tool_calls: None,
                         mentioned_mods: None,
+                        timestamp: None,
                     });
                 }
             }
@@ -6824,6 +6932,19 @@ async fn chat_send_message(
         final_msg.mentioned_mods = Some(mentioned);
     }
 
+    // Persist assistant message to DB (only if it has content)
+    if !final_msg.content.trim().is_empty() {
+        let db = state.db.clone();
+        let gid = game_id.clone();
+        let bn = bottle_name.clone();
+        let msg_to_save = final_msg.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Err(e) = db.save_chat_message(&gid, &bn, &msg_to_save) {
+                log::warn!("[CHAT] Failed to save assistant message: {e}");
+            }
+        });
+    }
+
     Ok(llm_chat::ChatResponse {
         message: final_msg,
         tool_results,
@@ -6834,7 +6955,11 @@ async fn chat_send_message(
 
 /// Clear chat history but keep model loaded.
 #[tauri::command]
-async fn chat_clear_history(state: State<'_, AppState>) -> Result<(), String> {
+async fn chat_clear_history(
+    game_id: String,
+    bottle_name: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
     let mut session = state.chat_session.lock().await;
     // Keep system message, clear the rest
     if let Some(system) = session.messages.first().cloned() {
@@ -6843,7 +6968,41 @@ async fn chat_clear_history(state: State<'_, AppState>) -> Result<(), String> {
             session.messages.push(system);
         }
     }
+
+    // Also clear persisted history
+    let db = state.db.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        if let Err(e) = db.clear_chat_history(&game_id, &bottle_name) {
+            log::warn!("[CHAT] Failed to clear DB history: {e}");
+        }
+    });
+
     Ok(())
+}
+
+/// Get persisted chat history for display before model is loaded.
+#[tauri::command]
+async fn chat_get_history(
+    game_id: String,
+    bottle_name: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<llm_chat::ChatMessage>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        db.load_chat_history(&game_id, &bottle_name, 50)
+            .map_err(|e| format!("Failed to load chat history: {e}"))
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))?
+}
+
+/// Validate a cloud API key by making a minimal request.
+#[tauri::command]
+async fn chat_validate_cloud_key(
+    provider: String,
+    api_key: String,
+) -> Result<String, String> {
+    llm_chat::validate_cloud_key(&provider, &api_key).await
 }
 
 /// Get contextual conversation starters based on game state.
@@ -6872,7 +7031,43 @@ async fn chat_get_starters(
         .await
         .unwrap_or((0, 0, 0, false));
 
+    // Check for new crash logs (fast filesystem stat).
+    let crash_gid = game_id.clone();
+    let crash_bn = bottle_name.clone();
+    let crash_info = tokio::task::spawn_blocking(move || {
+        match resolve_bottle(&crash_bn) {
+            Ok(bottle) => {
+                crashlog::check_new_crashes(&PathBuf::from(&bottle.path), &crash_gid)
+            }
+            Err(_) => crashlog::NewCrashInfo {
+                count: 0,
+                entries: vec![],
+            },
+        }
+    })
+    .await
+    .unwrap_or(crashlog::NewCrashInfo {
+        count: 0,
+        entries: vec![],
+    });
+
     let mut starters = Vec::new();
+
+    // Prepend crash starter if new crashes detected.
+    if crash_info.count > 0 {
+        let label = if crash_info.count == 1 {
+            "\u{1F534} New crash detected".to_string()
+        } else {
+            format!("\u{1F534} {} new crashes detected", crash_info.count)
+        };
+        starters.push(llm_chat::ChatStarter {
+            label,
+            prompt:
+                "I just crashed. Can you analyze my latest crash log and tell me what went wrong?"
+                    .into(),
+        });
+    }
+
     let page = current_page.as_deref().unwrap_or("Mods");
 
     if has_conflicts {
@@ -7089,6 +7284,7 @@ fn tool_display_name(tool_name: &str, args: &serde_json::Value) -> String {
         "sort_load_order" => "Sorting load order...".into(),
         "get_crash_logs" => "Checking crash logs...".into(),
         "analyze_crash_log" => "Analyzing crash log...".into(),
+        "check_wine_compatibility" => "Checking Wine mod compatibility...".into(),
         "enable_mod" | "disable_mod" => {
             let n = args
                 .get("mod_name")
@@ -7115,6 +7311,7 @@ fn tool_display_name(tool_name: &str, args: &serde_json::Value) -> String {
             let name = args.get("name").and_then(|n| n.as_str()).unwrap_or("mod");
             format!("Opening {} in Discover...", name)
         }
+        "find_needed_patches" => "Analyzing mod list for needed patches...".into(),
         other => format!("Running {}...", other),
     }
 }
@@ -7142,6 +7339,8 @@ fn tool_result_display_name(tool_name: &str, result: &str) -> String {
         "get_crash_logs" => "Crash logs".into(),
         "analyze_crash_log" => "Crash analysis".into(),
         "enable_mod" | "disable_mod" => result.lines().next().unwrap_or("Done").to_string(),
+        "check_wine_compatibility" => "Wine compatibility check".into(),
+        "find_needed_patches" => "Patch analysis".into(),
         other => format!("{} result", other),
     }
 }
@@ -7331,6 +7530,33 @@ async fn execute_tool(
                     mods.len(),
                     collections.len()
                 )
+            })
+            .await
+            .unwrap_or_else(|e| format!("Error: {e}"));
+            (r, true)
+        }
+
+        "check_wine_compatibility" => {
+            let r = tokio::task::spawn_blocking(move || {
+                let mods = db.list_mods_summary(&gid, &bn).unwrap_or_default();
+                let compat_input: Vec<(String, Vec<String>, Option<i64>)> = mods
+                    .iter()
+                    .filter(|m| m.enabled)
+                    .map(|m| {
+                        let mut dlls = Vec::new();
+                        if m.archive_name.to_lowercase().ends_with(".dll") {
+                            dlls.push(m.archive_name.clone());
+                        }
+                        dlls.push(m.name.clone());
+                        (m.name.clone(), dlls, m.nexus_mod_id)
+                    })
+                    .collect();
+                let warnings = wine_compat::check_all_mods_wine_compat(&compat_input);
+                if warnings.is_empty() {
+                    "No Wine compatibility issues detected. All enabled mods appear compatible.".to_string()
+                } else {
+                    wine_compat::format_warnings_report(&warnings)
+                }
             })
             .await
             .unwrap_or_else(|e| format!("Error: {e}"));
@@ -7832,6 +8058,80 @@ async fn execute_tool(
             .await
             .unwrap_or_else(|e| Ok(format!("Error: {e}")))
             .unwrap_or_else(|e| e);
+            (r, true)
+        }
+
+        "find_needed_patches" => {
+            let r = tokio::task::spawn_blocking(move || {
+                let mods = db.list_mods_summary(&gid, &bn).unwrap_or_default();
+                let enabled: Vec<_> = mods.iter().filter(|m| m.enabled).collect();
+                let total = enabled.len();
+
+                // Group by auto_category
+                let mut groups: std::collections::HashMap<String, Vec<String>> =
+                    std::collections::HashMap::new();
+                for m in &enabled {
+                    let cat = m
+                        .auto_category
+                        .as_deref()
+                        .unwrap_or("uncategorized")
+                        .to_string();
+                    groups.entry(cat).or_default().push(m.name.clone());
+                }
+
+                // Only keep categories with 2+ mods (potential conflicts)
+                let mut conflict_groups: Vec<(String, Vec<String>)> = groups
+                    .into_iter()
+                    .filter(|(cat, members)| {
+                        members.len() >= 2 && cat != "uncategorized"
+                    })
+                    .collect();
+                conflict_groups.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+
+                let mut out = format!(
+                    "Analyzing {} enabled mods for patch needs...\n\n",
+                    total
+                );
+
+                if conflict_groups.is_empty() {
+                    out.push_str(
+                        "No multi-mod category groups found. Mods may still need patches — use your knowledge of Skyrim modding to identify common pairs that need compatibility patches, then search_nexus for them.",
+                    );
+                } else {
+                    out.push_str("Potential conflict groups:\n");
+                    let mut suggestions = Vec::new();
+                    for (cat, members) in &conflict_groups {
+                        out.push_str(&format!(
+                            "- {} ({} mods): {}\n",
+                            cat,
+                            members.len(),
+                            members.join(", ")
+                        ));
+                        // Generate search suggestions for pairs within the group
+                        if members.len() >= 2 {
+                            for i in 0..members.len().min(3) {
+                                for j in (i + 1)..members.len().min(4) {
+                                    suggestions.push(format!(
+                                        "\"{}\" \"{}\" patch",
+                                        members[i], members[j]
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    if !suggestions.is_empty() {
+                        out.push_str("\nSuggested searches:\n");
+                        for s in suggestions.iter().take(8) {
+                            out.push_str(&format!("- {}\n", s));
+                        }
+                    }
+                    out.push_str("\nUse search_nexus to find patches for these combinations, then open_nexus_mod to show them to the user.");
+                }
+
+                out
+            })
+            .await
+            .unwrap_or_else(|e| format!("Error: {e}"));
             (r, true)
         }
 
@@ -10014,8 +10314,14 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_liquid_glass::init());
+        .plugin(tauri_plugin_liquid_glass::init())
+        .setup(|app| {
+            // Register updater plugin in setup per Tauri docs (advanced pattern)
+            app.handle()
+                .plugin(tauri_plugin_updater::Builder::new().build())?;
+            app.manage(app_updates::PendingUpdate(std::sync::Mutex::new(None)));
+            Ok(())
+        });
 
     #[cfg(debug_assertions)]
     {
@@ -10176,6 +10482,7 @@ pub fn run() {
             // Crash Logs
             find_crash_logs_cmd,
             analyze_crash_log_cmd,
+            chat_check_new_crashes,
             // Utility
             fetch_url_text,
             // Collections & Nexus Browse
@@ -10343,12 +10650,20 @@ pub fn run() {
             delete_model,
             chat_send_message,
             chat_clear_history,
+            chat_get_history,
+            chat_validate_cloud_key,
             vortex_fetch_extension,
             vortex_refresh_extension,
             vortex_list_cached_extensions,
             vortex_list_available_extensions,
             vortex_delete_cached_extension,
             vortex_get_extension_detail,
+            // Self-Update (macOS fallback)
+            self_update::get_installed_app_version,
+            self_update::manual_self_update,
+            // App Updates (advanced Rust-side updater per Tauri docs)
+            app_updates::fetch_update,
+            app_updates::install_update,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -1467,20 +1467,22 @@ export interface ChatMessage {
   content: string;
   tool_calls?: ToolCallResponse[];
   mentioned_mods?: MentionedMod[];
+  timestamp?: string;
 }
 
 export interface ToolCallResponse {
   function: { name: string; arguments: Record<string, unknown> };
 }
 
-export type LlmBackend = "ollama" | "mlx";
+export type LlmBackend = "ollama" | "mlx" | "cloud";
 
 export interface ChatState {
   model: string | null;
-  backend: LlmBackend;
+  backend: LlmBackend | { cloud: { provider: string; api_key: string } };
   loaded: boolean;
   messages: ChatMessage[];
   available_models: OllamaModel[];
+  cloud_provider?: string;
 }
 
 export interface ChatResponse {
@@ -1492,6 +1494,16 @@ export interface ToolResult {
   tool_name: string;
   result: string;
   success: boolean;
+}
+
+export interface ChatStarter {
+  label: string;
+  prompt: string;
+}
+
+export interface NewCrashInfo {
+  count: number;
+  entries: { filename: string; timestamp: string; summary: string; severity: string }[];
 }
 
 // Vortex Extensions

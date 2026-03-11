@@ -12,6 +12,10 @@
     chatUnloadModel,
     chatSendMessage,
     chatClearHistory,
+    chatGetHistory,
+    chatGetStarters,
+    chatCheckNewCrashes,
+    chatValidateCloudKey,
     checkOllamaStatus,
     getRecommendedModels,
     pullOllamaModel,
@@ -19,7 +23,7 @@
     installOllama,
     getRecommendedModel,
   } from "$lib/api";
-  import type { ChatMessage, ChatState, OllamaModel, OllamaStatus, ChatResponse, MentionedMod } from "$lib/types";
+  import type { ChatMessage, ChatState, ChatStarter, NewCrashInfo, OllamaModel, OllamaStatus, ChatResponse, MentionedMod } from "$lib/types";
 
   let {
     visible = false,
@@ -47,9 +51,61 @@
   let selectedBackend = $state<LlmBackend>("mlx");
   let installingMlx = $state(false);
   let showModelPicker = $state(false);
+
+  // Cloud backend state
+  let cloudProvider = $state<string>("groq");
+  let cloudApiKey = $state("");
+  let cloudKeyVisible = $state(false);
+  let cloudValidating = $state(false);
+  let cloudKeyValid = $state<boolean | null>(null);
+  let cloudConnecting = $state(false);
+
+  // Cloud provider metadata
+  const cloudProviders = [
+    { id: "groq", name: "Groq", model: "Llama 3.3 70B", free: "Free: 30 req/min, ~500K tokens/day", url: "https://console.groq.com/keys" },
+    { id: "gemini", name: "Google Gemini", model: "Gemini 2.5 Flash", free: "Free: 10 req/min, 250 req/day", url: "https://aistudio.google.com/apikey" },
+    { id: "cerebras", name: "Cerebras", model: "Llama 3.3 70B", free: "Free: 1M tokens/day, 30 req/min", url: "https://cloud.cerebras.ai/" },
+  ];
+
+  // Load saved cloud config from localStorage
+  function loadCloudConfig() {
+    try {
+      const saved = localStorage.getItem("corkscrew_cloud_llm_config");
+      if (saved) {
+        const config = JSON.parse(saved);
+        if (config.provider) cloudProvider = config.provider;
+        if (config.api_key) cloudApiKey = config.api_key;
+        cloudKeyValid = true; // Assume valid if saved
+      }
+    } catch {}
+  }
+
+  function saveCloudConfig() {
+    try {
+      localStorage.setItem("corkscrew_cloud_llm_config", JSON.stringify({
+        provider: cloudProvider,
+        api_key: cloudApiKey,
+      }));
+    } catch {}
+  }
+
+  function clearCloudConfig() {
+    cloudApiKey = "";
+    cloudKeyValid = null;
+    cloudKeyVisible = false;
+    try { localStorage.removeItem("corkscrew_cloud_llm_config"); } catch {}
+  }
   let customModelName = $state("");
   let autoUnloadTimer = $state<ReturnType<typeof setTimeout> | null>(null);
   let messagesDiv: HTMLDivElement | undefined = $state();
+
+  // Conversation starters & crash detection
+  let conversationStarters = $state<ChatStarter[]>([]);
+  let crashBanner = $state<NewCrashInfo | null>(null);
+
+  // Persisted history shown before model is loaded
+  let historyMessages = $state<ChatMessage[]>([]);
+  let historyCount = $state(0);
 
   // Streaming state
   let isStreaming = $state(false);
@@ -243,8 +299,28 @@
   $effect(() => {
     if (visible) {
       loadState();
+      checkForCrashes();
     }
   });
+
+  async function checkForCrashes() {
+    const game = $selectedGame;
+    if (!game) return;
+    try {
+      const [crashes, starters] = await Promise.all([
+        chatCheckNewCrashes(game.game_id, game.bottle_name),
+        chatGetStarters(game.game_id, game.bottle_name, currentPageName),
+      ]);
+      conversationStarters = starters;
+      if (crashes.count > 0) {
+        crashBanner = crashes;
+      } else {
+        crashBanner = null;
+      }
+    } catch {
+      // Non-critical — don't block chat
+    }
+  }
 
   // Auto-scroll on new messages
   $effect(() => {
@@ -274,8 +350,30 @@
       mlxAvailable = hasMlx;
       cachedMlxModels = mlxCached;
       // Restore backend from active session, otherwise keep default (mlx)
-      if (state.loaded) selectedBackend = state.backend;
-      if (!state.loaded) showModelPicker = true;
+      if (state.loaded) {
+        if (state.cloud_provider) {
+          selectedBackend = "cloud";
+        } else if (typeof state.backend === "string") {
+          selectedBackend = state.backend as LlmBackend;
+        }
+      }
+      if (!state.loaded) {
+        showModelPicker = true;
+        // Load persisted history for read-only display
+        const game = $selectedGame;
+        if (game) {
+          try {
+            const history = await chatGetHistory(game.game_id, game.bottle_name);
+            historyMessages = history;
+            historyCount = history.length;
+          } catch { /* non-critical */ }
+        }
+      } else {
+        // Model loaded — history already restored by backend
+        historyMessages = [];
+        historyCount = 0;
+      }
+      loadCloudConfig();
     } catch (e) {
       showError(`${e}`);
     }
@@ -297,7 +395,11 @@
     loading = true;
     loadingModelName = modelName;
     try {
-      await chatLoadModel(modelName, game.game_id, game.bottle_name, currentPageName, selectedBackend);
+      if (selectedBackend === "cloud") {
+        await chatLoadModel(modelName, game.game_id, game.bottle_name, currentPageName, "cloud", cloudProvider, cloudApiKey);
+      } else {
+        await chatLoadModel(modelName, game.game_id, game.bottle_name, currentPageName, selectedBackend);
+      }
       chatState = await chatGetState();
       showModelPicker = false;
       resetAutoUnload();
@@ -306,6 +408,43 @@
     } finally {
       loading = false;
       loadingModelName = null;
+    }
+  }
+
+  async function handleCloudConnect() {
+    if (!cloudApiKey.trim()) {
+      showError("Please enter an API key.");
+      return;
+    }
+    const game = $selectedGame;
+    if (!game) return;
+    cloudConnecting = true;
+    try {
+      await chatLoadModel("cloud", game.game_id, game.bottle_name, currentPageName, "cloud", cloudProvider, cloudApiKey);
+      saveCloudConfig();
+      chatState = await chatGetState();
+      showModelPicker = false;
+      resetAutoUnload();
+    } catch (e) {
+      showError(`Failed to connect: ${e}`);
+    } finally {
+      cloudConnecting = false;
+    }
+  }
+
+  async function handleValidateKey() {
+    if (!cloudApiKey.trim()) return;
+    cloudValidating = true;
+    cloudKeyValid = null;
+    try {
+      await chatValidateCloudKey(cloudProvider, cloudApiKey);
+      cloudKeyValid = true;
+      showSuccess("API key is valid!");
+    } catch (e) {
+      cloudKeyValid = false;
+      showError(`${e}`);
+    } finally {
+      cloudValidating = false;
     }
   }
 
@@ -482,8 +621,13 @@
   }
 
   async function handleClear() {
-    await chatClearHistory();
+    const game = $selectedGame;
+    if (game) {
+      await chatClearHistory(game.game_id, game.bottle_name);
+    }
     chatState = await chatGetState();
+    historyMessages = [];
+    historyCount = 0;
   }
 
   function handleKeydown(e: KeyboardEvent) {
@@ -595,6 +739,11 @@
             class:backend-active={selectedBackend === "ollama"}
             onclick={() => selectedBackend = "ollama"}
           >Ollama</button>
+          <button
+            class="backend-btn"
+            class:backend-active={selectedBackend === "cloud"}
+            onclick={() => selectedBackend = "cloud"}
+          >Cloud</button>
         </div>
 
         {#if selectedBackend === "mlx"}
@@ -686,7 +835,7 @@
               </div>
             </div>
           {/if}
-        {:else}
+        {:else if selectedBackend === "ollama"}
           <!-- Ollama backend -->
           {#if !ollamaStatus?.installed}
             <div class="setup-message">
@@ -818,6 +967,81 @@
               </div>
             </div>
           {/if}
+        {:else if selectedBackend === "cloud"}
+          <!-- Cloud backend -->
+          <div class="cloud-setup">
+            <div class="cloud-notice">
+              Cloud mode sends your chat messages to the selected provider. Your API key is stored locally in this browser and never sent to Corkscrew servers.
+            </div>
+
+            <div class="cloud-provider-select">
+              <label class="cloud-label">Provider</label>
+              <div class="cloud-provider-options">
+                {#each cloudProviders as provider}
+                  <button
+                    class="cloud-provider-btn"
+                    class:cloud-provider-active={cloudProvider === provider.id}
+                    onclick={() => { cloudProvider = provider.id; cloudKeyValid = null; }}
+                  >
+                    <span class="cloud-provider-name">{provider.name}</span>
+                    <span class="cloud-provider-model">{provider.model}</span>
+                  </button>
+                {/each}
+              </div>
+              {#each cloudProviders.filter(p => p.id === cloudProvider) as activeProvider}
+                <div class="cloud-provider-info">
+                  <span class="cloud-free-tier">{activeProvider.free}</span>
+                  <a class="cloud-get-key" href={activeProvider.url} onclick={(e) => { e.preventDefault(); openUrl(activeProvider.url); }}>
+                    Get free API key &rarr;
+                  </a>
+                </div>
+              {/each}
+            </div>
+
+            <div class="cloud-key-input">
+              <label class="cloud-label">API Key</label>
+              <div class="cloud-key-row">
+                <div class="cloud-key-field">
+                  <input
+                    type={cloudKeyVisible ? "text" : "password"}
+                    class="cloud-key-input-field"
+                    class:cloud-key-valid={cloudKeyValid === true}
+                    class:cloud-key-invalid={cloudKeyValid === false}
+                    placeholder="Paste your API key here"
+                    bind:value={cloudApiKey}
+                    onkeydown={(e) => { if (e.key === "Enter") handleCloudConnect(); }}
+                  />
+                  <button class="cloud-key-toggle" onclick={() => cloudKeyVisible = !cloudKeyVisible} title={cloudKeyVisible ? "Hide" : "Show"}>
+                    {cloudKeyVisible ? "Hide" : "Show"}
+                  </button>
+                </div>
+                <button
+                  class="model-btn model-btn-secondary"
+                  disabled={!cloudApiKey.trim() || cloudValidating}
+                  onclick={handleValidateKey}
+                >
+                  {cloudValidating ? "..." : "Validate"}
+                </button>
+              </div>
+            </div>
+
+            <div class="cloud-actions">
+              <button
+                class="model-btn model-btn-load cloud-connect-btn"
+                disabled={!cloudApiKey.trim() || cloudConnecting}
+                onclick={handleCloudConnect}
+              >
+                {#if cloudConnecting}
+                  <span class="mini-spinner"></span> Connecting...
+                {:else}
+                  Connect
+                {/if}
+              </button>
+              {#if cloudApiKey.trim()}
+                <button class="model-btn model-btn-secondary" onclick={clearCloudConfig}>Clear</button>
+              {/if}
+            </div>
+          </div>
         {/if}
       </div>
     {:else if showModelPicker && chatState?.loaded}
@@ -835,6 +1059,11 @@
             class:backend-active={selectedBackend === "ollama"}
             onclick={() => selectedBackend = "ollama"}
           >Ollama</button>
+          <button
+            class="backend-btn"
+            class:backend-active={selectedBackend === "cloud"}
+            onclick={() => selectedBackend = "cloud"}
+          >Cloud</button>
         </div>
         <div class="model-list">
           <!-- Current active model -->
@@ -842,14 +1071,14 @@
             <div class="model-row model-active">
               <div class="model-info">
                 <span class="model-name">{chatState.model.split("/").pop()}</span>
-                <span class="model-meta">{chatState.backend === "mlx" ? "MLX" : "Ollama"} &middot; Active</span>
+                <span class="model-meta">{chatState.cloud_provider ? cloudProviders.find(p => p.id === chatState!.cloud_provider)?.name ?? "Cloud" : (chatState.backend === "mlx" ? "MLX" : "Ollama")} &middot; Active</span>
               </div>
               <div class="model-actions-group">
                 <button class="model-btn model-btn-secondary" onclick={handleUnload} title="Unload from memory">Unload</button>
                 <button
                   class="model-btn model-btn-danger"
                   disabled={deletingModel !== null}
-                  onclick={() => handleDeleteModel(chatState!.model!, chatState!.backend)}
+                  onclick={() => handleDeleteModel(chatState!.model!, typeof chatState!.backend === "string" ? chatState!.backend : "cloud")}
                   title="Delete model files from disk"
                 >{deletingModel ? "..." : "Delete"}</button>
               </div>
@@ -870,17 +1099,67 @@
 
     <!-- Messages (hidden when model picker is showing and no model loaded) -->
     <div class="chat-messages" class:chat-messages-hidden={showModelPicker && !chatState?.loaded} bind:this={messagesDiv}>
+      {#if crashBanner && crashBanner.count > 0 && chatState?.loaded}
+        <div class="crash-banner" role="alert">
+          <span class="crash-banner-dot"></span>
+          <span class="crash-banner-text">
+            New crash log detected &mdash; want me to diagnose it?
+          </span>
+          <button class="crash-banner-btn" onclick={() => {
+            inputText = "I just crashed. Can you analyze my latest crash log and tell me what went wrong?";
+            crashBanner = null;
+            handleSend();
+          }}>Diagnose</button>
+          <button class="crash-banner-dismiss" onclick={() => { crashBanner = null; }} title="Dismiss">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+      {/if}
+      <!-- Persisted history (shown when no model loaded) -->
+      {#if !chatState?.loaded && historyMessages.length > 0}
+        <div class="history-divider"><span>Previous session</span></div>
+        {#each historyMessages.filter(m => m.role === "user" || (m.role === "assistant" && m.content?.trim())) as msg}
+          <div class="chat-msg chat-msg-{msg.role} chat-msg-history" title={msg.timestamp ? new Date(msg.timestamp + "Z").toLocaleString() : ""}>
+            <div class="msg-bubble">
+              {#if msg.role === "assistant"}
+                <span class="msg-content">{@html renderMarkdown(msg.content)}</span>
+              {:else}
+                {msg.content}
+              {/if}
+            </div>
+          </div>
+        {/each}
+        <div class="history-notice">Load a model to continue this conversation</div>
+      {/if}
       {#if displayMessages.length === 0 && chatState?.loaded}
         <div class="chat-empty">
           <p>Ask about your mods:</p>
           <div class="empty-suggestions">
-            <button class="suggestion" onclick={() => { inputText = "List all my enabled mods"; handleSend(); }}>List enabled mods</button>
-            <button class="suggestion" onclick={() => { inputText = "Are there any mod conflicts?"; handleSend(); }}>Check conflicts</button>
-            <button class="suggestion" onclick={() => { inputText = "What's my load order?"; handleSend(); }}>Show load order</button>
+            {#if conversationStarters.length > 0}
+              {#each conversationStarters as starter}
+                <button
+                  class="suggestion"
+                  class:suggestion-crash={starter.label.includes("🔴")}
+                  onclick={() => { inputText = starter.prompt; handleSend(); }}
+                >{starter.label}</button>
+              {/each}
+            {:else}
+              <button class="suggestion" onclick={() => { inputText = "List all my enabled mods"; handleSend(); }}>List enabled mods</button>
+              <button class="suggestion" onclick={() => { inputText = "Are there any mod conflicts?"; handleSend(); }}>Check conflicts</button>
+              <button class="suggestion" onclick={() => { inputText = "What's my load order?"; handleSend(); }}>Show load order</button>
+            {/if}
           </div>
         </div>
       {/if}
-      {#each displayMessages as { msg, origIdx }}
+      {#each displayMessages as { msg, origIdx }, idx}
+        <!-- "Previous session" header before restored history messages -->
+        {#if idx === 0 && msg.timestamp}
+          <div class="history-divider"><span>Previous session</span></div>
+        {/if}
+        <!-- Session boundary divider between restored and new messages -->
+        {#if idx > 0 && displayMessages[idx - 1]?.msg.timestamp && !msg.timestamp}
+          <div class="history-divider"><span>Current session</span></div>
+        {/if}
         <!-- Collapsible tool call summary (shown above assistant messages that used tools) -->
         {#if msg.role === "assistant" && completedToolSets.has(origIdx)}
           {@const tools = completedToolSets.get(origIdx)!}
@@ -909,7 +1188,7 @@
             {/if}
           </div>
         {/if}
-        <div class="chat-msg chat-msg-{msg.role}">
+        <div class="chat-msg chat-msg-{msg.role}" class:chat-msg-history={!!msg.timestamp} title={msg.timestamp ? new Date(msg.timestamp + "Z").toLocaleString() : ""}>
           <div class="msg-bubble">
             {#if msg.role === "assistant"}
               <span class="msg-content">{@html renderMarkdown(msg.content)}</span>
@@ -1149,6 +1428,156 @@
   .backend-btn.backend-active {
     background: var(--accent);
     color: white;
+  }
+
+  /* ---- Cloud setup ---- */
+  .cloud-setup {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 4px 0;
+  }
+
+  .cloud-notice {
+    font-size: 0.72rem;
+    color: var(--text-tertiary);
+    line-height: 1.4;
+    padding: 8px 10px;
+    background: var(--bg-tertiary);
+    border-radius: 6px;
+    border-left: 2px solid var(--accent);
+  }
+
+  .cloud-label {
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 4px;
+    display: block;
+  }
+
+  .cloud-provider-options {
+    display: flex;
+    gap: 6px;
+  }
+
+  .cloud-provider-btn {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: 8px 6px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-secondary);
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .cloud-provider-btn:hover {
+    border-color: var(--accent);
+  }
+
+  .cloud-provider-btn.cloud-provider-active {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+  }
+
+  .cloud-provider-name {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .cloud-provider-model {
+    font-size: 0.65rem;
+    color: var(--text-tertiary);
+  }
+
+  .cloud-provider-info {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 4px;
+  }
+
+  .cloud-free-tier {
+    font-size: 0.68rem;
+    color: var(--text-tertiary);
+  }
+
+  .cloud-get-key {
+    font-size: 0.68rem;
+    color: var(--accent);
+    cursor: pointer;
+    text-decoration: none;
+  }
+
+  .cloud-get-key:hover {
+    text-decoration: underline;
+  }
+
+  .cloud-key-row {
+    display: flex;
+    gap: 6px;
+    align-items: stretch;
+  }
+
+  .cloud-key-field {
+    flex: 1;
+    position: relative;
+    display: flex;
+  }
+
+  .cloud-key-input-field {
+    flex: 1;
+    padding: 6px 52px 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-size: 0.75rem;
+    font-family: monospace;
+    outline: none;
+  }
+
+  .cloud-key-input-field:focus {
+    border-color: var(--accent);
+  }
+
+  .cloud-key-input-field.cloud-key-valid {
+    border-color: #22c55e;
+  }
+
+  .cloud-key-input-field.cloud-key-invalid {
+    border-color: #ef4444;
+  }
+
+  .cloud-key-toggle {
+    position: absolute;
+    right: 4px;
+    top: 50%;
+    transform: translateY(-50%);
+    background: none;
+    border: none;
+    color: var(--text-tertiary);
+    font-size: 0.65rem;
+    cursor: pointer;
+    padding: 2px 6px;
+  }
+
+  .cloud-key-toggle:hover {
+    color: var(--text-secondary);
+  }
+
+  .cloud-actions {
+    display: flex;
+    gap: 6px;
+  }
+
+  .cloud-connect-btn {
+    flex: 1;
   }
 
   /* ---- Setup / Model picker ---- */
@@ -1990,5 +2419,128 @@
   .quick-action-danger:hover {
     background: color-mix(in srgb, #ef4444 20%, transparent);
     border-color: #ef4444;
+  }
+
+  /* --- Crash banner --- */
+  .crash-banner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    margin: 8px;
+    background: color-mix(in srgb, #ef4444 8%, var(--bg-base));
+    border: 1px solid color-mix(in srgb, #ef4444 30%, transparent);
+    border-radius: 10px;
+    font-size: 12px;
+    color: var(--text);
+    animation: crash-banner-in 0.3s ease;
+  }
+
+  @keyframes crash-banner-in {
+    from { opacity: 0; transform: translateY(-6px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  .crash-banner-dot {
+    width: 8px;
+    height: 8px;
+    min-width: 8px;
+    border-radius: 50%;
+    background: #ef4444;
+    animation: crash-pulse 1.5s ease-in-out infinite;
+  }
+
+  @keyframes crash-pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50%      { opacity: 0.5; transform: scale(0.8); }
+  }
+
+  .crash-banner-text {
+    flex: 1;
+    color: var(--text-secondary);
+  }
+
+  .crash-banner-btn {
+    font-size: 11px;
+    padding: 3px 10px;
+    border-radius: 6px;
+    border: 1px solid #ef4444;
+    background: color-mix(in srgb, #ef4444 15%, transparent);
+    color: #ef4444;
+    cursor: pointer;
+    font-weight: 500;
+    font-family: inherit;
+    transition: background 0.15s;
+  }
+
+  .crash-banner-btn:hover {
+    background: color-mix(in srgb, #ef4444 25%, transparent);
+  }
+
+  .crash-banner-dismiss {
+    background: none;
+    border: none;
+    color: var(--text-quaternary);
+    cursor: pointer;
+    padding: 2px;
+    display: flex;
+    align-items: center;
+  }
+
+  .crash-banner-dismiss:hover {
+    color: var(--text-secondary);
+  }
+
+  /* --- Crash-related suggestion starter --- */
+  .suggestion-crash {
+    border-color: color-mix(in srgb, #ef4444 40%, transparent);
+    background: color-mix(in srgb, #ef4444 8%, var(--bg-base));
+    color: #ef4444;
+  }
+
+  .suggestion-crash:hover {
+    background: color-mix(in srgb, #ef4444 18%, var(--bg-base));
+    border-color: #ef4444;
+    color: #ef4444;
+  }
+
+  /* --- Chat history persistence styles --- */
+
+  .history-divider {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 12px 0 8px;
+    font-size: 11px;
+    color: var(--text-quaternary);
+  }
+
+  .history-divider::before,
+  .history-divider::after {
+    content: "";
+    flex: 1;
+    border-bottom: 1px solid var(--border-light, rgba(255, 255, 255, 0.06));
+  }
+
+  .history-divider span {
+    white-space: nowrap;
+    opacity: 0.7;
+  }
+
+  .chat-msg-history {
+    opacity: 0.55;
+  }
+
+  .chat-msg-history:hover {
+    opacity: 0.8;
+  }
+
+  .history-notice {
+    text-align: center;
+    font-size: 11px;
+    color: var(--text-quaternary);
+    margin: 8px 0 4px;
+    opacity: 0.7;
+    font-style: italic;
   }
 </style>

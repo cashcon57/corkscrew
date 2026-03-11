@@ -1960,9 +1960,11 @@ export async function chatLoadModel(
   gameId: string,
   bottleName: string,
   currentPage?: string,
-  backend?: string
+  backend?: string,
+  cloudProvider?: string,
+  cloudApiKey?: string
 ): Promise<void> {
-  return invoke("chat_load_model", { modelName, gameId, bottleName, currentPage, backend });
+  return invoke("chat_load_model", { modelName, gameId, bottleName, currentPage, backend, cloudProvider, cloudApiKey });
 }
 
 export async function chatUnloadModel(): Promise<void> {
@@ -1986,8 +1988,31 @@ export async function chatSendMessage(
   return invoke("chat_send_message", { message, gameId, bottleName, currentPage });
 }
 
-export async function chatClearHistory(): Promise<void> {
-  return invoke("chat_clear_history");
+export async function chatClearHistory(gameId: string, bottleName: string): Promise<void> {
+  return invoke("chat_clear_history", { gameId, bottleName });
+}
+
+export async function chatGetHistory(gameId: string, bottleName: string): Promise<import("./types").ChatMessage[]> {
+  return invoke("chat_get_history", { gameId, bottleName });
+}
+
+export async function chatValidateCloudKey(provider: string, apiKey: string): Promise<string> {
+  return invoke("chat_validate_cloud_key", { provider, apiKey });
+}
+
+export async function chatGetStarters(
+  gameId: string,
+  bottleName: string,
+  currentPage?: string
+): Promise<import("./types").ChatStarter[]> {
+  return invoke("chat_get_starters", { gameId, bottleName, currentPage });
+}
+
+export async function chatCheckNewCrashes(
+  gameId: string,
+  bottleName: string
+): Promise<import("./types").NewCrashInfo> {
+  return invoke("chat_check_new_crashes", { gameId, bottleName });
 }
 
 // ---- Vortex Extensions ----
@@ -2023,4 +2048,46 @@ export async function submitFomodChoices(
   selections: Record<string, string[]>
 ): Promise<void> {
   return invoke("submit_fomod_choices", { correlationId, selections });
+}
+
+// ---- Self-Update (macOS fallback) ----
+
+export async function getInstalledAppVersion(): Promise<string> {
+  return invoke("get_installed_app_version");
+}
+
+export async function manualSelfUpdate(url: string, expectedVersion: string): Promise<string> {
+  return invoke("manual_self_update", { url, expectedVersion });
+}
+
+// ---- App Updates (advanced Rust-side updater) ----
+
+export interface UpdateMetadata {
+  version: string;
+  currentVersion: string;
+  body: string | null;
+  date: string | null;
+}
+
+export interface UpdateDownloadEvent {
+  event: "Started" | "Progress" | "Finished";
+  data?: {
+    contentLength?: number;
+    chunkLength?: number;
+  };
+}
+
+export async function fetchUpdate(): Promise<UpdateMetadata | null> {
+  return invoke("fetch_update");
+}
+
+export async function installUpdate(
+  onEvent?: (event: UpdateDownloadEvent) => void
+): Promise<void> {
+  const { Channel } = await import("@tauri-apps/api/core");
+  const channel = new Channel<UpdateDownloadEvent>();
+  if (onEvent) {
+    channel.onmessage = onEvent;
+  }
+  return invoke("install_update", { onEvent: channel });
 }

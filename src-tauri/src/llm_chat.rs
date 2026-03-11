@@ -23,6 +23,10 @@ use crate::instruction_types::{ModelCapabilityTier, OllamaModel};
 pub enum LlmBackend {
     Ollama,
     Mlx,
+    Cloud {
+        provider: String,
+        api_key: String,
+    },
 }
 
 impl Default for LlmBackend {
@@ -36,6 +40,12 @@ impl LlmBackend {
         match self {
             Self::Ollama => "http://localhost:11434",
             Self::Mlx => "http://localhost:8080",
+            Self::Cloud { provider, .. } => match provider.as_str() {
+                "groq" => "https://api.groq.com/openai/v1",
+                "cerebras" => "https://api.cerebras.ai/v1",
+                "gemini" => "https://generativelanguage.googleapis.com/v1beta",
+                _ => "",
+            },
         }
     }
 
@@ -43,7 +53,17 @@ impl LlmBackend {
         match self {
             Self::Ollama => "Ollama",
             Self::Mlx => "MLX",
+            Self::Cloud { provider, .. } => match provider.as_str() {
+                "groq" => "Groq",
+                "gemini" => "Gemini",
+                "cerebras" => "Cerebras",
+                _ => "Cloud",
+            },
         }
+    }
+
+    pub fn is_cloud(&self) -> bool {
+        matches!(self, Self::Cloud { .. })
     }
 }
 
@@ -98,6 +118,9 @@ pub struct ChatMessage {
     /// Mods referenced in this message (populated by backend after response)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mentioned_mods: Option<Vec<MentionedMod>>,
+    /// ISO-8601 timestamp for persisted messages (None for live session messages)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
 }
 
 /// A mod referenced in a chat message, with contextual action info.
@@ -147,6 +170,9 @@ pub struct ChatState {
     pub loaded: bool,
     pub messages: Vec<ChatMessage>,
     pub available_models: Vec<OllamaModel>,
+    /// Cloud provider name if cloud backend is active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_provider: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -286,6 +312,7 @@ pub fn get_chat_tools(tier: ModelCapabilityTier) -> Vec<ChatTool> {
             "properties": { "query": { "type": "string" } },
             "required": ["query"]
         })),
+        tool("check_wine_compatibility", "Check if installed mods have known Wine/CrossOver compatibility issues.", no_params.clone()),
     ];
 
     // ── Standard tier — 3-4B+ models ─────────────────────────────────
@@ -381,6 +408,11 @@ pub fn get_chat_tools(tier: ModelCapabilityTier) -> Vec<ChatTool> {
                 "Redeploy mod files to game directory.",
                 no_params.clone(),
             ),
+            tool(
+                "find_needed_patches",
+                "Analyze installed mods and find compatibility patches they need. Lists mods, identifies likely conflict pairs (same category, known interactions), searches NexusMods for patches. Returns patch recommendations with install links.",
+                no_params.clone(),
+            ),
         ]);
     }
 
@@ -397,6 +429,7 @@ pub fn build_chat_system_prompt(
     platform: &str,
     current_page: &str,
     _readme_content: Option<&str>,
+    wine_warnings: Option<&str>,
 ) -> String {
     // Page-specific focus hint (keeps the model on-task, saves tokens vs generic advice)
     let page_hint = match current_page {
@@ -409,6 +442,13 @@ pub fn build_chat_system_prompt(
         _ => "Help with whatever the user needs.",
     };
 
+    let wine_compat_section = match wine_warnings {
+        Some(warnings) if !warnings.is_empty() => format!(
+            "\n\nWine compatibility issues detected:\n{warnings}\nWarn the user about these when relevant (e.g., if they ask about crashes, performance, or the affected mods). Suggest disabling problematic mods or using alternatives."
+        ),
+        _ => String::new(),
+    };
+
     format!(
         r#"You are a {game_name} modding expert in Corkscrew (mod manager for {platform}). Use tools to look things up — never guess mod names or IDs.
 
@@ -417,15 +457,16 @@ pub fn build_chat_system_prompt(
 Rules: Use tools proactively. Never guess — look it up. If search_nexus returns no results, ALWAYS fall back to web_search to find the mod name, then retry search_nexus. Max 5 tool calls. Be concise. You CONTROL Corkscrew's UI — use navigate_ui and open_nexus_mod to show things to the user directly.
 SAFETY: For ANY destructive or hard-to-reverse action (uninstall mod, delete files, disable plugins, change load order, reset settings), ALWAYS ask the user to confirm before proceeding. Never auto-execute destructive actions.
 
-Routing: find mod → search_nexus → open_nexus_mod (to show it in Corkscrew UI with install button) | install → search_nexus → open_nexus_mod | crash → get_crash_logs → analyze | conflicts → get_conflicts | vague → web_search → search_nexus → open_nexus_mod
+Routing: find mod → search_nexus → open_nexus_mod (to show it in Corkscrew UI with install button) | install → search_nexus → open_nexus_mod | crash → get_crash_logs → analyze | conflicts → get_conflicts | patches needed → find_needed_patches → search_nexus for each group → open_nexus_mod for found patches | vague → web_search → search_nexus → open_nexus_mod
 When you find a mod the user wants, ALWAYS call open_nexus_mod to open it in Corkscrew's Discover tab where they can see images and install it.
 
-Modding: .esm first, .esl light, .esp last. Patches after patched plugin. Later plugin wins record conflicts. Higher-priority mod wins file conflicts. Navmesh conflicts = game-breaking. LOOT for auto-sort. Wine: .NET Script Framework and original SSE Engine Fixes crash — Corkscrew ships Wine-compatible fork."#,
+Modding: .esm first, .esl light, .esp last. Patches after patched plugin. Later plugin wins record conflicts. Higher-priority mod wins file conflicts. Navmesh conflicts = game-breaking. LOOT for auto-sort. Wine: .NET Script Framework and original SSE Engine Fixes crash — Corkscrew ships Wine-compatible fork.{wine_compat_section}"#,
         game_name = game_name,
         platform = platform,
         mod_count = mod_count,
         current_page = current_page,
         page_hint = page_hint,
+        wine_compat_section = wine_compat_section,
     )
 }
 
@@ -532,6 +573,10 @@ pub async fn chat_send(
             }
             Ok(response)
         }
+        LlmBackend::Cloud { provider, api_key } => {
+            chat_send_cloud_streaming(provider, api_key, messages, tools, max_tokens, |_, _| {})
+                .await
+        }
     }
 }
 
@@ -575,6 +620,10 @@ where
                 on_token,
             )
             .await
+        }
+        LlmBackend::Cloud { provider, api_key } => {
+            chat_send_cloud_streaming(provider, api_key, messages, tools, max_tokens, on_token)
+                .await
         }
     }
 }
@@ -684,6 +733,7 @@ where
         content: full_content,
         tool_calls,
         mentioned_mods: None,
+        timestamp: None,
     })
 }
 
@@ -884,6 +934,508 @@ where
         content: full_content,
         tool_calls,
         mentioned_mods: None,
+        timestamp: None,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Cloud LLM streaming (Groq, Gemini, Cerebras)
+// ---------------------------------------------------------------------------
+
+/// Cloud model name for a given provider.
+fn cloud_model_name(provider: &str) -> &str {
+    match provider {
+        "groq" => "llama-3.3-70b-versatile",
+        "cerebras" => "llama-3.3-70b",
+        "gemini" => "gemini-2.5-flash",
+        _ => "llama-3.3-70b-versatile",
+    }
+}
+
+/// Cloud display name for the ChatState model field.
+pub fn cloud_model_display(provider: &str) -> String {
+    match provider {
+        "groq" => "Llama 3.3 70B (Groq)".into(),
+        "cerebras" => "Llama 3.3 70B (Cerebras)".into(),
+        "gemini" => "Gemini 2.5 Flash".into(),
+        _ => format!("Cloud ({})", provider),
+    }
+}
+
+/// Validate a cloud API key by making a minimal request.
+pub async fn validate_cloud_key(provider: &str, api_key: &str) -> Result<String, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    match provider {
+        "groq" => {
+            let resp = client
+                .post("https://api.groq.com/openai/v1/chat/completions")
+                .header("Authorization", format!("Bearer {api_key}"))
+                .header("Content-Type", "application/json")
+                .json(&serde_json::json!({
+                    "model": "llama-3.3-70b-versatile",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "max_tokens": 1
+                }))
+                .send()
+                .await
+                .map_err(|e| format!("Request failed: {e}"))?;
+            if resp.status().is_success() {
+                Ok("Groq API key is valid.".into())
+            } else {
+                let body = resp.text().await.unwrap_or_default();
+                Err(format!("Invalid API key: {body}"))
+            }
+        }
+        "cerebras" => {
+            let resp = client
+                .post("https://api.cerebras.ai/v1/chat/completions")
+                .header("Authorization", format!("Bearer {api_key}"))
+                .header("Content-Type", "application/json")
+                .json(&serde_json::json!({
+                    "model": "llama-3.3-70b",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "max_tokens": 1
+                }))
+                .send()
+                .await
+                .map_err(|e| format!("Request failed: {e}"))?;
+            if resp.status().is_success() {
+                Ok("Cerebras API key is valid.".into())
+            } else {
+                let body = resp.text().await.unwrap_or_default();
+                Err(format!("Invalid API key: {body}"))
+            }
+        }
+        "gemini" => {
+            let resp = client
+                .post(format!(
+                    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+                ))
+                .header("Content-Type", "application/json")
+                .json(&serde_json::json!({
+                    "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+                    "generationConfig": {"maxOutputTokens": 1}
+                }))
+                .send()
+                .await
+                .map_err(|e| format!("Request failed: {e}"))?;
+            if resp.status().is_success() {
+                Ok("Gemini API key is valid.".into())
+            } else {
+                let body = resp.text().await.unwrap_or_default();
+                Err(format!("Invalid API key: {body}"))
+            }
+        }
+        _ => Err(format!("Unknown provider: {provider}")),
+    }
+}
+
+/// Convert our ChatTool format to Gemini's tool format.
+fn tools_to_gemini_format(tools: &[ChatTool]) -> serde_json::Value {
+    let declarations: Vec<serde_json::Value> = tools
+        .iter()
+        .map(|t| {
+            serde_json::json!({
+                "name": t.function.name,
+                "description": t.function.description,
+                "parameters": t.function.parameters,
+            })
+        })
+        .collect();
+    serde_json::json!([{ "functionDeclarations": declarations }])
+}
+
+/// Convert messages to Gemini's content format.
+fn messages_to_gemini_format(messages: &[ChatMessage]) -> (Option<String>, Vec<serde_json::Value>) {
+    let mut system_instruction = None;
+    let mut contents = Vec::new();
+
+    for msg in messages {
+        match msg.role.as_str() {
+            "system" => {
+                system_instruction = Some(msg.content.clone());
+            }
+            "user" => {
+                contents.push(serde_json::json!({
+                    "role": "user",
+                    "parts": [{"text": msg.content}]
+                }));
+            }
+            "assistant" => {
+                let mut parts: Vec<serde_json::Value> = Vec::new();
+                if !msg.content.is_empty() {
+                    parts.push(serde_json::json!({"text": msg.content}));
+                }
+                if let Some(ref tc) = msg.tool_calls {
+                    for call in tc {
+                        parts.push(serde_json::json!({
+                            "functionCall": {
+                                "name": call.function.name,
+                                "args": call.function.arguments,
+                            }
+                        }));
+                    }
+                }
+                contents.push(serde_json::json!({
+                    "role": "model",
+                    "parts": parts,
+                }));
+            }
+            "tool" => {
+                // Gemini expects tool results as functionResponse parts
+                contents.push(serde_json::json!({
+                    "role": "user",
+                    "parts": [{"functionResponse": {
+                        "name": "tool_result",
+                        "response": {"result": msg.content}
+                    }}]
+                }));
+            }
+            _ => {}
+        }
+    }
+
+    (system_instruction, contents)
+}
+
+/// Send streaming chat to a cloud provider (Groq/Cerebras use OpenAI-compat, Gemini is different).
+pub async fn chat_send_cloud_streaming<F>(
+    provider: &str,
+    api_key: &str,
+    messages: &[ChatMessage],
+    tools: &[ChatTool],
+    max_tokens: u32,
+    on_token: F,
+) -> Result<ChatMessage, String>
+where
+    F: Fn(&str, StreamPhase) + Send + Sync + 'static,
+{
+    match provider {
+        "groq" | "cerebras" => {
+            chat_send_openai_cloud_streaming(provider, api_key, messages, tools, max_tokens, on_token)
+                .await
+        }
+        "gemini" => {
+            chat_send_gemini_streaming(api_key, messages, tools, max_tokens, on_token).await
+        }
+        _ => Err(format!("Unknown cloud provider: {provider}")),
+    }
+}
+
+/// OpenAI-compatible cloud streaming (Groq, Cerebras).
+async fn chat_send_openai_cloud_streaming<F>(
+    provider: &str,
+    api_key: &str,
+    messages: &[ChatMessage],
+    tools: &[ChatTool],
+    max_tokens: u32,
+    on_token: F,
+) -> Result<ChatMessage, String>
+where
+    F: Fn(&str, StreamPhase) + Send + Sync + 'static,
+{
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let model = cloud_model_name(provider);
+    let base_url = match provider {
+        "groq" => "https://api.groq.com/openai/v1",
+        "cerebras" => "https://api.cerebras.ai/v1",
+        _ => return Err(format!("Unknown provider: {provider}")),
+    };
+
+    let msgs: Vec<serde_json::Value> = messages
+        .iter()
+        .map(|m| {
+            let mut msg = serde_json::json!({ "role": m.role, "content": m.content });
+            if let Some(ref tc) = m.tool_calls {
+                let oai_calls: Vec<serde_json::Value> = tc
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| {
+                        serde_json::json!({
+                            "id": format!("call_{i}"),
+                            "type": "function",
+                            "function": {
+                                "name": c.function.name,
+                                "arguments": c.function.arguments.to_string()
+                            }
+                        })
+                    })
+                    .collect();
+                msg["tool_calls"] = serde_json::json!(oai_calls);
+            }
+            msg
+        })
+        .collect();
+
+    let mut body = serde_json::json!({
+        "model": model,
+        "messages": msgs,
+        "temperature": 0.7,
+        "top_p": 0.8,
+        "max_tokens": max_tokens,
+        "stream": true,
+    });
+
+    if !tools.is_empty() {
+        let oai_tools: Vec<serde_json::Value> = tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.function.name,
+                        "description": t.function.description,
+                        "parameters": t.function.parameters,
+                    }
+                })
+            })
+            .collect();
+        body["tools"] = serde_json::json!(oai_tools);
+    }
+
+    let resp = client
+        .post(format!("{base_url}/chat/completions"))
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("{} request failed: {e}", provider))?;
+
+    if !resp.status().is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("{} error: {text}", provider));
+    }
+
+    let mut full_content = String::new();
+    let mut tool_calls_map: std::collections::HashMap<usize, (String, String)> =
+        std::collections::HashMap::new();
+    let mut stream = resp.bytes_stream();
+
+    use futures::StreamExt;
+    let mut buffer = String::new();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("Stream error: {e}"))?;
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+        while let Some(data_end) = buffer.find("\n\n") {
+            let block = buffer[..data_end].to_string();
+            buffer = buffer[data_end + 2..].to_string();
+
+            for line in block.lines() {
+                let line = line.trim();
+                if line == "data: [DONE]" {
+                    continue;
+                }
+                if line.starts_with(':') {
+                    continue;
+                }
+                if let Some(json_str) = line.strip_prefix("data: ") {
+                    if let Ok(obj) = serde_json::from_str::<serde_json::Value>(json_str) {
+                        if let Some(choice) = obj.get("choices").and_then(|c| c.get(0)) {
+                            if let Some(delta) = choice.get("delta") {
+                                if let Some(content) =
+                                    delta.get("content").and_then(|c| c.as_str())
+                                {
+                                    if !content.is_empty() {
+                                        on_token(content, StreamPhase::Content);
+                                        full_content.push_str(content);
+                                    }
+                                }
+                                if let Some(tc_arr) =
+                                    delta.get("tool_calls").and_then(|t| t.as_array())
+                                {
+                                    for tc in tc_arr {
+                                        let idx = tc
+                                            .get("index")
+                                            .and_then(|i| i.as_u64())
+                                            .unwrap_or(0)
+                                            as usize;
+                                        let entry = tool_calls_map
+                                            .entry(idx)
+                                            .or_insert_with(|| (String::new(), String::new()));
+                                        if let Some(func) = tc.get("function") {
+                                            if let Some(name) =
+                                                func.get("name").and_then(|n| n.as_str())
+                                            {
+                                                entry.0.push_str(name);
+                                            }
+                                            if let Some(args) =
+                                                func.get("arguments").and_then(|a| a.as_str())
+                                            {
+                                                entry.1.push_str(args);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let tool_calls = if tool_calls_map.is_empty() {
+        None
+    } else {
+        let mut calls: Vec<(usize, ToolCallResponse)> = tool_calls_map
+            .into_iter()
+            .map(|(idx, (name, args))| {
+                let arguments = serde_json::from_str(&args).unwrap_or(serde_json::json!({}));
+                (
+                    idx,
+                    ToolCallResponse {
+                        function: ToolCallFunction { name, arguments },
+                    },
+                )
+            })
+            .collect();
+        calls.sort_by_key(|(idx, _)| *idx);
+        Some(calls.into_iter().map(|(_, tc)| tc).collect())
+    };
+
+    Ok(ChatMessage {
+        role: "assistant".into(),
+        content: full_content,
+        tool_calls,
+        mentioned_mods: None,
+        timestamp: None,
+    })
+}
+
+/// Gemini streaming: POST streamGenerateContent with SSE (alt=sse).
+async fn chat_send_gemini_streaming<F>(
+    api_key: &str,
+    messages: &[ChatMessage],
+    tools: &[ChatTool],
+    max_tokens: u32,
+    on_token: F,
+) -> Result<ChatMessage, String>
+where
+    F: Fn(&str, StreamPhase) + Send + Sync + 'static,
+{
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let model = cloud_model_name("gemini");
+    let (system_instruction, contents) = messages_to_gemini_format(messages);
+
+    let mut body = serde_json::json!({
+        "contents": contents,
+        "generationConfig": {
+            "temperature": 0.7,
+            "topP": 0.8,
+            "maxOutputTokens": max_tokens,
+        }
+    });
+
+    if let Some(ref sys) = system_instruction {
+        body["systemInstruction"] = serde_json::json!({
+            "parts": [{"text": sys}]
+        });
+    }
+
+    if !tools.is_empty() {
+        body["tools"] = tools_to_gemini_format(tools);
+    }
+
+    let url = format!(
+        "https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?key={api_key}&alt=sse"
+    );
+
+    let resp = client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Gemini request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Gemini error: {text}"));
+    }
+
+    let mut full_content = String::new();
+    let mut tool_calls: Vec<ToolCallResponse> = Vec::new();
+    let mut stream = resp.bytes_stream();
+
+    use futures::StreamExt;
+    let mut buffer = String::new();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("Stream error: {e}"))?;
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+        while let Some(data_end) = buffer.find("\n\n") {
+            let block = buffer[..data_end].to_string();
+            buffer = buffer[data_end + 2..].to_string();
+
+            for line in block.lines() {
+                let line = line.trim();
+                if line.starts_with(':') {
+                    continue;
+                }
+                if let Some(json_str) = line.strip_prefix("data: ") {
+                    if let Ok(obj) = serde_json::from_str::<serde_json::Value>(json_str) {
+                        // Gemini format: candidates[0].content.parts[]
+                        if let Some(parts) = obj
+                            .pointer("/candidates/0/content/parts")
+                            .and_then(|p| p.as_array())
+                        {
+                            for part in parts {
+                                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                                    if !text.is_empty() {
+                                        on_token(text, StreamPhase::Content);
+                                        full_content.push_str(text);
+                                    }
+                                }
+                                if let Some(fc) = part.get("functionCall") {
+                                    let name = fc
+                                        .get("name")
+                                        .and_then(|n| n.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    let arguments = fc
+                                        .get("args")
+                                        .cloned()
+                                        .unwrap_or(serde_json::json!({}));
+                                    if !name.is_empty() {
+                                        tool_calls.push(ToolCallResponse {
+                                            function: ToolCallFunction { name, arguments },
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(ChatMessage {
+        role: "assistant".into(),
+        content: full_content,
+        tool_calls: if tool_calls.is_empty() {
+            None
+        } else {
+            Some(tool_calls)
+        },
+        mentioned_mods: None,
+        timestamp: None,
     })
 }
 
@@ -962,6 +1514,7 @@ async fn chat_send_ollama(
             .get("tool_calls")
             .and_then(|tc| serde_json::from_value::<Vec<ToolCallResponse>>(tc.clone()).ok()),
         mentioned_mods: None,
+        timestamp: None,
     })
 }
 
@@ -1088,12 +1641,17 @@ async fn chat_send_openai_compat(
         content,
         tool_calls,
         mentioned_mods: None,
+        timestamp: None,
     })
 }
 
 /// Load a model into memory.
 pub async fn load_model(backend: &LlmBackend, model: &str, num_ctx: u32) -> Result<(), String> {
     match backend {
+        LlmBackend::Cloud { .. } => {
+            // Cloud backends don't need model loading — the model is served remotely.
+            Ok(())
+        }
         LlmBackend::Ollama => {
             let client = reqwest::Client::builder()
                 .timeout(Duration::from_secs(120))
@@ -1138,6 +1696,10 @@ pub async fn load_model(backend: &LlmBackend, model: &str, num_ctx: u32) -> Resu
 /// Unload a model from memory.
 pub async fn unload_model(backend: &LlmBackend, model: &str) -> Result<(), String> {
     match backend {
+        LlmBackend::Cloud { .. } => {
+            // Cloud backends have nothing to unload.
+            Ok(())
+        }
         LlmBackend::Ollama => {
             let client = reqwest::Client::builder()
                 .timeout(Duration::from_secs(10))

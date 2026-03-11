@@ -7,9 +7,7 @@
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
   import { getVersion } from "@tauri-apps/api/app";
-  import { check } from "@tauri-apps/plugin-updater";
-  import { relaunch } from "@tauri-apps/plugin-process";
-  import { downloadFromNexus, installMod, getAllGames, getDownloadQueue, retryDownload, cancelDownload, clearFinishedDownloads, onDownloadQueueUpdate, listProfiles, listInstalledCollections, getConfig, setConfigValue, launchGame, getAllInterruptedInstalls, resumeCollectionInstall, abandonCollectionInstall, getCheckpointModNames, getPendingWabbajackInstalls, checkSkyrimVersion, getPinnedGameVersion, pinGameVersion, checkSteamStatus, addToSteam } from "$lib/api";
+  import { downloadFromNexus, installMod, getAllGames, getDownloadQueue, retryDownload, cancelDownload, clearFinishedDownloads, onDownloadQueueUpdate, listProfiles, listInstalledCollections, getConfig, setConfigValue, launchGame, getAllInterruptedInstalls, resumeCollectionInstall, abandonCollectionInstall, getCheckpointModNames, getPendingWabbajackInstalls, checkSkyrimVersion, getPinnedGameVersion, pinGameVersion, checkSteamStatus, addToSteam, fetchUpdate, installUpdate } from "$lib/api";
   import { resumeInstallTracking } from "$lib/installService";
   import { initHashingListener, destroyHashingListener, dismissHashingBanner } from "$lib/hashingService";
   import { hashingProgress } from "$lib/stores";
@@ -174,7 +172,7 @@
 
   async function handleSidebarUpdateClick() {
     if ($updateCheckingStore) return;
-    if (sidebarUpdateState === "ready") { handleRelaunch(); return; }
+    if (sidebarUpdateState === "ready") { handleStartUpdate(); return; }
     if (sidebarUpdateState === "available") { handleStartUpdate(); return; }
     if (sidebarUpdateState === "downloading") return;
 
@@ -700,14 +698,13 @@
     updateCheckingStore.set(true);
     updateErrorStore.set(null);
     try {
-      const update = await check();
+      const update = await fetchUpdate();
       if (update) {
         // Check if user dismissed this specific version
         try {
           const cfg = await getConfig();
           const dismissed = (cfg as Record<string, unknown>).dismissed_update_version;
           if (dismissed === update.version) {
-            // User already dismissed this version — don't show banner
             updateCheckingStore.set(false);
             return;
           }
@@ -721,11 +718,9 @@
         updateNotesStore.set(update.body ?? null);
         showUpdateBanner = true;
 
-        // Fetch multi-version changelog
         fetchMultiVersionChangelog();
       }
     } catch (e) {
-      // Update check failed — error stored for UI display
       updateErrorStore.set(String(e));
     } finally {
       updateCheckingStore.set(false);
@@ -779,30 +774,27 @@
     if (!updateObject) return;
     updateDownloading = true;
     updateProgress = 0;
-    console.log("[updater] Starting download+install, version:", updateObject.version);
-    console.log("[updater] Current app location:", window.location.href);
+    console.log("[updater] Starting download+install via Rust, version:", updateObject.version);
     try {
-      await updateObject.downloadAndInstall((progress: any) => {
-        if (progress.event === "Started") {
-          console.log("[updater] Download started, contentLength:", progress.data?.contentLength);
-          updateDownloading = true;
-        } else if (progress.event === "Progress") {
-          updateProgress += progress.data.chunkLength;
-        } else if (progress.event === "Finished") {
-          console.log("[updater] Download finished, total bytes:", updateProgress);
-          updateReady = true;
-          updateDownloading = false;
-          updateReadyStore.set(true);
+      // Rust-side handles download, install, AND app restart
+      await installUpdate((event) => {
+        if (event.event === "Started") {
+          console.log("[updater] Download started, contentLength:", event.data?.contentLength);
+        } else if (event.event === "Progress") {
+          updateProgress += event.data?.chunkLength ?? 0;
+        } else if (event.event === "Finished") {
+          console.log("[updater] Download finished");
         }
       });
-      console.log("[updater] downloadAndInstall() resolved successfully — update should be applied");
-      updateReady = true;
-      updateDownloading = false;
-      updateReadyStore.set(true);
+      // If we reach here, download_and_install succeeded but app.restart() hasn't fired yet
+      // (in practice, app.restart() exits the process so this line may not execute)
+      console.log("[updater] Update installed — app is restarting...");
     } catch (e) {
-      console.error("[updater] downloadAndInstall() FAILED:", e);
+      console.error("[updater] Update failed:", e);
       updateDownloading = false;
-      updateErrorStore.set(String(e));
+      updateErrorStore.set(
+        `Update failed: ${e}. Please download the latest version manually from https://github.com/cashcon57/corkscrew/releases`
+      );
     }
   }
 
@@ -815,15 +807,8 @@
   // Register so settings page can trigger manual checks
   setUpdateCheckFn(checkForUpdates);
 
-  async function handleRelaunch() {
-    console.log("[updater] Relaunching app...");
-    try {
-      await relaunch();
-    } catch (e) {
-      console.error("[updater] Relaunch failed:", e);
-      updateErrorStore.set(`Relaunch failed: ${e}. Try quitting and reopening manually.`);
-    }
-  }
+  // handleStartUpdate now handles download+install+restart from Rust in one call.
+  // No separate relaunch step needed.
 
   function navigate(page: string) {
     currentPage.set(page);
@@ -1183,7 +1168,7 @@
 
           <!-- Status pill -->
           {#if sidebarUpdateState === "ready"}
-            <button class="update-pill ready" onclick={handleRelaunch}>
+            <button class="update-pill ready" onclick={handleStartUpdate}>
               Restart
             </button>
           {:else if sidebarUpdateState === "available"}
@@ -1296,7 +1281,7 @@
             </div>
             <div class="update-banner-actions">
               {#if updateReady}
-                <button class="btn btn-accent btn-sm update-ready-btn" onclick={handleRelaunch}>Restart to Update</button>
+                <button class="btn btn-accent btn-sm update-ready-btn" onclick={handleStartUpdate}>Restart to Update</button>
               {:else if updateDownloading}
                 <span class="update-banner-downloading"><span class="spinner spinner-sm"></span> Downloading...</span>
               {:else}

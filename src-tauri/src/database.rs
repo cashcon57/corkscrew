@@ -2679,6 +2679,102 @@ impl ModDatabase {
 }
 
 // ---------------------------------------------------------------------------
+// Chat history persistence
+// ---------------------------------------------------------------------------
+
+impl ModDatabase {
+    /// Save a chat message to the persistent history.
+    ///
+    /// Only user and assistant messages should be persisted — system and tool
+    /// messages are ephemeral context rebuilt each session.
+    pub fn save_chat_message(
+        &self,
+        game_id: &str,
+        bottle_name: &str,
+        msg: &crate::llm_chat::ChatMessage,
+    ) -> Result<i64> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tool_calls_json = msg
+            .tool_calls
+            .as_ref()
+            .map(|tc| serde_json::to_string(tc).unwrap_or_default());
+        let mentioned_mods_json = msg
+            .mentioned_mods
+            .as_ref()
+            .map(|mm| serde_json::to_string(mm).unwrap_or_default());
+        conn.execute(
+            "INSERT INTO chat_history (game_id, bottle_name, role, content, tool_calls, mentioned_mods)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                game_id,
+                bottle_name,
+                msg.role,
+                msg.content,
+                tool_calls_json,
+                mentioned_mods_json,
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Load the most recent chat messages for a game/bottle pair.
+    ///
+    /// Returns up to `limit` messages ordered oldest-first (chronological),
+    /// suitable for prepending into a new session after the system prompt.
+    pub fn load_chat_history(
+        &self,
+        game_id: &str,
+        bottle_name: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::llm_chat::ChatMessage>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT role, content, tool_calls, mentioned_mods, created_at
+             FROM chat_history
+             WHERE game_id = ?1 AND bottle_name = ?2
+             ORDER BY id DESC
+             LIMIT ?3",
+        )?;
+        let rows: Vec<crate::llm_chat::ChatMessage> = stmt
+            .query_map(params![game_id, bottle_name, limit as i64], |row| {
+                let role: String = row.get(0)?;
+                let content: String = row.get(1)?;
+                let tool_calls_json: Option<String> = row.get(2)?;
+                let mentioned_mods_json: Option<String> = row.get(3)?;
+                let created_at: Option<String> = row.get(4)?;
+
+                let tool_calls = tool_calls_json.and_then(|j| serde_json::from_str(&j).ok());
+                let mentioned_mods =
+                    mentioned_mods_json.and_then(|j| serde_json::from_str(&j).ok());
+
+                Ok(crate::llm_chat::ChatMessage {
+                    role,
+                    content,
+                    tool_calls,
+                    mentioned_mods,
+                    timestamp: created_at,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        // Reverse so messages are in chronological order (oldest first)
+        let mut messages = rows;
+        messages.reverse();
+        Ok(messages)
+    }
+
+    /// Delete all chat history for a game/bottle pair.
+    pub fn clear_chat_history(&self, game_id: &str, bottle_name: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "DELETE FROM chat_history WHERE game_id = ?1 AND bottle_name = ?2",
+            params![game_id, bottle_name],
+        )?;
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

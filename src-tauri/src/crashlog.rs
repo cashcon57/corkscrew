@@ -261,6 +261,130 @@ pub fn find_crash_logs(game_path: &Path, bottle_path: &Path, game_id: &str) -> V
     entries
 }
 
+/// Summary of new (unseen) crash logs since last check.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NewCrashInfo {
+    /// Number of new crash logs found.
+    pub count: usize,
+    /// Preview entries (most recent first, up to 3).
+    pub entries: Vec<CrashLogEntry>,
+}
+
+/// Check for crash logs newer than the last-seen timestamp and update the marker.
+///
+/// The "last seen" timestamp is stored in a small file at
+/// `<data_dir>/Corkscrew/crash_check_<game_id>.txt`. On first run (no marker file)
+/// all existing crashes are considered "seen" — we write the current marker without
+/// reporting anything, so users don't get a wall of stale crash alerts.
+pub fn check_new_crashes(
+    bottle_path: &Path,
+    game_id: &str,
+) -> NewCrashInfo {
+    let marker_dir = dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Corkscrew");
+    let _ = fs::create_dir_all(&marker_dir);
+    let marker_path = marker_dir.join(format!("crash_check_{}.txt", game_id));
+
+    let last_seen = fs::read_to_string(&marker_path)
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok());
+
+    let log_dir = script_extender_log_dir(bottle_path, game_id);
+    if !log_dir.is_dir() {
+        return NewCrashInfo { count: 0, entries: vec![] };
+    }
+
+    // Collect crash log files with their modification times (fast: stat only).
+    let mut crash_files: Vec<(PathBuf, std::time::SystemTime, String)> = Vec::new();
+    for entry in WalkDir::new(&log_dir).max_depth(1).into_iter().flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let filename = match path.file_name().and_then(|n| n.to_str()) {
+            Some(name) if name.starts_with("crash-") && name.ends_with(".log") => name.to_string(),
+            _ => continue,
+        };
+        if let Ok(meta) = fs::metadata(path) {
+            if let Ok(mtime) = meta.modified() {
+                crash_files.push((path.to_path_buf(), mtime, filename));
+            }
+        }
+    }
+
+    // Find the newest mtime across all crash logs to use as the new marker.
+    let now_epoch = crash_files
+        .iter()
+        .filter_map(|(_, mtime, _)| {
+            mtime
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_secs() as i64)
+        })
+        .max();
+
+    // First run: no marker file — seed it with current max and report nothing.
+    if last_seen.is_none() {
+        if let Some(epoch) = now_epoch {
+            let _ = fs::write(&marker_path, epoch.to_string());
+        }
+        return NewCrashInfo { count: 0, entries: vec![] };
+    }
+
+    let threshold = last_seen.unwrap();
+
+    // Filter to only files newer than the threshold.
+    let mut new_files: Vec<(PathBuf, i64, String)> = crash_files
+        .into_iter()
+        .filter_map(|(path, mtime, filename)| {
+            let epoch = mtime
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_secs() as i64)?;
+            if epoch > threshold {
+                Some((path, epoch, filename))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Sort newest first.
+    new_files.sort_by(|a, b| b.1.cmp(&a.1));
+
+    let count = new_files.len();
+
+    // Build preview entries (up to 3) — read a quick summary for each.
+    let entries: Vec<CrashLogEntry> = new_files
+        .iter()
+        .take(3)
+        .map(|(path, _epoch, filename)| {
+            let timestamp = filename
+                .trim_start_matches("crash-")
+                .trim_end_matches(".log")
+                .to_string();
+            let (summary, severity) = match fs::read_to_string(path) {
+                Ok(content) => quick_summary(&content),
+                Err(_) => ("Unreadable crash log".to_string(), CrashSeverity::Unknown),
+            };
+            CrashLogEntry {
+                filename: filename.clone(),
+                timestamp,
+                summary,
+                severity,
+            }
+        })
+        .collect();
+
+    // Update marker to the newest mtime.
+    if let Some(epoch) = now_epoch {
+        let _ = fs::write(&marker_path, epoch.to_string());
+    }
+
+    NewCrashInfo { count, entries }
+}
+
 /// Parse a single crash log file and produce a full analysis.
 pub fn analyze_crash_log(log_path: &Path) -> Result<CrashReport> {
     let content = fs::read_to_string(log_path)?;

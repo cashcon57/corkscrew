@@ -19,7 +19,7 @@ pub enum MigrationError {
 pub type Result<T> = std::result::Result<T, MigrationError>;
 
 /// The current target schema version. Bump this when adding a new migration.
-const TARGET_VERSION: u32 = 17;
+const TARGET_VERSION: u32 = 18;
 
 /// Get the current schema version (0 if no version table exists).
 pub fn current_version(conn: &Connection) -> Result<u32> {
@@ -129,6 +129,11 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     if version == 16 {
         migrate_v16_to_v17(conn)?;
         version = 17;
+    }
+
+    if version == 17 {
+        migrate_v17_to_v18(conn)?;
+        version = 18;
     }
 
     let _ = version; // suppress unused warning when TARGET_VERSION == current
@@ -892,6 +897,35 @@ fn migrate_v16_to_v17(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Migration 17 -> 18: Chat history persistence.
+///
+/// Creates a table to store LLM chat messages per game/bottle so conversation
+/// context survives app restarts and model reloads.
+fn migrate_v17_to_v18(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS chat_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            game_id TEXT NOT NULL,
+            bottle_name TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            tool_calls TEXT,
+            mentioned_mods TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_chat_history_game
+            ON chat_history (game_id, bottle_name);",
+    )?;
+
+    tx.execute("UPDATE schema_version SET version = 18", [])?;
+    tx.commit()?;
+    log::info!("Migration 17 → 18 complete (chat history table)");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1029,7 +1063,7 @@ mod tests {
     fn v13_creates_deployment_manifest_index() {
         let conn = memory_db();
         migrate(&conn).unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 17);
+        assert_eq!(current_version(&conn).unwrap(), 18);
 
         // Verify the compound index exists
         let index_exists: bool = conn
