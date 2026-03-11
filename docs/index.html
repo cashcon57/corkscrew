@@ -1,0 +1,866 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Corkscrew — Skyrim Modding on macOS, SteamOS & Linux</title>
+<meta name="description" content="The first native mod manager for Skyrim on macOS, SteamOS, and Linux. Works with CrossOver, Wine, Whisky, and Proton. Built with Rust and Svelte.">
+<meta property="og:title" content="Corkscrew — Skyrim Modding on macOS, SteamOS & Linux">
+<meta property="og:description" content="Native mod manager for macOS, SteamOS, Ubuntu, Fedora, and more. Nexus Collections, Wabbajack, FOMOD — all through Wine/Proton.">
+<meta property="og:image" content="img/hero-screenshot.png">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="theme-color" content="#080808">
+<link rel="icon" type="image/png" href="img/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#070709;--bg2:#0c0c10;--bg3:#111116;
+  --text:#f0ede8;--text2:#9a9aa5;--text3:#55555f;
+  --orange:#ff6b35;--orange2:#ff8555;--orange-dim:rgba(255,107,53,.12);--orange-glow:rgba(255,107,53,.25);
+  --blue:#3b82f6;--purple:#8b5cf6;
+  --glass-bg:rgba(255,255,255,.025);--glass-border:rgba(255,255,255,.06);--glass-hi:rgba(255,255,255,.09);
+  --r:14px;--mono:'JetBrains Mono',monospace;--sans:'Inter',-apple-system,BlinkMacSystemFont,sans-serif;
+}
+html{scroll-behavior:smooth;-webkit-font-smoothing:antialiased}
+body{font-family:var(--sans);background:var(--bg);color:var(--text);line-height:1.6;overflow-x:hidden}
+a{color:inherit;text-decoration:none}
+img{display:block;max-width:100%}
+
+/* Noise */
+body::after{content:'';position:fixed;inset:0;z-index:9999;pointer-events:none;opacity:.03;
+  background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size:200px 200px}
+
+/* Scroll progress bar */
+#progress{position:fixed;top:0;left:272px;right:0;height:2px;background:linear-gradient(90deg,var(--orange),var(--orange2));z-index:9998;width:0;transition:width .1s linear}
+
+/* ══════════ PARTICLES ══════════ */
+#particles{position:fixed;inset:0;z-index:0;pointer-events:none}
+
+/* ══════════ GLASS ══════════ */
+.glass{background:var(--glass-bg);border:1px solid var(--glass-border);border-radius:var(--r);backdrop-filter:blur(20px) saturate(1.4);-webkit-backdrop-filter:blur(20px) saturate(1.4);position:relative;overflow:hidden}
+.glass::before{content:'';position:absolute;inset:0;border-radius:inherit;background:linear-gradient(135deg,rgba(255,255,255,.05) 0%,transparent 50%);pointer-events:none}
+.glass::after{content:'';position:absolute;top:-1px;left:15%;right:15%;height:1px;background:linear-gradient(90deg,transparent,var(--glass-hi),transparent);pointer-events:none}
+
+/* Animated gradient border wrapper */
+.glow-border{position:relative;padding:2px;border-radius:16px;background:linear-gradient(135deg,var(--orange),var(--blue),var(--purple),var(--orange));background-size:300% 300%;animation:grad-shift 6s ease infinite}
+@keyframes grad-shift{0%{background-position:0% 50%}50%{background-position:100% 50%}100%{background-position:0% 50%}}
+.glow-border>*{border-radius:14px}
+
+/* ══════════ SIDEBAR ══════════ */
+.sidebar{position:fixed;left:16px;top:16px;bottom:16px;width:240px;background:rgba(17,17,22,0.92);border:1px solid rgba(255,255,255,0.06);border-radius:14px;backdrop-filter:blur(24px) saturate(1.4);-webkit-backdrop-filter:blur(24px) saturate(1.4);padding:22px 14px;z-index:100;display:flex;flex-direction:column;box-shadow:0 8px 32px rgba(0,0,0,.3),0 0 0 1px rgba(255,255,255,.03)}
+
+.sidebar-brand{display:flex;align-items:center;gap:9px;padding:0 8px}
+.sidebar-brand img{width:24px;height:24px;border-radius:5px}
+.sidebar-brand span{font-weight:700;font-size:14px;letter-spacing:-.01em}
+.sidebar-tagline{font-size:11px;color:var(--text3);padding:4px 8px 0;font-weight:400}
+.sidebar-sep{height:1px;background:rgba(255,255,255,0.06);margin:12px 0}
+
+.sidebar-nav{display:flex;flex-direction:column;gap:2px}
+.sidebar-link{display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:8px;font-size:13px;font-weight:450;color:var(--text2);transition:color .2s, background .2s;cursor:pointer}
+.sidebar-link:hover{background:rgba(255,255,255,0.06)}
+.sidebar-link.active{background:rgba(255,107,53,0.12);color:var(--orange)}
+.sidebar-link svg{width:16px;height:16px;flex-shrink:0;stroke:currentColor;fill:none;stroke-width:1.5}
+
+.sidebar-footer{margin-top:auto;display:flex;flex-direction:column;gap:10px;padding:0 4px}
+.sidebar-gh{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text3);transition:color .2s}
+.sidebar-gh:hover{color:var(--text2)}
+.sidebar-gh svg{width:14px;height:14px;fill:currentColor;flex-shrink:0}
+.sidebar-kofi{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text3);transition:color .2s}
+.sidebar-kofi:hover{color:#ff5e5b}
+.sidebar-kofi svg{flex-shrink:0}
+.sidebar-ver{font-family:var(--mono);font-size:11px;color:var(--text3)}
+.sidebar-dl{display:block;width:100%;padding:10px 0;border-radius:10px;background:var(--orange);color:#fff;font-weight:600;font-size:13px;text-align:center;transition:all .2s;border:none;cursor:pointer}
+.sidebar-dl:hover{background:var(--orange2);box-shadow:0 4px 16px var(--orange-glow)}
+
+/* ══════════ MAIN CONTENT ══════════ */
+#content{margin-left:272px;position:relative}
+
+/* ══════════ LAYOUT ══════════ */
+.wrap{max-width:1200px;margin:0 auto;padding:0 28px}
+section{position:relative;z-index:1}
+
+/* Section divider */
+.divider{height:1px;background:linear-gradient(90deg,transparent,rgba(255,107,53,.15),rgba(59,130,246,.1),transparent);margin:0 auto;max-width:800px}
+
+/* ══════════ HERO ══════════ */
+.hero{min-height:100vh;min-height:100dvh;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;padding:80px 28px 40px;position:relative}
+
+.hero-glow{position:absolute;inset:0;overflow:hidden;pointer-events:none}
+.hero-glow .orb{position:absolute;border-radius:50%;filter:blur(100px);animation:orb-f 8s ease-in-out infinite alternate}
+.hero-glow .orb-1{width:700px;height:700px;top:-20%;left:25%;background:rgba(255,107,53,.14);opacity:1}
+.hero-glow .orb-2{width:500px;height:500px;top:30%;right:-10%;background:rgba(59,130,246,.09);opacity:1;animation-delay:-3s}
+.hero-glow .orb-3{width:400px;height:400px;bottom:5%;left:5%;background:rgba(139,92,246,.07);opacity:1;animation-delay:-5s}
+@keyframes orb-f{0%{transform:translate(0,0) scale(1)}100%{transform:translate(40px,-30px) scale(1.15)}}
+
+/* Hero animated icon */
+.hero-icon{position:relative;z-index:2;margin-bottom:16px;display:flex;flex-direction:column;align-items:center}
+.hero-icon img{width:120px;height:120px;border-radius:24px;transition:transform .5s cubic-bezier(.14,1,.34,1), opacity .5s ease;transform-origin:center center;will-change:transform, opacity}
+.hero-icon.icon-shrunk img{transform:scale(0.3);opacity:0}
+.hero-icon-label{font-size:28px;font-weight:800;letter-spacing:-.03em;margin-top:12px;transition:opacity .4s ease, transform .4s ease;position:relative;z-index:2}
+.hero-icon.icon-shrunk .hero-icon-label{opacity:0;transform:translateY(-10px)}
+
+.hero-badge{display:inline-flex;align-items:center;gap:8px;padding:5px 14px 5px 10px;border-radius:100px;font-size:12px;font-weight:500;color:var(--orange);border:1px solid var(--orange-dim);background:rgba(255,107,53,.04);margin-bottom:28px;position:relative;z-index:2}
+.hero-badge .dot{width:7px;height:7px;border-radius:50%;background:var(--orange);animation:blink 2s infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+
+.hero h1{font-size:clamp(44px,7.5vw,90px);font-weight:900;letter-spacing:-.045em;line-height:1;max-width:850px;margin-bottom:24px;position:relative;z-index:1}
+
+/* Word-by-word stagger */
+.hw{display:inline-block;opacity:0;transform:translateY(24px) rotateX(-15deg);animation:hw-in .6s cubic-bezier(.14,1,.34,1) forwards}
+@keyframes hw-in{to{opacity:1;transform:translateY(0) rotateX(0)}}
+.hw.grad{background:linear-gradient(135deg,var(--orange),var(--orange2),#ffb088);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+
+.hero-sub{font-size:clamp(15px,1.6vw,18px);color:var(--text2);max-width:480px;line-height:1.65;margin-bottom:40px;font-weight:380;position:relative;z-index:1;opacity:0;animation:fade-up .7s .55s cubic-bezier(.14,1,.34,1) forwards}
+@keyframes fade-up{to{opacity:1;transform:translateY(0)}}
+.hero-sub{transform:translateY(16px)}
+
+.hero-actions{display:flex;gap:12px;margin-bottom:48px;position:relative;z-index:1;opacity:0;animation:fade-up .7s .7s cubic-bezier(.14,1,.34,1) forwards;transform:translateY(16px)}
+
+.btn-p{padding:14px 30px;border-radius:10px;background:var(--orange);color:#fff;font-weight:600;font-size:14px;display:inline-flex;align-items:center;gap:8px;transition:all .3s cubic-bezier(.14,1,.34,1);border:none;cursor:pointer}
+.btn-p:hover{background:var(--orange2);transform:translateY(-2px);box-shadow:0 8px 32px var(--orange-glow)}
+.btn-g{padding:14px 30px;border-radius:10px;border:1px solid var(--glass-border);color:var(--text2);font-weight:500;font-size:14px;display:inline-flex;align-items:center;gap:8px;transition:all .2s;background:var(--glass-bg);cursor:pointer}
+.btn-g:hover{border-color:var(--text3);color:var(--text)}
+
+/* Hero screenshot with reflection */
+.hero-shot{position:relative;z-index:1;width:100%;max-width:1100px;opacity:0;animation:fade-up .8s .85s cubic-bezier(.14,1,.34,1) forwards;transform:translateY(24px)}
+.hero-shot .glow-border{box-shadow:0 24px 80px rgba(255,107,53,.08),0 8px 32px rgba(0,0,0,.4)}
+.hero-shot img{width:100%;display:block}
+
+/* Reflection */
+.hero-reflect{position:relative;z-index:1;width:100%;max-width:1100px;height:120px;margin-top:-2px;overflow:hidden;-webkit-mask-image:linear-gradient(to bottom,rgba(0,0,0,.18),transparent 90%);mask-image:linear-gradient(to bottom,rgba(0,0,0,.18),transparent 90%)}
+.hero-reflect img{width:100%;transform:scaleY(-1);filter:blur(4px) brightness(.5);border-radius:14px}
+
+.hero-meta{font-family:var(--mono);font-size:12px;color:var(--text3);margin-top:16px;position:relative;z-index:1;opacity:0;animation:fade-up .6s 1s ease forwards;transform:translateY(10px)}
+
+/* ══════════ STATS MARQUEE ══════════ */
+.marquee-section{padding:40px 0;border-top:1px solid var(--glass-border);border-bottom:1px solid var(--glass-border);overflow:hidden;position:relative;z-index:1;background:var(--bg2)}
+.marquee-track{display:flex;gap:56px;animation:marq 25s linear infinite;white-space:nowrap}
+.marquee-track:hover{animation-play-state:paused}
+.marquee-item{display:flex;align-items:baseline;gap:10px;flex-shrink:0}
+.marquee-num{font-size:28px;font-weight:800;letter-spacing:-.03em;color:var(--orange);font-variant-numeric:tabular-nums}
+.marquee-label{font-size:13px;color:var(--text2);font-weight:450}
+@keyframes marq{0%{transform:translateX(0)}100%{transform:translateX(-50%)}}
+
+/* ══════════ HOW IT WORKS ══════════ */
+.hiw{padding:120px 0}
+.hiw-header{text-align:center;margin-bottom:64px}
+.sh-l{font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--orange);margin-bottom:12px}
+.sh h2,.hiw-header h2{font-size:clamp(30px,3.8vw,48px);font-weight:900;letter-spacing:-.035em}
+
+.hiw-steps{display:grid;grid-template-columns:repeat(3,1fr);gap:32px;position:relative}
+/* Connecting line between steps */
+.hiw-steps::before{content:'';position:absolute;top:36px;left:calc(16.67% + 16px);right:calc(16.67% + 16px);height:2px;background:linear-gradient(90deg,var(--orange-dim),var(--orange),var(--orange-dim))}
+.hiw-step{text-align:center;position:relative;z-index:1}
+.step-num{width:72px;height:72px;border-radius:50%;background:var(--bg);border:2px solid var(--orange);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:24px;font-weight:700;color:var(--orange);margin:0 auto 20px;position:relative;box-shadow:0 0 24px var(--orange-glow)}
+.hiw-step h3{font-size:18px;font-weight:700;margin-bottom:8px}
+.hiw-step p{font-size:14px;color:var(--text2);line-height:1.6;max-width:280px;margin:0 auto}
+
+/* ══════════ PROBLEM/SOLUTION ══════════ */
+.ps{padding:120px 0}
+.ps-grid{display:grid;grid-template-columns:1fr 1fr;gap:80px;align-items:start}
+.ps-label{font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--text3);margin-bottom:16px;display:flex;align-items:center;gap:8px}
+.ps-label::before{content:'';width:20px;height:1px;background:var(--text3)}
+.ps h2{font-size:clamp(24px,2.8vw,34px);font-weight:800;letter-spacing:-.03em;line-height:1.2;margin-bottom:18px}
+.ps p{color:var(--text2);font-size:15px;line-height:1.7}
+.hl{color:var(--orange)}
+.cklist{list-style:none;display:flex;flex-direction:column;gap:14px}
+.cklist li{display:flex;gap:12px;color:var(--text2);font-size:14px;line-height:1.6}
+.ck{flex-shrink:0;width:22px;height:22px;border-radius:6px;background:var(--orange-dim);display:flex;align-items:center;justify-content:center;margin-top:1px}
+.ck svg{width:12px;height:12px;stroke:var(--orange);fill:none;stroke-width:2.5}
+
+/* ══════════ FEATURES ══════════ */
+.feat{padding:80px 0 140px}
+.sh{text-align:center;margin-bottom:80px}
+
+.fr{display:grid;grid-template-columns:1fr 1.15fr;gap:56px;align-items:center;margin-bottom:120px}
+.fr:last-child{margin-bottom:0}
+.fr.rev{grid-template-columns:1.15fr 1fr}
+.fr.rev .ft{order:2}
+.fr.rev .fi{order:1}
+.ft h3{font-size:clamp(24px,2.6vw,32px);font-weight:800;letter-spacing:-.02em;margin-bottom:14px}
+.ft p{color:var(--text2);font-size:15px;line-height:1.7;margin-bottom:20px}
+.tg{display:inline-block;padding:5px 12px;border-radius:6px;font-family:var(--mono);font-size:12px;font-weight:500;color:var(--orange);background:var(--orange-dim);margin-right:8px;margin-bottom:8px}
+.badge-beta{display:inline-block;padding:3px 8px;border-radius:6px;font-family:var(--mono);font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#febc2e;background:rgba(254,188,46,.1);border:1px solid rgba(254,188,46,.15);margin-left:8px;vertical-align:middle}
+
+/* Screenshot glow on hover */
+.fi{position:relative;transition:transform .5s cubic-bezier(.14,1,.34,1)}
+.fi:hover{transform:translateY(-6px)}
+.fi::before{content:'';position:absolute;inset:-20px;border-radius:30px;background:radial-gradient(ellipse at center,rgba(255,107,53,.08),transparent 70%);opacity:0;transition:opacity .5s;pointer-events:none;z-index:-1}
+.fi:hover::before{opacity:1}
+.fi img{border-radius:var(--r);border:1px solid rgba(255,255,255,.08);box-shadow:0 8px 40px rgba(0,0,0,.3);transition:border-color .4s,box-shadow .4s;filter:brightness(1.05)}
+.fi:hover img{border-color:rgba(255,107,53,.2);box-shadow:0 12px 48px rgba(0,0,0,.4),0 0 40px rgba(255,107,53,.06)}
+
+/* ══════════ WABBAJACK ══════════ */
+.wj{padding:0 0 140px}
+.wj-card{padding:2px;border-radius:20px;background:linear-gradient(135deg,var(--orange),var(--blue),var(--purple),var(--orange));background-size:300% 300%;animation:grad-shift 6s ease infinite}
+.wj-inner{background:var(--bg2);border-radius:18px;padding:56px 60px;display:grid;grid-template-columns:1fr 1.2fr;gap:48px;align-items:center;position:relative;overflow:hidden}
+.wj-inner::before{content:'';position:absolute;top:-30%;right:-10%;width:400px;height:400px;background:radial-gradient(circle,rgba(255,107,53,.07) 0%,transparent 70%);pointer-events:none}
+.wj-txt h3{font-size:clamp(26px,3vw,38px);font-weight:900;letter-spacing:-.03em;margin-bottom:16px;line-height:1.1}
+.wj-txt h3 .hl{font-style:italic}
+.wj-txt p{color:var(--text2);font-size:15px;line-height:1.7;margin-bottom:20px}
+.wj-txt .sub{font-family:var(--mono);font-size:12px;color:var(--text3);display:flex;align-items:center;gap:8px}
+.wj-txt .sub::before{content:'';width:16px;height:1px;background:var(--orange)}
+.wj-img img{border-radius:12px;border:1px solid rgba(255,255,255,.08);box-shadow:0 12px 48px rgba(0,0,0,.35);filter:brightness(1.05)}
+
+/* ══════════ BENTO ══════════ */
+.bento{padding:0 0 140px}
+.bg{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.bc{padding:32px 28px;min-height:200px;display:flex;flex-direction:column;transition:all .4s cubic-bezier(.14,1,.34,1)}
+.bc:hover{border-color:rgba(255,107,53,.18);box-shadow:0 0 48px rgba(255,107,53,.05);transform:translateY(-4px)}
+.bc.w2{grid-column:span 2}
+/* Subtle tint variations */
+.bc:nth-child(1){background:linear-gradient(135deg,rgba(255,107,53,.03),var(--glass-bg))}
+.bc:nth-child(2){background:linear-gradient(135deg,rgba(59,130,246,.03),var(--glass-bg))}
+.bc:nth-child(3){background:linear-gradient(135deg,rgba(139,92,246,.03),var(--glass-bg))}
+.bc:nth-child(4){background:linear-gradient(135deg,var(--glass-bg),rgba(255,107,53,.02))}
+.bc:nth-child(5){background:linear-gradient(135deg,rgba(59,130,246,.02),var(--glass-bg))}
+.bi{width:40px;height:40px;border-radius:10px;background:var(--orange-dim);display:flex;align-items:center;justify-content:center;margin-bottom:16px}
+.bi svg{width:18px;height:18px;stroke:var(--orange);fill:none;stroke-width:1.5}
+.bc h3{font-size:17px;font-weight:700;margin-bottom:8px}
+.bc p{color:var(--text2);font-size:13px;line-height:1.6}
+
+/* ══════════ TECH (terminal aesthetic) ══════════ */
+.tech{padding:140px 0;border-top:1px solid var(--glass-border);border-bottom:1px solid var(--glass-border)}
+.tech-s{display:grid;grid-template-columns:1fr 1fr;gap:72px;align-items:start}
+.tech-s h2{font-size:clamp(30px,3.8vw,48px);font-weight:900;letter-spacing:-.035em;margin-bottom:18px}
+.tech-s>div:first-child>p{color:var(--text2);font-size:15px;line-height:1.7}
+
+.term{background:var(--bg2);border:1px solid var(--glass-border);border-radius:12px;overflow:hidden;font-family:var(--mono);font-size:13px}
+.term-bar{display:flex;align-items:center;gap:6px;padding:12px 16px;border-bottom:1px solid var(--glass-border);background:rgba(255,255,255,.02)}
+.term-dot{width:10px;height:10px;border-radius:50%}
+.term-dot.r{background:#ff5f57}.term-dot.y{background:#febc2e}.term-dot.g{background:#28c840}
+.term-title{margin-left:8px;color:var(--text3);font-size:11px}
+.term-body{padding:20px;line-height:2.2}
+.term-line{display:flex;gap:12px}
+.term-key{color:var(--orange);min-width:140px}
+.term-val{color:var(--text2)}
+.term-val strong{color:var(--text);font-weight:500}
+
+/* ══════════ TIMELINE ══════════ */
+.tls{padding:140px 0}
+.tl{position:relative;max-width:640px;margin:0 auto;padding:32px 0}
+.tl::before{content:'';position:absolute;left:22px;top:0;bottom:0;width:2px;background:linear-gradient(to bottom,transparent,rgba(255,107,53,.12) 8%,rgba(255,107,53,.22) 50%,rgba(255,107,53,.12) 92%,transparent)}
+.tl::after{content:'';position:absolute;left:19px;top:0;width:8px;height:80px;border-radius:4px;background:linear-gradient(to bottom,transparent,var(--orange),transparent);animation:tl-g 5s ease-in-out infinite;filter:blur(1px)}
+@keyframes tl-g{0%{top:0;opacity:0}8%{opacity:.7}92%{opacity:.7}100%{top:calc(100% - 80px);opacity:0}}
+
+.ti{position:relative;padding-left:60px;margin-bottom:48px;opacity:0;transform:translateY(16px);transition:all .6s cubic-bezier(.14,1,.34,1)}
+.ti.vis{opacity:1;transform:translateY(0)}
+.ti::before{content:'';position:absolute;left:14px;top:4px;width:18px;height:18px;border-radius:50%;background:var(--bg);border:2.5px solid var(--text3);z-index:2;transition:all .4s}
+.ti.vis::before{border-color:var(--orange);background:var(--orange);box-shadow:0 0 20px var(--orange-glow),0 0 40px rgba(255,107,53,.1)}
+.ti-d{font-family:var(--mono);font-size:11px;color:var(--text3);letter-spacing:.05em;margin-bottom:4px}
+.ti h3{font-size:17px;font-weight:700;margin-bottom:5px}
+.ti p{font-size:14px;color:var(--text2);line-height:1.55}
+
+/* ══════════ BUILDER ══════════ */
+.builder{padding:80px 0 140px;text-align:center}
+.builder-card{max-width:680px;margin:0 auto;padding:40px;border-radius:var(--r)}
+.builder-card p{color:var(--text2);font-size:15px;line-height:1.7;font-style:italic}
+.builder-card .sig{margin-top:20px;font-family:var(--mono);font-size:13px;color:var(--orange);font-style:normal}
+
+/* ══════════ CTA ══════════ */
+.cta{padding:140px 0;text-align:center;position:relative;overflow:hidden}
+.cta-glow{position:absolute;inset:0;pointer-events:none}
+.cta-glow .orb{position:absolute;border-radius:50%;filter:blur(80px)}
+.cta-glow .orb-a{width:500px;height:500px;top:10%;left:20%;background:rgba(255,107,53,.06)}
+.cta-glow .orb-b{width:400px;height:400px;bottom:10%;right:15%;background:rgba(59,130,246,.04)}
+.cta h2{font-size:clamp(40px,5.5vw,64px);font-weight:900;letter-spacing:-.04em;margin-bottom:16px;position:relative;z-index:1}
+.cta h2 .grad{background:linear-gradient(135deg,var(--orange),var(--orange2),#ffb088);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.cta>.wrap>p{color:var(--text2);font-size:16px;max-width:440px;margin:0 auto 36px;position:relative;z-index:1}
+.cta-b{display:flex;justify-content:center;gap:14px;margin-bottom:20px;position:relative;z-index:1}
+.cta-b a{display:flex;align-items:center;gap:9px;padding:14px 28px;border-radius:10px;font-weight:600;font-size:14px;transition:all .3s cubic-bezier(.14,1,.34,1)}
+.cta-b a svg{width:18px;height:18px}
+.cm{background:var(--orange);color:#fff}
+.cm:hover{background:var(--orange2);transform:translateY(-2px);box-shadow:0 8px 28px var(--orange-glow)}
+.cl{border:1px solid var(--glass-border);color:var(--text2);background:var(--glass-bg)}
+.cl:hover{border-color:var(--text3);color:var(--text)}
+.cta-n{font-size:12px;color:var(--text3);font-family:var(--mono);position:relative;z-index:1}
+.cta-src{margin-top:32px;position:relative;z-index:1}
+.cta-src code{font-family:var(--mono);font-size:12px;background:rgba(255,255,255,.04);border:1px solid var(--glass-border);padding:8px 16px;border-radius:8px;color:var(--text2);display:inline-block}
+
+/* ══════════ FOOTER ══════════ */
+footer{border-top:1px solid var(--glass-border);padding:40px 0}
+.ff{display:flex;justify-content:space-between;align-items:center}
+.fl{display:flex;align-items:center;gap:9px;font-size:13px;color:var(--text3)}
+.fl img{width:18px;height:18px;border-radius:4px;opacity:.5}
+.fk{display:flex;gap:20px}
+.fk a{font-size:12px;color:var(--text3);transition:color .2s}
+.fk a:hover{color:var(--text2)}
+
+/* ══════════ REVEALS ══════════ */
+.rv{opacity:0;transform:translateY(32px);transition:all .8s cubic-bezier(.14,1,.34,1)}
+.rv.vis{opacity:1;transform:translateY(0)}
+.rv-d1{transition-delay:.1s}.rv-d2{transition-delay:.2s}.rv-d3{transition-delay:.3s}.rv-d4{transition-delay:.4s}
+
+/* ══════════ RESPONSIVE ══════════ */
+@media(max-width:960px){
+  .sidebar{display:none}
+  #content{margin-left:0}
+  #progress{left:0}
+  .sidebar-kofi{display:none}
+  .ps-grid,.tech-s{grid-template-columns:1fr;gap:40px}
+  .fr,.fr.rev{grid-template-columns:1fr;gap:28px}
+  .fr.rev .ft{order:1}.fr.rev .fi{order:2}
+  .bg{grid-template-columns:1fr}.bc.w2{grid-column:span 1}
+  .hiw-steps{grid-template-columns:1fr;max-width:320px;margin:0 auto}
+  .hiw-steps::before{display:none}
+  .wj-inner{grid-template-columns:1fr;padding:32px 24px}
+
+  /* Mobile bottom nav */
+  .mobile-nav{display:flex;position:fixed;bottom:0;left:0;right:0;z-index:100;background:rgba(17,17,22,0.95);backdrop-filter:blur(20px) saturate(1.4);-webkit-backdrop-filter:blur(20px) saturate(1.4);border-top:1px solid rgba(255,255,255,0.06);padding:8px 0;justify-content:space-around;align-items:center}
+  .mobile-nav a{display:flex;flex-direction:column;align-items:center;gap:3px;padding:6px 12px;border-radius:8px;font-size:10px;color:var(--text3);transition:color .2s}
+  .mobile-nav a.active{color:var(--orange)}
+  .mobile-nav a svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:1.5}
+  footer{padding-bottom:80px}
+}
+@media(min-width:961px){
+  .mobile-nav{display:none}
+}
+@media(max-width:640px){
+  .hero{padding:80px 20px 40px}
+  .hero-actions{flex-direction:column;width:100%;max-width:300px}
+  .hero-actions a{text-align:center;justify-content:center}
+  .cta-b{flex-direction:column;align-items:center}
+  .cta-b a{width:100%;max-width:260px;justify-content:center}
+  .ff{flex-direction:column;gap:16px;text-align:center}
+  .marquee-num{font-size:22px}
+  .builder-card{padding:28px 20px}
+  .hero-icon img{width:80px;height:80px;border-radius:18px}
+  .hero-icon-label{font-size:22px}
+}
+
+</style>
+</head>
+<body>
+
+<div id="progress"></div>
+<canvas id="particles"></canvas>
+
+<!-- Sidebar -->
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-brand">
+    <img src="img/favicon.png" alt="Corkscrew" width="24" height="24">
+    <span>Corkscrew</span>
+  </div>
+  <div class="sidebar-tagline">Mod Manager</div>
+  <div class="sidebar-sep"></div>
+
+  <nav class="sidebar-nav">
+    <a href="#" class="sidebar-link active" data-section="hero">
+      <svg viewBox="0 0 24 24"><path d="M3 9.5L12 3l9 6.5V20a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9.5z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+      Home
+    </a>
+    <a href="#how" class="sidebar-link" data-section="how">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8" fill="currentColor" stroke="none"/></svg>
+      How it works
+    </a>
+    <a href="#features" class="sidebar-link" data-section="features">
+      <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+      Features
+    </a>
+    <a href="#wabbajack" class="sidebar-link" data-section="wabbajack">
+      <svg viewBox="0 0 24 24"><path d="M19.439 7.85c-.049.322.059.648.289.878l1.568 1.568c.47.47.706 1.087.706 1.704s-.235 1.233-.706 1.704l-1.611 1.611a.98.98 0 0 1-.837.276c-.47-.07-.802-.48-.743-.953a.99.99 0 0 0-.3-.838l-.005-.005a.99.99 0 0 0-.838-.3c-.472.059-.882-.274-.953-.743a.98.98 0 0 1 .276-.837l1.611-1.611a1.232 1.232 0 0 0 0-1.74l-1.568-1.568a2.449 2.449 0 0 1-.722-2.196l.29-1.776a1.232 1.232 0 0 0-1.216-1.44h-2.218c-.639 0-1.249.261-1.696.722l-1.568 1.568a.98.98 0 0 1-.878.289 1.232 1.232 0 0 0-1.44 1.216v2.218c0 .639.261 1.249.722 1.696l1.568 1.568c.23.23.338.556.289.878l-.29 1.776a1.232 1.232 0 0 0 1.216 1.44h2.218c.639 0 1.249-.261 1.696-.722"/><circle cx="12" cy="12" r="3"/></svg>
+      Wabbajack
+    </a>
+    <a href="#tech" class="sidebar-link" data-section="tech">
+      <svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+      Tech Stack
+    </a>
+    <a href="#timeline" class="sidebar-link" data-section="timeline">
+      <svg viewBox="0 0 24 24"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>
+      Roadmap
+    </a>
+    <a href="#download" class="sidebar-link" data-section="download">
+      <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      Download
+    </a>
+  </nav>
+
+  <div class="sidebar-footer">
+    <a href="https://github.com/cashcon57/corkscrew" target="_blank" rel="noopener" class="sidebar-gh">
+      <svg viewBox="0 0 24 24"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+      GitHub
+    </a>
+    <a href="https://ko-fi.com/cashconway" target="_blank" rel="noopener" class="sidebar-kofi">
+      <svg viewBox="0 0 24 24" width="14" height="14"><path d="M23.881 8.948c-.773-4.085-4.859-4.593-4.859-4.593H.723c-.604 0-.679.798-.679.798s-.082 7.324-.022 11.822c.164 2.424 2.586 2.672 2.586 2.672s8.267-.023 11.966-.049c2.438-.426 2.683-2.566 2.658-3.734 4.352.24 7.422-2.831 6.649-6.916zm-11.062 3.511c-1.246 1.453-4.011 3.976-4.011 3.976s-.121.119-.31.023c-.076-.057-.108-.09-.108-.09-.443-.441-3.368-3.049-4.034-3.954-.709-.965-1.041-2.7-.091-3.71.951-1.01 3.005-1.086 4.363.407 0 0 1.565-1.782 3.468-.963 1.904.82 1.832 3.011.723 4.311zm6.173.478c-.928.116-1.682.028-1.682.028V7.284h1.77s1.971.551 1.971 2.638c0 1.913-.985 2.667-2.059 3.015z" fill="currentColor"/></svg>
+      Support on Ko-fi
+    </a>
+    <span class="sidebar-ver">v0.9.29</span>
+    <a href="https://github.com/cashcon57/corkscrew/releases/latest" class="sidebar-dl">Download</a>
+  </div>
+</aside>
+
+<!-- Mobile bottom nav -->
+<div class="mobile-nav" id="mobileNav">
+  <a href="#" data-section="hero">
+    <svg viewBox="0 0 24 24"><path d="M3 9.5L12 3l9 6.5V20a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9.5z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+    Home
+  </a>
+  <a href="#features" data-section="features">
+    <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+    Features
+  </a>
+  <a href="#download" data-section="download">
+    <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+    Download
+  </a>
+</div>
+
+<!-- Main content -->
+<main id="content">
+
+<!-- Hero -->
+<section class="hero" id="hero">
+  <div class="hero-glow"><div class="orb orb-1"></div><div class="orb orb-2"></div><div class="orb orb-3"></div></div>
+  <div class="hero-icon" id="heroIcon">
+    <img src="img/icon.png" alt="Corkscrew icon">
+    <span class="hero-icon-label">Corkscrew</span>
+  </div>
+  <div class="hero-badge"><span class="dot"></span> v0.9 &mdash; Public Beta</div>
+  <h1 id="heroH1"></h1>
+  <p class="hero-sub">The first native mod manager for macOS, SteamOS, and Linux. Runs your mods through CrossOver, Wine, Whisky, or Proton&mdash;no Windows required.</p>
+  <div class="hero-actions">
+    <a href="https://github.com/cashcon57/corkscrew/releases/latest" class="btn-p">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      Download
+    </a>
+    <a href="https://github.com/cashcon57/corkscrew" target="_blank" rel="noopener" class="btn-g">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+      Source
+    </a>
+  </div>
+  <div class="hero-shot">
+    <div class="glow-border"><img src="img/hero-screenshot.png" alt="Corkscrew mod manager" loading="eager"></div>
+  </div>
+  <div class="hero-reflect"><img src="img/hero-screenshot.png" alt="" loading="eager" aria-hidden="true"></div>
+  <p class="hero-meta">v0.9.29 &middot; Rust + Svelte + Tauri &middot; GPL-3.0</p>
+</section>
+
+<!-- Stats Marquee -->
+<section class="marquee-section">
+  <div class="marquee-track" id="marquee">
+    <div class="marquee-item"><span class="marquee-num" data-target="174">0</span><span class="marquee-label">Wabbajack Lists</span></div>
+    <div class="marquee-item"><span class="marquee-num" data-target="60">0</span><span class="marquee-label">Engine Crash Patches</span></div>
+    <div class="marquee-item"><span class="marquee-num">0</span><span class="marquee-label">Windows Required</span></div>
+    <div class="marquee-item"><span class="marquee-num" data-target="12">0</span><span class="marquee-label">MB Binary</span></div>
+    <div class="marquee-item"><span class="marquee-num">100%</span><span class="marquee-label">Open Source</span></div>
+    <div class="marquee-item"><span class="marquee-num" data-target="3700">0</span><span class="marquee-label">Plugin Metadata Entries</span></div>
+    <div class="marquee-item"><span class="marquee-num">3</span><span class="marquee-label">Platforms (macOS, SteamOS, Linux)</span></div>
+    <!-- Duplicate for loop -->
+    <div class="marquee-item"><span class="marquee-num">174</span><span class="marquee-label">Wabbajack Lists</span></div>
+    <div class="marquee-item"><span class="marquee-num">60+</span><span class="marquee-label">Engine Crash Patches</span></div>
+    <div class="marquee-item"><span class="marquee-num">0</span><span class="marquee-label">Windows Required</span></div>
+    <div class="marquee-item"><span class="marquee-num">12</span><span class="marquee-label">MB Binary</span></div>
+    <div class="marquee-item"><span class="marquee-num">100%</span><span class="marquee-label">Open Source</span></div>
+    <div class="marquee-item"><span class="marquee-num">3,700+</span><span class="marquee-label">Plugin Metadata Entries</span></div>
+    <div class="marquee-item"><span class="marquee-num">3</span><span class="marquee-label">Platforms (macOS, SteamOS, Linux)</span></div>
+  </div>
+</section>
+
+<!-- How It Works -->
+<section class="hiw" id="how">
+  <div class="wrap">
+    <div class="hiw-header rv">
+      <div class="sh-l">How it works</div>
+      <h2>Three steps. That's it.</h2>
+    </div>
+    <div class="hiw-steps">
+      <div class="hiw-step rv">
+        <div class="step-num">1</div>
+        <h3>Point it at your game</h3>
+        <p>Corkscrew auto-detects CrossOver, Whisky, Proton, and Lutris bottles on macOS, SteamOS, Ubuntu, Fedora, and more.</p>
+      </div>
+      <div class="hiw-step rv rv-d1">
+        <div class="step-num">2</div>
+        <h3>Browse & install mods</h3>
+        <p>One-click Nexus Mods downloads. FOMOD wizards handled natively. Drag to reorder.</p>
+      </div>
+      <div class="hiw-step rv rv-d2">
+        <div class="step-num">3</div>
+        <h3>Hit play</h3>
+        <p>SKSE, Engine Fixes, and load order sorted automatically. Launch straight from Corkscrew.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- Problem / Solution -->
+<section class="ps">
+  <div class="wrap">
+    <div class="ps-grid">
+      <div class="rv">
+        <div class="ps-label">The problem</div>
+        <h2>macOS, SteamOS, and Linux gamers don't mod Skyrim. Not because they can't run it&mdash;because they can't manage mods.</h2>
+        <p>MO2 and Vortex are Windows-only. Running them through Wine or Proton is fragile, slow, and breaks on every update. Nobody wants to manage a 300-mod load order inside a virtual desktop on their Mac or Steam Deck.</p>
+      </div>
+      <div class="rv rv-d1">
+        <div class="ps-label">The fix</div>
+        <h2>A mod manager that <span class="hl">actually runs here.</span></h2>
+        <ul class="cklist">
+          <li><span class="ck"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></span>Native binary for macOS (Apple Silicon & Intel), SteamOS, Ubuntu, Fedora, Arch, and more. No Wine wrapper, no Electron.</li>
+          <li><span class="ck"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></span>One-click Nexus SSO. Download with manager, full API.</li>
+          <li><span class="ck"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></span>SKSE, Engine Fixes, Address Library auto-deployed.</li>
+          <li><span class="ck"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></span>LOOT plugin sorting and conflict detection built in.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- Features -->
+<section class="feat" id="features">
+  <div class="wrap">
+    <div class="sh rv">
+      <div class="sh-l">Features</div>
+      <h2>Everything you need, nothing you don't.</h2>
+    </div>
+
+    <div class="fr rv">
+      <div class="ft">
+        <h3>Drag, drop, done.</h3>
+        <p>Install from Nexus with one click or drop archives in. FOMOD wizards, BSA unpacking, and conflict resolution handled natively. Sort hundreds of mods with real-time search and category filters.</p>
+        <span class="tg">FOMOD</span><span class="tg">NXM Links</span><span class="tg">7z / RAR / ZIP</span>
+      </div>
+      <div class="fi"><img src="img/mods-screenshot.png" alt="Corkscrew mod list view" loading="lazy"></div>
+    </div>
+
+    <div class="fr rev rv">
+      <div class="ft">
+        <h3>Plugin sorting that works.</h3>
+        <p>Integrated LOOT engine sorts plugins automatically. See master dependencies, detect conflicts, fix load order before it crashes. Drag to override when you know better.</p>
+        <span class="tg">LOOT</span><span class="tg">Drag Reorder</span><span class="tg">Conflict Map</span>
+      </div>
+      <div class="fi"><img src="img/loadorder-screenshot.png" alt="Corkscrew load order view" loading="lazy"></div>
+    </div>
+
+    <div class="fr rv">
+      <div class="ft">
+        <h3>Nexus Collections. One click. <span class="badge-beta">Beta</span></h3>
+        <p>Install curated mod packs with automated dependency resolution. Every mod downloaded, configured, and ordered correctly. No manual intervention required.</p>
+        <span class="tg">Collections</span><span class="tg">Auto-Install</span><span class="tg">Profiles</span>
+      </div>
+      <div class="fi"><img src="img/collections-screenshot.png" alt="Corkscrew collections view" loading="lazy"></div>
+    </div>
+
+    <div class="fr rev rv">
+      <div class="ft">
+        <h3>Crash? We've got answers.</h3>
+        <p>Structured crash log viewer with stack traces mapped to your mod list. Know which mod broke your game in seconds, not hours of bisecting.</p>
+        <span class="tg">Stack Traces</span><span class="tg">Mod Attribution</span><span class="tg">Session Tracking</span>
+      </div>
+      <div class="fi"><img src="img/crashlogs-screenshot.png" alt="Corkscrew crash log viewer" loading="lazy"></div>
+    </div>
+  </div>
+</section>
+
+<!-- Wabbajack -->
+<section class="wj" id="wabbajack">
+  <div class="wrap">
+    <div class="wj-card rv">
+      <div class="wj-inner">
+        <div class="wj-txt">
+          <h3>Wabbajack modlists<br>on macOS & Linux. <span class="hl">Yes, really.</span> <span class="badge-beta">Beta</span></h3>
+          <p>Full 7-phase install pipeline: metadata resolution, archive downloads, BSA/BA2 packing, DDS texture transforms, binary delta patches, FOMOD evaluation, and hardlink deployment. Hundreds of mods from a single click.</p>
+          <div class="sub">174 lists &middot; Skyrim SE/AE &middot; macOS, SteamOS & Linux &middot; No Windows VM</div>
+        </div>
+        <div class="wj-img"><img src="img/wabbajack-screenshot.png" alt="Wabbajack modlist installation in Corkscrew" loading="lazy"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Bento -->
+<section class="bento">
+  <div class="wrap">
+    <div class="bg">
+      <div class="bc glass rv">
+        <div class="bi"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div>
+        <h3>Engine Fixes, Auto-Deployed</h3>
+        <p>Custom Wine-compatible SSE Engine Fixes patches 60+ crash sites with VEH recovery. Deployed automatically, updated silently.</p>
+      </div>
+      <div class="bc glass rv rv-d1">
+        <div class="bi"><svg viewBox="0 0 24 24"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg></div>
+        <h3>CrossOver, Whisky, Proton, Lutris</h3>
+        <p>Auto-detects your Wine compatibility layer on macOS, SteamOS, and Linux. Works with Steam, GOG, and manual installs across all distributions.</p>
+      </div>
+      <div class="bc glass rv rv-d2">
+        <div class="bi"><svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg></div>
+        <h3>Crash Logs, Decoded</h3>
+        <p>Built-in crash log viewer with stack traces mapped to your mod list.</p>
+      </div>
+      <div class="bc glass w2 rv">
+        <div class="bi"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg></div>
+        <h3>Open Source, GPL-3.0</h3>
+        <p>Every line is public. No telemetry, no accounts required. Built by a modder who got tired of waiting for someone else to solve this.</p>
+      </div>
+      <div class="bc glass rv rv-d1">
+        <div class="bi"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg></div>
+        <h3>Profiles & Presets</h3>
+        <p>Swap setups instantly. Vanilla, lightly modded, 400-plugin chaos.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- Tech -->
+<section class="tech" id="tech">
+  <div class="wrap">
+    <div class="tech-s">
+      <div class="rv">
+        <h2>Fast because it has to be.</h2>
+        <p>Corkscrew manages thousands of files across a Wine/Proton boundary on macOS, SteamOS, and Linux. Every millisecond of overhead is one you notice. That's why the backend is Rust and the frontend is Svelte&mdash;the two fastest options in their class.</p>
+      </div>
+      <div class="term rv rv-d1">
+        <div class="term-bar">
+          <div class="term-dot r"></div><div class="term-dot y"></div><div class="term-dot g"></div>
+          <span class="term-title">corkscrew &mdash; stack</span>
+        </div>
+        <div class="term-body">
+          <div class="term-line"><span class="term-key">Runtime</span><span class="term-val"><strong>Tauri v2</strong> &mdash; native webview, no Electron</span></div>
+          <div class="term-line"><span class="term-key">Backend</span><span class="term-val"><strong>Rust</strong> &mdash; memory-safe, concurrent, fast</span></div>
+          <div class="term-line"><span class="term-key">Frontend</span><span class="term-val"><strong>Svelte 5</strong> &mdash; compiled reactivity, no vDOM</span></div>
+          <div class="term-line"><span class="term-key">Sorting</span><span class="term-val"><strong>libloot</strong> &mdash; C++ FFI, 3,700+ metadata</span></div>
+          <div class="term-line"><span class="term-key">Database</span><span class="term-val"><strong>SQLite</strong> &mdash; WAL mode, 14 migrations</span></div>
+          <div class="term-line"><span class="term-key">Deploy</span><span class="term-val"><strong>Hardlinks</strong> &mdash; zero copies, instant</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Timeline -->
+<section class="tls" id="timeline">
+  <div class="wrap">
+    <div class="sh rv">
+      <div class="sh-l">Development</div>
+      <h2>Built in public, shipped fast.</h2>
+    </div>
+    <div class="tl">
+      <div class="ti"><div class="ti-d">Jan 2026</div><h3>First commit</h3><p>Can a Tauri app install a Skyrim mod into a CrossOver bottle on macOS? Turns out, yes. The prototype handled archive extraction, file deployment, and Wine prefix detection in under a week.</p></div>
+      <div class="ti"><div class="ti-d">Jan 2026</div><h3>Nexus Mods integration</h3><p>Full SSO authentication via WebSocket, NXM deep-link handling, and download-with-manager support. One-click installs from the Nexus website straight into your Wine bottle.</p></div>
+      <div class="ti"><div class="ti-d">Feb 2026</div><h3>FOMOD installer</h3><p>Complete XML wizard implementation with conditional flags, image previews, multi-step flows, and nested option groups. Handles the same FOMOD configs that MO2 and Vortex use.</p></div>
+      <div class="ti"><div class="ti-d">Feb 2026</div><h3>SSE Engine Fixes for Wine</h3><p>A custom fork of <a href="https://github.com/cashcon57/SSEEngineFixesForWine" target="_blank" rel="noopener" style="color:var(--orange)">SSEEngineFixesForWine</a>&mdash;a Wine-compatible SKSE plugin that patches 60+ crash sites with vectored exception handling, sentinel page recovery, and code-cave hooks. Auto-deployed by Corkscrew on every launch.</p></div>
+      <div class="ti"><div class="ti-d">Feb 2026</div><h3>LOOT integration</h3><p>Native libloot FFI binding for plugin sorting, master validation, and conflict detection. 3,700+ metadata entries. Sorts your entire load order in milliseconds.</p></div>
+      <div class="ti"><div class="ti-d">Mar 2026</div><h3>Nexus Collections & Wabbajack</h3><p>Automated modlist installation with a full 7-phase pipeline: metadata resolution, multi-source archive downloads (Nexus, MEGA, Google Drive), BSA/BA2 packing, DDS texture transforms, binary delta patches, FOMOD evaluation, and hardlink deployment.</p></div>
+      <div class="ti"><div class="ti-d">Mar 2026</div><h3>Public beta</h3><p>v0.9 released for macOS (Apple Silicon & Intel) and Linux (SteamOS, Ubuntu, Fedora, Arch via AppImage, .deb, and .rpm). Fully open source under GPL-3.0.</p></div>
+      <div class="ti"><div class="ti-d">Coming soon</div><h3>Starfield & Fallout 4 support</h3><p>Expanding beyond Skyrim. Plugin management, load order sorting, and archive handling for Bethesda's newer titles running through Wine and Proton.</p></div>
+      <div class="ti"><div class="ti-d">Coming soon</div><h3>Mod conflict visualization</h3><p>Visual conflict maps showing exactly which files overlap between mods. See winners and losers at a glance, drag to reprioritize.</p></div>
+      <div class="ti"><div class="ti-d">Planned</div><h3>Steam Workshop bridge</h3><p>Subscribe to Workshop mods and manage them alongside Nexus mods in a unified interface. Full metadata sync and update tracking.</p></div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- Builder note -->
+<section class="builder">
+  <div class="wrap">
+    <div class="builder-card glass rv">
+      <p>"I built Corkscrew because I wanted to mod Skyrim on my Mac and there was literally nothing that worked. MO2 through Wine was a nightmare. So I learned Rust, learned Tauri, reverse-engineered the game engine for Wine compatibility, and built what I needed. Whether you're on macOS, SteamOS, or any Linux distro&mdash;if you're here, you probably wanted the same thing."</p>
+      <div class="sig">&mdash; cashconway</div>
+    </div>
+  </div>
+</section>
+
+<!-- CTA -->
+<section class="cta" id="download">
+  <div class="cta-glow"><div class="orb orb-a"></div><div class="orb orb-b"></div></div>
+  <div class="wrap">
+    <h2 class="rv"><span class="grad">Ready to mod.</span></h2>
+    <p class="rv rv-d1">Free, open source, and built for your OS.</p>
+    <div class="cta-b rv rv-d2">
+      <a href="https://github.com/cashcon57/corkscrew/releases/latest" class="cm">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"/></svg>
+        macOS
+      </a>
+      <a href="https://github.com/cashcon57/corkscrew/releases/latest" class="cl">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12.504 0c-.155 0-.315.008-.48.021-4.226.333-3.105 4.807-3.17 6.298-.076 1.092-.3 1.953-1.05 3.02-.885 1.051-2.127 2.75-2.716 4.521-.278.832-.41 1.684-.287 2.489a.424.424 0 0 0-.11.135c-.26.268-.45.6-.663.839-.199.199-.485.267-.797.4-.313.136-.658.269-.864.68-.09.189-.136.394-.132.602 0 .199.027.4.055.536.058.399.116.728.04.97-.249.68-.28 1.145-.106 1.484.174.334.535.47.94.601.81.2 1.91.135 2.774.6.926.466 1.866.67 2.616.47.526-.116.97-.464 1.208-.946.587-.003 1.23-.269 2.26-.334.699-.058 1.574.267 2.577.2.025.134.063.198.114.333l.003.003c.391.778 1.113 1.368 1.884 1.43.868.07 1.723-.26 2.456-.594.366-.167.71-.368.96-.587.25-.221.43-.497.43-.82 0-.063-.003-.12-.01-.18.958-.243 1.838-1.13 1.913-2.27.04-.6-.157-1.14-.525-1.545.01-.04.023-.06.035-.098.396-1.298.12-2.345-.34-3.17-.47-.834-1.13-1.458-1.578-1.989-.447-.535-.76-.976-.76-1.567-.01-.627.173-1.14.342-1.578.238-.554.395-1.052.26-1.597-.278-1.13-1.296-2.067-2.426-2.067-1.075 0-2.014.573-2.681 1.38-.57.696-1 1.575-1.141 2.519-.152-.056-.325-.096-.498-.096-.146 0-.272.013-.398.05-.473-.866-1.162-1.71-1.947-2.292-.777-.59-1.624-.958-2.448-.958z"/></svg>
+        Linux
+      </a>
+    </div>
+    <p class="cta-n rv rv-d3">macOS 10.15+ (Apple Silicon & Intel) &middot; SteamOS &middot; Ubuntu &middot; Fedora &middot; Arch &middot; Linux x86_64</p>
+    <div class="cta-src rv rv-d4"><code>git clone https://github.com/cashcon57/corkscrew && cargo tauri build</code></div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="ff">
+      <div class="fl"><img src="img/favicon.png" alt="" width="18" height="18"><span>&copy; 2026 cashconway</span></div>
+      <div class="fk">
+        <a href="https://github.com/cashcon57/corkscrew" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://github.com/cashcon57/corkscrew/releases" target="_blank" rel="noopener">Releases</a>
+        <a href="https://github.com/cashcon57/corkscrew/issues" target="_blank" rel="noopener">Issues</a>
+      </div>
+    </div>
+  </div>
+</footer>
+
+</main>
+
+<script>
+/* ══════════ PARTICLES ══════════ */
+!function(){
+  var c=document.getElementById('particles'),g=c.getContext('2d'),w,h,P=[],M={x:-9e3,y:-9e3};
+  var N,LINK=170,MD=240;
+  function sz(){w=c.width=innerWidth;h=c.height=innerHeight;N=Math.min(130,Math.floor(w/12))}
+  function mk(){return{x:Math.random()*w,y:Math.random()*h,vx:(Math.random()-.5)*.45,vy:(Math.random()-.5)*.45,r:Math.random()*2.2+.6,a:Math.random()*.5+.18}}
+  function init(){sz();P=[];for(var i=0;i<N;i++)P.push(mk())}
+  function frame(){
+    g.clearRect(0,0,w,h);
+    for(var i=0;i<P.length;i++){
+      for(var j=i+1;j<P.length;j++){
+        var dx=P[i].x-P[j].x,dy=P[i].y-P[j].y,d=Math.sqrt(dx*dx+dy*dy);
+        if(d<LINK){var a=(1-d/LINK)*.14;g.strokeStyle='rgba(255,107,53,'+a+')';g.lineWidth=.7;g.beginPath();g.moveTo(P[i].x,P[i].y);g.lineTo(P[j].x,P[j].y);g.stroke()}
+      }
+    }
+    for(var k=0;k<P.length;k++){
+      var p=P[k],mx=p.x-M.x,my=p.y-M.y,md=Math.sqrt(mx*mx+my*my);
+      if(md<MD){var f=(1-md/MD)*.025;p.vx+=mx*f;p.vy+=my*f}
+      p.x+=p.vx;p.y+=p.vy;p.vx*=.993;p.vy*=.993;
+      if(p.x<-20)p.x=w+20;if(p.x>w+20)p.x=-20;if(p.y<-20)p.y=h+20;if(p.y>h+20)p.y=-20;
+      g.beginPath();g.arc(p.x,p.y,p.r,0,6.283);g.fillStyle='rgba(255,107,53,'+p.a+')';g.fill();
+    }
+    requestAnimationFrame(frame);
+  }
+  addEventListener('resize',function(){sz();while(P.length<N)P.push(mk());P.length=N});
+  addEventListener('mousemove',function(e){M.x=e.clientX;M.y=e.clientY});
+  addEventListener('mouseleave',function(){M.x=-9e3;M.y=-9e3});
+  init();frame();
+}();
+
+/* ══════════ HERO HEADLINE ══════════ */
+!function(){
+  var words=[{t:'Skyrim'},{t:'modding,'},{t:'minus'},{t:'the',g:1},{t:'Windows.',g:1}];
+  var h1=document.getElementById('heroH1'),html='';
+  for(var i=0;i<words.length;i++){
+    html+='<span class="hw'+(words[i].g?' grad':'')+'" style="animation-delay:'+(0.08+i*.1)+'s">'+words[i].t+'</span> ';
+    if(i===1)html+='<br>';
+  }
+  h1.innerHTML=html;
+}();
+
+/* ══════════ SCROLL REVEALS ══════════ */
+!function(){
+  var o=new IntersectionObserver(function(e){e.forEach(function(en){if(en.isIntersecting)en.target.classList.add('vis')})},{threshold:.08,rootMargin:'0px 0px -20px 0px'});
+  document.querySelectorAll('.rv,.ti').forEach(function(el){o.observe(el)});
+}();
+
+/* ══════════ COUNTER ANIMATION ══════════ */
+!function(){
+  var done=false;
+  var o=new IntersectionObserver(function(e){
+    if(done)return;
+    e.forEach(function(en){
+      if(en.isIntersecting){
+        done=true;
+        document.querySelectorAll('.marquee-num[data-target]').forEach(function(el){
+          var target=parseInt(el.dataset.target),dur=1200,start=performance.now();
+          function tick(now){
+            var t=Math.min((now-start)/dur,1);
+            t=1-Math.pow(1-t,3);// ease out cubic
+            var v=Math.round(target*t);
+            el.textContent=target>=1000?v.toLocaleString():v;
+            if(t<1)requestAnimationFrame(tick);
+            else if(target===60)el.textContent='60+';
+            else if(target===3700)el.textContent='3,700+';
+          }
+          requestAnimationFrame(tick);
+        });
+      }
+    });
+  },{threshold:.5});
+  o.observe(document.querySelector('.marquee-section'));
+}();
+
+/* ══════════ SCROLL PROGRESS ══════════ */
+!function(){
+  var bar=document.getElementById('progress'),t=false;
+  addEventListener('scroll',function(){
+    if(!t){requestAnimationFrame(function(){
+      var h=document.documentElement.scrollHeight-innerHeight;
+      bar.style.width=(scrollY/h*100)+'%';
+      t=false;
+    });t=true}
+  });
+}();
+
+/* ══════════ HERO ICON SCROLL ANIMATION ══════════ */
+!function(){
+  var icon=document.getElementById('heroIcon'),t=false;
+  if(!icon)return;
+  addEventListener('scroll',function(){
+    if(!t){requestAnimationFrame(function(){
+      icon.classList.toggle('icon-shrunk',scrollY>180);
+      t=false;
+    });t=true}
+  });
+}();
+
+/* ══════════ SIDEBAR ACTIVE SECTION TRACKING ══════════ */
+!function(){
+  var sectionIds=['hero','how','features','wabbajack','tech','timeline','download'];
+  var sidebarLinks=document.querySelectorAll('.sidebar-link[data-section]');
+  var mobileLinks=document.querySelectorAll('.mobile-nav a[data-section]');
+
+  function setActive(id){
+    sidebarLinks.forEach(function(link){
+      link.classList.toggle('active',link.dataset.section===id);
+    });
+    mobileLinks.forEach(function(link){
+      link.classList.toggle('active',link.dataset.section===id);
+    });
+  }
+
+  var observer=new IntersectionObserver(function(entries){
+    entries.forEach(function(entry){
+      if(entry.isIntersecting){
+        setActive(entry.target.id);
+      }
+    });
+  },{threshold:0.3,rootMargin:'0px 0px -40% 0px'});
+
+  sectionIds.forEach(function(id){
+    var el=document.getElementById(id);
+    if(el)observer.observe(el);
+  });
+}();
+
+/* ══════════ SMOOTH SCROLL ══════════ */
+document.querySelectorAll('a[href^="#"]').forEach(function(a){
+  a.addEventListener('click',function(e){
+    var href=this.getAttribute('href');
+    if(href==='#'){e.preventDefault();window.scrollTo({top:0,behavior:'smooth'});return}
+    var t=document.querySelector(href);
+    if(t){e.preventDefault();t.scrollIntoView({behavior:'smooth',block:'start'})}
+  });
+});
+
+/* ══════════ PARALLAX ══════════ */
+!function(){
+  var f=document.querySelector('.hero-shot'),r=document.querySelector('.hero-reflect'),t=false;
+  if(!f)return;
+  addEventListener('scroll',function(){
+    if(!t){requestAnimationFrame(function(){
+      var s=scrollY;
+      if(s<innerHeight*1.2){
+        f.style.transform='translateY('+s*.06+'px)';
+        if(r)r.style.transform='translateY('+s*.06+'px)';
+      }
+      t=false;
+    });t=true}
+  });
+}();
+</script>
+</body>
+</html>
