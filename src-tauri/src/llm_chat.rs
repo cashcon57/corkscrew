@@ -47,7 +47,7 @@ impl LlmBackend {
                 "gemini" => "https://generativelanguage.googleapis.com/v1beta",
                 _ => "",
             },
-            Self::GeminiOAuth => "https://cloudcode-pa.googleapis.com",
+            Self::GeminiOAuth => "https://generativelanguage.googleapis.com/v1beta",
         }
     }
 
@@ -466,8 +466,8 @@ pub fn build_chat_system_prompt(
     current_page: &str,
     _readme_content: Option<&str>,
     wine_warnings: Option<&str>,
+    backend: &LlmBackend,
 ) -> String {
-    // Page-specific focus hint (keeps the model on-task, saves tokens vs generic advice)
     let page_hint = match current_page {
         "Mods" => "User is managing mods. Focus on enable/disable, info, deployment.",
         "Load Order" => "User is on load order. Focus on plugin sorting, masters, patches.",
@@ -485,12 +485,79 @@ pub fn build_chat_system_prompt(
         _ => String::new(),
     };
 
-    format!(
-        r#"You are a {game_name} modding expert in Corkscrew (mod manager for {platform}). Use tools to look things up — never guess mod names or IDs.
+    let is_cloud_model = backend.is_cloud();
+
+    if is_cloud_model {
+        // Cloud models (Gemini, Groq, Cerebras) — leverage extended context, reasoning, and tool use
+        format!(
+            r#"You are a {game_name} modding expert assistant in Corkscrew, a mod manager for {platform}. You have deep knowledge of Bethesda modding, xEdit, load orders, Wine/CrossOver compatibility, and the NexusMods ecosystem.
+
+## Environment
+{mod_count} mods installed | Page: {current_page} | {page_hint}
+
+## Core Principles
+- **ALWAYS use tools first** — never respond with just text when a tool could answer better. Call search_nexus or web_search BEFORE writing your response. Never say "I think the mod is called X" — look it up.
+- **You control Corkscrew's UI** — use navigate_ui and open_nexus_mod to show things directly to the user. When you find a mod, ALWAYS call open_nexus_mod immediately — don't ask "would you like me to open it?"
+- **Be thorough but concise** — provide clear explanations with specific mod names and technical details.
+- **Chain tools intelligently** — up to 10 tool calls per turn. Never stop at one failed search.
+
+## Searching for Mods
+Nexus search is exact-match sensitive. When looking for a mod:
+1. First try search_nexus with the user's term
+2. If no results, try common variations: singular/plural, with/without "SE", shorter keywords
+3. If still no results, use web_search with "site:nexusmods.com skyrim [mod description]" to find the exact name
+4. Then retry search_nexus with the correct name found via web
+5. Once found, ALWAYS call open_nexus_mod to show it — never just describe it
+
+## Safety
+For ANY destructive or hard-to-reverse action (uninstall, delete, disable plugins, change load order, reset settings):
+- ALWAYS explain what will be affected and ask the user to confirm before proceeding
+- For batch_mod_operation, list the specific mods that will be affected before calling the tool
+
+## Routing & Workflows
+- **Find mod**: search_nexus (try variations if needed) → web_search as fallback → open_nexus_mod (ALWAYS open it)
+- **Install mod**: get_mod_requirements first → if missing deps, show them via open_nexus_mod → proceed
+- **Crash diagnosis**: get_crash_logs → analyze_crash_log → cross-reference with mod list and conflicts
+- **Conflicts**: get_conflicts → explain each in plain English: what the files do in-game, which mod wins, and whether the user should care. Identify specific records and suggest patches.
+- **Patches**: find_needed_patches → search_nexus for each group → open_nexus_mod for found patches
+- **Batch operations**: batch_mod_operation with appropriate filter
+- **Health check**: get_mod_health → explain issues and suggest specific fixes
+- **Vague requests**: web_search → search_nexus → open_nexus_mod
+
+## Modding Knowledge
+- Load order: .esm first, .esl (light) next, .esp last. Patches load after the plugin they patch.
+- Conflict resolution: later plugin wins record conflicts. Higher-priority mod wins file (loose) conflicts.
+- Navmesh conflicts are game-breaking — always flag these and recommend resolution patches.
+- LOOT for automated load order sorting.
+- Wine/CrossOver: .NET Script Framework and original SSE Engine Fixes crash on Wine — Corkscrew ships a Wine-compatible fork of Engine Fixes. DLL-based mods that hook Windows APIs may not work.{wine_compat_section}
+
+## Troubleshooting Flow
+When a user reports crashes:
+1. Ask WHEN: startup, main menu, loading save, new game, specific location, or random
+2. Diagnose based on timing:
+   - Startup/main menu → run_full_diagnostic (Wine compat, SKSE, missing masters)
+   - Loading save → check_dependency_issues, ask if mods changed since the save
+   - New game → run_full_diagnostic (script-heavy mods, navmesh conflicts)
+   - Specific location → get_conflicts for city overhaul/area mods at that location
+   - Random/combat → analyze_crash_log, check combat/animation mods
+3. Narrow to 3-5 specific suspect mods before suggesting any changes
+4. If a crash log is available, always analyze it first
+5. Explain your reasoning — what each suspect mod does and why it might cause the issue"#,
+            game_name = game_name,
+            platform = platform,
+            mod_count = mod_count,
+            current_page = current_page,
+            page_hint = page_hint,
+            wine_compat_section = wine_compat_section,
+        )
+    } else {
+        // Local models (Ollama/MLX) — compact prompt to fit smaller context windows
+        format!(
+            r#"You are a {game_name} modding expert in Corkscrew (mod manager for {platform}). Use tools to look things up — never guess mod names or IDs.
 
 {mod_count} mods installed | Page: {current_page} | {page_hint}
 
-Rules: Use tools proactively. Never guess — look it up. If search_nexus returns no results, ALWAYS fall back to web_search to find the mod name, then retry search_nexus. Max 5 tool calls. Be concise. You CONTROL Corkscrew's UI — use navigate_ui and open_nexus_mod to show things to the user directly.
+Rules: ALWAYS use tools first — never guess. If search_nexus fails, try singular/plural/shorter terms, then web_search "site:nexusmods.com skyrim [query]" to find the exact name. Max 5 tool calls. Be concise. You CONTROL Corkscrew's UI — use navigate_ui and open_nexus_mod to show things directly. ALWAYS call open_nexus_mod when you find a mod — don't just describe it.
 SAFETY: For ANY destructive or hard-to-reverse action (uninstall mod, delete files, disable plugins, change load order, reset settings), ALWAYS ask the user to confirm before proceeding. Never auto-execute destructive actions. For batch_mod_operation, ALWAYS tell the user what will be affected BEFORE calling the tool. Say "I'll disable X texture mods, shall I proceed?" and only call the tool after they confirm.
 
 Routing: find mod → search_nexus → open_nexus_mod (to show it in Corkscrew UI with install button) | install mod → get_mod_requirements first → if missing deps, show them via open_nexus_mod → then proceed with install | crash → get_crash_logs → analyze | conflicts → get_conflicts (returns grouped, categorized conflicts) → explain each in plain English: what the files do in-game, which mod wins, and whether the user should care | patches needed → find_needed_patches → search_nexus for each group → open_nexus_mod for found patches | batch operations ("disable all X", "enable my Y collection") → batch_mod_operation with appropriate filter | health check → get_mod_health → explain issues and suggest fixes | vague → web_search → search_nexus → open_nexus_mod
@@ -509,13 +576,14 @@ Troubleshooting: When user reports crashes or issues, follow this flow:
 3. Narrow suspects to 3-5 specific mods before suggesting any disabling
 4. Never suggest "disable all mods" or binary search as first step
 5. If crash log available, always analyze it first with analyze_crash_log"#,
-        game_name = game_name,
-        platform = platform,
-        mod_count = mod_count,
-        current_page = current_page,
-        page_hint = page_hint,
-        wine_compat_section = wine_compat_section,
-    )
+            game_name = game_name,
+            platform = platform,
+            mod_count = mod_count,
+            current_page = current_page,
+            page_hint = page_hint,
+            wine_compat_section = wine_compat_section,
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1107,6 +1175,8 @@ fn tools_to_gemini_format(tools: &[ChatTool]) -> serde_json::Value {
 fn messages_to_gemini_format(messages: &[ChatMessage]) -> (Option<String>, Vec<serde_json::Value>) {
     let mut system_instruction = None;
     let mut contents = Vec::new();
+    // Track pending tool call names so each tool result gets the correct functionCall name.
+    let mut pending_tool_names: Vec<String> = Vec::new();
 
     for msg in messages {
         match msg.role.as_str() {
@@ -1125,7 +1195,9 @@ fn messages_to_gemini_format(messages: &[ChatMessage]) -> (Option<String>, Vec<s
                     parts.push(serde_json::json!({"text": msg.content}));
                 }
                 if let Some(ref tc) = msg.tool_calls {
+                    pending_tool_names.clear();
                     for call in tc {
+                        pending_tool_names.push(call.function.name.clone());
                         parts.push(serde_json::json!({
                             "functionCall": {
                                 "name": call.function.name,
@@ -1140,11 +1212,17 @@ fn messages_to_gemini_format(messages: &[ChatMessage]) -> (Option<String>, Vec<s
                 }));
             }
             "tool" => {
-                // Gemini expects tool results as functionResponse parts
+                // Pop the next pending tool name to match Gemini's requirement that
+                // functionResponse.name matches the original functionCall.name.
+                let tool_name = if !pending_tool_names.is_empty() {
+                    pending_tool_names.remove(0)
+                } else {
+                    "tool_result".to_string()
+                };
                 contents.push(serde_json::json!({
                     "role": "user",
                     "parts": [{"functionResponse": {
-                        "name": "tool_result",
+                        "name": tool_name,
                         "response": {"result": msg.content}
                     }}]
                 }));
@@ -1431,7 +1509,7 @@ where
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| format!("Stream error: {e}"))?;
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
+        buffer.push_str(&String::from_utf8_lossy(&chunk).replace('\r', ""));
 
         while let Some(data_end) = buffer.find("\n\n") {
             let block = buffer[..data_end].to_string();
@@ -1494,7 +1572,6 @@ where
 }
 
 /// Gemini OAuth streaming: uses Bearer token from Google OAuth instead of API key.
-/// Targets the Code Assist endpoint for per-user free quota.
 pub async fn chat_send_gemini_oauth_streaming<F>(
     messages: &[ChatMessage],
     tools: &[ChatTool],
@@ -1536,7 +1613,7 @@ where
     }
 
     let url = format!(
-        "https://cloudcode-pa.googleapis.com/v1internal/models/{model}:streamGenerateContent?alt=sse"
+        "https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse"
     );
 
     let resp = client
@@ -1548,22 +1625,28 @@ where
         .await
         .map_err(|e| format!("Gemini OAuth request failed: {e}"))?;
 
-    if !resp.status().is_success() {
+    let status = resp.status();
+    if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();
-        return Err(format!("Gemini OAuth error: {text}"));
+        return Err(format!("Gemini OAuth error ({status}): {text}"));
     }
+
+    log::info!("[CHAT] Gemini OAuth stream started (status: {status})");
 
     // Parse SSE stream — same format as standard Gemini API
     let mut full_content = String::new();
     let mut tool_calls: Vec<ToolCallResponse> = Vec::new();
     let mut stream = resp.bytes_stream();
+    let mut raw_dump = String::new();
 
     use futures::StreamExt;
     let mut buffer = String::new();
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| format!("Stream error: {e}"))?;
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
+        let chunk_str = String::from_utf8_lossy(&chunk).replace('\r', "");
+        raw_dump.push_str(&chunk_str);
+        buffer.push_str(&chunk_str);
 
         while let Some(data_end) = buffer.find("\n\n") {
             let block = buffer[..data_end].to_string();
@@ -1576,13 +1659,20 @@ where
                 }
                 if let Some(json_str) = line.strip_prefix("data: ") {
                     if let Ok(obj) = serde_json::from_str::<serde_json::Value>(json_str) {
+                        // Log first few chunks for debugging
+                        if full_content.len() < 100 && tool_calls.is_empty() {
+                            log::info!("[CHAT] Gemini OAuth SSE chunk: {}",
+                                serde_json::to_string(&obj).unwrap_or_default().chars().take(500).collect::<String>());
+                        }
                         if let Some(parts) = obj
                             .pointer("/candidates/0/content/parts")
                             .and_then(|p| p.as_array())
                         {
                             for part in parts {
+                                // Handle thinking tokens (Gemini 2.5 Flash)
+                                let is_thought = part.get("thought").and_then(|t| t.as_bool()).unwrap_or(false);
                                 if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                                    if !text.is_empty() {
+                                    if !text.is_empty() && !is_thought {
                                         on_token(text, StreamPhase::Content);
                                         full_content.push_str(text);
                                     }
@@ -1605,10 +1695,31 @@ where
                                 }
                             }
                         }
+                    } else {
+                        log::warn!("[CHAT] Gemini OAuth: failed to parse SSE JSON: {}",
+                            json_str.chars().take(200).collect::<String>());
                     }
                 }
             }
         }
+    }
+
+    log::info!(
+        "[CHAT] Gemini OAuth stream done: content_len={} tool_calls={} raw_bytes={}",
+        full_content.len(),
+        tool_calls.len(),
+        raw_dump.len()
+    );
+
+    // Dump raw SSE to file for debugging
+    if full_content.is_empty() && tool_calls.is_empty() {
+        let dump_path = dirs::config_dir()
+            .unwrap_or_default()
+            .join("corkscrew")
+            .join("gemini_sse_dump.txt");
+        let _ = std::fs::write(&dump_path, &raw_dump);
+        log::warn!("[CHAT] Gemini empty response! Raw SSE dumped to {:?} ({} bytes)", dump_path, raw_dump.len());
+        return Err(format!("Gemini returned empty response ({} bytes raw SSE). Debug dump saved.", raw_dump.len()));
     }
 
     Ok(ChatMessage {

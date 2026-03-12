@@ -22,11 +22,9 @@ const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const GOOGLE_REVOKE_URL: &str = "https://oauth2.googleapis.com/revoke";
 const GOOGLE_USERINFO_URL: &str = "https://www.googleapis.com/oauth2/v3/userinfo";
 
-/// Scopes needed for Code Assist + user info.
-const SCOPES: &str = "openid email profile https://www.googleapis.com/auth/cloud-platform";
-
-/// Code Assist onboarding endpoints.
-const CODE_ASSIST_BASE: &str = "https://cloudcode-pa.googleapis.com/v1internal";
+/// Scopes needed for Gemini API + user info.
+/// cloud-platform is required per Google's OAuth docs for generativelanguage.googleapis.com.
+const SCOPES: &str = "openid https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/generative-language.retriever";
 
 /// OAuth callback path.
 const CALLBACK_PATH: &str = "/callback";
@@ -34,9 +32,9 @@ const CALLBACK_PATH: &str = "/callback";
 /// Refresh tokens this many seconds before they actually expire.
 const REFRESH_MARGIN_SECS: i64 = 60;
 
-// TODO: Replace with actual OAuth Client ID and Secret from Google Cloud Console.
-const GOOGLE_CLIENT_ID: &str = "PLACEHOLDER_CLIENT_ID.apps.googleusercontent.com";
-const GOOGLE_CLIENT_SECRET: &str = "PLACEHOLDER_CLIENT_SECRET";
+const GOOGLE_CLIENT_ID: &str =
+    "440303664335-9pgcd0u055bcjl7g03nmsaoj623s8m11.apps.googleusercontent.com";
+const GOOGLE_CLIENT_SECRET: &str = "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";
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -61,9 +59,6 @@ pub enum GoogleOAuthError {
 
     #[error("Not signed in")]
     NotSignedIn,
-
-    #[error("Onboarding failed: {0}")]
-    Onboarding(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -82,9 +77,6 @@ pub struct GoogleTokens {
     /// User display name.
     #[serde(default)]
     pub name: Option<String>,
-    /// Whether Code Assist onboarding has been completed.
-    #[serde(default)]
-    pub onboarded: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -177,8 +169,7 @@ pub fn clear_google_tokens() -> Result<(), GoogleOAuthError> {
 /// 4. Wait for the redirect callback with the authorization code.
 /// 5. Exchange the code for access + refresh tokens.
 /// 6. Fetch user info.
-/// 7. Onboard to Code Assist if needed.
-/// 8. Return the tokens.
+/// 7. Return the tokens.
 pub async fn start_google_oauth_flow() -> Result<GoogleTokens, GoogleOAuthError> {
     let pkce = oauth::generate_pkce().map_err(|e| GoogleOAuthError::TokenExchange(e.to_string()))?;
     let state =
@@ -244,23 +235,13 @@ pub async fn start_google_oauth_flow() -> Result<GoogleTokens, GoogleOAuthError>
     // Fetch user info
     let (email, name) = fetch_user_info(&client, &token_response.access_token).await;
 
-    let mut tokens = GoogleTokens {
+    let tokens = GoogleTokens {
         access_token: token_response.access_token,
         refresh_token: token_response.refresh_token.unwrap_or_default(),
         expires_at,
         email,
         name,
-        onboarded: false,
     };
-
-    // Onboard to Code Assist
-    match onboard_code_assist(&client, &tokens.access_token).await {
-        Ok(()) => tokens.onboarded = true,
-        Err(e) => {
-            log::warn!("[google_oauth] Code Assist onboarding failed (non-fatal): {e}");
-            // Still save tokens — onboarding can be retried later.
-        }
-    }
 
     save_google_tokens(&tokens)?;
     Ok(tokens)
@@ -305,7 +286,6 @@ pub async fn refresh_google_tokens(refresh_token: &str) -> Result<GoogleTokens, 
         expires_at,
         email,
         name,
-        onboarded: true, // If we have a refresh token, we've onboarded before
     };
 
     save_google_tokens(&tokens)?;
@@ -403,50 +383,4 @@ async fn fetch_user_info(
         }
         _ => (None, None),
     }
-}
-
-/// One-time onboarding: provision managed GCP project for Code Assist.
-async fn onboard_code_assist(
-    client: &reqwest::Client,
-    access_token: &str,
-) -> Result<(), GoogleOAuthError> {
-    // Step 1: Load Code Assist (triggers project provisioning)
-    let load_url = format!("{CODE_ASSIST_BASE}/loadCodeAssist");
-    let resp = client
-        .post(&load_url)
-        .header("Authorization", format!("Bearer {access_token}"))
-        .header("Content-Type", "application/json")
-        .body("{}")
-        .send()
-        .await?;
-
-    if !resp.status().is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(GoogleOAuthError::Onboarding(format!(
-            "loadCodeAssist failed: {body}"
-        )));
-    }
-
-    // Step 2: Onboard user
-    let onboard_url = format!("{CODE_ASSIST_BASE}/onboardUser");
-    let resp = client
-        .post(&onboard_url)
-        .header("Authorization", format!("Bearer {access_token}"))
-        .header("Content-Type", "application/json")
-        .body("{}")
-        .send()
-        .await?;
-
-    let status = resp.status();
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        // 409 Conflict means already onboarded — that's fine.
-        if status.as_u16() != 409 {
-            return Err(GoogleOAuthError::Onboarding(format!(
-                "onboardUser failed: {body}"
-            )));
-        }
-    }
-
-    Ok(())
 }

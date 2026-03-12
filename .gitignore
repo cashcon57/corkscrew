@@ -35,6 +35,9 @@ Thumbs.db
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 
+# OAuth client secrets (credentials embedded in binary, JSON stays local)
+client_secret_*.json
+
 # Signing keys (private key stays local, never committed)
 .keys/updater-signing-key
 
@@ -43,6 +46,7 @@ latest.json
 *.sig
 
 # Screenshots (dev/testing)
+Screenshots/
 crashlogs-page.png
 dashboard-initial.png
 discover-page.png
@@ -52,6 +56,8 @@ phase2-*.png
 settings-dark-mode.png
 settings-page.png
 avatar.jpg
+noun-arrow-right-*.png
+"DMG Arrow.svg"
 
 # Raw icon sources (processed into static/icons/)
 tools:sites icons/

@@ -6509,6 +6509,7 @@ async fn chat_load_model(
         page,
         None,
         wine_warnings_text.as_deref(),
+        &session.backend,
     );
     session.messages.push(llm_chat::ChatMessage {
         role: "system".into(),
@@ -6637,6 +6638,7 @@ async fn chat_send_message(
 
         // Update system prompt with current page context if it changed
         if let Some(ref page) = current_page {
+            let backend_ref = session.backend.clone();
             if let Some(system_msg) = session.messages.first_mut() {
                 if system_msg.role == "system"
                     && !system_msg.content.contains(&format!("Page: {page}"))
@@ -6661,6 +6663,7 @@ async fn chat_send_message(
                         page,
                         None,
                         warnings_text.as_deref(),
+                        &backend_ref,
                     );
                 }
             }
@@ -6937,16 +6940,10 @@ async fn chat_send_message(
         current_response = forced;
     }
 
-    // Store final response in session
-    {
-        let mut session = state.chat_session.lock().await;
-        session.messages.push(current_response.clone());
-    }
-    let final_response = current_response;
     let tool_results = all_tool_results;
 
     // Scan for mentioned mods and attach to the final response
-    let mut final_msg = final_response;
+    let mut final_msg = current_response;
     let mentioned = scan_mentioned_mods(
         &final_msg.content,
         &tool_results,
@@ -6957,6 +6954,12 @@ async fn chat_send_message(
     .await;
     if !mentioned.is_empty() {
         final_msg.mentioned_mods = Some(mentioned);
+    }
+
+    // Store final response (with mentioned_mods) in session
+    {
+        let mut session = state.chat_session.lock().await;
+        session.messages.push(final_msg.clone());
     }
 
     // Persist assistant message to DB (only if it has content)
