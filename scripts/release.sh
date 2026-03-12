@@ -114,11 +114,13 @@ echo ""
 echo "=== Building macOS (Apple Silicon) ==="
 echo ""
 cargo tauri build --target aarch64-apple-darwin
+"$ROOT/scripts/rebuild-dmg.sh" aarch64-apple-darwin
 
 echo ""
 echo "=== Building macOS (Intel) ==="
 echo ""
 cargo tauri build --target x86_64-apple-darwin
+"$ROOT/scripts/rebuild-dmg.sh" x86_64-apple-darwin
 
 # --- Stage artifacts ---
 STAGE="$ROOT/target/release-stage"

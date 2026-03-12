@@ -42,4 +42,23 @@ else
   echo "      Run ./scripts/setup-apple-signing.sh to configure."
 fi
 
-exec cargo tauri build "$@"
+cargo tauri build "$@"
+
+# Rebuild DMG with appdmg for correct icon positioning (macOS only)
+if [[ "$(uname)" == "Darwin" ]]; then
+  # Detect target triple from args, default to native arch
+  TARGET=""
+  for arg in "$@"; do
+    case "$arg" in
+      aarch64-apple-darwin|x86_64-apple-darwin) TARGET="$arg" ;;
+    esac
+  done
+  if [[ -z "$TARGET" ]]; then
+    if [[ "$(uname -m)" == "arm64" ]]; then
+      TARGET="aarch64-apple-darwin"
+    else
+      TARGET="x86_64-apple-darwin"
+    fi
+  fi
+  "$ROOT/scripts/rebuild-dmg.sh" "$TARGET"
+fi
