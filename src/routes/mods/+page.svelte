@@ -55,6 +55,8 @@
     getUserEndorsements,
     getConfig,
     setConfigValue,
+    getGameLockStatus,
+    forceUnlockGame,
   } from "$lib/api";
   import type { InstallProgressEvent, DeploymentHealth, IncrementalDeployResult, ConflictSuggestion, ResolutionResult, DeployProgress, ModTool, UserEndorsement, IdenticalContentStats } from "$lib/types";
   import {
@@ -69,6 +71,8 @@
     collectionList,
     nxmInstallComplete,
     collectionInstallStatus,
+    gameLock,
+    gameLockOverridden,
   } from "$lib/stores";
   import type { InstalledMod, DetectedGame, SkseStatus, DowngradeStatus, FileConflict, ModUpdateInfo, FomodInstaller } from "$lib/types";
   import GameIcon from "$lib/components/GameIcon.svelte";
@@ -96,6 +100,7 @@
   let confirmUninstall = $state<number | null>(null);
   let togglingMod = $state<number | null>(null);
   let launching = $state(false);
+  let gameLockPollInterval: ReturnType<typeof setInterval> | null = null;
   let skse = $state<SkseStatus | null>(null);
   let showSksePrompt = $state(false);
   let installingSkse = $state(false);
@@ -348,6 +353,17 @@
       disableGameFixes = cfg.disable_game_fixes === "true";
     }).catch(() => {});
 
+    // Check if a game is already running (e.g., launched before navigating here)
+    {
+      const game = get(selectedGame);
+      if (game) {
+        getGameLockStatus(game.game_id, game.bottle_name).then(lock => {
+          gameLock.set(lock);
+          if (lock) startGameLockPolling(game.game_id, game.bottle_name);
+        }).catch(() => {});
+      }
+    }
+
     return () => document.removeEventListener("click", closeOverflow);
   });
 
@@ -355,6 +371,7 @@
     if (installUnlisten) { installUnlisten(); installUnlisten = null; }
     if (deployUnlisten) { deployUnlisten(); deployUnlisten = null; }
     if (bulkProgressUnlisten) { bulkProgressUnlisten(); bulkProgressUnlisten = null; }
+    stopGameLockPolling();
   });
 
   // View mode state
@@ -729,6 +746,10 @@
 
   async function batchEnable() {
     if (!activeGame) return;
+    if ($gameLock && !$gameLockOverridden) {
+      showError('Cannot modify mods while the game is running. Close the game or click "Unlock Anyway".');
+      return;
+    }
     bulkOperating = "enabling";
     await startBulkListener();
     try {
@@ -751,6 +772,10 @@
 
   async function batchDisable() {
     if (!activeGame) return;
+    if ($gameLock && !$gameLockOverridden) {
+      showError('Cannot modify mods while the game is running. Close the game or click "Unlock Anyway".');
+      return;
+    }
     bulkOperating = "disabling";
     await startBulkListener();
     try {
@@ -772,6 +797,10 @@
   }
 
   async function batchUninstall() {
+    if ($gameLock && !$gameLockOverridden) {
+      showError('Cannot uninstall mods while the game is running. Close the game or click "Unlock Anyway".');
+      return;
+    }
     bulkOperating = "uninstalling";
     try {
       for (const id of selectedModIds) {
@@ -914,6 +943,26 @@
   }
 
   const activeGame = $derived(pickedGame ?? $selectedGame);
+
+  // Re-check game lock when the active game changes
+  $effect(() => {
+    const game = activeGame;
+    if (game) {
+      getGameLockStatus(game.game_id, game.bottle_name).then(lock => {
+        if (!get(gameLockOverridden)) {
+          gameLock.set(lock);
+          if (lock) {
+            startGameLockPolling(game.game_id, game.bottle_name);
+          } else {
+            stopGameLockPolling();
+          }
+        }
+      }).catch(() => {});
+    } else {
+      gameLock.set(null);
+      stopGameLockPolling();
+    }
+  });
 
   // Track the current load to avoid stale race conditions
   let loadGeneration = 0;
@@ -1164,6 +1213,10 @@
   }
 
   async function doInstallMod(filePath: string) {
+    if ($gameLock && !$gameLockOverridden) {
+      showError('Cannot install mods while the game is running. Close the game or click "Unlock Anyway".');
+      return;
+    }
     const game = pickedGame ?? $selectedGame;
     if (!game) return;
 
@@ -1254,6 +1307,10 @@
   }
 
   async function handleUninstall(modId: number) {
+    if ($gameLock && !$gameLockOverridden) {
+      showError('Cannot uninstall mods while the game is running. Close the game or click "Unlock Anyway".');
+      return;
+    }
     const installStatus = get(collectionInstallStatus);
     if (installStatus?.active) {
       showError('Cannot modify mods while a collection is being installed');
@@ -1274,6 +1331,10 @@
   }
 
   async function handleToggle(mod: InstalledMod) {
+    if ($gameLock && !$gameLockOverridden) {
+      showError('Cannot modify mods while the game is running. Close the game or click "Unlock Anyway".');
+      return;
+    }
     const installStatus = get(collectionInstallStatus);
     if (installStatus?.active) {
       showError('Cannot modify mods while a collection is being installed');
@@ -1365,12 +1426,57 @@
         if (result.warning) {
           showError(`SKSE warning: ${result.warning}`);
         }
+        // Start polling game lock status
+        gameLockOverridden.set(false);
+        startGameLockPolling(game.game_id, game.bottle_name);
       }
     } catch (e: unknown) {
       showError(`Failed to launch: ${e}`);
     } finally {
       launching = false;
     }
+  }
+
+  function startGameLockPolling(gameId: string, bottleName: string) {
+    stopGameLockPolling();
+    // Initial check
+    pollGameLock(gameId, bottleName);
+    // Poll every 5 seconds
+    gameLockPollInterval = setInterval(() => pollGameLock(gameId, bottleName), 5000);
+  }
+
+  function stopGameLockPolling() {
+    if (gameLockPollInterval) {
+      clearInterval(gameLockPollInterval);
+      gameLockPollInterval = null;
+    }
+  }
+
+  async function pollGameLock(gameId: string, bottleName: string) {
+    try {
+      // If user force-unlocked, don't re-lock from an in-flight poll
+      if (get(gameLockOverridden)) return;
+      const lock = await getGameLockStatus(gameId, bottleName);
+      // Double-check after await — user may have unlocked while we were waiting
+      if (get(gameLockOverridden)) return;
+      gameLock.set(lock);
+      if (!lock) {
+        // Game exited — stop polling, clear override
+        stopGameLockPolling();
+        gameLockOverridden.set(false);
+      }
+    } catch {
+      // Ignore poll errors
+    }
+  }
+
+  async function handleForceUnlock() {
+    const game = pickedGame ?? $selectedGame;
+    if (!game) return;
+    await forceUnlockGame(game.game_id, game.bottle_name);
+    gameLock.set(null);
+    gameLockOverridden.set(true);
+    stopGameLockPolling();
   }
 
   async function toggleGameFixes() {
@@ -1862,6 +1968,10 @@
 
   // --- Deploy / Purge / Health ---
   async function handleDeploy() {
+    if ($gameLock && !$gameLockOverridden) {
+      showError('Cannot deploy while the game is running. Close the game or click "Unlock Anyway".');
+      return;
+    }
     const installStatus = get(collectionInstallStatus);
     if (installStatus?.active) {
       showError('Cannot modify mods while a collection is being installed');
@@ -1921,6 +2031,10 @@
   }
 
   async function handlePurge() {
+    if ($gameLock && !$gameLockOverridden) {
+      showError('Cannot purge while the game is running. Close the game or click "Unlock Anyway".');
+      return;
+    }
     const game = pickedGame ?? $selectedGame;
     if (!game) return;
     purging = true;
@@ -2616,6 +2730,29 @@
     </div>
 
     <!-- Banners (full-width, above the main content grid) -->
+    {#if $gameLock && !$gameLockOverridden}
+      <div class="game-lock-banner">
+        <div class="skse-banner-icon game-lock-icon">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="4" y="9" width="12" height="9" rx="1.5" />
+            <path d="M7 9V6a3 3 0 0 1 6 0v3" />
+          </svg>
+        </div>
+        <div class="skse-banner-content">
+          <p class="skse-banner-title">Game Is Running</p>
+          <p class="skse-banner-text">
+            Mod changes are locked while the game is running (pid {$gameLock.pid}).
+            Close the game to make changes, or unlock to override.
+          </p>
+        </div>
+        <div class="skse-banner-actions">
+          <button class="btn btn-ghost-danger btn-sm" onclick={handleForceUnlock}>
+            Unlock Anyway
+          </button>
+        </div>
+      </div>
+    {/if}
+
     {#if showSksePrompt && activeGame?.game_id === "skyrimse"}
       <div class="skse-banner">
         <div class="skse-banner-icon">
@@ -5266,6 +5403,22 @@
 
   .downgrade-banner .skse-banner-icon {
     color: var(--blue);
+  }
+
+  /* --- Game Lock Banner --- */
+
+  .game-lock-banner {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+    padding: var(--space-3) var(--space-4);
+    background: color-mix(in srgb, var(--red) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--red) 25%, transparent);
+    border-radius: var(--radius);
+  }
+
+  .game-lock-icon {
+    color: var(--red);
   }
 
   /* --- Drag & Drop Overlay --- */

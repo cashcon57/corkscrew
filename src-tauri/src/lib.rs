@@ -10,6 +10,7 @@ pub mod conflict_resolver;
 pub mod crashlog;
 pub mod cursor_clamp;
 pub mod database;
+pub mod deploy_journal;
 pub mod deployer;
 pub mod disk_budget;
 pub mod display_fix;
@@ -18,6 +19,7 @@ pub mod download_queue;
 pub mod executables;
 pub mod fomod;
 pub mod fomod_recipes;
+pub mod game_lock;
 pub mod game_registry;
 pub mod games;
 pub mod google_oauth;
@@ -111,6 +113,8 @@ struct AppState {
     /// current game, we skip further freshness checks until the game changes
     /// or the user force-refreshes.
     loot_masterlist_checked: Arc<AtomicBool>,
+    /// Tracks running game processes per (game_id, bottle_name).
+    game_locks: Arc<game_lock::GameLockManager>,
 }
 
 /// Resolve a bottle by name, returning a useful error if not found.
@@ -152,6 +156,22 @@ fn auto_snapshot_before_destructive(
         Ok(id) => log::info!("Auto-snapshot {} created: {}", id, label),
         Err(e) => log::warn!("Failed to create auto-snapshot '{}': {}", label, e),
     }
+}
+
+/// Check game lock for a specific game/bottle and return an error if locked.
+fn check_game_lock(
+    locks: &game_lock::GameLockManager,
+    game_id: &str,
+    bottle_name: &str,
+) -> Result<(), String> {
+    if let Some(lock) = locks.get(game_id, bottle_name) {
+        return Err(format!(
+            "GAME_LOCKED: Cannot modify mods while {} is running (pid {}). \
+             Close the game first or use 'Unlock anyway' to override.",
+            game_id, lock.pid
+        ));
+    }
+    Ok(())
 }
 
 /// Create a NexusClient from the current auth method (OAuth or API key),
@@ -298,6 +318,7 @@ async fn install_mod_cmd(
     nexus_mod_id: Option<i64>,
     state: State<'_, AppState>,
 ) -> Result<InstalledMod, String> {
+    check_game_lock(&state.game_locks, &game_id, &bottle_name)?;
     let db = state.db.clone();
     let app = app.clone();
     tokio::task::spawn_blocking(move || {
@@ -488,6 +509,7 @@ async fn uninstall_mod(
     bottle_name: String,
     state: State<'_, AppState>,
 ) -> Result<Vec<String>, String> {
+    check_game_lock(&state.game_locks, &game_id, &bottle_name)?;
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
         let installed_mod = db
@@ -549,6 +571,7 @@ async fn toggle_mod(
     enabled: bool,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    check_game_lock(&state.game_locks, &game_id, &bottle_name)?;
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
         let installed_mod = db
@@ -563,6 +586,14 @@ async fn toggle_mod(
         if let Some(ref staging_path_str) = installed_mod.staging_path {
             let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
             let staging_path = PathBuf::from(staging_path_str);
+
+            let op = if enabled {
+                deploy_journal::JournalOp::Deploy
+            } else {
+                deploy_journal::JournalOp::Undeploy
+            };
+            let journal_id = deploy_journal::begin(&game_id, &bottle_name, op, &[mod_id])
+                .unwrap_or_default();
 
             if enabled {
                 // Re-deploy from staging
@@ -591,6 +622,8 @@ async fn toggle_mod(
                 .map_err(|e| e.to_string())?;
             }
 
+            let _ = deploy_journal::complete(&journal_id);
+
             // Sync Skyrim plugins if applicable
             if game_id == "skyrimse" {
                 let _ = sync_plugins_for_game(&game, &bottle);
@@ -616,6 +649,7 @@ async fn batch_toggle_mods(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
+    check_game_lock(&state.game_locks, &game_id, &bottle_name)?;
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
         let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
@@ -1277,9 +1311,33 @@ async fn launch_game_cmd(
     state: State<'_, AppState>,
 ) -> Result<LaunchResult, String> {
     let db = state.db.clone();
+    let game_locks = state.game_locks.clone();
     tokio::task::spawn_blocking(move || {
     let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
     let game_path = PathBuf::from(&game.game_path);
+    let data_dir_check = PathBuf::from(&game.data_dir);
+
+    // Pre-launch self-healing: check if deployment is consistent, auto-fix if not
+    {
+        let manifest = db.get_deployment_manifest(&game_id, &bottle_name).unwrap_or_default();
+        if !manifest.is_empty() {
+            let missing: usize = manifest.iter()
+                .filter(|e| !data_dir_check.join(&e.relative_path).exists())
+                .count();
+            if missing > 0 {
+                log::warn!(
+                    "Pre-launch: {} deployed files missing — triggering self-heal redeploy",
+                    missing
+                );
+                match deployer::redeploy_all(
+                    &db, &game_id, &bottle_name, &data_dir_check, &game.game_path,
+                ) {
+                    Ok(_) => log::info!("Pre-launch: self-heal redeploy succeeded"),
+                    Err(e) => log::error!("Pre-launch: self-heal redeploy failed: {}", e),
+                }
+            }
+        }
+    }
 
     // When SKSE is requested, it takes priority over custom executables.
     // Otherwise, check for a custom default executable first.
@@ -1534,6 +1592,13 @@ async fn launch_game_cmd(
     // Attach any SKSE compatibility warning to the launch result
     if let Some(warning) = skse_warning {
         result.warning = Some(warning);
+    }
+
+    // Register game lock so frontend can show "game is running" banner
+    if result.success {
+        if let Some(pid) = result.pid {
+            game_locks.register(&game_id, &bottle_name, pid);
+        }
     }
 
     Ok(result)
@@ -2122,6 +2187,7 @@ async fn resolve_all_conflicts_cmd(
     bottle_name: String,
     state: State<'_, AppState>,
 ) -> Result<conflict_resolver::ResolutionResult, String> {
+    check_game_lock(&state.game_locks, &game_id, &bottle_name)?;
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
         let conflicts = db
@@ -2251,6 +2317,7 @@ async fn reorder_mods(
     ordered_mod_ids: Vec<i64>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    check_game_lock(&state.game_locks, &game_id, &bottle_name)?;
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
         db.reorder_priorities(&game_id, &bottle_name, &ordered_mod_ids)
@@ -2280,10 +2347,15 @@ async fn redeploy_all_mods(
     bottle_name: String,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
+    check_game_lock(&state.game_locks, &game_id, &bottle_name)?;
     let db = state.db.clone();
     let app = app.clone();
     tokio::task::spawn_blocking(move || {
         let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
+
+        let journal_id = deploy_journal::begin(
+            &game_id, &bottle_name, deploy_journal::JournalOp::RedeployAll, &[],
+        ).unwrap_or_default();
 
         let app_clone = app.clone();
         let result = deployer::redeploy_all_with_progress(
@@ -2312,6 +2384,8 @@ async fn redeploy_all_mods(
             ),
         )
         .map_err(|e| e.to_string())?;
+
+        let _ = deploy_journal::complete(&journal_id);
 
         if game_id == "skyrimse" {
             let _ = sync_plugins_for_game(&game, &bottle);
@@ -2361,6 +2435,7 @@ async fn deploy_incremental_cmd(
     bottle_name: String,
     state: State<'_, AppState>,
 ) -> Result<deployer::IncrementalDeployResult, String> {
+    check_game_lock(&state.game_locks, &game_id, &bottle_name)?;
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
         let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
@@ -2578,15 +2653,22 @@ async fn purge_deployment_cmd(
     bottle_name: String,
     state: State<'_, AppState>,
 ) -> Result<Vec<String>, String> {
+    check_game_lock(&state.game_locks, &game_id, &bottle_name)?;
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
         let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
 
         auto_snapshot_before_destructive(&db, &game_id, &bottle_name, "Before purge deployment");
 
+        let journal_id = deploy_journal::begin(
+            &game_id, &bottle_name, deploy_journal::JournalOp::Purge, &[],
+        ).unwrap_or_default();
+
         let removed =
             deployer::purge_deployment(&db, &game_id, &bottle_name, &data_dir, &game.game_path)
                 .map_err(|e| e.to_string())?;
+
+        let _ = deploy_journal::complete(&journal_id);
 
         if game_id == "skyrimse" {
             let _ = sync_plugins_for_game(&game, &bottle);
@@ -2822,6 +2904,7 @@ async fn switch_collection_cmd(
     collection_name: String,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
+    check_game_lock(&state.game_locks, &game_id, &bottle_name)?;
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
         let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
@@ -2896,6 +2979,7 @@ async fn delete_collection_cmd(
     remove_all_mods: bool,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
+    check_game_lock(&state.game_locks, &game_id, &bottle_name)?;
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
         let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
@@ -3427,6 +3511,7 @@ async fn restore_mod_snapshot(
     bottle_name: String,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
+    check_game_lock(&state.game_locks, &game_id, &bottle_name)?;
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
         let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
@@ -3466,6 +3551,7 @@ async fn return_to_vanilla(
     clean_orphans: bool,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
+    check_game_lock(&state.game_locks, &game_id, &bottle_name)?;
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
         let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
@@ -4040,6 +4126,7 @@ async fn activate_profile(
     bottle_name: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    check_game_lock(&state.game_locks, &game_id, &bottle_name)?;
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
         // Look up the game
@@ -9082,6 +9169,66 @@ async fn get_stability_summary(
     .map_err(|e| format!("Stability summary task failed: {e}"))?
 }
 
+// --- Game Lock Commands ---
+
+#[tauri::command]
+async fn get_game_lock_status(
+    game_id: String,
+    bottle_name: String,
+    state: State<'_, AppState>,
+) -> Result<Option<game_lock::GameLock>, String> {
+    Ok(state.game_locks.get(&game_id, &bottle_name))
+}
+
+#[tauri::command]
+async fn get_all_game_locks(
+    state: State<'_, AppState>,
+) -> Result<Vec<game_lock::GameLock>, String> {
+    Ok(state.game_locks.all_locks())
+}
+
+#[tauri::command]
+async fn force_unlock_game(
+    game_id: String,
+    bottle_name: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    Ok(state.game_locks.force_unlock(&game_id, &bottle_name))
+}
+
+// --- Deploy Journal Commands ---
+
+#[tauri::command]
+async fn get_deploy_journal_status() -> Result<Vec<deploy_journal::JournalEntry>, String> {
+    Ok(deploy_journal::get_incomplete())
+}
+
+#[tauri::command]
+async fn heal_deployment(
+    game_id: String,
+    bottle_name: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let bottle = bottles::find_bottle_by_name(&bottle_name)
+            .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
+        let game = games::detect_games(&bottle)
+            .into_iter()
+            .find(|g| g.game_id == game_id)
+            .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
+        let data_dir = PathBuf::from(&game.data_dir);
+
+        deployer::redeploy_all(&db, &game_id, &bottle_name, &data_dir, &game.game_path)
+            .map_err(|e| format!("Heal redeploy failed: {e}"))?;
+
+        log::info!("heal_deployment: redeployed {}/{}", game_id, bottle_name);
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
 // --- FOMOD Recipe Commands ---
 
 #[tauri::command]
@@ -10954,6 +11101,18 @@ pub fn run() {
     // Clean up stale corkscrew_extract_* temp dirs from collection installs
     cleanup_orphaned_temp_dirs();
 
+    // Replay any incomplete deployment journal entries (self-healing)
+    {
+        let healed = deploy_journal::replay_incomplete(&db);
+        if !healed.is_empty() {
+            log::info!(
+                "Self-healed {} deployment(s) from interrupted operations: {:?}",
+                healed.len(),
+                healed
+            );
+        }
+    }
+
     #[allow(unused_mut)]
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -11001,6 +11160,7 @@ pub fn run() {
                 fomod_cache: Arc::new(fomod::new_fomod_cache()),
                 loot_masterlist_checked: Arc::new(AtomicBool::new(false)),
                 chat_session: llm_chat::create_shared_session(),
+                game_locks: Arc::new(game_lock::GameLockManager::new()),
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -11252,6 +11412,13 @@ pub fn run() {
             record_session_mod_change,
             get_session_history,
             get_stability_summary,
+            // Game Lock
+            get_game_lock_status,
+            get_all_game_locks,
+            force_unlock_game,
+            // Deploy Journal
+            get_deploy_journal_status,
+            heal_deployment,
             // FOMOD Recipes
             save_fomod_recipe,
             get_fomod_recipe,

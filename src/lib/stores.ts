@@ -1,5 +1,5 @@
 import { writable, derived } from "svelte/store";
-import type { Bottle, DetectedGame, InstalledMod, AppConfig, SkseStatus, Profile, CollectionSummary, FomodInstaller } from "./types";
+import type { Bottle, DetectedGame, InstalledMod, AppConfig, SkseStatus, Profile, CollectionSummary, FomodInstaller, GameLock } from "./types";
 
 // App state
 export const bottles = writable<Bottle[]>([]);
@@ -230,3 +230,8 @@ export function showSuccess(msg: string) {
   successMessage.set(msg);
   setTimeout(() => successMessage.set(null), 3000);
 }
+
+// Game Lock — tracks whether a game is currently running (MO2-style lock)
+export const gameLock = writable<GameLock | null>(null);
+// Whether the user has force-unlocked (overridden the lock for this session)
+export const gameLockOverridden = writable<boolean>(false);

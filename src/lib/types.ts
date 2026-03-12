@@ -1576,3 +1576,10 @@ export interface SteamStatus {
   registered: boolean;
   is_deck: boolean;
 }
+
+export interface GameLock {
+  game_id: string;
+  bottle_name: string;
+  pid: number;
+  started_at: string;
+}

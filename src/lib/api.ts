@@ -85,6 +85,7 @@ import type {
   ProfileSaveInfo,
   DlcStatus,
   IncrementalDeployResult,
+  GameLock,
 } from "./types";
 
 // Bottles
@@ -2104,4 +2105,31 @@ export async function installUpdate(
     channel.onmessage = onEvent;
   }
   return invoke("install_update", { onEvent: channel });
+}
+
+// Game Lock
+export async function getGameLockStatus(
+  gameId: string,
+  bottleName: string
+): Promise<GameLock | null> {
+  return invoke("get_game_lock_status", { gameId, bottleName });
+}
+
+export async function getAllGameLocks(): Promise<GameLock[]> {
+  return invoke("get_all_game_locks");
+}
+
+export async function forceUnlockGame(
+  gameId: string,
+  bottleName: string
+): Promise<boolean> {
+  return invoke("force_unlock_game", { gameId, bottleName });
+}
+
+// Deploy Journal
+export async function healDeployment(
+  gameId: string,
+  bottleName: string
+): Promise<void> {
+  return invoke("heal_deployment", { gameId, bottleName });
 }
