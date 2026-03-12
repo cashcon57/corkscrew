@@ -1122,7 +1122,7 @@
                       Sign in with Google
                     {/if}
                   </button>
-                  <span class="google-signin-hint">No API key needed — sign in with your Google account</span>
+                  <span class="google-signin-hint">No API key needed — sign in with your Google account. <a href="https://github.com/cashcon57/corkscrew/blob/main/PRIVACY.md" class="privacy-link" onclick={(e) => { e.preventDefault(); openUrl("https://github.com/cashcon57/corkscrew/blob/main/PRIVACY.md"); }}>Privacy Policy</a></span>
                 </div>
               {/if}
             {/if}
@@ -1746,6 +1746,16 @@
     font-size: 11px;
     color: var(--text-tertiary);
     text-align: center;
+  }
+
+  .google-signin-hint .privacy-link {
+    color: var(--text-secondary, #8e8e93);
+    text-decoration: underline;
+    cursor: pointer;
+  }
+
+  .google-signin-hint .privacy-link:hover {
+    color: var(--text-primary, #fff);
   }
 
   .google-signed-in {
