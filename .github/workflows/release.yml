@@ -214,6 +214,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/build-latest-json.py artifacts/ > latest.json
 
+      - name: Verify latest.json signatures match pubkey
+        run: python3 scripts/verify-latest-json.py latest.json
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:

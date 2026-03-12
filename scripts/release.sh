@@ -162,6 +162,12 @@ echo "  latest.json generated with macOS platforms"
 cat "$STAGE/latest.json" | python3 -m json.tool 2>/dev/null || cat "$STAGE/latest.json"
 rm -rf "$LATEST_TMP"
 
+# CRITICAL: Verify signatures in latest.json match our pubkey BEFORE uploading.
+# This catches the exact bug where CI or a wrong key signs the artifacts.
+echo ""
+echo "=== Verifying latest.json signatures ==="
+python3 "$ROOT/scripts/verify-latest-json.py" "$STAGE/latest.json"
+
 # --- Commit, tag, push ---
 echo ""
 echo "=== Committing version bump ==="

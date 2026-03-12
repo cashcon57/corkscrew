@@ -224,7 +224,11 @@
         const cfg = await getConfig();
         const lastVersion = (cfg as Record<string, unknown>).last_known_version;
         if (lastVersion && lastVersion !== v) {
-          wrappedShowSuccess(`Updated to v${v} successfully!`);
+          wrappedShowSuccess(`Updated from v${lastVersion} to v${v} successfully!`);
+          // Clear any stale update state so we don't show "update available" for the version we just installed
+          updateReadyStore.set(false);
+          updateVersionStore.set("");
+          updateNotesStore.set(null);
         }
         await setConfigValue("last_known_version", v);
       } catch { /* config not available yet */ }
