@@ -9,21 +9,54 @@ License: GPL-3.0-or-later.
 Acceptable minimum: parity with how modlists and mod managers work on Windows.
 Any modlist that works on Windows should work at least as well under Wine/CrossOver.
 
+## Build & Test
+
+```bash
+cargo tauri dev                        # Development mode (hot-reload frontend + backend)
+cargo test                             # 787+ backend tests (run from src-tauri/)
+npx svelte-check --threshold error     # Frontend type checking (MUST pass before commit)
+./scripts/release.sh <version>         # Hybrid release (local macOS + CI Linux)
+```
+
+ALWAYS run `cargo test` and `npx svelte-check` after making changes. Fix failures before moving on.
+
 ## Coding Standards
 
 - Write code to a senior-engineer standard
 - Don't take existing conventions as gospel, but don't assume they're wrong either
 - Always version-bump fixes (user preference)
-- Never commit signing keys, tokens, or credentials — check MEMORY.md for what's sensitive
+- NEVER commit signing keys, tokens, or credentials — check MEMORY.md for what's sensitive
 
-## Key Commands
+## Critical Invariants
 
-```bash
-cargo tauri dev                        # Development mode
-cargo test                             # 706+ backend tests (run from src-tauri/)
-npx svelte-check --threshold error     # Frontend type checking
-./scripts/release.sh <version>         # Hybrid release (local macOS + CI Linux)
-```
+These rules exist because violating them caused real bugs. Follow them exactly.
+
+### Frontend (Svelte 5)
+- **After ANY mod state change**: MUST call both `loadMods()` AND `refreshHealth()`
+- **NEVER use `.catch(() => {})`** — always log errors: `.catch((err) => console.error('context:', err))`
+- **Svelte 5 runes ONLY**: Use `$state`, `$derived`, `$effect` — NEVER old `$:` reactive syntax
+- **`@const`** only inside `{#if}`/`{#each}` blocks
+- **Event listeners before commands**: When listening for Tauri events from a backend command, register the listener BEFORE invoking the command to avoid race conditions
+- **Type-safe invokes**: Always use typed wrappers from `api.ts`, never raw `invoke()`
+
+### Backend (Rust)
+- **Path safety**: All paths from external sources (archives, DB, user input) MUST be validated with `is_safe_relative_path()` or canonicalization before use. Check for traversal (`..`), null bytes, drive letters.
+- **`DeployGuard` RAII**: Use for all deploy operations — sets `deploy_in_progress` flag, clears on Drop
+- **`auto_snapshot_before_destructive()`** before purge/delete/clean ops
+- **`AppState.db` is `Arc<ModDatabase>`** — internal Mutex, do NOT `.lock()` externally
+- **Symlink checks BEFORE file operations**, never after (TOCTOU prevention)
+
+### NexusMods (Compliance — CRITICAL)
+- **NEVER automate downloads for free users** — enforced in `nexus.rs::get_download_links()`
+- Premium-only API downloads; free users get browser links
+- API headers: `Application-Name: Corkscrew`, no caching, no scraping
+- OAuth: PKCE flow, redirect `http://127.0.0.1:{port}/callback` (NOT localhost)
+- `@tauri-apps/plugin-opener` exports `openUrl` (NOT `open`)
+
+### Wine/CrossOver
+- File lookups MUST be case-insensitive (Wine targets NTFS/APFS)
+- Path separators: normalize to `/` in all comparisons and HashMap keys
+- WJ installs: `collection_name = "wj:{modlist_name}"`
 
 ## Cross-Repo Awareness
 
@@ -45,51 +78,10 @@ When modifying either repo, check if the change affects this integration surface
 
 ## Memory Management
 
-### Auto-Memory System
+Auto-memory lives at `~/.claude/projects/-Users-cashconway-Corkscrew/memory/`. The index (`MEMORY.md`, ~200 line limit) loads every conversation; detailed knowledge in topic files linked from it.
 
-This project uses Claude Code's persistent auto-memory at:
-`~/.claude/projects/-Users-cashconway-Corkscrew/memory/`
+**Update memory after:** bug fixes (root cause + fix), feature completion (module list), releases (version numbers), RE discoveries, architecture changes, cross-repo changes.
 
-The main index (`MEMORY.md`, ~200 line limit) is loaded into every conversation automatically. Detailed knowledge lives in topic files linked from the index.
+**Do NOT save:** mid-task WIP, info already in CLAUDE.md or memory files, speculative conclusions.
 
-### Memory File Conventions
-
-| File | Purpose |
-|------|---------|
-| `MEMORY.md` | Concise index. Project structure, key patterns, commands, version info. |
-| `engine-fixes-wine.md` | Cross-repo integration: Corkscrew ↔ SSEEngineFixesForWine |
-| `sseef-wine.md` | SSEEngineFixesForWine RE findings, architecture, crash history |
-| `audit-findings.md` | Code quality audit results and fix tracking |
-| `skse-plugin-compat.md` | SKSE plugin PE parsing and version compatibility system |
-| `backlog.md` | Deferred work items and future features |
-
-### When to Update Memory
-
-**DO update after:**
-- Fixing a bug — record root cause and fix in the appropriate topic file
-- Completing a feature — update MEMORY.md module list and feature status
-- A release — update version numbers across all memory files that reference them
-- RE discoveries — update sseef-wine.md with new offsets, crash sites, findings
-- Architecture changes — update MEMORY.md patterns and structure sections
-- Cross-repo changes — update engine-fixes-wine.md if the integration surface changes
-
-**DO NOT save:**
-- Mid-task temporary state (current WIP, debugging attempts in progress)
-- Information already in CLAUDE.md or existing memory files (check first)
-- Speculative conclusions from reading a single file — verify before persisting
-
-### Compaction Survival
-
-When context is compressed mid-session:
-1. Re-read the relevant memory files to re-anchor context
-2. Check the conversation summary (provided by the system) for in-progress work state
-3. Auto-memory files persist across sessions — use them to recover context
-4. If working on SSEEngineFixesForWine, re-read both `engine-fixes-wine.md` and `sseef-wine.md`
-
-### Cross-Repo Memory Hygiene
-
-After changes to SSEEngineFixesForWine:
-- Update version references in `engine-fixes-wine.md` and `sseef-wine.md`
-- Update MEMORY.md's SSEEngineFixesForWine summary section
-- If crash behavior changed, update the crash history in `sseef-wine.md`
-- If TOML schema changed, update `engine-fixes-wine.md` config section
+**On compaction:** Re-read relevant memory files to recover context. If working on SSEEngineFixesForWine, re-read both `engine-fixes-wine.md` and `sseef-wine.md`.

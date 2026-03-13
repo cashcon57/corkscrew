@@ -1583,3 +1583,86 @@ export interface GameLock {
   pid: number;
   started_at: string;
 }
+
+// Shader Conversion
+export type CsDetectionReason =
+  | "core_dll"
+  | "cs_config_files"
+  | "light_placer_configs"
+  | "pbr_textures"
+  | "fomod_cs_selection"
+  | "known_cs_ecosystem_mod"
+  | "cs_only_files";
+
+export type CsModAction =
+  | { type: "disable" }
+  | { type: "swap_to_enb_variant"; enb_file_id: number; enb_file_name: string }
+  | { type: "rerun_fomod"; suggested_selections: Record<string, string[]> }
+  | { type: "keep" };
+
+export interface CsDetectedMod {
+  mod_id: number;
+  mod_name: string;
+  nexus_mod_id: number | null;
+  nexus_file_id: number | null;
+  reasons: CsDetectionReason[];
+  action: CsModAction;
+}
+
+export interface ShaderScanResult {
+  detected_mods: CsDetectedMod[];
+  total_cs_mods: number;
+  swappable_count: number;
+  fomod_rerun_count: number;
+  disable_only_count: number;
+  keep_count: number;
+  enb_already_installed: boolean;
+}
+
+export type EnbPresetChoice =
+  | "performance"
+  | "balanced"
+  | "quality"
+  | { custom: { nexus_mod_id: number; nexus_file_id: number } };
+
+export interface ConversionConfig {
+  install_enb_binary: boolean;
+  enb_preset: EnbPresetChoice | null;
+  mod_actions: [number, CsModAction][];
+  install_enb_ecosystem: boolean;
+  switch_to_dxvk: boolean;
+}
+
+export interface ConversionResult {
+  conversion_id: number;
+  snapshot_id: number;
+  mods_disabled: number;
+  mods_swapped: number;
+  fomods_rerun: number;
+  enb_installed: boolean;
+  dxvk_switched: boolean;
+  errors: string[];
+}
+
+export interface ConversionProgress {
+  phase: string;
+  message?: string;
+  current?: number;
+  total?: number;
+  mod_name?: string;
+  step?: string;
+  result?: ConversionResult;
+  error?: string;
+}
+
+export interface ConversionHistoryEntry {
+  id: number;
+  game_id: string;
+  bottle_name: string;
+  snapshot_id: number;
+  status: string;
+  disabled_mods: number[];
+  swapped_mods: number[];
+  enb_installed: boolean;
+  created_at: string;
+}

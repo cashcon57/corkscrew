@@ -185,7 +185,7 @@
     nexusDetail = null;
     getNexusModDetail(nexusSlug, m.nexus_mod_id)
       .then((info) => { if (mod.id === m.id) nexusDetail = info; })
-      .catch(() => {})
+      .catch((err) => console.error('Failed to load mod details:', err))
       .finally(() => { nexusDetailLoading = false; });
   });
 
@@ -197,7 +197,7 @@
       .then(([deps, dependents]) => {
         if (mod.id === m.id) { detailDeps = deps; detailDependents = dependents; }
       })
-      .catch(() => {})
+      .catch((err) => console.error('Failed to load mod dependencies:', err))
       .finally(() => { detailDepsLoading = false; });
   });
 

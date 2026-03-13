@@ -41,7 +41,15 @@ pub fn validate_game_id(game_id: &str) -> Result<(), String> {
 
 /// Validate a filename to prevent path traversal.
 fn validate_filename(name: &str) -> Result<(), String> {
-    if name.is_empty() || name.contains("..") || name.contains('/') || name.contains('\\') {
+    let lower = name.to_lowercase();
+    if name.is_empty()
+        || name.contains("..")
+        || name.contains('/')
+        || name.contains('\\')
+        || lower.contains("%2e%2e")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
         return Err(format!("Invalid filename: '{}'", name));
     }
     Ok(())
@@ -340,6 +348,16 @@ mod tests {
         assert!(validate_filename("foo/../bar.js").is_err());
         assert!(validate_filename("foo/bar.js").is_err());
         assert!(validate_filename("").is_err());
+    }
+
+    #[test]
+    fn validate_filename_rejects_url_encoded_traversal() {
+        assert!(validate_filename("%2e%2e%2fsecret.js").is_err());
+        assert!(validate_filename("%2E%2E%2Fsecret.js").is_err());
+        assert!(validate_filename("foo%2fbar.js").is_err());
+        assert!(validate_filename("foo%5cbar.js").is_err());
+        assert!(validate_filename("foo%2Fbar.js").is_err());
+        assert!(validate_filename("foo%5Cbar.js").is_err());
     }
 
     #[test]

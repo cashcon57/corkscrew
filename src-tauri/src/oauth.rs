@@ -8,6 +8,8 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use serde::{Deserialize, Serialize};
@@ -394,6 +396,7 @@ pub(crate) fn wait_for_callback(
     listener.set_nonblocking(false)?;
 
     let timeout = std::time::Duration::from_secs(CALLBACK_TIMEOUT_SECS);
+    let callback_received = Arc::new(AtomicBool::new(false));
 
     // Use a blocking accept with a manual timeout via SO_RCVTIMEO equivalent.
     // TcpListener doesn't have set_timeout directly, so we use
@@ -441,6 +444,23 @@ pub(crate) fn wait_for_callback(
                     continue;
                 }
 
+                // Ensure only the first valid callback is processed.
+                if callback_received.swap(true, Ordering::SeqCst) {
+                    let body = "<html><body><h1>Already Processed</h1>\
+                                <p>This callback has already been handled. You can close this tab.</p></body></html>";
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let mut writer = stream.try_clone()?;
+                    let _ = writer.write_all(response.as_bytes());
+                    let _ = writer.flush();
+                    return Err(OAuthError::TokenExchange(
+                        "duplicate callback received".to_string(),
+                    ));
+                }
+
                 let params = parse_query_params(&path);
 
                 // Check for errors from the OAuth provider
@@ -476,7 +496,25 @@ pub(crate) fn wait_for_callback(
                     OAuthError::TokenExchange("no authorization code in callback".to_string())
                 })?;
 
-                let state = params.get("state").cloned().unwrap_or_default();
+                let state = match params.get("state").cloned() {
+                    Some(s) if !s.is_empty() => s,
+                    _ => {
+                        let body = "<html><body><h1>Authorization Failed</h1>\
+                                    <p>Missing or empty state parameter.</p>\
+                                    <p>You can close this tab.</p></body></html>";
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let mut writer = stream.try_clone()?;
+                        let _ = writer.write_all(response.as_bytes());
+                        let _ = writer.flush();
+                        return Err(OAuthError::TokenExchange(
+                            "missing or empty state parameter in OAuth callback".to_string(),
+                        ));
+                    }
+                };
 
                 // Verify state parameter matches
                 if state != expected_state {
@@ -835,20 +873,36 @@ pub async fn get_auth_method_refreshed() -> AuthMethod {
             return AuthMethod::OAuth(tokens);
         }
 
-        // Token expired or about to expire — try refreshing.
+        // Token expired or about to expire — try refreshing with retries.
         if !tokens.refresh_token.is_empty() {
-            match refresh_tokens(CLIENT_ID, &tokens.refresh_token).await {
-                Ok(new_tokens) => return AuthMethod::OAuth(new_tokens),
-                Err(e) => {
-                    eprintln!("[oauth] token refresh failed, clearing stale tokens: {e}");
-                    // Clear stale tokens to force re-auth instead of silently
-                    // using an expired token that will 401 on every request.
-                    if let Err(clear_err) = clear_tokens() {
-                        eprintln!("[oauth] failed to clear stale tokens: {clear_err}");
+            const MAX_REFRESH_ATTEMPTS: u32 = 3;
+            let mut last_err = String::new();
+            for attempt in 1..=MAX_REFRESH_ATTEMPTS {
+                match refresh_tokens(CLIENT_ID, &tokens.refresh_token).await {
+                    Ok(new_tokens) => return AuthMethod::OAuth(new_tokens),
+                    Err(e) => {
+                        last_err = format!("{e}");
+                        // Only retry on transient (network/timeout) errors.
+                        let is_transient = matches!(&e, OAuthError::Http(_) | OAuthError::Io(_));
+                        if is_transient && attempt < MAX_REFRESH_ATTEMPTS {
+                            eprintln!(
+                                "[oauth] token refresh attempt {attempt}/{MAX_REFRESH_ATTEMPTS} failed (transient): {e}"
+                            );
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                            continue;
+                        }
+                        // Non-transient error or final attempt — give up.
+                        break;
                     }
-                    return AuthMethod::None;
                 }
             }
+            eprintln!("[oauth] token refresh failed after retries, clearing stale tokens: {last_err}");
+            // Clear stale tokens to force re-auth instead of silently
+            // using an expired token that will 401 on every request.
+            if let Err(clear_err) = clear_tokens() {
+                eprintln!("[oauth] failed to clear stale tokens: {clear_err}");
+            }
+            return AuthMethod::None;
         }
 
         // Refresh token is empty and access token is expired — clear and force re-auth.

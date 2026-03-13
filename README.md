@@ -115,6 +115,13 @@ Requires [Node.js](https://nodejs.org/) 18+ and [Rust](https://rustup.rs/). On L
 - INI editor with presets (performance, ultra, Steam Deck)
 - Crash log analysis with diagnosis and suggested fixes
 
+### Shader Compatibility (Wine)
+- **Community Shaders → ENB conversion wizard** — detects CS-dependent mods and helps swap to Wine-compatible ENB equivalents
+- Smart detection: config-only files (harmless without CS DLL) are kept; actual CS ecosystem mods are disabled
+- Essential SKSE plugin protection — po3_Tweaks, CrashLogger, BugFixesSSE, etc. are never disabled
+- ENB binary auto-download and install with Wine compatibility patches
+- Full revert support with snapshot restore
+
 ### AI Mod Assistant
 - Local LLM chat (via [Ollama](https://ollama.com/)) — no cloud, fully private
 - 20+ tool actions: list/enable/disable mods, search NexusMods, sort plugins, analyze crashes, switch profiles
@@ -234,7 +241,7 @@ src/                          Svelte frontend
 │   └── settings/             Config, tools, auth, diagnostics
 └── app.css                   Design tokens + themes
 
-src-tauri/src/                Rust backend (~53 modules, 715+ tests)
+src-tauri/src/                Rust backend (~54 modules, 787+ tests)
 ├── lib.rs                    ~249 IPC commands + CLI
 ├── bottles.rs                Bottle detection (9 sources)
 ├── games.rs                  Game detection + plugin registry

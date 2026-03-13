@@ -33,6 +33,8 @@ pub enum WjDirectiveError {
     TextureFailed(String),
     #[error("ZIP error: {0}")]
     ZipError(String),
+    #[error("Path traversal blocked: {0}")]
+    PathTraversal(String),
     #[error("{0}")]
     Other(String),
 }
@@ -180,12 +182,18 @@ impl DirectiveProcessor {
         let bytes_processed = AtomicU64::new(0);
         let total_bytes: u64 = directives.iter().map(|d| d.size().max(0) as u64).sum();
         let mut skipped: usize = 0;
-        let warnings: Vec<String> = Vec::new();
+        let warnings: Mutex<Vec<String>> = Mutex::new(Vec::new());
         let mut errors: Vec<String> = Vec::new();
 
         // Process ignored directives (no-ops, count them immediately)
         for d in &ignored {
-            self.process_directive(d).ok();
+            if let Err(e) = self.process_directive(d) {
+                warnings.lock().unwrap().push(format!(
+                    "Ignored directive {} had error: {}",
+                    d.to_path(),
+                    e
+                ));
+            }
             skipped += 1;
             bytes_processed.fetch_add(d.size().max(0) as u64, Ordering::Relaxed);
             let count = processed_counter.fetch_add(1, Ordering::Relaxed) + 1;
@@ -200,6 +208,7 @@ impl DirectiveProcessor {
         }
 
         // Phase 1: File production — parallel via rayon
+        let phase1_warnings = Mutex::new(Vec::new());
         let phase1_errors = Mutex::new(Vec::new());
         let num_threads = std::thread::available_parallelism()
             .map(|n| n.get().min(8))
@@ -218,13 +227,19 @@ impl DirectiveProcessor {
             phase1.par_iter().for_each(|d| {
                 if let Err(e) = self.process_directive(d) {
                     let msg = format!("{} -> {}: {}", d.kind_name(), d.to_path(), e);
-                    warn!("Directive error: {}", msg);
-                    phase1_errors.lock().unwrap().push(msg);
+                    // Hash mismatches are non-fatal warnings — the file was still written
+                    if matches!(e, WjDirectiveError::HashMismatch { .. }) {
+                        warn!("Directive warning: {}", msg);
+                        phase1_warnings.lock().unwrap().push(msg);
+                    } else {
+                        warn!("Directive error: {}", msg);
+                        phase1_errors.lock().unwrap().push(msg);
+                    }
                 }
 
                 bytes_processed.fetch_add(d.size().max(0) as u64, Ordering::Relaxed);
                 let count = processed_counter.fetch_add(1, Ordering::Relaxed) + 1;
-                if count.is_multiple_of(10) || count == total {
+                if count.is_multiple_of(5) || count == total || count == phase1.len() {
                     progress_callback(
                         count,
                         total,
@@ -238,6 +253,10 @@ impl DirectiveProcessor {
         });
 
         errors.extend(phase1_errors.into_inner().unwrap());
+        warnings
+            .lock()
+            .unwrap()
+            .extend(phase1_warnings.into_inner().unwrap());
 
         // Phase 2: Merged patches (sequential — depends on Phase 1 outputs)
         for d in &phase2 {
@@ -288,7 +307,7 @@ impl DirectiveProcessor {
         Ok(WjDirectiveResult {
             total_processed: processed - skipped - errors.len(),
             total_skipped: skipped,
-            warnings,
+            warnings: warnings.into_inner().unwrap(),
             errors,
         })
     }
@@ -307,7 +326,7 @@ impl DirectiveProcessor {
         archive_hash_path: &ArchiveHashPath,
     ) -> Result<(), WjDirectiveError> {
         let source_path = self.resolve_archive_file(archive_hash_path)?;
-        let dest_path = self.resolve_output_path(to);
+        let dest_path = self.resolve_output_path(to)?;
         ensure_parent_dir(&dest_path)?;
         std::fs::copy(&source_path, &dest_path).map_err(|e| {
             WjDirectiveError::Io(std::io::Error::new(
@@ -358,7 +377,7 @@ impl DirectiveProcessor {
             .map_err(|e| WjDirectiveError::PatchFailed(format!("Patch apply failed: {}", e)))?;
 
         // Write output
-        let dest_path = self.resolve_output_path(to);
+        let dest_path = self.resolve_output_path(to)?;
         ensure_parent_dir(&dest_path)?;
         std::fs::write(&dest_path, &target_data)?;
 
@@ -381,7 +400,7 @@ impl DirectiveProcessor {
         let entry_name = source_data_id.to_string();
         let data = read_wj_zip_entry(&self.wabbajack_path, &entry_name)?;
 
-        let dest_path = self.resolve_output_path(to);
+        let dest_path = self.resolve_output_path(to)?;
         ensure_parent_dir(&dest_path)?;
         std::fs::write(&dest_path, &data)?;
 
@@ -403,7 +422,7 @@ impl DirectiveProcessor {
         let text = String::from_utf8_lossy(&data);
         let remapped = substitute_wj_path(&text, &self.game_dir, &self.output_dir);
 
-        let dest_path = self.resolve_output_path(to);
+        let dest_path = self.resolve_output_path(to)?;
         ensure_parent_dir(&dest_path)?;
         std::fs::write(&dest_path, remapped.as_bytes())?;
 
@@ -427,7 +446,7 @@ impl DirectiveProcessor {
         state: Option<&BsaState>,
         file_states: &[BsaFileState],
     ) -> Result<(), WjDirectiveError> {
-        let dest_path = self.resolve_output_path(to);
+        let dest_path = self.resolve_output_path(to)?;
         ensure_parent_dir(&dest_path)?;
 
         if file_states.is_empty() {
@@ -512,10 +531,26 @@ impl DirectiveProcessor {
 
         let mut archive = Archive::new();
 
+        let canonical_output = self
+            .output_dir
+            .canonicalize()
+            .unwrap_or_else(|_| self.output_dir.clone());
+
         for fs in file_states {
             let normalized = normalize_wj_path(&fs.path);
             // Files are in the output directory, placed there by earlier directives
             let file_path = self.output_dir.join(&normalized);
+
+            // Path traversal check for BA2 file states
+            if let Ok(canonical_fp) = file_path.canonicalize() {
+                if !canonical_fp.starts_with(&canonical_output) {
+                    return Err(WjDirectiveError::PathTraversal(format!(
+                        "BA2 file state path {} escapes output directory",
+                        canonical_fp.display()
+                    )));
+                }
+            }
+
             let resolved_path = if file_path.exists() {
                 file_path.clone()
             } else {
@@ -554,6 +589,19 @@ impl DirectiveProcessor {
                     };
 
                     // Strip DDS header, pack only the pixel data
+                    if dds_info.data_offset > data.len() {
+                        warn!(
+                            "DDS data_offset ({}) exceeds file size ({}), falling back to GNRL",
+                            dds_info.data_offset,
+                            data.len()
+                        );
+                        // Fall through to GNRL-style packing below
+                        let chunk = Chunk::from_decompressed(data.into_boxed_slice());
+                        let file: File = std::iter::once(chunk).collect();
+                        let key = ArchiveKey::from(normalized.replace('/', "\\").as_bytes());
+                        archive.insert(key, file);
+                        continue;
+                    }
                     let pixel_data = data[dds_info.data_offset..].to_vec();
                     let mip_range = 0..=(dds_info.mip_count.saturating_sub(1) as u16);
                     let mut chunk = Chunk::from_decompressed(pixel_data.into_boxed_slice());
@@ -655,10 +703,24 @@ impl DirectiveProcessor {
         // Group files by their parent directory within the BSA
         let mut dir_map: HashMap<String, Vec<(String, Vec<u8>)>> = HashMap::new();
         let mut archive_types = ArchiveTypes::empty();
+        let canonical_output = self
+            .output_dir
+            .canonicalize()
+            .unwrap_or_else(|_| self.output_dir.clone());
 
         for fs in file_states {
             let normalized = normalize_wj_path(&fs.path);
             let file_path = self.output_dir.join(&normalized);
+
+            // Path traversal check for BSA file states
+            if let Ok(canonical_fp) = file_path.canonicalize() {
+                if !canonical_fp.starts_with(&canonical_output) {
+                    return Err(WjDirectiveError::PathTraversal(format!(
+                        "BSA file state path {} escapes output directory",
+                        canonical_fp.display()
+                    )));
+                }
+            }
 
             let data = if file_path.exists() {
                 std::fs::read(&file_path).map_err(|e| {
@@ -690,21 +752,34 @@ impl DirectiveProcessor {
             };
 
             // Detect archive type from file extension
-            let lower = normalized.to_lowercase();
-            if lower.ends_with(".nif") || lower.ends_with(".btr") || lower.ends_with(".bto") {
-                archive_types |= ArchiveTypes::MESHES;
-            } else if lower.ends_with(".dds") || lower.ends_with(".tga") || lower.ends_with(".png")
-            {
-                archive_types |= ArchiveTypes::TEXTURES;
-            } else if lower.ends_with(".wav") || lower.ends_with(".xwm") || lower.ends_with(".fuz")
-            {
-                archive_types |= ArchiveTypes::SOUNDS;
-            } else if lower.ends_with(".lip") || lower.contains("voice") {
-                archive_types |= ArchiveTypes::VOICES;
-            } else if lower.ends_with(".swf") || lower.ends_with(".txt") {
-                archive_types |= ArchiveTypes::MENUS;
-            } else {
-                archive_types |= ArchiveTypes::MISC;
+            let ext = std::path::Path::new(&normalized)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_lowercase());
+            match ext.as_deref() {
+                Some("nif") | Some("btr") | Some("bto") => {
+                    archive_types |= ArchiveTypes::MESHES;
+                }
+                Some("dds") | Some("tga") | Some("png") => {
+                    archive_types |= ArchiveTypes::TEXTURES;
+                }
+                Some("wav") | Some("xwm") | Some("fuz") => {
+                    archive_types |= ArchiveTypes::SOUNDS;
+                }
+                Some("lip") => {
+                    archive_types |= ArchiveTypes::VOICES;
+                }
+                Some("swf") | Some("txt") => {
+                    archive_types |= ArchiveTypes::MENUS;
+                }
+                _ => {
+                    // Check for voice directory as a secondary heuristic
+                    if normalized.to_lowercase().contains("voice") {
+                        archive_types |= ArchiveTypes::VOICES;
+                    } else {
+                        archive_types |= ArchiveTypes::MISC;
+                    }
+                }
             }
 
             // BSA paths use backslashes. Split into directory + filename.
@@ -778,7 +853,7 @@ impl DirectiveProcessor {
         image_state: Option<&ImageState>,
     ) -> Result<(), WjDirectiveError> {
         let source_path = self.resolve_archive_file(archive_hash_path)?;
-        let dest_path = self.resolve_output_path(to);
+        let dest_path = self.resolve_output_path(to)?;
         ensure_parent_dir(&dest_path)?;
 
         // If no image state or zero dimensions, just copy as-is
@@ -976,7 +1051,7 @@ impl DirectiveProcessor {
         })?;
 
         // Write output
-        let dest_path = self.resolve_output_path(to);
+        let dest_path = self.resolve_output_path(to)?;
         ensure_parent_dir(&dest_path)?;
         std::fs::write(&dest_path, &target_data)?;
 
@@ -1041,7 +1116,7 @@ impl DirectiveProcessor {
 
     /// Resolve a Wabbajack `To` path to an absolute output path.
     /// Rejects path traversal attempts as defense-in-depth.
-    fn resolve_output_path(&self, to: &str) -> PathBuf {
+    fn resolve_output_path(&self, to: &str) -> Result<PathBuf, WjDirectiveError> {
         let normalized = normalize_wj_path(to);
         if !crate::staging::is_safe_relative_path(&normalized) {
             log::warn!(
@@ -1053,9 +1128,40 @@ impl DirectiveProcessor {
                 .file_name()
                 .map(|f| f.to_string_lossy().to_string())
                 .unwrap_or_else(|| "unknown".to_string());
-            return self.output_dir.join(safe);
+            return Ok(self.output_dir.join(safe));
         }
-        self.output_dir.join(normalized)
+        let dst = self.output_dir.join(&normalized);
+
+        // ZIP Slip protection: verify the resolved path stays within output_dir
+        let canonical_output = self
+            .output_dir
+            .canonicalize()
+            .unwrap_or_else(|_| self.output_dir.clone());
+
+        if let Ok(canonical_dst) = dst.canonicalize() {
+            if !canonical_dst.starts_with(&canonical_output) {
+                return Err(WjDirectiveError::PathTraversal(format!(
+                    "resolved path {} escapes output directory {}",
+                    canonical_dst.display(),
+                    canonical_output.display()
+                )));
+            }
+        } else if let Some(parent) = dst.parent() {
+            // File doesn't exist yet — check its parent directory
+            if parent.exists() {
+                if let Ok(canonical_parent) = parent.canonicalize() {
+                    if !canonical_parent.starts_with(&canonical_output) {
+                        return Err(WjDirectiveError::PathTraversal(format!(
+                            "parent path {} escapes output directory {}",
+                            canonical_parent.display(),
+                            canonical_output.display()
+                        )));
+                    }
+                }
+            }
+        }
+
+        Ok(dst)
     }
 }
 
@@ -1382,7 +1488,7 @@ mod tests {
             PathBuf::from("/tmp/game"),
         );
 
-        let result = processor.resolve_output_path(r"mods\SkyUI\SkyUI.esp");
+        let result = processor.resolve_output_path(r"mods\SkyUI\SkyUI.esp").unwrap();
         assert_eq!(result, PathBuf::from("/tmp/output/mods/SkyUI/SkyUI.esp"));
     }
 
@@ -1395,7 +1501,7 @@ mod tests {
             PathBuf::from("/tmp/game"),
         );
 
-        let result = processor.resolve_output_path("mods/SkyUI/SkyUI.esp");
+        let result = processor.resolve_output_path("mods/SkyUI/SkyUI.esp").unwrap();
         assert_eq!(result, PathBuf::from("/tmp/output/mods/SkyUI/SkyUI.esp"));
     }
 

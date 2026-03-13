@@ -628,7 +628,7 @@ function applyEvent(
         {
           const game = get(selectedGame);
           if (game && e.failed === 0) {
-            triggerBackgroundHashing(game.game_id, game.bottle_name).catch(() => {});
+            triggerBackgroundHashing(game.game_id, game.bottle_name).catch((err) => console.error('Failed to trigger background hashing:', err));
           }
         }
         break;

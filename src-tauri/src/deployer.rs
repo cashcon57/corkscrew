@@ -59,6 +59,9 @@ fn is_vanilla_file_with_set(
         return true;
     }
 
+    // Lowercase comparison is intentional: Wine targets use case-insensitive
+    // filesystems (NTFS under Wine, APFS on macOS), so vanilla file lookups
+    // must be case-folded to match regardless of how the path was authored.
     let lower = rel_path.to_lowercase();
 
     // Check built-in baseline (pre-computed set)
@@ -224,9 +227,9 @@ fn deploy_mod_inner(
     let manifest = db
         .get_deployment_manifest(game_id, bottle_name)
         .map_err(|e| DeployerError::Database(e.to_string()))?;
-    let deployed_map: std::collections::HashMap<&str, i64> = manifest
+    let deployed_map: std::collections::HashMap<String, i64> = manifest
         .iter()
-        .map(|e| (e.relative_path.as_str(), e.mod_id))
+        .map(|e| (e.relative_path.replace('\\', "/"), e.mod_id))
         .collect();
     let priorities = db
         .get_all_mod_priorities()
@@ -272,8 +275,21 @@ fn deploy_mod_inner(
                 return None;
             }
 
+            // Symlink check BEFORE any removal — prevents TOCTOU race where
+            // an attacker replaces a file with a symlink between remove and deploy.
+            if dst.exists() || dst.symlink_metadata().is_ok() {
+                if let Ok(meta) = fs::symlink_metadata(&dst) {
+                    if meta.file_type().is_symlink() {
+                        warn!("Skipping deployment to symlink target: {}", dst.display());
+                        skipped_count.fetch_add(1, Ordering::Relaxed);
+                        return None;
+                    }
+                }
+            }
+
             // Conflict resolution via in-memory lookup
-            if let Some(&owner_mod_id) = deployed_map.get(rel_path.as_str()) {
+            let normalized_key = rel_path.replace('\\', "/");
+            if let Some(&owner_mod_id) = deployed_map.get(normalized_key.as_str()) {
                 if owner_mod_id == mod_id {
                     return None; // already deployed by us
                 }
@@ -306,17 +322,6 @@ fn deploy_mod_inner(
 
             if let Some(parent) = dst.parent() {
                 let _ = fs::create_dir_all(parent); // idempotent, safe for parallel calls
-            }
-
-            // Prevent symlink-following attacks
-            if dst.exists() {
-                if let Ok(meta) = fs::symlink_metadata(&dst) {
-                    if meta.file_type().is_symlink() {
-                        warn!("Skipping deployment to symlink target: {}", dst.display());
-                        skipped_count.fetch_add(1, Ordering::Relaxed);
-                        return None;
-                    }
-                }
             }
 
             let method = if can_hardlink {
@@ -530,6 +535,12 @@ pub fn undeploy_mod(
     let mut errors = Vec::new();
     let mut restore_failures = Vec::new();
 
+    // Fetch the mod list ONCE for all restore_next_winner calls.
+    // Previously this was fetched per-file, causing O(n²) DB queries for large mods.
+    let all_mods = db
+        .list_mods(game_id, bottle_name)
+        .map_err(|e| DeployerError::Database(e.to_string()))?;
+
     for (rel_path, deploy_target) in &manifest_paths {
         // SAFETY: Never delete vanilla game files even if they're in the manifest.
         if deploy_target != "root"
@@ -576,7 +587,7 @@ pub fn undeploy_mod(
         // Restore next-priority mod's version of this file if applicable.
         // This runs BEFORE manifest deletion so that on failure, the manifest
         // still tracks the file until cleanup completes.
-        if let Err(e) = restore_next_winner(db, game_id, bottle_name, rel_path, base) {
+        if let Err(e) = restore_next_winner_with_mods(db, &all_mods, rel_path, base) {
             warn!("Failed to restore winner for {}: {}", rel_path, e);
             restore_failures.push(rel_path.clone());
         }
@@ -691,6 +702,10 @@ where
         }
 
         if let Some(ref staging_path_str) = m.staging_path {
+            if !crate::staging::is_safe_relative_path(staging_path_str) && !PathBuf::from(staging_path_str).is_absolute() {
+                warn!("Skipping mod with suspicious staging path: {}", staging_path_str);
+                continue;
+            }
             let staging_path = PathBuf::from(staging_path_str);
             if staging_path.exists() {
                 let files = crate::staging::list_staging_files(&staging_path)
@@ -846,6 +861,11 @@ fn prune_empty_dirs(removed_file: &Path, stop_at: &Path) {
 }
 
 /// Check if another enabled mod has a file at this path and re-deploy it.
+///
+/// This convenience wrapper fetches the mod list from the database. For batch
+/// operations (e.g., `undeploy_mod`), prefer `restore_next_winner_with_mods`
+/// to avoid repeated DB queries.
+#[allow(dead_code)]
 fn restore_next_winner(
     db: &ModDatabase,
     game_id: &str,
@@ -856,8 +876,19 @@ fn restore_next_winner(
     let mods = db
         .list_mods(game_id, bottle_name)
         .map_err(|e| DeployerError::Database(e.to_string()))?;
+    restore_next_winner_with_mods(db, &mods, rel_path, data_dir)
+}
 
-    let mut candidates: Vec<_> = mods
+/// Like `restore_next_winner`, but accepts a pre-fetched mod list to avoid
+/// repeated `db.list_mods()` calls. Use this when undeploying many files at
+/// once (e.g., `undeploy_mod`) to avoid O(n²) DB queries.
+fn restore_next_winner_with_mods(
+    db: &ModDatabase,
+    all_mods: &[crate::database::InstalledMod],
+    rel_path: &str,
+    data_dir: &Path,
+) -> Result<()> {
+    let mut candidates: Vec<_> = all_mods
         .iter()
         .filter(|m| {
             m.enabled
@@ -887,7 +918,7 @@ fn restore_next_winner(
                 match fs::hard_link(&src, &dst) {
                     Ok(_) => "hardlink",
                     Err(e) => {
-                        warn!("Hardlink failed in restore_next_winner: {}", e);
+                        warn!("Hardlink failed in restore_next_winner_with_mods: {}", e);
                         platform::fast_copy(&src, &dst, copy_method)?;
                         "copy"
                     }
@@ -898,8 +929,8 @@ fn restore_next_winner(
             };
 
             db.add_deployment_entry(
-                game_id,
-                bottle_name,
+                &winner.game_id,
+                &winner.bottle_name,
                 winner.id,
                 rel_path,
                 &staging_path.to_string_lossy(),

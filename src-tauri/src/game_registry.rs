@@ -385,12 +385,14 @@ pub fn detect_unregistered_steam_games(
         };
 
         // Skip if already detected by a registered plugin
+        let manifest_dir_lower = manifest.install_dir.to_lowercase();
         if already_detected.iter().any(|g| {
-            // Match by Steam app ID in game_id or by install dir overlap
-            g.game_path
-                .to_string_lossy()
-                .to_lowercase()
-                .contains(&manifest.install_dir.to_lowercase())
+            g.game_path.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.to_lowercase() == manifest_dir_lower)
+                .unwrap_or(false)
+            || g.game_path.to_string_lossy().to_lowercase().ends_with(&format!("/{}", manifest_dir_lower))
+            || g.game_path.to_string_lossy().to_lowercase().ends_with(&format!("\\{}", manifest_dir_lower))
         }) {
             continue;
         }

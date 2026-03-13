@@ -13,6 +13,9 @@
   import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
   import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
   import { relaunch } from "@tauri-apps/plugin-process";
+  import { scanShaderCompatibility } from "$lib/api";
+  import type { ShaderScanResult } from "$lib/types";
+  import ShaderConversionWizard from "$lib/components/ShaderConversionWizard.svelte";
 
   let manualCheckDone = $state(false);
   let settingsNotesExpanded = $state(false);
@@ -149,6 +152,7 @@
     "winePlugins",
     "deploymentHealth",
     "gameMaintenance",
+    "shaderCompatibility",
     "moddingTools",
     "iniSettings",
     "wineDiagnostics",
@@ -213,6 +217,25 @@
   let cleanResult = $state<CleanResult | null>(null);
   let cleanRemoveSaves = $state(false);
   let showCleanFileList = $state(false);
+
+  // Shader conversion
+  let shaderScanResult = $state<ShaderScanResult | null>(null);
+  let shaderScanning = $state(false);
+  let showShaderWizard = $state(false);
+
+  async function handleShaderScan() {
+    const game = $selectedGame;
+    if (!game) return;
+    shaderScanning = true;
+    shaderScanResult = null;
+    try {
+      shaderScanResult = await scanShaderCompatibility(game.game_id, game.bottle_name);
+    } catch (e: unknown) {
+      showError(`Shader scan failed: ${e}`);
+    } finally {
+      shaderScanning = false;
+    }
+  }
 
   // Steam integration (Linux only)
   let steamStatus = $state<SteamStatus | null>(null);
@@ -1015,7 +1038,7 @@
           onclick={() => {
             const next = !$controllerMode;
             controllerMode.set(next);
-            setConfigValue("controller_mode", String(next)).then(() => getConfig()).then(cfg => config.set(cfg)).catch(() => {});
+            setConfigValue("controller_mode", String(next)).then(() => getConfig()).then(cfg => config.set(cfg)).catch((err) => console.error('Failed to save controller mode:', err));
           }}
           type="button"
           role="switch"
@@ -1035,7 +1058,7 @@
           onclick={() => {
             const current = $config?.profile_saves_enabled === "true";
             const next = !current;
-            setConfigValue("profile_saves_enabled", String(next)).then(() => getConfig()).then(cfg => config.set(cfg)).catch(() => {});
+            setConfigValue("profile_saves_enabled", String(next)).then(() => getConfig()).then(cfg => config.set(cfg)).catch((err) => console.error('Failed to save profile saves setting:', err));
           }}
           type="button"
           role="switch"
@@ -1640,7 +1663,7 @@
             class:toggle-on={disableGameFixes}
             onclick={() => {
               disableGameFixes = !disableGameFixes;
-              setConfigValue("disable_game_fixes", disableGameFixes ? "true" : "false").catch(() => {});
+              setConfigValue("disable_game_fixes", disableGameFixes ? "true" : "false").catch((err) => console.error('Failed to save game fixes setting:', err));
             }}
             type="button"
             role="switch"
@@ -1785,6 +1808,67 @@
       </div>
       {/if}
     </div>
+  {/if}
+
+  <!-- Shader Compatibility (Skyrim SE only) -->
+  {#if game && game.game_id === 'skyrimse'}
+    <div class="section">
+      <button class="section-title section-title-collapsible" onclick={() => toggleSection('shaderCompatibility')}>
+        <span class="section-chevron">{collapsedSections.has('shaderCompatibility') ? '\u25B8' : '\u25BE'}</span>
+        Shader Compatibility
+      </button>
+      {#if !collapsedSections.has('shaderCompatibility')}
+      <div class="section-card">
+        <div class="card-row" style="flex-direction: column; align-items: stretch; gap: 12px;">
+          <div style="display: flex; align-items: center; justify-content: space-between;">
+            <div>
+              <span class="row-label">Community Shaders Detection</span>
+              <p class="row-description">Scan for Community Shaders mods (incompatible with Wine) and optionally convert to ENB.</p>
+            </div>
+            <div style="display: flex; gap: 8px; align-items: center;">
+              <button class="btn-primary" onclick={handleShaderScan} disabled={shaderScanning} type="button">
+                {shaderScanning ? "Scanning..." : "Scan for CS Mods"}
+              </button>
+            </div>
+          </div>
+
+          {#if shaderScanResult}
+            {#if shaderScanResult.total_cs_mods === 0}
+              <div style="display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--surface-bg); border-radius: 6px; border: 1px solid var(--green);">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="var(--green)" stroke-width="1.5" stroke-linecap="round"><path d="M4 8l3 3 5-6"/></svg>
+                <span style="color: var(--green);">No Community Shaders mods detected</span>
+              </div>
+            {:else}
+              <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+                <span class="badge badge-red">{shaderScanResult.total_cs_mods} CS mod{shaderScanResult.total_cs_mods !== 1 ? 's' : ''} found</span>
+                {#if shaderScanResult.swappable_count > 0}
+                  <span class="badge badge-blue">{shaderScanResult.swappable_count} swappable</span>
+                {/if}
+                {#if shaderScanResult.fomod_rerun_count > 0}
+                  <span class="badge badge-yellow">{shaderScanResult.fomod_rerun_count} FOMOD re-run</span>
+                {/if}
+                {#if shaderScanResult.enb_already_installed}
+                  <span class="badge badge-green">ENB detected</span>
+                {/if}
+              </div>
+              <button class="btn-primary" onclick={() => { showShaderWizard = true; }} type="button">
+                Convert Shaders
+              </button>
+            {/if}
+          {/if}
+        </div>
+      </div>
+      {/if}
+    </div>
+  {/if}
+
+  {#if showShaderWizard && game}
+    <ShaderConversionWizard
+      gameId={game.game_id}
+      bottleName={game.bottle_name}
+      onComplete={() => { showShaderWizard = false; shaderScanResult = null; }}
+      onCancel={() => { showShaderWizard = false; }}
+    />
   {/if}
 
   <!-- Modding Tools -->

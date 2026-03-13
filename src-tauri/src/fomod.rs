@@ -162,27 +162,30 @@ fn evaluate_file_dependency(dep: &FileDependency, data_dir: Option<&Path>) -> bo
 /// Compare two dotted version strings numerically.
 /// Returns `true` if `actual >= required`.
 fn version_gte(actual: &str, required: &str) -> bool {
-    // Split on '.' and parse each component.  An unparseable component
-    // (e.g. "x" in "1.6.x") is treated as a wildcard that satisfies any
-    // required value — this prevents unknown AE version strings like
-    // "1.6.x (Anniversary Edition, ~35 MB)" from failing checks like
-    // `>= 1.6.640`.
+    // Split on '.' and parse each component.
+    // Unparseable components (e.g. "x" in "1.6.x") are treated as wildcards:
+    // they satisfy the comparison for that position and we continue checking
+    // remaining components. This is safe because preceding numeric components
+    // have already been compared — e.g. "1.6.x" vs "2.0.0" fails at 1 < 2
+    // before ever reaching "x".
     let parts_actual: Vec<&str> = actual.split('.').collect();
     let parts_required: Vec<&str> = required.split('.').collect();
     let len = parts_actual.len().max(parts_required.len());
     for i in 0..len {
         let a_str = parts_actual.get(i).copied().unwrap_or("0");
         let r_str = parts_required.get(i).copied().unwrap_or("0");
-        let av = a_str.parse::<u64>();
-        let rv = r_str.parse::<u64>().unwrap_or(0);
-        match av {
-            Ok(av) => match av.cmp(&rv) {
-                std::cmp::Ordering::Greater => return true,
-                std::cmp::Ordering::Less => return false,
-                std::cmp::Ordering::Equal => continue,
-            },
-            // Unparseable component (wildcard) — treat as always >= required
-            Err(_) => return true,
+        let av = match a_str.parse::<u64>() {
+            Ok(v) => v,
+            Err(_) => continue, // Wildcard in actual (e.g. "x"), treat as satisfied
+        };
+        let rv = match r_str.parse::<u64>() {
+            Ok(v) => v,
+            Err(_) => continue, // Wildcard in requirement, treat as satisfied
+        };
+        match av.cmp(&rv) {
+            std::cmp::Ordering::Greater => return true,
+            std::cmp::Ordering::Less => return false,
+            std::cmp::Ordering::Equal => continue,
         }
     }
     true // Equal versions
@@ -2926,5 +2929,23 @@ mod tests {
         // Non-existent path returns None
         let resolved = resolve_path_case_insensitive(tmp.path(), "nonexistent/path");
         assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn test_version_gte_wildcard_handling() {
+        // Wildcard in actual — preceding numeric components catch mismatches
+        assert!(!version_gte("1.6.x", "2.0.0")); // 1 < 2 fails before "x"
+        assert!(!version_gte("1.6.x", "1.7.0")); // 6 < 7 fails before "x"
+        // Wildcard in actual with equal preceding components — treated as satisfied
+        assert!(version_gte("1.6.x", "1.6.0")); // 1==1, 6==6, "x" wildcard
+        assert!(version_gte("1.6.x", "1.6.640")); // same — real FOMOD scenario
+        // Wildcard in actual with greater preceding components
+        assert!(version_gte("2.0.x", "1.0.0")); // 2 > 1 returns true
+        // Wildcard in requirement should be treated as satisfied
+        assert!(version_gte("1.6.5", "1.6.x"));
+        // Normal cases still work
+        assert!(version_gte("1.6.5", "1.6.0"));
+        assert!(!version_gte("1.5.0", "1.6.0"));
+        assert!(version_gte("2.0.0", "1.9.9"));
     }
 }

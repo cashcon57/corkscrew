@@ -65,10 +65,12 @@ pub mod wabbajack_types;
 pub mod wine_compat;
 pub mod app_updates;
 pub mod self_update;
+pub mod shader_conversion;
 pub mod wine_diagnostic;
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 
@@ -115,6 +117,28 @@ struct AppState {
     loot_masterlist_checked: Arc<AtomicBool>,
     /// Tracks running game processes per (game_id, bottle_name).
     game_locks: Arc<game_lock::GameLockManager>,
+    /// True while a deployment operation (redeploy, switch collection) is in progress.
+    deploy_in_progress: Arc<AtomicBool>,
+}
+
+/// RAII guard that sets an `AtomicBool` flag to `true` on creation and back to
+/// `false` on drop, ensuring the flag is always cleared even if the enclosing
+/// scope exits via panic or early return.
+struct DeployGuard(Arc<AtomicBool>, AppHandle);
+
+impl DeployGuard {
+    fn new(flag: Arc<AtomicBool>, app_handle: AppHandle) -> Self {
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = app_handle.emit("deploy-status-changed", true);
+        Self(flag, app_handle)
+    }
+}
+
+impl Drop for DeployGuard {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Relaxed);
+        let _ = self.1.emit("deploy-status-changed", false);
+    }
 }
 
 /// Resolve a bottle by name, returning a useful error if not found.
@@ -1312,13 +1336,18 @@ async fn launch_game_cmd(
 ) -> Result<LaunchResult, String> {
     let db = state.db.clone();
     let game_locks = state.game_locks.clone();
+    if state.deploy_in_progress.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err("Cannot launch game while deployment is in progress. Please wait for the deployment to finish.".to_string());
+    }
     tokio::task::spawn_blocking(move || {
+    let launch_start = Instant::now();
     let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
     let game_path = PathBuf::from(&game.game_path);
     let data_dir_check = PathBuf::from(&game.data_dir);
 
     // Pre-launch self-healing: check if deployment is consistent, auto-fix if not
     {
+        let t = Instant::now();
         let manifest = db.get_deployment_manifest(&game_id, &bottle_name).unwrap_or_default();
         if !manifest.is_empty() {
             let missing: usize = manifest.iter()
@@ -1332,10 +1361,14 @@ async fn launch_game_cmd(
                 match deployer::redeploy_all(
                     &db, &game_id, &bottle_name, &data_dir_check, &game.game_path,
                 ) {
-                    Ok(_) => log::info!("Pre-launch: self-heal redeploy succeeded"),
+                    Ok(_) => log::info!("Pre-launch: self-heal redeploy succeeded ({}ms)", t.elapsed().as_millis()),
                     Err(e) => log::error!("Pre-launch: self-heal redeploy failed: {}", e),
                 }
+            } else {
+                log::info!("Pre-launch: deployment integrity OK ({} files, {}ms)", manifest.len(), t.elapsed().as_millis());
             }
+        } else {
+            log::info!("Pre-launch: no deployment manifest ({}ms)", t.elapsed().as_millis());
         }
     }
 
@@ -1517,13 +1550,17 @@ async fn launch_game_cmd(
     // Pre-launch plugin sync — ensure plugins.txt reflects all deployed
     // plugins as enabled.  This catches any staleness from the game itself
     // rewriting the file on a previous exit/crash.
+    let t = Instant::now();
     let _ = sync_plugins_for_game(&game, &bottle);
+    log::info!("Pre-launch: plugin sync ({}ms)", t.elapsed().as_millis());
 
     // Pre-launch SKSE plugin DLL version fix — swap incompatible plugins
     // for compatible alternatives from other installed mods' staging dirs.
     let mut wine_plugin_warning: Option<String> = None;
     if game_id == "skyrimse" {
+        let skyrim_prelaunch_start = Instant::now();
         let data_dir = PathBuf::from(&game.data_dir);
+        let t = Instant::now();
         let skse_fixes = skse::fix_skse_plugin_conflicts(
             &db,
             &game_id,
@@ -1531,26 +1568,19 @@ async fn launch_game_cmd(
             &data_dir,
             &game_path,
         );
-        if skse_fixes > 0 {
-            log::info!(
-                "Pre-launch: swapped {} incompatible SKSE plugin DLL(s)",
-                skse_fixes
-            );
-        }
+        log::info!("Pre-launch: SKSE plugin conflict fix ({} swapped, {}ms)", skse_fixes, t.elapsed().as_millis());
 
         // EngineFixes Wine compatibility: disable all patches (they crash under Wine)
+        let t = Instant::now();
         let ef_fixes =
             skse::fix_engine_fixes_for_wine(&data_dir, &db, &game_id, &bottle_name);
-        if ef_fixes > 0 {
-            log::info!(
-                "Pre-launch: patched {} EngineFixes TOML(s) for Wine compatibility",
-                ef_fixes
-            );
-        }
+        log::info!("Pre-launch: EngineFixes TOML patch ({} patched, {}ms)", ef_fixes, t.elapsed().as_millis());
 
         // Disable Wine-incompatible SKSE plugins (CrashLogger, etc.)
+        let t = Instant::now();
         let wine_disabled =
             skse::disable_wine_incompatible_plugins(&data_dir, &db, &game_id, &bottle_name);
+        log::info!("Pre-launch: Wine-incompatible plugin check ({} disabled, {}ms)", wine_disabled.len(), t.elapsed().as_millis());
         if !wine_disabled.is_empty() {
             let names: Vec<&str> = wine_disabled.iter().map(|(n, _)| n.as_str()).collect();
             log::info!(
@@ -1565,15 +1595,19 @@ async fn launch_game_cmd(
         }
 
         // Auto-deploy SSE Engine Fixes for Wine (Wine-safe replacement)
+        let t = Instant::now();
         match skse::install_engine_fixes_wine_blocking(&data_dir) {
-            Ok(true) => log::info!("Pre-launch: auto-deployed SSE Engine Fixes for Wine"),
-            Ok(false) => log::debug!("Pre-launch: SSE Engine Fixes for Wine already deployed"),
+            Ok(true) => log::info!("Pre-launch: auto-deployed SSE Engine Fixes for Wine ({}ms)", t.elapsed().as_millis()),
+            Ok(false) => log::info!("Pre-launch: SSE Engine Fixes for Wine already deployed ({}ms)", t.elapsed().as_millis()),
             Err(e) => log::warn!(
-                "Pre-launch: could not auto-deploy SSE Engine Fixes for Wine: {}",
-                e
+                "Pre-launch: could not auto-deploy SSE Engine Fixes for Wine: {} ({}ms)",
+                e, t.elapsed().as_millis()
             ),
         }
+        log::info!("Pre-launch: Skyrim-specific fixes total: {}ms", skyrim_prelaunch_start.elapsed().as_millis());
     }
+
+    log::info!("Pre-launch: total pre-launch pipeline: {}ms", launch_start.elapsed().as_millis());
 
     let mut result = launcher::launch_game(&bottle, &exe_path, Some(&game_path))
         .map_err(|e| format!("Launch failed ({}): {}", bottle.source, e))?;
@@ -2350,7 +2384,9 @@ async fn redeploy_all_mods(
     check_game_lock(&state.game_locks, &game_id, &bottle_name)?;
     let db = state.db.clone();
     let app = app.clone();
+    let _guard = DeployGuard::new(state.deploy_in_progress.clone(), app.clone());
     tokio::task::spawn_blocking(move || {
+        let redeploy_start = Instant::now();
         let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
 
         let journal_id = deploy_journal::begin(
@@ -2417,14 +2453,28 @@ async fn redeploy_all_mods(
             }
         }
 
+        let elapsed = redeploy_start.elapsed();
+        log::info!(
+            "Redeploy complete: {} deployed, {} skipped, {:.1}s",
+            result.deployed_count, result.skipped_count,
+            elapsed.as_secs_f64()
+        );
+
         Ok(serde_json::json!({
             "deployed_count": result.deployed_count,
             "skipped_count": result.skipped_count,
             "fallback_used": result.fallback_used,
+            "elapsed_ms": elapsed.as_millis() as u64,
         }))
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
+}
+
+/// Check whether a deployment operation is currently in progress.
+#[tauri::command]
+fn is_deploy_in_progress(state: State<'_, AppState>) -> bool {
+    state.deploy_in_progress.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Incremental deployment: compute diff and apply only changes.
@@ -2438,11 +2488,18 @@ async fn deploy_incremental_cmd(
     check_game_lock(&state.game_locks, &game_id, &bottle_name)?;
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
+        let deploy_start = Instant::now();
         let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
 
         let result =
             deployer::deploy_incremental(&db, &game_id, &bottle_name, &data_dir, &game.game_path)
                 .map_err(|e| e.to_string())?;
+
+        log::info!(
+            "Incremental deploy: {} added, {} removed, {} updated, {} unchanged, {:.1}s",
+            result.files_added, result.files_removed, result.files_updated, result.files_unchanged,
+            deploy_start.elapsed().as_secs_f64()
+        );
 
         if game_id == "skyrimse" {
             let _ = sync_plugins_for_game(&game, &bottle);
@@ -2475,6 +2532,8 @@ async fn deploy_incremental_cmd(
             }
         }
 
+        log::info!("Incremental deploy total (with post-deploy fixes): {:.1}s", deploy_start.elapsed().as_secs_f64());
+
         Ok(result)
     })
     .await
@@ -2488,11 +2547,13 @@ async fn deploy_incremental_cmd(
 /// - Paranoid: existence + full SHA-256 verification of every file
 #[tauri::command]
 async fn check_deployment_health(
+    app: AppHandle,
     game_id: String,
     bottle_name: String,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     let db = state.db.clone();
+    let app = app.clone();
     tokio::task::spawn_blocking(move || {
         let (_bottle, _game, data_dir) = resolve_game(&game_id, &bottle_name)?;
 
@@ -2507,6 +2568,13 @@ async fn check_deployment_health(
         let manifest = db
             .get_deployment_manifest(&game_id, &bottle_name)
             .map_err(|e| e.to_string())?;
+
+        let _ = app.emit("health-check-progress", serde_json::json!({
+            "step": "staging",
+            "message": format!("Checking staging for {} mods...", mods.len()),
+            "current": 0,
+            "total": mods.len(),
+        }));
 
         let mut enabled_count = 0usize;
         let mut staging_ok = 0usize;
@@ -2561,17 +2629,45 @@ async fn check_deployment_health(
             }
         }
 
+        let _ = app.emit("health-check-progress", serde_json::json!({
+            "step": "deployment",
+            "message": format!("Verifying {} deployed files...", manifest.len()),
+            "current": 0,
+            "total": manifest.len(),
+        }));
+
         // Check deployment manifest vs data dir (existence check — all modes)
         let mut deployed_ok = 0usize;
         let mut deployed_missing = 0usize;
-        for entry in &manifest {
+        for (idx, entry) in manifest.iter().enumerate() {
             let file_path = data_dir.join(&entry.relative_path);
             if file_path.exists() {
                 deployed_ok += 1;
             } else {
                 deployed_missing += 1;
             }
+            if idx % 5000 == 0 {
+                let _ = app.emit("health-check-progress", serde_json::json!({
+                    "step": "deployment",
+                    "message": format!("Checking file {}/{}...", idx + 1, manifest.len()),
+                    "current": idx + 1,
+                    "total": manifest.len(),
+                }));
+            }
         }
+
+        let level_str = match verification_level {
+            config::VerificationLevel::Fast => "Fast",
+            config::VerificationLevel::Balanced => "Balanced",
+            config::VerificationLevel::Paranoid => "Paranoid",
+        };
+
+        let _ = app.emit("health-check-progress", serde_json::json!({
+            "step": "verification",
+            "message": format!("Running {} hash verification...", level_str),
+            "current": 0,
+            "total": 0,
+        }));
 
         // Hash verification (Balanced/Paranoid modes only)
         let verification = deployer::verify_deployment(
@@ -2590,11 +2686,12 @@ async fn check_deployment_health(
             && verification.hash_mismatches == 0
             && !manifest.is_empty();
 
-        let level_str = match verification_level {
-            config::VerificationLevel::Fast => "Fast",
-            config::VerificationLevel::Balanced => "Balanced",
-            config::VerificationLevel::Paranoid => "Paranoid",
-        };
+        let _ = app.emit("health-check-progress", serde_json::json!({
+            "step": "complete",
+            "message": "Health check complete",
+            "current": 1,
+            "total": 1,
+        }));
 
         Ok(serde_json::json!({
             "healthy": healthy,
@@ -2899,6 +2996,7 @@ async fn set_mod_collection_name_cmd(
 
 #[tauri::command]
 async fn switch_collection_cmd(
+    app: AppHandle,
     game_id: String,
     bottle_name: String,
     collection_name: String,
@@ -2906,8 +3004,14 @@ async fn switch_collection_cmd(
 ) -> Result<serde_json::Value, String> {
     check_game_lock(&state.game_locks, &game_id, &bottle_name)?;
     let db = state.db.clone();
+    let app = app.clone();
+    let _guard = DeployGuard::new(state.deploy_in_progress.clone(), app.clone());
     tokio::task::spawn_blocking(move || {
         let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
+
+        let journal_id = deploy_journal::begin(
+            &game_id, &bottle_name, deploy_journal::JournalOp::RedeployAll, &[],
+        ).unwrap_or_default();
 
         // 1. Purge current deployment
         deployer::purge_deployment(&db, &game_id, &bottle_name, &data_dir, &game.game_path)
@@ -2934,10 +3038,36 @@ async fn switch_collection_cmd(
             .map_err(|e| e.to_string())?;
         }
 
-        // 4. Redeploy
-        let result =
-            deployer::redeploy_all(&db, &game_id, &bottle_name, &data_dir, &game.game_path)
-                .map_err(|e| e.to_string())?;
+        // 4. Redeploy with progress events
+        let app_clone = app.clone();
+        let result = deployer::redeploy_all_with_progress(
+            &db,
+            &game_id,
+            &bottle_name,
+            &data_dir,
+            &game.game_path,
+            Some(
+                move |current: usize,
+                      total: usize,
+                      mod_name: &str,
+                      files_deployed: usize,
+                      total_files: usize| {
+                    let _ = app_clone.emit(
+                        "deploy-progress",
+                        serde_json::json!({
+                            "current": current,
+                            "total": total,
+                            "mod_name": mod_name,
+                            "files_deployed": files_deployed,
+                            "total_files": total_files,
+                        }),
+                    );
+                },
+            ),
+        )
+        .map_err(|e| e.to_string())?;
+
+        let _ = deploy_journal::complete(&journal_id);
 
         // 5. Sync plugins if Skyrim SE
         if game_id == "skyrimse" {
@@ -10585,6 +10715,45 @@ fn cli_vortex_test(game_id: &str) {
     println!("{}", serde_json::to_string_pretty(&result).unwrap());
 }
 
+// --- CLI shader scan test ---
+
+/// Scan installed mods for Community Shaders dependencies and print results as JSON.
+///
+/// Usage:  corkscrew --test-shader-scan <game_id> <bottle_name>
+/// Example: corkscrew --test-shader-scan skyrimse Steam
+fn cli_test_shader_scan(game_id: &str, bottle_name: &str, db: &Arc<ModDatabase>) {
+    println!(
+        "[corkscrew] Scanning for Community Shaders mods: game={} bottle={}",
+        game_id, bottle_name
+    );
+
+    let (_, game, _) = match resolve_game(game_id, bottle_name) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[corkscrew] ERROR resolving game: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let game_path = PathBuf::from(&game.game_path);
+
+    match shader_conversion::scan_for_cs_mods(db, game_id, bottle_name, &game_path) {
+        Ok(result) => {
+            println!("[corkscrew] Scan complete:");
+            println!("  Total CS mods detected:  {}", result.total_cs_mods);
+            println!("  Swappable (ENB variant): {}", result.swappable_count);
+            println!("  FOMOD re-run needed:     {}", result.fomod_rerun_count);
+            println!("  Disable-only:            {}", result.disable_only_count);
+            println!("  ENB already installed:   {}", result.enb_already_installed);
+            println!();
+            println!("{}", serde_json::to_string_pretty(&result).unwrap());
+        }
+        Err(e) => {
+            eprintln!("[corkscrew] ERROR scanning for CS mods: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
 // --- CLI headless launch ---
 
 /// Run the full pre-launch pipeline and spawn the game without opening the UI.
@@ -11058,6 +11227,20 @@ pub fn run() {
             return;
         }
 
+        // --test-shader-scan <game_id> <bottle_name>  (scan for CS mods, print results as JSON)
+        if let Some(pos) = args.iter().position(|a| a == "--test-shader-scan") {
+            let game_id = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("");
+            let bottle_name = args.get(pos + 2).map(|s| s.as_str()).unwrap_or("");
+            if game_id.is_empty() || bottle_name.is_empty() {
+                eprintln!("Usage: corkscrew --test-shader-scan <game_id> <bottle_name>");
+                eprintln!("  Scans installed mods for Community Shaders dependencies.");
+                eprintln!("  Example: corkscrew --test-shader-scan skyrimse Steam");
+                std::process::exit(1);
+            }
+            cli_test_shader_scan(game_id, bottle_name, &db);
+            return;
+        }
+
         // --version  (print version and exit)
         if args.iter().any(|a| a == "--version") {
             println!("{}", env!("CARGO_PKG_VERSION"));
@@ -11087,6 +11270,7 @@ pub fn run() {
             println!("  corkscrew --list-profiles <game> <bottle>    List profiles (JSON)");
             println!("  corkscrew --add-game <id> <name> <bottle> <path>  Add custom game");
             println!("  corkscrew --remove-game <id>                 Remove custom game");
+            println!("  corkscrew --test-shader-scan <game> <bottle>  Scan for CS mods (JSON)");
             println!("  corkscrew --version                          Print version");
             return;
         }
@@ -11161,6 +11345,7 @@ pub fn run() {
                 loot_masterlist_checked: Arc::new(AtomicBool::new(false)),
                 chat_session: llm_chat::create_shared_session(),
                 game_locks: Arc::new(game_lock::GameLockManager::new()),
+                deploy_in_progress: Arc::new(AtomicBool::new(false)),
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -11220,6 +11405,7 @@ pub fn run() {
             reorder_mods,
             redeploy_all_mods,
             deploy_incremental_cmd,
+            is_deploy_in_progress,
             check_deployment_health,
             get_verification_level,
             set_verification_level,
@@ -11481,6 +11667,13 @@ pub fn run() {
             // App Updates (advanced Rust-side updater per Tauri docs)
             app_updates::fetch_update,
             app_updates::install_update,
+            // Shader Conversion
+            shader_conversion::scan_shader_compatibility,
+            shader_conversion::quick_cs_mod_count,
+            shader_conversion::discover_shader_swap_options,
+            shader_conversion::execute_shader_conversion_cmd,
+            shader_conversion::revert_shader_conversion_cmd,
+            shader_conversion::get_shader_conversion_history_cmd,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

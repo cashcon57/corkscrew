@@ -138,6 +138,12 @@ pub fn is_safe_relative_path(path: &str) -> bool {
         && !path.starts_with('\\')
         && !path.contains(":/")
         && !path.contains(":\\")
+        && !path.contains('\0')
+        && !path.starts_with("\\\\?\\")
+        // Reject Windows drive letters (e.g. "C:", "D:")
+        && !(path.len() >= 2
+            && path.as_bytes()[0].is_ascii_alphabetic()
+            && path.as_bytes()[1] == b':')
 }
 
 // ---------------------------------------------------------------------------

@@ -19,8 +19,17 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # --- Config ---
 KEY_FILE="$ROOT/.keys/updater-signing-key"
-KEY_PASSWORD="corkscrew-updater-2024"
 REPO="cashcon57/corkscrew"
+
+# Signing key password: prefer env var, fall back to interactive prompt
+if [[ -z "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" ]]; then
+    echo -n "Enter signing key password: "
+    read -rs KEY_PASSWORD
+    echo
+else
+    KEY_PASSWORD="$TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
+fi
+export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$KEY_PASSWORD"
 
 # --- Preflight checks ---
 echo "=== Corkscrew Release $TAG ==="
@@ -81,7 +90,6 @@ echo "  Cargo.toml       → $VERSION"
 # --- Load signing credentials ---
 export TAURI_SIGNING_PRIVATE_KEY
 TAURI_SIGNING_PRIVATE_KEY="$(cat "$KEY_FILE")"
-export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$KEY_PASSWORD"
 
 # CRITICAL: Verify the signing key matches the pubkey in tauri.conf.json.
 # A mismatch means auto-update will silently fail for all users.

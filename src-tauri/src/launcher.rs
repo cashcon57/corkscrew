@@ -231,8 +231,13 @@ fn resolve_wine_binary(bottle: &Bottle) -> Result<WineCommand> {
                 bottle.path.to_string_lossy().into_owned(),
             ));
             let proton_wine = find_proton_wine(bottle);
-            proton_wine
-                .unwrap_or_else(|| find_system_wine().unwrap_or_else(|| PathBuf::from("wine")))
+            match proton_wine {
+                Some(p) => p,
+                None => find_system_wine().ok_or_else(|| LauncherError::WineNotFound {
+                    bottle_source: source.to_string(),
+                    tried: "Proton wine, wine (system PATH)".to_string(),
+                })?,
+            }
         }
 
         #[cfg(not(target_os = "macos"))]

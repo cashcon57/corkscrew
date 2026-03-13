@@ -19,7 +19,7 @@ pub enum MigrationError {
 pub type Result<T> = std::result::Result<T, MigrationError>;
 
 /// The current target schema version. Bump this when adding a new migration.
-const TARGET_VERSION: u32 = 18;
+const TARGET_VERSION: u32 = 19;
 
 /// Get the current schema version (0 if no version table exists).
 pub fn current_version(conn: &Connection) -> Result<u32> {
@@ -134,6 +134,11 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     if version == 17 {
         migrate_v17_to_v18(conn)?;
         version = 18;
+    }
+
+    if version == 18 {
+        migrate_v18_to_v19(conn)?;
+        version = 19;
     }
 
     let _ = version; // suppress unused warning when TARGET_VERSION == current
@@ -926,6 +931,33 @@ fn migrate_v17_to_v18(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Migration 18 -> 19: Shader conversion tracking.
+fn migrate_v18_to_v19(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS shader_conversions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            game_id         TEXT NOT NULL,
+            bottle_name     TEXT NOT NULL,
+            snapshot_id     INTEGER NOT NULL,
+            status          TEXT NOT NULL DEFAULT 'completed',
+            disabled_mods   TEXT NOT NULL DEFAULT '[]',
+            swapped_mods    TEXT NOT NULL DEFAULT '[]',
+            enb_installed   INTEGER NOT NULL DEFAULT 0,
+            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_shader_conversions_game_bottle
+            ON shader_conversions (game_id, bottle_name);",
+    )?;
+
+    tx.execute("UPDATE schema_version SET version = 19", [])?;
+    tx.commit()?;
+    log::info!("Migration 18 → 19 complete (shader conversions table)");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1063,7 +1095,7 @@ mod tests {
     fn v13_creates_deployment_manifest_index() {
         let conn = memory_db();
         migrate(&conn).unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 18);
+        assert_eq!(current_version(&conn).unwrap(), 19);
 
         // Verify the compound index exists
         let index_exists: bool = conn

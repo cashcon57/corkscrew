@@ -1684,6 +1684,19 @@ export function onDeployProgress(
   );
 }
 
+// Deploy status (in-progress indicator)
+export async function isDeployInProgress(): Promise<boolean> {
+  return invoke("is_deploy_in_progress");
+}
+
+export function onDeployStatusChanged(
+  callback: (inProgress: boolean) => void
+): Promise<UnlistenFn> {
+  return listen<boolean>("deploy-status-changed", (e) =>
+    callback(e.payload)
+  );
+}
+
 // Tool Requirement Detection
 export async function detectCollectionTools(
   manifestJson: string,
@@ -2132,4 +2145,50 @@ export async function healDeployment(
   bottleName: string
 ): Promise<void> {
   return invoke("heal_deployment", { gameId, bottleName });
+}
+
+// Shader Conversion
+export async function scanShaderCompatibility(
+  gameId: string,
+  bottleName: string
+): Promise<import("$lib/types").ShaderScanResult> {
+  return invoke("scan_shader_compatibility", { gameId, bottleName });
+}
+
+export async function quickCsModCount(
+  gameId: string,
+  bottleName: string
+): Promise<number> {
+  return invoke("quick_cs_mod_count", { gameId, bottleName });
+}
+
+export async function discoverShaderSwapOptions(
+  gameId: string,
+  bottleName: string,
+  detectedMods: import("$lib/types").CsDetectedMod[]
+): Promise<import("$lib/types").CsDetectedMod[]> {
+  return invoke("discover_shader_swap_options", { gameId, bottleName, detectedMods });
+}
+
+export async function executeShaderConversion(
+  gameId: string,
+  bottleName: string,
+  config: import("$lib/types").ConversionConfig
+): Promise<import("$lib/types").ConversionResult> {
+  return invoke("execute_shader_conversion_cmd", { gameId, bottleName, config });
+}
+
+export async function revertShaderConversion(
+  gameId: string,
+  bottleName: string,
+  conversionId: number
+): Promise<{ mods_enabled: number; mods_disabled: number; mods_not_found: number }> {
+  return invoke("revert_shader_conversion_cmd", { gameId, bottleName, conversionId });
+}
+
+export async function getShaderConversionHistory(
+  gameId: string,
+  bottleName: string
+): Promise<import("$lib/types").ConversionHistoryEntry[]> {
+  return invoke("get_shader_conversion_history_cmd", { gameId, bottleName });
 }

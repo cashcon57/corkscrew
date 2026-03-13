@@ -45,6 +45,7 @@
     hasGameSnapshot,
     checkDlcStatus,
     launchGame,
+    quickCsModCount,
   } from "$lib/api";
   import { startInstallTracking, stopInstallTracking, resumeInstallTracking } from "$lib/installService";
   import { listen } from "@tauri-apps/api/event";
@@ -92,16 +93,28 @@
   let deleteDownloadSizeLoading = $state(false);
   let collectionDiffs = $state<Record<string, CollectionDiff | "loading" | "error">>({});
   let collectionHealth = $state<Record<string, DeploymentHealth | "loading" | "error">>({});
+  let deployProgress = $state<{ current: number; total: number; mod_name: string; files_deployed: number; total_files: number } | null>(null);
+  let healthCheckProgress = $state<{ step: string; message: string; current: number; total: number } | null>(null);
 
   async function handleVerifyCollection(colName: string) {
     const game = $selectedGame;
     if (!game) return;
     collectionHealth = { ...collectionHealth, [colName]: "loading" };
+    healthCheckProgress = null;
+
+    const { listen } = await import('@tauri-apps/api/event');
+    const unlisten = await listen<typeof healthCheckProgress>('health-check-progress', (e) => {
+      healthCheckProgress = e.payload as typeof healthCheckProgress;
+    });
+
     try {
       const health = await checkDeploymentHealth(game.game_id, game.bottle_name);
       collectionHealth = { ...collectionHealth, [colName]: health };
     } catch {
       collectionHealth = { ...collectionHealth, [colName]: "error" };
+    } finally {
+      unlisten();
+      healthCheckProgress = null;
     }
   }
 
@@ -171,6 +184,13 @@
     const game = $selectedGame;
     if (!game) return;
     switchingCollection = name;
+    deployProgress = null;
+
+    const { listen } = await import('@tauri-apps/api/event');
+    const unlisten = await listen<typeof deployProgress>('deploy-progress', (e) => {
+      deployProgress = e.payload as typeof deployProgress;
+    });
+
     try {
       // Auto-swap game version if collection targets a different version
       if (game.game_id === "skyrimse") {
@@ -200,11 +220,29 @@
 
       await switchCollection(game.game_id, game.bottle_name, name);
       showSuccess(`Switched to "${name}" — mods deployed`);
+
+      // Refresh deployment health after switching
+      handleVerifyCollection(name);
+
+      // Proactive Community Shaders detection after deploy
+      if (game.game_id === "skyrimse") {
+        try {
+          const csCount = await quickCsModCount(game.game_id, game.bottle_name);
+          if (csCount > 0) {
+            showError(
+              `Warning: ${csCount} Community Shaders mod(s) detected. These are incompatible with Wine/CrossOver. Go to Settings > Game > Shader Compatibility to convert or disable them.`
+            );
+          }
+        } catch { /* CS check is best-effort */ }
+      }
+
       await loadMyCollections();
     } catch (e: unknown) {
       showError(`Failed to switch: ${e}`);
     } finally {
+      unlisten();
       switchingCollection = null;
+      deployProgress = null;
     }
   }
 
@@ -1009,10 +1047,14 @@
       summary: "",
       description: null,
       author: "",
+      category_id: 0,
       version: "",
       endorsement_count: 0,
       unique_downloads: 0,
       picture_url: null,
+      updated_at: null,
+      created_at: null,
+      available: true,
       adult_content: false,
     };
     openModDetail(stub);
@@ -1042,7 +1084,7 @@
         modStatuses,
       );
       goto("/collections/progress");
-      resumeCollectionInstall(interruptedInstall.id).catch(() => {});
+      resumeCollectionInstall(interruptedInstall.id).catch((err) => console.error('Failed to resume collection install:', err));
     } catch (e: unknown) {
       showError(`Failed to resume: ${e}`);
       resuming = false;
@@ -1949,7 +1991,11 @@
               onclick={() => { handleSwitchCollection(selectedMyCollection!.name); }}
               disabled={switchingCollection === selectedMyCollection.name}
             >
-              {switchingCollection === selectedMyCollection.name ? "Activating..." : "Activate Collection"}
+              {switchingCollection === selectedMyCollection.name
+                ? (deployProgress
+                  ? `Deploying... ${Math.round((deployProgress.files_deployed / Math.max(deployProgress.total_files, 1)) * 100)}%`
+                  : "Activating...")
+                : "Activate Collection"}
             </button>
             <button
               class="btn btn-ghost-danger"
@@ -2074,7 +2120,11 @@
                   onclick={() => handleSwitchCollection(col.name)}
                   disabled={switchingCollection === col.name}
                 >
-                  {switchingCollection === col.name ? "Switching..." : "Activate"}
+                  {switchingCollection === col.name
+                    ? (deployProgress
+                      ? `Deploying ${deployProgress.mod_name.length > 25 ? deployProgress.mod_name.slice(0, 25) + '...' : deployProgress.mod_name} (${deployProgress.files_deployed}/${deployProgress.total_files})`
+                      : "Switching...")
+                    : "Activate"}
                 </button>
                 <button
                   class="btn btn-secondary btn-sm"
@@ -2082,7 +2132,11 @@
                   disabled={collectionHealth[col.name] === "loading"}
                   title="Verify staging files, deployed files, and file integrity"
                 >
-                  {collectionHealth[col.name] === "loading" ? "Checking..." : "Verify"}
+                  {collectionHealth[col.name] === "loading"
+                    ? (healthCheckProgress
+                      ? `${healthCheckProgress.step === 'staging' ? 'Checking staging...' : healthCheckProgress.step === 'deployment' ? `Files ${healthCheckProgress.current}/${healthCheckProgress.total}` : healthCheckProgress.step === 'verification' ? 'Hashing...' : 'Checking...'}`
+                      : "Checking...")
+                    : "Verify"}
                 </button>
                 {#if col.original_mod_count && col.mod_count < col.original_mod_count}
                   <button

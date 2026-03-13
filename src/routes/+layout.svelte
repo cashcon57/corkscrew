@@ -198,8 +198,8 @@
 
   // Log toasts to persistent notification log
   function logToast(level: string, message: string) {
-    logNotification(level, message).catch(() => {});
-    getNotificationCount().then(c => notificationCount.set(c)).catch(() => {});
+    logNotification(level, message).catch((err) => console.error('Failed to log notification:', err));
+    getNotificationCount().then(c => notificationCount.set(c)).catch((err) => console.error('Failed to get notification count:', err));
   }
 
   // Override showError/showSuccess to also persist
@@ -232,7 +232,7 @@
         }
         await setConfigValue("last_known_version", v);
       } catch { /* config not available yet */ }
-    }).catch(() => {});
+    }).catch((err) => console.error('Failed to load version info:', err));
 
     // Check if first-run wizard should show + load game fixes preference
     getConfig().then(config => {
@@ -240,8 +240,8 @@
         showFirstRunWizard = true;
       }
       disableGameFixesLayout = config.disable_game_fixes === "true";
-    }).catch(() => {});
-    getNotificationCount().then(c => notificationCount.set(c)).catch(() => {});
+    }).catch((err) => console.error('Failed to load config:', err));
+    getNotificationCount().then(c => notificationCount.set(c)).catch((err) => console.error('Failed to get notification count:', err));
 
     // Check for app updates on startup
     checkForUpdates();
@@ -256,8 +256,8 @@
     initHashingListener();
 
     // Subscribe to download queue updates
-    getDownloadQueue().then(items => queueItems = items).catch(() => {});
-    onDownloadQueueUpdate((items) => { queueItems = items; }).then(fn => queueUnlisten = fn).catch(() => {});
+    getDownloadQueue().then(items => queueItems = items).catch((err) => console.error('Failed to load download queue:', err));
+    onDownloadQueueUpdate((items) => { queueItems = items; }).then(fn => queueUnlisten = fn).catch((err) => console.error('Failed to subscribe to download queue:', err));
 
     // Listen for NXM deep-link URLs (e.g. nxm://skyrimspecialedition/mods/123/files/456?key=abc&expires=123)
     onOpenUrl((urls) => {

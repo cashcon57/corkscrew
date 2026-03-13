@@ -5,6 +5,7 @@
   import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
   import ModlistImportWizard from "$lib/components/ModlistImportWizard.svelte";
   import FomodWizard from "$lib/components/FomodWizard.svelte";
+  import ShaderConversionWizard from "$lib/components/ShaderConversionWizard.svelte";
   import {
     getInstalledMods,
     getInstalledModsSummary,
@@ -57,6 +58,9 @@
     setConfigValue,
     getGameLockStatus,
     forceUnlockGame,
+    quickCsModCount,
+    isDeployInProgress,
+    onDeployStatusChanged,
   } from "$lib/api";
   import type { InstallProgressEvent, DeploymentHealth, IncrementalDeployResult, ConflictSuggestion, ResolutionResult, DeployProgress, ModTool, UserEndorsement, IdenticalContentStats } from "$lib/types";
   import {
@@ -101,6 +105,7 @@
   let togglingMod = $state<number | null>(null);
   let launching = $state(false);
   let gameLockPollInterval: ReturnType<typeof setInterval> | null = null;
+  let gameLockPollFailCount = 0;
   let skse = $state<SkseStatus | null>(null);
   let showSksePrompt = $state(false);
   let installingSkse = $state(false);
@@ -139,6 +144,8 @@
   let purging = $state(false);
   let deployHealth = $state<DeploymentHealth | null>(null);
   let showHealthPanel = $state(false);
+  let backendDeployInProgress = $state(false);
+  let deployStatusUnlisten: (() => void) | null = null;
 
   // Search/filter state
   let searchQuery = $state("");
@@ -186,6 +193,12 @@
       sessionStorage.setItem(storeKey, JSON.stringify([...next]));
     }
   }
+
+  // Community Shaders detection
+  let csModCount = $state(0);
+  let csCheckDone = $state(false);
+  let csCheckTrigger = $state(0);
+  let showShaderWizard = $state(false);
 
   // Bulk selection state (functions defined after filteredMods)
   let selectedModIds = $state<Set<number>>(new Set());
@@ -351,7 +364,13 @@
     // Load game fixes preference from config
     getConfig().then(cfg => {
       disableGameFixes = cfg.disable_game_fixes === "true";
-    }).catch(() => {});
+    }).catch((err) => console.error('Failed to load config:', err));
+
+    // Check initial deploy-in-progress state and listen for changes
+    isDeployInProgress().then(v => { backendDeployInProgress = v; }).catch(() => {});
+    onDeployStatusChanged((inProgress) => {
+      backendDeployInProgress = inProgress;
+    }).then(unlisten => { deployStatusUnlisten = unlisten; }).catch(() => {});
 
     // Check if a game is already running (e.g., launched before navigating here)
     {
@@ -360,7 +379,7 @@
         getGameLockStatus(game.game_id, game.bottle_name).then(lock => {
           gameLock.set(lock);
           if (lock) startGameLockPolling(game.game_id, game.bottle_name);
-        }).catch(() => {});
+        }).catch((err) => console.error('Initial game lock check failed:', err));
       }
     }
 
@@ -371,6 +390,7 @@
     if (installUnlisten) { installUnlisten(); installUnlisten = null; }
     if (deployUnlisten) { deployUnlisten(); deployUnlisten = null; }
     if (bulkProgressUnlisten) { bulkProgressUnlisten(); bulkProgressUnlisten = null; }
+    if (deployStatusUnlisten) { deployStatusUnlisten(); deployStatusUnlisten = null; }
     stopGameLockPolling();
   });
 
@@ -721,7 +741,7 @@
               detailMod = fullMod;
             }
           })
-          .catch(() => {}) // Graceful — detail panel works with summary
+          .catch((err) => console.error('Failed to load mod detail:', err)) // Graceful — detail panel works with summary
           .finally(() => { if (detailLoadingId === mod.id) detailLoadingId = null; });
       }
     }
@@ -957,11 +977,14 @@
             stopGameLockPolling();
           }
         }
-      }).catch(() => {});
+      }).catch((err) => console.error('Game lock status check failed:', err));
     } else {
       gameLock.set(null);
       stopGameLockPolling();
     }
+    return () => {
+      stopGameLockPolling();
+    };
   });
 
   // Track the current load to avoid stale race conditions
@@ -1028,6 +1051,28 @@
     }
   });
 
+  // Check for Community Shaders mods (incompatible with Wine/CrossOver)
+  // Re-runs when game changes, mods are reloaded, or manually triggered
+  $effect(() => {
+    const _trigger = csCheckTrigger; // depend on re-check trigger
+    const _modCount = $installedMods.length; // re-check when mod list changes
+    const game = activeGame;
+    if (game?.game_id === 'skyrimse') {
+      const checkGame = game;
+      quickCsModCount(checkGame.game_id, checkGame.bottle_name)
+        .then(count => {
+          if (activeGame === checkGame) { csModCount = count; csCheckDone = true; }
+        })
+        .catch((err) => {
+          console.error('CS mod count check failed:', err);
+          // Don't set csCheckDone = true on failure
+        });
+    } else {
+      csModCount = 0;
+      csCheckDone = false;
+    }
+  });
+
   // ---- Persistent mod cache (localStorage) --------------------------------
   // Saves mod summaries to disk so the list appears instantly on next launch.
   // Fresh data is fetched in the background and merged.
@@ -1089,13 +1134,13 @@
           console.log(`[perf] getConflicts: ${(performance.now() - tc0).toFixed(0)}ms (${c.length} conflicts)`);
           if (thisLoad === loadGeneration) conflicts = c;
         })
-        .catch(() => {});
+        .catch((err) => console.error('Failed to load conflicts:', err));
       // Background: endorsements
       loadEndorsements(game.nexus_slug);
       // Background: tools
       detectModTools(game.game_id, game.bottle_name)
         .then(tools => { if (thisLoad === loadGeneration) modTools = tools; })
-        .catch(() => {});
+        .catch((err) => console.error('Failed to detect mod tools:', err));
     } catch (e: unknown) {
       if (thisLoad !== loadGeneration) return;
       showError(`Failed to load mods: ${e}`);
@@ -1261,6 +1306,10 @@
         game.game_id,
         game.bottle_name
       );
+      if (!mod || typeof mod !== 'object' || !('nexus_mod_id' in (mod as any))) {
+        console.error('Unexpected install result:', mod);
+        return;
+      }
       const installed = mod as InstalledMod;
 
       // Associate mod with the active modlist
@@ -1272,6 +1321,7 @@
 
       showSuccess(`Installed "${installed.name}" successfully`);
       await loadMods(game);
+      await refreshHealth(game);
 
       // Check for duplicate mod (same nexus_mod_id)
       if (installed.nexus_mod_id) {
@@ -1352,7 +1402,12 @@
     try {
       await toggleMod(mod.id, game.game_id, game.bottle_name, newEnabled);
       // Refresh data in parallel, non-blocking (UI already updated)
-      Promise.all([loadMods(game), refreshHealth(game)]).catch(() => {});
+      Promise.all([loadMods(game), refreshHealth(game)]).catch((err) => {
+        console.error('Failed to sync after toggle:', err);
+        // Revert the optimistic update
+        mod.enabled = !newEnabled;
+        installedMods.set($installedMods);
+      });
     } catch (e: unknown) {
       // Revert optimistic update on failure
       mod.enabled = !newEnabled;
@@ -1439,6 +1494,7 @@
 
   function startGameLockPolling(gameId: string, bottleName: string) {
     stopGameLockPolling();
+    gameLockPollFailCount = 0;
     // Initial check
     pollGameLock(gameId, bottleName);
     // Poll every 5 seconds
@@ -1459,14 +1515,24 @@
       const lock = await getGameLockStatus(gameId, bottleName);
       // Double-check after await — user may have unlocked while we were waiting
       if (get(gameLockOverridden)) return;
+      gameLockPollFailCount = 0;
       gameLock.set(lock);
       if (!lock) {
         // Game exited — stop polling, clear override
         stopGameLockPolling();
         gameLockOverridden.set(false);
       }
-    } catch {
-      // Ignore poll errors
+    } catch (e) {
+      // Poll failed — require 3 consecutive failures before clearing lock
+      // to avoid transient errors (e.g. brief backend hiccup) hiding the banner.
+      gameLockPollFailCount++;
+      if (gameLockPollFailCount >= 3) {
+        console.warn('Game lock poll failed 3 times, clearing lock:', e);
+        gameLock.set(null);
+        stopGameLockPolling();
+        gameLockOverridden.set(false);
+        gameLockPollFailCount = 0;
+      }
     }
   }
 
@@ -1689,9 +1755,14 @@
       });
 
       const mod = await installMod(filePath, game.game_id, game.bottle_name);
+      if (!mod || typeof mod !== 'object' || !('nexus_mod_id' in (mod as any))) {
+        console.error('Unexpected install result:', mod);
+        return;
+      }
       const installed = mod as InstalledMod;
       showSuccess(`Installed "${installed.name}" successfully`);
       await loadMods(game);
+      await refreshHealth(game);
 
       // Auto-detect FOMOD after drag-and-drop install
       if (installed.staging_path) {
@@ -2317,7 +2388,7 @@
       categoriesBackfilled = true;
       backfillCategories(activeGame.game_id, activeGame.bottle_name)
         .then((count) => { if (count > 0) loadMods(activeGame!); })
-        .catch(() => {});
+        .catch((err) => console.error('Failed to backfill categories:', err));
     }
   });
 </script>
@@ -2548,7 +2619,12 @@
             Purge
           {/if}
         </button>
-        {#if deployHealth}
+        {#if backendDeployInProgress && !deploying}
+          <span class="deploy-in-progress-badge">
+            <span class="deploy-pulse-dot"></span>
+            Deploying...
+          </span>
+        {:else if deployHealth}
           <span class="deploy-status" class:status-deployed={deployHealth.is_deployed} class:status-purged={!deployHealth.is_deployed}>
             {deployHealth.is_deployed ? "Deployed" : "Purged"}
           </span>
@@ -2748,6 +2824,32 @@
         <div class="skse-banner-actions">
           <button class="btn btn-ghost-danger btn-sm" onclick={handleForceUnlock}>
             Unlock Anyway
+          </button>
+        </div>
+      </div>
+    {/if}
+
+    {#if csModCount > 0 && csCheckDone && !dismissedBanners.has("cs-warning")}
+      <div class="cs-warning-banner">
+        <div class="skse-banner-icon cs-warning-icon">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M10 2L1 18h18L10 2z" />
+            <path d="M10 8v4" />
+            <circle cx="10" cy="15" r="0.5" fill="currentColor" />
+          </svg>
+        </div>
+        <div class="skse-banner-content">
+          <p class="skse-banner-title">Community Shaders Incompatibility</p>
+          <p class="skse-banner-text">
+            {csModCount} Community Shaders mod{csModCount === 1 ? '' : 's'} detected &mdash; these are incompatible with Wine/CrossOver and may crash the game.
+          </p>
+        </div>
+        <div class="skse-banner-actions">
+          <button class="btn btn-warning btn-sm" onclick={() => { showShaderWizard = true; }}>
+            Fix Now
+          </button>
+          <button class="btn btn-ghost btn-sm" onclick={() => dismissBanner("cs-warning")}>
+            Dismiss
           </button>
         </div>
       </div>
@@ -3961,6 +4063,15 @@
   </div>
 {/if}
 
+{#if showShaderWizard && activeGame}
+  <ShaderConversionWizard
+    gameId={activeGame.game_id}
+    bottleName={activeGame.bottle_name}
+    onComplete={() => { showShaderWizard = false; csCheckTrigger++; }}
+    onCancel={() => { showShaderWizard = false; }}
+  />
+{/if}
+
 <ConfirmDialog
   open={duplicateDialog !== null}
   title="Duplicate Mod Detected"
@@ -3974,6 +4085,7 @@
         await uninstallMod(duplicateDialog.oldMod.id, activeGame.game_id, activeGame.bottle_name);
         showSuccess(`Removed old version of "${duplicateDialog.oldMod.name}"`);
         await loadMods(activeGame);
+        await refreshHealth(activeGame);
       } catch (e) {
         showError(`Failed to uninstall old version: ${e}`);
       }
@@ -4028,7 +4140,8 @@
         try {
           await toggleMod(culprit.id, g.game_id, g.bottle_name, false);
           await redeployAllMods(g.game_id, g.bottle_name);
-          loadMods(g);
+          await loadMods(g);
+          await refreshHealth(g);
           showSuccess(`Disabled "${culprit.name}" — the likely culprit.`);
         } finally {
           deploying = false;
@@ -5421,6 +5534,32 @@
     color: var(--red);
   }
 
+  /* --- Community Shaders Warning Banner --- */
+
+  .cs-warning-banner {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+    padding: var(--space-3) var(--space-4);
+    background: color-mix(in srgb, var(--yellow, #f59e0b) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--yellow, #f59e0b) 25%, transparent);
+    border-radius: var(--radius);
+  }
+
+  .cs-warning-icon {
+    color: var(--yellow, #f59e0b);
+  }
+
+  .btn-warning {
+    background: color-mix(in srgb, var(--yellow, #f59e0b) 20%, transparent);
+    color: var(--yellow, #f59e0b);
+    border: 1px solid color-mix(in srgb, var(--yellow, #f59e0b) 30%, transparent);
+  }
+
+  .btn-warning:hover {
+    background: color-mix(in srgb, var(--yellow, #f59e0b) 30%, transparent);
+  }
+
   /* --- Drag & Drop Overlay --- */
 
   /* position: relative merged into main .mods-page rule */
@@ -5479,6 +5618,33 @@
   .status-purged {
     background: color-mix(in srgb, var(--yellow) 15%, transparent);
     color: var(--yellow);
+  }
+
+  .deploy-in-progress-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 10px;
+    border-radius: 100px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    background: color-mix(in srgb, var(--blue, #58a6ff) 15%, transparent);
+    color: var(--blue, #58a6ff);
+  }
+
+  .deploy-pulse-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--blue, #58a6ff);
+    animation: deploy-pulse 1.4s ease-in-out infinite;
+  }
+
+  @keyframes deploy-pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.4; transform: scale(0.75); }
   }
 
   /* ============================
