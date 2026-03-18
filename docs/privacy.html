@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Privacy Policy — Corkscrew</title>
+<meta name="description" content="Privacy policy for Corkscrew, the open-source mod manager for macOS and Linux.">
+<meta name="theme-color" content="#080808">
+<link rel="icon" type="image/png" href="img/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#070709;--bg2:#0c0c10;--bg3:#111116;
+  --text:#f0ede8;--text2:#9a9aa5;--text3:#55555f;
+  --orange:#ff6b35;--orange2:#ff8555;--orange-dim:rgba(255,107,53,.12);
+  --glass-bg:rgba(255,255,255,.025);--glass-border:rgba(255,255,255,.06);
+  --r:14px;--mono:'JetBrains Mono',monospace;--sans:'Inter',-apple-system,BlinkMacSystemFont,sans-serif;
+}
+html{scroll-behavior:smooth;-webkit-font-smoothing:antialiased}
+body{font-family:var(--sans);background:var(--bg);color:var(--text);line-height:1.7;overflow-x:hidden}
+a{color:var(--orange);text-decoration:underline;text-underline-offset:2px}
+a:hover{color:var(--orange2)}
+
+.wrap{max-width:740px;margin:0 auto;padding:80px 28px 60px}
+.back{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--text3);text-decoration:none;margin-bottom:40px;transition:color .2s}
+.back:hover{color:var(--text2)}
+.back svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.5}
+
+h1{font-size:clamp(30px,4vw,42px);font-weight:900;letter-spacing:-.035em;margin-bottom:8px}
+.updated{font-family:var(--mono);font-size:12px;color:var(--text3);margin-bottom:48px}
+
+h2{font-size:20px;font-weight:700;margin:40px 0 12px;letter-spacing:-.02em}
+h2:first-of-type{margin-top:0}
+p{color:var(--text2);font-size:15px;margin-bottom:16px}
+ul{padding-left:24px;margin-bottom:16px}
+li{color:var(--text2);font-size:15px;margin-bottom:8px}
+li strong{color:var(--text);font-weight:600}
+code{font-family:var(--mono);font-size:13px;background:rgba(255,255,255,.04);padding:2px 6px;border-radius:4px}
+
+.card{background:var(--glass-bg);border:1px solid var(--glass-border);border-radius:var(--r);padding:24px 28px;margin:24px 0}
+.card p{margin-bottom:0}
+.card p+p{margin-top:8px}
+
+footer{border-top:1px solid var(--glass-border);padding:32px 0;margin-top:60px}
+.ff{display:flex;justify-content:space-between;align-items:center;max-width:740px;margin:0 auto;padding:0 28px}
+.fl{font-size:13px;color:var(--text3);display:flex;align-items:center;gap:9px}
+.fl img{width:18px;height:18px;border-radius:4px;opacity:.5}
+.fk a{font-size:12px;color:var(--text3);margin-left:20px;text-decoration:none;transition:color .2s}
+.fk a:hover{color:var(--text2)}
+
+@media(max-width:640px){
+  .wrap{padding:40px 20px 40px}
+  .ff{flex-direction:column;gap:12px;text-align:center}
+  .fk a{margin:0 10px}
+}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <a href="/" class="back">
+    <svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>
+    Back to Corkscrew
+  </a>
+
+  <h1>Privacy Policy</h1>
+  <p class="updated">Last updated: March 18, 2026</p>
+
+  <div class="card">
+    <p><strong>The short version:</strong> Corkscrew is a local desktop application. It does not collect telemetry, analytics, or usage data. Your mods, your data, your machine.</p>
+  </div>
+
+  <h2>What Corkscrew Does Not Do</h2>
+  <ul>
+    <li>Does <strong>not</strong> collect telemetry or analytics of any kind</li>
+    <li>Does <strong>not</strong> track usage patterns, crash reports, or feature usage</li>
+    <li>Does <strong>not</strong> send any data to Corkscrew servers (we don't have servers)</li>
+    <li>Does <strong>not</strong> display ads or use advertising trackers</li>
+    <li>Does <strong>not</strong> sell, share, or monetize user data</li>
+  </ul>
+
+  <h2>Third-Party Services</h2>
+  <p>Corkscrew connects to the following external services <strong>only when you explicitly initiate the action</strong> (e.g., signing in, searching for mods, checking for updates):</p>
+
+  <ul>
+    <li><strong>NexusMods API</strong> — When you browse, search, or download mods. Requests include your API key or OAuth token and the <code>Application-Name: Corkscrew</code> header. NexusMods may log these requests per their own <a href="https://www.nexusmods.com/privacy" target="_blank" rel="noopener">privacy policy</a>.</li>
+    <li><strong>NexusMods OAuth</strong> — If you sign in via OAuth, Corkscrew uses the standard PKCE flow with a local redirect (<code>http://127.0.0.1</code>). Tokens are stored locally on your machine and never transmitted elsewhere.</li>
+    <li><strong>Google OAuth</strong> — If you use Gemini-powered features, Corkscrew authenticates via Google OAuth. Tokens are stored locally. Google may collect data per their <a href="https://policies.google.com/privacy" target="_blank" rel="noopener">privacy policy</a>.</li>
+    <li><strong>GitHub API</strong> — Used to check for Corkscrew updates, download SKSE builds, and fetch SSEEngineFixesForWine releases. No authentication required. GitHub may log requests per their <a href="https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement" target="_blank" rel="noopener">privacy statement</a>.</li>
+    <li><strong>Wabbajack CDN &amp; download sources</strong> — When installing Wabbajack modlists, Corkscrew downloads archives from various sources (Nexus, MEGA, Google Drive, MediaFire, HTTP mirrors) as specified by the modlist. Each service has its own privacy policy.</li>
+  </ul>
+
+  <h2>Data Stored Locally</h2>
+  <p>All Corkscrew data is stored on your local filesystem:</p>
+  <ul>
+    <li><strong>Configuration</strong> — App settings, game paths, bottle locations (JSON files)</li>
+    <li><strong>Mod database</strong> — SQLite database tracking installed mods, load order, profiles</li>
+    <li><strong>Auth tokens</strong> — NexusMods API key/OAuth tokens and Google OAuth tokens, stored in your app data directory</li>
+    <li><strong>Cached data</strong> — Downloaded mod archives, extracted staging files, Vortex extension cache</li>
+  </ul>
+  <p>You can delete all Corkscrew data by removing the app and its data directory. On macOS: <code>~/Library/Application Support/com.corkscrew.app</code>. On Linux: <code>~/.local/share/corkscrew</code>.</p>
+
+  <h2>Auto-Updates</h2>
+  <p>Corkscrew checks for updates via the GitHub Releases API. This is a standard HTTPS request to a public API endpoint. No personally identifiable information is sent. You can disable auto-update checks in Settings.</p>
+
+  <h2>Open Source</h2>
+  <p>Corkscrew is open source under the <a href="https://www.gnu.org/licenses/gpl-3.0.html" target="_blank" rel="noopener">GPL-3.0 license</a>. You can audit the complete source code at <a href="https://github.com/cashcon57/corkscrew" target="_blank" rel="noopener">github.com/cashcon57/corkscrew</a> to verify these claims.</p>
+
+  <h2>This Website</h2>
+  <p>This website (<code>corkscrewmodmanager.com</code>) is a static site hosted on GitHub Pages. It does not use cookies, analytics, or tracking scripts. The only external request is to the GitHub Releases API to display the changelog and current version. GitHub Pages may collect standard web server logs (IP addresses, user agents) per GitHub's privacy statement.</p>
+
+  <h2>Changes to This Policy</h2>
+  <p>If this policy changes, the updated version will be posted here with a new "Last updated" date. Since Corkscrew is open source, any changes to data handling are visible in the commit history.</p>
+
+  <h2>Contact</h2>
+  <p>Questions or concerns? Open an issue on <a href="https://github.com/cashcon57/corkscrew/issues" target="_blank" rel="noopener">GitHub</a>.</p>
+</div>
+
+<footer>
+  <div class="ff">
+    <div class="fl"><img src="img/favicon.png" alt="" width="18" height="18"><span>&copy; 2026 cashconway</span></div>
+    <div class="fk">
+      <a href="/">Home</a>
+      <a href="https://github.com/cashcon57/corkscrew" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://github.com/cashcon57/corkscrew/releases" target="_blank" rel="noopener">Releases</a>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>
