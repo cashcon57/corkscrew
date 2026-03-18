@@ -291,6 +291,27 @@ footer{border-top:1px solid var(--glass-border);padding:40px 0}
 .fk a{font-size:12px;color:var(--text3);transition:color .2s}
 .fk a:hover{color:var(--text2)}
 
+/* ══════════ CHANGELOG ══════════ */
+.changelog{padding:140px 0}
+.cl-list{max-width:780px;margin:0 auto;display:flex;flex-direction:column;gap:20px}
+.cl-card{padding:28px 32px;transition:all .4s cubic-bezier(.14,1,.34,1)}
+.cl-card:hover{border-color:rgba(255,107,53,.18);transform:translateY(-2px)}
+.cl-head{display:flex;align-items:baseline;gap:14px;margin-bottom:12px;flex-wrap:wrap}
+.cl-ver{font-family:var(--mono);font-size:18px;font-weight:700;color:var(--orange)}
+.cl-date{font-family:var(--mono);font-size:12px;color:var(--text3)}
+.cl-body{font-size:14px;color:var(--text2);line-height:1.7}
+.cl-body ul{padding-left:20px;margin:8px 0}
+.cl-body li{margin-bottom:4px}
+.cl-body code{font-family:var(--mono);font-size:12px;background:rgba(255,255,255,.04);padding:2px 6px;border-radius:4px}
+.cl-body strong{color:var(--text);font-weight:600}
+.cl-body a{color:var(--orange);text-decoration:underline;text-underline-offset:2px}
+.cl-body a:hover{color:var(--orange2)}
+.cl-body h2,.cl-body h3{font-size:14px;font-weight:600;color:var(--text);margin:12px 0 4px}
+.cl-body p{margin:4px 0}
+.cl-more{display:block;margin:28px auto 0;padding:10px 28px;border-radius:10px;border:1px solid var(--glass-border);background:var(--glass-bg);color:var(--text2);font-size:13px;font-weight:500;cursor:pointer;transition:all .2s}
+.cl-more:hover{border-color:var(--text3);color:var(--text)}
+.cl-loading{text-align:center;padding:40px;color:var(--text3);font-family:var(--mono);font-size:13px}
+
 /* ══════════ REVEALS ══════════ */
 .rv{opacity:0;transform:translateY(32px);transition:all .8s cubic-bezier(.14,1,.34,1)}
 .rv.vis{opacity:1;transform:translateY(0)}
@@ -374,6 +395,10 @@ footer{border-top:1px solid var(--glass-border);padding:40px 0}
       <svg viewBox="0 0 24 24"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>
       Roadmap
     </a>
+    <a href="#changelog" class="sidebar-link" data-section="changelog">
+      <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+      Changelog
+    </a>
     <a href="#download" class="sidebar-link" data-section="download">
       <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
       Download
@@ -389,7 +414,7 @@ footer{border-top:1px solid var(--glass-border);padding:40px 0}
       <svg viewBox="0 0 24 24" width="14" height="14"><path d="M23.881 8.948c-.773-4.085-4.859-4.593-4.859-4.593H.723c-.604 0-.679.798-.679.798s-.082 7.324-.022 11.822c.164 2.424 2.586 2.672 2.586 2.672s8.267-.023 11.966-.049c2.438-.426 2.683-2.566 2.658-3.734 4.352.24 7.422-2.831 6.649-6.916zm-11.062 3.511c-1.246 1.453-4.011 3.976-4.011 3.976s-.121.119-.31.023c-.076-.057-.108-.09-.108-.09-.443-.441-3.368-3.049-4.034-3.954-.709-.965-1.041-2.7-.091-3.71.951-1.01 3.005-1.086 4.363.407 0 0 1.565-1.782 3.468-.963 1.904.82 1.832 3.011.723 4.311zm6.173.478c-.928.116-1.682.028-1.682.028V7.284h1.77s1.971.551 1.971 2.638c0 1.913-.985 2.667-2.059 3.015z" fill="currentColor"/></svg>
       Support on Ko-fi
     </a>
-    <span class="sidebar-ver">v0.9.29</span>
+    <span class="sidebar-ver" id="sidebarVer">v0.9.29</span>
     <a href="https://github.com/cashcon57/corkscrew/releases/latest" class="sidebar-dl">Download</a>
   </div>
 </aside>
@@ -403,6 +428,10 @@ footer{border-top:1px solid var(--glass-border);padding:40px 0}
   <a href="#features" data-section="features">
     <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
     Features
+  </a>
+  <a href="#changelog" data-section="changelog">
+    <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+    Changelog
   </a>
   <a href="#download" data-section="download">
     <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
@@ -420,7 +449,7 @@ footer{border-top:1px solid var(--glass-border);padding:40px 0}
     <img src="img/icon.png" alt="Corkscrew icon">
     <span class="hero-icon-label">Corkscrew</span>
   </div>
-  <div class="hero-badge"><span class="dot"></span> v0.9 &mdash; Public Beta</div>
+  <div class="hero-badge"><span class="dot"></span> <span id="heroBadgeVer">v0.9</span> &mdash; Public Beta</div>
   <h1 id="heroH1"></h1>
   <p class="hero-sub">The first native mod manager for macOS, SteamOS, and Linux. Runs your mods through CrossOver, Wine, Whisky, or Proton&mdash;no Windows required.</p>
   <div class="hero-actions">
@@ -437,7 +466,7 @@ footer{border-top:1px solid var(--glass-border);padding:40px 0}
     <div class="glow-border"><img src="img/hero-screenshot.png" alt="Corkscrew mod manager" loading="eager"></div>
   </div>
   <div class="hero-reflect"><img src="img/hero-screenshot.png" alt="" loading="eager" aria-hidden="true"></div>
-  <p class="hero-meta">v0.9.29 &middot; Rust + Svelte + Tauri &middot; GPL-3.0</p>
+  <p class="hero-meta"><span id="heroMetaVer">v0.9.29</span> &middot; Rust + Svelte + Tauri &middot; GPL-3.0</p>
 </section>
 
 <!-- Stats Marquee -->
@@ -660,6 +689,19 @@ footer{border-top:1px solid var(--glass-border);padding:40px 0}
   </div>
 </section>
 
+<!-- Changelog -->
+<section class="changelog" id="changelog">
+  <div class="wrap">
+    <div class="sh rv">
+      <div class="sh-l">Changelog</div>
+      <h2>What's new.</h2>
+    </div>
+    <div class="cl-list" id="clList">
+      <div class="cl-loading">Loading releases&hellip;</div>
+    </div>
+  </div>
+</section>
+
 <div class="divider"></div>
 
 <!-- Builder note -->
@@ -809,7 +851,7 @@ footer{border-top:1px solid var(--glass-border);padding:40px 0}
 
 /* ══════════ SIDEBAR ACTIVE SECTION TRACKING ══════════ */
 !function(){
-  var sectionIds=['hero','how','features','wabbajack','tech','timeline','download'];
+  var sectionIds=['hero','how','features','wabbajack','tech','timeline','changelog','download'];
   var sidebarLinks=document.querySelectorAll('.sidebar-link[data-section]');
   var mobileLinks=document.querySelectorAll('.mobile-nav a[data-section]');
 
@@ -845,6 +887,93 @@ document.querySelectorAll('a[href^="#"]').forEach(function(a){
     if(t){e.preventDefault();t.scrollIntoView({behavior:'smooth',block:'start'})}
   });
 });
+
+/* ══════════ GITHUB RELEASES (version + changelog) ══════════ */
+!function(){
+  var API='https://api.github.com/repos/cashcon57/corkscrew/releases';
+  var SHOW=5;
+  var list=document.getElementById('clList');
+
+  function fmtDate(iso){
+    var d=new Date(iso);
+    return d.toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric'});
+  }
+
+  /* Minimal markdown→HTML: headers, bold, code, links, lists */
+  function md(s){
+    if(!s)return'';
+    return s
+      .replace(/^### (.+)$/gm,'<h3>$1</h3>')
+      .replace(/^## (.+)$/gm,'<h2>$1</h2>')
+      .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
+      .replace(/`([^`]+)`/g,'<code>$1</code>')
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>')
+      .replace(/^[*\-] (.+)$/gm,'<li>$1</li>')
+      .replace(/(<li>.*<\/li>\n?)+/gs,function(m){return'<ul>'+m+'</ul>'})
+      .replace(/\n{2,}/g,'</p><p>')
+      .replace(/^(?!<[hup]|<li)/gm,function(m){return m?'<p>'+m:m});
+  }
+
+  fetch(API+'?per_page=30')
+    .then(function(r){
+      if(!r.ok)throw new Error(r.status);
+      return r.json();
+    })
+    .then(function(releases){
+      if(!releases.length){list.innerHTML='<div class="cl-loading">No releases found.</div>';return}
+
+      /* Update version indicators from latest release */
+      var latest=releases[0].tag_name;
+      var ver=latest.replace(/^v/,'');
+      var major=ver.split('.').slice(0,2).join('.');
+      document.getElementById('sidebarVer').textContent=latest;
+      document.getElementById('heroBadgeVer').textContent='v'+major;
+      document.getElementById('heroMetaVer').textContent=latest;
+
+      /* Render changelog cards */
+      var html='';
+      var all=releases.length;
+      releases.slice(0,SHOW).forEach(function(r){
+        html+='<div class="cl-card glass rv">'
+          +'<div class="cl-head">'
+          +'<span class="cl-ver">'+r.tag_name+'</span>'
+          +'<span class="cl-date">'+fmtDate(r.published_at||r.created_at)+'</span>'
+          +'</div>'
+          +'<div class="cl-body">'+md(r.body)+'</div>'
+          +'</div>';
+      });
+      if(all>SHOW){
+        html+='<button class="cl-more" id="clMore">Show all '+all+' releases</button>';
+      }
+      list.innerHTML=html;
+
+      /* Reveal animation for dynamically added cards */
+      var obs=new IntersectionObserver(function(e){e.forEach(function(en){if(en.isIntersecting)en.target.classList.add('vis')})},{threshold:.08});
+      list.querySelectorAll('.rv').forEach(function(el){obs.observe(el)});
+
+      /* Show more button */
+      if(all>SHOW){
+        document.getElementById('clMore').addEventListener('click',function(){
+          var extra='';
+          releases.slice(SHOW).forEach(function(r){
+            extra+='<div class="cl-card glass rv vis">'
+              +'<div class="cl-head">'
+              +'<span class="cl-ver">'+r.tag_name+'</span>'
+              +'<span class="cl-date">'+fmtDate(r.published_at||r.created_at)+'</span>'
+              +'</div>'
+              +'<div class="cl-body">'+md(r.body)+'</div>'
+              +'</div>';
+          });
+          this.insertAdjacentHTML('beforebegin',extra);
+          this.remove();
+        });
+      }
+    })
+    .catch(function(err){
+      console.error('Failed to fetch releases:',err);
+      list.innerHTML='<div class="cl-loading">Couldn\'t load releases. <a href="https://github.com/cashcon57/corkscrew/releases" target="_blank" rel="noopener" style="color:var(--orange)">View on GitHub</a></div>';
+    });
+}();
 
 /* ══════════ PARALLAX ══════════ */
 !function(){
