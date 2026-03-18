@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Terms of Service — Corkscrew</title>
+<meta name="description" content="Terms of service for Corkscrew, the open-source mod manager for macOS and Linux.">
+<meta name="theme-color" content="#080808">
+<link rel="icon" type="image/png" href="img/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#070709;--bg2:#0c0c10;--bg3:#111116;
+  --text:#f0ede8;--text2:#9a9aa5;--text3:#55555f;
+  --orange:#ff6b35;--orange2:#ff8555;--orange-dim:rgba(255,107,53,.12);
+  --glass-bg:rgba(255,255,255,.025);--glass-border:rgba(255,255,255,.06);
+  --r:14px;--mono:'JetBrains Mono',monospace;--sans:'Inter',-apple-system,BlinkMacSystemFont,sans-serif;
+}
+html{scroll-behavior:smooth;-webkit-font-smoothing:antialiased}
+body{font-family:var(--sans);background:var(--bg);color:var(--text);line-height:1.7;overflow-x:hidden}
+a{color:var(--orange);text-decoration:underline;text-underline-offset:2px}
+a:hover{color:var(--orange2)}
+
+.wrap{max-width:740px;margin:0 auto;padding:80px 28px 60px}
+.back{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--text3);text-decoration:none;margin-bottom:40px;transition:color .2s}
+.back:hover{color:var(--text2)}
+.back svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.5}
+
+h1{font-size:clamp(30px,4vw,42px);font-weight:900;letter-spacing:-.035em;margin-bottom:8px}
+.updated{font-family:var(--mono);font-size:12px;color:var(--text3);margin-bottom:48px}
+
+h2{font-size:20px;font-weight:700;margin:40px 0 12px;letter-spacing:-.02em}
+h2:first-of-type{margin-top:0}
+p{color:var(--text2);font-size:15px;margin-bottom:16px}
+ul{padding-left:24px;margin-bottom:16px}
+ol{padding-left:24px;margin-bottom:16px}
+li{color:var(--text2);font-size:15px;margin-bottom:8px}
+li strong{color:var(--text);font-weight:600}
+code{font-family:var(--mono);font-size:13px;background:rgba(255,255,255,.04);padding:2px 6px;border-radius:4px}
+
+.card{background:var(--glass-bg);border:1px solid var(--glass-border);border-radius:var(--r);padding:24px 28px;margin:24px 0}
+.card p{margin-bottom:0}
+.card p+p{margin-top:8px}
+
+footer{border-top:1px solid var(--glass-border);padding:32px 0;margin-top:60px}
+.ff{display:flex;justify-content:space-between;align-items:center;max-width:740px;margin:0 auto;padding:0 28px}
+.fl{font-size:13px;color:var(--text3);display:flex;align-items:center;gap:9px}
+.fl img{width:18px;height:18px;border-radius:4px;opacity:.5}
+.fk a{font-size:12px;color:var(--text3);margin-left:20px;text-decoration:none;transition:color .2s}
+.fk a:hover{color:var(--text2)}
+
+@media(max-width:640px){
+  .wrap{padding:40px 20px 40px}
+  .ff{flex-direction:column;gap:12px;text-align:center}
+  .fk a{margin:0 10px}
+}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <a href="/" class="back">
+    <svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>
+    Back to Corkscrew
+  </a>
+
+  <h1>Terms of Service</h1>
+  <p class="updated">Last updated: March 18, 2026</p>
+
+  <div class="card">
+    <p><strong>The short version:</strong> Corkscrew is free, open-source software provided as-is under the GPL-3.0 license. Use it responsibly, respect third-party services, and don't blame us if something breaks.</p>
+  </div>
+
+  <h2>1. Acceptance</h2>
+  <p>By downloading, installing, or using Corkscrew, you agree to these terms. If you don't agree, don't use the software.</p>
+
+  <h2>2. License</h2>
+  <p>Corkscrew is licensed under the <a href="https://www.gnu.org/licenses/gpl-3.0.html" target="_blank" rel="noopener">GNU General Public License v3.0</a> (GPL-3.0-or-later). You are free to use, modify, and distribute Corkscrew in accordance with the GPL-3.0 license terms. The full license text is included in the <a href="https://github.com/cashcon57/corkscrew/blob/main/LICENSE" target="_blank" rel="noopener">source repository</a>.</p>
+
+  <h2>3. No Warranty</h2>
+  <p>Corkscrew is provided <strong>"as is"</strong>, without warranty of any kind, express or implied. This includes but is not limited to warranties of merchantability, fitness for a particular purpose, and non-infringement. The authors are not liable for any claim, damages, or other liability arising from the use of the software.</p>
+  <p>Modding games carries inherent risks, including but not limited to save corruption, game instability, and performance issues. You are responsible for backing up your game files and save data.</p>
+
+  <h2>4. Third-Party Services</h2>
+  <p>Corkscrew integrates with third-party services that have their own terms of service. By using these integrations, you agree to comply with the respective terms:</p>
+  <ul>
+    <li><strong>NexusMods</strong> — You must have a valid NexusMods account and comply with the <a href="https://www.nexusmods.com/about/tos" target="_blank" rel="noopener">NexusMods Terms of Service</a>. Automated downloads are only available to Premium members as required by the NexusMods API terms.</li>
+    <li><strong>Google</strong> — If you use Google OAuth for Gemini features, you agree to the <a href="https://policies.google.com/terms" target="_blank" rel="noopener">Google Terms of Service</a>.</li>
+    <li><strong>GitHub</strong> — Update checks and SKSE downloads use the GitHub API, subject to <a href="https://docs.github.com/en/site-policy/github-terms/github-terms-of-service" target="_blank" rel="noopener">GitHub's Terms of Service</a>.</li>
+    <li><strong>Wabbajack modlists</strong> — Modlists may download from various sources (MEGA, Google Drive, MediaFire, etc.). You are responsible for complying with each service's terms.</li>
+  </ul>
+
+  <h2>5. Acceptable Use</h2>
+  <p>You agree not to use Corkscrew to:</p>
+  <ul>
+    <li>Circumvent API rate limits or access restrictions on any third-party service</li>
+    <li>Automate downloads in violation of NexusMods' terms (free-tier automated downloads are blocked by design)</li>
+    <li>Distribute pirated game files, mods, or other copyrighted content</li>
+    <li>Reverse engineer or redistribute paid mod content without authorization</li>
+  </ul>
+
+  <h2>6. Game Files and Mods</h2>
+  <p>Corkscrew modifies game files within Wine bottles and compatibility layers. You are responsible for:</p>
+  <ul>
+    <li>Owning legitimate copies of any games you mod</li>
+    <li>Respecting mod authors' permissions and redistribution terms</li>
+    <li>Maintaining backups of your game installations and save files</li>
+    <li>Understanding that modding may affect game stability or online play eligibility</li>
+  </ul>
+
+  <h2>7. Updates</h2>
+  <p>Corkscrew may check for updates via the GitHub Releases API. Updates are optional and can be disabled in Settings. We may release updates that change functionality, fix bugs, or address security issues. Continued use after an update constitutes acceptance of any changes.</p>
+
+  <h2>8. Limitation of Liability</h2>
+  <p>To the maximum extent permitted by law, the authors and contributors of Corkscrew shall not be liable for any indirect, incidental, special, consequential, or punitive damages, including but not limited to loss of data, game saves, mod configurations, or system stability, arising from the use or inability to use the software.</p>
+
+  <h2>9. Changes to These Terms</h2>
+  <p>We may update these terms from time to time. The updated version will be posted here with a new "Last updated" date. Since Corkscrew is open source, changes are visible in the <a href="https://github.com/cashcon57/corkscrew" target="_blank" rel="noopener">commit history</a>.</p>
+
+  <h2>10. Contact</h2>
+  <p>Questions about these terms? Open an issue on <a href="https://github.com/cashcon57/corkscrew/issues" target="_blank" rel="noopener">GitHub</a>.</p>
+</div>
+
+<footer>
+  <div class="ff">
+    <div class="fl"><img src="img/favicon.png" alt="" width="18" height="18"><span>&copy; 2026 cashconway</span></div>
+    <div class="fk">
+      <a href="/">Home</a>
+      <a href="https://github.com/cashcon57/corkscrew" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://github.com/cashcon57/corkscrew/releases" target="_blank" rel="noopener">Releases</a>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>
