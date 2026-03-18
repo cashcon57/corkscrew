@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://cashcon57.github.io/corkscrew/">🌐 Website</a>
+  <a href="https://corkscrewmodmanager.com">🌐 Website</a>
 </p>
 
 <p align="center">
