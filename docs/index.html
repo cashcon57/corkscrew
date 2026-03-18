@@ -7,10 +7,16 @@
 <meta name="description" content="The first native mod manager for Skyrim on macOS, SteamOS, and Linux. Works with CrossOver, Wine, Whisky, and Proton. Built with Rust and Svelte.">
 <meta property="og:title" content="Corkscrew — Skyrim Modding on macOS, SteamOS & Linux">
 <meta property="og:description" content="Native mod manager for macOS, SteamOS, Ubuntu, Fedora, and more. Nexus Collections, Wabbajack, FOMOD — all through Wine/Proton.">
-<meta property="og:image" content="img/hero-screenshot.png">
+<meta property="og:image" content="https://corkscrewmodmanager.com/img/hero-screenshot.png">
 <meta property="og:type" content="website">
+<meta property="og:url" content="https://corkscrewmodmanager.com">
+<meta property="og:site_name" content="Corkscrew">
 <meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Corkscrew — Skyrim Modding on macOS, SteamOS & Linux">
+<meta name="twitter:description" content="Native mod manager for macOS, SteamOS, Ubuntu, Fedora, and more. Nexus Collections, Wabbajack, FOMOD — all through Wine/Proton.">
+<meta name="twitter:image" content="https://corkscrewmodmanager.com/img/hero-screenshot.png">
 <meta name="theme-color" content="#080808">
+<link rel="canonical" href="https://corkscrewmodmanager.com">
 <link rel="icon" type="image/png" href="img/favicon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -125,6 +131,17 @@ section{position:relative;z-index:1}
 .btn-p:hover{background:var(--orange2);transform:translateY(-2px);box-shadow:0 8px 32px var(--orange-glow)}
 .btn-g{padding:14px 30px;border-radius:10px;border:1px solid var(--glass-border);color:var(--text2);font-weight:500;font-size:14px;display:inline-flex;align-items:center;gap:8px;transition:all .2s;background:var(--glass-bg);cursor:pointer}
 .btn-g:hover{border-color:var(--text3);color:var(--text)}
+
+/* Download dropdown */
+.dl-group{display:inline-flex;align-items:stretch;position:relative}
+.dl-group>.btn-p,.dl-group>.cm{border-top-right-radius:0;border-bottom-right-radius:0}
+.dl-toggle{border-top-left-radius:0!important;border-bottom-left-radius:0!important;border-left:1px solid rgba(255,255,255,.12)!important;padding:14px 16px;font-size:13px;white-space:nowrap}
+.dl-menu{display:none;position:absolute;top:calc(100% + 8px);right:0;min-width:260px;background:rgba(17,17,22,0.96);border:1px solid var(--glass-border);border-radius:10px;backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);padding:8px;z-index:50;box-shadow:0 12px 40px rgba(0,0,0,.5)}
+.dl-menu.open{display:flex;flex-direction:column;gap:2px}
+.dl-menu a{display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:8px;font-size:13px;font-weight:450;color:var(--text2);transition:background .2s,color .2s;text-decoration:none}
+.dl-menu a:hover{background:rgba(255,255,255,.06);color:var(--text)}
+.dl-ext{font-family:var(--mono);font-size:11px;color:var(--text3);margin-left:auto}
+.cta-b .dl-group{justify-content:center}
 
 /* Hero screenshot with reflection */
 .hero-shot{position:relative;z-index:1;width:100%;max-width:1100px;opacity:0;animation:fade-up .8s .85s cubic-bezier(.14,1,.34,1) forwards;transform:translateY(24px)}
@@ -343,10 +360,15 @@ footer{border-top:1px solid var(--glass-border);padding:40px 0}
 }
 @media(max-width:640px){
   .hero{padding:80px 20px 40px}
-  .hero-actions{flex-direction:column;width:100%;max-width:300px}
-  .hero-actions a{text-align:center;justify-content:center}
+  .hero-actions{flex-direction:column;width:100%;max-width:300px;align-items:center}
+  .hero-actions a,.hero-actions button{text-align:center;justify-content:center}
+  .dl-group{flex-direction:column;width:100%;max-width:300px}
+  .dl-group>.btn-p,.dl-group>.cm{border-radius:10px 10px 0 0!important}
+  .dl-toggle{border-radius:0 0 10px 10px!important;border-left:none!important;border-top:1px solid rgba(255,255,255,.12)!important}
+  .dl-menu{left:0;right:0}
   .cta-b{flex-direction:column;align-items:center}
-  .cta-b a{width:100%;max-width:260px;justify-content:center}
+  .cta-b a,.cta-b button{width:100%;max-width:260px;justify-content:center}
+  .cta-b .dl-group{max-width:260px}
   .ff{flex-direction:column;gap:16px;text-align:center}
   .marquee-num{font-size:22px}
   .builder-card{padding:28px 20px}
@@ -355,6 +377,9 @@ footer{border-top:1px solid var(--glass-border);padding:40px 0}
 }
 
 </style>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"SoftwareApplication","name":"Corkscrew","operatingSystem":"macOS, Linux, SteamOS","applicationCategory":"GameApplication","description":"The first native mod manager for Skyrim on macOS, SteamOS, and Linux. Works with CrossOver, Wine, Whisky, and Proton.","url":"https://corkscrewmodmanager.com","downloadUrl":"https://github.com/cashcon57/corkscrew/releases/latest","license":"https://www.gnu.org/licenses/gpl-3.0.html","author":{"@type":"Person","name":"cashconway","url":"https://github.com/cashcon57"},"offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}}
+</script>
 </head>
 <body>
 
@@ -415,7 +440,7 @@ footer{border-top:1px solid var(--glass-border);padding:40px 0}
       Support on Ko-fi
     </a>
     <span class="sidebar-ver" id="sidebarVer">v0.9.29</span>
-    <a href="https://github.com/cashcon57/corkscrew/releases/latest" class="sidebar-dl">Download</a>
+    <a href="https://github.com/cashcon57/corkscrew/releases/latest" class="sidebar-dl" id="sidebarDl">Download</a>
   </div>
 </aside>
 
@@ -453,10 +478,14 @@ footer{border-top:1px solid var(--glass-border);padding:40px 0}
   <h1 id="heroH1"></h1>
   <p class="hero-sub">The first native mod manager for macOS, SteamOS, and Linux. Runs your mods through CrossOver, Wine, Whisky, or Proton&mdash;no Windows required.</p>
   <div class="hero-actions">
-    <a href="https://github.com/cashcon57/corkscrew/releases/latest" class="btn-p">
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-      Download
-    </a>
+    <div class="dl-group">
+      <a href="https://github.com/cashcon57/corkscrew/releases/latest" class="btn-p" id="heroDlPrimary">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        <span id="heroDlLabel">Download</span>
+      </a>
+      <button class="btn-g dl-toggle">&#9662;</button>
+      <div class="dl-menu" id="heroDlMenu"></div>
+    </div>
     <a href="https://github.com/cashcon57/corkscrew" target="_blank" rel="noopener" class="btn-g">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
       Source
@@ -479,6 +508,8 @@ footer{border-top:1px solid var(--glass-border);padding:40px 0}
     <div class="marquee-item"><span class="marquee-num">100%</span><span class="marquee-label">Open Source</span></div>
     <div class="marquee-item"><span class="marquee-num" data-target="3700">0</span><span class="marquee-label">Plugin Metadata Entries</span></div>
     <div class="marquee-item"><span class="marquee-num">3</span><span class="marquee-label">Platforms (macOS, SteamOS, Linux)</span></div>
+    <div class="marquee-item"><span class="marquee-num" id="marqueeStars">&mdash;</span><span class="marquee-label">GitHub Stars</span></div>
+    <div class="marquee-item"><span class="marquee-num" id="marqueeDownloads">&mdash;</span><span class="marquee-label">Downloads</span></div>
     <!-- Duplicate for loop -->
     <div class="marquee-item"><span class="marquee-num">174</span><span class="marquee-label">Wabbajack Lists</span></div>
     <div class="marquee-item"><span class="marquee-num">60+</span><span class="marquee-label">Engine Crash Patches</span></div>
@@ -487,6 +518,8 @@ footer{border-top:1px solid var(--glass-border);padding:40px 0}
     <div class="marquee-item"><span class="marquee-num">100%</span><span class="marquee-label">Open Source</span></div>
     <div class="marquee-item"><span class="marquee-num">3,700+</span><span class="marquee-label">Plugin Metadata Entries</span></div>
     <div class="marquee-item"><span class="marquee-num">3</span><span class="marquee-label">Platforms (macOS, SteamOS, Linux)</span></div>
+    <div class="marquee-item"><span class="marquee-num" id="marqueeStars2">&mdash;</span><span class="marquee-label">GitHub Stars</span></div>
+    <div class="marquee-item"><span class="marquee-num" id="marqueeDownloads2">&mdash;</span><span class="marquee-label">Downloads</span></div>
   </div>
 </section>
 
@@ -558,7 +591,7 @@ footer{border-top:1px solid var(--glass-border);padding:40px 0}
         <p>Install from Nexus with one click or drop archives in. FOMOD wizards, BSA unpacking, and conflict resolution handled natively. Sort hundreds of mods with real-time search and category filters.</p>
         <span class="tg">FOMOD</span><span class="tg">NXM Links</span><span class="tg">7z / RAR / ZIP</span>
       </div>
-      <div class="fi"><img src="img/mods-screenshot.png" alt="Corkscrew mod list view" loading="lazy"></div>
+      <div class="fi"><img src="img/mods-screenshot.png" alt="Corkscrew mod list view" loading="lazy" decoding="async"></div>
     </div>
 
     <div class="fr rev rv">
@@ -567,7 +600,7 @@ footer{border-top:1px solid var(--glass-border);padding:40px 0}
         <p>Integrated LOOT engine sorts plugins automatically. See master dependencies, detect conflicts, fix load order before it crashes. Drag to override when you know better.</p>
         <span class="tg">LOOT</span><span class="tg">Drag Reorder</span><span class="tg">Conflict Map</span>
       </div>
-      <div class="fi"><img src="img/loadorder-screenshot.png" alt="Corkscrew load order view" loading="lazy"></div>
+      <div class="fi"><img src="img/loadorder-screenshot.png" alt="Corkscrew load order view" loading="lazy" decoding="async"></div>
     </div>
 
     <div class="fr rv">
@@ -576,7 +609,7 @@ footer{border-top:1px solid var(--glass-border);padding:40px 0}
         <p>Install curated mod packs with automated dependency resolution. Every mod downloaded, configured, and ordered correctly. No manual intervention required.</p>
         <span class="tg">Collections</span><span class="tg">Auto-Install</span><span class="tg">Profiles</span>
       </div>
-      <div class="fi"><img src="img/collections-screenshot.png" alt="Corkscrew collections view" loading="lazy"></div>
+      <div class="fi"><img src="img/collections-screenshot.png" alt="Corkscrew collections view" loading="lazy" decoding="async"></div>
     </div>
 
     <div class="fr rev rv">
@@ -585,7 +618,7 @@ footer{border-top:1px solid var(--glass-border);padding:40px 0}
         <p>Structured crash log viewer with stack traces mapped to your mod list. Know which mod broke your game in seconds, not hours of bisecting.</p>
         <span class="tg">Stack Traces</span><span class="tg">Mod Attribution</span><span class="tg">Session Tracking</span>
       </div>
-      <div class="fi"><img src="img/crashlogs-screenshot.png" alt="Corkscrew crash log viewer" loading="lazy"></div>
+      <div class="fi"><img src="img/crashlogs-screenshot.png" alt="Corkscrew crash log viewer" loading="lazy" decoding="async"></div>
     </div>
   </div>
 </section>
@@ -600,7 +633,7 @@ footer{border-top:1px solid var(--glass-border);padding:40px 0}
           <p>Full 7-phase install pipeline: metadata resolution, archive downloads, BSA/BA2 packing, DDS texture transforms, binary delta patches, FOMOD evaluation, and hardlink deployment. Hundreds of mods from a single click.</p>
           <div class="sub">174 lists &middot; Skyrim SE/AE &middot; macOS, SteamOS & Linux &middot; No Windows VM</div>
         </div>
-        <div class="wj-img"><img src="img/wabbajack-screenshot.png" alt="Wabbajack modlist installation in Corkscrew" loading="lazy"></div>
+        <div class="wj-img"><img src="img/wabbajack-screenshot.png" alt="Wabbajack modlist installation in Corkscrew" loading="lazy" decoding="async"></div>
       </div>
     </div>
   </div>
@@ -720,14 +753,14 @@ footer{border-top:1px solid var(--glass-border);padding:40px 0}
     <h2 class="rv"><span class="grad">Ready to mod.</span></h2>
     <p class="rv rv-d1">Free, open source, and built for your OS.</p>
     <div class="cta-b rv rv-d2">
-      <a href="https://github.com/cashcon57/corkscrew/releases/latest" class="cm">
-        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"/></svg>
-        macOS
-      </a>
-      <a href="https://github.com/cashcon57/corkscrew/releases/latest" class="cl">
-        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12.504 0c-.155 0-.315.008-.48.021-4.226.333-3.105 4.807-3.17 6.298-.076 1.092-.3 1.953-1.05 3.02-.885 1.051-2.127 2.75-2.716 4.521-.278.832-.41 1.684-.287 2.489a.424.424 0 0 0-.11.135c-.26.268-.45.6-.663.839-.199.199-.485.267-.797.4-.313.136-.658.269-.864.68-.09.189-.136.394-.132.602 0 .199.027.4.055.536.058.399.116.728.04.97-.249.68-.28 1.145-.106 1.484.174.334.535.47.94.601.81.2 1.91.135 2.774.6.926.466 1.866.67 2.616.47.526-.116.97-.464 1.208-.946.587-.003 1.23-.269 2.26-.334.699-.058 1.574.267 2.577.2.025.134.063.198.114.333l.003.003c.391.778 1.113 1.368 1.884 1.43.868.07 1.723-.26 2.456-.594.366-.167.71-.368.96-.587.25-.221.43-.497.43-.82 0-.063-.003-.12-.01-.18.958-.243 1.838-1.13 1.913-2.27.04-.6-.157-1.14-.525-1.545.01-.04.023-.06.035-.098.396-1.298.12-2.345-.34-3.17-.47-.834-1.13-1.458-1.578-1.989-.447-.535-.76-.976-.76-1.567-.01-.627.173-1.14.342-1.578.238-.554.395-1.052.26-1.597-.278-1.13-1.296-2.067-2.426-2.067-1.075 0-2.014.573-2.681 1.38-.57.696-1 1.575-1.141 2.519-.152-.056-.325-.096-.498-.096-.146 0-.272.013-.398.05-.473-.866-1.162-1.71-1.947-2.292-.777-.59-1.624-.958-2.448-.958z"/></svg>
-        Linux
-      </a>
+      <div class="dl-group">
+        <a href="https://github.com/cashcon57/corkscrew/releases/latest" class="cm" id="ctaDlPrimary">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          <span id="ctaDlLabel">Download</span>
+        </a>
+        <button class="cl dl-toggle">&#9662;</button>
+        <div class="dl-menu" id="ctaDlMenu"></div>
+      </div>
     </div>
     <p class="cta-n rv rv-d3">macOS 10.15+ (Apple Silicon & Intel) &middot; SteamOS &middot; Ubuntu &middot; Fedora &middot; Arch &middot; Linux x86_64</p>
     <div class="cta-src rv rv-d4"><code>git clone https://github.com/cashcon57/corkscrew && cargo tauri build</code></div>
@@ -889,9 +922,58 @@ document.querySelectorAll('a[href^="#"]').forEach(function(a){
   });
 });
 
-/* ══════════ GITHUB RELEASES (version + changelog) ══════════ */
+/* ══════════ OS DETECTION ══════════ */
+function detectOS(){
+  var ua=navigator.userAgent||'';
+  var plat=(navigator.userAgentData&&navigator.userAgentData.platform)||navigator.platform||'';
+  if(/Mac|macOS/i.test(plat))return{os:'mac',arch:/arm64|aarch64/i.test(ua)?'aarch64':'aarch64'}; /* default Apple Silicon */
+  if(/Linux/i.test(plat))return{os:'linux',arch:'amd64'};
+  return{os:'unknown',arch:'x86_64'};
+}
+
+function populateDownloads(assets,primaryId,labelId,menuId){
+  var det=detectOS();
+  var labels={
+    'aarch64.dmg':{label:'macOS (Apple Silicon)',ext:'.dmg'},
+    'x86_64.dmg':{label:'macOS (Intel)',ext:'.dmg'},
+    'amd64.AppImage':{label:'Linux AppImage',ext:'.AppImage'},
+    'amd64.deb':{label:'Linux .deb',ext:'.deb'},
+    'amd64.rpm':{label:'Linux .rpm',ext:'.rpm'}
+  };
+  var mapped=[];
+  (assets||[]).forEach(function(a){
+    for(var key in labels){
+      if(a.name.indexOf(key)!==-1){
+        mapped.push({url:a.browser_download_url,key:key,label:labels[key].label,ext:labels[key].ext});
+        break;
+      }
+    }
+  });
+  var primary=null;
+  if(det.os==='mac')primary=mapped.find(function(m){return m.key===det.arch+'.dmg'})||mapped.find(function(m){return m.key.indexOf('.dmg')!==-1});
+  else if(det.os==='linux')primary=mapped.find(function(m){return m.key==='amd64.AppImage'});
+  if(!primary&&mapped.length)primary=mapped[0];
+
+  var btn=document.getElementById(primaryId);
+  var lbl=document.getElementById(labelId);
+  var menu=document.getElementById(menuId);
+  if(primary&&btn){btn.href=primary.url;if(lbl)lbl.textContent='Download for '+primary.label}
+  var others=mapped.filter(function(m){return m!==primary});
+  if(menu&&others.length){
+    menu.innerHTML=others.map(function(m){
+      return'<a href="'+m.url+'">'+m.label+'<span class="dl-ext">'+m.ext+'</span></a>';
+    }).join('');
+  }
+  /* Also update sidebar download */
+  if(primary&&primaryId==='heroDlPrimary'){
+    var sb=document.getElementById('sidebarDl');
+    if(sb)sb.href=primary.url;
+  }
+}
+
+/* ══════════ GITHUB RELEASES (version + changelog + downloads) ══════════ */
 !function(){
-  var API='https://api.github.com/repos/cashcon57/corkscrew/releases';
+  var API='https://api.github.com/repos/cashcon57/corkscrew';
   var SHOW=5;
   var list=document.getElementById('clList');
 
@@ -900,7 +982,6 @@ document.querySelectorAll('a[href^="#"]').forEach(function(a){
     return d.toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric'});
   }
 
-  /* Minimal markdown→HTML: headers, bold, code, links, lists */
   function md(s){
     if(!s)return'';
     return s
@@ -915,7 +996,18 @@ document.querySelectorAll('a[href^="#"]').forEach(function(a){
       .replace(/^(?!<[hup]|<li)/gm,function(m){return m?'<p>'+m:m});
   }
 
-  fetch(API+'?per_page=30')
+  /* Fetch star count */
+  fetch(API)
+    .then(function(r){return r.json()})
+    .then(function(repo){
+      var s=repo.stargazers_count||0;
+      var t=s>=1000?(s/1000).toFixed(1)+'k':s.toLocaleString();
+      ['marqueeStars','marqueeStars2'].forEach(function(id){var el=document.getElementById(id);if(el)el.textContent=t});
+    })
+    .catch(function(err){console.error('Failed to fetch repo:',err)});
+
+  /* Fetch releases */
+  fetch(API+'/releases?per_page=30')
     .then(function(r){
       if(!r.ok)throw new Error(r.status);
       return r.json();
@@ -923,13 +1015,23 @@ document.querySelectorAll('a[href^="#"]').forEach(function(a){
     .then(function(releases){
       if(!releases.length){list.innerHTML='<div class="cl-loading">No releases found.</div>';return}
 
-      /* Update version indicators from latest release */
+      /* Update version indicators */
       var latest=releases[0].tag_name;
       var ver=latest.replace(/^v/,'');
       var major=ver.split('.').slice(0,2).join('.');
       document.getElementById('sidebarVer').textContent=latest;
       document.getElementById('heroBadgeVer').textContent='v'+major;
       document.getElementById('heroMetaVer').textContent=latest;
+
+      /* OS-detecting download buttons */
+      populateDownloads(releases[0].assets,'heroDlPrimary','heroDlLabel','heroDlMenu');
+      populateDownloads(releases[0].assets,'ctaDlPrimary','ctaDlLabel','ctaDlMenu');
+
+      /* Total download count across all releases */
+      var totalDl=0;
+      releases.forEach(function(rel){(rel.assets||[]).forEach(function(a){totalDl+=a.download_count||0})});
+      var dlFmt=totalDl>=1000?(totalDl/1000).toFixed(1)+'k':totalDl.toLocaleString();
+      ['marqueeDownloads','marqueeDownloads2'].forEach(function(id){var el=document.getElementById(id);if(el)el.textContent=dlFmt});
 
       /* Render changelog cards */
       var html='';
@@ -948,11 +1050,9 @@ document.querySelectorAll('a[href^="#"]').forEach(function(a){
       }
       list.innerHTML=html;
 
-      /* Reveal animation for dynamically added cards */
       var obs=new IntersectionObserver(function(e){e.forEach(function(en){if(en.isIntersecting)en.target.classList.add('vis')})},{threshold:.08});
       list.querySelectorAll('.rv').forEach(function(el){obs.observe(el)});
 
-      /* Show more button */
       if(all>SHOW){
         document.getElementById('clMore').addEventListener('click',function(){
           var extra='';
@@ -974,6 +1074,20 @@ document.querySelectorAll('a[href^="#"]').forEach(function(a){
       console.error('Failed to fetch releases:',err);
       list.innerHTML='<div class="cl-loading">Couldn\'t load releases. <a href="https://github.com/cashcon57/corkscrew/releases" target="_blank" rel="noopener" style="color:var(--orange)">View on GitHub</a></div>';
     });
+}();
+
+/* ══════════ DOWNLOAD DROPDOWN TOGGLE ══════════ */
+!function(){
+  document.querySelectorAll('.dl-toggle').forEach(function(btn){
+    btn.addEventListener('click',function(e){
+      e.stopPropagation();
+      var menu=this.parentElement.querySelector('.dl-menu');
+      if(menu)menu.classList.toggle('open');
+    });
+  });
+  document.addEventListener('click',function(){
+    document.querySelectorAll('.dl-menu.open').forEach(function(m){m.classList.remove('open')});
+  });
 }();
 
 /* ══════════ PARALLAX ══════════ */
