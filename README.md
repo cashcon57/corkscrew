@@ -245,13 +245,13 @@ src/                          Svelte frontend
 │   └── settings/             Config, tools, auth, diagnostics
 └── app.css                   Design tokens + themes
 
-src-tauri/src/                Rust backend (~54 modules, 787+ tests)
+src-tauri/src/                Rust backend (~54 modules, 873+ tests)
 ├── lib.rs                    ~249 IPC commands + CLI
 ├── bottles.rs                Bottle detection (9 sources)
 ├── games.rs                  Game detection + plugin registry
 ├── installer.rs              Archive extraction + data root detection
 ├── deployer.rs               Hardlink deployment + atomic rollback
-├── database.rs               SQLite with versioned migrations (v1→v17)
+├── database.rs               SQLite with versioned migrations (v1→v19)
 ├── collections.rs            NexusMods Collections GraphQL client
 ├── collection_installer.rs   Collection install orchestrator
 ├── wabbajack_installer.rs    Wabbajack modlist pipeline
