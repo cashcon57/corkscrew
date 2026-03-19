@@ -19,7 +19,7 @@ pub enum MigrationError {
 pub type Result<T> = std::result::Result<T, MigrationError>;
 
 /// The current target schema version. Bump this when adding a new migration.
-const TARGET_VERSION: u32 = 19;
+const TARGET_VERSION: u32 = 20;
 
 /// Get the current schema version (0 if no version table exists).
 pub fn current_version(conn: &Connection) -> Result<u32> {
@@ -139,6 +139,11 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     if version == 18 {
         migrate_v18_to_v19(conn)?;
         version = 19;
+    }
+
+    if version == 19 {
+        migrate_v19_to_v20(conn)?;
+        version = 20;
     }
 
     let _ = version; // suppress unused warning when TARGET_VERSION == current
@@ -958,6 +963,62 @@ fn migrate_v18_to_v19(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Migration 19 -> 20: Wabbajack directive-level resume tracking.
+///
+/// Creates a table to track individual directive completion status during
+/// Wabbajack installs, enabling resume after crash or cancellation without
+/// re-processing already-completed directives.
+fn migrate_v19_to_v20(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS wj_directive_status (
+            install_id      TEXT    NOT NULL,
+            directive_index INTEGER NOT NULL,
+            directive_type  TEXT    NOT NULL,
+            status          TEXT    NOT NULL DEFAULT 'pending',
+            updated_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (install_id, directive_index)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_wj_directive_status_install
+            ON wj_directive_status (install_id);
+
+        CREATE TABLE IF NOT EXISTS nexus_url_cache (
+            game_domain TEXT NOT NULL,
+            mod_id INTEGER NOT NULL,
+            file_id INTEGER NOT NULL,
+            url TEXT NOT NULL,
+            cached_at TEXT NOT NULL DEFAULT (datetime('now')),
+            expires_at TEXT NOT NULL,
+            PRIMARY KEY (game_domain, mod_id, file_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS patch_basis_cache (
+            modlist TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            quick_hash INTEGER NOT NULL,
+            full_hash TEXT NOT NULL,
+            file_size INTEGER NOT NULL,
+            cached_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (modlist, file_path)
+        );
+
+        CREATE TABLE IF NOT EXISTS modlist_config (
+            name TEXT NOT NULL,
+            version TEXT NOT NULL,
+            config_json TEXT NOT NULL,
+            saved_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (name, version)
+        );",
+    )?;
+
+    tx.execute("UPDATE schema_version SET version = 20", [])?;
+    tx.commit()?;
+    log::info!("Migration 19 → 20 complete (wj_directive_status + cache tables)");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1095,7 +1156,7 @@ mod tests {
     fn v13_creates_deployment_manifest_index() {
         let conn = memory_db();
         migrate(&conn).unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 19);
+        assert_eq!(current_version(&conn).unwrap(), 20);
 
         // Verify the compound index exists
         let index_exists: bool = conn

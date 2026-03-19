@@ -157,6 +157,7 @@ pub enum WjArchiveState {
 
     #[serde(
         alias = "WabbajackCDNDownloader+State, Wabbajack.Lib",
+        alias = "WabbajackCDNDownloader, Wabbajack.Lib",
         alias = "WabbajackCDN, Wabbajack.DTOs",
         alias = "WabbajackCDNDownloader+State"
     )]
@@ -167,6 +168,7 @@ pub enum WjArchiveState {
 
     #[serde(
         alias = "GameFileSourceDownloader+State, Wabbajack.Lib",
+        alias = "GameFileSourceDownloader, Wabbajack.Lib",
         alias = "GameFileSource, Wabbajack.DTOs",
         alias = "GameFileSourceDownloader+State"
     )]
@@ -175,12 +177,15 @@ pub enum WjArchiveState {
         game: String,
         #[serde(rename = "GameFile", alias = "gameFile", default)]
         game_file: String,
+        #[serde(rename = "GameVersion", alias = "gameVersion", default)]
+        game_version: String,
         #[serde(rename = "Hash", alias = "hash", default)]
         hash: WjHash,
     },
 
     #[serde(
         alias = "ManualDownloader+State, Wabbajack.Lib",
+        alias = "ManualDownloader, Wabbajack.Lib",
         alias = "Manual, Wabbajack.DTOs",
         alias = "ManualDownloader+State"
     )]
@@ -193,9 +198,12 @@ pub enum WjArchiveState {
 
     #[serde(
         alias = "LoversLabDownloader+State, Wabbajack.Lib",
+        alias = "LoversLabDownloader, Wabbajack.Lib",
         alias = "LoversLab, Wabbajack.DTOs",
         alias = "LoversLabOAuthDownloader+State, Wabbajack.Lib",
-        alias = "LoversLabOAuthDownloader+State"
+        alias = "LoversLabOAuthDownloader, Wabbajack.Lib",
+        alias = "LoversLabOAuthDownloader+State",
+        alias = "LoversLabDownloader+State"
     )]
     LoversLab {
         #[serde(rename = "IPS4Url", alias = "url", default)]
@@ -208,9 +216,12 @@ pub enum WjArchiveState {
 
     #[serde(
         alias = "VectorPlexusDownloader+State, Wabbajack.Lib",
+        alias = "VectorPlexusDownloader, Wabbajack.Lib",
         alias = "VectorPlexus, Wabbajack.DTOs",
         alias = "VectorPlexusOAuthDownloader+State, Wabbajack.Lib",
-        alias = "VectorPlexusOAuthDownloader+State"
+        alias = "VectorPlexusOAuthDownloader, Wabbajack.Lib",
+        alias = "VectorPlexusOAuthDownloader+State",
+        alias = "VectorPlexusDownloader+State"
     )]
     VectorPlexus {
         #[serde(rename = "IPS4Url", alias = "url", default)]
@@ -223,6 +234,7 @@ pub enum WjArchiveState {
 
     #[serde(
         alias = "TESAllianceDownloader+State, Wabbajack.Lib",
+        alias = "TESAllianceDownloader, Wabbajack.Lib",
         alias = "TESAlliance, Wabbajack.DTOs",
         alias = "TESAllianceDownloader+State"
     )]
@@ -237,7 +249,9 @@ pub enum WjArchiveState {
 
     #[serde(
         alias = "BethesdaNetDownloader+State, Wabbajack.Lib",
+        alias = "BethesdaNetDownloader, Wabbajack.Lib",
         alias = "Bethesda, Wabbajack.DTOs",
+        alias = "BethesdaNet, Wabbajack.DTOs",
         alias = "BethesdaNetDownloader+State"
     )]
     Bethesda {
@@ -279,12 +293,92 @@ pub struct ImageState {
     pub width: u32,
     #[serde(default)]
     pub height: u32,
-    #[serde(default)]
+    /// DXGI format — either a numeric ID (old WJ) or string name like "BC7_UNORM" (new WJ).
+    #[serde(default, deserialize_with = "deserialize_dxgi_format")]
     pub format: u32,
     #[serde(default)]
     pub perceptual_hash: Option<String>,
     #[serde(default)]
     pub mip_levels: u32,
+}
+
+/// Deserialize DXGI format as either a u32 or a string name.
+fn deserialize_dxgi_format<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    struct DxgiVisitor;
+
+    impl<'de> de::Visitor<'de> for DxgiVisitor {
+        type Value = u32;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a DXGI format number or name string")
+        }
+
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<u32, E> {
+            Ok(v as u32)
+        }
+
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<u32, E> {
+            Ok(v as u32)
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<u32, E> {
+            Ok(dxgi_format_from_name(v))
+        }
+
+        fn visit_string<E: de::Error>(self, v: String) -> Result<u32, E> {
+            Ok(dxgi_format_from_name(&v))
+        }
+
+        fn visit_none<E: de::Error>(self) -> Result<u32, E> {
+            Ok(0)
+        }
+
+        fn visit_unit<E: de::Error>(self) -> Result<u32, E> {
+            Ok(0)
+        }
+    }
+
+    deserializer.deserialize_any(DxgiVisitor)
+}
+
+/// Map DXGI format name strings to their numeric values.
+fn dxgi_format_from_name(name: &str) -> u32 {
+    match name {
+        "R8G8B8A8_UNORM" => 28,
+        "R8G8B8A8_UNORM_SRGB" => 29,
+        "B8G8R8A8_UNORM" => 87,
+        "B8G8R8A8_UNORM_SRGB" => 91,
+        "BC1_UNORM" => 71,
+        "BC1_UNORM_SRGB" => 72,
+        "BC2_UNORM" => 74,
+        "BC2_UNORM_SRGB" => 75,
+        "BC3_UNORM" => 77,
+        "BC3_UNORM_SRGB" => 78,
+        "BC4_UNORM" => 80,
+        "BC4_SNORM" => 81,
+        "BC5_UNORM" => 83,
+        "BC5_SNORM" => 84,
+        "BC6H_UF16" => 95,
+        "BC6H_SF16" => 96,
+        "BC7_UNORM" => 98,
+        "BC7_UNORM_SRGB" => 99,
+        "R8_UNORM" => 61,
+        "R16_FLOAT" => 54,
+        "R32_FLOAT" => 41,
+        "R16G16_FLOAT" => 34,
+        "R16G16B16A16_FLOAT" => 10,
+        "R32G32B32A32_FLOAT" => 2,
+        "A8_UNORM" => 65,
+        _ => {
+            log::warn!("Unknown DXGI format name '{}', defaulting to DXGI_FORMAT_UNKNOWN (0). DDS transforms using this format may fail.", name);
+            0
+        }
+    }
 }
 
 /// Source reference for MergedPatch directives.
@@ -349,8 +443,8 @@ pub enum WjDirective {
         archive_hash_path: ArchiveHashPath,
         #[serde(rename = "FromHash", default)]
         from_hash: WjHash,
-        #[serde(rename = "PatchID", default)]
-        patch_id: i64,
+        #[serde(rename = "PatchID", default, deserialize_with = "deserialize_source_data_id")]
+        patch_id: String,
     },
 
     #[serde(
@@ -364,8 +458,9 @@ pub enum WjDirective {
         size: i64,
         #[serde(rename = "To", default)]
         to: String,
-        #[serde(rename = "SourceDataID", default)]
-        source_data_id: i64,
+        /// Entry name in the .wabbajack ZIP. Was i64 in old WJ, UUID string in newer WJ.
+        #[serde(rename = "SourceDataID", default, deserialize_with = "deserialize_source_data_id")]
+        source_data_id: String,
     },
 
     #[serde(
@@ -379,8 +474,9 @@ pub enum WjDirective {
         size: i64,
         #[serde(rename = "To", default)]
         to: String,
-        #[serde(rename = "SourceDataID", default)]
-        source_data_id: i64,
+        /// Entry name in the .wabbajack ZIP. Was i64 in old WJ, UUID string in newer WJ.
+        #[serde(rename = "SourceDataID", default, deserialize_with = "deserialize_source_data_id")]
+        source_data_id: String,
     },
 
     #[serde(
@@ -394,8 +490,8 @@ pub enum WjDirective {
         size: i64,
         #[serde(rename = "To", default)]
         to: String,
-        #[serde(rename = "TempID", default)]
-        temp_id: i64,
+        #[serde(rename = "TempID", default, deserialize_with = "deserialize_source_data_id")]
+        temp_id: String,
         #[serde(rename = "State", default)]
         state: Option<BsaState>,
         #[serde(rename = "FileStates", default)]
@@ -430,8 +526,8 @@ pub enum WjDirective {
         size: i64,
         #[serde(rename = "To", default)]
         to: String,
-        #[serde(rename = "PatchID", default)]
-        patch_id: i64,
+        #[serde(rename = "PatchID", default, deserialize_with = "deserialize_source_data_id")]
+        patch_id: String,
         #[serde(rename = "Sources", default)]
         sources: Vec<SourcePatch>,
     },
@@ -516,13 +612,106 @@ impl WjDirective {
 
 /// Wabbajack's ArchiveHashPath: identifies a file by the archive's hash
 /// plus the relative path within the archive.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "PascalCase")]
+///
+/// Formats:
+/// - Old WJ object: `{"BaseHash": "abc=", "Parts": ["path", "to", "file"]}`
+/// - New WJ array: `["abc=", "path\\to\\file"]` or `["abc=", "archive.bsa", "inner\\path"]`
+/// - String: `"abc=|path\\to\\file"` (pipe-delimited)
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct ArchiveHashPath {
-    #[serde(default, rename = "BaseHash")]
     pub base_hash: WjHash,
-    #[serde(default, rename = "Parts")]
     pub parts: Vec<String>,
+}
+
+impl<'de> serde::Deserialize<'de> for ArchiveHashPath {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de;
+
+        struct AhpVisitor;
+
+        impl<'de> de::Visitor<'de> for AhpVisitor {
+            type Value = ArchiveHashPath;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("an ArchiveHashPath object, array, or string")
+            }
+
+            // New format: flat array ["hash", "path1", "path2", ...]
+            fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<ArchiveHashPath, A::Error> {
+                let hash: String = seq.next_element()?.unwrap_or_default();
+                let mut parts = Vec::new();
+                while let Some(part) = seq.next_element::<String>()? {
+                    parts.push(part);
+                }
+                Ok(ArchiveHashPath {
+                    base_hash: WjHash(hash),
+                    parts,
+                })
+            }
+
+            // Old format: object with BaseHash and Parts
+            fn visit_map<M: de::MapAccess<'de>>(self, mut map: M) -> Result<ArchiveHashPath, M::Error> {
+                let mut base_hash = WjHash(String::new());
+                let mut parts = Vec::new();
+
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "BaseHash" | "baseHash" | "base_hash" => {
+                            base_hash = WjHash(map.next_value::<String>()?);
+                        }
+                        "Parts" | "parts" => {
+                            // Parts can be a string or array
+                            let val: serde_json::Value = map.next_value()?;
+                            match val {
+                                serde_json::Value::String(s) => {
+                                    parts = s.split('\\').map(|s| s.to_string()).collect();
+                                }
+                                serde_json::Value::Array(arr) => {
+                                    for v in arr {
+                                        if let Some(s) = v.as_str() {
+                                            parts.push(s.to_string());
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        _ => { let _: serde_json::Value = map.next_value()?; }
+                    }
+                }
+
+                Ok(ArchiveHashPath { base_hash, parts })
+            }
+
+            // String format: "hash|path\\to\\file"
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<ArchiveHashPath, E> {
+                if let Some((hash, path)) = v.split_once('|') {
+                    Ok(ArchiveHashPath {
+                        base_hash: WjHash(hash.to_string()),
+                        parts: path.split('\\').map(|s| s.to_string()).collect(),
+                    })
+                } else {
+                    Ok(ArchiveHashPath {
+                        base_hash: WjHash(v.to_string()),
+                        parts: Vec::new(),
+                    })
+                }
+            }
+
+            fn visit_none<E: de::Error>(self) -> Result<ArchiveHashPath, E> {
+                Ok(ArchiveHashPath::default())
+            }
+
+            fn visit_unit<E: de::Error>(self) -> Result<ArchiveHashPath, E> {
+                Ok(ArchiveHashPath::default())
+            }
+        }
+
+        deserializer.deserialize_any(AhpVisitor)
+    }
 }
 
 impl ArchiveHashPath {
@@ -534,6 +723,50 @@ impl ArchiveHashPath {
         }
         path
     }
+}
+
+/// Deserialize SourceDataID as either an integer (old WJ) or UUID string (new WJ).
+fn deserialize_source_data_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    struct SourceDataIdVisitor;
+
+    impl<'de> de::Visitor<'de> for SourceDataIdVisitor {
+        type Value = String;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("an integer or string")
+        }
+
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<String, E> {
+            Ok(v.to_string())
+        }
+
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<String, E> {
+            Ok(v.to_string())
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<String, E> {
+            Ok(v.to_string())
+        }
+
+        fn visit_string<E: de::Error>(self, v: String) -> Result<String, E> {
+            Ok(v)
+        }
+
+        fn visit_none<E: de::Error>(self) -> Result<String, E> {
+            Ok(String::new())
+        }
+
+        fn visit_unit<E: de::Error>(self) -> Result<String, E> {
+            Ok(String::new())
+        }
+    }
+
+    deserializer.deserialize_any(SourceDataIdVisitor)
 }
 
 // ---------------------------------------------------------------------------
@@ -569,7 +802,7 @@ pub struct WjTypedModlist {
     pub description: String,
     #[serde(default)]
     pub version: String,
-    #[serde(default, rename = "GameType")]
+    #[serde(default, rename = "GameType", deserialize_with = "crate::wabbajack::deserialize_game_type")]
     pub game_type: u32,
     #[serde(default)]
     pub archives: Vec<WjTypedArchive>,
@@ -579,6 +812,31 @@ pub struct WjTypedModlist {
     pub is_nsfw: bool,
     #[serde(default)]
     pub wabbajack_version: String,
+}
+
+impl WjTypedModlist {
+    /// Extract the required game version from `GameFileSource` archives.
+    /// Returns the most common `GameVersion` string found (e.g. "1.6.1170.0").
+    /// Returns `None` if no `GameFileSource` archives exist or none have a version set.
+    pub fn required_game_version(&self) -> Option<String> {
+        let mut versions: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for archive in &self.archives {
+            if let WjArchiveState::GameFileSource {
+                game_version, ..
+            } = &archive.state
+            {
+                let v = game_version.trim();
+                if !v.is_empty() && v != "0.0.0.0" {
+                    *versions.entry(v.to_string()).or_insert(0) += 1;
+                }
+            }
+        }
+        versions
+            .into_iter()
+            .max_by_key(|(_, count)| *count)
+            .map(|(v, _)| v)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -867,7 +1125,7 @@ mod tests {
             hash: WjHash("abc=".to_string()),
             size: 100,
             to: "output/file.txt".to_string(),
-            source_data_id: 42,
+            source_data_id: "42".to_string(),
         };
         assert_eq!(directive.to_path(), "output/file.txt");
         assert_eq!(directive.hash().0, "abc=");

@@ -1,11 +1,12 @@
+use crate::database::ModDatabase;
 use crate::wabbajack_types::*;
 use log::{debug, info, warn};
 use rayon::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -64,6 +65,10 @@ pub struct DirectiveProcessor {
     output_dir: PathBuf,
     /// Game installation directory (for GAMEDIR substitution)
     game_dir: PathBuf,
+    /// Optional DB for directive resume tracking
+    db: Option<Arc<ModDatabase>>,
+    /// Install ID for resume tracking (format: "{modlist_name}::{modlist_version}")
+    install_id: Option<String>,
 }
 
 impl DirectiveProcessor {
@@ -78,7 +83,16 @@ impl DirectiveProcessor {
             archive_dirs,
             output_dir,
             game_dir,
+            db: None,
+            install_id: None,
         }
+    }
+
+    /// Enable directive resume tracking with the given database and install ID.
+    pub fn with_resume_tracking(mut self, db: Arc<ModDatabase>, install_id: String) -> Self {
+        self.db = Some(db);
+        self.install_id = Some(install_id);
+        self
     }
 
     // -----------------------------------------------------------------------
@@ -91,8 +105,9 @@ impl DirectiveProcessor {
             WjDirective::FromArchive {
                 to,
                 archive_hash_path,
+                size,
                 ..
-            } => self.process_from_archive(to, archive_hash_path),
+            } => self.process_from_archive(to, archive_hash_path, *size),
 
             WjDirective::PatchedFromArchive {
                 hash,
@@ -100,15 +115,15 @@ impl DirectiveProcessor {
                 archive_hash_path,
                 patch_id,
                 ..
-            } => self.process_patched_from_archive(to, archive_hash_path, *patch_id, hash),
+            } => self.process_patched_from_archive(to, archive_hash_path, patch_id, hash),
 
             WjDirective::InlineFile {
                 to, source_data_id, ..
-            } => self.process_inline_file(to, *source_data_id),
+            } => self.process_inline_file(to, source_data_id),
 
             WjDirective::RemappedInlineFile {
                 to, source_data_id, ..
-            } => self.process_remapped_inline_file(to, *source_data_id),
+            } => self.process_remapped_inline_file(to, source_data_id),
 
             WjDirective::CreateBSA {
                 to,
@@ -116,7 +131,7 @@ impl DirectiveProcessor {
                 state,
                 file_states,
                 ..
-            } => self.process_create_bsa(to, *temp_id, state.as_ref(), file_states),
+            } => self.process_create_bsa(to, temp_id, state.as_ref(), file_states),
 
             WjDirective::TransformedTexture {
                 to,
@@ -131,7 +146,7 @@ impl DirectiveProcessor {
                 patch_id,
                 sources,
                 ..
-            } => self.process_merged_patch(to, *patch_id, sources, hash),
+            } => self.process_merged_patch(to, patch_id, sources, hash),
 
             WjDirective::IgnoredDirectly { to, reason, .. } => {
                 self.process_ignored(to, reason);
@@ -158,22 +173,45 @@ impl DirectiveProcessor {
         directives: &[WjDirective],
         progress_callback: &(dyn Fn(usize, usize, &str, u64, u64, &str) + Sync),
     ) -> Result<WjDirectiveResult, WjDirectiveError> {
-        // Partition directives by processing phase
-        let mut phase1: Vec<&WjDirective> = Vec::new(); // File production
-        let mut phase2: Vec<&WjDirective> = Vec::new(); // Merged patches
-        let mut phase3: Vec<&WjDirective> = Vec::new(); // BSA creation
-        let mut ignored: Vec<&WjDirective> = Vec::new();
+        // Initialize resume tracking if DB is configured
+        let completed_set: HashSet<usize> =
+            if let (Some(db), Some(install_id)) = (&self.db, &self.install_id) {
+                let type_pairs: Vec<(usize, &str)> = directives
+                    .iter()
+                    .enumerate()
+                    .map(|(i, d)| (i, d.kind_name()))
+                    .collect();
 
-        for d in directives {
+                if let Err(e) = db.init_wj_directive_statuses(install_id, &type_pairs) {
+                    warn!("Failed to init directive statuses: {}", e);
+                }
+
+                if let Err(e) = db.reset_processing_directives(install_id) {
+                    warn!("Failed to reset processing directives: {}", e);
+                }
+
+                db.get_completed_directive_indices(install_id)
+                    .unwrap_or_default()
+            } else {
+                HashSet::new()
+            };
+
+        // Partition directives by processing phase, tracking original indices
+        let mut phase1: Vec<(usize, &WjDirective)> = Vec::new(); // File production
+        let mut phase2: Vec<(usize, &WjDirective)> = Vec::new(); // Merged patches
+        let mut phase3: Vec<(usize, &WjDirective)> = Vec::new(); // BSA creation
+        let mut ignored: Vec<(usize, &WjDirective)> = Vec::new();
+
+        for (i, d) in directives.iter().enumerate() {
             match d {
                 WjDirective::FromArchive { .. }
                 | WjDirective::PatchedFromArchive { .. }
                 | WjDirective::InlineFile { .. }
                 | WjDirective::RemappedInlineFile { .. }
-                | WjDirective::TransformedTexture { .. } => phase1.push(d),
-                WjDirective::MergedPatch { .. } => phase2.push(d),
-                WjDirective::CreateBSA { .. } => phase3.push(d),
-                WjDirective::IgnoredDirectly { .. } => ignored.push(d),
+                | WjDirective::TransformedTexture { .. } => phase1.push((i, d)),
+                WjDirective::MergedPatch { .. } => phase2.push((i, d)),
+                WjDirective::CreateBSA { .. } => phase3.push((i, d)),
+                WjDirective::IgnoredDirectly { .. } => ignored.push((i, d)),
             }
         }
 
@@ -186,7 +224,7 @@ impl DirectiveProcessor {
         let mut errors: Vec<String> = Vec::new();
 
         // Process ignored directives (no-ops, count them immediately)
-        for d in &ignored {
+        for &(orig_idx, d) in &ignored {
             if let Err(e) = self.process_directive(d) {
                 warnings.lock().unwrap().push(format!(
                     "Ignored directive {} had error: {}",
@@ -195,6 +233,10 @@ impl DirectiveProcessor {
                 ));
             }
             skipped += 1;
+            // Mark ignored directives as completed for resume tracking
+            if let (Some(db), Some(install_id)) = (&self.db, &self.install_id) {
+                let _ = db.mark_directive_completed(install_id, orig_idx);
+            }
             bytes_processed.fetch_add(d.size().max(0) as u64, Ordering::Relaxed);
             let count = processed_counter.fetch_add(1, Ordering::Relaxed) + 1;
             progress_callback(
@@ -224,16 +266,65 @@ impl DirectiveProcessor {
             });
 
         pool.install(|| {
-            phase1.par_iter().for_each(|d| {
-                if let Err(e) = self.process_directive(d) {
-                    let msg = format!("{} -> {}: {}", d.kind_name(), d.to_path(), e);
-                    // Hash mismatches are non-fatal warnings — the file was still written
-                    if matches!(e, WjDirectiveError::HashMismatch { .. }) {
-                        warn!("Directive warning: {}", msg);
-                        phase1_warnings.lock().unwrap().push(msg);
-                    } else {
-                        warn!("Directive error: {}", msg);
-                        phase1_errors.lock().unwrap().push(msg);
+            phase1.par_iter().for_each(|&(orig_idx, d)| {
+                // Skip already-completed directives (resume path)
+                if completed_set.contains(&orig_idx) {
+                    bytes_processed
+                        .fetch_add(d.size().max(0) as u64, Ordering::Relaxed);
+                    let count =
+                        processed_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                    if count.is_multiple_of(5) || count == total {
+                        progress_callback(
+                            count,
+                            total,
+                            "files",
+                            bytes_processed.load(Ordering::Relaxed),
+                            total_bytes,
+                            d.to_path(),
+                        );
+                    }
+                    return;
+                }
+
+                // Mark as processing
+                if let (Some(db), Some(install_id)) =
+                    (&self.db, &self.install_id)
+                {
+                    let _ = db.mark_directive_processing(install_id, orig_idx);
+                }
+
+                let result = self.process_directive(d);
+
+                match &result {
+                    Ok(()) => {
+                        if let (Some(db), Some(install_id)) =
+                            (&self.db, &self.install_id)
+                        {
+                            let _ = db.mark_directive_completed(install_id, orig_idx);
+                        }
+                    }
+                    Err(e) => {
+                        let msg =
+                            format!("{} -> {}: {}", d.kind_name(), d.to_path(), e);
+                        if matches!(e, WjDirectiveError::HashMismatch { .. }) {
+                            warn!("Directive warning: {}", msg);
+                            phase1_warnings.lock().unwrap().push(msg);
+                            // Still mark as completed — file was written
+                            if let (Some(db), Some(install_id)) =
+                                (&self.db, &self.install_id)
+                            {
+                                let _ =
+                                    db.mark_directive_completed(install_id, orig_idx);
+                            }
+                        } else {
+                            warn!("Directive error: {}", msg);
+                            phase1_errors.lock().unwrap().push(msg);
+                            if let (Some(db), Some(install_id)) =
+                                (&self.db, &self.install_id)
+                            {
+                                let _ = db.mark_directive_failed(install_id, orig_idx);
+                            }
+                        }
                     }
                 }
 
@@ -259,13 +350,40 @@ impl DirectiveProcessor {
             .extend(phase1_warnings.into_inner().unwrap());
 
         // Phase 2: Merged patches (sequential — depends on Phase 1 outputs)
-        for d in &phase2 {
+        for &(orig_idx, d) in &phase2 {
+            // Skip already-completed directives (resume path)
+            if completed_set.contains(&orig_idx) {
+                bytes_processed.fetch_add(d.size().max(0) as u64, Ordering::Relaxed);
+                let count = processed_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                progress_callback(
+                    count,
+                    total,
+                    "patches",
+                    bytes_processed.load(Ordering::Relaxed),
+                    total_bytes,
+                    d.to_path(),
+                );
+                continue;
+            }
+
+            // Mark as processing
+            if let (Some(db), Some(install_id)) = (&self.db, &self.install_id) {
+                let _ = db.mark_directive_processing(install_id, orig_idx);
+            }
+
             match self.process_directive(d) {
-                Ok(()) => {}
+                Ok(()) => {
+                    if let (Some(db), Some(install_id)) = (&self.db, &self.install_id) {
+                        let _ = db.mark_directive_completed(install_id, orig_idx);
+                    }
+                }
                 Err(e) => {
                     let msg = format!("{} -> {}: {}", d.kind_name(), d.to_path(), e);
                     warn!("Directive error: {}", msg);
                     errors.push(msg);
+                    if let (Some(db), Some(install_id)) = (&self.db, &self.install_id) {
+                        let _ = db.mark_directive_failed(install_id, orig_idx);
+                    }
                 }
             }
             bytes_processed.fetch_add(d.size().max(0) as u64, Ordering::Relaxed);
@@ -281,13 +399,40 @@ impl DirectiveProcessor {
         }
 
         // Phase 3: BSA creation (sequential — consumes produced files)
-        for d in &phase3 {
+        for &(orig_idx, d) in &phase3 {
+            // Skip already-completed directives (resume path)
+            if completed_set.contains(&orig_idx) {
+                bytes_processed.fetch_add(d.size().max(0) as u64, Ordering::Relaxed);
+                let count = processed_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                progress_callback(
+                    count,
+                    total,
+                    "archives",
+                    bytes_processed.load(Ordering::Relaxed),
+                    total_bytes,
+                    d.to_path(),
+                );
+                continue;
+            }
+
+            // Mark as processing
+            if let (Some(db), Some(install_id)) = (&self.db, &self.install_id) {
+                let _ = db.mark_directive_processing(install_id, orig_idx);
+            }
+
             match self.process_directive(d) {
-                Ok(()) => {}
+                Ok(()) => {
+                    if let (Some(db), Some(install_id)) = (&self.db, &self.install_id) {
+                        let _ = db.mark_directive_completed(install_id, orig_idx);
+                    }
+                }
                 Err(e) => {
                     let msg = format!("{} -> {}: {}", d.kind_name(), d.to_path(), e);
                     warn!("Directive error: {}", msg);
                     errors.push(msg);
+                    if let (Some(db), Some(install_id)) = (&self.db, &self.install_id) {
+                        let _ = db.mark_directive_failed(install_id, orig_idx);
+                    }
                 }
             }
             bytes_processed.fetch_add(d.size().max(0) as u64, Ordering::Relaxed);
@@ -303,6 +448,13 @@ impl DirectiveProcessor {
         }
 
         let processed = processed_counter.load(Ordering::Relaxed);
+
+        // Clean up directive statuses on successful completion
+        if let (Some(db), Some(install_id)) = (&self.db, &self.install_id) {
+            if let Err(e) = db.cleanup_directive_statuses(install_id) {
+                warn!("Failed to cleanup directive statuses: {}", e);
+            }
+        }
 
         Ok(WjDirectiveResult {
             total_processed: processed - skipped - errors.len(),
@@ -324,8 +476,10 @@ impl DirectiveProcessor {
         &self,
         to: &str,
         archive_hash_path: &ArchiveHashPath,
+        size: i64,
     ) -> Result<(), WjDirectiveError> {
-        let source_path = self.resolve_archive_file(archive_hash_path)?;
+        let expected_size = if size > 0 { Some(size as u64) } else { None };
+        let source_path = self.resolve_archive_file(archive_hash_path, expected_size)?;
         let dest_path = self.resolve_output_path(to)?;
         ensure_parent_dir(&dest_path)?;
         std::fs::copy(&source_path, &dest_path).map_err(|e| {
@@ -349,11 +503,13 @@ impl DirectiveProcessor {
         &self,
         to: &str,
         archive_hash_path: &ArchiveHashPath,
-        patch_id: i64,
+        patch_id: &str,
         expected_hash: &WjHash,
     ) -> Result<(), WjDirectiveError> {
-        // Read the source file from the extracted archive
-        let source_path = self.resolve_archive_file(archive_hash_path)?;
+        // Read the source file from the extracted archive.
+        // The directive size is the *output* size after patching, not the source file size,
+        // so we pass None to avoid false-matching a different file by size.
+        let source_path = self.resolve_archive_file(archive_hash_path, None)?;
         let source_data = std::fs::read(&source_path).map_err(|e| {
             WjDirectiveError::Io(std::io::Error::new(
                 e.kind(),
@@ -396,7 +552,7 @@ impl DirectiveProcessor {
     }
 
     /// Read an inline file from the .wabbajack ZIP and write to output.
-    fn process_inline_file(&self, to: &str, source_data_id: i64) -> Result<(), WjDirectiveError> {
+    fn process_inline_file(&self, to: &str, source_data_id: &str) -> Result<(), WjDirectiveError> {
         let entry_name = source_data_id.to_string();
         let data = read_wj_zip_entry(&self.wabbajack_path, &entry_name)?;
 
@@ -413,7 +569,7 @@ impl DirectiveProcessor {
     fn process_remapped_inline_file(
         &self,
         to: &str,
-        source_data_id: i64,
+        source_data_id: &str,
     ) -> Result<(), WjDirectiveError> {
         let entry_name = source_data_id.to_string();
         let data = read_wj_zip_entry(&self.wabbajack_path, &entry_name)?;
@@ -442,7 +598,7 @@ impl DirectiveProcessor {
     fn process_create_bsa(
         &self,
         to: &str,
-        temp_id: i64,
+        temp_id: &str,
         state: Option<&BsaState>,
         file_states: &[BsaFileState],
     ) -> Result<(), WjDirectiveError> {
@@ -521,7 +677,7 @@ impl DirectiveProcessor {
         dest_path: &Path,
         file_states: &[BsaFileState],
         is_dx10: bool,
-        temp_id: i64,
+        temp_id: &str,
     ) -> Result<(), WjDirectiveError> {
         use ba2::fo4::{
             Archive, ArchiveKey, ArchiveOptions, Chunk, DX10Header, File, FileHeader, Format,
@@ -671,7 +827,7 @@ impl DirectiveProcessor {
         dest_path: &Path,
         file_states: &[BsaFileState],
         state: Option<&BsaState>,
-        temp_id: i64,
+        temp_id: &str,
     ) -> Result<(), WjDirectiveError> {
         use ba2::tes4::{
             Archive, ArchiveFlags, ArchiveKey, ArchiveOptions, ArchiveTypes, Directory,
@@ -852,7 +1008,9 @@ impl DirectiveProcessor {
         archive_hash_path: &ArchiveHashPath,
         image_state: Option<&ImageState>,
     ) -> Result<(), WjDirectiveError> {
-        let source_path = self.resolve_archive_file(archive_hash_path)?;
+        // The directive size is the *output* size after transformation, not the source
+        // texture size, so we pass None to avoid false-matching by size.
+        let source_path = self.resolve_archive_file(archive_hash_path, None)?;
         let dest_path = self.resolve_output_path(to)?;
         ensure_parent_dir(&dest_path)?;
 
@@ -1004,7 +1162,7 @@ impl DirectiveProcessor {
     fn process_merged_patch(
         &self,
         to: &str,
-        patch_id: i64,
+        patch_id: &str,
         sources: &[SourcePatch],
         expected_hash: &WjHash,
     ) -> Result<(), WjDirectiveError> {
@@ -1082,7 +1240,16 @@ impl DirectiveProcessor {
     ///
     /// Looks up the archive extraction directory by `base_hash`, then
     /// constructs the full path using the parts (relative path components).
-    fn resolve_archive_file(&self, ahp: &ArchiveHashPath) -> Result<PathBuf, WjDirectiveError> {
+    ///
+    /// Three-tier fallback:
+    /// 1. Exact normalized path match (+ case-insensitive on case-sensitive FS)
+    /// 2. Filename (case-insensitive) + file size match via directory walk
+    /// 3. File size only match (last resort, only if unambiguous)
+    fn resolve_archive_file(
+        &self,
+        ahp: &ArchiveHashPath,
+        expected_size: Option<u64>,
+    ) -> Result<PathBuf, WjDirectiveError> {
         let hash_str = &ahp.base_hash.0;
 
         let archive_dir = self
@@ -1098,20 +1265,34 @@ impl DirectiveProcessor {
 
         let full_path = archive_dir.join(&rel_path);
 
-        if !full_path.exists() {
-            // Try case-insensitive lookup as a fallback
-            if let Some(found) = case_insensitive_find(archive_dir, &rel_path) {
-                return Ok(found);
-            }
-            return Err(WjDirectiveError::FileNotFound(format!(
-                "{}:{} (looked in {})",
-                hash_str,
-                rel_path.display(),
-                archive_dir.display()
-            )));
+        // Tier 1: exact path (or case-insensitive match)
+        if full_path.exists() {
+            return Ok(full_path);
+        }
+        if let Some(found) = case_insensitive_find(archive_dir, &rel_path) {
+            return Ok(found);
         }
 
-        Ok(full_path)
+        // Tier 2 + 3: fallback by filename+size or size-only via directory walk
+        let expected_filename = rel_path
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        if !expected_filename.is_empty() {
+            if let Some(found) =
+                find_file_fallback(archive_dir, &expected_filename, expected_size)
+            {
+                return Ok(found);
+            }
+        }
+
+        Err(WjDirectiveError::FileNotFound(format!(
+            "{}:{} (looked in {})",
+            hash_str,
+            rel_path.display(),
+            archive_dir.display()
+        )))
     }
 
     /// Resolve a Wabbajack `To` path to an absolute output path.
@@ -1384,6 +1565,36 @@ pub fn ensure_parent_dir(path: &Path) -> Result<(), WjDirectiveError> {
     Ok(())
 }
 
+/// Compute a quick hash (xxhash of first + last 64KB) for fast candidate elimination.
+/// This avoids reading the entire file when a cheap mismatch check is sufficient.
+pub fn quick_hash(path: &Path) -> Result<u64, std::io::Error> {
+    use std::io::{Read as _, Seek, SeekFrom};
+    use xxhash_rust::xxh64::xxh64;
+
+    const CHUNK_SIZE: usize = 65536; // 64KB
+
+    let mut file = std::fs::File::open(path)?;
+    let file_size = file.metadata()?.len();
+
+    let mut hasher_data = Vec::with_capacity(CHUNK_SIZE * 2);
+
+    // Read first 64KB
+    let first_chunk = CHUNK_SIZE.min(file_size as usize);
+    let mut buf = vec![0u8; first_chunk];
+    file.read_exact(&mut buf)?;
+    hasher_data.extend_from_slice(&buf);
+
+    // Read last 64KB (if file is large enough that it doesn't overlap)
+    if file_size > CHUNK_SIZE as u64 * 2 {
+        file.seek(SeekFrom::End(-(CHUNK_SIZE as i64)))?;
+        let mut buf2 = vec![0u8; CHUNK_SIZE];
+        file.read_exact(&mut buf2)?;
+        hasher_data.extend_from_slice(&buf2);
+    }
+
+    Ok(xxh64(&hasher_data, 0))
+}
+
 /// Verify that a file's xxHash64 matches the expected WjHash.
 pub fn verify_output_hash(path: &Path, expected: &WjHash) -> Result<(), WjDirectiveError> {
     let actual = xxhash64_file(path).map_err(|e| {
@@ -1442,6 +1653,73 @@ fn case_insensitive_find(base_dir: &Path, rel_path: &Path) -> Option<PathBuf> {
     } else {
         None
     }
+}
+
+/// Walk an archive extract directory to find a file by fallback criteria.
+///
+/// Used when exact path and case-insensitive path lookups both fail.
+/// Tier 2: match by filename (case-insensitive) + file size.
+/// Tier 3: match by file size only (last resort, only if unambiguous).
+fn find_file_fallback(
+    archive_dir: &Path,
+    expected_filename: &str,
+    expected_size: Option<u64>,
+) -> Option<PathBuf> {
+    use walkdir::WalkDir;
+
+    let expected_lower = expected_filename.to_lowercase();
+    let mut size_and_name_matches: Vec<PathBuf> = Vec::new();
+    let mut size_only_matches: Vec<PathBuf> = Vec::new();
+
+    for entry in WalkDir::new(archive_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let entry_name = entry.file_name().to_string_lossy().to_lowercase();
+        let entry_size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+
+        let name_matches = entry_name == expected_lower;
+        let size_matches = expected_size.map(|s| s == entry_size).unwrap_or(false);
+
+        if name_matches && size_matches {
+            size_and_name_matches.push(entry.path().to_path_buf());
+        } else if size_matches && expected_size.is_some() {
+            size_only_matches.push(entry.path().to_path_buf());
+        }
+    }
+
+    // Tier 2: size + filename
+    if !size_and_name_matches.is_empty() {
+        if size_and_name_matches.len() > 1 {
+            log::warn!(
+                "Fallback: {} files match name '{}' + size, using first: {}",
+                size_and_name_matches.len(),
+                expected_filename,
+                size_and_name_matches[0].display()
+            );
+        } else {
+            log::warn!(
+                "Fallback: exact path failed, matched by name+size: {}",
+                size_and_name_matches[0].display()
+            );
+        }
+        return Some(size_and_name_matches.into_iter().next().unwrap());
+    }
+
+    // Tier 3: size-only match DISABLED — too risky for silent file substitution.
+    // Many files share common sizes (4096, 8192, etc.) and substituting the wrong
+    // file can corrupt mod installations in ways that are very hard to debug.
+    if !size_only_matches.is_empty() {
+        log::debug!(
+            "Fallback: {} files match size only — not using (too risky)",
+            size_only_matches.len()
+        );
+    }
+
+    None
 }
 
 /// Parse a legacy pipe-delimited ArchiveHashPath string.
@@ -1590,7 +1868,7 @@ mod tests {
         );
 
         processor
-            .process_inline_file("config/settings.ini", 42)
+            .process_inline_file("config/settings.ini", "42")
             .unwrap();
 
         let written = std::fs::read_to_string(output_dir.join("config/settings.ini")).unwrap();
@@ -1625,7 +1903,7 @@ mod tests {
         );
 
         processor
-            .process_remapped_inline_file("config/paths.ini", 99)
+            .process_remapped_inline_file("config/paths.ini", "99")
             .unwrap();
 
         let written = std::fs::read_to_string(output_dir.join("config/paths.ini")).unwrap();
@@ -1664,7 +1942,7 @@ mod tests {
         };
 
         processor
-            .process_from_archive("mods/ArmorMod/textures/armor/cuirass.dds", &ahp)
+            .process_from_archive("mods/ArmorMod/textures/armor/cuirass.dds", &ahp, 16)
             .unwrap();
 
         let written =
@@ -1774,7 +2052,36 @@ mod tests {
         );
 
         // Should succeed with no files (early return)
-        let result = processor.process_create_bsa("test.bsa", 1, None, &[]);
+        let result = processor.process_create_bsa("test.bsa", "1", None, &[]);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_quick_hash_small_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("small.bin");
+        std::fs::write(&path, b"hello world").unwrap();
+        let h = quick_hash(&path).unwrap();
+        // Should produce a deterministic hash
+        let h2 = quick_hash(&path).unwrap();
+        assert_eq!(h, h2);
+    }
+
+    #[test]
+    fn test_quick_hash_large_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("large.bin");
+        // Create a file larger than 128KB so both first and last chunks are read
+        let data = vec![42u8; 200_000];
+        std::fs::write(&path, &data).unwrap();
+        let h = quick_hash(&path).unwrap();
+        assert_ne!(h, 0);
+
+        // A different large file should produce a different hash
+        let path2 = dir.path().join("large2.bin");
+        let data2 = vec![99u8; 200_000];
+        std::fs::write(&path2, &data2).unwrap();
+        let h2 = quick_hash(&path2).unwrap();
+        assert_ne!(h, h2);
     }
 }

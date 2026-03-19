@@ -11,8 +11,9 @@ use crate::wabbajack_types::*;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::StreamExt;
 use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
@@ -23,9 +24,13 @@ use tokio::sync::Semaphore;
 const NEXUS_API_BASE: &str = "https://api.nexusmods.com/v1";
 
 /// Maximum retry attempts for transient download failures.
-const MAX_DOWNLOAD_RETRIES: u32 = 3;
+const MAX_DOWNLOAD_RETRIES: u32 = 8;
 /// Base delay in milliseconds for exponential backoff between retries.
 const RETRY_BASE_DELAY_MS: u64 = 2000;
+/// Timeout in seconds before a download is considered stalled (no progress).
+const STALL_TIMEOUT_SECS: u64 = 180;
+/// Maximum backoff delay between retries (seconds).
+const MAX_BACKOFF_SECS: u64 = 60;
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -47,6 +52,8 @@ pub enum WjDownloadError {
     Other(String),
     #[error("Download cancelled")]
     Cancelled,
+    #[error("Download stalled after {secs}s with no progress")]
+    Stalled { secs: u64 },
 }
 
 // ---------------------------------------------------------------------------
@@ -88,9 +95,12 @@ pub enum WjProgressEvent {
 // WjDownloader
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 pub struct WjDownloader {
     http_client: reqwest::Client,
     nexus_api_key: Option<String>,
+    /// OAuth Bearer token for NexusMods API (alternative to API key).
+    nexus_oauth_token: Option<String>,
     is_premium: bool,
     download_dir: PathBuf,
     cancel_token: Option<Arc<AtomicBool>>,
@@ -99,7 +109,12 @@ pub struct WjDownloader {
 impl WjDownloader {
     /// Create a new downloader. If `nexus_api_key` is supplied the downloader
     /// can make NexusMods API calls; `is_premium` gates automated downloads.
-    pub fn new(nexus_api_key: Option<String>, is_premium: bool, download_dir: PathBuf) -> Self {
+    pub fn new(
+        nexus_api_key: Option<String>,
+        nexus_oauth_token: Option<String>,
+        is_premium: bool,
+        download_dir: PathBuf,
+    ) -> Self {
         let ua = format!("Corkscrew/{}", env!("CARGO_PKG_VERSION"));
         let mut default_headers = HeaderMap::new();
         default_headers.insert(USER_AGENT, HeaderValue::from_str(&ua).unwrap());
@@ -115,6 +130,7 @@ impl WjDownloader {
         Self {
             http_client,
             nexus_api_key,
+            nexus_oauth_token,
             is_premium,
             download_dir,
             cancel_token: None,
@@ -151,21 +167,29 @@ impl WjDownloader {
             )));
         }
 
-        let api_key = self.nexus_api_key.as_deref().ok_or_else(|| {
-            WjDownloadError::Other("NexusMods API key required for premium downloads".into())
-        })?;
-
         let domain = wj_game_to_nexus_domain(game);
         let url = format!(
             "{NEXUS_API_BASE}/games/{domain}/mods/{mod_id}/files/{file_id}/download_link.json"
         );
 
-        let resp = self
-            .http_client
-            .get(&url)
-            .header("apikey", api_key)
-            .send()
-            .await?;
+        // Use API key if available, otherwise OAuth Bearer token
+        let resp = if let Some(api_key) = self.nexus_api_key.as_deref() {
+            self.http_client
+                .get(&url)
+                .header("apikey", api_key)
+                .send()
+                .await?
+        } else if let Some(token) = self.nexus_oauth_token.as_deref() {
+            self.http_client
+                .get(&url)
+                .header("Authorization", format!("Bearer {}", token))
+                .send()
+                .await?
+        } else {
+            return Err(WjDownloadError::Other(
+                "NexusMods authentication required for downloads. Sign in via Settings.".into(),
+            ));
+        };
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
@@ -401,15 +425,46 @@ impl WjDownloader {
             .await
     }
 
-    /// Download from Wabbajack CDN (direct HTTP).
+    /// Download from Wabbajack CDN (direct HTTP), using concurrent parts when
+    /// the server supports Range requests and the file is large enough.
     async fn download_wabbajack_cdn(
         &self,
         app: &AppHandle,
         archive_name: &str,
         url: &str,
     ) -> Result<PathBuf, WjDownloadError> {
-        self.stream_download(app, archive_name, url, &HeaderMap::new())
-            .await
+        let url = remap_cdn_url(url);
+
+        // Probe the server with a HEAD request to check size + Range support.
+        let head_resp = self.http_client.head(&url).send().await?;
+        let supports_range = head_resp
+            .headers()
+            .get("accept-ranges")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.contains("bytes"));
+        let total_size = head_resp
+            .headers()
+            .get(reqwest::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+
+        const MIN_CONCURRENT_SIZE: u64 = 2 * 1024 * 1024; // 2MB threshold
+
+        if supports_range && total_size >= MIN_CONCURRENT_SIZE {
+            let dest = self.download_dir.join(sanitize_filename(archive_name));
+            let cancel = self
+                .cancel_token
+                .clone()
+                .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+
+            download_cdn_concurrent(&self.http_client, &url, &dest, total_size, &cancel).await?;
+            Ok(dest)
+        } else {
+            // Fall back to normal streaming download.
+            self.stream_download(app, archive_name, &url, &HeaderMap::new())
+                .await
+        }
     }
 
     /// Download from ModDB (direct HTTP with redirect following).
@@ -498,7 +553,10 @@ impl WjDownloader {
                     {
                         break 'retry Err(last_err.unwrap_or(WjDownloadError::Cancelled));
                     }
-                    let delay = RETRY_BASE_DELAY_MS * (1 << (attempt - 1));
+                    let delay = std::cmp::min(
+                        RETRY_BASE_DELAY_MS * (1u64 << (attempt - 1)),
+                        MAX_BACKOFF_SECS * 1000,
+                    );
                     log::warn!(
                         "Retry {}/{} for '{}' after {}ms",
                         attempt,
@@ -506,7 +564,7 @@ impl WjDownloader {
                         name,
                         delay,
                     );
-                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
                 }
 
                 let try_result = match &archive.state {
@@ -623,7 +681,7 @@ impl WjDownloader {
     /// the archive is skipped. The checkpoint directory is removed on
     /// successful completion of all archives.
     pub async fn download_all_archives(
-        &mut self,
+        &self,
         app: &AppHandle,
         db: &Arc<ModDatabase>,
         install_id: i64,
@@ -631,10 +689,6 @@ impl WjDownloader {
         concurrency: usize,
         cancel_token: Arc<AtomicBool>,
     ) -> Result<HashMap<String, PathBuf>, WjDownloadError> {
-        // Wire up the cancel token so streaming downloads can be interrupted
-        // mid-transfer, not just between archives.
-        self.set_cancel_token(cancel_token.clone());
-
         let total = archives.len();
         let results: Arc<tokio::sync::Mutex<HashMap<String, PathBuf>>> =
             Arc::new(tokio::sync::Mutex::new(HashMap::new()));
@@ -643,15 +697,18 @@ impl WjDownloader {
         let checkpoint_dir = self.download_dir.join(".wj_checkpoint");
         tokio::fs::create_dir_all(&checkpoint_dir).await?;
 
-        // Because `self` is not `'static` we cannot move it into `tokio::spawn`.
-        // Instead, process downloads sequentially with semaphore-gated concurrency.
-        let sem = Arc::new(Semaphore::new(concurrency));
+        let all_succeeded = Arc::new(AtomicBool::new(true));
 
-        let mut all_succeeded = true;
+        // -----------------------------------------------------------------
+        // Pre-filter pass: check checkpoints and cache sequentially (fast,
+        // mostly filesystem metadata lookups). Only archives that actually
+        // need downloading are pushed into `to_download`.
+        // -----------------------------------------------------------------
+        let mut to_download: Vec<(usize, WjTypedArchive)> = Vec::new();
 
         for (index, archive) in archives.iter().enumerate() {
             if cancel_token.load(Ordering::Relaxed) {
-                all_succeeded = false;
+                all_succeeded.store(false, Ordering::Relaxed);
                 break;
             }
 
@@ -659,15 +716,11 @@ impl WjDownloader {
             let archive_name = archive.name.clone();
 
             // ----- Resume checkpoint check -----
-            // If a checkpoint file exists for this archive hash, the archive
-            // was already successfully downloaded and verified in a prior run.
             let checkpoint_file =
                 checkpoint_dir.join(format!("{}.done", sanitize_filename(&hash_str)));
             if checkpoint_file.exists() {
-                // The downloaded file should still be on disk.
                 let dest = self.download_dir.join(sanitize_filename(&archive_name));
                 if dest.exists() {
-                    // Re-verify hash to guard against truncated/corrupt files from prior crash.
                     if verify_xxhash64(&dest, &archive.hash).is_ok() {
                         let _ = app.emit(
                             "wabbajack-install-progress",
@@ -688,15 +741,12 @@ impl WjDownloader {
                         results.lock().await.insert(hash_str, dest);
                         continue;
                     }
-                    // Hash mismatch — archive was likely truncated. Re-download.
                     log::warn!(
                         "Checkpoint archive failed hash check, re-downloading: {}",
                         archive_name
                     );
                     let _ = tokio::fs::remove_file(&dest).await;
                 }
-                // Checkpoint exists but file is missing or corrupt — remove stale
-                // checkpoint and re-download.
                 let _ = tokio::fs::remove_file(&checkpoint_file).await;
             }
 
@@ -721,7 +771,6 @@ impl WjDownloader {
                             Some(&cached_path),
                             None,
                         );
-                        // Write checkpoint so future resumes are fast too.
                         let _ = write_checkpoint(&checkpoint_file).await;
                         results.lock().await.insert(hash_str, cached);
                         continue;
@@ -730,115 +779,148 @@ impl WjDownloader {
                             "Cached archive failed hash check, re-downloading: {}",
                             archive_name
                         );
-                        // Fall through to normal download.
                     }
                 }
             }
 
-            let permit = sem.clone().acquire_owned().await.expect("semaphore closed");
-
-            let _ = app.emit(
-                "wabbajack-install-progress",
-                WjProgressEvent::DownloadStarted {
-                    archive_name: archive_name.clone(),
-                    index,
-                    total,
-                },
-            );
-
-            match self.download_archive(app, archive, install_id, db).await {
-                Ok(path) => {
-                    // Verify xxHash64.
-                    match verify_xxhash64(&path, &archive.hash) {
-                        Ok(()) => {
-                            let _ = app.emit(
-                                "wabbajack-install-progress",
-                                WjProgressEvent::DownloadCompleted {
-                                    archive_name: archive_name.clone(),
-                                },
-                            );
-                            let _ = db.upsert_wj_archive_status(
-                                install_id,
-                                &hash_str,
-                                &archive_name,
-                                archive.state.source_type_name(),
-                                "verified",
-                                Some(&path.to_string_lossy()),
-                                None,
-                            );
-                            // Write resume checkpoint after successful verification.
-                            let _ = write_checkpoint(&checkpoint_file).await;
-                            results.lock().await.insert(hash_str, path);
-                        }
-                        Err(e) => {
-                            all_succeeded = false;
-                            // Remove the corrupted/mismatched file so retries
-                            // don't keep reusing a bad download.
-                            let _ = tokio::fs::remove_file(&path).await;
-                            let _ = app.emit(
-                                "wabbajack-install-progress",
-                                WjProgressEvent::DownloadFailed {
-                                    archive_name: archive_name.clone(),
-                                    error: e.to_string(),
-                                },
-                            );
-                            let _ = db.upsert_wj_archive_status(
-                                install_id,
-                                &hash_str,
-                                &archive_name,
-                                archive.state.source_type_name(),
-                                "failed",
-                                None,
-                                Some(&e.to_string()),
-                            );
-                        }
-                    }
-                }
-                Err(WjDownloadError::Cancelled) => {
-                    all_succeeded = false;
-                    let _ = app.emit(
-                        "wabbajack-install-progress",
-                        WjProgressEvent::DownloadFailed {
-                            archive_name: archive_name.clone(),
-                            error: "Download cancelled".into(),
-                        },
-                    );
-                    break;
-                }
-                Err(WjDownloadError::UserActionRequired(msg)) => {
-                    all_succeeded = false;
-                    // Extract URL from the message (best-effort).
-                    let url_part = msg
-                        .split_whitespace()
-                        .find(|w| w.starts_with("http"))
-                        .unwrap_or("")
-                        .to_string();
-                    let _ = app.emit(
-                        "wabbajack-install-progress",
-                        WjProgressEvent::UserActionRequired {
-                            archive_name: archive_name.clone(),
-                            url: url_part,
-                            prompt: msg.clone(),
-                        },
-                    );
-                }
-                Err(e) => {
-                    all_succeeded = false;
-                    let _ = app.emit(
-                        "wabbajack-install-progress",
-                        WjProgressEvent::DownloadFailed {
-                            archive_name: archive_name.clone(),
-                            error: e.to_string(),
-                        },
-                    );
-                }
-            }
-
-            drop(permit);
+            to_download.push((index, archive.clone()));
         }
 
+        // -----------------------------------------------------------------
+        // Concurrent download phase: run actual HTTP downloads in parallel
+        // using buffer_unordered for true concurrency.
+        // -----------------------------------------------------------------
+        let sem = Arc::new(Semaphore::new(concurrency));
+
+        let download_futures = to_download.into_iter().map(|(index, archive)| {
+            let mut downloader = self.clone();
+            downloader.cancel_token = Some(cancel_token.clone());
+            let app = app.clone();
+            let db = db.clone();
+            let cancel = cancel_token.clone();
+            let sem = sem.clone();
+            let results = results.clone();
+            let checkpoint_dir = checkpoint_dir.clone();
+            let all_succeeded = all_succeeded.clone();
+
+            async move {
+                let _permit = sem.acquire_owned().await.expect("semaphore closed");
+
+                if cancel.load(Ordering::Relaxed) {
+                    all_succeeded.store(false, Ordering::Relaxed);
+                    return;
+                }
+
+                let hash_str = archive.hash.0.clone();
+                let archive_name = archive.name.clone();
+                let checkpoint_file =
+                    checkpoint_dir.join(format!("{}.done", sanitize_filename(&hash_str)));
+
+                let _ = app.emit(
+                    "wabbajack-install-progress",
+                    WjProgressEvent::DownloadStarted {
+                        archive_name: archive_name.clone(),
+                        index,
+                        total,
+                    },
+                );
+
+                match downloader
+                    .download_archive(&app, &archive, install_id, &db)
+                    .await
+                {
+                    Ok(path) => {
+                        match verify_xxhash64(&path, &archive.hash) {
+                            Ok(()) => {
+                                let _ = app.emit(
+                                    "wabbajack-install-progress",
+                                    WjProgressEvent::DownloadCompleted {
+                                        archive_name: archive_name.clone(),
+                                    },
+                                );
+                                let _ = db.upsert_wj_archive_status(
+                                    install_id,
+                                    &hash_str,
+                                    &archive_name,
+                                    archive.state.source_type_name(),
+                                    "verified",
+                                    Some(&path.to_string_lossy()),
+                                    None,
+                                );
+                                let _ = write_checkpoint(&checkpoint_file).await;
+                                results.lock().await.insert(hash_str, path);
+                            }
+                            Err(e) => {
+                                all_succeeded.store(false, Ordering::Relaxed);
+                                let _ = tokio::fs::remove_file(&path).await;
+                                let _ = app.emit(
+                                    "wabbajack-install-progress",
+                                    WjProgressEvent::DownloadFailed {
+                                        archive_name: archive_name.clone(),
+                                        error: e.to_string(),
+                                    },
+                                );
+                                let _ = db.upsert_wj_archive_status(
+                                    install_id,
+                                    &hash_str,
+                                    &archive_name,
+                                    archive.state.source_type_name(),
+                                    "failed",
+                                    None,
+                                    Some(&e.to_string()),
+                                );
+                            }
+                        }
+                    }
+                    Err(WjDownloadError::Cancelled) => {
+                        all_succeeded.store(false, Ordering::Relaxed);
+                        let _ = app.emit(
+                            "wabbajack-install-progress",
+                            WjProgressEvent::DownloadFailed {
+                                archive_name: archive_name.clone(),
+                                error: "Download cancelled".into(),
+                            },
+                        );
+                        // Signal cancellation so other tasks stop too.
+                        cancel.store(true, Ordering::Relaxed);
+                    }
+                    Err(WjDownloadError::UserActionRequired(msg)) => {
+                        all_succeeded.store(false, Ordering::Relaxed);
+                        let url_part = msg
+                            .split_whitespace()
+                            .find(|w| w.starts_with("http"))
+                            .unwrap_or("")
+                            .to_string();
+                        let _ = app.emit(
+                            "wabbajack-install-progress",
+                            WjProgressEvent::UserActionRequired {
+                                archive_name: archive_name.clone(),
+                                url: url_part,
+                                prompt: msg.clone(),
+                            },
+                        );
+                    }
+                    Err(e) => {
+                        all_succeeded.store(false, Ordering::Relaxed);
+                        let _ = app.emit(
+                            "wabbajack-install-progress",
+                            WjProgressEvent::DownloadFailed {
+                                archive_name: archive_name.clone(),
+                                error: e.to_string(),
+                            },
+                        );
+                    }
+                }
+            }
+        });
+
+        futures::stream::iter(download_futures)
+            .buffer_unordered(concurrency)
+            .collect::<Vec<()>>()
+            .await;
+
         // Clean up checkpoint directory on successful full completion.
-        if all_succeeded {
+        if all_succeeded.load(Ordering::Relaxed) {
             let _ = tokio::fs::remove_dir_all(&checkpoint_dir).await;
         }
 
@@ -858,6 +940,14 @@ impl WjDownloader {
     // -----------------------------------------------------------------------
 
     /// Stream an HTTP response body to a file with progress events.
+    ///
+    /// Supports:
+    /// - **HTTP Range resume**: if a `.partial` file exists from a previous
+    ///   failed attempt, sends a `Range` header to resume from where it left
+    ///   off. Falls back to a fresh download if the server doesn't support it.
+    /// - **Stall detection**: uses `tokio::select!` to race the byte stream
+    ///   against a stall timer. If no bytes arrive for `STALL_TIMEOUT_SECS`,
+    ///   the download is aborted so the retry loop can kick in.
     async fn stream_download(
         &self,
         app: &AppHandle,
@@ -868,67 +958,183 @@ impl WjDownloader {
         let dest = self.download_dir.join(sanitize_filename(archive_name));
         let partial = dest.with_extension("partial");
 
-        let resp = self
-            .http_client
-            .get(url)
-            .headers(extra_headers.clone())
-            .send()
-            .await?;
+        // --- HTTP Range resume: check for a partial file from a prior attempt ---
+        let partial_size = if partial.exists() {
+            tokio::fs::metadata(&partial)
+                .await
+                .map(|m| m.len())
+                .unwrap_or(0)
+        } else {
+            0
+        };
 
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(WjDownloadError::Other(format!("HTTP {status}: {body}")));
+        let mut request = self.http_client.get(url).headers(extra_headers.clone());
+        if partial_size > 0 {
+            log::info!(
+                "Resuming download of '{}' from byte {}",
+                archive_name,
+                partial_size
+            );
+            request = request.header("Range", format!("bytes={}-", partial_size));
         }
 
-        let total_bytes = resp.content_length().unwrap_or(0);
+        let resp = request.send().await?;
+        let status = resp.status();
+
+        // Determine whether we're resuming or starting fresh.
+        let (mut file, offset) = if status == reqwest::StatusCode::PARTIAL_CONTENT
+            && partial_size > 0
+        {
+            // Server supports Range -- append to the existing partial file.
+            log::info!(
+                "Server returned 206 Partial Content, resuming from byte {}",
+                partial_size
+            );
+            let file = tokio::fs::OpenOptions::new()
+                .append(true)
+                .open(&partial)
+                .await?;
+            (file, partial_size)
+        } else if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+            // Range is invalid (e.g. file changed on server) -- start over.
+            log::warn!(
+                "Server returned 416 Range Not Satisfiable for '{}', restarting download",
+                archive_name
+            );
+            let _ = tokio::fs::remove_file(&partial).await;
+            let file = tokio::fs::File::create(&partial).await?;
+            (file, 0)
+        } else if status.is_success() {
+            // Either a fresh 200 OK (no Range support) or first download.
+            if partial_size > 0 {
+                log::info!(
+                    "Server does not support Range resume for '{}' (got {}), restarting",
+                    archive_name,
+                    status.as_u16()
+                );
+            }
+            let _ = tokio::fs::remove_file(&partial).await;
+            let file = tokio::fs::File::create(&partial).await?;
+            (file, 0)
+        } else {
+            let code = status.as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(WjDownloadError::Other(format!("HTTP {code}: {body}")));
+        };
+
+        // Content-Length from the response reflects remaining bytes (for 206)
+        // or total bytes (for 200).
+        let remaining_bytes = resp.content_length().unwrap_or(0);
+        let total_bytes = offset + remaining_bytes;
         let mut stream = resp.bytes_stream();
-        let mut file = tokio::fs::File::create(&partial).await?;
-        let mut downloaded: u64 = 0;
+        let mut downloaded: u64 = offset;
         // Throttle progress events to avoid flooding.
         let mut last_progress_emit: u64 = 0;
 
+        // --- Stall detection via tokio::select! + sleep reset ---
+        let last_progress_time = Arc::new(AtomicU64::new(now_epoch()));
+
         use tokio::io::AsyncWriteExt;
 
-        while let Some(chunk_result) = stream.next().await {
-            // Check cancel token before processing each chunk.
-            if let Some(ref token) = self.cancel_token {
-                if token.load(Ordering::Relaxed) {
-                    drop(file);
-                    let _ = tokio::fs::remove_file(&partial).await;
-                    return Err(WjDownloadError::Cancelled);
+        let stream_result: Result<(), WjDownloadError> = async {
+            let stall_sleep = tokio::time::sleep(Duration::from_secs(STALL_TIMEOUT_SECS));
+            tokio::pin!(stall_sleep);
+
+            loop {
+                tokio::select! {
+                    chunk_opt = stream.next() => {
+                        match chunk_opt {
+                            Some(Ok(chunk)) => {
+                                // Check cancel token.
+                                if let Some(ref token) = self.cancel_token {
+                                    if token.load(Ordering::Relaxed) {
+                                        return Err(WjDownloadError::Cancelled);
+                                    }
+                                }
+
+                                file.write_all(&chunk).await?;
+                                downloaded += chunk.len() as u64;
+
+                                // Reset stall deadline.
+                                last_progress_time.store(now_epoch(), Ordering::Relaxed);
+                                stall_sleep.as_mut().reset(
+                                    tokio::time::Instant::now()
+                                        + Duration::from_secs(STALL_TIMEOUT_SECS),
+                                );
+
+                                // Emit progress at most every 256 KB.
+                                if downloaded - last_progress_emit > 256 * 1024
+                                    || downloaded == total_bytes
+                                {
+                                    let _ = app.emit(
+                                        "wabbajack-install-progress",
+                                        WjProgressEvent::DownloadProgress {
+                                            archive_name: archive_name.to_string(),
+                                            bytes_downloaded: downloaded,
+                                            total_bytes,
+                                        },
+                                    );
+                                    last_progress_emit = downloaded;
+                                }
+                            }
+                            Some(Err(e)) => return Err(WjDownloadError::Http(e)),
+                            None => return Ok(()), // stream finished
+                        }
+                    }
+                    _ = &mut stall_sleep => {
+                        let elapsed = now_epoch().saturating_sub(
+                            last_progress_time.load(Ordering::Relaxed),
+                        );
+                        log::warn!(
+                            "Download stalled for {}s, aborting for retry",
+                            elapsed
+                        );
+                        return Err(WjDownloadError::Stalled { secs: elapsed });
+                    }
                 }
             }
+        }
+        .await;
 
-            let chunk = chunk_result?;
-            file.write_all(&chunk).await?;
-            downloaded += chunk.len() as u64;
-
-            // Emit progress at most every 256 KB.
-            if downloaded - last_progress_emit > 256 * 1024 || downloaded == total_bytes {
-                let _ = app.emit(
-                    "wabbajack-install-progress",
-                    WjProgressEvent::DownloadProgress {
-                        archive_name: archive_name.to_string(),
-                        bytes_downloaded: downloaded,
-                        total_bytes,
-                    },
+        match stream_result {
+            Ok(()) => {
+                file.flush().await?;
+                drop(file);
+                // Rename .partial -> final name.
+                tokio::fs::rename(&partial, &dest).await?;
+                Ok(dest)
+            }
+            Err(WjDownloadError::Cancelled) => {
+                drop(file);
+                // On cancel, remove partial (user explicitly cancelled).
+                let _ = tokio::fs::remove_file(&partial).await;
+                Err(WjDownloadError::Cancelled)
+            }
+            Err(WjDownloadError::Stalled { secs }) => {
+                // Keep partial file so Range resume can pick up where we left off.
+                drop(file);
+                log::warn!(
+                    "Download of '{}' stalled after {}s at {} bytes, partial file kept for resume",
+                    archive_name,
+                    secs,
+                    downloaded
                 );
-                last_progress_emit = downloaded;
+                Err(WjDownloadError::Stalled { secs })
+            }
+            Err(e) => {
+                // Keep partial file for resume on transient errors.
+                drop(file);
+                Err(e)
             }
         }
-
-        file.flush().await?;
-        drop(file);
-
-        // Rename .partial -> final name.
-        tokio::fs::rename(&partial, &dest).await?;
-        Ok(dest)
     }
 
     /// Stream an already-obtained HTTP response body to a file with progress
     /// events. Used when we already hold a `reqwest::Response` (e.g. the
     /// Google Drive fast path where the first response is the actual file).
+    ///
+    /// Includes stall detection but no Range resume since we already have the
+    /// response in hand.
     async fn stream_download_from_response(
         &self,
         app: &AppHandle,
@@ -944,40 +1150,95 @@ impl WjDownloader {
         let mut downloaded: u64 = 0;
         let mut last_progress_emit: u64 = 0;
 
+        // --- Stall detection via tokio::select! + sleep reset ---
+        let last_progress_time = Arc::new(AtomicU64::new(now_epoch()));
+
         use tokio::io::AsyncWriteExt;
 
-        while let Some(chunk_result) = stream.next().await {
-            // Check cancel token before processing each chunk.
-            if let Some(ref token) = self.cancel_token {
-                if token.load(Ordering::Relaxed) {
-                    drop(file);
-                    let _ = tokio::fs::remove_file(&partial).await;
-                    return Err(WjDownloadError::Cancelled);
+        let stream_result: Result<(), WjDownloadError> = async {
+            let stall_sleep = tokio::time::sleep(Duration::from_secs(STALL_TIMEOUT_SECS));
+            tokio::pin!(stall_sleep);
+
+            loop {
+                tokio::select! {
+                    chunk_opt = stream.next() => {
+                        match chunk_opt {
+                            Some(Ok(chunk)) => {
+                                if let Some(ref token) = self.cancel_token {
+                                    if token.load(Ordering::Relaxed) {
+                                        return Err(WjDownloadError::Cancelled);
+                                    }
+                                }
+
+                                file.write_all(&chunk).await?;
+                                downloaded += chunk.len() as u64;
+
+                                last_progress_time.store(now_epoch(), Ordering::Relaxed);
+                                stall_sleep.as_mut().reset(
+                                    tokio::time::Instant::now()
+                                        + Duration::from_secs(STALL_TIMEOUT_SECS),
+                                );
+
+                                if downloaded - last_progress_emit > 256 * 1024
+                                    || downloaded == total_bytes
+                                {
+                                    let _ = app.emit(
+                                        "wabbajack-install-progress",
+                                        WjProgressEvent::DownloadProgress {
+                                            archive_name: archive_name.to_string(),
+                                            bytes_downloaded: downloaded,
+                                            total_bytes,
+                                        },
+                                    );
+                                    last_progress_emit = downloaded;
+                                }
+                            }
+                            Some(Err(e)) => return Err(WjDownloadError::Http(e)),
+                            None => return Ok(()),
+                        }
+                    }
+                    _ = &mut stall_sleep => {
+                        let elapsed = now_epoch().saturating_sub(
+                            last_progress_time.load(Ordering::Relaxed),
+                        );
+                        log::warn!(
+                            "Download stalled for {}s, aborting for retry",
+                            elapsed
+                        );
+                        return Err(WjDownloadError::Stalled { secs: elapsed });
+                    }
                 }
             }
+        }
+        .await;
 
-            let chunk = chunk_result?;
-            file.write_all(&chunk).await?;
-            downloaded += chunk.len() as u64;
-
-            if downloaded - last_progress_emit > 256 * 1024 || downloaded == total_bytes {
-                let _ = app.emit(
-                    "wabbajack-install-progress",
-                    WjProgressEvent::DownloadProgress {
-                        archive_name: archive_name.to_string(),
-                        bytes_downloaded: downloaded,
-                        total_bytes,
-                    },
+        match stream_result {
+            Ok(()) => {
+                file.flush().await?;
+                drop(file);
+                tokio::fs::rename(&partial, &dest).await?;
+                Ok(dest)
+            }
+            Err(WjDownloadError::Cancelled) => {
+                drop(file);
+                let _ = tokio::fs::remove_file(&partial).await;
+                Err(WjDownloadError::Cancelled)
+            }
+            Err(WjDownloadError::Stalled { secs }) => {
+                drop(file);
+                log::warn!(
+                    "Download of '{}' stalled after {}s at {} bytes",
+                    archive_name,
+                    secs,
+                    downloaded
                 );
-                last_progress_emit = downloaded;
+                Err(WjDownloadError::Stalled { secs })
+            }
+            Err(e) => {
+                drop(file);
+                Err(e)
             }
         }
-
-        file.flush().await?;
-        drop(file);
-
-        tokio::fs::rename(&partial, &dest).await?;
-        Ok(dest)
     }
 }
 
@@ -1030,8 +1291,17 @@ fn is_transient_error(e: &WjDownloadError) -> bool {
                 || msg.contains("connection")
                 || msg.contains("network")
         }
+        WjDownloadError::Stalled { .. } => true,
         _ => false,
     }
+}
+
+/// Returns the current epoch time in seconds.
+fn now_epoch() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 // ---------------------------------------------------------------------------
@@ -1122,6 +1392,117 @@ fn sanitize_filename(name: &str) -> String {
     } else {
         cleaned
     }
+}
+
+// ---------------------------------------------------------------------------
+// CDN concurrent download
+// ---------------------------------------------------------------------------
+
+/// Download a file from WJ CDN using concurrent parts.
+async fn download_cdn_concurrent(
+    client: &reqwest::Client,
+    url: &str,
+    dest_path: &Path,
+    total_size: u64,
+    cancel_token: &Arc<AtomicBool>,
+) -> Result<(), WjDownloadError> {
+    const MAX_CONCURRENT_PARTS: usize = 16;
+    const MIN_PART_SIZE: u64 = 1024 * 1024; // 1MB minimum per part
+
+    // Pre-allocate the file
+    let file = std::fs::File::create(dest_path).map_err(WjDownloadError::Io)?;
+    file.set_len(total_size).map_err(WjDownloadError::Io)?;
+    drop(file);
+
+    // Calculate part ranges
+    let num_parts = if total_size / MIN_PART_SIZE > MAX_CONCURRENT_PARTS as u64 {
+        MAX_CONCURRENT_PARTS
+    } else {
+        (total_size / MIN_PART_SIZE).max(1) as usize
+    };
+    let part_size = total_size / num_parts as u64;
+
+    let mut ranges: Vec<(u64, u64)> = Vec::new();
+    for i in 0..num_parts {
+        let start = i as u64 * part_size;
+        let end = if i == num_parts - 1 {
+            total_size - 1
+        } else {
+            (i as u64 + 1) * part_size - 1
+        };
+        ranges.push((start, end));
+    }
+
+    log::info!(
+        "CDN concurrent download: {} parts, {:.1}MB each",
+        num_parts,
+        part_size as f64 / 1_048_576.0
+    );
+
+    // Download parts concurrently, streaming each to a temp file to avoid
+    // holding entire parts in memory (a 2GB file / 16 parts = 128MB per part).
+    let dest = dest_path.to_path_buf();
+    let results: Vec<Result<(), WjDownloadError>> = futures::stream::iter(ranges)
+        .map(|(start, end)| {
+            let client = client.clone();
+            let url = url.to_string();
+            let dest = dest.clone();
+            let cancel = cancel_token.clone();
+
+            async move {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err(WjDownloadError::Cancelled);
+                }
+
+                let response = client
+                    .get(&url)
+                    .header("Range", format!("bytes={}-{}", start, end))
+                    .send()
+                    .await?;
+
+                // Stream response bytes to file at correct offset via spawn_blocking
+                // to avoid blocking the tokio runtime with synchronous I/O.
+                let mut stream = response.bytes_stream();
+                let mut buf = Vec::with_capacity(256 * 1024); // 256KB buffer
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk?;
+                    buf.extend_from_slice(&chunk);
+                }
+
+                // Write buffer to file at offset (blocking I/O in spawn_blocking)
+                let offset = start;
+                tokio::task::spawn_blocking(move || {
+                    use std::io::{Seek, SeekFrom, Write};
+                    let mut file = std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(&dest)
+                        .map_err(WjDownloadError::Io)?;
+                    file.seek(SeekFrom::Start(offset))
+                        .map_err(WjDownloadError::Io)?;
+                    file.write_all(&buf).map_err(WjDownloadError::Io)?;
+                    Ok::<(), WjDownloadError>(())
+                })
+                .await
+                .map_err(|e| WjDownloadError::Other(format!("Task join error: {}", e)))?
+            }
+        })
+        .buffer_unordered(MAX_CONCURRENT_PARTS)
+        .collect()
+        .await;
+
+    // Check for errors
+    for result in results {
+        result?;
+    }
+
+    Ok(())
+}
+
+/// Remap CDN URLs to preferred domains.
+fn remap_cdn_url(url: &str) -> String {
+    // B-CDN → official WJ domain fallback
+    url.replace("authored-files.wabbajack.b-cdn.net", "build.wabbajack.org")
+        .replace("wabbajack.b-cdn.net", "build.wabbajack.org")
 }
 
 // ---------------------------------------------------------------------------
@@ -1221,7 +1602,7 @@ mod tests {
         // Verify that constructing a downloader with is_premium=false
         // and no API key means the struct is in the right state.
         let tmp = TempDir::new().unwrap();
-        let dl = WjDownloader::new(None, false, tmp.path().to_path_buf());
+        let dl = WjDownloader::new(None, None, false, tmp.path().to_path_buf());
         assert!(!dl.is_premium);
         assert!(dl.nexus_api_key.is_none());
     }
@@ -1271,5 +1652,26 @@ mod tests {
         assert!(!sanitized.contains('/'));
         assert!(!sanitized.contains('='));
         assert_eq!(sanitized, "abc_def_ghi_jk__");
+    }
+
+    #[test]
+    fn test_remap_cdn_url_b_cdn() {
+        assert_eq!(
+            remap_cdn_url("https://authored-files.wabbajack.b-cdn.net/some/file.7z"),
+            "https://build.wabbajack.org/some/file.7z"
+        );
+        assert_eq!(
+            remap_cdn_url("https://wabbajack.b-cdn.net/files/archive.zip"),
+            "https://build.wabbajack.org/files/archive.zip"
+        );
+    }
+
+    #[test]
+    fn test_remap_cdn_url_passthrough() {
+        let url = "https://build.wabbajack.org/already/correct.7z";
+        assert_eq!(remap_cdn_url(url), url);
+
+        let url2 = "https://example.com/unrelated.zip";
+        assert_eq!(remap_cdn_url(url2), url2);
     }
 }

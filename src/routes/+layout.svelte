@@ -2,12 +2,12 @@
   import { onMount, onDestroy } from "svelte";
   import "../app.css";
   import { goto } from "$app/navigation";
-  import { currentPage, errorMessage, successMessage, selectedGame, selectedBottle, showError, showSuccess, appVersion, collectionInstallStatus, collectionUninstallStatus, updateReady as updateReadyStore, updateVersion as updateVersionStore, updateNotes as updateNotesStore, updateChecking as updateCheckingStore, updateError as updateErrorStore, setUpdateCheckFn, notificationCount, showNotificationLog, activeProfile, profileList, activeCollection, collectionList, sidebarCollapsed, controllerMode, pendingNxmInstall, nxmInstallComplete } from "$lib/stores";
+  import { currentPage, errorMessage, successMessage, selectedGame, selectedBottle, showError, showSuccess, appVersion, collectionInstallStatus, collectionUninstallStatus, wjInstallStatus, updateReady as updateReadyStore, updateVersion as updateVersionStore, updateNotes as updateNotesStore, updateChecking as updateCheckingStore, updateError as updateErrorStore, setUpdateCheckFn, notificationCount, showNotificationLog, activeProfile, profileList, activeCollection, collectionList, sidebarCollapsed, controllerMode, pendingNxmInstall, nxmInstallComplete } from "$lib/stores";
   import { initTheme } from "$lib/theme";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
   import { getVersion } from "@tauri-apps/api/app";
-  import { downloadFromNexus, installMod, getAllGames, getDownloadQueue, retryDownload, cancelDownload, clearFinishedDownloads, onDownloadQueueUpdate, listProfiles, listInstalledCollections, getConfig, setConfigValue, launchGame, getAllInterruptedInstalls, resumeCollectionInstall, abandonCollectionInstall, getCheckpointModNames, getPendingWabbajackInstalls, checkSkyrimVersion, getPinnedGameVersion, pinGameVersion, checkSteamStatus, addToSteam, fetchUpdate, installUpdate } from "$lib/api";
+  import { downloadFromNexus, installMod, getAllGames, getDownloadQueue, retryDownload, cancelDownload, clearFinishedDownloads, onDownloadQueueUpdate, listProfiles, listInstalledCollections, getConfig, setConfigValue, launchGame, getAllInterruptedInstalls, resumeCollectionInstall, abandonCollectionInstall, getCheckpointModNames, getPendingWabbajackInstalls, checkSkyrimVersion, getPinnedGameVersion, pinGameVersion, checkSteamStatus, addToSteam, fetchUpdate, installUpdate, chatCheckNewCrashes } from "$lib/api";
   import { resumeInstallTracking } from "$lib/installService";
   import { initHashingListener, destroyHashingListener, dismissHashingBanner } from "$lib/hashingService";
   import { hashingProgress } from "$lib/stores";
@@ -133,6 +133,7 @@
   let updateReady = $state(false);
   let showUpdateBanner = $state(false);
   let showChat = $state(false);
+  let chatCrashCount = $state(0);
   let sidebarWidth = $state(300);
   let resizing = $state(false);
 
@@ -194,6 +195,18 @@
       const rect = queueBtnEl.getBoundingClientRect();
       popoverStyle = `bottom: ${window.innerHeight - rect.top + 8}px; left: ${rect.left}px;`;
     }
+  });
+
+  // Check for new crash logs when game changes (badge on chat button)
+  $effect(() => {
+    const game = $selectedGame;
+    const bottle = $selectedBottle;
+    if (!game || !bottle) { chatCrashCount = 0; return; }
+    // Clear badge when chat is opened (LlmChat handles its own detection)
+    if (showChat) { chatCrashCount = 0; return; }
+    chatCheckNewCrashes(game.game_id, bottle)
+      .then(info => { chatCrashCount = info.count; })
+      .catch((err) => console.error('crash check:', err));
   });
 
   // Log toasts to persistent notification log
@@ -435,9 +448,20 @@
     }
   }
 
+  async function handleResumeWjInterrupted() {
+    // WJ installs resume via directive tracking — navigate to the modlists page
+    // where the user can re-download the .wabbajack (cached) and restart.
+    // The directive resume system will skip already-completed work.
+    const wj = interruptedWj;
+    interruptedWj = null;
+    if (wj) {
+      goto("/modlists");
+    }
+  }
+
   async function handleDismissInterrupted() {
     if (interruptedInstall) {
-      try { await abandonCollectionInstall(interruptedInstall.id); } catch {}
+      try { await abandonCollectionInstall(interruptedInstall.id); } catch (e) { console.error('abandonCollectionInstall:', e); }
       interruptedInstall = null;
     }
     if (interruptedWj) {
@@ -999,6 +1023,61 @@
       </div>
     {/if}
 
+    {#if $wjInstallStatus && ($wjInstallStatus.active || $wjInstallStatus.phase === "complete" || $wjInstallStatus.phase === "failed")}
+      <div class="sidebar-status-bar">
+        <button class="sidebar-status-btn" onclick={() => goto('/modlists/progress')}>
+          {#if $wjInstallStatus.phase === "complete"}
+            <svg class="status-check" width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="var(--green, #30d158)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="3 7 6 10 11 4" />
+            </svg>
+          {:else if $wjInstallStatus.phase === "failed"}
+            <svg class="status-check" width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="#ef4444" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="3" y1="3" x2="11" y2="11" />
+              <line x1="11" y1="3" x2="3" y2="11" />
+            </svg>
+          {:else}
+            <div class="status-spinner status-spinner-sm"></div>
+          {/if}
+          <div class="status-text">
+            <span class="status-collection">{$wjInstallStatus.modlistName}</span>
+            <span class="status-detail">
+              {#if $wjInstallStatus.phase === "preflight"}
+                Preflight checks...
+              {:else if $wjInstallStatus.phase === "downloading"}
+                Downloading {$wjInstallStatus.downloadProgress.current}/{$wjInstallStatus.downloadProgress.total}
+                {#if $wjInstallStatus.speedLabel}
+                  &mdash; {$wjInstallStatus.speedLabel}
+                {/if}
+              {:else if $wjInstallStatus.phase === "extracting"}
+                Extracting {$wjInstallStatus.extractionProgress.current}/{$wjInstallStatus.extractionProgress.total}
+              {:else if $wjInstallStatus.phase === "directives"}
+                Processing {$wjInstallStatus.directiveProgress.current.toLocaleString()}/{$wjInstallStatus.directiveProgress.total.toLocaleString()}
+              {:else if $wjInstallStatus.phase === "deploying"}
+                Deploying {$wjInstallStatus.deployProgress.current.toLocaleString()}/{$wjInstallStatus.deployProgress.total.toLocaleString()}
+              {:else if $wjInstallStatus.phase === "complete"}
+                {$wjInstallStatus.result?.filesDeployed?.toLocaleString() ?? 0} files deployed
+              {:else if $wjInstallStatus.phase === "failed"}
+                Failed
+              {:else}
+                Starting...
+              {/if}
+            </span>
+          </div>
+          {#if $wjInstallStatus.phase !== "complete" && $wjInstallStatus.phase !== "failed"}
+            <span class="status-percent">{$wjInstallStatus.overallProgress}%</span>
+          {/if}
+          <svg class="status-chevron" width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="4.5 2.5 8 6 4.5 9.5" />
+          </svg>
+        </button>
+        <div class="status-progress-track">
+          <div class="status-progress-fill" class:status-progress-complete={$wjInstallStatus.phase === "complete"}
+            style="width: {$wjInstallStatus.overallProgress}%">
+          </div>
+        </div>
+      </div>
+    {/if}
+
     {#if $collectionUninstallStatus?.active && $collectionUninstallStatus.phase !== "complete"}
       <div class="sidebar-status-bar sidebar-status-bar-uninstall">
         <div class="sidebar-status-btn" style="cursor: default;">
@@ -1190,11 +1269,14 @@
             class="chat-toggle-btn"
             class:chat-active={showChat}
             onclick={() => showChat = !showChat}
-            title={showChat ? "Close AI Chat" : "Open AI Chat"}
+            title={showChat ? "Close AI Chat" : chatCrashCount > 0 ? `${chatCrashCount} new crash${chatCrashCount > 1 ? "es" : ""} detected` : "Open AI Chat"}
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
             </svg>
+            {#if chatCrashCount > 0 && !showChat}
+              <span class="chat-crash-badge"></span>
+            {/if}
           </button>
         </div>
       {/if}
@@ -1396,6 +1478,13 @@
                   <polygon points="5 3 19 12 5 21" />
                 </svg>
                 {resumingInstall ? "Resuming..." : "Resume Now"}
+              </button>
+            {:else if interruptedWj}
+              <button class="btn btn-accent btn-sm resume-btn-cta" onclick={handleResumeWjInterrupted}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                  <polygon points="5 3 19 12 5 21" />
+                </svg>
+                Return to Gallery
               </button>
             {/if}
             <button class="btn btn-ghost btn-sm" onclick={handleDismissInterrupted}>Dismiss</button>
@@ -1821,6 +1910,7 @@
   }
 
   .chat-toggle-btn {
+    position: relative;
     margin-left: auto;
     display: flex;
     align-items: center;
@@ -1841,6 +1931,20 @@
   .chat-toggle-btn.chat-active {
     color: var(--accent);
     background: color-mix(in srgb, var(--accent) 18%, transparent);
+  }
+  .chat-crash-badge {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #ef4444;
+    animation: crash-pulse 1.5s ease-in-out infinite;
+  }
+  @keyframes crash-pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.7; transform: scale(1.3); }
   }
 
   .sidebar-version {
