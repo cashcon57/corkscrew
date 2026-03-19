@@ -16,6 +16,16 @@ let unlisten: UnlistenFn | null = null;
 let elapsedTimer: ReturnType<typeof setInterval> | null = null;
 let speedTracker = new SpeedTracker();
 
+// Cumulative download tracking across all archives
+let completedArchiveBytes = 0;   // Sum of total_bytes from finished archives
+let currentArchiveBytes = 0;     // bytes_downloaded for the archive in progress
+let currentArchiveTotalBytes = 0;// total_bytes for the archive in progress
+let totalEstimatedBytes = 0;     // Best estimate of total bytes across all archives
+let currentArchiveName = "";     // Name of the archive currently downloading
+
+// Monotonic progress floor — progress can never go below this
+let progressFloor = 0;
+
 const PHASE_WEIGHTS: Record<string, [number, number]> = {
   preflight: [0, 2],
   downloading: [2, 32],
@@ -64,27 +74,64 @@ function processEvent(s: WjInstallStatus, p: WjInstallProgressEvent): WjInstallS
       s.downloadProgress.total = p.total;
       s.downloadProgress.current = 0;
       s.downloadProgress.bytesDownloaded = 0;
+      completedArchiveBytes = 0;
+      currentArchiveBytes = 0;
+      currentArchiveTotalBytes = 0;
+      totalEstimatedBytes = 0;
+      currentArchiveName = "";
       speedTracker.reset();
       break;
     case "DownloadStarted":
+      // A new archive is starting — finalize the previous one
+      if (currentArchiveName && currentArchiveTotalBytes > 0) {
+        completedArchiveBytes += currentArchiveTotalBytes;
+      }
+      currentArchiveName = p.name;
+      currentArchiveBytes = 0;
+      currentArchiveTotalBytes = 0;
       s.downloadProgress.current = p.index + 1;
       s.downloadProgress.currentFile = p.name;
       break;
-    case "DownloadProgress":
-      s.downloadProgress.bytesDownloaded = p.bytes;
-      if (p.total_bytes > 0) s.downloadProgress.totalBytes = p.total_bytes;
+    case "DownloadProgress": {
+      currentArchiveBytes = p.bytes;
+      if (p.total_bytes > 0) currentArchiveTotalBytes = p.total_bytes;
       s.downloadProgress.currentFile = p.name;
-      s.speed = speedTracker.update(p.bytes);
+      // Cumulative bytes for display
+      const cumulativeBytes = completedArchiveBytes + currentArchiveBytes;
+      s.downloadProgress.bytesDownloaded = cumulativeBytes;
+      // Estimate total: assume average archive size * total count
+      if (s.downloadProgress.current > 0 && currentArchiveTotalBytes > 0) {
+        const avgArchiveSize = (completedArchiveBytes + currentArchiveTotalBytes) / s.downloadProgress.current;
+        totalEstimatedBytes = Math.max(totalEstimatedBytes, Math.round(avgArchiveSize * s.downloadProgress.total));
+      }
+      s.downloadProgress.totalBytes = totalEstimatedBytes > 0 ? totalEstimatedBytes : currentArchiveTotalBytes;
+      s.speed = speedTracker.update(cumulativeBytes);
       s.speedLabel = SpeedTracker.formatSpeed(s.speed);
-      s.etaLabel = SpeedTracker.formatEta(p.total_bytes - p.bytes, s.speed);
+      const remaining = Math.max(0, (totalEstimatedBytes || currentArchiveTotalBytes) - cumulativeBytes);
+      s.etaLabel = SpeedTracker.formatEta(remaining, s.speed);
       s.downloadProgress.speed = s.speed;
       s.downloadProgress.eta = s.etaLabel;
-      s.overallProgress = computeOverall("downloading", p.bytes, p.total_bytes > 0 ? p.total_bytes : 1);
+      // Compute overall from cumulative bytes
+      s.overallProgress = computeOverall("downloading", cumulativeBytes, totalEstimatedBytes > 0 ? totalEstimatedBytes : 1);
       break;
+    }
     case "DownloadCompleted":
-      // current already incremented by DownloadStarted
+      // Finalize this archive's bytes
+      if (currentArchiveTotalBytes > 0) {
+        completedArchiveBytes += currentArchiveTotalBytes;
+        currentArchiveBytes = 0;
+        currentArchiveTotalBytes = 0;
+        currentArchiveName = "";
+      }
       break;
     case "DownloadFailed":
+      // Finalize bytes so next archive doesn't regress
+      if (currentArchiveTotalBytes > 0) {
+        completedArchiveBytes += currentArchiveTotalBytes;
+        currentArchiveBytes = 0;
+        currentArchiveTotalBytes = 0;
+        currentArchiveName = "";
+      }
       break;
     case "DownloadSkipped":
       break;
@@ -118,12 +165,13 @@ function processEvent(s: WjInstallStatus, p: WjInstallProgressEvent): WjInstallS
       s.extractionProgress.current++;
       break;
     case "ExtractionProgress":
-      s.extractionProgress.current = p.index + 1;
+      // Only advance current — never regress (events may arrive out of order)
+      s.extractionProgress.current = Math.max(s.extractionProgress.current, p.index + 1);
       s.extractionProgress.currentArchive = p.name;
       if (p.total_bytes > 0) {
-        s.extractionProgress.bytesCompleted = p.bytes_completed ?? 0;
+        s.extractionProgress.bytesCompleted = Math.max(s.extractionProgress.bytesCompleted, p.bytes_completed ?? 0);
         s.extractionProgress.totalBytes = p.total_bytes;
-        s.speed = speedTracker.update(p.bytes_completed ?? 0);
+        s.speed = speedTracker.update(s.extractionProgress.bytesCompleted);
         s.speedLabel = SpeedTracker.formatSpeed(s.speed);
         s.overallProgress = computeOverall("extracting", s.extractionProgress.current, s.extractionProgress.total);
       }
@@ -194,6 +242,15 @@ function processEvent(s: WjInstallStatus, p: WjInstallProgressEvent): WjInstallS
       // Handled elsewhere (e.g., open browser for manual download)
       break;
   }
+
+  // Monotonic enforcement: progress can never decrease (prevents visual jitter
+  // from out-of-order events, phase transitions, or per-file resets).
+  if (s.overallProgress < progressFloor) {
+    s.overallProgress = progressFloor;
+  } else {
+    progressFloor = s.overallProgress;
+  }
+
   return s;
 }
 
@@ -241,6 +298,12 @@ export async function startWjInstallTracking(modlistName: string, meta?: WjInsta
 
   wjInstallStatus.set(initial);
   speedTracker = new SpeedTracker();
+  progressFloor = 0;
+  completedArchiveBytes = 0;
+  currentArchiveBytes = 0;
+  currentArchiveTotalBytes = 0;
+  totalEstimatedBytes = 0;
+  currentArchiveName = "";
 
   // Elapsed timer
   elapsedTimer = setInterval(() => {

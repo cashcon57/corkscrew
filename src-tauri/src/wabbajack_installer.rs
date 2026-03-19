@@ -414,7 +414,7 @@ pub async fn preflight_check(
                         required, detected
                     ),
                 });
-            } else if required != detected {
+            } else if !versions_match_normalized(required, detected) {
                 // Same major, different patch — warn but allow
                 issues.push(WjPreflightIssue {
                     severity: "warning".to_string(),
@@ -506,6 +506,46 @@ fn parse_version_major(version: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Compare version strings with normalization.
+/// Handles: "1.6.1170" == "1.6.1170.0", trailing ".0" removal,
+/// and fuzzy "1.6.x" detected versions matching any "1.6.NNNN" required.
+fn versions_match_normalized(required: &str, detected: &str) -> bool {
+    // Exact match
+    if required == detected {
+        return true;
+    }
+    // Extract numeric parts only (strip labels like "(Anniversary Edition, ~35.4 MB)")
+    let req_nums = extract_version_nums(required);
+    let det_nums = extract_version_nums(detected);
+    // If detected is "1.6.x" (unknown AE build), accept any required 1.6.x version
+    if det_nums.len() >= 2 && det_nums[0] == req_nums.get(0).copied().unwrap_or(0)
+        && det_nums[1] == req_nums.get(1).copied().unwrap_or(0)
+        && detected.contains("1.6.x")
+    {
+        return true;
+    }
+    // Compare numeric parts, ignoring trailing zeros
+    // "1.6.1170" == "1.6.1170.0"
+    let max_len = req_nums.len().max(det_nums.len());
+    for i in 0..max_len {
+        let r = req_nums.get(i).copied().unwrap_or(0);
+        let d = det_nums.get(i).copied().unwrap_or(0);
+        if r != d {
+            return false;
+        }
+    }
+    true
+}
+
+/// Extract numeric version parts from a version string.
+/// "1.6.1170.0" → [1, 6, 1170, 0]
+/// "1.6.x (Anniversary Edition, ~35.4 MB)" → [1, 6]
+fn extract_version_nums(s: &str) -> Vec<u32> {
+    s.split('.')
+        .map_while(|part| part.trim().parse::<u32>().ok())
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -644,6 +684,20 @@ pub async fn install_wabbajack_modlist(
     let start_time = Instant::now();
     let mut warnings: Vec<String> = Vec::new();
 
+    // Compute parallelism from CPU core count.
+    // Downloads are I/O-bound (network) so they get more headroom.
+    // Extraction and directives are mixed I/O + CPU, capped lower.
+    let cpu_cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let download_concurrency = cpu_cores.clamp(2, 16);
+    let extract_concurrency = cpu_cores.clamp(2, 8);
+
+    log::info!(
+        "Parallelism: {} cores detected → {} download, {} extraction threads",
+        cpu_cores, download_concurrency, extract_concurrency
+    );
+
     // -----------------------------------------------------------------------
     // Step 1: Parse the .wabbajack file
     // -----------------------------------------------------------------------
@@ -763,7 +817,7 @@ pub async fn install_wabbajack_modlist(
             db,
             install_id,
             &modlist.archives,
-            8,
+            download_concurrency,
             cancel_token.clone(),
         )
         .await
@@ -855,8 +909,8 @@ pub async fn install_wabbajack_modlist(
     let mut extracted_dirs: HashMap<String, PathBuf> = HashMap::new();
     let extraction_temp_base = install_dir.join(".wj_extraction_temp");
 
-    // Parallel extraction: up to 6 concurrent extractions via semaphore
-    let extract_semaphore = Arc::new(Semaphore::new(6));
+    // Parallel extraction: scale with CPU cores
+    let extract_semaphore = Arc::new(Semaphore::new(extract_concurrency));
     let extract_bytes_completed = Arc::new(AtomicU64::new(0));
     let mut extract_handles = Vec::with_capacity(extraction_count);
 

@@ -196,6 +196,46 @@ impl DirectiveProcessor {
                 HashSet::new()
             };
 
+        // Pre-scan: identify archive hashes referenced by directives but missing
+        // from the extracted archive map. This lets us skip them efficiently and
+        // report one summary warning per missing archive instead of per-file.
+        let missing_hashes: HashSet<String> = {
+            let mut needed: HashSet<String> = HashSet::new();
+            for d in directives {
+                match d {
+                    WjDirective::FromArchive { archive_hash_path, .. }
+                    | WjDirective::PatchedFromArchive { archive_hash_path, .. }
+                    | WjDirective::TransformedTexture { archive_hash_path, .. } => {
+                        needed.insert(archive_hash_path.base_hash.0.clone());
+                    }
+                    _ => {}
+                }
+            }
+            let missing: HashSet<String> = needed
+                .into_iter()
+                .filter(|h| !self.archive_dirs.contains_key(h))
+                .collect();
+            if !missing.is_empty() {
+                warn!(
+                    "{} archive(s) not available — {} directive(s) will be skipped. \
+                     Missing hashes: {:?}",
+                    missing.len(),
+                    directives.iter().filter(|d| {
+                        match d {
+                            WjDirective::FromArchive { archive_hash_path, .. }
+                            | WjDirective::PatchedFromArchive { archive_hash_path, .. }
+                            | WjDirective::TransformedTexture { archive_hash_path, .. } => {
+                                missing.contains(&archive_hash_path.base_hash.0)
+                            }
+                            _ => false,
+                        }
+                    }).count(),
+                    missing
+                );
+            }
+            missing
+        };
+
         // Partition directives by processing phase, tracking original indices
         let mut phase1: Vec<(usize, &WjDirective)> = Vec::new(); // File production
         let mut phase2: Vec<(usize, &WjDirective)> = Vec::new(); // Merged patches
@@ -253,7 +293,7 @@ impl DirectiveProcessor {
         let phase1_warnings = Mutex::new(Vec::new());
         let phase1_errors = Mutex::new(Vec::new());
         let num_threads = std::thread::available_parallelism()
-            .map(|n| n.get().min(8))
+            .map(|n| n.get().min(16))
             .unwrap_or(4);
 
         let pool = rayon::ThreadPoolBuilder::new()
@@ -269,6 +309,34 @@ impl DirectiveProcessor {
             phase1.par_iter().for_each(|&(orig_idx, d)| {
                 // Skip already-completed directives (resume path)
                 if completed_set.contains(&orig_idx) {
+                    bytes_processed
+                        .fetch_add(d.size().max(0) as u64, Ordering::Relaxed);
+                    let count =
+                        processed_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                    if count.is_multiple_of(5) || count == total {
+                        progress_callback(
+                            count,
+                            total,
+                            "files",
+                            bytes_processed.load(Ordering::Relaxed),
+                            total_bytes,
+                            d.to_path(),
+                        );
+                    }
+                    return;
+                }
+
+                // Skip directives whose archive is known to be missing
+                // (already reported as a summary warning above)
+                let has_missing_archive = match d {
+                    WjDirective::FromArchive { archive_hash_path, .. }
+                    | WjDirective::PatchedFromArchive { archive_hash_path, .. }
+                    | WjDirective::TransformedTexture { archive_hash_path, .. } => {
+                        missing_hashes.contains(&archive_hash_path.base_hash.0)
+                    }
+                    _ => false,
+                };
+                if has_missing_archive {
                     bytes_processed
                         .fetch_add(d.size().max(0) as u64, Ordering::Relaxed);
                     let count =
@@ -456,10 +524,32 @@ impl DirectiveProcessor {
             }
         }
 
+        // Add summary warning for missing archives (instead of per-file errors)
+        let mut all_warnings = warnings.into_inner().unwrap();
+        if !missing_hashes.is_empty() {
+            let missing_directive_count = directives.iter().filter(|d| {
+                match d {
+                    WjDirective::FromArchive { archive_hash_path, .. }
+                    | WjDirective::PatchedFromArchive { archive_hash_path, .. }
+                    | WjDirective::TransformedTexture { archive_hash_path, .. } => {
+                        missing_hashes.contains(&archive_hash_path.base_hash.0)
+                    }
+                    _ => false,
+                }
+            }).count();
+            all_warnings.push(format!(
+                "{} archive(s) were not downloaded — {} directive(s) skipped. \
+                 These files will be missing from the install. Missing hashes: {}",
+                missing_hashes.len(),
+                missing_directive_count,
+                missing_hashes.iter().cloned().collect::<Vec<_>>().join(", ")
+            ));
+        }
+
         Ok(WjDirectiveResult {
             total_processed: processed - skipped - errors.len(),
             total_skipped: skipped,
-            warnings: warnings.into_inner().unwrap(),
+            warnings: all_warnings,
             errors,
         })
     }
