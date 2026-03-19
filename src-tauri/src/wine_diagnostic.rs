@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::path::Path;
 
 use serde::Serialize;
 
@@ -626,6 +627,203 @@ pub fn fix_appdata(bottle: &Bottle) -> std::io::Result<()> {
     let appdata = bottle.appdata_local();
     fs::create_dir_all(&appdata)?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Linux-specific Wine prefix health checks
+// ---------------------------------------------------------------------------
+
+/// Linux-specific Wine prefix health checks.
+#[derive(Debug, Clone, Serialize)]
+pub struct LinuxPrefixHealth {
+    pub proton_version: Option<String>,
+    pub proton_compatible: Option<bool>,
+    pub dll_overrides_present: bool,
+    pub dotnet_installed: bool,
+    pub dxvk_version: Option<String>,
+    pub winetricks_packages: Vec<String>,
+    pub filesystem_type: Option<String>,
+    pub disk_free_bytes: u64,
+    pub issues: Vec<HealthIssue>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HealthIssue {
+    pub severity: String, // "error", "warning", "info"
+    pub message: String,
+    pub fix_action: Option<String>,
+}
+
+/// Run comprehensive prefix health checks (Linux).
+pub fn check_prefix_health_linux(prefix_path: &Path, _game_id: &str) -> LinuxPrefixHealth {
+    let mut issues = Vec::new();
+
+    // Check Proton version
+    let proton_version = detect_proton_version_from_prefix(prefix_path);
+    let proton_compatible = proton_version.as_ref().map(|v| {
+        // Parse major version and check >= 9
+        v.split(|c: char| !c.is_ascii_digit())
+            .find_map(|s| s.parse::<u32>().ok())
+            .map(|major| major >= 9)
+            .unwrap_or(false)
+    });
+
+    if let Some(false) = proton_compatible {
+        issues.push(HealthIssue {
+            severity: "warning".to_string(),
+            message: format!(
+                "Proton version {:?} may be too old. Proton 9+ recommended.",
+                proton_version
+            ),
+            fix_action: Some("update_proton".to_string()),
+        });
+    }
+
+    // Check DLL overrides
+    let dll_overrides_present = prefix_path.join("user.reg").exists()
+        && {
+            fs::read_to_string(prefix_path.join("user.reg"))
+                .map(|c| c.contains("DllOverrides"))
+                .unwrap_or(false)
+        };
+
+    // Check .NET
+    let dotnet_installed = prefix_path
+        .join("drive_c/windows/Microsoft.NET")
+        .exists()
+        || prefix_path.join("drive_c/Program Files/dotnet").exists();
+
+    // Check DXVK
+    let dxvk_version = {
+        let d3d11 = prefix_path.join("drive_c/windows/system32/d3d11.dll");
+        if d3d11.exists() {
+            let size = fs::metadata(&d3d11).map(|m| m.len()).unwrap_or(0);
+            if size > 500_000 {
+                Some("detected".to_string())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    // Check winetricks log
+    let winetricks_packages = {
+        let log = prefix_path.join("winetricks.log");
+        if log.exists() {
+            fs::read_to_string(&log)
+                .unwrap_or_default()
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        } else {
+            Vec::new()
+        }
+    };
+
+    // Check filesystem type
+    let filesystem_type = detect_filesystem_type(prefix_path);
+    if let Some(ref fs_type) = filesystem_type {
+        let lower = fs_type.to_lowercase();
+        if lower.contains("ntfs") || lower.contains("fat") {
+            issues.push(HealthIssue {
+                severity: "warning".to_string(),
+                message: format!(
+                    "Prefix on {} filesystem — ext4 or btrfs recommended for Wine",
+                    fs_type
+                ),
+                fix_action: None,
+            });
+        }
+    }
+
+    // Check disk space
+    let disk_free_bytes = get_free_space_bytes(prefix_path);
+    if disk_free_bytes < 5_000_000_000 {
+        issues.push(HealthIssue {
+            severity: "warning".to_string(),
+            message: format!(
+                "Low disk space: {:.1}GB free",
+                disk_free_bytes as f64 / 1_073_741_824.0
+            ),
+            fix_action: None,
+        });
+    }
+
+    LinuxPrefixHealth {
+        proton_version,
+        proton_compatible,
+        dll_overrides_present,
+        dotnet_installed,
+        dxvk_version,
+        winetricks_packages,
+        filesystem_type,
+        disk_free_bytes,
+        issues,
+    }
+}
+
+fn detect_proton_version_from_prefix(prefix_path: &Path) -> Option<String> {
+    // Proton writes version info to the prefix
+    let version_file = prefix_path.join("version");
+    if let Ok(content) = fs::read_to_string(&version_file) {
+        return Some(content.trim().to_string());
+    }
+    None
+}
+
+fn detect_filesystem_type(path: &Path) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let output = std::process::Command::new("stat")
+            .arg("-f")
+            .arg("-c")
+            .arg("%T")
+            .arg(path)
+            .output()
+            .ok()?;
+        let fs_type = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .to_string();
+        if !fs_type.is_empty() {
+            Some(fs_type)
+        } else {
+            None
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+fn get_free_space_bytes(path: &Path) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::mem;
+        use std::os::unix::ffi::OsStrExt;
+
+        let c_path = match CString::new(path.as_os_str().as_bytes()) {
+            Ok(p) => p,
+            Err(_) => return 0,
+        };
+        let mut stat: libc::statvfs = unsafe { mem::zeroed() };
+        let result = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
+        if result == 0 {
+            stat.f_bavail as u64 * stat.f_frsize as u64
+        } else {
+            0
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        0
+    }
 }
 
 #[cfg(test)]

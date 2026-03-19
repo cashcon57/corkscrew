@@ -314,64 +314,31 @@ fn find_system_wine() -> Option<PathBuf> {
 /// Attempt to find a Wine binary bundled with Proton for this bottle.
 ///
 /// Steam Proton stores its Wine build alongside the compatibility tool.
-/// The typical layout is:
-///   `~/.local/share/Steam/steamapps/common/Proton X.Y/dist/bin/wine`
-/// or
-///   `~/.local/share/Steam/steamapps/common/Proton X.Y/files/bin/wine`
+///
+/// Delegates to `crate::proton::find_proton_for_bottle()` which scans all
+/// known Proton locations (steamapps/common, compatibilitytools.d, Flatpak,
+/// Snap, secondary library folders) and returns the best match.
 fn find_proton_wine(bottle: &Bottle) -> Option<PathBuf> {
-    // Proton bottles live under steamapps/compatdata/<appid>/pfx.
-    // Walk up from the bottle path to find the steamapps root, then look
-    // for Proton installations under steamapps/common/.
-    let bottle_path = &bottle.path;
+    crate::proton::find_proton_for_bottle(&bottle.path).map(|v| v.wine_bin)
+}
 
-    // Collect candidate steamapps/common directories to search.
-    let mut common_dirs: Vec<PathBuf> = Vec::new();
+// ---------------------------------------------------------------------------
+// Flatpak sandbox escape
+// ---------------------------------------------------------------------------
 
-    // Navigate up from the bottle path to find `steamapps`.
-    let mut ancestor = bottle_path.parent();
-    while let Some(dir) = ancestor {
-        if dir
-            .file_name()
-            .map(|n| n.to_string_lossy().to_lowercase() == "steamapps")
-            .unwrap_or(false)
-        {
-            common_dirs.push(dir.join("common"));
-            break;
-        }
-        ancestor = dir.parent();
+/// Wrap a command for Flatpak if needed.
+/// If running inside Flatpak, prepends `flatpak-spawn --host` to break out of sandbox.
+#[allow(dead_code)]
+pub fn maybe_flatpak_spawn(cmd: &str, args: &[&str]) -> (String, Vec<String>) {
+    if crate::bottles::detect_container_environment()
+        == Some(crate::bottles::ContainerEnvironment::Flatpak)
+    {
+        let mut all_args = vec!["--host".to_string(), cmd.to_string()];
+        all_args.extend(args.iter().map(|a| a.to_string()));
+        ("flatpak-spawn".to_string(), all_args)
+    } else {
+        (cmd.to_string(), args.iter().map(|a| a.to_string()).collect())
     }
-
-    // Also check Flatpak Steam Proton path.
-    if let Some(home) = dirs::home_dir() {
-        let flatpak_common =
-            home.join(".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common");
-        if flatpak_common.is_dir() && !common_dirs.contains(&flatpak_common) {
-            common_dirs.push(flatpak_common);
-        }
-    }
-
-    for common in &common_dirs {
-        if !common.is_dir() {
-            continue;
-        }
-        if let Ok(entries) = fs::read_dir(common) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_lowercase();
-                if name.starts_with("proton") {
-                    let proton_dir = entry.path();
-                    // Check both dist/bin/wine and files/bin/wine
-                    for sub in &["dist/bin/wine", "files/bin/wine"] {
-                        let wine = proton_dir.join(sub);
-                        if wine.exists() {
-                            return Some(wine);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    None
 }
 
 // ---------------------------------------------------------------------------
@@ -529,6 +496,78 @@ pub fn find_executable_recursive(game_path: &Path, exe_name: &str) -> Option<Pat
     }
 
     None
+}
+
+// ---------------------------------------------------------------------------
+// Bidirectional save sync
+// ---------------------------------------------------------------------------
+
+/// Sync save games from Wine prefix back to profile after game exit.
+pub fn sync_saves_from_prefix(
+    prefix_path: &Path,
+    profile_save_dir: &Path,
+    game_id: &str,
+) -> Result<usize> {
+    // Determine save location in prefix based on game
+    let save_dir_in_prefix = match game_id {
+        "skyrimse" | "skyrimspecialedition" => prefix_path.join(
+            "drive_c/users/steamuser/Documents/My Games/Skyrim Special Edition/Saves",
+        ),
+        "fallout4" => {
+            prefix_path.join("drive_c/users/steamuser/Documents/My Games/Fallout4/Saves")
+        }
+        "skyrim" => {
+            prefix_path.join("drive_c/users/steamuser/Documents/My Games/Skyrim/Saves")
+        }
+        _ => return Ok(0), // Unknown game, skip
+    };
+
+    if !save_dir_in_prefix.exists() {
+        return Ok(0);
+    }
+
+    fs::create_dir_all(profile_save_dir)
+        .map_err(|e| LauncherError::Other(format!("Failed to create save dir: {}", e)))?;
+
+    let mut synced = 0;
+    for entry in walkdir::WalkDir::new(&save_dir_in_prefix)
+        .min_depth(1)
+        .max_depth(1)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if entry.file_type().is_file() {
+            let dest = profile_save_dir.join(entry.file_name());
+            // Only sync if source is newer
+            let should_sync = if dest.exists() {
+                let src_mod = entry.metadata().ok().and_then(|m| m.modified().ok());
+                let dst_mod = fs::metadata(&dest).and_then(|m| m.modified()).ok();
+                match (src_mod, dst_mod) {
+                    (Some(s), Some(d)) => s > d,
+                    _ => true,
+                }
+            } else {
+                true
+            };
+
+            if should_sync {
+                fs::copy(entry.path(), &dest).map_err(|e| {
+                    LauncherError::Other(format!(
+                        "Failed to sync save {}: {}",
+                        entry.file_name().to_string_lossy(),
+                        e
+                    ))
+                })?;
+                synced += 1;
+            }
+        }
+    }
+
+    if synced > 0 {
+        info!("Synced {} save files from prefix", synced);
+    }
+
+    Ok(synced)
 }
 
 // ---------------------------------------------------------------------------

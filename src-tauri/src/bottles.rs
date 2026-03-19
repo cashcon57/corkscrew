@@ -6,6 +6,18 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// Enriched game info from Heroic Launcher.
+#[derive(Debug, Clone, Serialize)]
+pub struct HeroicGameInfo {
+    pub app_name: String,
+    pub title: String,
+    /// "gog" or "epic"
+    pub platform: String,
+    pub install_path: Option<String>,
+    pub wine_prefix: Option<PathBuf>,
+    pub version: Option<String>,
+}
+
 /// Represents a Wine bottle (prefix) managed by a compatibility layer.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Bottle {
@@ -161,6 +173,61 @@ impl Bottle {
 }
 
 // ---------------------------------------------------------------------------
+// Container / immutable-distro path normalization
+// ---------------------------------------------------------------------------
+
+/// Container environment type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[allow(dead_code)]
+pub enum ContainerEnvironment {
+    Flatpak,
+    Snap,
+    Docker,
+}
+
+/// Detect if running inside a container environment.
+#[allow(dead_code)]
+pub fn detect_container_environment() -> Option<ContainerEnvironment> {
+    // Flatpak
+    if std::path::Path::new("/.flatpak-info").exists()
+        || std::env::var("FLATPAK_ID").is_ok()
+    {
+        return Some(ContainerEnvironment::Flatpak);
+    }
+
+    // Snap
+    if std::env::var("SNAP").is_ok() {
+        return Some(ContainerEnvironment::Snap);
+    }
+
+    // Podman/Docker (less likely for desktop apps but possible)
+    if std::path::Path::new("/.dockerenv").exists() {
+        return Some(ContainerEnvironment::Docker);
+    }
+
+    None
+}
+
+/// Normalize paths for container environments (Flatpak, Fedora Atomic/Bazzite).
+///
+/// - `/var/home/user/` -> `/home/user/` (Fedora Atomic/Bazzite use /var/home)
+/// - Detects Flatpak environment and adjusts paths accordingly
+#[allow(dead_code)]
+pub fn normalize_container_path(path: &Path) -> PathBuf {
+    let path_str = path.to_string_lossy();
+
+    // Fedora Atomic / Bazzite: /var/home/ -> /home/
+    if path_str.starts_with("/var/home/") {
+        let normalized = PathBuf::from(path_str.replacen("/var/home/", "/home/", 1));
+        if normalized.exists() || !path.exists() {
+            return normalized;
+        }
+    }
+
+    path.to_path_buf()
+}
+
+// ---------------------------------------------------------------------------
 // Platform-specific search path definitions
 // ---------------------------------------------------------------------------
 
@@ -225,6 +292,9 @@ fn platform_search_locations(home: &Path) -> Vec<SearchLocation> {
 /// Build the list of directories to scan on Linux.
 #[cfg(target_os = "linux")]
 fn platform_search_locations(home: &Path) -> Vec<SearchLocation> {
+    // Normalize for Fedora Atomic / Bazzite (/var/home -> /home)
+    let home = normalize_container_path(home);
+    let home = home.as_path();
     vec![
         // Native Wine default prefix
         SearchLocation {
@@ -345,22 +415,278 @@ fn collect_bottles_from(location: &SearchLocation, bottles: &mut Vec<Bottle>) {
 }
 
 // ---------------------------------------------------------------------------
+// Heroic Launcher metadata parsing
+// ---------------------------------------------------------------------------
+
+/// Parse Heroic's GOG installed games.
+fn parse_heroic_gog_games(heroic_config_dir: &Path) -> Vec<HeroicGameInfo> {
+    let gog_path = heroic_config_dir.join("gog_store").join("installed.json");
+    let mut games = Vec::new();
+
+    let content = match fs::read_to_string(&gog_path) {
+        Ok(c) => c,
+        Err(_) => return games,
+    };
+
+    let parsed: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("Failed to parse Heroic GOG installed.json: {}", e);
+            return games;
+        }
+    };
+
+    if let Some(installed) = parsed.get("installed").and_then(|v| v.as_array()) {
+        for game in installed {
+            let app_name = game
+                .get("appName")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let title = game
+                .get("install_path")
+                .and_then(|v| v.as_str())
+                .and_then(|p| Path::new(p).file_name())
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| app_name.clone());
+            let install_path = game
+                .get("install_path")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let version = game
+                .get("version")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+
+            let wine_prefix = get_heroic_wine_prefix(heroic_config_dir, &app_name);
+
+            games.push(HeroicGameInfo {
+                app_name,
+                title,
+                platform: "gog".to_string(),
+                install_path,
+                wine_prefix,
+                version,
+            });
+        }
+    }
+
+    games
+}
+
+/// Parse Heroic's Epic installed games (via Legendary).
+fn parse_heroic_epic_games(heroic_config_dir: &Path) -> Vec<HeroicGameInfo> {
+    let epic_path = heroic_config_dir
+        .join("store_cache")
+        .join("legendary_library.json");
+    let mut games = Vec::new();
+
+    let content = match fs::read_to_string(&epic_path) {
+        Ok(c) => c,
+        Err(_) => return games,
+    };
+
+    let parsed: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("Failed to parse Heroic Epic library: {}", e);
+            return games;
+        }
+    };
+
+    if let Some(library) = parsed.get("library").and_then(|v| v.as_array()) {
+        for game in library {
+            let app_name = game
+                .get("app_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let title = game
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&app_name)
+                .to_string();
+            let install_path = game
+                .get("install_path")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let version = game
+                .get("version")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+
+            let is_installed = game
+                .get("is_installed")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if !is_installed {
+                continue;
+            }
+
+            let wine_prefix = get_heroic_wine_prefix(heroic_config_dir, &app_name);
+
+            games.push(HeroicGameInfo {
+                app_name,
+                title,
+                platform: "epic".to_string(),
+                install_path,
+                wine_prefix,
+                version,
+            });
+        }
+    }
+
+    games
+}
+
+/// Get Wine prefix path for a Heroic game from its GamesConfig.
+fn get_heroic_wine_prefix(heroic_config_dir: &Path, app_name: &str) -> Option<PathBuf> {
+    let config_path = heroic_config_dir
+        .join("GamesConfig")
+        .join(format!("{}.json", app_name));
+    let content = fs::read_to_string(&config_path).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
+
+    // The config can have the prefix nested under the app_name key or at top level
+    parsed
+        .get(app_name)
+        .or_else(|| parsed.get("winePrefix"))
+        .and_then(|v| {
+            v.get("winePrefix")
+                .and_then(|p| p.as_str())
+                .or_else(|| v.as_str())
+        })
+        .map(PathBuf::from)
+        .and_then(|p| {
+            // Validate path from external JSON — reject traversal, null bytes, drive letters
+            let s = p.to_string_lossy();
+            if s.contains('\0') || s.contains("..") {
+                log::warn!("Rejecting unsafe Heroic wine prefix path: {:?}", p);
+                return None;
+            }
+            // Must be an absolute path to be a valid wine prefix
+            if !p.is_absolute() {
+                log::warn!("Rejecting non-absolute Heroic wine prefix path: {:?}", p);
+                return None;
+            }
+            Some(p)
+        })
+}
+
+/// Find all Heroic config directories (standard + Flatpak + macOS).
+fn find_heroic_config_dirs() -> Vec<PathBuf> {
+    let mut config_dirs = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        // Linux: standard install
+        let standard = home.join(".config").join("heroic");
+        if standard.is_dir() {
+            config_dirs.push(standard);
+        }
+        // Linux: Flatpak install
+        let flatpak = home
+            .join(".var")
+            .join("app")
+            .join("com.heroicgameslauncher.hgl")
+            .join("config")
+            .join("heroic");
+        if flatpak.is_dir() {
+            config_dirs.push(flatpak);
+        }
+        // macOS
+        let macos = home
+            .join("Library")
+            .join("Application Support")
+            .join("heroic");
+        if macos.is_dir() {
+            config_dirs.push(macos);
+        }
+    }
+    config_dirs
+}
+
+/// Detect all Heroic games with enriched metadata.
+pub fn detect_heroic_games() -> Vec<HeroicGameInfo> {
+    let mut all_games = Vec::new();
+
+    for config_dir in find_heroic_config_dirs() {
+        let mut gog = parse_heroic_gog_games(&config_dir);
+        let mut epic = parse_heroic_epic_games(&config_dir);
+        all_games.append(&mut gog);
+        all_games.append(&mut epic);
+    }
+
+    // Deduplicate by app_name
+    all_games.sort_by(|a, b| a.app_name.cmp(&b.app_name));
+    all_games.dedup_by(|a, b| a.app_name == b.app_name);
+
+    log::info!(
+        "Detected {} Heroic games ({} GOG, {} Epic)",
+        all_games.len(),
+        all_games.iter().filter(|g| g.platform == "gog").count(),
+        all_games.iter().filter(|g| g.platform == "epic").count(),
+    );
+
+    all_games
+}
+
+/// Build a lookup from wine prefix path to HeroicGameInfo for enriching bottles.
+fn build_heroic_prefix_map(
+    games: &[HeroicGameInfo],
+) -> std::collections::HashMap<PathBuf, &HeroicGameInfo> {
+    let mut map = std::collections::HashMap::new();
+    for game in games {
+        if let Some(ref prefix) = game.wine_prefix {
+            map.insert(prefix.clone(), game);
+        }
+    }
+    map
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
 /// Scan all known locations for Wine bottles and return every valid bottle
 /// found. A bottle is considered valid if its `drive_c` directory exists.
+///
+/// Heroic bottles are enriched with game metadata (title, platform) from
+/// Heroic's config files when available.
 pub fn detect_bottles() -> Vec<Bottle> {
     let Some(home) = dirs::home_dir() else {
         log::warn!("Could not determine home directory; no bottles detected.");
         return Vec::new();
     };
 
+    // Log container environment on Linux
+    #[cfg(target_os = "linux")]
+    if let Some(ref env) = detect_container_environment() {
+        log::info!("Container environment detected: {:?}", env);
+    }
+
     let locations = platform_search_locations(&home);
     let mut bottles = Vec::new();
 
     for location in &locations {
         collect_bottles_from(location, &mut bottles);
+    }
+
+    // Enrich Heroic bottles with game metadata
+    let heroic_games = detect_heroic_games();
+    if !heroic_games.is_empty() {
+        let prefix_map = build_heroic_prefix_map(&heroic_games);
+        for bottle in &mut bottles {
+            if bottle.source != "Heroic" {
+                continue;
+            }
+            // Match by wine prefix path (the bottle path itself)
+            if let Some(game) = prefix_map.get(&bottle.path) {
+                bottle.name = game.title.clone();
+                bottle.source = format!(
+                    "Heroic ({})",
+                    if game.platform == "gog" { "GOG" } else { "Epic" }
+                );
+            }
+        }
     }
 
     bottles
@@ -471,6 +797,101 @@ mod tests {
         };
 
         assert!(bottle.find_path(&["NonExistent", "Path"]).is_none());
+    }
+
+    #[test]
+    fn parse_heroic_gog_games_from_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gog_dir = tmp.path().join("gog_store");
+        fs::create_dir_all(&gog_dir).unwrap();
+
+        let json = r#"{
+            "installed": [
+                {
+                    "appName": "1234567890",
+                    "install_path": "/home/user/Games/Heroic/Cyberpunk 2077",
+                    "version": "1.63"
+                }
+            ]
+        }"#;
+        fs::write(gog_dir.join("installed.json"), json).unwrap();
+
+        let games = parse_heroic_gog_games(tmp.path());
+        assert_eq!(games.len(), 1);
+        assert_eq!(games[0].app_name, "1234567890");
+        assert_eq!(games[0].title, "Cyberpunk 2077");
+        assert_eq!(games[0].platform, "gog");
+        assert_eq!(games[0].version.as_deref(), Some("1.63"));
+    }
+
+    #[test]
+    fn parse_heroic_epic_games_filters_uninstalled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path().join("store_cache");
+        fs::create_dir_all(&cache_dir).unwrap();
+
+        let json = r#"{
+            "library": [
+                {
+                    "app_name": "Fortnite",
+                    "title": "Fortnite",
+                    "is_installed": true
+                },
+                {
+                    "app_name": "UninstalledGame",
+                    "title": "Some Game",
+                    "is_installed": false
+                }
+            ]
+        }"#;
+        fs::write(cache_dir.join("legendary_library.json"), json).unwrap();
+
+        let games = parse_heroic_epic_games(tmp.path());
+        assert_eq!(games.len(), 1);
+        assert_eq!(games[0].app_name, "Fortnite");
+        assert_eq!(games[0].title, "Fortnite");
+        assert_eq!(games[0].platform, "epic");
+    }
+
+    #[test]
+    fn get_heroic_wine_prefix_from_games_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("GamesConfig");
+        fs::create_dir_all(&config_dir).unwrap();
+
+        let json = r#"{
+            "MyGame123": {
+                "winePrefix": "/home/user/.wine/prefixes/mygame"
+            }
+        }"#;
+        fs::write(config_dir.join("MyGame123.json"), json).unwrap();
+
+        let prefix = get_heroic_wine_prefix(tmp.path(), "MyGame123");
+        assert_eq!(
+            prefix,
+            Some(PathBuf::from("/home/user/.wine/prefixes/mygame"))
+        );
+    }
+
+    #[test]
+    fn get_heroic_wine_prefix_returns_none_for_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prefix = get_heroic_wine_prefix(tmp.path(), "NonExistent");
+        assert!(prefix.is_none());
+    }
+
+    #[test]
+    fn parse_heroic_gog_returns_empty_for_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let games = parse_heroic_gog_games(tmp.path());
+        assert!(games.is_empty());
+    }
+
+    #[test]
+    fn parse_heroic_epic_returns_empty_for_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let games = parse_heroic_epic_games(tmp.path());
+        assert!(games.is_empty());
     }
 
     #[test]

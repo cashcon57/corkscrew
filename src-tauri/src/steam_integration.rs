@@ -40,13 +40,26 @@ pub fn is_flatpak() -> bool {
 /// Detect a Steam installation on this system.
 #[cfg(target_os = "linux")]
 pub fn detect_steam_installation() -> Option<SteamInfo> {
-    let home = dirs::home_dir()?;
+    let raw_home = dirs::home_dir()?;
+    // Normalize for Fedora Atomic / Bazzite (/var/home -> /home)
+    let home = crate::bottles::normalize_container_path(&raw_home);
 
-    let candidates = [
+    // Log container environment once during detection
+    if let Some(ref env) = crate::bottles::detect_container_environment() {
+        log::info!("Steam detection running in container environment: {:?}", env);
+    }
+
+    let mut candidates = vec![
         home.join(".steam/steam"),
         home.join(".local/share/Steam"),
         home.join(".var/app/com.valvesoftware.Steam/.steam/steam"), // Flatpak
     ];
+    // Also check /var/home variant if the normalized home differs from the raw home
+    if home != raw_home {
+        candidates.push(raw_home.join(".steam/steam"));
+        candidates.push(raw_home.join(".local/share/Steam"));
+        candidates.push(raw_home.join(".var/app/com.valvesoftware.Steam/.steam/steam"));
+    }
 
     for candidate in &candidates {
         if candidate.join("steam.sh").exists() || candidate.join("ubuntu12_32").exists() {
