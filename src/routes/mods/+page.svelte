@@ -77,6 +77,8 @@
     collectionInstallStatus,
     gameLock,
     gameLockOverridden,
+    wjInstallGeneration,
+    modStateVersion,
   } from "$lib/stores";
   import type { InstalledMod, DetectedGame, SkseStatus, DowngradeStatus, FileConflict, ModUpdateInfo, FomodInstaller } from "$lib/types";
   import GameIcon from "$lib/components/GameIcon.svelte";
@@ -367,10 +369,10 @@
     }).catch((err) => console.error('Failed to load config:', err));
 
     // Check initial deploy-in-progress state and listen for changes
-    isDeployInProgress().then(v => { backendDeployInProgress = v; }).catch(() => {});
+    isDeployInProgress().then(v => { backendDeployInProgress = v; }).catch((err) => console.error('deploy status:', err));
     onDeployStatusChanged((inProgress) => {
       backendDeployInProgress = inProgress;
-    }).then(unlisten => { deployStatusUnlisten = unlisten; }).catch(() => {});
+    }).then(unlisten => { deployStatusUnlisten = unlisten; }).catch((err) => console.error('deploy status listener:', err));
 
     // Check if a game is already running (e.g., launched before navigating here)
     {
@@ -1053,6 +1055,27 @@
 
   // Check for Community Shaders mods (incompatible with Wine/CrossOver)
   // Re-runs when game changes, mods are reloaded, or manually triggered
+  // Refresh mod list and health when a WJ install completes (CLAUDE.md invariant)
+  $effect(() => {
+    const gen = $wjInstallGeneration;
+    if (gen > 0 && activeGame) {
+      const game = activeGame;
+      loadMods(game).catch((err: unknown) => console.error("loadMods after WJ install:", err));
+      refreshHealth(game).catch((err: unknown) => console.error("refreshHealth after WJ install:", err));
+    }
+  });
+
+  // Refresh mod list when profile or collection switch bumps modStateVersion
+  $effect(() => {
+    const ver = $modStateVersion;
+    if (ver > 0 && activeGame) {
+      const game = activeGame;
+      cachedGameKey = null;
+      loadMods(game).catch((err: unknown) => console.error("loadMods after state change:", err));
+      refreshHealth(game).catch((err: unknown) => console.error("refreshHealth after state change:", err));
+    }
+  });
+
   $effect(() => {
     const _trigger = csCheckTrigger; // depend on re-check trigger
     const _modCount = $installedMods.length; // re-check when mod list changes
@@ -1922,6 +1945,7 @@
     try {
       await reorderMods(game.game_id, game.bottle_name, orderedIds);
       await loadMods(game);
+      await refreshHealth(game);
     } catch (e: unknown) {
       showError(`Failed to reorder mods: ${e}`);
     } finally {
@@ -4123,7 +4147,7 @@
 {#if showImportWizard}
   <ModlistImportWizard
     onclose={() => showImportWizard = false}
-    oncomplete={() => { showImportWizard = false; const g = pickedGame ?? $selectedGame; if (g) loadMods(g); }}
+    oncomplete={() => { showImportWizard = false; const g = pickedGame ?? $selectedGame; if (g) { loadMods(g); refreshHealth(g); } }}
   />
 {/if}
 

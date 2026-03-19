@@ -466,6 +466,7 @@ export interface ModlistSummary {
   game: string;
   tags: string[];
   nsfw: boolean;
+  official: boolean;
   version: string;
   image_url: string;
   readme_url: string;
@@ -476,6 +477,7 @@ export interface ModlistSummary {
   install_size: number;
   archive_count: number;
   file_count: number;
+  github_stars: number;
 }
 
 export interface ParsedModlist {
@@ -491,6 +493,8 @@ export interface ParsedModlist {
   directive_count: number;
   directive_breakdown: Record<string, number>;
   archives: ArchiveSummary[];
+  /** Required game version from GameFileSource archives (e.g. "1.6.1170.0") */
+  required_game_version: string | null;
 }
 
 export interface ArchiveSummary {
@@ -1300,6 +1304,10 @@ export interface WjPreflightReport {
   nexus_archives: number;
   is_nexus_premium: boolean;
   manual_downloads: number;
+  /** Game version required by the modlist (e.g. "1.6.1170.0") */
+  required_game_version: string | null;
+  /** Currently installed game version */
+  detected_game_version: string | null;
 }
 
 export interface WjInstallResult {
@@ -1665,4 +1673,20 @@ export interface ConversionHistoryEntry {
   swapped_mods: number[];
   enb_installed: boolean;
   created_at: string;
+}
+
+export interface OrphanedDownload {
+  path: string;
+  filename: string;
+  size_bytes: number;
+}
+
+export interface ProtonVersion {
+  name: string;
+  path: string;
+  wine_bin: string;
+  major: number;
+  minor: number;
+  variant: string;
+  is_recommended: boolean;
 }

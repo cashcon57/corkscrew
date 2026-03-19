@@ -8,7 +8,7 @@
     saveProfileSnapshot,
     activateProfile,
   } from "$lib/api";
-  import { selectedGame, showError, showSuccess } from "$lib/stores";
+  import { selectedGame, showError, showSuccess, modStateVersion } from "$lib/stores";
   import type { Profile } from "$lib/types";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import SkeletonRows from "$lib/components/SkeletonRows.svelte";
@@ -84,6 +84,7 @@
       await activateProfile(id, game.game_id, game.bottle_name);
       showSuccess("Profile activated");
       await loadProfiles();
+      modStateVersion.update(n => n + 1);
     } catch (e: unknown) {
       showError(`Failed to activate profile: ${e}`);
     } finally {

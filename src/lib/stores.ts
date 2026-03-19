@@ -1,5 +1,5 @@
 import { writable, derived } from "svelte/store";
-import type { Bottle, DetectedGame, InstalledMod, AppConfig, SkseStatus, Profile, CollectionSummary, FomodInstaller, GameLock } from "./types";
+import type { Bottle, DetectedGame, InstalledMod, AppConfig, SkseStatus, Profile, CollectionSummary, FomodInstaller, GameLock, WjArchiveStatus } from "./types";
 
 // App state
 export const bottles = writable<Bottle[]>([]);
@@ -151,6 +151,78 @@ export interface LogEntry {
 }
 export const collectionInstallStatus = writable<CollectionInstallStatus | null>(null);
 
+// Wabbajack install progress (global — visible from any page)
+export interface WjInstallStatus {
+  active: boolean;
+  modlistName: string;
+  phase: "preflight" | "downloading" | "extracting" | "directives" | "deploying" | "complete" | "failed" | "cancelled" | "";
+  // Download phase
+  downloadProgress: {
+    current: number;
+    total: number;
+    bytesDownloaded: number;
+    totalBytes: number;
+    currentFile: string;
+    speed: number; // bytes/sec
+    eta: string;
+  };
+  // Extraction phase
+  extractionProgress: {
+    current: number;
+    total: number;
+    currentArchive: string;
+    totalBytes: number;
+    bytesCompleted: number;
+  };
+  // Directive phase
+  directiveProgress: {
+    current: number;
+    total: number;
+    bytesProcessed: number;
+    totalBytes: number;
+    currentFile: string;
+    directiveType: string;
+  };
+  // Deploy phase
+  deployProgress: {
+    current: number;
+    total: number;
+    bytesDeployed: number;
+    totalBytes: number;
+  };
+  // Per-archive status (for extraction view)
+  archives: WjArchiveStatus[];
+  // Timing
+  startTime: number;
+  elapsed: string;
+  overallProgress: number; // 0-100
+  speed: number; // bytes/sec — current phase speed
+  speedLabel: string;
+  etaLabel: string;
+  // Result
+  result: {
+    filesDeployed: number;
+    warnings: string[];
+    elapsed: number;
+  } | null;
+  error: string | null;
+  // Install ID for cancellation
+  installId: number | null;
+  // Preflight report
+  preflightNote: string;
+  // Modlist metadata (for display during install)
+  readmeHtml: string;
+  description: string;
+  author: string;
+  imageUrl: string;
+  featuredMods: Array<{ name: string; description: string }>;
+}
+
+export const wjInstallStatus = writable<WjInstallStatus | null>(null);
+
+/** Incremented when a WJ install completes — mods page should refresh on change. */
+export const wjInstallGeneration = writable<number>(0);
+
 // Collection uninstall progress (global — visible from any page)
 export interface CollectionUninstallStatus {
   active: boolean;
@@ -230,6 +302,9 @@ export function showSuccess(msg: string) {
   successMessage.set(msg);
   setTimeout(() => successMessage.set(null), 3000);
 }
+
+// Mod state version — incremented on profile/collection switches to trigger mods page refresh
+export const modStateVersion = writable(0);
 
 // Game Lock — tracks whether a game is currently running (MO2-style lock)
 export const gameLock = writable<GameLock | null>(null);

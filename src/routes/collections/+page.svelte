@@ -2,7 +2,7 @@
   import { onMount, onDestroy, untrack } from "svelte";
   import { goto } from "$app/navigation";
   import InstructionParser from "$lib/components/InstructionParser.svelte";
-  import { selectedGame, showError, showSuccess, collectionInstallStatus, collectionUninstallStatus } from "$lib/stores";
+  import { selectedGame, showError, showSuccess, collectionInstallStatus, collectionUninstallStatus, modStateVersion } from "$lib/stores";
   import type { CollectionUninstallStatus } from "$lib/stores";
   import type { UninstallProgressEvent } from "$lib/types";
   import type { CollectionInfo, CollectionManifest, CollectionMod, CollectionModEntry, CollectionSearchResult, InstalledMod, NexusModInfo, NexusCategory, NexusSearchResult, NexusModFile, CollectionInstallCheckpoint } from "$lib/types";
@@ -220,6 +220,7 @@
 
       await switchCollection(game.game_id, game.bottle_name, name);
       showSuccess(`Switched to "${name}" — mods deployed`);
+      modStateVersion.update(n => n + 1);
 
       // Refresh deployment health after switching
       handleVerifyCollection(name);
@@ -1069,7 +1070,7 @@
     if (browseAuthorTimer) { clearTimeout(browseAuthorTimer); browseAuthorTimer = null; }
     if (depotPollTimer) { clearInterval(depotPollTimer); depotPollTimer = null; }
     // Close any active webviews when navigating away
-    closeBrowserWebview().catch(() => {});
+    closeBrowserWebview().catch((err) => console.error('closeBrowserWebview:', err));
   });
 
   async function handleResumeInstall() {
@@ -1760,21 +1761,21 @@
 <div class="collections-page">
   <!-- Tab Switcher -->
   <div class="tab-bar">
-    <button class="tab-btn" class:tab-active={activeTab === "my"} onclick={() => { closeBrowserWebview().catch(() => {}); activeTab = "my"; }}>
+    <button class="tab-btn" class:tab-active={activeTab === "my"} onclick={() => { closeBrowserWebview().catch((err) => console.error('closeBrowserWebview:', err)); activeTab = "my"; }}>
       My Collections
       {#if myCollections.length > 0}
         <span class="tab-count">{myCollections.length}</span>
       {/if}
     </button>
-    <button class="tab-btn" class:tab-active={activeTab === "nexus"} onclick={() => { closeBrowserWebview().catch(() => {}); activeTab = "nexus"; }}>
+    <button class="tab-btn" class:tab-active={activeTab === "nexus"} onclick={() => { closeBrowserWebview().catch((err) => console.error('closeBrowserWebview:', err)); activeTab = "nexus"; }}>
       <NexusLogo size={14} />
       Nexus Mods Collections
     </button>
-    <button class="tab-btn" class:tab-active={activeTab === "wabbajack"} onclick={() => { closeBrowserWebview().catch(() => {}); activeTab = "wabbajack"; }}>
+    <button class="tab-btn" class:tab-active={activeTab === "wabbajack"} onclick={() => { closeBrowserWebview().catch((err) => console.error('closeBrowserWebview:', err)); activeTab = "wabbajack"; }}>
       <WabbajackLogo size={14} />
       Wabbajack Lists
     </button>
-    <button class="tab-btn" class:tab-active={activeTab === "browse_mods"} onclick={() => { closeBrowserWebview().catch(() => {}); activeTab = "browse_mods"; }}>
+    <button class="tab-btn" class:tab-active={activeTab === "browse_mods"} onclick={() => { closeBrowserWebview().catch((err) => console.error('closeBrowserWebview:', err)); activeTab = "browse_mods"; }}>
       <NexusLogo size={14} />
       Browse Nexus
     </button>

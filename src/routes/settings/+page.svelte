@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, uninstallSkse, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, checkModToolUpdate, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads, checkSteamStatus, addToSteam, removeFromSteam, scanGameDirectory, cleanGameDirectory, checkSkyrimVersion, downgradeSkyrim, checkDeploymentHealth, redeployAllMods, getVerificationLevel, setVerificationLevel, getDepotDownloadCommand, startDepotDownload, checkDepotReady, applyDowngrade, listGameVersions, swapGameVersion, listDisabledWinePlugins, reenableWinePlugin, vortexListCachedExtensions, vortexFetchExtension, vortexRefreshExtension, vortexDeleteCachedExtension, vortexListAvailableExtensions, vortexGetExtensionDetail } from "$lib/api";
+  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, uninstallSkse, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, findOrphanedDownloads, deleteOrphanedDownloads, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, checkModToolUpdate, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads, checkSteamStatus, addToSteam, removeFromSteam, scanGameDirectory, cleanGameDirectory, checkSkyrimVersion, downgradeSkyrim, checkDeploymentHealth, redeployAllMods, getVerificationLevel, setVerificationLevel, setUseOriginalEngineFixes, getDepotDownloadCommand, startDepotDownload, checkDepotReady, applyDowngrade, listGameVersions, swapGameVersion, listDisabledWinePlugins, reenableWinePlugin, vortexListCachedExtensions, vortexFetchExtension, vortexRefreshExtension, vortexDeleteCachedExtension, vortexListAvailableExtensions, vortexGetExtensionDetail } from "$lib/api";
   import type { CleanReport, CleanResult, DowngradeStatus, DeploymentHealth, VerificationLevel, CachedVersion, DepotDownloadInfo } from "$lib/types";
   import type { SteamStatus } from "$lib/types";
   import { config, showError, showSuccess, selectedGame, skseStatus, currentPage, appVersion, updateReady, updateVersion, updateNotes, updateChecking, updateError, triggerUpdateCheck, controllerMode } from "$lib/stores";
@@ -39,6 +39,9 @@
   // Launch fixes toggle
   let disableGameFixes = $state(false);
 
+  // Engine Fixes mode
+  let useOriginalEngineFixes = $state(false);
+
   // Download concurrency
   let downloadThreads = $state("auto");
   let optimalThreads = $state(6);
@@ -56,6 +59,11 @@
   let deletingArchive = $state<string | null>(null);
   let clearingAll = $state(false);
   let showArchiveList = $state(false);
+  // Orphaned download cleanup
+  let orphanedDownloads = $state<import("$lib/types").OrphanedDownload[]>([]);
+  let scanningOrphans = $state(false);
+  let showOrphanList = $state(false);
+  let deletingOrphans = $state(false);
   let downloadsStats = $state<{ total_size_bytes: number; archive_count: number; directory: string } | null>(null);
 
   // Vortex Extensions
@@ -150,6 +158,7 @@
   let collapsedSections = $state<Set<string>>(new Set([
     "gameVersion",
     "winePlugins",
+    "engineFixes",
     "deploymentHealth",
     "gameMaintenance",
     "shaderCompatibility",
@@ -397,6 +406,7 @@
       downloadDir = cfg.download_dir ?? "";
       autoDeleteArchives = (cfg as Record<string, unknown>).auto_delete_archives === "true";
       disableGameFixes = (cfg as Record<string, unknown>).disable_game_fixes === "true";
+      useOriginalEngineFixes = (cfg as Record<string, unknown>).use_original_engine_fixes === true;
       // Read download threads from the same config
       const saved = (cfg as Record<string, unknown>).download_threads;
       if (saved && saved !== "auto") {
@@ -919,6 +929,35 @@
       showError(`Failed to clear archives: ${e}`);
     } finally {
       clearingAll = false;
+    }
+  }
+
+  async function handleScanOrphans() {
+    scanningOrphans = true;
+    try {
+      orphanedDownloads = await findOrphanedDownloads();
+      showOrphanList = true;
+    } catch (e: unknown) {
+      showError(`Failed to scan for orphaned downloads: ${e}`);
+    } finally {
+      scanningOrphans = false;
+    }
+  }
+
+  async function handleDeleteOrphans() {
+    if (orphanedDownloads.length === 0) return;
+    deletingOrphans = true;
+    try {
+      const paths = orphanedDownloads.map(o => o.path);
+      const count = await deleteOrphanedDownloads(paths);
+      orphanedDownloads = [];
+      showOrphanList = false;
+      downloadsStats = await getDownloadsStats();
+      showSuccess(`Deleted ${count} orphaned archive${count !== 1 ? "s" : ""}`);
+    } catch (e: unknown) {
+      showError(`Failed to delete orphaned downloads: ${e}`);
+    } finally {
+      deletingOrphans = false;
     }
   }
 </script>
@@ -1526,6 +1565,44 @@
       {/if}
     </div>
     {/if}
+
+    <!-- Engine Fixes Mode -->
+    <div class="section">
+      <button class="section-title section-title-collapsible" onclick={() => toggleSection('engineFixes')}>
+        <span class="section-chevron">{collapsedSections.has('engineFixes') ? '\u25B8' : '\u25BE'}</span>
+        Engine Fixes
+      </button>
+      {#if !collapsedSections.has('engineFixes')}
+      <div class="section-card">
+        <div class="card-row appearance-row">
+          <div class="toggle-info">
+            <span class="row-label">Use Original SSE Engine Fixes</span>
+            <span class="toggle-description">Disable Corkscrew's Wine-compatible Engine Fixes fork. Use this if your modlist includes its own version or for testing. Not recommended for most users.</span>
+          </div>
+          <button
+            class="toggle-switch"
+            class:toggle-on={useOriginalEngineFixes}
+            onclick={async () => {
+              const next = !useOriginalEngineFixes;
+              useOriginalEngineFixes = next;
+              try {
+                await setUseOriginalEngineFixes(next);
+              } catch (err) {
+                console.error('Failed to save Engine Fixes preference:', err);
+                useOriginalEngineFixes = !next;
+                showError(`Failed to save Engine Fixes preference: ${err}`);
+              }
+            }}
+            type="button"
+            role="switch"
+            aria-checked={useOriginalEngineFixes}
+          >
+            <span class="toggle-thumb"></span>
+          </button>
+        </div>
+      </div>
+      {/if}
+    </div>
   {/if}
 
   <!-- Deployment Health -->
@@ -2481,6 +2558,65 @@
                   </svg>
                 {/if}
               </button>
+            </div>
+          {/each}
+        {/if}
+      {/if}
+
+      <div class="card-divider"></div>
+      <div class="card-row">
+        <div class="archives-summary">
+          <div class="archives-info">
+            <span class="row-label">Orphaned Downloads</span>
+            <span class="archives-stats">Archives not used by any installed mod or collection</span>
+          </div>
+          <div class="archives-actions">
+            {#if !showOrphanList}
+              <button
+                class="btn-ghost"
+                onclick={handleScanOrphans}
+                disabled={scanningOrphans}
+                type="button"
+              >
+                {scanningOrphans ? "Scanning..." : "Scan"}
+              </button>
+            {:else}
+              <button
+                class="btn-ghost"
+                onclick={() => { showOrphanList = false; orphanedDownloads = []; }}
+                type="button"
+              >
+                Hide
+              </button>
+              {#if orphanedDownloads.length > 0}
+                <button
+                  class="btn-danger"
+                  onclick={handleDeleteOrphans}
+                  disabled={deletingOrphans}
+                  type="button"
+                >
+                  {deletingOrphans ? "Deleting..." : `Delete ${orphanedDownloads.length} (${formatBytes(orphanedDownloads.reduce((s, o) => s + o.size_bytes, 0))})`}
+                </button>
+              {/if}
+            {/if}
+          </div>
+        </div>
+      </div>
+
+      {#if showOrphanList}
+        {#if orphanedDownloads.length === 0}
+          <div class="card-divider"></div>
+          <div class="card-row">
+            <span class="archives-empty">No orphaned downloads found.</span>
+          </div>
+        {:else}
+          {#each orphanedDownloads as orphan (orphan.path)}
+            <div class="card-divider"></div>
+            <div class="card-row archive-row">
+              <div class="archive-info">
+                <span class="archive-name" title={orphan.filename}>{orphan.filename}</span>
+                <span class="archive-meta">{formatBytes(orphan.size_bytes)}</span>
+              </div>
             </div>
           {/each}
         {/if}

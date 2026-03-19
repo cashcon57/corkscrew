@@ -80,6 +80,10 @@ pub struct WjPreflightReport {
     pub nexus_archives: usize,
     pub is_nexus_premium: bool,
     pub manual_downloads: usize,
+    /// Game version required by the modlist (from GameFileSource archives).
+    pub required_game_version: Option<String>,
+    /// Currently installed game version (detected from executable).
+    pub detected_game_version: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -183,6 +187,11 @@ pub enum WjInstallProgressEvent {
 /// Parse a .wabbajack ZIP file and deserialize the modlist JSON into a
 /// strongly-typed `WjTypedModlist`. Tries entry names "modlist" then
 /// "modlist.json".
+/// Public wrapper for CLI testing of typed WJ parse.
+pub fn parse_wabbajack_file_typed_cli(path: &Path) -> Result<WjTypedModlist, String> {
+    parse_wabbajack_file_typed(path)
+}
+
 fn parse_wabbajack_file_typed(path: &Path) -> Result<WjTypedModlist, String> {
     let file =
         std::fs::File::open(path).map_err(|e| format!("Cannot open .wabbajack file: {}", e))?;
@@ -293,8 +302,8 @@ pub async fn preflight_check(
     app: &AppHandle,
     db: &Arc<ModDatabase>,
     wabbajack_path: &Path,
-    _game_id: &str,
-    _bottle_name: &str,
+    game_id: &str,
+    bottle_name: &str,
     install_dir: &Path,
     download_dir: &Path,
 ) -> Result<WjPreflightReport, WjInstallError> {
@@ -348,7 +357,11 @@ pub async fn preflight_check(
         }
     }
 
-    // 7. Collect issues
+    // 7. Detect game version and check against modlist requirements
+    let required_game_version = modlist.required_game_version();
+    let detected_game_version = detect_installed_game_version(game_id, bottle_name);
+
+    // 8. Collect issues
     let mut issues = Vec::new();
 
     if disk_space_available < disk_space_required {
@@ -383,6 +396,46 @@ pub async fn preflight_check(
         });
     }
 
+    // Game version mismatch check
+    if let (Some(ref required), Some(ref detected)) =
+        (&required_game_version, &detected_game_version)
+    {
+        let required_major = parse_version_major(required);
+        let detected_major = parse_version_major(detected);
+
+        if let (Some(req), Some(det)) = (required_major, detected_major) {
+            // Major version mismatch (e.g. 1.5 vs 1.6) is a blocking error
+            if req != det {
+                issues.push(WjPreflightIssue {
+                    severity: "error".to_string(),
+                    message: format!(
+                        "Game version mismatch: modlist requires {} but your game is {}. \
+                         You may need to downgrade or update your game.",
+                        required, detected
+                    ),
+                });
+            } else if required != detected {
+                // Same major, different patch — warn but allow
+                issues.push(WjPreflightIssue {
+                    severity: "warning".to_string(),
+                    message: format!(
+                        "Game version differs slightly: modlist was built for {} but \
+                         your game is {}. This may still work.",
+                        required, detected
+                    ),
+                });
+            }
+        }
+    } else if required_game_version.is_some() && detected_game_version.is_none() {
+        issues.push(WjPreflightIssue {
+            severity: "warning".to_string(),
+            message: format!(
+                "Modlist requires game version {} but we couldn't detect your installed version.",
+                required_game_version.as_deref().unwrap_or("unknown")
+            ),
+        });
+    }
+
     // Can proceed if there are no "error" severity issues
     let can_proceed = !issues.iter().any(|i| i.severity == "error");
 
@@ -398,6 +451,8 @@ pub async fn preflight_check(
         nexus_archives,
         is_nexus_premium,
         manual_downloads,
+        required_game_version,
+        detected_game_version,
     };
 
     emit_progress(
@@ -408,6 +463,151 @@ pub async fn preflight_check(
     );
 
     Ok(report)
+}
+
+/// Detect the installed game version by resolving the game path from bottle + game_id.
+/// Returns a version string like "1.6.1170" or "1.5.97", or None if detection fails.
+fn detect_installed_game_version(game_id: &str, bottle_name: &str) -> Option<String> {
+    // Currently only Skyrim SE has detailed version detection
+    if !game_id.eq_ignore_ascii_case("skyrimse") {
+        return None;
+    }
+
+    let bottles = crate::bottles::detect_bottles();
+    let bottle = bottles.iter().find(|b| b.name == bottle_name)?;
+
+    let game_path = crate::games::with_plugin(game_id, |plugin| {
+        plugin.detect(bottle).map(|g| g.game_path)
+    })
+    .flatten()?;
+
+    match crate::downgrader::detect_skyrim_version(&game_path) {
+        Ok(status) => {
+            log::info!(
+                "Detected Skyrim version: {} (downgraded: {})",
+                status.current_version,
+                status.is_downgraded
+            );
+            Some(status.current_version)
+        }
+        Err(e) => {
+            log::warn!("Failed to detect Skyrim version: {}", e);
+            None
+        }
+    }
+}
+
+/// Parse the major version prefix from a version string.
+/// e.g. "1.6.1170.0" → "1.6", "1.5.97" → "1.5"
+fn parse_version_major(version: &str) -> Option<String> {
+    let parts: Vec<&str> = version.split('.').collect();
+    if parts.len() >= 2 {
+        Some(format!("{}.{}", parts[0], parts[1]))
+    } else {
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase metrics helpers
+// ---------------------------------------------------------------------------
+
+/// Get the current process RSS (Resident Set Size) in bytes.
+fn get_rss_bytes() -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+            for line in status.lines() {
+                if line.starts_with("VmRSS:") {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if let Some(kb_str) = parts.get(1) {
+                        if let Ok(kb) = kb_str.parse::<u64>() {
+                            return kb * 1024;
+                        }
+                    }
+                }
+            }
+        }
+        return 0;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use std::mem;
+
+        // Layout must match macOS `mach_task_basic_info` (stable since macOS 10.x).
+        // If Apple changes this struct in a future OS, RSS reporting will return 0
+        // (safe fallback). Consider the `mach2` crate if this breaks.
+        #[repr(C)]
+        struct MachTaskBasicInfo {
+            virtual_size: u64,
+            resident_size: u64,
+            resident_size_max: u64,
+            user_time: [u32; 2],
+            system_time: [u32; 2],
+            policy: i32,
+            suspend_count: i32,
+        }
+
+        const MACH_TASK_BASIC_INFO: u32 = 20;
+
+        extern "C" {
+            fn mach_task_self() -> u32;
+            fn task_info(
+                target_task: u32,
+                flavor: u32,
+                task_info_out: *mut MachTaskBasicInfo,
+                task_info_count: *mut u32,
+            ) -> i32;
+        }
+
+        let mut info: MachTaskBasicInfo = unsafe { mem::zeroed() };
+        let mut count =
+            (mem::size_of::<MachTaskBasicInfo>() / mem::size_of::<u32>()) as u32;
+
+        let result =
+            unsafe { task_info(mach_task_self(), MACH_TASK_BASIC_INFO, &mut info, &mut count) };
+
+        if result == 0 {
+            return info.resident_size;
+        }
+        return 0;
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        0
+    }
+}
+
+/// Emit phase metrics (elapsed time + RSS memory) for observability.
+fn log_phase_metrics(app: &AppHandle, phase: &str, start_time: Instant) {
+    let elapsed_ms = start_time.elapsed().as_millis() as u64;
+    let rss_bytes = get_rss_bytes();
+
+    log::info!(
+        "WJ phase '{}' completed in {}ms (RSS: {:.1}MB)",
+        phase,
+        elapsed_ms,
+        rss_bytes as f64 / 1_048_576.0,
+    );
+
+    let _ = app.emit(
+        "wj://phase-metrics",
+        serde_json::json!({
+            "phase": phase,
+            "elapsed_ms": elapsed_ms,
+            "rss_bytes": rss_bytes,
+        }),
+    );
+
+    // On Linux (glibc), call malloc_trim to return freed pages to OS.
+    // Critical on Steam Deck with 16GB shared RAM.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::malloc_trim(0);
+        log::debug!("malloc_trim(0) called after phase '{}'", phase);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -465,6 +665,7 @@ pub async fn install_wabbajack_modlist(
     // -----------------------------------------------------------------------
     // Step 2: Run pre-flight check
     // -----------------------------------------------------------------------
+    let phase_start = Instant::now();
     let preflight_report = preflight_check(
         app,
         db,
@@ -492,6 +693,8 @@ pub async fn install_wabbajack_modlist(
             warnings.push(issue.message.clone());
         }
     }
+
+    log_phase_metrics(app, "preflight", phase_start);
 
     // Check cancellation
     if is_cancelled(&cancel_token) {
@@ -525,6 +728,7 @@ pub async fn install_wabbajack_modlist(
     // -----------------------------------------------------------------------
     // Step 4: Download phase
     // -----------------------------------------------------------------------
+    let phase_start = Instant::now();
     db.update_wj_install_status(install_id, "downloading", None)
         .map_err(|e| WjInstallError::Database(e.to_string()))?;
 
@@ -536,24 +740,23 @@ pub async fn install_wabbajack_modlist(
     );
 
     // Get Nexus API key and premium status for the downloader
-    let (nexus_api_key, is_premium) = match oauth::get_auth_method() {
+    let (nexus_api_key, nexus_oauth_token, is_premium) = match oauth::get_auth_method() {
         oauth::AuthMethod::ApiKey(key) => {
             let client = nexus::NexusClient::new(key.clone());
             let premium = client.is_premium().await;
-            (Some(key), premium)
+            (Some(key), None, premium)
         }
         oauth::AuthMethod::OAuth(tokens) => {
             let premium = oauth::parse_user_info(&tokens.access_token)
                 .map(|u| u.is_premium)
                 .unwrap_or(false);
-            // OAuth doesn't provide an API key for NexusMods REST API;
-            // NexusMods downloads will require manual action.
-            (None, premium)
+            (None, Some(tokens.access_token.clone()), premium)
         }
-        oauth::AuthMethod::None => (None, false),
+        oauth::AuthMethod::None => (None, None, false),
     };
 
-    let mut downloader = WjDownloader::new(nexus_api_key, is_premium, download_dir.to_path_buf());
+    let downloader =
+        WjDownloader::new(nexus_api_key, nexus_oauth_token, is_premium, download_dir.to_path_buf());
     let archive_download_paths = downloader
         .download_all_archives(
             app,
@@ -574,6 +777,40 @@ pub async fn install_wabbajack_modlist(
     db.update_wj_install_archive_progress(install_id, archive_download_paths.len() as i64)
         .map_err(|e| WjInstallError::Database(e.to_string()))?;
 
+    // Register downloaded archives in the download_registry for orphan tracking
+    let collection_name = format!("wj:{}", modlist.name);
+    for archive in &modlist.archives {
+        if let Some(path) = archive_download_paths.get(&archive.hash.0) {
+            let filename = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let file_size = std::fs::metadata(path).map(|m| m.len() as i64).unwrap_or(0);
+            let (nexus_mod_id, nexus_file_id) = match &archive.state {
+                WjArchiveState::Nexus { mod_id, file_id, .. } => (Some(*mod_id), Some(*file_id)),
+                _ => (None, None),
+            };
+            if let Ok(download_id) = db.register_download(
+                &path.to_string_lossy(),
+                &filename,
+                nexus_mod_id,
+                nexus_file_id,
+                None, // SHA-256 not available here
+                file_size,
+            ) {
+                let _ = db.add_download_collection_ref(
+                    download_id,
+                    &collection_name,
+                    game_id,
+                    bottle_name,
+                );
+            }
+        }
+    }
+
+    log_phase_metrics(app, "download", phase_start);
+
     // Check cancellation
     if is_cancelled(&cancel_token) {
         mark_cancelled(db, install_id);
@@ -584,6 +821,7 @@ pub async fn install_wabbajack_modlist(
     // -----------------------------------------------------------------------
     // Step 5: Extraction phase
     // -----------------------------------------------------------------------
+    let phase_start = Instant::now();
     db.update_wj_install_status(install_id, "extracting", None)
         .map_err(|e| WjInstallError::Database(e.to_string()))?;
 
@@ -739,6 +977,8 @@ pub async fn install_wabbajack_modlist(
         }
     }
 
+    log_phase_metrics(app, "extraction", phase_start);
+
     // Check cancellation
     if is_cancelled(&cancel_token) {
         mark_cancelled(db, install_id);
@@ -749,6 +989,7 @@ pub async fn install_wabbajack_modlist(
     // -----------------------------------------------------------------------
     // Step 6: Directive processing phase
     // -----------------------------------------------------------------------
+    let phase_start = Instant::now();
     db.update_wj_install_status(install_id, "processing", None)
         .map_err(|e| WjInstallError::Database(e.to_string()))?;
 
@@ -778,12 +1019,14 @@ pub async fn install_wabbajack_modlist(
             .unwrap_or_else(|| install_dir.join("Data"))
     };
 
+    let install_id_str = format!("{}::{}", modlist.name, modlist.version);
     let processor = DirectiveProcessor::new(
         wabbajack_path.to_path_buf(),
         extracted_dirs.clone(),
         install_dir.to_path_buf(),
         game_dir.clone(),
-    );
+    )
+    .with_resume_tracking(db.clone(), install_id_str);
 
     let app_clone = app.clone();
     let directive_count = modlist.directives.len();
@@ -839,6 +1082,8 @@ pub async fn install_wabbajack_modlist(
         directive_result.errors.len(),
     );
 
+    log_phase_metrics(app, "directives", phase_start);
+
     // Check cancellation
     if is_cancelled(&cancel_token) {
         mark_cancelled(db, install_id);
@@ -849,6 +1094,7 @@ pub async fn install_wabbajack_modlist(
     // -----------------------------------------------------------------------
     // Step 7: Deploy phase
     // -----------------------------------------------------------------------
+    let phase_start = Instant::now();
     db.update_wj_install_status(install_id, "deploying", None)
         .map_err(|e| WjInstallError::Database(e.to_string()))?;
 
@@ -885,6 +1131,15 @@ pub async fn install_wabbajack_modlist(
     let files_deployed = if deploy_files.is_empty() {
         0usize
     } else {
+        // Remove any existing mod records for this modlist (from prior interrupted installs)
+        // to prevent duplicates showing up in the mod list.
+        if let Ok(existing_ids) = db.find_mods_by_name(game_id, bottle_name, &modlist.name) {
+            for old_id in existing_ids {
+                log::info!("Removing stale mod record id={} for '{}' (prior interrupted install)", old_id, modlist.name);
+                let _ = db.remove_mod(old_id);
+            }
+        }
+
         // Create a mod record for the modlist output
         let mod_id = db
             .add_mod(
@@ -897,6 +1152,10 @@ pub async fn install_wabbajack_modlist(
                 &deploy_files,
             )
             .map_err(|e| WjInstallError::Database(e.to_string()))?;
+
+        // Tag this mod as belonging to the WJ modlist collection
+        let wj_collection = format!("wj:{}", modlist.name);
+        let _ = db.set_collection_name(mod_id, &wj_collection);
 
         match crate::deployer::deploy_mod_atomic(
             db,
@@ -946,6 +1205,29 @@ pub async fn install_wabbajack_modlist(
             }
         }
     };
+
+    log_phase_metrics(app, "deployment", phase_start);
+
+    // -----------------------------------------------------------------------
+    // Step 7b: Import MO2 profiles (if present in the modlist)
+    // -----------------------------------------------------------------------
+    let imported_profiles = crate::profiles::import_mo2_profiles(
+        db,
+        install_dir,
+        game_id,
+        bottle_name,
+        &modlist.name,
+    );
+    if !imported_profiles.is_empty() {
+        log::info!(
+            "Imported {} MO2 profile(s): {}",
+            imported_profiles.len(),
+            imported_profiles.join(", ")
+        );
+        for name in &imported_profiles {
+            warnings.push(format!("Imported MO2 profile: {}", name));
+        }
+    }
 
     // -----------------------------------------------------------------------
     // Step 8: Mark completed in DB
@@ -1300,9 +1582,12 @@ mod tests {
             nexus_archives: 30,
             is_nexus_premium: false,
             manual_downloads: 5,
+            required_game_version: Some("1.6.1170.0".to_string()),
+            detected_game_version: Some("1.6.1170".to_string()),
         };
         let json = serde_json::to_string(&report).unwrap();
         assert!(json.contains("\"can_proceed\":true"));
+        assert!(json.contains("\"required_game_version\""));
         assert!(json.contains("\"total_archives\":50"));
     }
 

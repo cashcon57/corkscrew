@@ -10,12 +10,14 @@ pub mod conflict_resolver;
 pub mod crashlog;
 pub mod cursor_clamp;
 pub mod database;
+pub mod deck;
 pub mod deploy_journal;
 pub mod deployer;
 pub mod disk_budget;
 pub mod display_fix;
 pub mod downgrader;
 pub mod download_queue;
+pub mod dxvk;
 pub mod executables;
 pub mod fomod;
 pub mod fomod_recipes;
@@ -23,6 +25,7 @@ pub mod game_lock;
 pub mod game_registry;
 pub mod games;
 pub mod google_oauth;
+pub mod gpu_encoder;
 pub mod ini_manager;
 pub mod installer;
 pub mod instruction_parser;
@@ -41,12 +44,15 @@ pub mod mod_tools;
 pub mod modlist_io;
 pub mod nexus;
 pub mod nexus_sso;
+pub mod nxm_handler;
 pub mod oauth;
 pub mod platform;
 pub mod plugins;
 pub mod preflight;
+pub mod prefix_setup;
 pub mod profiles;
 pub mod progress;
+pub mod proton;
 pub mod rollback;
 pub mod session_tracker;
 pub mod skse;
@@ -63,6 +69,7 @@ pub mod wabbajack_downloader;
 pub mod wabbajack_installer;
 pub mod wabbajack_types;
 pub mod wine_compat;
+pub mod wine_dll_overrides;
 pub mod app_updates;
 pub mod self_update;
 pub mod shader_conversion;
@@ -1220,6 +1227,143 @@ async fn clear_all_download_archives() -> Result<u64, String> {
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct OrphanedDownload {
+    path: String,
+    filename: String,
+    size_bytes: u64,
+}
+
+#[tauri::command]
+async fn find_orphaned_downloads(
+    state: State<'_, AppState>,
+) -> Result<Vec<OrphanedDownload>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let cfg = config::get_config().map_err(|e| e.to_string())?;
+        let dir = cfg
+            .download_dir
+            .map(PathBuf::from)
+            .unwrap_or_else(config::downloads_dir);
+
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        // 1. List all archive files on disk
+        let mut disk_files: Vec<(String, String, u64)> = Vec::new(); // (path, filename, size)
+        let entries = std::fs::read_dir(&dir).map_err(|e| e.to_string())?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            if !["zip", "7z", "rar", "gz", "tar"].contains(&ext.as_str()) {
+                continue;
+            }
+            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            let filename = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            disk_files.push((path.to_string_lossy().to_string(), filename, size));
+        }
+
+        // 2. Get all archive names referenced by installed mods
+        let installed_names = db.get_all_archive_names().map_err(|e| e.to_string())?;
+
+        // 3. Get all download registry records
+        let registry_records = db.get_all_download_records().map_err(|e| e.to_string())?;
+        let registry_names: std::collections::HashSet<String> = registry_records
+            .iter()
+            .map(|r| r.archive_name.clone())
+            .collect();
+
+        // 4. Get download IDs with collection refs
+        let ids_with_refs = db.get_download_ids_with_refs().map_err(|e| e.to_string())?;
+
+        // 5. A file is orphaned if:
+        //    - NOT referenced by any installed mod's archive_name AND
+        //    - (NOT in download_registry OR in registry but has zero collection refs)
+        let mut orphans = Vec::new();
+        for (path, filename, size) in &disk_files {
+            if installed_names.contains(filename) {
+                continue;
+            }
+            // Check if it's in the registry with collection refs
+            let has_live_ref = registry_records.iter().any(|r| {
+                r.archive_name == *filename && ids_with_refs.contains(&r.id)
+            });
+            if has_live_ref {
+                continue;
+            }
+            orphans.push(OrphanedDownload {
+                path: path.clone(),
+                filename: filename.clone(),
+                size_bytes: *size,
+            });
+        }
+
+        Ok(orphans)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
+#[tauri::command]
+async fn delete_orphaned_downloads(
+    paths: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<u64, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let cfg = config::get_config().map_err(|e| e.to_string())?;
+        let downloads = cfg
+            .download_dir
+            .map(PathBuf::from)
+            .unwrap_or_else(config::downloads_dir);
+        let canonical_downloads = downloads
+            .canonicalize()
+            .map_err(|e| format!("Invalid downloads directory: {e}"))?;
+
+        let mut deleted = 0u64;
+        for path_str in &paths {
+            let archive_path = PathBuf::from(path_str);
+            if !archive_path.exists() {
+                continue;
+            }
+            let canonical = match archive_path.canonicalize() {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            if !canonical.starts_with(&canonical_downloads) {
+                continue;
+            }
+            if !canonical.is_file() {
+                continue;
+            }
+            // Clean up registry entry if present
+            let filename = canonical
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            if let Ok(Some(record)) = db.find_download_by_name(&filename) {
+                let _ = db.delete_download_record(record.id);
+            }
+            if std::fs::remove_file(&canonical).is_ok() {
+                deleted += 1;
+            }
+        }
+        Ok(deleted)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
 /// Fetch a transparent game logo PNG from Steam CDN and cache it locally.
 /// Returns a base64-encoded data URL, or null if unavailable.
 /// The PNG is cached on disk so subsequent calls are instant.
@@ -1547,6 +1691,22 @@ async fn launch_game_cmd(
         }
     }
 
+    // Deploy DXVK config on Linux (game-specific overrides for modded games)
+    #[cfg(target_os = "linux")]
+    {
+        let t = Instant::now();
+        if let Err(e) = crate::dxvk::deploy_config(
+            &game_path,
+            &game_id,
+            &crate::dxvk::DxvkPreset::Default,
+            &std::collections::HashMap::new(),
+        ) {
+            log::warn!("Failed to deploy DXVK config: {}", e);
+        } else {
+            log::info!("Pre-launch: DXVK config deployed ({}ms)", t.elapsed().as_millis());
+        }
+    }
+
     // Pre-launch plugin sync — ensure plugins.txt reflects all deployed
     // plugins as enabled.  This catches any staleness from the game itself
     // rewriting the file on a previous exit/crash.
@@ -1570,11 +1730,20 @@ async fn launch_game_cmd(
         );
         log::info!("Pre-launch: SKSE plugin conflict fix ({} swapped, {}ms)", skse_fixes, t.elapsed().as_millis());
 
-        // EngineFixes Wine compatibility: disable all patches (they crash under Wine)
-        let t = Instant::now();
-        let ef_fixes =
-            skse::fix_engine_fixes_for_wine(&data_dir, &db, &game_id, &bottle_name);
-        log::info!("Pre-launch: EngineFixes TOML patch ({} patched, {}ms)", ef_fixes, t.elapsed().as_millis());
+        // Check if user wants Wine fork of Engine Fixes
+        let use_wine_ef = !config::get_config()
+            .map(|c| c.use_original_engine_fixes)
+            .unwrap_or(false);
+
+        if use_wine_ef {
+            // EngineFixes Wine compatibility: disable all patches (they crash under Wine)
+            let t = Instant::now();
+            let ef_fixes =
+                skse::fix_engine_fixes_for_wine(&data_dir, &db, &game_id, &bottle_name);
+            log::info!("Pre-launch: EngineFixes TOML patch ({} patched, {}ms)", ef_fixes, t.elapsed().as_millis());
+        } else {
+            log::info!("Pre-launch: skipping Wine EngineFixes (user chose original)");
+        }
 
         // Disable Wine-incompatible SKSE plugins (CrashLogger, etc.)
         let t = Instant::now();
@@ -1594,15 +1763,17 @@ async fn launch_game_cmd(
             wine_plugin_warning = Some(msg);
         }
 
-        // Auto-deploy SSE Engine Fixes for Wine (Wine-safe replacement)
-        let t = Instant::now();
-        match skse::install_engine_fixes_wine_blocking(&data_dir) {
-            Ok(true) => log::info!("Pre-launch: auto-deployed SSE Engine Fixes for Wine ({}ms)", t.elapsed().as_millis()),
-            Ok(false) => log::info!("Pre-launch: SSE Engine Fixes for Wine already deployed ({}ms)", t.elapsed().as_millis()),
-            Err(e) => log::warn!(
-                "Pre-launch: could not auto-deploy SSE Engine Fixes for Wine: {} ({}ms)",
-                e, t.elapsed().as_millis()
-            ),
+        if use_wine_ef {
+            // Auto-deploy SSE Engine Fixes for Wine (Wine-safe replacement)
+            let t = Instant::now();
+            match skse::install_engine_fixes_wine_blocking(&data_dir) {
+                Ok(true) => log::info!("Pre-launch: auto-deployed SSE Engine Fixes for Wine ({}ms)", t.elapsed().as_millis()),
+                Ok(false) => log::info!("Pre-launch: SSE Engine Fixes for Wine already deployed ({}ms)", t.elapsed().as_millis()),
+                Err(e) => log::warn!(
+                    "Pre-launch: could not auto-deploy SSE Engine Fixes for Wine: {} ({}ms)",
+                    e, t.elapsed().as_millis()
+                ),
+            }
         }
         log::info!("Pre-launch: Skyrim-specific fixes total: {}ms", skyrim_prelaunch_start.elapsed().as_millis());
     }
@@ -2425,12 +2596,19 @@ async fn redeploy_all_mods(
 
         if game_id == "skyrimse" {
             let _ = sync_plugins_for_game(&game, &bottle);
-            let ef = skse::fix_engine_fixes_for_wine(&data_dir, &db, &game_id, &bottle_name);
-            if ef > 0 {
-                log::info!(
-                    "Redeploy: patched {} EngineFixes TOML(s) for Wine compatibility",
-                    ef
-                );
+            let use_wine_ef = !config::get_config()
+                .map(|c| c.use_original_engine_fixes)
+                .unwrap_or(false);
+            if use_wine_ef {
+                let ef = skse::fix_engine_fixes_for_wine(&data_dir, &db, &game_id, &bottle_name);
+                if ef > 0 {
+                    log::info!(
+                        "Redeploy: patched {} EngineFixes TOML(s) for Wine compatibility",
+                        ef
+                    );
+                }
+            } else {
+                log::info!("Redeploy: skipping Wine EngineFixes (user chose original)");
             }
             // Disable Wine-incompatible SKSE plugins
             let wine_disabled =
@@ -2442,14 +2620,16 @@ async fn redeploy_all_mods(
                     reason
                 );
             }
-            // Auto-deploy SSE Engine Fixes for Wine on redeploy
-            match skse::install_engine_fixes_wine_blocking(&data_dir) {
-                Ok(true) => log::info!("Redeploy: auto-deployed SSE Engine Fixes for Wine"),
-                Ok(false) => {}
-                Err(e) => log::warn!(
-                    "Redeploy: could not auto-deploy SSE Engine Fixes for Wine: {}",
-                    e
-                ),
+            if use_wine_ef {
+                // Auto-deploy SSE Engine Fixes for Wine on redeploy
+                match skse::install_engine_fixes_wine_blocking(&data_dir) {
+                    Ok(true) => log::info!("Redeploy: auto-deployed SSE Engine Fixes for Wine"),
+                    Ok(false) => {}
+                    Err(e) => log::warn!(
+                        "Redeploy: could not auto-deploy SSE Engine Fixes for Wine: {}",
+                        e
+                    ),
+                }
             }
         }
 
@@ -2503,12 +2683,19 @@ async fn deploy_incremental_cmd(
 
         if game_id == "skyrimse" {
             let _ = sync_plugins_for_game(&game, &bottle);
-            let ef = skse::fix_engine_fixes_for_wine(&data_dir, &db, &game_id, &bottle_name);
-            if ef > 0 {
-                log::info!(
-                    "Incremental deploy: patched {} EngineFixes TOML(s) for Wine compatibility",
-                    ef
-                );
+            let use_wine_ef = !config::get_config()
+                .map(|c| c.use_original_engine_fixes)
+                .unwrap_or(false);
+            if use_wine_ef {
+                let ef = skse::fix_engine_fixes_for_wine(&data_dir, &db, &game_id, &bottle_name);
+                if ef > 0 {
+                    log::info!(
+                        "Incremental deploy: patched {} EngineFixes TOML(s) for Wine compatibility",
+                        ef
+                    );
+                }
+            } else {
+                log::info!("Incremental deploy: skipping Wine EngineFixes (user chose original)");
             }
             // Disable Wine-incompatible SKSE plugins
             let wine_disabled =
@@ -2520,15 +2707,17 @@ async fn deploy_incremental_cmd(
                     reason
                 );
             }
-            match skse::install_engine_fixes_wine_blocking(&data_dir) {
-                Ok(true) => {
-                    log::info!("Incremental deploy: auto-deployed SSE Engine Fixes for Wine")
+            if use_wine_ef {
+                match skse::install_engine_fixes_wine_blocking(&data_dir) {
+                    Ok(true) => {
+                        log::info!("Incremental deploy: auto-deployed SSE Engine Fixes for Wine")
+                    }
+                    Ok(false) => {}
+                    Err(e) => log::warn!(
+                        "Incremental deploy: could not auto-deploy SSE Engine Fixes for Wine: {}",
+                        e
+                    ),
                 }
-                Ok(false) => {}
-                Err(e) => log::warn!(
-                    "Incremental deploy: could not auto-deploy SSE Engine Fixes for Wine: {}",
-                    e
-                ),
             }
         }
 
@@ -2742,6 +2931,19 @@ async fn set_verification_level(level: String) -> Result<(), String> {
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
+}
+
+/// Toggle whether to use the original SSE Engine Fixes instead of the Wine fork.
+#[tauri::command]
+async fn set_use_original_engine_fixes(enabled: bool) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let mut cfg = config::get_config().map_err(|e| e.to_string())?;
+        cfg.use_original_engine_fixes = enabled;
+        config::save_config(&cfg).map_err(|e| e.to_string())?;
+        Ok(())
+    })
+    .await
+    .map_err(|e: tokio::task::JoinError| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -4254,9 +4456,11 @@ async fn activate_profile(
     profile_id: i64,
     game_id: String,
     bottle_name: String,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     check_game_lock(&state.game_locks, &game_id, &bottle_name)?;
+    let _guard = DeployGuard::new(state.deploy_in_progress.clone(), app.clone());
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
         // Look up the game
@@ -4533,10 +4737,45 @@ async fn launch_mod_tool(
             .detected_path
             .as_ref()
             .ok_or_else(|| format!("Tool '{}' is not installed", tool_id))?;
+
+        // Apply DLL overrides for this tool
+        let overrides = crate::wine_dll_overrides::detect_and_get_overrides(Path::new(exe_path));
+        if !overrides.is_empty() {
+            if let Err(e) = crate::wine_dll_overrides::apply_overrides(&bottle.path, &overrides) {
+                log::warn!("Failed to apply DLL overrides for {}: {}", exe_path, e);
+            }
+        }
+
         mod_tools::launch_tool_with_logging(Path::new(exe_path), &bottle, &tool_id, &tool.name, &db)
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
+}
+
+#[tauri::command]
+async fn get_prefix_dependencies(game_id: String, prefix_path: String) -> Result<Vec<crate::prefix_setup::WineDependency>, String> {
+    let mut deps = crate::prefix_setup::get_game_dependencies(&game_id);
+    crate::prefix_setup::check_installed_deps(std::path::Path::new(&prefix_path), &mut deps);
+    Ok(deps)
+}
+
+#[tauri::command]
+async fn install_prefix_dependencies(
+    app: AppHandle,
+    game_id: String,
+    prefix_path: String,
+    wine_bin: Option<String>,
+    steam_app_id: Option<u32>,
+) -> Result<Vec<crate::prefix_setup::InstallResult>, String> {
+    let mut deps = crate::prefix_setup::get_game_dependencies(&game_id);
+    crate::prefix_setup::check_installed_deps(std::path::Path::new(&prefix_path), &mut deps);
+    Ok(crate::prefix_setup::install_dependencies(
+        &app,
+        std::path::Path::new(&prefix_path),
+        wine_bin.as_ref().map(|p| std::path::Path::new(p.as_str())),
+        &deps,
+        steam_app_id,
+    ))
 }
 
 #[tauri::command]
@@ -5098,7 +5337,27 @@ async fn parse_wabbajack_file(file_path: String) -> Result<ParsedModlist, String
 }
 
 #[tauri::command]
-async fn download_wabbajack_file(url: String, filename: String) -> Result<String, String> {
+async fn check_wabbajack_cache(filename: String) -> Result<String, String> {
+    let download_dir = config::get_config()
+        .ok()
+        .and_then(|c| c.download_dir)
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::data_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join("corkscrew")
+                .join("downloads")
+        });
+    let dest = download_dir.join(&filename);
+    if dest.exists() && std::fs::metadata(&dest).map(|m| m.len() > 0).unwrap_or(false) {
+        Ok(dest.to_string_lossy().to_string())
+    } else {
+        Err(format!("Cached file not found: {}", filename))
+    }
+}
+
+#[tauri::command]
+async fn download_wabbajack_file(app: tauri::AppHandle, url: String, filename: String, force: Option<bool>) -> Result<String, String> {
     let download_dir = config::get_config()
         .ok()
         .and_then(|c| c.download_dir)
@@ -5115,23 +5374,66 @@ async fn download_wabbajack_file(url: String, filename: String) -> Result<String
 
     let dest = download_dir.join(&filename);
 
+    // Check if file already exists (skip redownload)
+    // TODO: Verify cached file hash matches modlist metadata.
+    // For now, existence + non-empty is sufficient since filenames include
+    // the content hash (e.g., "Tuxborn.wabbajack_b49465c4-...").
+    if !force.unwrap_or(false) && dest.exists() {
+        let meta = std::fs::metadata(&dest);
+        if let Ok(m) = meta {
+            if m.len() > 0 {
+                log::info!(
+                    "Using cached .wabbajack file: {} ({:.1} MB)",
+                    dest.display(),
+                    m.len() as f64 / 1_048_576.0
+                );
+                return Ok(dest.to_string_lossy().to_string());
+            }
+        }
+    }
+
     let client = reqwest::Client::builder()
         .user_agent(format!("Corkscrew/{}", env!("CARGO_PKG_VERSION")))
-        .timeout(std::time::Duration::from_secs(300))
+        .timeout(std::time::Duration::from_secs(600))
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;
 
+    let is_wj_cdn = url.contains("authored-files.wabbajack.org")
+        || url.contains("wabbajack.b-cdn.net");
+
+    if is_wj_cdn {
+        // WJ CDN uses a chunked protocol: definition.json.gz + parts/{index}
+        download_wj_cdn_chunked(&client, &url, &dest, &app).await?;
+    } else if url.contains("github.com") && url.contains("/releases/") {
+        // GitHub releases: direct download
+        download_direct(&client, &url, &dest).await?;
+    } else {
+        // Try direct first, fall back to CDN chunked
+        match download_direct(&client, &url, &dest).await {
+            Ok(()) => {}
+            Err(_) => {
+                download_wj_cdn_chunked(&client, &url, &dest, &app).await?;
+            }
+        }
+    }
+
+    Ok(dest.to_string_lossy().to_string())
+}
+
+/// Direct HTTP download (GitHub releases, etc).
+async fn download_direct(
+    client: &reqwest::Client,
+    url: &str,
+    dest: &std::path::Path,
+) -> Result<(), String> {
     let resp = client
-        .get(&url)
+        .get(url)
         .send()
         .await
         .map_err(|e| format!("Download failed: {e}"))?;
 
     if !resp.status().is_success() {
-        return Err(format!(
-            "Download failed: HTTP {} — the file may have been removed from the Wabbajack CDN.",
-            resp.status()
-        ));
+        return Err(format!("HTTP {}", resp.status()));
     }
 
     let bytes = resp
@@ -5139,9 +5441,180 @@ async fn download_wabbajack_file(url: String, filename: String) -> Result<String
         .await
         .map_err(|e| format!("Failed to read download: {e}"))?;
 
-    std::fs::write(&dest, &bytes).map_err(|e| format!("Failed to save file: {e}"))?;
+    std::fs::write(dest, &bytes).map_err(|e| format!("Failed to save file: {e}"))?;
+    Ok(())
+}
 
-    Ok(dest.to_string_lossy().to_string())
+/// WJ CDN chunked download: fetch definition.json.gz, then download parts.
+///
+/// The WJ CDN doesn't serve files directly. Instead:
+/// 1. GET {url}/definition.json.gz → decompress → FileDefinition JSON
+/// 2. For each part: GET {url}/parts/{index} → write at offset
+async fn download_wj_cdn_chunked(
+    client: &reqwest::Client,
+    base_url: &str,
+    dest: &std::path::Path,
+    app: &tauri::AppHandle,
+) -> Result<(), String> {
+    // URL-encode the path portion (spaces in filenames)
+    let encoded_url = base_url.replace(' ', "%20");
+    let def_url = format!("{}/definition.json.gz", encoded_url);
+
+    log::info!("Fetching WJ CDN definition from {}", def_url);
+
+    let resp = client
+        .get(&def_url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch CDN definition: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!(
+            "CDN definition returned HTTP {} — the modlist may have been removed.",
+            resp.status()
+        ));
+    }
+
+    let compressed = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read CDN definition: {e}"))?;
+
+    // Decompress gzip
+    use std::io::Read;
+    let mut decoder = flate2::read::GzDecoder::new(&compressed[..]);
+    let mut json_str = String::new();
+    decoder
+        .read_to_string(&mut json_str)
+        .map_err(|e| format!("Failed to decompress CDN definition: {e}"))?;
+
+    let definition: serde_json::Value = serde_json::from_str(&json_str)
+        .map_err(|e| format!("Failed to parse CDN definition: {e}"))?;
+
+    let total_size = definition
+        .get("Size")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let parts = definition
+        .get("Parts")
+        .and_then(|v| v.as_array())
+        .ok_or("CDN definition missing Parts array")?;
+
+    log::info!(
+        "WJ CDN download: {} parts, {:.1} MB total",
+        parts.len(),
+        total_size as f64 / 1_048_576.0
+    );
+
+    let _ = app.emit("wj-file-download-progress", serde_json::json!({
+        "phase": "started",
+        "total_parts": parts.len(),
+        "total_bytes": total_size,
+        "current_part": 0,
+        "bytes_downloaded": 0u64,
+    }));
+
+    // Write to a temp file, rename on success to avoid partial corruption
+    let dest_tmp = dest.with_extension("wabbajack.part");
+
+    // Pre-allocate the temp output file and open once before the loop
+    use std::io::{Seek, SeekFrom, Write};
+    let mut file = {
+        let f = std::fs::File::create(&dest_tmp)
+            .map_err(|e| format!("Failed to create temp output file: {e}"))?;
+        f.set_len(total_size)
+            .map_err(|e| format!("Failed to pre-allocate file: {e}"))?;
+        drop(f);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&dest_tmp)
+            .map_err(|e| format!("Failed to open temp output file: {e}"))?
+    };
+
+    // Download parts sequentially (they must be written at correct offsets)
+    let download_result: Result<(), String> = async {
+        for part in parts {
+            let index = part.get("Index").and_then(|v| v.as_u64()).unwrap_or(0);
+            let offset = part.get("Offset").and_then(|v| v.as_u64()).unwrap_or(0);
+            let size = part.get("Size").and_then(|v| v.as_u64()).unwrap_or(0);
+
+            let part_url = format!("{}/parts/{}", encoded_url, index);
+
+            let part_resp = client
+                .get(&part_url)
+                .send()
+                .await
+                .map_err(|e| format!("Failed to download part {index}: {e}"))?;
+
+            if !part_resp.status().is_success() {
+                return Err(format!(
+                    "CDN part {index} returned HTTP {}",
+                    part_resp.status()
+                ));
+            }
+
+            let part_bytes = part_resp
+                .bytes()
+                .await
+                .map_err(|e| format!("Failed to read part {index}: {e}"))?;
+
+            if part_bytes.len() as u64 != size {
+                log::warn!(
+                    "Part {index} size mismatch: expected {size}, got {}",
+                    part_bytes.len()
+                );
+            }
+
+            // Write at correct offset
+            file.seek(SeekFrom::Start(offset))
+                .map_err(|e| format!("Failed to seek: {e}"))?;
+            file.write_all(&part_bytes)
+                .map_err(|e| format!("Failed to write part {index}: {e}"))?;
+
+            let bytes_so_far = offset + size;
+            if index % 10 == 0 || index == parts.len() as u64 - 1 {
+                log::info!("CDN download progress: part {}/{} ({:.1}%)", index + 1, parts.len(),
+                    bytes_so_far as f64 / total_size.max(1) as f64 * 100.0);
+            }
+            let _ = app.emit("wj-file-download-progress", serde_json::json!({
+                "phase": "downloading",
+                "total_parts": parts.len(),
+                "total_bytes": total_size,
+                "current_part": index + 1,
+                "bytes_downloaded": bytes_so_far,
+            }));
+        }
+        Ok(())
+    }.await;
+
+    // Close the file handle
+    drop(file);
+
+    // On error, clean up the temp file
+    if let Err(e) = &download_result {
+        let _ = std::fs::remove_file(&dest_tmp);
+        return Err(e.clone());
+    }
+
+    // Rename temp file to final destination
+    std::fs::rename(&dest_tmp, dest)
+        .map_err(|e| format!("Failed to rename temp file to final destination: {e}"))?;
+
+    let _ = app.emit("wj-file-download-progress", serde_json::json!({
+        "phase": "completed",
+        "total_parts": parts.len(),
+        "total_bytes": total_size,
+        "current_part": parts.len(),
+        "bytes_downloaded": total_size,
+    }));
+
+    log::info!(
+        "WJ CDN download complete: {} -> {}",
+        base_url,
+        dest.display()
+    );
+
+    Ok(())
 }
 
 // --- Helpers ---
@@ -9084,6 +9557,57 @@ async fn fix_wine_retina_mode(bottle_name: String) -> Result<(), String> {
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
+#[tauri::command]
+async fn check_prefix_health_linux(
+    bottle_name: String,
+    game_id: String,
+) -> Result<wine_diagnostic::LinuxPrefixHealth, String> {
+    tokio::task::spawn_blocking(move || {
+        let bottle = resolve_bottle(&bottle_name)?;
+        Ok(wine_diagnostic::check_prefix_health_linux(&bottle.path, &game_id))
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
+// --- DXVK Configuration Commands ---
+
+#[tauri::command]
+async fn get_dxvk_config(game_id: String) -> Result<String, String> {
+    Ok(crate::dxvk::generate_config(
+        &game_id,
+        &crate::dxvk::DxvkPreset::Default,
+        &std::collections::HashMap::new(),
+    ))
+}
+
+#[tauri::command]
+async fn deploy_dxvk_config(
+    game_dir: String,
+    game_id: String,
+    preset: String,
+) -> Result<String, String> {
+    let preset = match preset.as_str() {
+        "performance" => crate::dxvk::DxvkPreset::Performance,
+        "compatibility" => crate::dxvk::DxvkPreset::Compatibility,
+        _ => crate::dxvk::DxvkPreset::Default,
+    };
+    crate::dxvk::deploy_config(
+        std::path::Path::new(&game_dir),
+        &game_id,
+        &preset,
+        &std::collections::HashMap::new(),
+    )
+    .map(|p| p.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn detect_dxvk_version(prefix_path: String) -> Result<Option<String>, String> {
+    Ok(crate::dxvk::detect_dxvk_version(std::path::Path::new(
+        &prefix_path,
+    )))
+}
+
 // --- Pre-flight Commands ---
 
 #[tauri::command]
@@ -9728,6 +10252,22 @@ async fn check_cached_files(
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
+// --- Proton Detection ---
+
+#[tauri::command]
+async fn list_proton_versions() -> Result<Vec<proton::ProtonVersion>, String> {
+    tokio::task::spawn_blocking(move || Ok(proton::detect_proton_versions()))
+        .await
+        .map_err(|e| format!("Task failed: {e}"))?
+}
+
+#[tauri::command]
+async fn get_recommended_proton() -> Result<Option<proton::ProtonVersion>, String> {
+    tokio::task::spawn_blocking(move || Ok(proton::get_recommended_proton()))
+        .await
+        .map_err(|e| format!("Task failed: {e}"))?
+}
+
 // --- Steam Integration ---
 
 #[tauri::command]
@@ -9775,6 +10315,35 @@ async fn steam_deck_warnings() -> Result<Vec<String>, String> {
     tokio::task::spawn_blocking(move || steam_integration::steam_deck_warnings())
         .await
         .map_err(|e| format!("Task failed: {e}"))
+}
+
+// --- Steam Deck Profile ---
+
+#[tauri::command]
+async fn get_deck_profile() -> Result<deck::DeckProfile, String> {
+    Ok(deck::detect_deck_profile())
+}
+
+#[tauri::command]
+async fn get_deck_defaults() -> Result<deck::DeckDefaults, String> {
+    Ok(deck::get_defaults())
+}
+
+// --- NXM Handler ---
+
+#[tauri::command]
+async fn register_nxm_handler() -> Result<(), String> {
+    nxm_handler::register_nxm_handler()
+}
+
+#[tauri::command]
+async fn unregister_nxm_handler() -> Result<(), String> {
+    nxm_handler::unregister_nxm_handler()
+}
+
+#[tauri::command]
+async fn is_nxm_handler_registered() -> Result<bool, String> {
+    Ok(nxm_handler::is_nxm_handler_registered())
 }
 
 // --- Startup Cleanup ---
@@ -10838,9 +11407,17 @@ fn cli_launch(game_id: &str, bottle_name: &str, use_skse: bool, db: &Arc<ModData
             println!("[corkscrew] Fixed {} SKSE plugin DLL(s)", fixes);
         }
 
-        let ef = skse::fix_engine_fixes_for_wine(&data_dir, db, game_id, bottle_name);
-        if ef > 0 {
-            println!("[corkscrew] Patched {} EngineFixes TOML(s) for Wine", ef);
+        let use_wine_ef = !config::get_config()
+            .map(|c| c.use_original_engine_fixes)
+            .unwrap_or(false);
+
+        if use_wine_ef {
+            let ef = skse::fix_engine_fixes_for_wine(&data_dir, db, game_id, bottle_name);
+            if ef > 0 {
+                println!("[corkscrew] Patched {} EngineFixes TOML(s) for Wine", ef);
+            }
+        } else {
+            println!("[corkscrew] Skipping Wine EngineFixes (user chose original)");
         }
 
         let wine_disabled =
@@ -10849,10 +11426,12 @@ fn cli_launch(game_id: &str, bottle_name: &str, use_skse: bool, db: &Arc<ModData
             println!("[corkscrew] Disabled Wine-incompatible plugin: {}", name);
         }
 
-        match skse::install_engine_fixes_wine_blocking(&data_dir) {
-            Ok(true) => println!("[corkscrew] Deployed SSE Engine Fixes for Wine"),
-            Ok(false) => println!("[corkscrew] SSE Engine Fixes for Wine already up to date"),
-            Err(e) => eprintln!("[corkscrew] Warning: Engine Fixes deploy failed: {}", e),
+        if use_wine_ef {
+            match skse::install_engine_fixes_wine_blocking(&data_dir) {
+                Ok(true) => println!("[corkscrew] Deployed SSE Engine Fixes for Wine"),
+                Ok(false) => println!("[corkscrew] SSE Engine Fixes for Wine already up to date"),
+                Err(e) => eprintln!("[corkscrew] Warning: Engine Fixes deploy failed: {}", e),
+            }
         }
     }
 
@@ -11241,6 +11820,87 @@ pub fn run() {
             return;
         }
 
+        // --parse-wj <path>  (parse a .wabbajack file and print summary JSON)
+        if let Some(pos) = args.iter().position(|a| a == "--parse-wj") {
+            let path = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("");
+            if path.is_empty() {
+                eprintln!("Usage: corkscrew --parse-wj <path-to-wabbajack-file>");
+                std::process::exit(1);
+            }
+            let path = std::path::Path::new(path);
+            if !path.exists() {
+                eprintln!("File not found: {}", path.display());
+                std::process::exit(1);
+            }
+            eprintln!("Parsing {}...", path.display());
+            // First try the summary parse (lenient)
+            match wabbajack::parse_wabbajack_file(path) {
+                Ok(parsed) => {
+                    eprintln!("Summary parse OK: {} archives, {} directives", parsed.archive_count, parsed.directive_count);
+                }
+                Err(e) => {
+                    eprintln!("Summary parse error: {}", e);
+                }
+            }
+
+            // Now try the full typed parse (strict — this is what the installer uses)
+            match wabbajack_installer::parse_wabbajack_file_typed_cli(path) {
+                Ok(typed) => {
+                    println!("{}", serde_json::json!({
+                        "name": typed.name,
+                        "archives": typed.archives.len(),
+                        "directives": typed.directives.len(),
+                        "status": "OK"
+                    }));
+                }
+                Err(e) => {
+                    eprintln!("Typed parse error: {}", e);
+                    // Diagnose: extract raw JSON and find the problematic field
+                    if let Ok(file) = std::fs::File::open(path) {
+                        if let Ok(mut archive) = zip::ZipArchive::new(file) {
+                            if let Ok(entry) = archive.by_name("modlist") {
+                                let raw: Result<serde_json::Value, _> = serde_json::from_reader(entry);
+                                if let Ok(val) = raw {
+                                    // Check archives for problematic states
+                                    if let Some(archives) = val.get("Archives").and_then(|v| v.as_array()) {
+                                        eprintln!("\nArchives: {} total", archives.len());
+                                        // Find archives with string fields where i64 expected
+                                        for (i, a) in archives.iter().enumerate() {
+                                            if let Some(state) = a.get("State") {
+                                                let t = state.get("$type").and_then(|v| v.as_str()).unwrap_or("");
+                                                // Check for string IDs that should be i64
+                                                for key in ["ModID", "FileID", "modID", "fileID", "IPS4Mod", "IPS4File"] {
+                                                    if let Some(val) = state.get(key) {
+                                                        if val.is_string() {
+                                                            eprintln!("  FOUND STRING-AS-NUMBER: archive[{}] $type={} {key}={}", i, t, val);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // Check directives for problematic fields
+                                    if let Some(directives) = val.get("Directives").and_then(|v| v.as_array()) {
+                                        eprintln!("Directives: {} total", directives.len());
+                                        for (i, d) in directives.iter().enumerate() {
+                                            if let Some(ahp) = d.get("ArchiveHashPath") {
+                                                if ahp.is_string() {
+                                                    eprintln!("  FOUND STRING ArchiveHashPath: directive[{}] = {}", i, ahp);
+                                                    if i < 3 { eprintln!("    full: {}", serde_json::to_string(d).unwrap_or_default()); }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
+
         // --version  (print version and exit)
         if args.iter().any(|a| a == "--version") {
             println!("{}", env!("CARGO_PKG_VERSION"));
@@ -11409,6 +12069,7 @@ pub fn run() {
             check_deployment_health,
             get_verification_level,
             set_verification_level,
+            set_use_original_engine_fixes,
             purge_deployment_cmd,
             verify_mod_integrity,
             sort_plugins_loot,
@@ -11438,6 +12099,9 @@ pub fn run() {
             apply_tool_ini_edits_cmd,
             detect_collection_tools,
             detect_wabbajack_tools,
+            // Wine Prefix Dependencies
+            get_prefix_dependencies,
+            install_prefix_dependencies,
             get_platform_detail,
             get_optimal_download_threads,
             detect_fomod,
@@ -11451,6 +12115,7 @@ pub fn run() {
             clean_game_directory,
             get_wabbajack_modlists,
             parse_wabbajack_file,
+            check_wabbajack_cache,
             download_wabbajack_file,
             // Wabbajack Install Pipeline
             wabbajack_installer::install_wabbajack_modlist_cmd,
@@ -11529,6 +12194,8 @@ pub fn run() {
             delete_download_archive,
             get_downloads_stats,
             clear_all_download_archives,
+            find_orphaned_downloads,
+            delete_orphaned_downloads,
             // Collection Management
             list_installed_collections_cmd,
             set_mod_collection_name_cmd,
@@ -11581,6 +12248,11 @@ pub fn run() {
             fix_wine_appdata,
             fix_wine_dll_override,
             fix_wine_retina_mode,
+            check_prefix_health_linux,
+            // DXVK Configuration
+            get_dxvk_config,
+            deploy_dxvk_config,
+            detect_dxvk_version,
             // Pre-flight
             run_preflight_check,
             // Mod Dependencies
@@ -11621,6 +12293,9 @@ pub fn run() {
             download_and_install_nexus_mod,
             // Download Cache
             check_cached_files,
+            // Proton Detection
+            list_proton_versions,
+            get_recommended_proton,
             // Steam Integration
             detect_steam,
             check_steam_status,
@@ -11628,6 +12303,13 @@ pub fn run() {
             remove_from_steam,
             is_steam_deck,
             steam_deck_warnings,
+            // Steam Deck Profile
+            get_deck_profile,
+            get_deck_defaults,
+            // NXM Handler
+            register_nxm_handler,
+            unregister_nxm_handler,
+            is_nxm_handler_registered,
             // Instruction parsing (LLM)
             parse_instructions_cmd,
             parse_instructions_llm_cmd,

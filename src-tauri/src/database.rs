@@ -205,6 +205,56 @@ pub struct ModDatabase {
     conn: Mutex<Connection>,
 }
 
+/// Detect if a path is on a network filesystem where WAL mode may fail.
+fn is_network_filesystem(path: &Path) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        // Try /proc/mounts first (more reliable than stat on all Linux distros)
+        if let Ok(mounts) = std::fs::read_to_string("/proc/mounts") {
+            let path_str = path.to_string_lossy();
+            for line in mounts.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 3 {
+                    let mount_point = parts[1];
+                    let fs_type = parts[2].to_lowercase();
+                    if path_str.starts_with(mount_point)
+                        && matches!(
+                            fs_type.as_str(),
+                            "nfs" | "nfs4" | "cifs" | "smb" | "smb2" | "9p" | "fuse.sshfs"
+                        )
+                    {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+        // Fallback to GNU stat (may not exist on all systems)
+        let output = std::process::Command::new("stat")
+            .arg("-f")
+            .arg("-c")
+            .arg("%T")
+            .arg(path)
+            .output()
+            .ok();
+        if let Some(out) = output {
+            let fs_type = String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .to_lowercase()
+                .to_string();
+            return matches!(
+                fs_type.as_str(),
+                "nfs" | "cifs" | "smb" | "smb2" | "9p" | "fuse.sshfs"
+            );
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+    }
+    false
+}
+
 impl ModDatabase {
     /// Open (or create) the database at `db_path`, creating parent
     /// directories as needed, and run all pending schema migrations.
@@ -223,7 +273,13 @@ impl ModDatabase {
         }
 
         // Enable WAL mode for better concurrent-read performance.
-        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+        // On network filesystems WAL can fail, so fall back to DELETE mode.
+        if is_network_filesystem(db_path) {
+            log::warn!("Database on network filesystem — using exclusive locking instead of WAL");
+            conn.execute_batch("PRAGMA journal_mode = DELETE; PRAGMA locking_mode = EXCLUSIVE;")?;
+        } else {
+            conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+        }
 
         // Enable foreign key enforcement.
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
@@ -419,6 +475,27 @@ impl ModDatabase {
             tx.commit()?;
         }
         Ok(existing)
+    }
+
+    /// Find mod IDs matching a name, game, and bottle (for deduplication on re-install).
+    pub fn find_mods_by_name(
+        &self,
+        game_id: &str,
+        bottle_name: &str,
+        name: &str,
+    ) -> Result<Vec<i64>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT id FROM installed_mods WHERE game_id = ?1 AND bottle_name = ?2 AND name = ?3",
+        )?;
+        let rows = stmt.query_map(params![game_id, bottle_name, name], |row| {
+            row.get::<_, i64>(0)
+        })?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(row?);
+        }
+        Ok(ids)
     }
 
     /// Fetch a single mod by its primary key.
@@ -1639,6 +1716,59 @@ impl ModDatabase {
         Ok(())
     }
 
+    /// Get all distinct archive_name values from installed_mods.
+    pub fn get_all_archive_names(&self) -> Result<HashSet<String>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt =
+            conn.prepare("SELECT DISTINCT archive_name FROM installed_mods WHERE archive_name != ''")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut names = HashSet::new();
+        for row in rows {
+            names.insert(row?);
+        }
+        Ok(names)
+    }
+
+    /// Get all download records from the download_registry.
+    pub fn get_all_download_records(&self) -> Result<Vec<DownloadRecord>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT id, archive_path, archive_name, nexus_mod_id, nexus_file_id,
+                    sha256, file_size, downloaded_at
+             FROM download_registry",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(DownloadRecord {
+                id: row.get(0)?,
+                archive_path: row.get(1)?,
+                archive_name: row.get(2)?,
+                nexus_mod_id: row.get(3)?,
+                nexus_file_id: row.get(4)?,
+                sha256: row.get(5)?,
+                file_size: row.get(6)?,
+                downloaded_at: row.get(7)?,
+            })
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+        Ok(records)
+    }
+
+    /// Get all download IDs that have collection references.
+    pub fn get_download_ids_with_refs(&self) -> Result<HashSet<i64>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt =
+            conn.prepare("SELECT DISTINCT download_id FROM download_collection_refs")?;
+        let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
+        let mut ids = HashSet::new();
+        for row in rows {
+            ids.insert(row?);
+        }
+        Ok(ids)
+    }
+
     // -- Notes & tags --------------------------------------------------------
 
     /// Set user notes for a mod.
@@ -2141,6 +2271,13 @@ impl ModDatabase {
         total_directives: usize,
     ) -> Result<i64> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        // Mark any existing pending/failed/downloading/extracting installs for this
+        // modlist as cancelled to prevent duplicates on resume/retry.
+        conn.execute(
+            "UPDATE wabbajack_installs SET status = 'cancelled'
+             WHERE modlist_name = ?1 AND status IN ('pending', 'failed', 'downloading', 'extracting', 'processing')",
+            params![modlist_name],
+        )?;
         conn.execute(
             "INSERT INTO wabbajack_installs
                 (modlist_name, modlist_version, game_type, install_dir, status,
@@ -2714,7 +2851,20 @@ impl ModDatabase {
                 mentioned_mods_json,
             ],
         )?;
-        Ok(conn.last_insert_rowid())
+        let row_id = conn.last_insert_rowid();
+
+        // Auto-prune: keep at most 500 messages per game/bottle pair
+        conn.execute(
+            "DELETE FROM chat_history WHERE game_id = ?1 AND bottle_name = ?2
+             AND id NOT IN (
+                SELECT id FROM chat_history
+                WHERE game_id = ?1 AND bottle_name = ?2
+                ORDER BY id DESC LIMIT 500
+             )",
+            params![game_id, bottle_name],
+        )?;
+
+        Ok(row_id)
     }
 
     /// Load the most recent chat messages for a game/bottle pair.
@@ -2772,6 +2922,380 @@ impl ModDatabase {
         )?;
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Wabbajack directive resume tracking
+// ---------------------------------------------------------------------------
+
+impl ModDatabase {
+    /// Initialize directive statuses for a new WJ install.
+    pub fn init_wj_directive_statuses(
+        &self,
+        install_id: &str,
+        directives: &[(usize, &str)], // (index, directive_type)
+    ) -> std::result::Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+
+        // Clear any prior statuses for this install (crash recovery)
+        tx.execute(
+            "DELETE FROM wj_directive_status WHERE install_id = ?1",
+            params![install_id],
+        )
+        .map_err(|e| e.to_string())?;
+
+        let mut stmt = tx
+            .prepare(
+                "INSERT INTO wj_directive_status (install_id, directive_index, directive_type, status, updated_at)
+                 VALUES (?1, ?2, ?3, 'pending', datetime('now'))",
+            )
+            .map_err(|e| e.to_string())?;
+
+        for (index, dtype) in directives {
+            stmt.execute(params![install_id, index, dtype])
+                .map_err(|e| e.to_string())?;
+        }
+        drop(stmt);
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Mark a directive as processing.
+    pub fn mark_directive_processing(
+        &self,
+        install_id: &str,
+        directive_index: usize,
+    ) -> std::result::Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE wj_directive_status SET status = 'processing', updated_at = datetime('now')
+             WHERE install_id = ?1 AND directive_index = ?2",
+            params![install_id, directive_index],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Mark a directive as completed.
+    pub fn mark_directive_completed(
+        &self,
+        install_id: &str,
+        directive_index: usize,
+    ) -> std::result::Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE wj_directive_status SET status = 'completed', updated_at = datetime('now')
+             WHERE install_id = ?1 AND directive_index = ?2",
+            params![install_id, directive_index],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Mark a directive as failed.
+    pub fn mark_directive_failed(
+        &self,
+        install_id: &str,
+        directive_index: usize,
+    ) -> std::result::Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE wj_directive_status SET status = 'failed', updated_at = datetime('now')
+             WHERE install_id = ?1 AND directive_index = ?2",
+            params![install_id, directive_index],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Reset all 'processing' directives back to 'pending' (crash recovery).
+    pub fn reset_processing_directives(
+        &self,
+        install_id: &str,
+    ) -> std::result::Result<usize, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let count = conn
+            .execute(
+                "UPDATE wj_directive_status SET status = 'pending', updated_at = datetime('now')
+                 WHERE install_id = ?1 AND status = 'processing'",
+                params![install_id],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(count)
+    }
+
+    /// Get set of completed directive indices for an install.
+    pub fn get_completed_directive_indices(
+        &self,
+        install_id: &str,
+    ) -> std::result::Result<HashSet<usize>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT directive_index FROM wj_directive_status
+                 WHERE install_id = ?1 AND status = 'completed'",
+            )
+            .map_err(|e| e.to_string())?;
+        let indices = stmt
+            .query_map(params![install_id], |row| row.get::<_, usize>(0))
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(indices)
+    }
+
+    /// Clean up directive statuses for a completed/cancelled install.
+    pub fn cleanup_directive_statuses(
+        &self,
+        install_id: &str,
+    ) -> std::result::Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM wj_directive_status WHERE install_id = ?1",
+            params![install_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Nexus URL cache
+// ---------------------------------------------------------------------------
+
+impl ModDatabase {
+    /// Cache a Nexus download URL with expiry.
+    pub fn cache_nexus_url(
+        &self,
+        game_domain: &str,
+        mod_id: i64,
+        file_id: i64,
+        url: &str,
+        expires_at: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "INSERT OR REPLACE INTO nexus_url_cache (game_domain, mod_id, file_id, url, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![game_domain, mod_id, file_id, url, expires_at],
+        )?;
+        Ok(())
+    }
+
+    /// Get a cached Nexus URL if it hasn't expired.
+    pub fn get_cached_nexus_url(
+        &self,
+        game_domain: &str,
+        mod_id: i64,
+        file_id: i64,
+    ) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let result = conn
+            .prepare(
+                "SELECT url FROM nexus_url_cache
+                 WHERE game_domain = ?1 AND mod_id = ?2 AND file_id = ?3
+                 AND datetime(expires_at) > datetime('now')",
+            )?
+            .query_row(params![game_domain, mod_id, file_id], |row| row.get(0))
+            .ok();
+        Ok(result)
+    }
+}
+
+// -----------------------------------------------------------------------
+// Patch basis cache (on ModDatabase — persistent across installs)
+// -----------------------------------------------------------------------
+
+impl ModDatabase {
+    /// Cache patch basis file hashes for quick lookup.
+    pub fn cache_patch_basis_hash(
+        &self,
+        modlist: &str,
+        file_path: &str,
+        quick_hash: u64,
+        full_hash: &str,
+        file_size: u64,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        // SQLite stores integers as i64. Values > i64::MAX wrap to negative but
+        // round-trip correctly through Rust's `as u64` bit-preserving cast.
+        // Do NOT filter on this column in SQL — use Rust-side comparison only.
+        conn.execute(
+            "INSERT OR REPLACE INTO patch_basis_cache (modlist, file_path, quick_hash, full_hash, file_size)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![modlist, file_path, quick_hash as i64, full_hash, file_size as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Get a cached patch basis hash entry.
+    /// Returns (quick_hash, full_hash, file_size) if found.
+    pub fn get_cached_patch_basis(
+        &self,
+        modlist: &str,
+        file_path: &str,
+    ) -> Result<Option<(u64, String, u64)>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        // SQLite stores integers as i64. Values > i64::MAX wrap to negative but
+        // round-trip correctly through Rust's `as u64` bit-preserving cast.
+        // Do NOT filter on this column in SQL — use Rust-side comparison only.
+        let result = conn
+            .prepare(
+                "SELECT quick_hash, full_hash, file_size FROM patch_basis_cache
+                 WHERE modlist = ?1 AND file_path = ?2",
+            )?
+            .query_row(params![modlist, file_path], |row| {
+                Ok((
+                    row.get::<_, i64>(0)? as u64,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)? as u64,
+                ))
+            })
+            .ok();
+        Ok(result)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-modlist config cache
+// ---------------------------------------------------------------------------
+
+impl ModDatabase {
+    /// Save modlist install configuration for future reinstalls.
+    pub fn save_modlist_config(
+        &self,
+        name: &str,
+        version: &str,
+        config_json: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "INSERT OR REPLACE INTO modlist_config (name, version, config_json)
+             VALUES (?1, ?2, ?3)",
+            params![name, version, config_json],
+        )?;
+        Ok(())
+    }
+
+    /// Get a saved modlist configuration.
+    pub fn get_modlist_config(
+        &self,
+        name: &str,
+        version: &str,
+    ) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let result = conn
+            .prepare(
+                "SELECT config_json FROM modlist_config WHERE name = ?1 AND version = ?2",
+            )?
+            .query_row(params![name, version], |row| row.get(0))
+            .ok();
+        Ok(result)
+    }
+
+    /// Get any saved config for a modlist (any version, newest first).
+    pub fn get_latest_modlist_config(
+        &self,
+        name: &str,
+    ) -> Result<Option<(String, String)>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let result = conn
+            .prepare(
+                "SELECT version, config_json FROM modlist_config
+                 WHERE name = ?1 ORDER BY saved_at DESC LIMIT 1",
+            )?
+            .query_row(params![name], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .ok();
+        Ok(result)
+    }
+}
+
+// -----------------------------------------------------------------------
+// BSA extraction cache (temporary — aggressive pragmas for speed)
+// -----------------------------------------------------------------------
+
+/// Open or create the BSA cache database (separate from main DB for isolation).
+/// Uses aggressive pragmas since this is temporary data only.
+pub fn open_bsa_cache(cache_dir: &Path) -> std::result::Result<rusqlite::Connection, String> {
+    std::fs::create_dir_all(cache_dir).map_err(|e| e.to_string())?;
+    let db_path = cache_dir.join("bsa_cache.db");
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+
+    // Aggressive pragmas — this is throwaway temp data
+    conn.execute_batch(
+        "PRAGMA journal_mode = OFF;
+         PRAGMA synchronous = OFF;
+         PRAGMA cache_size = -65536;
+         PRAGMA temp_store = MEMORY;",
+    )
+    .map_err(|e| e.to_string())?;
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS bsa_cache (
+            bsa_path TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            data BLOB NOT NULL,
+            PRIMARY KEY (bsa_path, file_path)
+        )",
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(conn)
+}
+
+/// Insert a file into the BSA cache.
+pub fn bsa_cache_insert(
+    conn: &rusqlite::Connection,
+    bsa_path: &str,
+    file_path: &str,
+    data: &[u8],
+) -> std::result::Result<(), String> {
+    conn.execute(
+        "INSERT OR REPLACE INTO bsa_cache (bsa_path, file_path, data) VALUES (?1, ?2, ?3)",
+        params![bsa_path, file_path, data],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Get a file from the BSA cache.
+pub fn bsa_cache_get(
+    conn: &rusqlite::Connection,
+    bsa_path: &str,
+    file_path: &str,
+) -> std::result::Result<Option<Vec<u8>>, String> {
+    let result = conn
+        .prepare("SELECT data FROM bsa_cache WHERE bsa_path = ?1 AND file_path = ?2")
+        .map_err(|e| e.to_string())?
+        .query_row(params![bsa_path, file_path], |row| row.get(0))
+        .ok();
+    Ok(result)
+}
+
+/// Clear all entries for a specific BSA.
+pub fn bsa_cache_clear(
+    conn: &rusqlite::Connection,
+    bsa_path: &str,
+) -> std::result::Result<(), String> {
+    conn.execute(
+        "DELETE FROM bsa_cache WHERE bsa_path = ?1",
+        params![bsa_path],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Clear the entire BSA cache (call after install completes).
+pub fn bsa_cache_clear_all(conn: &rusqlite::Connection) -> std::result::Result<(), String> {
+    conn.execute("DELETE FROM bsa_cache", [])
+        .map_err(|e| e.to_string())?;
+    // Reclaim space
+    conn.execute("VACUUM", [])
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -3102,5 +3626,82 @@ mod tests {
         let bulk = db.get_file_hashes_bulk(&[mod1]).unwrap();
         let for_mods = db.get_file_hashes_for_mods(&[mod1]).unwrap();
         assert_eq!(bulk, for_mods);
+    }
+
+    #[test]
+    fn test_patch_basis_cache_roundtrip() {
+        let (db, _tmp) = test_db();
+        db.cache_patch_basis_hash("GTS", "textures/sky.dds", 12345, "abc123==", 4096)
+            .unwrap();
+        let cached = db.get_cached_patch_basis("GTS", "textures/sky.dds").unwrap();
+        assert!(cached.is_some());
+        let (qh, fh, sz) = cached.unwrap();
+        assert_eq!(qh, 12345);
+        assert_eq!(fh, "abc123==");
+        assert_eq!(sz, 4096);
+    }
+
+    #[test]
+    fn test_patch_basis_cache_miss() {
+        let (db, _tmp) = test_db();
+        let cached = db.get_cached_patch_basis("GTS", "nonexistent.dds").unwrap();
+        assert!(cached.is_none());
+    }
+
+    #[test]
+    fn test_patch_basis_cache_overwrite() {
+        let (db, _tmp) = test_db();
+        db.cache_patch_basis_hash("GTS", "test.esp", 111, "old_hash", 100)
+            .unwrap();
+        db.cache_patch_basis_hash("GTS", "test.esp", 222, "new_hash", 200)
+            .unwrap();
+        let (qh, fh, sz) = db.get_cached_patch_basis("GTS", "test.esp").unwrap().unwrap();
+        assert_eq!(qh, 222);
+        assert_eq!(fh, "new_hash");
+        assert_eq!(sz, 200);
+    }
+
+    #[test]
+    fn test_bsa_cache_roundtrip() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = open_bsa_cache(tmp.path()).unwrap();
+
+        bsa_cache_insert(&conn, "Skyrim.bsa", "textures/sky.dds", b"pixel_data").unwrap();
+        let data = bsa_cache_get(&conn, "Skyrim.bsa", "textures/sky.dds").unwrap();
+        assert_eq!(data, Some(b"pixel_data".to_vec()));
+    }
+
+    #[test]
+    fn test_bsa_cache_miss() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = open_bsa_cache(tmp.path()).unwrap();
+        let data = bsa_cache_get(&conn, "Skyrim.bsa", "nonexistent.dds").unwrap();
+        assert!(data.is_none());
+    }
+
+    #[test]
+    fn test_bsa_cache_clear_specific() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = open_bsa_cache(tmp.path()).unwrap();
+
+        bsa_cache_insert(&conn, "A.bsa", "file1.dds", b"data1").unwrap();
+        bsa_cache_insert(&conn, "B.bsa", "file2.dds", b"data2").unwrap();
+        bsa_cache_clear(&conn, "A.bsa").unwrap();
+
+        assert!(bsa_cache_get(&conn, "A.bsa", "file1.dds").unwrap().is_none());
+        assert!(bsa_cache_get(&conn, "B.bsa", "file2.dds").unwrap().is_some());
+    }
+
+    #[test]
+    fn test_bsa_cache_clear_all() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = open_bsa_cache(tmp.path()).unwrap();
+
+        bsa_cache_insert(&conn, "A.bsa", "file1.dds", b"data1").unwrap();
+        bsa_cache_insert(&conn, "B.bsa", "file2.dds", b"data2").unwrap();
+        bsa_cache_clear_all(&conn).unwrap();
+
+        assert!(bsa_cache_get(&conn, "A.bsa", "file1.dds").unwrap().is_none());
+        assert!(bsa_cache_get(&conn, "B.bsa", "file2.dds").unwrap().is_none());
     }
 }

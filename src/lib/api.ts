@@ -86,6 +86,7 @@ import type {
   DlcStatus,
   IncrementalDeployResult,
   GameLock,
+  ProtonVersion,
 } from "./types";
 
 // Bottles
@@ -526,6 +527,10 @@ export async function setVerificationLevel(level: string): Promise<void> {
   return invoke("set_verification_level", { level });
 }
 
+export async function setUseOriginalEngineFixes(enabled: boolean): Promise<void> {
+  return invoke("set_use_original_engine_fixes", { enabled });
+}
+
 export async function purgeDeployment(
   gameId: string,
   bottleName: string
@@ -763,11 +768,16 @@ export async function parseWabbajackFile(
   return invoke("parse_wabbajack_file", { filePath });
 }
 
+export async function checkWabbajackCache(filename: string): Promise<string> {
+  return invoke("check_wabbajack_cache", { filename });
+}
+
 export async function downloadWabbajackFile(
   url: string,
-  filename: string
+  filename: string,
+  force?: boolean
 ): Promise<string> {
-  return invoke("download_wabbajack_file", { url, filename });
+  return invoke("download_wabbajack_file", { url, filename, force: force ?? false });
 }
 
 // Wabbajack Install Pipeline
@@ -1858,6 +1868,20 @@ export async function isSteamDeck(): Promise<boolean> {
   return invoke("is_steam_deck");
 }
 
+// --- NXM Handler ---
+
+export async function registerNxmHandler(): Promise<void> {
+  return invoke<void>('register_nxm_handler');
+}
+
+export async function unregisterNxmHandler(): Promise<void> {
+  return invoke<void>('unregister_nxm_handler');
+}
+
+export async function isNxmHandlerRegistered(): Promise<boolean> {
+  return invoke<boolean>('is_nxm_handler_registered');
+}
+
 // ---- Bulk Operation Progress ----
 
 export interface BulkOperationProgress {
@@ -2191,4 +2215,24 @@ export async function getShaderConversionHistory(
   bottleName: string
 ): Promise<import("$lib/types").ConversionHistoryEntry[]> {
   return invoke("get_shader_conversion_history_cmd", { gameId, bottleName });
+}
+
+// --- Orphaned Download Cleanup ---
+
+export async function findOrphanedDownloads(): Promise<import("$lib/types").OrphanedDownload[]> {
+  return invoke("find_orphaned_downloads");
+}
+
+export async function deleteOrphanedDownloads(paths: string[]): Promise<number> {
+  return invoke("delete_orphaned_downloads", { paths });
+}
+
+// --- Proton Detection ---
+
+export async function listProtonVersions(): Promise<ProtonVersion[]> {
+  return invoke<ProtonVersion[]>("list_proton_versions");
+}
+
+export async function getRecommendedProton(): Promise<ProtonVersion | null> {
+  return invoke<ProtonVersion | null>("get_recommended_proton");
 }
