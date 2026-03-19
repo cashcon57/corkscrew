@@ -4,7 +4,7 @@
 //! mods, mod priorities, and plugin load orders per game/bottle. Switching
 //! profiles triggers a full purge-and-redeploy cycle.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use rusqlite::{params, Connection};
@@ -431,6 +431,318 @@ pub fn snapshot_current_state(
 }
 
 // ---------------------------------------------------------------------------
+// Wine prefix case-variant file sync
+// ---------------------------------------------------------------------------
+
+/// Write a file to both case variants in a Wine prefix for compatibility.
+/// Wine is inconsistent about whether it reads `plugins.txt` or `Plugins.txt`.
+pub fn write_case_variants(dir: &Path, filename: &str, content: &[u8]) -> Result<()> {
+    // Write lowercase version
+    let lower_path = dir.join(filename.to_lowercase());
+    std::fs::write(&lower_path, content)
+        .map_err(|e| ProfileError::Other(format!("Failed to write {}: {}", lower_path.display(), e)))?;
+
+    // Write original case version (if different)
+    let original_path = dir.join(filename);
+    if original_path != lower_path {
+        std::fs::write(&original_path, content)
+            .map_err(|e| ProfileError::Other(format!("Failed to write {}: {}", original_path.display(), e)))?;
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// MO2 profile import (Wabbajack modlists)
+// ---------------------------------------------------------------------------
+
+/// An MO2 profile discovered in a Wabbajack install directory.
+#[derive(Debug, Clone, Serialize)]
+pub struct Mo2Profile {
+    pub name: String,
+    pub dir: PathBuf,
+    pub has_modlist: bool,
+    pub has_plugins: bool,
+    pub mod_count: usize,
+    pub plugin_count: usize,
+}
+
+/// Scan a Wabbajack install directory for MO2 profiles.
+///
+/// MO2 stores profiles at `<install>/profiles/<name>/` with files like
+/// `modlist.txt`, `plugins.txt`, and INI files.
+pub fn scan_mo2_profiles(install_dir: &Path) -> Vec<Mo2Profile> {
+    let profiles_dir = install_dir.join("profiles");
+    if !profiles_dir.is_dir() {
+        return Vec::new();
+    }
+
+    let mut profiles = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&profiles_dir) {
+        for entry in entries.flatten() {
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let dir = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+
+            let modlist_path = dir.join("modlist.txt");
+            let plugins_path = dir.join("plugins.txt");
+
+            let has_modlist = modlist_path.exists();
+            let has_plugins = plugins_path.exists();
+
+            // Skip empty/invalid profile dirs
+            if !has_modlist && !has_plugins {
+                continue;
+            }
+
+            let mod_count = if has_modlist {
+                parse_mo2_modlist(&modlist_path).len()
+            } else {
+                0
+            };
+
+            let plugin_count = if has_plugins {
+                parse_mo2_plugins(&plugins_path).len()
+            } else {
+                0
+            };
+
+            profiles.push(Mo2Profile {
+                name,
+                dir,
+                has_modlist,
+                has_plugins,
+                mod_count,
+                plugin_count,
+            });
+        }
+    }
+
+    profiles.sort_by(|a, b| a.name.cmp(&b.name));
+    log::info!(
+        "Found {} MO2 profiles in {}",
+        profiles.len(),
+        install_dir.display()
+    );
+    profiles
+}
+
+/// Parse an MO2 `modlist.txt` file.
+///
+/// Format: one entry per line.
+/// - `+ModName` = enabled
+/// - `-ModName` = disabled
+/// - `*ModName` = unmanaged/separator (skip)
+/// - Lines starting with `#` are comments
+///
+/// Returns entries in order (first = highest priority in MO2's convention).
+pub fn parse_mo2_modlist(path: &Path) -> Vec<(String, bool)> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("Failed to read MO2 modlist.txt: {}", e);
+            return Vec::new();
+        }
+    };
+
+    let mut entries = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('+') {
+            entries.push((line[1..].to_string(), true));
+        } else if line.starts_with('-') {
+            entries.push((line[1..].to_string(), false));
+        }
+        // Skip '*' (separators/unmanaged) and other prefixes
+    }
+
+    entries
+}
+
+/// Parse an MO2 `plugins.txt` file.
+///
+/// Format: one plugin per line.
+/// - `*PluginName.esp` = enabled
+/// - `PluginName.esp` (no prefix) = disabled
+/// - Lines starting with `#` are comments
+pub fn parse_mo2_plugins(path: &Path) -> Vec<(String, bool)> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("Failed to read MO2 plugins.txt: {}", e);
+            return Vec::new();
+        }
+    };
+
+    let mut entries = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('*') {
+            entries.push((line[1..].to_string(), true));
+        } else {
+            entries.push((line.to_string(), false));
+        }
+    }
+
+    entries
+}
+
+/// Import MO2 profiles from a Wabbajack install into Corkscrew's profile system.
+///
+/// For each MO2 profile directory found:
+/// 1. Parse `modlist.txt` → map mod names to installed mod IDs → set enable/priority
+/// 2. Parse `plugins.txt` → import as plugin load order
+/// 3. Create a Corkscrew profile with this state
+///
+/// Returns the names of successfully imported profiles.
+pub fn import_mo2_profiles(
+    db: &ModDatabase,
+    install_dir: &Path,
+    game_id: &str,
+    bottle_name: &str,
+    modlist_name: &str,
+) -> Vec<String> {
+    let mo2_profiles = scan_mo2_profiles(install_dir);
+    if mo2_profiles.is_empty() {
+        log::debug!("No MO2 profiles found in {}", install_dir.display());
+        return Vec::new();
+    }
+
+    // Get all installed mods for name matching
+    let installed_mods = db
+        .list_mods(game_id, bottle_name)
+        .unwrap_or_default();
+
+    let mut imported = Vec::new();
+
+    for mo2_profile in &mo2_profiles {
+        // Build profile name: "ModlistName - ProfileName"
+        let profile_name = if mo2_profiles.len() == 1 {
+            format!("wj:{}", modlist_name)
+        } else {
+            format!("wj:{} - {}", modlist_name, mo2_profile.name)
+        };
+
+        let profile_id = match create_profile(db, game_id, bottle_name, &profile_name) {
+            Ok(id) => id,
+            Err(ProfileError::DuplicateName(_)) => {
+                log::info!("Profile '{}' already exists, skipping", profile_name);
+                continue;
+            }
+            Err(e) => {
+                log::warn!("Failed to create profile '{}': {}", profile_name, e);
+                continue;
+            }
+        };
+
+        // Import mod states from modlist.txt
+        if mo2_profile.has_modlist {
+            let mo2_mods = parse_mo2_modlist(&mo2_profile.dir.join("modlist.txt"));
+
+            // MO2 modlist.txt lists mods top-to-bottom = highest to lowest priority.
+            // We reverse so index 0 = lowest priority (matching our priority convention).
+            let mut mod_states = Vec::new();
+            let total = mo2_mods.len() as i32;
+
+            for (i, (mod_name, enabled)) in mo2_mods.iter().enumerate() {
+                // Try to match MO2 mod name to an installed Corkscrew mod.
+                // MO2 mod names often match the staging folder name which we use as mod name.
+                let mod_name_lower = mod_name.to_lowercase();
+                if let Some(installed) = installed_mods.iter().find(|m| {
+                    let installed_lower = m.name.to_lowercase();
+                    // Prefer exact match, fall back to substring containment
+                    installed_lower == mod_name_lower
+                        || installed_lower.contains(&mod_name_lower)
+                        || mod_name_lower.contains(&installed_lower)
+                }) {
+                    log::debug!(
+                        "MO2 mod '{}' matched to installed mod '{}' (id={})",
+                        mod_name, installed.name, installed.id
+                    );
+                    mod_states.push(ProfileModState {
+                        mod_id: installed.id,
+                        enabled: *enabled,
+                        priority: total - i as i32, // Higher number = higher priority
+                    });
+                }
+            }
+
+            if !mod_states.is_empty() {
+                if let Err(e) = save_mod_states(db, profile_id, &mod_states) {
+                    log::warn!("Failed to save mod states for '{}': {}", profile_name, e);
+                } else {
+                    log::info!(
+                        "Imported {} mod states for profile '{}'",
+                        mod_states.len(),
+                        profile_name
+                    );
+                }
+            }
+        }
+
+        // Import plugin states from plugins.txt
+        if mo2_profile.has_plugins {
+            let mo2_plugins = parse_mo2_plugins(&mo2_profile.dir.join("plugins.txt"));
+
+            let plugin_states: Vec<ProfilePluginState> = mo2_plugins
+                .iter()
+                .enumerate()
+                .map(|(i, (filename, enabled))| ProfilePluginState {
+                    plugin_filename: filename.clone(),
+                    enabled: *enabled,
+                    load_index: i as i32,
+                })
+                .collect();
+
+            if !plugin_states.is_empty() {
+                if let Err(e) = save_plugin_states(db, profile_id, &plugin_states) {
+                    log::warn!(
+                        "Failed to save plugin states for '{}': {}",
+                        profile_name,
+                        e
+                    );
+                } else {
+                    log::info!(
+                        "Imported {} plugin states for profile '{}'",
+                        plugin_states.len(),
+                        profile_name
+                    );
+                }
+            }
+        }
+
+        imported.push(profile_name.clone());
+        log::info!(
+            "Created profile '{}' from MO2 profile '{}' ({} mods, {} plugins)",
+            profile_name,
+            mo2_profile.name,
+            mo2_profile.mod_count,
+            mo2_profile.plugin_count,
+        );
+    }
+
+    // If only one profile was imported, activate it automatically
+    if imported.len() == 1 {
+        if let Ok(profiles) = list_profiles(db, game_id, bottle_name) {
+            if let Some(p) = profiles.iter().find(|p| p.name == imported[0]) {
+                let _ = set_active_profile(db, game_id, bottle_name, p.id);
+                log::info!("Auto-activated profile '{}'", imported[0]);
+            }
+        }
+    }
+
+    imported
+}
+
+// ---------------------------------------------------------------------------
 // Profile save management
 // ---------------------------------------------------------------------------
 
@@ -756,5 +1068,99 @@ mod tests {
         let profiles = list_profiles(&db, "skyrimse", "Gaming").unwrap();
         let p1 = profiles.iter().find(|p| p.id == id1).unwrap();
         assert!(!p1.is_active);
+    }
+
+    #[test]
+    fn parse_mo2_modlist_basic() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("modlist.txt");
+        std::fs::write(
+            &path,
+            "# This file was automatically generated by Mod Organizer.\n\
+             +SkyUI\n\
+             -Immersive Armors\n\
+             +USSEP\n\
+             *Separator_Visuals\n\
+             +RaceMenu\n",
+        )
+        .unwrap();
+
+        let entries = parse_mo2_modlist(&path);
+        assert_eq!(entries.len(), 4);
+        assert_eq!(entries[0], ("SkyUI".to_string(), true));
+        assert_eq!(entries[1], ("Immersive Armors".to_string(), false));
+        assert_eq!(entries[2], ("USSEP".to_string(), true));
+        assert_eq!(entries[3], ("RaceMenu".to_string(), true));
+    }
+
+    #[test]
+    fn parse_mo2_plugins_basic() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugins.txt");
+        std::fs::write(
+            &path,
+            "# This file is used by Mod Organizer.\n\
+             *Skyrim.esm\n\
+             *Update.esm\n\
+             *Dawnguard.esm\n\
+             SomeDisabled.esp\n\
+             *SkyUI_SE.esp\n",
+        )
+        .unwrap();
+
+        let entries = parse_mo2_plugins(&path);
+        assert_eq!(entries.len(), 5);
+        assert_eq!(entries[0], ("Skyrim.esm".to_string(), true));
+        assert_eq!(entries[3], ("SomeDisabled.esp".to_string(), false));
+        assert_eq!(entries[4], ("SkyUI_SE.esp".to_string(), true));
+    }
+
+    #[test]
+    fn scan_mo2_profiles_finds_profiles() {
+        let dir = tempfile::tempdir().unwrap();
+        let profiles_dir = dir.path().join("profiles");
+
+        // Create a Default profile
+        let default_dir = profiles_dir.join("Default");
+        std::fs::create_dir_all(&default_dir).unwrap();
+        std::fs::write(default_dir.join("modlist.txt"), "+SkyUI\n+USSEP\n").unwrap();
+        std::fs::write(
+            default_dir.join("plugins.txt"),
+            "*Skyrim.esm\n*SkyUI_SE.esp\n",
+        )
+        .unwrap();
+
+        // Create a Performance profile
+        let perf_dir = profiles_dir.join("Performance");
+        std::fs::create_dir_all(&perf_dir).unwrap();
+        std::fs::write(perf_dir.join("modlist.txt"), "+SkyUI\n-USSEP\n").unwrap();
+
+        // Create an empty dir (should be skipped)
+        std::fs::create_dir_all(profiles_dir.join("Empty")).unwrap();
+
+        let profiles = scan_mo2_profiles(dir.path());
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(profiles[0].name, "Default");
+        assert!(profiles[0].has_modlist);
+        assert!(profiles[0].has_plugins);
+        assert_eq!(profiles[0].mod_count, 2);
+        assert_eq!(profiles[0].plugin_count, 2);
+        assert_eq!(profiles[1].name, "Performance");
+        assert!(profiles[1].has_modlist);
+        assert!(!profiles[1].has_plugins);
+    }
+
+    #[test]
+    fn parse_mo2_modlist_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("modlist.txt");
+        std::fs::write(&path, "# Empty\n").unwrap();
+        assert!(parse_mo2_modlist(&path).is_empty());
+    }
+
+    #[test]
+    fn parse_mo2_modlist_missing_file() {
+        let path = Path::new("/nonexistent/modlist.txt");
+        assert!(parse_mo2_modlist(path).is_empty());
     }
 }

@@ -603,7 +603,7 @@ query CollectionRevisions($slug: String!, $viewAdultContent: Boolean) {
 const GET_REVISION_MODS_QUERY: &str = r#"
 query RevisionMods($slug: String!, $revision: Int, $viewAdultContent: Boolean) {
     collectionRevision(slug: $slug, revision: $revision, viewAdultContent: $viewAdultContent) {
-        installInstructions
+        installationInfo
         gameVersions { id reference }
         modFiles {
             fileId optional
@@ -979,8 +979,9 @@ pub async fn get_revision_mods(
         }
     }
 
+    // NexusMods renamed installInstructions → installationInfo (2026-03)
     let install_instructions = revision_node
-        .get("installInstructions")
+        .get("installationInfo")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(String::from);

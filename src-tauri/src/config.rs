@@ -91,6 +91,11 @@ pub struct AppConfig {
     #[serde(default)]
     pub verification_level: VerificationLevel,
 
+    /// If true, skip deploying the Wine fork of SSE Engine Fixes and use
+    /// whatever the modlist provides (original SSE Engine Fixes or none).
+    #[serde(default)]
+    pub use_original_engine_fixes: bool,
+
     /// Catch-all for any additional settings that may be added in the future.
     /// Flattened so extra keys sit at the top level of the JSON object.
     #[serde(flatten)]
@@ -278,6 +283,9 @@ pub fn set_config_value(key: &str, value: &str) -> Result<()> {
                 _ => VerificationLevel::Balanced,
             };
         }
+        "use_original_engine_fixes" => {
+            config.use_original_engine_fixes = value == "true";
+        }
         _ => {
             config
                 .extra
@@ -309,6 +317,7 @@ pub fn get_config_value(key: &str) -> Result<Option<String>> {
             VerificationLevel::Balanced => "Balanced".to_string(),
             VerificationLevel::Paranoid => "Paranoid".to_string(),
         }),
+        "use_original_engine_fixes" => Some(config.use_original_engine_fixes.to_string()),
         _ => config.extra.get(key).map(|v| match v {
             serde_json::Value::String(s) => s.clone(),
             other => other.to_string(),
@@ -348,6 +357,7 @@ mod tests {
             has_completed_setup: false,
             controller_mode: false,
             verification_level: VerificationLevel::default(),
+            use_original_engine_fixes: false,
             extra: HashMap::new(),
         };
         config

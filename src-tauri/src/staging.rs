@@ -547,15 +547,21 @@ pub fn stage_mod_extract_direct(
 }
 
 /// Recursively copy a directory (fallback if rename fails across filesystems).
+/// Uses platform-optimized copy (reflink/clonefile when available).
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    let copy_method = platform::detect_copy_method(src, dst);
+    copy_dir_recursive_inner(src, dst, copy_method)
+}
+
+fn copy_dir_recursive_inner(src: &Path, dst: &Path, copy_method: platform::FsCopyMethod) -> Result<()> {
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
         let dest = dst.join(entry.file_name());
         if entry.file_type()?.is_dir() {
-            copy_dir_recursive(&entry.path(), &dest)?;
+            copy_dir_recursive_inner(&entry.path(), &dest, copy_method)?;
         } else {
-            fs::copy(entry.path(), &dest)?;
+            platform::fast_copy(&entry.path(), &dest, copy_method)?;
         }
     }
     Ok(())

@@ -1,9 +1,13 @@
 //! Deployment engine for installing mod files from staging into game directories.
 //!
-//! Uses a **hardlink-first, copy-fallback** strategy:
+//! Uses a **hardlink → reflink → copy** strategy:
 //! 1. Attempt `std::fs::hard_link()` for each file (zero disk overhead).
-//! 2. If that fails (cross-volume, unsupported FS), fall back to `std::fs::copy()`.
-//! 3. Track every deployed file in the `deployment_manifest` database table.
+//! 2. If hardlink fails, try reflink/clonefile via `platform::fast_copy()` (CoW).
+//! 3. If reflink is unsupported, fall back to `std::fs::copy()`.
+//! 4. Track every deployed file in the `deployment_manifest` database table.
+//!
+//! **Important:** `.exe` and `.dll` files must never be symlinked — Wine path
+//! resolution breaks with symlinks. See `should_avoid_symlink()`.
 //!
 //! Key operations:
 //! - `deploy_mod` — deploy a single mod's files from staging to game dir
@@ -19,9 +23,21 @@ use thiserror::Error;
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use rayon::prelude::*;
+
 use crate::baselines;
 use crate::database::ModDatabase;
 use crate::platform;
+
+// ---------------------------------------------------------------------------
+// Batch existence check
+// ---------------------------------------------------------------------------
+
+/// Batch-check file existence to minimize stat() syscalls.
+/// Wine probes 10,000+ files on startup, so reducing redundant stats matters.
+pub fn batch_check_exists(paths: &[PathBuf]) -> Vec<bool> {
+    paths.par_iter().map(|p| p.exists()).collect()
+}
 
 // ---------------------------------------------------------------------------
 // Vanilla file protection
@@ -100,6 +116,21 @@ pub fn same_filesystem(a: &Path, b: &Path) -> bool {
 #[cfg(not(unix))]
 pub fn same_filesystem(_a: &Path, _b: &Path) -> bool {
     false // assume different on non-Unix; always copy
+}
+
+/// Check whether a file extension indicates an executable or library that
+/// must NOT be deployed via symlink. Wine resolves DLL/EXE paths through
+/// its own path resolution layer, and symlinks can break that resolution.
+///
+/// Note: Corkscrew currently never creates symlinks during deployment
+/// (hardlink -> reflink -> copy), so this is a defense-in-depth guard.
+pub fn should_avoid_symlink(path: &Path) -> bool {
+    if let Some(ext) = path.extension() {
+        let ext_lower = ext.to_string_lossy().to_lowercase();
+        matches!(ext_lower.as_str(), "exe" | "dll" | "com" | "bat" | "cmd")
+    } else {
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1090,10 +1121,16 @@ fn compute_diff(
     }
 }
 
-/// Deploy a single file from staging to the game directory using hardlink-first
-/// strategy. Returns the deploy method used ("hardlink" or "copy"), or None on
-/// failure.
-fn deploy_single_file(src: &Path, dst: &Path, can_hardlink: bool) -> Option<&'static str> {
+/// Deploy a single file from staging to the game directory.
+///
+/// Priority chain: hardlink → reflink/clonefile → copy.
+/// Returns the deploy method used ("hardlink" or "copy"), or None on failure.
+fn deploy_single_file(
+    src: &Path,
+    dst: &Path,
+    can_hardlink: bool,
+    copy_method: platform::FsCopyMethod,
+) -> Option<&'static str> {
     if let Some(parent) = dst.parent() {
         if let Err(e) = fs::create_dir_all(parent) {
             warn!(
@@ -1124,12 +1161,13 @@ fn deploy_single_file(src: &Path, dst: &Path, can_hardlink: bool) -> Option<&'st
             Ok(_) => Some("hardlink"),
             Err(e) => {
                 warn!(
-                    "Hardlink failed for {} → {}: {} (falling back to copy)",
+                    "Hardlink failed for {} → {}: {} (falling back to reflink/copy)",
                     src.display(),
                     dst.display(),
                     e
                 );
-                match fs::copy(src, dst) {
+                // Use platform::fast_copy which tries reflink/clonefile before fs::copy
+                match platform::fast_copy(src, dst, copy_method) {
                     Ok(_) => Some("copy"),
                     Err(copy_err) => {
                         warn!(
@@ -1144,7 +1182,8 @@ fn deploy_single_file(src: &Path, dst: &Path, can_hardlink: bool) -> Option<&'st
             }
         }
     } else {
-        match fs::copy(src, dst) {
+        // Cross-device: use platform::fast_copy (reflink/clonefile → fs::copy)
+        match platform::fast_copy(src, dst, copy_method) {
             Ok(_) => Some("copy"),
             Err(e) => {
                 warn!(
@@ -1237,6 +1276,7 @@ pub fn deploy_incremental(
     // Determine staging root for filesystem check
     let staging_root = crate::staging::staging_base_dir(game_id, bottle_name);
     let can_hardlink = same_filesystem(&staging_root, data_dir);
+    let copy_method = platform::detect_copy_method(&staging_root, data_dir);
 
     if !can_hardlink {
         // Estimate space needed for additions/updates only
@@ -1300,7 +1340,7 @@ pub fn deploy_incremental(
                 return None;
             }
 
-            match deploy_single_file(&src, &dst, can_hardlink) {
+            match deploy_single_file(&src, &dst, can_hardlink, copy_method) {
                 Some(method) => {
                     updated_count.fetch_add(1, Ordering::Relaxed);
                     if method == "copy" {
@@ -1357,7 +1397,7 @@ pub fn deploy_incremental(
                 return None;
             }
 
-            match deploy_single_file(&src, &dst, can_hardlink) {
+            match deploy_single_file(&src, &dst, can_hardlink, copy_method) {
                 Some(method) => {
                     added_count.fetch_add(1, Ordering::Relaxed);
                     if method == "copy" {

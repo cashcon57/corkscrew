@@ -14,6 +14,33 @@ use zip::ZipArchive;
 /// Callback type for reporting extraction progress: (files_done, files_total).
 pub type ExtractProgressCb = dyn Fn(u64, u64) + Send + Sync;
 
+/// CP437 (DOS/OEM) high-byte to Unicode translation table.
+/// Maps bytes 0x80..0xFF to their Unicode equivalents.
+const CP437_HIGH: [char; 128] = [
+    'Ç', 'ü', 'é', 'â', 'ä', 'à', 'å', 'ç', 'ê', 'ë', 'è', 'ï', 'î', 'ì', 'Ä', 'Å',
+    'É', 'æ', 'Æ', 'ô', 'ö', 'ò', 'û', 'ù', 'ÿ', 'Ö', 'Ü', '¢', '£', '¥', '₧', 'ƒ',
+    'á', 'í', 'ó', 'ú', 'ñ', 'Ñ', 'ª', 'º', '¿', '⌐', '¬', '½', '¼', '¡', '«', '»',
+    '░', '▒', '▓', '│', '┤', '╡', '╢', '╖', '╕', '╣', '║', '╗', '╝', '╜', '╛', '┐',
+    '└', '┴', '┬', '├', '─', '┼', '╞', '╟', '╚', '╔', '╩', '╦', '╠', '═', '╬', '╧',
+    '╨', '╤', '╥', '╙', '╘', '╒', '╓', '╫', '╪', '┘', '┌', '█', '▄', '▌', '▐', '▀',
+    'α', 'ß', 'Γ', 'π', 'Σ', 'σ', 'µ', 'τ', 'Φ', 'Θ', 'Ω', 'δ', '∞', 'φ', 'ε', '∩',
+    '≡', '±', '≥', '≤', '⌠', '⌡', '÷', '≈', '°', '∙', '·', '√', 'ⁿ', '²', '■', ' ',
+];
+
+/// Convert a CP437-encoded byte slice to a UTF-8 string.
+/// Bytes 0x00..0x7F pass through as ASCII; 0x80..0xFF map via the table.
+fn cp437_to_utf8(bytes: &[u8]) -> String {
+    let mut result = String::with_capacity(bytes.len());
+    for &b in bytes {
+        if b < 0x80 {
+            result.push(b as char);
+        } else {
+            result.push(CP437_HIGH[(b - 0x80) as usize]);
+        }
+    }
+    result
+}
+
 /// Returns `true` if a path component or filename is macOS/archive junk that
 /// should never be staged or deployed (`.DS_Store`, `__MACOSX`, `Thumbs.db`).
 pub fn is_junk_file(path: &Path) -> bool {
@@ -139,7 +166,7 @@ const MOD_FOLDER_NAMES: &[&str] = &[
 ///   - `.7z`
 ///
 /// Detect archive format from magic bytes (first 8 bytes of file).
-/// Returns `"zip"`, `"7z"`, `"rar"`, or `None` if unrecognized.
+/// Returns `"zip"`, `"7z"`, `"rar"`, `"bsa"`, `"ba2"`, or `None` if unrecognized.
 pub(crate) fn detect_format_from_magic(path: &Path) -> Option<&'static str> {
     let mut buf = [0u8; 8];
     let mut file = std::fs::File::open(path).ok()?;
@@ -150,6 +177,10 @@ pub(crate) fn detect_format_from_magic(path: &Path) -> Option<&'static str> {
         Some("7z")
     } else if buf[0..4] == [0x52, 0x61, 0x72, 0x21] {
         Some("rar")
+    } else if buf[0..4] == [0x42, 0x53, 0x41, 0x00] {
+        Some("bsa") // BSA\x00 — Bethesda BSA archive
+    } else if buf[0..4] == [0x42, 0x54, 0x44, 0x58] {
+        Some("ba2") // BTDX — Bethesda BA2 archive
     } else {
         None
     }
@@ -167,6 +198,13 @@ fn extract_by_magic(archive_path: &Path, dest_dir: &Path) -> Option<Result<Vec<P
         "zip" => extract_zip(archive_path, dest_dir),
         "7z" => extract_7z(archive_path, dest_dir),
         "rar" => extract_rar(archive_path, dest_dir),
+        "bsa" | "ba2" => {
+            log::info!(
+                "Detected Bethesda archive ({}) — skipping general extraction",
+                detected
+            );
+            return None; // BSA/BA2 handled by Wabbajack pipeline
+        }
         _ => return None,
     })
 }
@@ -377,16 +415,33 @@ fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
 
     for i in 0..archive.len() {
         let entry = archive.by_index(i)?;
-        let relative = match entry.enclosed_name() {
-            Some(p) => p.to_path_buf(),
-            None => {
-                warn!("Skipping ZIP entry with unsafe path");
-                continue;
-            }
+
+        // Reject raw filenames with null bytes before any conversion
+        let raw_name = entry.name_raw();
+        if raw_name.contains(&0u8) {
+            warn!("Skipping ZIP entry with null byte in raw filename");
+            continue;
+        }
+
+        // Convert CP437-encoded filenames to UTF-8 (common in old DOS-era archives)
+        // Note: CP437 high-byte table (0x80-0xFF) is null-free; check above is defense-in-depth
+        let decoded_name = if raw_name.iter().any(|&b| b >= 0x80) {
+            let converted = cp437_to_utf8(raw_name);
+            debug!("CP437 filename converted: {:?} -> {}", raw_name, converted);
+            converted
+        } else {
+            entry.name().to_string()
         };
+
+        let relative = PathBuf::from(&decoded_name);
         if relative
             .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
+            .any(|c| matches!(
+                c,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            ))
         {
             warn!(
                 "Skipping ZIP path traversal attempt: {}",
@@ -492,16 +547,33 @@ fn extract_zip_with_progress(
 
     for i in 0..archive.len() {
         let entry = archive.by_index(i)?;
-        let relative = match entry.enclosed_name() {
-            Some(p) => p.to_path_buf(),
-            None => {
-                warn!("Skipping ZIP entry with unsafe path");
-                continue;
-            }
+
+        // Reject raw filenames with null bytes before any conversion
+        let raw_name = entry.name_raw();
+        if raw_name.contains(&0u8) {
+            warn!("Skipping ZIP entry with null byte in raw filename");
+            continue;
+        }
+
+        // Convert CP437-encoded filenames to UTF-8 (common in old DOS-era archives)
+        // Note: CP437 high-byte table (0x80-0xFF) is null-free; check above is defense-in-depth
+        let decoded_name = if raw_name.iter().any(|&b| b >= 0x80) {
+            let converted = cp437_to_utf8(raw_name);
+            debug!("CP437 filename converted: {:?} -> {}", raw_name, converted);
+            converted
+        } else {
+            entry.name().to_string()
         };
+
+        let relative = PathBuf::from(&decoded_name);
         if relative
             .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
+            .any(|c| matches!(
+                c,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            ))
         {
             warn!(
                 "Skipping ZIP path traversal attempt: {}",
@@ -782,7 +854,12 @@ fn extract_rar(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
         if entry
             .filename
             .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
+            .any(|c| matches!(
+                c,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            ))
         {
             warn!(
                 "Skipping RAR entry with path traversal: {}",
@@ -1498,5 +1575,38 @@ mod tests {
         assert!(!is_deploy_junk(Path::new("mymod.esp")));
         assert!(!is_deploy_junk(Path::new("skse/plugins/engine.dll")));
         assert!(!is_deploy_junk(Path::new("scripts/script.pex")));
+    }
+
+    #[test]
+    fn test_cp437_to_utf8_ascii() {
+        let input = b"hello.txt";
+        assert_eq!(cp437_to_utf8(input), "hello.txt");
+    }
+
+    #[test]
+    fn test_cp437_to_utf8_high_bytes() {
+        // 0x81 = 'ü', 0x82 = 'é'
+        let input = &[0x68, 0x81, 0x82]; // "hüé"
+        assert_eq!(cp437_to_utf8(input), "hüé");
+    }
+
+    #[test]
+    fn test_detect_bsa_magic() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.bsa");
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(&[0x42, 0x53, 0x41, 0x00, 0, 0, 0, 0]).unwrap();
+        assert_eq!(detect_format_from_magic(&path), Some("bsa"));
+    }
+
+    #[test]
+    fn test_detect_ba2_magic() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.ba2");
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(&[0x42, 0x54, 0x44, 0x58, 0, 0, 0, 0]).unwrap();
+        assert_eq!(detect_format_from_magic(&path), Some("ba2"));
     }
 }

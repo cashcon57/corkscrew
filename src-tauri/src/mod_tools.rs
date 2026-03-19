@@ -2010,6 +2010,7 @@ mod tests {
                     nexus_file_id: Some(1),
                 })
                 .collect(),
+            required_game_version: None,
         }
     }
 
