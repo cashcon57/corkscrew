@@ -5,8 +5,9 @@
 export class SpeedTracker {
   private samples: { time: number; bytes: number }[] = [];
   private windowMs: number;
+  private lastSpeed = 0;
 
-  constructor(windowMs = 5000) {
+  constructor(windowMs = 15000) {
     this.windowMs = windowMs;
   }
 
@@ -15,15 +16,17 @@ export class SpeedTracker {
     const now = Date.now();
     this.samples.push({ time: now, bytes: currentBytes });
     this.samples = this.samples.filter((s) => now - s.time <= this.windowMs);
-    if (this.samples.length < 2) return 0;
+    if (this.samples.length < 2) return this.lastSpeed;
     const oldest = this.samples[0];
     const elapsed = (now - oldest.time) / 1000;
-    if (elapsed <= 0) return 0;
-    return (currentBytes - oldest.bytes) / elapsed;
+    if (elapsed <= 0) return this.lastSpeed;
+    this.lastSpeed = (currentBytes - oldest.bytes) / elapsed;
+    return this.lastSpeed;
   }
 
   reset(): void {
     this.samples = [];
+    this.lastSpeed = 0;
   }
 
   static formatSpeed(bytesPerSec: number): string {

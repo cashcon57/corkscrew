@@ -314,17 +314,34 @@ export async function startWjInstallTracking(modlistName: string, meta?: WjInsta
   }, 1000);
 
   // Register event listeners BEFORE backend command fires.
-  // The installer emits on "wj-install-progress" and the downloader emits on
-  // "wabbajack-install-progress" with slightly different field names.
-  const updateStore = (payload: any) => {
+  // Events are queued and flushed once per animation frame (~60 FPS cap)
+  // to prevent UI jitter from high-frequency backend events.
+  let eventQueue: any[] = [];
+  let rafId: number | null = null;
+
+  function flushEventQueue() {
+    rafId = null;
+    if (eventQueue.length === 0) return;
+    const batch = eventQueue;
+    eventQueue = [];
     wjInstallStatus.update((s) => {
       if (!s) return s;
-      const updated = processEvent(s, payload);
+      let updated = s;
+      for (const payload of batch) {
+        updated = processEvent(updated, payload);
+      }
       return { ...updated };
     });
-  };
+  }
 
-  unlisten = await listen<WjInstallProgressEvent>("wj-install-progress", (e) => updateStore(e.payload));
+  function enqueueEvent(payload: any) {
+    eventQueue.push(payload);
+    if (rafId === null) {
+      rafId = requestAnimationFrame(flushEventQueue);
+    }
+  }
+
+  unlisten = await listen<WjInstallProgressEvent>("wj-install-progress", (e) => enqueueEvent(e.payload));
 
   // Also listen to downloader-specific events (different channel + field names)
   const unlistenDl = await listen<any>("wabbajack-install-progress", (e) => {
@@ -338,12 +355,16 @@ export async function startWjInstallTracking(modlistName: string, meta?: WjInsta
     if (p.total !== undefined) mapped.total = p.total;
     if (p.error !== undefined) mapped.error = p.error;
     if (p.reason !== undefined) mapped.reason = p.reason;
-    updateStore(mapped);
+    enqueueEvent(mapped);
   });
 
-  // Store both unlisten fns
+  // Store both unlisten fns — also cancel any pending RAF
   const origUnlisten = unlisten;
-  unlisten = () => { origUnlisten(); unlistenDl(); };
+  unlisten = () => {
+    origUnlisten();
+    unlistenDl();
+    if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
+  };
 }
 
 /** Set the install ID (returned by the backend command) for cancellation support. */
