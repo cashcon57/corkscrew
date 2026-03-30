@@ -211,7 +211,7 @@ fn hash_mmap(path: &Path) -> io::Result<String> {
     let mmap = unsafe { memmap2::Mmap::map(&file)? };
     let mut hasher = Sha256::new();
     hasher.update(&mmap[..]);
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect())
 }
 
 /// Buffered 128 KiB read hashing — used for small files where mmap overhead
@@ -227,7 +227,7 @@ fn hash_buffered(path: &Path) -> io::Result<String> {
         }
         hasher.update(&buffer[..n]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -285,7 +285,7 @@ fn copy_and_hash_buffered(src: &Path, dst: &Path) -> io::Result<(String, u64)> {
         total += n as u64;
     }
 
-    let hash = format!("{:x}", hasher.finalize());
+    let hash: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
     Ok((hash, total))
 }
 

@@ -28,7 +28,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Database
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
 
 # HTTP client (for Nexus API)
 reqwest = { version = "0.12", features = ["json", "stream", "blocking"] }
@@ -76,7 +76,7 @@ url = "2"
 futures = "0.3"
 
 # Window vibrancy (macOS)
-window-vibrancy = "0.5"
+window-vibrancy = "0.7"
 
 # Hashing (for version detection)
 sha2 = "0.11"
@@ -115,7 +115,7 @@ image_dds = { version = "0.7", features = ["ddsfile", "image"] }
 pelite = "0.10"
 
 # Embedded JS engine (Vortex extension execution)
-rquickjs = { version = "0.10", features = ["futures", "parallel", "loader", "macro", "rust-alloc"] }
+rquickjs = { version = "0.11", features = ["futures", "parallel", "loader", "macro", "rust-alloc"] }
 
 # UUID generation (FOMOD correlation IDs)
 uuid = { version = "1", features = ["v4"] }

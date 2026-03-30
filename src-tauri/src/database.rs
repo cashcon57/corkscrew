@@ -2079,7 +2079,7 @@ impl ModDatabase {
         )?;
 
         let rows = stmt.query_map(params![game_id, bottle_name], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, usize>(1)?))
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
         })?;
 
         Ok(rows.filter_map(|r| r.ok()).collect())
@@ -3056,7 +3056,7 @@ impl ModDatabase {
             .map_err(|e| e.to_string())?;
 
         for (index, dtype) in directives {
-            stmt.execute(params![install_id, index, dtype])
+            stmt.execute(params![install_id, *index as i64, dtype])
                 .map_err(|e| e.to_string())?;
         }
         drop(stmt);
@@ -3074,7 +3074,7 @@ impl ModDatabase {
         conn.execute(
             "UPDATE wj_directive_status SET status = 'processing', updated_at = datetime('now')
              WHERE install_id = ?1 AND directive_index = ?2",
-            params![install_id, directive_index],
+            params![install_id, directive_index as i64],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -3090,7 +3090,7 @@ impl ModDatabase {
         conn.execute(
             "UPDATE wj_directive_status SET status = 'completed', updated_at = datetime('now')
              WHERE install_id = ?1 AND directive_index = ?2",
-            params![install_id, directive_index],
+            params![install_id, directive_index as i64],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -3106,7 +3106,7 @@ impl ModDatabase {
         conn.execute(
             "UPDATE wj_directive_status SET status = 'failed', updated_at = datetime('now')
              WHERE install_id = ?1 AND directive_index = ?2",
-            params![install_id, directive_index],
+            params![install_id, directive_index as i64],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -3141,7 +3141,7 @@ impl ModDatabase {
             )
             .map_err(|e| e.to_string())?;
         let indices = stmt
-            .query_map(params![install_id], |row| row.get::<_, usize>(0))
+            .query_map(params![install_id], |row| Ok(row.get::<_, i64>(0)? as usize))
             .map_err(|e| e.to_string())?
             .filter_map(|r| r.ok())
             .collect();
