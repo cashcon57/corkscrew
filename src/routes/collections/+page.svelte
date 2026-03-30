@@ -555,6 +555,7 @@
   let selectedMods = $state<CollectionMod[]>([]);
   let selectedGameVersions = $state<string[]>([]);
   let loadingDetail = $state(false);
+  let detailLoadStart = $state(0);
   let detailAbortController: AbortController | null = null;
   let detailCacheInfo = $state<{ cached: number; total: number; nexusTotal: number } | null>(null);
   let installing = $state(false);
@@ -1390,17 +1391,18 @@
     detailAbortController = ac;
 
     loadingDetail = true;
+    detailLoadStart = Date.now();
     renderedDescription = "";
     renderedInstallInstructions = "";
     rawInstallInstructions = "";
     detailCacheInfo = null;
     try {
-      const detailTimeout = <T>(p: Promise<T>, ms: number): Promise<T> =>
-        Promise.race([p, new Promise<T>((_, reject) => setTimeout(() => reject(new Error("Request timed out — try again")), ms))]);
+      const detailTimeout = <T>(p: Promise<T>, ms: number, label: string): Promise<T> =>
+        Promise.race([p, new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`${label} timed out — NexusMods may be slow, try again`)), ms))]);
 
       const [detail, modsResult] = await Promise.all([
-        detailTimeout(getCollection(collection.slug, collection.game_domain), 30_000),
-        detailTimeout(getCollectionMods(collection.slug, collection.latest_revision), 30_000),
+        detailTimeout(getCollection(collection.slug, collection.game_domain), 15_000, "Collection details"),
+        detailTimeout(getCollectionMods(collection.slug, collection.latest_revision), 15_000, "Mod list"),
       ]);
 
       // Check if cancelled while waiting
@@ -3246,7 +3248,7 @@
           <div class="spinner"><div class="spinner-ring"></div></div>
           <div class="loading-text">
             <p class="loading-title">{loadingDetail ? "Loading collection" : "Fetching collections"}</p>
-            <p class="loading-detail">{loadingDetail ? "Loading collection details..." : "Loading collections from Nexus Mods..."}</p>
+            <p class="loading-detail">{loadingDetail ? "Fetching from NexusMods API..." : "Loading collections from Nexus Mods..."}</p>
           </div>
           {#if loadingDetail}
             <button class="btn btn-ghost loading-cancel" onclick={cancelDetailLoad}>Cancel</button>
