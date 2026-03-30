@@ -77,7 +77,7 @@ We're actively expanding support to cover the **top 80 most-modded games on Nexu
 | Tier | What It Means | Games |
 |------|---------------|-------|
 | **Full** | Load order, LOOT sorting, script extender auto-install, INI presets, crash logs, mod tools | Skyrim SE, Fallout 4 |
-| **Enhanced** | Dedicated plugin with custom mod routing, saves dir, deploy hooks | Hogwarts Legacy |
+| **Enhanced** | Dedicated plugin with custom mod routing, framework auto-install, deploy hooks | Hogwarts Legacy |
 | **Standard** | Auto-detection, mod install/deploy, collections, profiles, NexusMods integration | 36 games (see below) |
 | **Planned** | Not yet in registry — will be added in upcoming releases | 41 games (see below) |
 
@@ -87,6 +87,29 @@ We're actively expanding support to cover the **top 80 most-modded games on Nexu
 |------|--------------|------------|-----------------|-------------|
 | Skyrim Special Edition | 129k | LOOT | SKSE (auto-install) | Full |
 | Fallout 4 | 72.2k | LOOT | — | Full |
+
+### Enhanced Support: Hogwarts Legacy
+
+Hogwarts Legacy has a dedicated plugin that provides a **fully automated, zero-config modding experience** — better than the typical Windows workflow, which requires manual UE4SS setup, third-party merger tools, and config editing.
+
+| Feature | Status | What Corkscrew Does |
+|---------|--------|---------------------|
+| PAK mods | Automatic | Routes to `~mods/` — detected by `.pak` extension |
+| UE4SS framework | Auto-installed | Downloads from GitHub/NexusMods when Lua or Logic mods are detected |
+| Lua script mods | Automatic | Routes to `Mods/`, auto-registers in `Mods.txt` via deploy hooks |
+| Blueprint/Logic mods | Automatic | Detected by `.logicmod`/`.ue4sslogicmod` markers, routes to `LogicMods/` |
+| Engine root (UE4SS DLLs, ReShade) | Automatic | Detected by known DLL names, routes to exe directory |
+| Movie mods (.bk2) | Automatic | Detected and routed to `Phoenix/Content` |
+| PAK database conflicts | Auto-merged | Native Rust merger (replaces Windows-only HLModMerger.exe) — detects conflicting pakchunk numbers and merges SQLite databases automatically |
+| FOMOD installers | Automatic | Generic FOMOD wizard; mod type detection runs post-FOMOD |
+
+**Collections like [Goblet](https://next.nexusmods.com/hogwartslegacy/collections) install with zero manual steps.** UE4SS is auto-deployed, Lua mods are auto-registered, PAK conflicts are auto-merged, and all 5 mod types route to the correct directories.
+
+#### Unreal Engine Generalization
+
+Most of this implementation is being generalized into a reusable `UnrealEnginePlugin` base that will provide PAK routing, UE4SS integration, Lua mod management, and database merging for **any UE4/5 game** with minimal per-game configuration. Games that will benefit:
+
+Ready or Not | Palworld | Kingdom Hearts III | Ace Combat 7 | Sifu | FF VII Remake | FF VII Rebirth | S.T.A.L.K.E.R. 2 | Dying Light 2 | Oblivion Remastered
 
 ### Standard Support (In Registry)
 
@@ -250,6 +273,8 @@ Requires [Node.js](https://nodejs.org/) 18+ and [Rust](https://rustup.rs/). On L
 ### Game Launching & Tools
 - Launch through Wine/CrossOver/Whisky/Proton directly from the app
 - Script extender auto-install (SKSE, F4SE) — version-aware
+- UE4SS framework auto-install for Hogwarts Legacy (extending to all UE4/5 games)
+- Native PAK database merger for UE games (replaces Windows-only HLModMerger.exe)
 - Mod tools: detect, auto-install, launch (SSEEdit, Pandora, BodySlide, DynDOLOD, etc.)
 - Wine bottle diagnostics with one-click fixes
 - INI editor with presets (performance, ultra, Steam Deck)
