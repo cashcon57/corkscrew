@@ -1463,9 +1463,14 @@ async fn get_game_logo(game_id: String) -> Result<Option<String>, String> {
     // 1. Return cached version if it exists (instant)
     if cached_path.exists() {
         let bytes = std::fs::read(&cached_path).map_err(|e| e.to_string())?;
-        if !bytes.is_empty() {
+        if bytes.len() >= 4 {
             let b64 = base64_encode(&bytes);
-            return Ok(Some(format!("data:image/png;base64,{b64}")));
+            let mime = if &bytes[..4] == b"\x89PNG" {
+                "image/png"
+            } else {
+                "image/jpeg"
+            };
+            return Ok(Some(format!("data:{mime};base64,{b64}")));
         }
     }
 
