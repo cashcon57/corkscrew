@@ -43,7 +43,7 @@ unrar = "0.5"
 tar = "0.4"
 flate2 = "1"
 xz2 = "0.1"
-bzip2 = "0.5"
+bzip2 = "0.6"
 
 # XML parsing (FOMOD)
 quick-xml = { version = "0.36", features = ["serialize"] }
