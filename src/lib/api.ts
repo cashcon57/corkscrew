@@ -809,6 +809,12 @@ export async function resumeWabbajackInstall(
   return invoke("resume_wabbajack_install", { installId });
 }
 
+export async function dismissWabbajackInstall(
+  installId: number
+): Promise<void> {
+  return invoke("dismiss_wabbajack_install", { installId });
+}
+
 export async function cleanupWabbajackInstall(
   installId: number
 ): Promise<void> {

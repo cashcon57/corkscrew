@@ -1356,9 +1356,12 @@
     rawInstallInstructions = "";
     detailCacheInfo = null;
     try {
+      const detailTimeout = <T>(p: Promise<T>, ms: number): Promise<T> =>
+        Promise.race([p, new Promise<T>((_, reject) => setTimeout(() => reject(new Error("Request timed out — try again")), ms))]);
+
       const [detail, modsResult] = await Promise.all([
-        getCollection(collection.slug, collection.game_domain),
-        getCollectionMods(collection.slug, collection.latest_revision),
+        detailTimeout(getCollection(collection.slug, collection.game_domain), 30_000),
+        detailTimeout(getCollectionMods(collection.slug, collection.latest_revision), 30_000),
       ]);
       selectedCollection = detail;
       selectedMods = modsResult.mods;

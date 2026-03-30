@@ -6299,6 +6299,18 @@ async fn get_pending_wabbajack_installs(
         .collect())
 }
 
+/// Permanently dismiss a pending Wabbajack install by marking it as cancelled.
+#[tauri::command]
+async fn dismiss_wabbajack_install(
+    install_id: i64,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state
+        .db
+        .update_wj_install_status(install_id, "cancelled", None)
+        .map_err(|e| format!("Failed to dismiss WJ install: {}", e))
+}
+
 // --- Game Version Pinning ---
 
 #[tauri::command]
@@ -12170,6 +12182,7 @@ pub fn run() {
             resume_collection_install_cmd,
             abandon_collection_install,
             get_pending_wabbajack_installs,
+            dismiss_wabbajack_install,
             get_pinned_game_version,
             pin_game_version,
             // Plugin Rules

@@ -7,7 +7,7 @@
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
   import { getVersion } from "@tauri-apps/api/app";
-  import { downloadFromNexus, installMod, getAllGames, getDownloadQueue, retryDownload, cancelDownload, clearFinishedDownloads, onDownloadQueueUpdate, listProfiles, listInstalledCollections, getConfig, setConfigValue, launchGame, getAllInterruptedInstalls, resumeCollectionInstall, abandonCollectionInstall, getCheckpointModNames, getPendingWabbajackInstalls, checkSkyrimVersion, getPinnedGameVersion, pinGameVersion, checkSteamStatus, addToSteam, fetchUpdate, installUpdate, chatCheckNewCrashes } from "$lib/api";
+  import { downloadFromNexus, installMod, getAllGames, getDownloadQueue, retryDownload, cancelDownload, clearFinishedDownloads, onDownloadQueueUpdate, listProfiles, listInstalledCollections, getConfig, setConfigValue, launchGame, getAllInterruptedInstalls, resumeCollectionInstall, abandonCollectionInstall, getCheckpointModNames, getPendingWabbajackInstalls, dismissWabbajackInstall, checkSkyrimVersion, getPinnedGameVersion, pinGameVersion, checkSteamStatus, addToSteam, fetchUpdate, installUpdate, chatCheckNewCrashes } from "$lib/api";
   import { resumeInstallTracking } from "$lib/installService";
   import { initHashingListener, destroyHashingListener, dismissHashingBanner } from "$lib/hashingService";
   import { hashingProgress } from "$lib/stores";
@@ -465,7 +465,9 @@
       interruptedInstall = null;
     }
     if (interruptedWj) {
+      const wj = interruptedWj;
       interruptedWj = null;
+      try { await dismissWabbajackInstall(wj.install_id); } catch (e) { console.error('dismissWabbajackInstall:', e); }
     }
   }
 
