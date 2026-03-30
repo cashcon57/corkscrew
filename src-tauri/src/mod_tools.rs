@@ -252,13 +252,9 @@ pub const TOOL_SIGNATURES: &[ToolSignature] = &[
         name_patterns: &["ue4ss", "re-ue4ss"],
         game_ids: &["hogwartslegacy"],
     },
-    ToolSignature {
-        tool_id: "hl-mod-merger",
-        tool_name: "Hogwarts Legacy Mod Merger",
-        nexus_mod_ids: &[178],
-        name_patterns: &["hlmodmerger", "mod merger"],
-        game_ids: &["hogwartslegacy"],
-    },
+    // NOTE: HLModMerger (Nexus mod 178) is NOT listed here — Corkscrew has a
+    // native PAK database merger (hl_merger.rs) that replaces it entirely.
+    // No external tool needed.
 ];
 
 /// A tool detected as required by a collection or wabbajack modlist.
@@ -867,22 +863,24 @@ fn hogwarts_legacy_tools() -> Vec<ModTool> {
             recommended_ini_edits: vec![],
             support_url: Some("https://github.com/UE4SS-RE/RE-UE4SS".into()),
         },
+        // NOTE: HLModMerger removed — Corkscrew has native PAK database merging
+        // via hl_merger.rs. The external Windows tool is not needed.
         ModTool {
-            id: "hl-mod-merger".into(),
-            name: "Hogwarts Legacy Mod Merger".into(),
-            description: "Merge conflicting PhoenixShipData.sqlite pak mods".into(),
-            exe_names: vec!["HLModMerger.exe".into()],
+            id: "hl-mod-merger-native".into(),
+            name: "PAK Database Merger (built-in)".into(),
+            description: "Automatically merges conflicting PhoenixShipData.sqlite — no external tool needed".into(),
+            exe_names: vec![],
             detected_path: None,
-            requires_wine: true,
+            requires_wine: false,
             category: "Utility".into(),
             can_auto_install: false,
             github_repo: None,
-            nexus_mod_id: Some(178),
-            nexus_game_slug: Some("hogwartslegacy".into()),
+            nexus_mod_id: None,
+            nexus_game_slug: None,
             download_url: None,
-            license: "Unknown".into(),
-            wine_notes: Some("May require .NET under Wine".into()),
-            wine_compat: "unknown".into(),
+            license: "GPL-3.0".into(),
+            wine_notes: None,
+            wine_compat: "native".into(),
             recommended_alternative: None,
             recommended_ini_edits: vec![],
             support_url: None,
