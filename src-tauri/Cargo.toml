@@ -100,7 +100,7 @@ regex = "1"
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 base64 = "0.22"
 mega = "0.8"
-scraper = "0.25"
+scraper = "0.26"
 qbsdiff = "1"
 
 # BSA/BA2 archive creation (Bethesda game archives)
