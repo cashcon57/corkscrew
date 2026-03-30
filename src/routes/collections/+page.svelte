@@ -47,6 +47,7 @@
     launchGame,
     quickCsModCount,
     getAllGames,
+    startOAuthLogin,
   } from "$lib/api";
   import { startInstallTracking, stopInstallTracking, resumeInstallTracking } from "$lib/installService";
   import { listen } from "@tauri-apps/api/event";
@@ -506,6 +507,8 @@
   let account = $state<AccountStatus | null>(null);
   let checkingAuth = $state(true);
   let signingIn = $state(false);
+  let oauthConnecting = $state(false);
+  let showApiKeyFallback = $state(false);
   let apiKeyInput = $state("");
   let validationError = $state<string | null>(null);
 
@@ -1224,6 +1227,33 @@
     try {
       await openUrl(NEXUS_API_KEY_URL);
     } catch { /* fallback: link is visible in UI */ }
+  }
+
+  async function handleOAuthLogin() {
+    oauthConnecting = true;
+    validationError = null;
+    try {
+      await startOAuthLogin();
+      const status = await getNexusAccountStatus();
+      if (status.connected) {
+        account = status;
+        showSuccess(`Signed in as ${status.name}`);
+        const game = $selectedGame;
+        const slug = game ? (gameSlugMap[game.game_id] ?? game.game_id) : "skyrimspecialedition";
+        collectionsInitializedForGame = slug;
+        gameFilter = slug;
+        await loadCollections(slug);
+      } else {
+        validationError = "Authorization completed but account check failed. Try again.";
+      }
+    } catch (e: unknown) {
+      const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
+      if (!msg.includes("Cancelled") && !msg.includes("timed out")) {
+        validationError = `Sign-in failed: ${msg}`;
+      }
+    } finally {
+      oauthConnecting = false;
+    }
   }
 
   async function handleConnect() {
@@ -2371,17 +2401,31 @@
         </p>
         <div class="connect-steps">
           <button
-            class="btn btn-secondary btn-step"
-            onclick={openNexusApiPage}
+            class="btn btn-accent btn-step"
+            onclick={handleOAuthLogin}
+            disabled={oauthConnecting}
             type="button"
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
-              <polyline points="15 3 21 3 21 9" />
-              <line x1="10" y1="14" x2="21" y2="3" />
-            </svg>
-            Get API Key from Nexus Mods
+            {#if oauthConnecting}
+              <span class="spinner-sm"></span>
+              Opening browser...
+            {:else}
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
+                <polyline points="10 17 15 12 10 7" />
+                <line x1="15" y1="12" x2="3" y2="12" />
+              </svg>
+              Sign in with Nexus Mods
+            {/if}
           </button>
+          <button
+            class="btn-text"
+            onclick={() => { showApiKeyFallback = !showApiKeyFallback; }}
+            type="button"
+          >
+            {showApiKeyFallback ? "Hide API key option" : "Use API key instead"}
+          </button>
+          {#if showApiKeyFallback}
           <div class="connect-input-row">
             <input
               type="password"
@@ -2404,6 +2448,7 @@
               {/if}
             </button>
           </div>
+          {/if}
           {#if validationError}
             <span class="connect-error">{validationError}</span>
           {/if}
@@ -4427,6 +4472,21 @@
   .connect-error {
     font-size: 12px;
     color: var(--red);
+  }
+
+  .btn-text {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 12px;
+    cursor: pointer;
+    padding: 4px 0;
+    text-decoration: underline;
+    text-decoration-color: transparent;
+    transition: text-decoration-color 0.15s;
+  }
+  .btn-text:hover {
+    text-decoration-color: var(--text-secondary);
   }
 
   /* ---- Header ---- */
