@@ -75,7 +75,7 @@ futures = "0.3"
 window-vibrancy = "0.5"
 
 # Hashing (for version detection)
-sha2 = "0.10"
+sha2 = "0.11"
 
 # LOOT integration (plugin sorting + load order)
 libloot = "0.29"
