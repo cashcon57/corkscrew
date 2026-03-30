@@ -2522,7 +2522,7 @@
                   <span class="col-mod-optional">Required</span>
                 </div>
                 <div class="mods-table-body">
-                  {#each selectedMods as mod, i (mod.name)}
+                  {#each selectedMods as mod, i (mod.name + ':' + i)}
                     <div class="mods-table-row">
                       <span class="col-mod-name">
                         <span class="mod-name-text">{mod.name}</span>
