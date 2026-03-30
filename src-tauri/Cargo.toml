@@ -111,7 +111,7 @@ image_dds = { version = "0.7", features = ["ddsfile", "image"] }
 pelite = "0.10"
 
 # Embedded JS engine (Vortex extension execution)
-rquickjs = { version = "0.10", features = ["futures", "parallel", "loader", "macro", "rust-alloc"] }
+rquickjs = { version = "0.11", features = ["futures", "parallel", "loader", "macro", "rust-alloc"] }
 
 # UUID generation (FOMOD correlation IDs)
 uuid = { version = "1", features = ["v4"] }
