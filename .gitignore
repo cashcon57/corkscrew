@@ -1,6 +1,5 @@
 # Rust
 target/
-Cargo.lock
 
 # Node
 node_modules/
@@ -38,8 +37,9 @@ vite.config.ts.timestamp-*
 # OAuth client secrets (credentials embedded in binary, JSON stays local)
 client_secret_*.json
 
-# Signing keys (private key stays local, never committed)
-.keys/updater-signing-key
+# Signing keys (only public keys are committed)
+.keys/*
+!.keys/*.pub
 
 # Release artifacts
 latest.json

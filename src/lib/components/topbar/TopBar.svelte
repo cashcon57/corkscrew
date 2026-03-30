@@ -105,26 +105,8 @@
     display: flex;
     align-items: center;
     gap: 2px;
-    padding: 5px 10px;
-    border-radius: 100px;
-    background: var(--surface-glass);
-    backdrop-filter: var(--glass-blur-light);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    box-shadow: var(--glass-refraction),
-                inset 0 1px 0 0 rgba(255, 255, 255, 0.1),
-                inset 0 -1px 0 0 rgba(255, 255, 255, 0.04),
-                0 1px 3px rgba(0, 0, 0, 0.12);
-    transition: box-shadow var(--duration-fast) var(--ease),
-                background var(--duration-fast) var(--ease);
+    padding: 2px 0;
     -webkit-app-region: no-drag;
-  }
-
-  .topbar-pill:hover {
-    background: var(--surface-glass-hover);
-    box-shadow: var(--glass-refraction),
-                inset 0 1px 0 0 rgba(255, 255, 255, 0.14),
-                inset 0 -1px 0 0 rgba(255, 255, 255, 0.05),
-                0 2px 8px rgba(0, 0, 0, 0.18);
   }
 
   .topbar-separator {

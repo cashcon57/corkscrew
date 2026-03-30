@@ -31,15 +31,6 @@
     height={size}
     style="object-fit: contain; filter: drop-shadow(0 1px 3px rgba(0,0,0,0.3));"
   />
-{:else if gameId === "skyrimse" || gameId === "skyrim"}
-  <!-- Skyrim Dragon logo -->
-  <img
-    src="/skyrim-logo-for-your-skyrim-needs-silver-dragon-png-clipart.jpg"
-    alt="Skyrim"
-    width={size}
-    height={size}
-    style="object-fit: contain; filter: drop-shadow(0 1px 3px rgba(0,0,0,0.3));"
-  />
 {:else}
   <!-- Generic game icon fallback -->
   <svg width={size} height={size} viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">

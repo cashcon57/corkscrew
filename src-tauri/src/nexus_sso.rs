@@ -93,6 +93,10 @@ fn generate_uuid() -> Result<String, SsoError> {
 // ---------------------------------------------------------------------------
 
 fn open_browser(url: &str) -> Result<(), SsoError> {
+    if !url.starts_with("https://") {
+        return Err(SsoError::Failed(format!("Blocked non-HTTPS URL: {url}")));
+    }
+
     #[cfg(target_os = "macos")]
     let cmd = "open";
 

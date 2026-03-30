@@ -317,7 +317,16 @@ pub(crate) mod urlencoding {
 // ---------------------------------------------------------------------------
 
 /// Open a URL in the user's default browser.
+///
+/// Only `https://` URLs are allowed to prevent opening dangerous schemes
+/// (e.g. `file://`, `javascript:`) via OS launcher.
 pub(crate) fn open_browser(url: &str) -> Result<(), OAuthError> {
+    if !url.starts_with("https://") {
+        return Err(OAuthError::InvalidToken(format!(
+            "Blocked non-HTTPS URL: {url}"
+        )));
+    }
+
     #[cfg(target_os = "macos")]
     let cmd = "open";
 

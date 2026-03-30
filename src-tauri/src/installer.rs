@@ -817,7 +817,11 @@ fn collect_extracted_files(dest_dir: &Path) -> Result<Vec<PathBuf>> {
                     let _ = std::fs::remove_file(&path);
                 }
             } else {
-                extracted.push(path);
+                warn!(
+                    "Skipping 7z entry that failed canonicalization: {}",
+                    path.display()
+                );
+                let _ = std::fs::remove_file(&path);
             }
         }
     }
@@ -907,7 +911,11 @@ fn extract_rar(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
                     let _ = fs::remove_file(&out_path);
                 }
             } else {
-                extracted.push(out_path);
+                warn!(
+                    "Skipping RAR entry that failed canonicalization: {}",
+                    out_path.display()
+                );
+                let _ = fs::remove_file(&out_path);
             }
             cursor = Some(
                 result
