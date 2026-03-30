@@ -1709,46 +1709,11 @@ async fn launch_game_cmd(
         }
     }
 
-    // Steam protocol launch: if the game has a Steam App ID and SKSE is not
-    // requested, launch via steam://rungameid/{id} to avoid the "custom
-    // arguments" dialog. This opens the URL on the host OS, telling Steam
-    // to launch the game through its normal flow.
-    if !use_skse {
-        if let Some(steam_id) = games::with_plugin(&game_id, |p| p.steam_launch_id().map(|s| s.to_string())).flatten() {
-            let steam_url = format!("steam://rungameid/{}", steam_id);
-            log::info!(
-                "launch_game_cmd: using Steam protocol launch: {}",
-                steam_url
-            );
-            // Use macOS `open` to open the steam:// URL on the host
-            match std::process::Command::new("open").arg(&steam_url).spawn() {
-                Ok(mut child) => {
-                    let pid = child.id();
-                    // Don't wait for `open` — it returns immediately
-                    let _ = child.wait();
-                    log::info!("Steam protocol launch initiated (open pid={})", pid);
-
-                    // Register game lock — pgrep fallback will detect the actual game process
-                    game_locks.register(&game_id, &bottle_name, pid);
-                    let exe_display = format!("steam://rungameid/{}", steam_id);
-                    return Ok(launcher::LaunchResult {
-                        executable: exe_display,
-                        bottle_name: bottle.name.clone(),
-                        pid: Some(pid),
-                        success: true,
-                        warning: None,
-                    });
-                }
-                Err(e) => {
-                    log::warn!(
-                        "Steam protocol launch failed ({}), falling back to direct exe launch",
-                        e
-                    );
-                    // Fall through to direct exe launch
-                }
-            }
-        }
-    }
+    // NOTE: Steam protocol launch (steam://rungameid/{id}) was attempted here
+    // but doesn't work when Steam is installed on both macOS and in Wine —
+    // the macOS Steam client intercepts the URL and shows "Invalid platform".
+    // TODO: Investigate launching the steam:// URL inside Wine instead of on
+    // the host OS, or find the Wine Steam.exe and pass launch args to it.
 
     // Determine which executable to launch.
     // 1. SKSE takes priority if requested
