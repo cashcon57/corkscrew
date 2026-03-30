@@ -1510,6 +1510,15 @@ fn wj_game_to_nexus_domain(game: &str) -> String {
         "MechWarrior5" | "mechwarrior5mercenaries" => "mechwarrior5mercenaries".into(),
         "NoMansSky" | "nomanssky" => "nomanssky".into(),
         "KingdomComeDeliverance" | "kingdomcomedeliverance" => "kingdomcomedeliverance".into(),
+        // Utility/tool domains on NexusMods (not actual games)
+        "ModdingTools" | "moddingtools" | "site" => "site".into(),
+        "DarkSouls" | "darksouls" => "darksouls".into(),
+        "DarkSouls3" | "darksouls3" => "darksouls3".into(),
+        "MountAndBlade2Bannerlord" | "mountandblade2bannerlord" => {
+            "mountandblade2bannerlord".into()
+        }
+        "EldenRing" | "eldenring" => "eldenring".into(),
+        "DragonsDogma2" | "dragonsdogma2" => "dragonsdogma2".into(),
         other => other.to_lowercase(),
     }
 }

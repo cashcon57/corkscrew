@@ -849,7 +849,41 @@ pub async fn install_wabbajack_modlist(
     let total_extract_bytes: u64 = archive_size_map.values().sum();
     let extract_bytes_completed = Arc::new(AtomicU64::new(0));
 
-    let extraction_temp_base = install_dir.join(".wj_extraction_temp");
+    // Extraction temp: prefer install_dir, fall back to download_dir if install_dir
+    // is not writable (e.g. read-only volumes on macOS, sandboxed paths).
+    let extraction_temp_base = {
+        let preferred = install_dir.join(".wj_extraction_temp");
+        match std::fs::create_dir_all(&preferred) {
+            Ok(()) => {
+                // Verify writable by attempting a temp file
+                let probe = preferred.join(".write_probe");
+                match std::fs::write(&probe, b"ok") {
+                    Ok(()) => {
+                        let _ = std::fs::remove_file(&probe);
+                        preferred
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "Extraction temp at install_dir is not writable ({}), falling back to download_dir",
+                            e
+                        );
+                        let fallback = download_dir.join(".wj_extraction_temp");
+                        std::fs::create_dir_all(&fallback).ok();
+                        fallback
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!(
+                    "Cannot create extraction temp at install_dir ({}), falling back to download_dir",
+                    e
+                );
+                let fallback = download_dir.join(".wj_extraction_temp");
+                std::fs::create_dir_all(&fallback).ok();
+                fallback
+            }
+        }
+    };
     let checkpoint_dir = download_dir.join(".wj_checkpoint");
     std::fs::create_dir_all(&checkpoint_dir).ok();
 
@@ -1175,10 +1209,103 @@ pub async fn install_wabbajack_modlist(
                 },
             );
 
+            // Determine if this is a single-file source (game file, bare .dll/.exe/.ccc etc.)
+            // that should be placed directly into the extraction dir rather than extracted.
+            let is_single_file_source = matches!(
+                &archive.state,
+                crate::wabbajack_types::WjArchiveState::GameFileSource { .. }
+            ) || {
+                // Check if the downloaded file is not a recognized archive format.
+                // Common single-file extensions from game directories:
+                let name_lower = download_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_lowercase();
+                let single_exts = [
+                    ".dll", ".exe", ".esm", ".esp", ".esl", ".bsa", ".ba2",
+                    ".bik", ".bk2", ".ccc", ".ini", ".cfg", ".txt", ".pdf",
+                    ".bat", ".py", ".json", ".xml", ".css", ".toml", ".hkx",
+                    ".nif", ".dds", ".pex", ".psc", ".wav", ".xwm", ".fuz",
+                    ".swf", ".tlx", ".clx",
+                ];
+                single_exts.iter().any(|ext| name_lower.ends_with(ext))
+                    && !name_lower.ends_with(".7z")
+                    && !name_lower.ends_with(".zip")
+                    && !name_lower.ends_with(".rar")
+            };
+
             // Extraction with retry: on failure, delete archive, re-download, re-extract
             let max_extract_retries = 2u32;
             let mut extract_ok = false;
 
+            if is_single_file_source {
+                // Single-file source: place the file directly into the extraction
+                // directory under its original filename. Directives reference files
+                // inside archives by path — for single files, the "archive" contains
+                // exactly one file: the file itself.
+                if let Err(e) = tokio::fs::create_dir_all(&extract_dest).await {
+                    let err_msg = format!(
+                        "Failed to create extraction dir for single-file '{}': {}",
+                        archive_name, e
+                    );
+                    log::error!("{}", err_msg);
+                    failures_c.lock().unwrap().push(err_msg.clone());
+                    emit_progress(
+                        &app_c,
+                        &WjInstallProgressEvent::ExtractionArchiveFailed {
+                            name: archive_name.clone(),
+                            error: err_msg,
+                        },
+                    );
+                    return;
+                }
+
+                // Determine the filename to use inside the extraction dir.
+                // For GameFileSource, use the game_file path so directives can find it.
+                // For other single files, use the archive name.
+                let inner_name = if let crate::wabbajack_types::WjArchiveState::GameFileSource {
+                    game_file, ..
+                } = &archive.state
+                {
+                    game_file.replace('\\', "/")
+                } else {
+                    archive_name.clone()
+                };
+
+                let dest_file = extract_dest.join(&inner_name);
+                if let Some(parent) = dest_file.parent() {
+                    let _ = tokio::fs::create_dir_all(parent).await;
+                }
+
+                match tokio::fs::copy(&download_path, &dest_file).await {
+                    Ok(_) => {
+                        log::info!(
+                            "Placed single-file source '{}' as '{}'",
+                            archive_name,
+                            inner_name
+                        );
+                        extract_ok = true;
+                    }
+                    Err(e) => {
+                        let err_msg = format!(
+                            "Failed to copy single-file source '{}': {}",
+                            archive_name, e
+                        );
+                        log::error!("{}", err_msg);
+                        failures_c.lock().unwrap().push(err_msg.clone());
+                        emit_progress(
+                            &app_c,
+                            &WjInstallProgressEvent::ExtractionArchiveFailed {
+                                name: archive_name.clone(),
+                                error: err_msg,
+                            },
+                        );
+                        return;
+                    }
+                }
+            } else {
+            // Archive extraction with retry
             for attempt in 0..=max_extract_retries {
                 let dest_c = extract_dest.clone();
                 let archive_for_blocking = download_path.clone();
@@ -1266,6 +1393,7 @@ pub async fn install_wabbajack_modlist(
                     }
                 }
             }
+            } // end else (archive extraction)
 
             if extract_ok {
                 let completed =
@@ -1469,17 +1597,33 @@ pub async fn install_wabbajack_modlist(
 
     let app_clone = app.clone();
     let directive_count = modlist.directives.len();
+    // Use a moderate interval but with a time-based fallback so the UI
+    // always gets updates at least every 2 seconds.
     let progress_interval = match directive_count {
         0..=100 => 1,
-        101..=500 => 10,
-        501..=2000 => 25,
-        _ => 50,
+        101..=500 => 5,
+        501..=2000 => 15,
+        _ => 30,
     };
+    let last_emit_time = std::sync::Mutex::new(std::time::Instant::now());
     let directive_result = processor
         .process_all(
             &modlist.directives,
             &|current, total, phase, bytes_processed, total_bytes, current_file| {
-                if current % progress_interval == 0 || current == total {
+                let should_emit = current == 1
+                    || current == total
+                    || current % progress_interval == 0
+                    || {
+                        // Time-based fallback: emit at least every 2 seconds
+                        let mut last = last_emit_time.lock().unwrap();
+                        if last.elapsed() >= std::time::Duration::from_secs(2) {
+                            *last = std::time::Instant::now();
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                if should_emit {
                     emit_progress(
                         &app_clone,
                         &WjInstallProgressEvent::DirectiveProgress {

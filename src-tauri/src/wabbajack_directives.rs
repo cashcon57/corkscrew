@@ -611,9 +611,27 @@ impl DirectiveProcessor {
         let patch_entry_name = patch_id.to_string();
         let patch_data = read_wj_zip_entry(&self.wabbajack_path, &patch_entry_name)?;
 
-        // Apply BSDiff patch
-        let patcher = qbsdiff::Bspatch::new(&patch_data)
-            .map_err(|e| WjDirectiveError::PatchFailed(format!("Invalid patch data: {}", e)))?;
+        // Apply BSDiff patch.
+        // Wabbajack uses standard BSDiff4 format (header "BSDIFF40").
+        // Detect format mismatch early for better error messages.
+        let patcher = match qbsdiff::Bspatch::new(&patch_data) {
+            Ok(p) => p,
+            Err(e) => {
+                // Check for OctoDiff format (starts with "OCTODELTA")
+                let header_hint = if patch_data.len() >= 9
+                    && &patch_data[..9] == b"OCTODELTA"
+                {
+                    " (patch appears to be OctoDiff format, not BSDiff4 — this WJ version may not be supported)"
+                } else if patch_data.is_empty() {
+                    " (patch data is empty — the patch entry may be missing from the .wabbajack file)"
+                } else {
+                    ""
+                };
+                return Err(WjDirectiveError::PatchFailed(format!(
+                    "Invalid patch data: {}{}", e, header_hint
+                )));
+            }
+        };
 
         let target_size = patcher.hint_target_size() as usize;
         let mut target_data = Vec::with_capacity(target_size);
