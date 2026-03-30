@@ -65,6 +65,38 @@ pub trait GamePlugin: Send + Sync {
     fn vortex_mod_types(&self) -> Vec<crate::vortex_types::VortexModType> {
         vec![]
     }
+
+    /// Auto-detect mod type from staged file list. Returns the mod type ID
+    /// (matching an entry from [`vortex_mod_types`]) if detection succeeds.
+    /// Used during manual installs to route mods to the correct directory.
+    fn detect_mod_type_from_files(&self, _files: &[String]) -> Option<String> {
+        None
+    }
+
+    /// Detect the installed game version, if possible.
+    /// Returns a version string (e.g. `"1233043"` for HL).
+    fn detect_game_version(&self, _game_path: &Path) -> Option<String> {
+        None
+    }
+
+    /// Post-deploy hook called after a mod is deployed. Game plugins can use
+    /// this to update game-specific config files (e.g. Mods.txt for HL Lua mods).
+    fn on_mod_deployed(
+        &self,
+        _game_path: &Path,
+        _mod_type: Option<&str>,
+        _deployed_files: &[String],
+    ) {
+    }
+
+    /// Post-undeploy hook called after a mod is undeployed.
+    fn on_mod_undeployed(
+        &self,
+        _game_path: &Path,
+        _mod_type: Option<&str>,
+        _undeployed_files: &[String],
+    ) {
+    }
 }
 
 // ---------------------------------------------------------------------------

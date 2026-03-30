@@ -115,6 +115,20 @@ export async function getAllGames(): Promise<DetectedGame[]> {
   return invoke("get_all_games");
 }
 
+export async function getGameVersion(
+  gameId: string,
+  bottleName: string
+): Promise<string | null> {
+  return invoke("get_game_version", { gameId, bottleName });
+}
+
+export async function syncLuaMods(
+  gameId: string,
+  bottleName: string
+): Promise<void> {
+  return invoke("sync_lua_mods", { gameId, bottleName });
+}
+
 // Mods
 export async function getInstalledMods(
   gameId: string,

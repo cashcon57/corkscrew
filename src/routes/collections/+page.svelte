@@ -495,6 +495,7 @@
   let collections = $state<CollectionInfo[]>([]);
   let filtered = $state<CollectionInfo[]>([]);
   let loading = $state(false);
+  let loadCollectionsGen = 0; // Generation counter to discard stale results
   let searchQuery = $state("");
   let gameFilter = $state("all");
   let nsfwFilter = $state<"hide" | "show" | "only">("hide");
@@ -554,6 +555,7 @@
   let selectedMods = $state<CollectionMod[]>([]);
   let selectedGameVersions = $state<string[]>([]);
   let loadingDetail = $state(false);
+  let detailAbortController: AbortController | null = null;
   let detailCacheInfo = $state<{ cached: number; total: number; nexusTotal: number } | null>(null);
   let installing = $state(false);
   let installResult = $state<{ installed: number; already_installed: number; skipped: number; failed: number; details: { name: string; status: string; error: string | null; url: string | null; instructions: string | null }[] } | null>(null);
@@ -659,6 +661,8 @@
   // WebView toggle state
   let browseWebviewToggle: WebViewToggle | null = $state(null);
   let collectionsWebviewToggle: WebViewToggle | null = $state(null);
+  let browseWebviewAnchor: HTMLElement | null = $state(null);
+  let collectionsWebviewAnchor: HTMLElement | null = $state(null);
   let browseViewMode = $state<"app" | "website">("app");
   let collectionsViewMode = $state<"app" | "website">("app");
 
@@ -1181,8 +1185,13 @@
     checkingAuth = true;
     try {
       account = await getNexusAccountStatus();
-      if (account.connected) {
-        await loadCollections();
+      if (account.connected && activeTab === "nexus") {
+        // Use game-specific slug if available, not the hardcoded default
+        const game = $selectedGame;
+        const slug = game ? (gameSlugMap[game.game_id] ?? game.game_id) : "skyrimspecialedition";
+        collectionsInitializedForGame = slug;
+        gameFilter = slug;
+        await loadCollections(slug);
       }
     } catch {
       account = { connected: false };
@@ -1210,7 +1219,11 @@
         account = status;
         apiKeyInput = "";
         showSuccess(`Connected as ${status.name}`);
-        await loadCollections();
+        const game = $selectedGame;
+        const slug = game ? (gameSlugMap[game.game_id] ?? game.game_id) : "skyrimspecialedition";
+        collectionsInitializedForGame = slug;
+        gameFilter = slug;
+        await loadCollections(slug);
       } else {
         await setConfigValue("nexus_api_key", "");
         const cfg2 = await getConfig();
@@ -1231,6 +1244,7 @@
   }
 
   async function loadCollections(gameDomain: string = "skyrimspecialedition", resetOffset = true) {
+    const gen = ++loadCollectionsGen;
     loading = true;
     if (resetOffset) collectionsOffset = 0;
     try {
@@ -1239,7 +1253,7 @@
       const serverSort = sortField === "size" ? "endorsements" : sortField;
       // Pass NSFW filter server-side so pagination reflects the correct count
       const adultContentFilter = nsfwFilter === "hide" ? false : nsfwFilter === "only" ? true : null;
-      const result: CollectionSearchResult = await browseCollections(
+      const browsePromise = browseCollections(
         gameDomain, collectionsPerPage, collectionsOffset,
         serverSort, sortDirection, searchText,
         collectionsAuthorFilter.trim() || undefined,
@@ -1247,6 +1261,12 @@
         collectionsMinEndorsements || undefined,
         adultContentFilter,
       );
+      const result: CollectionSearchResult = await Promise.race([
+        browsePromise,
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Request timed out — try again")), 30_000)),
+      ]);
+      // Discard result if a newer load was started while we were waiting
+      if (gen !== loadCollectionsGen) return;
       // Apply client-side size sort if needed
       if (sortField === "size") {
         collections = [...result.collections].sort((a, b) => {
@@ -1261,9 +1281,15 @@
       // Compute download cache percentages in background
       computeCachePercentages(sortField === "size" ? collections : result.collections);
     } catch (e: unknown) {
+      if (gen !== loadCollectionsGen) return;
+      // Reset initialized guard so a game switch or tab switch can retry
+      collectionsInitializedForGame = null;
       showError(`Failed to load collections: ${e}`);
     } finally {
-      loading = false;
+      // Only clear loading if this is still the latest request
+      if (gen === loadCollectionsGen) {
+        loading = false;
+      }
     }
   }
 
@@ -1349,7 +1375,20 @@
     loadCollections(gd, false);
   }
 
+  function cancelDetailLoad() {
+    if (detailAbortController) {
+      detailAbortController.abort();
+      detailAbortController = null;
+    }
+    loadingDetail = false;
+  }
+
   async function viewCollectionDetail(collection: CollectionInfo) {
+    // Cancel any in-flight load
+    if (detailAbortController) detailAbortController.abort();
+    const ac = new AbortController();
+    detailAbortController = ac;
+
     loadingDetail = true;
     renderedDescription = "";
     renderedInstallInstructions = "";
@@ -1363,6 +1402,10 @@
         detailTimeout(getCollection(collection.slug, collection.game_domain), 30_000),
         detailTimeout(getCollectionMods(collection.slug, collection.latest_revision), 30_000),
       ]);
+
+      // Check if cancelled while waiting
+      if (ac.signal.aborted) return;
+
       selectedCollection = detail;
       selectedMods = modsResult.mods;
       selectedGameVersions = modsResult.game_versions;
@@ -1385,9 +1428,13 @@
       // Compute cache percentage for this collection
       computeDetailCacheInfo(modsResult.mods);
     } catch (e: unknown) {
+      if (ac.signal.aborted) return;
       showError(`Failed to load collection details: ${e}`);
     } finally {
-      loadingDetail = false;
+      if (!ac.signal.aborted) {
+        loadingDetail = false;
+      }
+      if (detailAbortController === ac) detailAbortController = null;
     }
   }
 
@@ -2714,6 +2761,7 @@
           url={`https://www.nexusmods.com/${getGameSlug()}/mods/`}
           defaultMode={account?.connected ? "app" : "website"}
           onModeChange={(m) => browseViewMode = m}
+          anchorEl={browseWebviewAnchor}
         />
         {#if !browseModsLoading && browseModsTotalCount > 0 && browseViewMode === "app"}
           <div class="stat-pill">
@@ -2725,7 +2773,7 @@
     </header>
 
     {#if browseViewMode === "website"}
-      <div class="webview-placeholder">
+      <div class="webview-placeholder" bind:this={browseWebviewAnchor}>
         <p class="webview-hint">Browsing NexusMods directly. Switch to "In-App" to use built-in search and filters.</p>
       </div>
     {:else if !$selectedGame}
@@ -3153,6 +3201,7 @@
           url={`https://next.nexusmods.com/${getGameSlug()}/collections`}
           defaultMode={account?.connected ? "app" : "website"}
           onModeChange={(m) => collectionsViewMode = m}
+          anchorEl={collectionsWebviewAnchor}
         />
         {#if account?.connected}
           <div class="account-badge">
@@ -3178,7 +3227,7 @@
     </header>
 
     {#if collectionsViewMode === "website"}
-      <div class="webview-placeholder">
+      <div class="webview-placeholder" bind:this={collectionsWebviewAnchor}>
         <p class="webview-hint">Browsing NexusMods Collections directly. Switch to "In-App" to use built-in search and filters.</p>
       </div>
     {:else if !account?.connected}
@@ -3199,6 +3248,9 @@
             <p class="loading-title">{loadingDetail ? "Loading collection" : "Fetching collections"}</p>
             <p class="loading-detail">{loadingDetail ? "Loading collection details..." : "Loading collections from Nexus Mods..."}</p>
           </div>
+          {#if loadingDetail}
+            <button class="btn btn-ghost loading-cancel" onclick={cancelDetailLoad}>Cancel</button>
+          {/if}
         </div>
       </div>
     {:else}
@@ -4463,6 +4515,12 @@
     align-items: center;
     gap: var(--space-6);
     padding: var(--space-12) var(--space-10);
+  }
+
+  .loading-cancel {
+    margin-top: var(--space-2);
+    font-size: 13px;
+    color: var(--text-secondary);
   }
 
   .spinner { width: 36px; height: 36px; }
@@ -6535,6 +6593,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
+    flex: 1;
     min-height: 120px;
     padding: var(--space-8);
   }

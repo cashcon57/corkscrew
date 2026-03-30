@@ -44,6 +44,7 @@
 
   // WebView toggle state
   let webviewToggle: WebViewToggle | null = $state(null);
+  let webviewAnchor: HTMLElement | null = $state(null);
   let viewMode = $state<"app" | "website">("app");
 
   // Detail view state
@@ -948,6 +949,7 @@
           bind:this={webviewToggle}
           url="https://www.wabbajack.org/gallery"
           onModeChange={(m) => viewMode = m}
+          anchorEl={webviewAnchor}
         />
         <button class="btn btn-accent btn-sm" onclick={openLocalFile}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -965,7 +967,7 @@
     </header>
 
     {#if viewMode === "website"}
-      <div class="webview-placeholder">
+      <div class="webview-placeholder" bind:this={webviewAnchor}>
         <p class="webview-hint">Browsing Wabbajack Gallery directly. Switch to "In-App" to use built-in search and filters.</p>
       </div>
     {:else if loading}
@@ -2273,6 +2275,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
+    flex: 1;
     min-height: 120px;
     padding: var(--space-8);
   }

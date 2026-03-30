@@ -260,6 +260,40 @@ fn list_supported_games() -> Result<Vec<game_registry::SupportedGame>, String> {
 }
 
 #[tauri::command]
+async fn get_game_version(
+    game_id: String,
+    bottle_name: String,
+) -> Result<Option<String>, String> {
+    tokio::task::spawn_blocking(move || {
+        let (_bottle, game, _data_dir) = resolve_game(&game_id, &bottle_name)?;
+        let version = games::with_plugin(&game_id, |plugin| {
+            plugin.detect_game_version(&game.game_path)
+        })
+        .flatten();
+        Ok(version)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
+#[tauri::command]
+async fn sync_lua_mods(
+    game_id: String,
+    bottle_name: String,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let (_bottle, game, _data_dir) = resolve_game(&game_id, &bottle_name)?;
+        if game_id == "hogwartslegacy" {
+            crate::plugins::hogwarts_legacy::sync_mods_txt(&game.game_path)
+        } else {
+            Err("Lua mod management is only supported for Hogwarts Legacy".into())
+        }
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
+#[tauri::command]
 async fn get_bottle_settings(bottle_name: String) -> Result<bottle_config::BottleSettings, String> {
     tokio::task::spawn_blocking(move || {
         let bottle = resolve_bottle(&bottle_name)?;
@@ -463,6 +497,37 @@ async fn install_mod_cmd(
         db.store_file_hashes(mod_id, &staging_result.hashes)
             .map_err(|e| e.to_string())?;
 
+        // Step 3b: Auto-detect mod type and resolve deploy directory
+        let detected_mod_type = games::with_plugin(&game_id, |plugin| {
+            plugin.detect_mod_type_from_files(&staging_result.files)
+        })
+        .flatten();
+
+        let effective_dir = if let Some(ref mod_type_id) = detected_mod_type {
+            // Look up the target path from registered vortex mod types
+            let target = games::with_plugin(&game_id, |plugin| {
+                plugin
+                    .vortex_mod_types()
+                    .into_iter()
+                    .find(|t| t.id == *mod_type_id)
+                    .map(|t| t.target_path)
+            })
+            .flatten();
+            if let Some(rel_path) = target {
+                let resolved = game.game_path.join(rel_path);
+                log::debug!(
+                    "Auto-detected mod type '{}' → deploying to {}",
+                    mod_type_id,
+                    resolved.display()
+                );
+                resolved
+            } else {
+                data_dir.clone()
+            }
+        } else {
+            data_dir.clone()
+        };
+
         // Step 4: Deploy from staging to game dir
         let _ = app.emit(
             INSTALL_PROGRESS_EVENT,
@@ -479,7 +544,7 @@ async fn install_mod_cmd(
             &bottle_name,
             mod_id,
             &staging_result.staging_path,
-            &data_dir,
+            &effective_dir,
             &staging_result.files,
         ) {
             let _ = staging::remove_staging(&staging_result.staging_path);
@@ -493,6 +558,19 @@ async fn install_mod_cmd(
                 },
             );
             return Err(format!("Deploy failed: {}", e));
+        }
+
+        // Record detected mod type and fire post-deploy hook
+        if let Some(ref mod_type_id) = detected_mod_type {
+            let deploy_target = if effective_dir != data_dir { "custom" } else { "data" };
+            let _ = db.set_deploy_target_for_mod(mod_id, deploy_target);
+            games::with_plugin(&game_id, |plugin| {
+                plugin.on_mod_deployed(
+                    &game.game_path,
+                    Some(mod_type_id.as_str()),
+                    &staging_result.files,
+                );
+            });
         }
 
         // Step 5: Sync plugins
@@ -587,6 +665,11 @@ async fn uninstall_mod(
         if game_id == "skyrimse" {
             let _ = sync_plugins_for_game(&game, &bottle);
         }
+
+        // Post-undeploy hook (e.g. sync Mods.txt for HL Lua mods)
+        games::with_plugin(&game_id, |plugin| {
+            plugin.on_mod_undeployed(&game.game_path, None, &removed);
+        });
 
         Ok(removed)
     })
@@ -12026,6 +12109,8 @@ pub fn run() {
             get_bottles,
             get_games,
             get_all_games,
+            get_game_version,
+            sync_lua_mods,
             list_supported_games,
             get_bottle_settings,
             get_bottle_setting_defs,

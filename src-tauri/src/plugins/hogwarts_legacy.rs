@@ -11,7 +11,9 @@
 //! Pak mods deploy to `Phoenix/Content/Paks/~mods/` (the `~` prefix
 //! ensures mods load after base game files in alphanumeric order).
 
+use log::debug;
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use crate::bottles::Bottle;
@@ -147,6 +149,372 @@ impl GamePlugin for HogwartsLegacyPlugin {
             },
         ]
     }
+
+    fn detect_mod_type_from_files(&self, files: &[String]) -> Option<String> {
+        detect_hl_mod_type(files)
+    }
+
+    fn detect_game_version(&self, game_path: &Path) -> Option<String> {
+        read_da_version(game_path)
+    }
+
+    fn on_mod_deployed(
+        &self,
+        game_path: &Path,
+        mod_type: Option<&str>,
+        _deployed_files: &[String],
+    ) {
+        if mod_type == Some("hl-lua-mod") {
+            if let Err(e) = sync_mods_txt(game_path) {
+                debug!("Failed to sync Mods.txt after deploy: {e}");
+            }
+        }
+    }
+
+    fn on_mod_undeployed(
+        &self,
+        game_path: &Path,
+        mod_type: Option<&str>,
+        undeployed_files: &[String],
+    ) {
+        // Sync Mods.txt on any undeploy if it might have contained Lua mods.
+        // When mod_type is None (e.g. uninstall), check file list for Lua patterns.
+        let is_lua = mod_type == Some("hl-lua-mod")
+            || (mod_type.is_none()
+                && undeployed_files
+                    .iter()
+                    .any(|f| f.to_lowercase().contains("main.lua")));
+        if is_lua {
+            if let Err(e) = sync_mods_txt(game_path) {
+                debug!("Failed to sync Mods.txt after undeploy: {e}");
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mod type auto-detection
+// ---------------------------------------------------------------------------
+
+/// Known UE4SS/engine root DLLs and files.
+const ENGINE_ROOT_FILES: &[&str] = &[
+    "ue4ss.dll",
+    "xinput1_3.dll",
+    "dwmapi.dll",
+    "reshade-shaders",
+    "reshade.ini",
+    "ue4ss-settings.ini",
+    "d3d11.dll",
+    "dxgi.dll",
+];
+
+/// Detect the Hogwarts Legacy mod type from a list of staged file paths.
+///
+/// Heuristics (checked in priority order):
+/// 1. Any file matching `*/Scripts/main.lua` → Lua mod
+/// 2. Any `.pak` in a `LogicMods` directory or marker files → Logic mod
+/// 3. All files are `.bk2` → Movie mod
+/// 4. Known engine root DLLs (ue4ss.dll, xinput1_3.dll, etc.) → Engine root
+/// 5. Default → PAK mod
+fn detect_hl_mod_type(files: &[String]) -> Option<String> {
+    if files.is_empty() {
+        return None;
+    }
+
+    let lower_files: Vec<String> = files.iter().map(|f| f.to_lowercase().replace('\\', "/")).collect();
+
+    // 1. Lua mod: contains Scripts/main.lua pattern
+    if lower_files.iter().any(|f| f.ends_with("/scripts/main.lua") || f == "scripts/main.lua") {
+        return Some("hl-lua-mod".into());
+    }
+
+    // 2. Logic/Blueprint mod: .pak files in LogicMods or marker files
+    let logic_markers = [".ue4sslogicmod", "ue4sslogicmod.info", ".logicmod"];
+    if lower_files.iter().any(|f| {
+        logic_markers.iter().any(|m| f.ends_with(m))
+            || (f.contains("logicmods/") && f.ends_with(".pak"))
+    }) {
+        return Some("hl-logic-mod".into());
+    }
+
+    // 3. Movie mod: all content files are .bk2
+    let content_files: Vec<&String> = lower_files
+        .iter()
+        .filter(|f| !f.ends_with('/'))
+        .collect();
+    if !content_files.is_empty() && content_files.iter().all(|f| f.ends_with(".bk2")) {
+        return Some("hogwarts-modtype-movies".into());
+    }
+
+    // 4. Engine root: known DLLs/files
+    if lower_files.iter().any(|f| {
+        let basename = f.rsplit('/').next().unwrap_or(f);
+        ENGINE_ROOT_FILES.iter().any(|root| *root == basename)
+    }) {
+        return Some("hl-engine-root".into());
+    }
+
+    // 5. Default: PAK mod (if any .pak files present)
+    if lower_files.iter().any(|f| f.ends_with(".pak")) {
+        return Some("hogwarts-PAK-modtype".into());
+    }
+
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Game version detection
+// ---------------------------------------------------------------------------
+
+/// Read the game version from `Phoenix/Content/Data/Version/DA_Version.txt`.
+///
+/// The file contains a single integer (e.g. `1233043`) representing the
+/// build version. Returns `None` if the file doesn't exist or can't be read.
+fn read_da_version(game_path: &Path) -> Option<String> {
+    // Case-insensitive traversal for Wine/APFS
+    let mut dir = game_path.to_path_buf();
+    for component in &["Phoenix", "Content", "Data", "Version"] {
+        dir = find_child_case_insensitive(&dir, component)?;
+    }
+    let version_file = find_file_case_insensitive(&dir, "DA_Version.txt")?;
+    let content = fs::read_to_string(&version_file).ok()?;
+    let version = content.trim().to_string();
+    if version.is_empty() {
+        None
+    } else {
+        Some(version)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Lua Mods.txt management
+// ---------------------------------------------------------------------------
+
+/// Path to the UE4SS Mods directory (relative components from game root).
+const MODS_DIR_COMPONENTS: &[&str] = &["Phoenix", "Binaries", "Win64", "Mods"];
+
+/// Reserved UE4SS mod directories that should not be toggled by the user.
+/// These are part of UE4SS itself, not user Lua mods.
+const UE4SS_BUILTINS: &[&str] = &[
+    "shared",
+    "bpmodloadmod",
+    "bpmodloadermod",
+    "consolecreatormod",
+    "consoleenablermod",
+    "cheatmanagerenablermod",
+    "keybindmanager",
+    "linetracemod",
+    "jsbpmod",
+    "objectdumpermod",
+    "usettingsmod",
+    "splashscreendumpermod",
+];
+
+/// Sync `Mods.txt` to match the currently deployed Lua mods.
+///
+/// Scans the `Phoenix/Binaries/Win64/Mods/` directory for mod folders
+/// containing `Scripts/main.lua`. Each discovered mod is written as
+/// `ModName : 1` (enabled). UE4SS built-in mod entries are preserved
+/// with their existing enable/disable state.
+///
+/// This is resilient to:
+/// - Repeated enable/disable cycles (regenerates from disk state)
+/// - Missing Mods directory (creates if needed after UE4SS is installed)
+/// - Corrupt/truncated Mods.txt (completely regenerated)
+/// - Extra whitespace or inconsistent formatting in existing file
+pub fn sync_mods_txt(game_path: &Path) -> Result<(), String> {
+    let mods_dir = resolve_case_insensitive_path(game_path, MODS_DIR_COMPONENTS)
+        .ok_or("UE4SS Mods directory not found — is UE4SS installed?")?;
+
+    let mods_txt = mods_dir.join("Mods.txt");
+
+    // 1. Read existing entries to preserve built-in mod states
+    let mut builtin_states: Vec<(String, bool)> = Vec::new();
+    if mods_txt.exists() {
+        if let Ok(file) = fs::File::open(&mods_txt) {
+            let reader = BufReader::new(file);
+            for line in reader.lines() {
+                let line = match line {
+                    Ok(l) => l,
+                    Err(_) => continue,
+                };
+                if let Some((name, enabled)) = parse_mods_txt_line(&line) {
+                    if UE4SS_BUILTINS.contains(&name.to_lowercase().as_str()) {
+                        builtin_states.push((name, enabled));
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Scan for deployed user Lua mods (folders with Scripts/main.lua)
+    let mut user_mods: Vec<String> = Vec::new();
+    if let Ok(entries) = fs::read_dir(&mods_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if UE4SS_BUILTINS.contains(&name.to_lowercase().as_str()) {
+                continue;
+            }
+            // Check for Scripts/main.lua (case-insensitive)
+            let mod_dir = entry.path();
+            if !mod_dir.is_dir() {
+                continue;
+            }
+            let has_main_lua = find_child_case_insensitive(&mod_dir, "Scripts")
+                .and_then(|scripts_dir| find_file_case_insensitive(&scripts_dir, "main.lua"))
+                .is_some();
+            if has_main_lua {
+                user_mods.push(name);
+            }
+        }
+    }
+    user_mods.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+
+    // 3. Write Mods.txt — built-ins first (preserved state), then user mods (enabled)
+    let mut output = String::new();
+    output.push_str("; Managed by Corkscrew — do not edit while the mod manager is running.\n");
+    output.push_str("; Built-in UE4SS mods:\n");
+    for (name, enabled) in &builtin_states {
+        output.push_str(&format!("{} : {}\n", name, if *enabled { 1 } else { 0 }));
+    }
+    if !user_mods.is_empty() {
+        output.push_str("\n; User Lua mods:\n");
+        for name in &user_mods {
+            output.push_str(&format!("{} : 1\n", name));
+        }
+    }
+
+    // 4. Atomic write via temp file + rename
+    let tmp_path = mods_txt.with_extension("txt.tmp");
+    let mut file = fs::File::create(&tmp_path).map_err(|e| format!("Failed to write Mods.txt: {e}"))?;
+    file.write_all(output.as_bytes()).map_err(|e| format!("Failed to write Mods.txt: {e}"))?;
+    file.sync_all().map_err(|e| format!("Sync failed: {e}"))?;
+    fs::rename(&tmp_path, &mods_txt).map_err(|e| format!("Failed to rename Mods.txt: {e}"))?;
+
+    debug!(
+        "Synced Mods.txt: {} built-in entries, {} user mods",
+        builtin_states.len(),
+        user_mods.len()
+    );
+    Ok(())
+}
+
+/// Parse a `Mods.txt` line like `"ModName : 1"` or `"ModName : 0"`.
+fn parse_mods_txt_line(line: &str) -> Option<(String, bool)> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
+        return None;
+    }
+    let parts: Vec<&str> = line.splitn(2, ':').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let name = parts[0].trim().to_string();
+    let enabled = parts[1].trim() == "1";
+    if name.is_empty() {
+        return None;
+    }
+    Some((name, enabled))
+}
+
+// ---------------------------------------------------------------------------
+// Movie (.bk2) file matching
+// ---------------------------------------------------------------------------
+
+/// Scan the game's `Phoenix/Content/Movies/` tree and find the correct
+/// subdirectory for each `.bk2` file by matching filenames.
+///
+/// Returns a map of `staged_relative_path -> correct_relative_deploy_path`
+/// (relative to `Phoenix/Content`). Files that don't match any game directory
+/// are mapped to `Movies/` as a fallback.
+pub fn match_bk2_files(
+    game_path: &Path,
+    staged_files: &[String],
+) -> Vec<(String, String)> {
+    let bk2_files: Vec<&String> = staged_files
+        .iter()
+        .filter(|f| f.to_lowercase().ends_with(".bk2"))
+        .collect();
+
+    if bk2_files.is_empty() {
+        return Vec::new();
+    }
+
+    // Build index of all .bk2 files in game's Movies directory tree
+    let movies_dir = resolve_case_insensitive_path(
+        game_path,
+        &["Phoenix", "Content", "Movies"],
+    );
+
+    let mut game_bk2_index: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+
+    if let Some(ref movies) = movies_dir {
+        index_bk2_files(movies, movies, &mut game_bk2_index);
+    }
+
+    let mut mappings = Vec::new();
+    for staged_file in bk2_files {
+        let basename = staged_file
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(staged_file)
+            .to_lowercase();
+
+        if let Some(game_rel_path) = game_bk2_index.get(&basename) {
+            // Found matching file in game — deploy to its directory
+            mappings.push((staged_file.clone(), format!("Movies/{}", game_rel_path)));
+        } else {
+            // No match — deploy directly to Movies/
+            let filename = staged_file.rsplit(['/', '\\']).next().unwrap_or(staged_file);
+            mappings.push((staged_file.clone(), format!("Movies/{}", filename)));
+        }
+    }
+
+    mappings
+}
+
+/// Recursively index all `.bk2` files under a directory.
+/// Maps `lowercase_filename -> relative_path_from_root`.
+fn index_bk2_files(
+    dir: &Path,
+    root: &Path,
+    index: &mut std::collections::HashMap<String, String>,
+) {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            index_bk2_files(&path, root, index);
+        } else if let Some(name) = path.file_name() {
+            let name_str = name.to_string_lossy();
+            if name_str.to_lowercase().ends_with(".bk2") {
+                if let Ok(rel) = path.strip_prefix(root) {
+                    index.insert(
+                        name_str.to_lowercase(),
+                        rel.to_string_lossy().replace('\\', "/"),
+                    );
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Path helpers
+// ---------------------------------------------------------------------------
+
+/// Resolve a path with case-insensitive traversal for each component.
+fn resolve_case_insensitive_path(base: &Path, components: &[&str]) -> Option<PathBuf> {
+    let mut dir = base.to_path_buf();
+    for component in components {
+        dir = find_child_case_insensitive(&dir, component)?;
+    }
+    Some(dir)
 }
 
 // ---------------------------------------------------------------------------
@@ -617,5 +985,385 @@ mod tests {
         assert_eq!(paths.len(), 2);
         assert_eq!(paths[0], PathBuf::from("C:/Program Files (x86)/Steam"));
         assert_eq!(paths[1], PathBuf::from("D:/SteamLibrary"));
+    }
+
+    // --- Mod type auto-detection tests ---
+
+    #[test]
+    fn detect_lua_mod() {
+        let files = vec![
+            "MyMod/Scripts/main.lua".to_string(),
+            "MyMod/Scripts/helper.lua".to_string(),
+        ];
+        assert_eq!(detect_hl_mod_type(&files), Some("hl-lua-mod".into()));
+    }
+
+    #[test]
+    fn detect_lua_mod_case_insensitive() {
+        let files = vec!["CoolMod/SCRIPTS/Main.lua".to_string()];
+        assert_eq!(detect_hl_mod_type(&files), Some("hl-lua-mod".into()));
+    }
+
+    #[test]
+    fn detect_logic_mod_by_marker() {
+        let files = vec![
+            "MyBPMod.pak".to_string(),
+            ".ue4sslogicmod".to_string(),
+        ];
+        assert_eq!(detect_hl_mod_type(&files), Some("hl-logic-mod".into()));
+    }
+
+    #[test]
+    fn detect_logic_mod_by_info_file() {
+        let files = vec![
+            "SomeMod/SomeMod.pak".to_string(),
+            "SomeMod/ue4sslogicmod.info".to_string(),
+        ];
+        assert_eq!(detect_hl_mod_type(&files), Some("hl-logic-mod".into()));
+    }
+
+    #[test]
+    fn detect_logic_mod_by_path() {
+        let files = vec!["LogicMods/MyMod.pak".to_string()];
+        assert_eq!(detect_hl_mod_type(&files), Some("hl-logic-mod".into()));
+    }
+
+    #[test]
+    fn detect_movie_mod() {
+        let files = vec![
+            "intro_movie.bk2".to_string(),
+            "outro_movie.bk2".to_string(),
+        ];
+        assert_eq!(
+            detect_hl_mod_type(&files),
+            Some("hogwarts-modtype-movies".into())
+        );
+    }
+
+    #[test]
+    fn detect_engine_root_ue4ss() {
+        let files = vec![
+            "UE4SS.dll".to_string(),
+            "UE4SS-settings.ini".to_string(),
+        ];
+        assert_eq!(detect_hl_mod_type(&files), Some("hl-engine-root".into()));
+    }
+
+    #[test]
+    fn detect_engine_root_reshade() {
+        let files = vec![
+            "dxgi.dll".to_string(),
+            "reshade.ini".to_string(),
+            "reshade-shaders".to_string(),
+        ];
+        assert_eq!(detect_hl_mod_type(&files), Some("hl-engine-root".into()));
+    }
+
+    #[test]
+    fn detect_pak_mod() {
+        let files = vec![
+            "MyTextures_P.pak".to_string(),
+            "MyTextures_P.utoc".to_string(),
+        ];
+        assert_eq!(
+            detect_hl_mod_type(&files),
+            Some("hogwarts-PAK-modtype".into())
+        );
+    }
+
+    #[test]
+    fn detect_empty_files() {
+        assert_eq!(detect_hl_mod_type(&[]), None);
+    }
+
+    #[test]
+    fn detect_unknown_files() {
+        let files = vec!["readme.txt".to_string(), "config.json".to_string()];
+        assert_eq!(detect_hl_mod_type(&files), None);
+    }
+
+    #[test]
+    fn detect_mixed_bk2_and_pak_not_movie() {
+        // Mixed archives with both .bk2 and .pak should NOT be classified as movie
+        let files = vec![
+            "intro.bk2".to_string(),
+            "textures.pak".to_string(),
+        ];
+        // Should detect as PAK (bk2 are not ALL files)
+        assert_eq!(
+            detect_hl_mod_type(&files),
+            Some("hogwarts-PAK-modtype".into())
+        );
+    }
+
+    #[test]
+    fn lua_takes_priority_over_pak() {
+        // Lua mod with a pak file included
+        let files = vec![
+            "MyMod/Scripts/main.lua".to_string(),
+            "MyMod/Data.pak".to_string(),
+        ];
+        assert_eq!(detect_hl_mod_type(&files), Some("hl-lua-mod".into()));
+    }
+
+    // --- Game version detection tests ---
+
+    #[test]
+    fn read_da_version_from_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let game_path = tmp.path();
+        let version_dir = game_path
+            .join("Phoenix")
+            .join("Content")
+            .join("Data")
+            .join("Version");
+        fs::create_dir_all(&version_dir).unwrap();
+        fs::write(version_dir.join("DA_Version.txt"), "1233043\n").unwrap();
+
+        assert_eq!(read_da_version(game_path), Some("1233043".into()));
+    }
+
+    #[test]
+    fn read_da_version_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(read_da_version(tmp.path()), None);
+    }
+
+    #[test]
+    fn read_da_version_empty_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let version_dir = tmp
+            .path()
+            .join("Phoenix")
+            .join("Content")
+            .join("Data")
+            .join("Version");
+        fs::create_dir_all(&version_dir).unwrap();
+        fs::write(version_dir.join("DA_Version.txt"), "  \n").unwrap();
+
+        assert_eq!(read_da_version(tmp.path()), None);
+    }
+
+    // --- Mods.txt management tests ---
+
+    #[test]
+    fn parse_mods_txt_line_enabled() {
+        let (name, enabled) = parse_mods_txt_line("MyMod : 1").unwrap();
+        assert_eq!(name, "MyMod");
+        assert!(enabled);
+    }
+
+    #[test]
+    fn parse_mods_txt_line_disabled() {
+        let (name, enabled) = parse_mods_txt_line("SomeMod : 0").unwrap();
+        assert_eq!(name, "SomeMod");
+        assert!(!enabled);
+    }
+
+    #[test]
+    fn parse_mods_txt_line_comment() {
+        assert!(parse_mods_txt_line("; This is a comment").is_none());
+        assert!(parse_mods_txt_line("# This too").is_none());
+    }
+
+    #[test]
+    fn parse_mods_txt_line_empty() {
+        assert!(parse_mods_txt_line("").is_none());
+        assert!(parse_mods_txt_line("  ").is_none());
+    }
+
+    #[test]
+    fn parse_mods_txt_line_extra_spaces() {
+        let (name, enabled) = parse_mods_txt_line("  CoolMod  :  1  ").unwrap();
+        assert_eq!(name, "CoolMod");
+        assert!(enabled);
+    }
+
+    #[test]
+    fn sync_mods_txt_creates_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mods_dir = tmp
+            .path()
+            .join("Phoenix")
+            .join("Binaries")
+            .join("Win64")
+            .join("Mods");
+        fs::create_dir_all(&mods_dir).unwrap();
+
+        // Create a user Lua mod
+        let mod_dir = mods_dir.join("TestLuaMod");
+        fs::create_dir_all(mod_dir.join("Scripts")).unwrap();
+        fs::write(mod_dir.join("Scripts").join("main.lua"), "-- test").unwrap();
+
+        sync_mods_txt(tmp.path()).unwrap();
+
+        let content = fs::read_to_string(mods_dir.join("Mods.txt")).unwrap();
+        assert!(content.contains("TestLuaMod : 1"));
+    }
+
+    #[test]
+    fn sync_mods_txt_preserves_builtins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mods_dir = tmp
+            .path()
+            .join("Phoenix")
+            .join("Binaries")
+            .join("Win64")
+            .join("Mods");
+        fs::create_dir_all(&mods_dir).unwrap();
+
+        // Write existing Mods.txt with a builtin disabled
+        fs::write(
+            mods_dir.join("Mods.txt"),
+            "ConsoleEnablerMod : 0\nCheatManagerEnablerMod : 1\n",
+        )
+        .unwrap();
+
+        sync_mods_txt(tmp.path()).unwrap();
+
+        let content = fs::read_to_string(mods_dir.join("Mods.txt")).unwrap();
+        assert!(content.contains("ConsoleEnablerMod : 0"));
+        assert!(content.contains("CheatManagerEnablerMod : 1"));
+    }
+
+    #[test]
+    fn sync_mods_txt_removes_undeployed_mods() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mods_dir = tmp
+            .path()
+            .join("Phoenix")
+            .join("Binaries")
+            .join("Win64")
+            .join("Mods");
+        fs::create_dir_all(&mods_dir).unwrap();
+
+        // Create a mod, sync, then remove the mod and sync again
+        let mod_dir = mods_dir.join("TempMod");
+        fs::create_dir_all(mod_dir.join("Scripts")).unwrap();
+        fs::write(mod_dir.join("Scripts").join("main.lua"), "-- temp").unwrap();
+
+        sync_mods_txt(tmp.path()).unwrap();
+        let content = fs::read_to_string(mods_dir.join("Mods.txt")).unwrap();
+        assert!(content.contains("TempMod : 1"));
+
+        // Remove the mod
+        fs::remove_dir_all(&mod_dir).unwrap();
+
+        // Sync again — TempMod should be gone
+        sync_mods_txt(tmp.path()).unwrap();
+        let content = fs::read_to_string(mods_dir.join("Mods.txt")).unwrap();
+        assert!(!content.contains("TempMod"));
+    }
+
+    #[test]
+    fn sync_mods_txt_no_ue4ss_returns_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = sync_mods_txt(tmp.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sync_mods_txt_ignores_non_lua_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mods_dir = tmp
+            .path()
+            .join("Phoenix")
+            .join("Binaries")
+            .join("Win64")
+            .join("Mods");
+        fs::create_dir_all(&mods_dir).unwrap();
+
+        // Create a directory without Scripts/main.lua
+        fs::create_dir_all(mods_dir.join("NotALuaMod")).unwrap();
+        fs::write(mods_dir.join("NotALuaMod").join("readme.txt"), "hi").unwrap();
+
+        sync_mods_txt(tmp.path()).unwrap();
+
+        let content = fs::read_to_string(mods_dir.join("Mods.txt")).unwrap();
+        assert!(!content.contains("NotALuaMod"));
+    }
+
+    // --- Movie .bk2 matching tests ---
+
+    #[test]
+    fn match_bk2_finds_game_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let game_path = tmp.path();
+        let movies_dir = game_path.join("Phoenix").join("Content").join("Movies");
+        let sub_dir = movies_dir.join("Cinematics");
+        fs::create_dir_all(&sub_dir).unwrap();
+        fs::write(sub_dir.join("intro.bk2"), b"video").unwrap();
+
+        let staged = vec!["intro.bk2".to_string()];
+        let mappings = match_bk2_files(game_path, &staged);
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].1, "Movies/Cinematics/intro.bk2");
+    }
+
+    #[test]
+    fn match_bk2_fallback_to_movies_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let game_path = tmp.path();
+        let movies_dir = game_path.join("Phoenix").join("Content").join("Movies");
+        fs::create_dir_all(&movies_dir).unwrap();
+
+        // No matching game file
+        let staged = vec!["custom_video.bk2".to_string()];
+        let mappings = match_bk2_files(game_path, &staged);
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].1, "Movies/custom_video.bk2");
+    }
+
+    #[test]
+    fn match_bk2_case_insensitive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let game_path = tmp.path();
+        let movies_dir = game_path.join("Phoenix").join("Content").join("Movies");
+        fs::create_dir_all(&movies_dir).unwrap();
+        fs::write(movies_dir.join("Logo.bk2"), b"video").unwrap();
+
+        let staged = vec!["logo.BK2".to_string()];
+        let mappings = match_bk2_files(game_path, &staged);
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].1, "Movies/Logo.bk2");
+    }
+
+    #[test]
+    fn match_bk2_no_bk2_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let staged = vec!["texture.pak".to_string()];
+        let mappings = match_bk2_files(tmp.path(), &staged);
+        assert!(mappings.is_empty());
+    }
+
+    // --- Trait method tests ---
+
+    #[test]
+    fn detect_mod_type_via_trait() {
+        let plugin = HogwartsLegacyPlugin;
+        let files = vec!["MyMod/Scripts/main.lua".to_string()];
+        assert_eq!(
+            plugin.detect_mod_type_from_files(&files),
+            Some("hl-lua-mod".into())
+        );
+    }
+
+    #[test]
+    fn detect_game_version_via_trait() {
+        let tmp = tempfile::tempdir().unwrap();
+        let version_dir = tmp
+            .path()
+            .join("Phoenix")
+            .join("Content")
+            .join("Data")
+            .join("Version");
+        fs::create_dir_all(&version_dir).unwrap();
+        fs::write(version_dir.join("DA_Version.txt"), "1235957").unwrap();
+
+        let plugin = HogwartsLegacyPlugin;
+        assert_eq!(
+            plugin.detect_game_version(tmp.path()),
+            Some("1235957".into())
+        );
     }
 }

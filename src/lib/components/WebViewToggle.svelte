@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy } from "svelte";
+  import { onDestroy, tick } from "svelte";
   import { sidebarCollapsed } from "$lib/stores";
   import {
     createBrowserWebview,
@@ -11,9 +11,10 @@
     url: string;
     defaultMode?: "app" | "website";
     onModeChange?: (mode: "app" | "website") => void;
+    anchorEl?: HTMLElement | null;
   }
 
-  let { url, defaultMode = "app", onModeChange }: Props = $props();
+  let { url, defaultMode = "app", onModeChange, anchorEl = null }: Props = $props();
   let mode = $state<"app" | "website">(defaultMode);
   let webviewActive = $state(false);
 
@@ -34,6 +35,12 @@
   const SIDEBAR_COLLAPSED = 56;
 
   function getContentBounds() {
+    // Use anchor element bounds if available — positions webview exactly where the placeholder is
+    if (anchorEl) {
+      const rect = anchorEl.getBoundingClientRect();
+      return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+    }
+    // Fallback to calculated layout bounds
     const sidebarWidth = $sidebarCollapsed ? SIDEBAR_COLLAPSED : SIDEBAR_EXPANDED;
     const x = APP_PADDING + sidebarWidth + GAP;
     const y = APP_PADDING + TOPBAR_HEIGHT;
@@ -64,12 +71,15 @@
   async function setMode(newMode: "app" | "website") {
     if (newMode === mode) return;
     mode = newMode;
+    // Fire callback first so parent renders the placeholder anchor
+    onModeChange?.(newMode);
     if (newMode === "website") {
+      // Wait for DOM to update so anchorEl is bound
+      await tick();
       await activateWebview();
     } else {
       await deactivateWebview();
     }
-    onModeChange?.(newMode);
   }
 
   // Handle window resize
@@ -79,10 +89,11 @@
     resizeBrowserWebview(b.x, b.y, b.width, b.height).catch(() => {});
   }
 
-  // React to sidebar collapse changes
+  // React to anchor element or sidebar changes — reposition webview
   $effect(() => {
-    // Access the store to track it
     const _ = $sidebarCollapsed;
+    // Also track anchorEl changes
+    const _a = anchorEl;
     if (webviewActive) {
       // Small delay to let CSS transition finish
       setTimeout(() => handleResize(), 200);
