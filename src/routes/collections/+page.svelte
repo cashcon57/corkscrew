@@ -2,7 +2,7 @@
   import { onMount, onDestroy, untrack } from "svelte";
   import { goto } from "$app/navigation";
   import InstructionParser from "$lib/components/InstructionParser.svelte";
-  import { selectedGame, showError, showSuccess, collectionInstallStatus, collectionUninstallStatus, modStateVersion } from "$lib/stores";
+  import { selectedGame, showError, showSuccess, collectionInstallStatus, collectionUninstallStatus, modStateVersion, installedMods, collectionList, activeCollection } from "$lib/stores";
   import type { CollectionUninstallStatus } from "$lib/stores";
   import type { UninstallProgressEvent } from "$lib/types";
   import type { CollectionInfo, CollectionManifest, CollectionMod, CollectionModEntry, CollectionSearchResult, InstalledMod, NexusModInfo, NexusCategory, NexusSearchResult, NexusModFile, CollectionInstallCheckpoint } from "$lib/types";
@@ -426,6 +426,25 @@
       unlistenUninstall?.();
       unlistenUninstall = null;
       deletingCollection = null;
+
+      // Refresh global state so Mods page and top bar reflect the uninstall
+      const g = $selectedGame;
+      if (g) {
+        listInstalledCollections(g.game_id, g.bottle_name)
+          .then(cols => {
+            collectionList.set(cols);
+            // Clear active collection if the deleted one was active
+            if ($activeCollection?.name === name) {
+              activeCollection.set(null);
+            }
+          })
+          .catch((err) => console.error('Failed to refresh collections after uninstall:', err));
+
+        // Refresh the installed mods store so Mods page updates immediately
+        getInstalledMods(g.game_id, g.bottle_name)
+          .then(mods => installedMods.set(mods))
+          .catch((err) => console.error('Failed to refresh mods after uninstall:', err));
+      }
     }
   }
 
