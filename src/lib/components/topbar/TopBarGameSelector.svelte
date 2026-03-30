@@ -38,10 +38,10 @@
     title={$selectedGame?.display_name ?? "Select a game"}
   >
     {#if $selectedGame}
-      <GameIcon gameId={$selectedGame.game_id} size={18} />
+      <GameIcon gameId={$selectedGame.game_id} size={20} />
       <span class="topbar-selector-label">{$selectedGame.display_name}</span>
     {:else}
-      <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.4">
+      <svg width="20" height="20" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.4">
         <rect x="2" y="4" width="12" height="8" rx="2" />
         <circle cx="6" cy="8" r="1.5" />
         <circle cx="10" cy="8" r="1.5" />
@@ -113,17 +113,17 @@
   .topbar-selector {
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 4px 8px;
+    gap: 8px;
+    padding: 6px 12px;
     border-radius: 100px;
-    font-size: 13px;
+    font-size: 13.5px;
     color: var(--text-primary);
     background: none;
     border: none;
     cursor: pointer;
     -webkit-app-region: no-drag;
     transition: background 0.15s ease;
-    max-width: 220px;
+    max-width: 240px;
   }
 
   .topbar-selector:hover {
@@ -156,8 +156,8 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 26px;
-    height: 26px;
+    width: 30px;
+    height: 30px;
     border-radius: var(--radius);
     background: none;
     border: none;

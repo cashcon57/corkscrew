@@ -81,7 +81,7 @@
     display: flex;
     align-items: center;
     gap: 2px;
-    height: 44px;
+    height: 52px;
     flex-shrink: 0;
     -webkit-app-region: drag;
     position: sticky;
@@ -105,7 +105,7 @@
     display: flex;
     align-items: center;
     gap: 2px;
-    padding: 3px 6px;
+    padding: 5px 10px;
     border-radius: 100px;
     background: var(--surface-glass);
     backdrop-filter: var(--glass-blur-light);
@@ -129,10 +129,10 @@
 
   .topbar-separator {
     color: var(--text-quaternary);
-    font-size: 14px;
+    font-size: 16px;
     line-height: 1;
     user-select: none;
-    padding: 0 1px;
+    padding: 0 2px;
     opacity: 0.5;
   }
 </style>

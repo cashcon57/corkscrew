@@ -102,7 +102,7 @@
     onclick={(e) => { e.stopPropagation(); onToggle(); }}
     title={$activeProfile?.name ?? "default"}
   >
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.5">
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.5">
       <rect x="2" y="2" width="12" height="4" rx="1" />
       <rect x="2" y="10" width="12" height="4" rx="1" />
     </svg>
@@ -213,17 +213,17 @@
   .topbar-selector {
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 4px 8px;
+    gap: 8px;
+    padding: 6px 12px;
     border-radius: 100px;
-    font-size: 13px;
+    font-size: 13.5px;
     color: var(--text-primary);
     background: none;
     border: none;
     cursor: pointer;
     -webkit-app-region: no-drag;
     transition: background 0.15s ease;
-    max-width: 200px;
+    max-width: 220px;
   }
 
   .topbar-selector:hover {

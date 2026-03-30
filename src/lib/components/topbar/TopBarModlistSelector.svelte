@@ -83,7 +83,7 @@
     onclick={(e) => { e.stopPropagation(); onToggle(); }}
     title={displayLabel}
   >
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.5">
+    <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.5">
       <path d="M2 4h12M2 8h12M2 12h8" />
     </svg>
     <span class="topbar-selector-label">
@@ -180,17 +180,17 @@
   .topbar-selector {
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 4px 8px;
+    gap: 8px;
+    padding: 6px 12px;
     border-radius: 100px;
-    font-size: 13px;
+    font-size: 13.5px;
     color: var(--text-primary);
     background: none;
     border: none;
     cursor: pointer;
     -webkit-app-region: no-drag;
     transition: background 0.15s ease;
-    max-width: 220px;
+    max-width: 240px;
   }
 
   .topbar-selector:hover {

@@ -552,7 +552,7 @@
       } else if (pinned !== currentVersion) {
         versionWarning = { oldVersion: pinned, newVersion: currentVersion };
       }
-    } catch { /* version check not available */ }
+    } catch (err) { console.error('version check failed:', err); }
   }
 
   function handleAcknowledgeVersion() {
@@ -572,7 +572,8 @@
       profileList.set(profiles);
       const active = profiles.find(p => p.is_active) ?? null;
       activeProfile.set(active);
-    } catch {
+    } catch (err) {
+      console.error('loadProfilesForGame failed:', err);
       profileList.set([]);
       activeProfile.set(null);
     }
@@ -592,7 +593,8 @@
       if (!get(activeCollection) && collections.length === 1) {
         activeCollection.set(collections[0]);
       }
-    } catch {
+    } catch (err) {
+      console.error('loadCollectionsForGame failed:', err);
       collectionList.set([]);
       activeCollection.set(null);
     }
