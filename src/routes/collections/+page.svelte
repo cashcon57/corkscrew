@@ -2187,7 +2187,7 @@
       </div>
     {:else}
       <div class="my-collections-grid">
-        {#each myCollections as col (col.name)}
+        {#each myCollections as col, i (col.name + ':' + i)}
           <!-- svelte-ignore a11y_no_static_element_interactions -->
           <div class="my-collection-card" role="button" tabindex="0" onclick={() => viewLocalCollection(col)} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') viewLocalCollection(col); }}>
             <div class="my-card-image">

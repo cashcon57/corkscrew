@@ -21,14 +21,17 @@ export async function initSentry(): Promise<void> {
       dsn: SENTRY_DSN,
       sendDefaultPii: false,
       sampleRate: 1.0,
+      debug: false,
       beforeSend(event) {
         // Strip any PII that might leak through
         delete event.server_name;
         if (event.user) delete event.user;
+        console.log("[sentry] sending event:", event.event_id, event.message || event.exception?.values?.[0]?.value);
         return event;
       },
     });
     initialized = true;
+    console.log("[sentry] initialized successfully");
   } catch (err) {
     console.error("Sentry init failed:", err);
   }
@@ -41,7 +44,11 @@ export function captureError(
   error: Error | string,
   context?: Record<string, string>
 ): void {
-  if (!initialized) return;
+  if (!initialized) {
+    console.log("[sentry] captureError called but not initialized — skipping");
+    return;
+  }
+  console.log("[sentry] capturing:", typeof error === "string" ? error : error.message);
   if (typeof error === "string") {
     Sentry.captureMessage(error, { extra: context });
   } else {
