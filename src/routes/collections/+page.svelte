@@ -46,6 +46,7 @@
     checkDlcStatus,
     launchGame,
     quickCsModCount,
+    getAllGames,
   } from "$lib/api";
   import { startInstallTracking, stopInstallTracking, resumeInstallTracking } from "$lib/installService";
   import { listen } from "@tauri-apps/api/event";
@@ -60,8 +61,14 @@
   import NexusLogo from "$lib/components/NexusLogo.svelte";
   import WabbajackLogo from "$lib/components/WabbajackLogo.svelte";
   import WebViewToggle from "$lib/components/WebViewToggle.svelte";
+  import type { DetectedGame } from "$lib/types";
 
   const NEXUS_API_KEY_URL = "https://www.nexusmods.com/users/myaccount?tab=api+access";
+
+  // ---- All detected games (for game selector dropdowns) ----
+  let allDetectedGames = $state<DetectedGame[]>([]);
+  // Browse Nexus tab: override game slug (null = use selectedGame)
+  let browseGameOverride = $state<string | null>(null);
 
   /** Validate that a URL is a safe HTTP(S) URL before opening in browser. */
   function safeOpenUrl(url: string | null | undefined) {
@@ -700,9 +707,20 @@
   };
 
   function getGameSlug(): string {
+    // If a browse game override is set, use it directly (it's already a nexus slug)
+    if (browseGameOverride) return browseGameOverride;
     const game = $selectedGame;
     if (!game) return "";
     return gameSlugMap[game.game_id] ?? game.game_id;
+  }
+
+  /** Get display name for the currently browsed game. */
+  function getBrowseGameName(): string {
+    if (browseGameOverride) {
+      const game = allDetectedGames.find(g => (gameSlugMap[g.game_id] ?? g.game_id) === browseGameOverride);
+      return game?.display_name ?? gameDomainDisplay(browseGameOverride);
+    }
+    return $selectedGame?.display_name ?? "your game";
   }
 
   const browseTotalPages = $derived(Math.max(1, Math.ceil(browseModsTotalCount / BROWSE_PAGE_SIZE)));
@@ -960,7 +978,12 @@
   }
 
   const gameOptions = $derived.by(() => {
+    // Combine games from loaded collections with all detected games
     const gamesSet = new Set(collections.map(c => c.game_domain));
+    for (const g of allDetectedGames) {
+      const slug = gameSlugMap[g.game_id] ?? g.game_id;
+      gamesSet.add(slug);
+    }
     return Array.from(gamesSet).sort();
   });
 
@@ -993,6 +1016,13 @@
   });
 
   onMount(async () => {
+    // Load all detected games for the game selector dropdowns
+    try {
+      allDetectedGames = await getAllGames();
+    } catch (err) {
+      console.error("Failed to load games for selector:", err);
+    }
+
     // Listen for LLM "open this mod" events
     window.addEventListener("corkscrew-open-nexus-mod", handleOpenNexusMod);
 
@@ -2606,7 +2636,7 @@
     <header class="page-header">
       <div class="header-text">
         <h2 class="page-title"><NexusLogo size={22} /> Browse Nexus</h2>
-        <p class="page-subtitle">Discover mods on NexusMods for {$selectedGame?.display_name ?? "your game"}</p>
+        <p class="page-subtitle">Discover mods on NexusMods for {getBrowseGameName()}</p>
       </div>
       <div class="header-right">
         <WebViewToggle
@@ -2797,6 +2827,17 @@
         </div>
       {:else}
       <div class="filters-bar">
+        {#if allDetectedGames.length > 1}
+          <select class="filter-select" bind:value={browseGameOverride} onchange={() => { browseInitializedForGame = ""; loadBrowseMods(); loadBrowseCategories(); }}>
+            <option value={null}>{$selectedGame?.display_name ?? "Current Game"}</option>
+            {#each allDetectedGames as game}
+              {@const slug = gameSlugMap[game.game_id] ?? game.game_id}
+              {#if slug !== getGameSlug() || browseGameOverride}
+                <option value={slug}>{game.display_name}</option>
+              {/if}
+            {/each}
+          </select>
+        {/if}
         <div class="search-wrapper">
           <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="11" cy="11" r="8" />

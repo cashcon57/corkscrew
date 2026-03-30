@@ -7115,6 +7115,7 @@ fn game_display_name(game_id: &str) -> &str {
         "oblivion" => "The Elder Scrolls IV: Oblivion",
         "morrowind" => "Morrowind",
         "starfield" => "Starfield",
+        "hogwartslegacy" => "Hogwarts Legacy",
         other => other,
     }
 }

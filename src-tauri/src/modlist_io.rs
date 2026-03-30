@@ -406,6 +406,7 @@ fn game_display_name(game_id: &str) -> &str {
         "starfield" => "Starfield",
         "enderal" => "Enderal",
         "enderalse" => "Enderal Special Edition",
+        "hogwartslegacy" => "Hogwarts Legacy",
         _ => game_id,
     }
 }
