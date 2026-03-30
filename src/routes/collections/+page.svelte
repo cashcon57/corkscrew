@@ -458,6 +458,22 @@
     }
   });
 
+  // Auto-load Nexus Collections when switching to the nexus tab or changing game
+  let collectionsInitializedForGame = $state<string | null>(null);
+  $effect(() => {
+    const game = $selectedGame;
+    const tab = activeTab;
+    const connected = untrack(() => account?.connected);
+    if (tab === "nexus" && game && connected) {
+      const slug = gameSlugMap[game.game_id] ?? game.game_id;
+      if (untrack(() => collectionsInitializedForGame) !== slug) {
+        collectionsInitializedForGame = slug;
+        gameFilter = slug;
+        loadCollections(slug);
+      }
+    }
+  });
+
   // ---- Account State ----
 
   interface AccountStatus {
@@ -1122,14 +1138,43 @@
     }
   }
 
+  let showDismissConfirm = $state(false);
+  let dismissCleanup = $state(true);
+  let dismissing = $state(false);
+
   async function handleDismissInstall() {
     if (!interruptedInstall) return;
+    showDismissConfirm = true;
+  }
+
+  async function confirmDismissInstall() {
+    if (!interruptedInstall) return;
+    const checkpoint = interruptedInstall;
+    dismissing = true;
     try {
-      await abandonCollectionInstall(interruptedInstall.id);
-    } catch {
-      // ignore
+      // Always abandon the checkpoint so it never comes back
+      await abandonCollectionInstall(checkpoint.id);
+
+      // Optionally clean up partially installed mods
+      if (dismissCleanup && $selectedGame) {
+        try {
+          await deleteCollection(
+            $selectedGame.game_id,
+            $selectedGame.bottle_name,
+            checkpoint.collection_name,
+            true, // delete unique downloads
+          );
+        } catch (err) {
+          console.error("Cleanup of partial install failed (non-fatal):", err);
+        }
+      }
+    } catch (err) {
+      console.error("Failed to abandon checkpoint:", err);
+    } finally {
+      interruptedInstall = null;
+      showDismissConfirm = false;
+      dismissing = false;
     }
-    interruptedInstall = null;
   }
 
   async function checkAccount() {
@@ -1232,10 +1277,13 @@
       const CONCURRENCY = 3;
       const modLists: (CollectionMod[] | null)[] = new Array(cols.length).fill(null);
 
+      const withTimeout = <T>(p: Promise<T>, ms: number): Promise<T> =>
+        Promise.race([p, new Promise<T>((_, reject) => setTimeout(() => reject(new Error("timeout")), ms))]);
+
       for (let i = 0; i < cols.length; i += CONCURRENCY) {
         const batch = cols.slice(i, i + CONCURRENCY);
         const results = await Promise.allSettled(
-          batch.map(c => getCollectionMods(c.slug, c.latest_revision))
+          batch.map(c => withTimeout(getCollectionMods(c.slug, c.latest_revision), 15_000))
         );
         for (let j = 0; j < results.length; j++) {
           const r = results[j];
@@ -1844,8 +1892,27 @@
             Resume Installation
           {/if}
         </button>
-        <button class="btn btn-ghost" onclick={handleDismissInstall}>Dismiss</button>
+        <button class="btn btn-ghost" onclick={handleDismissInstall} disabled={dismissing}>Dismiss</button>
       </div>
+      {#if showDismissConfirm}
+        <div class="resume-dismiss-confirm">
+          <p class="dismiss-title">Permanently dismiss this installation?</p>
+          <label class="dismiss-option">
+            <input type="checkbox" bind:checked={dismissCleanup} />
+            <span>Remove partially installed mods and downloaded files</span>
+          </label>
+          <div class="dismiss-actions">
+            <button class="btn btn-danger btn-sm" onclick={confirmDismissInstall} disabled={dismissing}>
+              {#if dismissing}
+                <span class="spinner spinner-sm"></span> Cleaning up...
+              {:else}
+                Confirm
+              {/if}
+            </button>
+            <button class="btn btn-ghost btn-sm" onclick={() => showDismissConfirm = false} disabled={dismissing}>Cancel</button>
+          </div>
+        </div>
+      {/if}
     </div>
   {/if}
 
@@ -4137,6 +4204,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    flex-wrap: wrap;
     gap: var(--space-4);
     padding: var(--space-4) var(--space-5);
     background: rgba(255, 159, 10, 0.08);
@@ -4172,6 +4240,27 @@
     transition: width 300ms ease;
   }
   .resume-actions { display: flex; gap: var(--space-2); flex-shrink: 0; align-items: center; }
+
+  .resume-dismiss-confirm {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    width: 100%;
+    padding-top: var(--space-3);
+    border-top: 1px solid rgba(255, 159, 10, 0.2);
+    margin-top: var(--space-2);
+  }
+  .dismiss-title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+  .dismiss-option {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: 12px;
+    color: var(--text-secondary);
+    cursor: pointer;
+  }
+  .dismiss-option input[type="checkbox"] { accent-color: #f59e0b; }
+  .dismiss-actions { display: flex; gap: var(--space-2); margin-top: var(--space-1); }
 
   /* ---- Connect Prompt ---- */
 
