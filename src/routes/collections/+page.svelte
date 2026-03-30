@@ -1521,7 +1521,32 @@
   };
 
   async function handleInstallCollection() {
-    if (!selectedCollection || !$selectedGame) return;
+    if (!selectedCollection) return;
+
+    // Auto-switch to the correct game if the collection targets a different game
+    const collectionDomain = selectedCollection.game_domain;
+    if ($selectedGame) {
+      const currentSlug = gameSlugMap[$selectedGame.game_id] ?? $selectedGame.game_id;
+      if (collectionDomain && currentSlug !== collectionDomain && $selectedGame.nexus_slug !== collectionDomain) {
+        // Find the right game from all detected games
+        try {
+          const allGames = await getAllGames();
+          const targetGame = allGames.find(
+            (g: { nexus_slug: string; game_id: string }) =>
+              g.nexus_slug === collectionDomain ||
+              (gameSlugMap[g.game_id] ?? g.game_id) === collectionDomain
+          );
+          if (targetGame) {
+            selectedGame.set(targetGame);
+            showSuccess(`Switched to ${targetGame.display_name} for collection install`);
+          }
+        } catch (e) {
+          console.error("Failed to auto-switch game:", e);
+        }
+      }
+    }
+
+    if (!$selectedGame) return;
 
     // Build manifest first so we can check for required tools
     const manifest = {
