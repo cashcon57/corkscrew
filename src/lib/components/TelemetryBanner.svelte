@@ -1,6 +1,6 @@
 <script lang="ts">
   import { setConfigValue } from "$lib/api";
-  import { initSentry } from "$lib/sentry";
+  import { initSentry, teardownSentry } from "$lib/sentry";
 
   interface Props {
     visible: boolean;
@@ -21,6 +21,7 @@
   async function decline() {
     try {
       await setConfigValue("telemetry_consent", "denied");
+      teardownSentry();
     } catch (err) {
       console.error("Failed to save telemetry consent:", err);
     }
