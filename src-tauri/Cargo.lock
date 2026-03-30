@@ -1088,7 +1088,7 @@ dependencies = [
 
 [[package]]
 name = "corkscrew"
-version = "0.9.52"
+version = "0.9.53"
 dependencies = [
  "anyhow",
  "ba2",
