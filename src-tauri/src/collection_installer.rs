@@ -1924,6 +1924,54 @@ pub async fn install_collection(
         InstallProgress::InstallPhaseStarted { total_mods },
     );
 
+    // Inject bundled mod archives from the collection bundle into pre_downloaded
+    // so they are available as pre-downloaded files during install.
+    for (i, &mod_idx) in install_order.iter().enumerate() {
+        let mod_entry = &manifest.mods[mod_idx];
+        if mod_entry.source.source_type == "bundle" || mod_entry.source.source_type == "bundled" {
+            if let Some(bundled_path) = manifest.bundled_files.get(&mod_entry.name) {
+                if bundled_path.exists() {
+                    pre_downloaded.insert(i, bundled_path.clone());
+                    log::info!(
+                        "Bundled mod '{}' mapped to pre-downloaded: {}",
+                        mod_entry.name,
+                        bundled_path.display()
+                    );
+                }
+            }
+        }
+    }
+
+    // Deduplicate mod names: when multiple collection entries share the same
+    // name (common when a NexusMods mod page has multiple files), build a
+    // mapping of mod_idx → display name with suffixes to distinguish them.
+    let deduped_names: std::collections::HashMap<usize, String> = {
+        let mut name_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for &mod_idx in &install_order {
+            let name = &manifest.mods[mod_idx].name;
+            *name_counts.entry(name.clone()).or_insert(0) += 1;
+        }
+        let mut result = std::collections::HashMap::new();
+        let mut name_seen: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for &mod_idx in &install_order {
+            let entry = &manifest.mods[mod_idx];
+            let count = name_counts.get(&entry.name).copied().unwrap_or(1);
+            if count > 1 {
+                let seen = name_seen.entry(entry.name.clone()).or_insert(0);
+                *seen += 1;
+                let suffix = if let Some(fid) = entry.source.file_id {
+                    format!(" (file {})", fid)
+                } else {
+                    format!(" ({})", seen)
+                };
+                result.insert(mod_idx, format!("{}{}", entry.name, suffix));
+            }
+        }
+        result
+    };
+
     // Deferred mods whose extraction wasn't done yet during the first pass.
     // After pass 1 completes, these are retried (extractions will be done by then).
     let mut deferred: Vec<(usize, usize)> = Vec::new(); // (order_pos, mod_idx)
@@ -2415,11 +2463,23 @@ pub async fn install_collection(
                     if mod_entry.optional {
                         let _ = db.set_collection_optional(mod_id, true);
                     }
+                    // Apply deduped name if this mod had a duplicate name
+                    let display_name = if let Some(deduped) = deduped_names.get(&mod_idx) {
+                        if let Ok(conn) = db.conn() {
+                            let _ = conn.execute(
+                                "UPDATE installed_mods SET name = ?1 WHERE id = ?2",
+                                rusqlite::params![deduped, mod_id],
+                            );
+                        }
+                        deduped.clone()
+                    } else {
+                        mod_name.clone()
+                    };
                     let _ = app.emit(
                         INSTALL_PROGRESS_EVENT,
                         InstallProgress::ModCompleted {
                             mod_index: i,
-                            mod_name: mod_name.clone(),
+                            mod_name: display_name,
                             mod_id,
                             deployed_size,
                             duration_ms: install_duration_ms,
@@ -3142,17 +3202,57 @@ async fn install_single_mod(
                 .clone()
                 .or_else(|| mod_entry.source.instructions.clone()),
         }),
-        "bundle" | "bundled" => Err(InstallError::UserAction {
-            action: format!(
-                "'{}' is bundled in the collection archive. Download the full collection .7z from NexusMods to include bundled mods.",
-                mod_entry.name
-            ),
-            url: None,
-            instructions: Some(
-                "This mod is embedded in the collection archive and cannot be downloaded separately."
-                    .to_string(),
-            ),
-        }),
+        "bundle" | "bundled" => {
+            // Bundled mods are extracted from the collection .7z during bundle parsing.
+            // Check if we have a pre-extracted archive for this mod.
+            if let Some(bundled_path) = pre_downloaded {
+                if bundled_path.exists() {
+                    log::info!(
+                        "Installing bundled mod '{}' from extracted archive: {}",
+                        mod_entry.name,
+                        bundled_path.display()
+                    );
+                    // Stage + deploy the bundled archive directly
+                    stage_and_deploy(
+                        app,
+                        db,
+                        bundled_path,
+                        mod_entry,
+                        mod_index,
+                        game_id,
+                        bottle_name,
+                        data_dir,
+                        game_path,
+                        pre_extracted,
+                    )
+                    .await
+                } else {
+                    Err(InstallError::UserAction {
+                        action: format!(
+                            "'{}' is bundled in the collection archive but the extracted file was not found.",
+                            mod_entry.name
+                        ),
+                        url: None,
+                        instructions: Some(
+                            "This mod is embedded in the collection archive. Try re-downloading the collection."
+                                .to_string(),
+                        ),
+                    })
+                }
+            } else {
+                Err(InstallError::UserAction {
+                    action: format!(
+                        "'{}' is bundled in the collection archive. Download the full collection .7z from NexusMods to include bundled mods.",
+                        mod_entry.name
+                    ),
+                    url: None,
+                    instructions: Some(
+                        "This mod is embedded in the collection archive and cannot be downloaded separately."
+                            .to_string(),
+                    ),
+                })
+            }
+        }
         _ => Err(InstallError::Failed(format!(
             "Unsupported source type '{}' for mod '{}'",
             source_type, mod_entry.name

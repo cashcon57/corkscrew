@@ -2070,6 +2070,7 @@ mod tests {
             plugins: vec![],
             game_versions: vec![],
             ini_tweaks: vec![],
+            bundled_files: std::collections::HashMap::new(),
         }
     }
 

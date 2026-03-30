@@ -251,6 +251,11 @@ pub struct CollectionManifest {
     /// Applied to game INI files after all mods are deployed.
     #[serde(default, skip)]
     pub ini_tweaks: Vec<CollectionIniTweak>,
+    /// Bundled mod archives extracted from the collection .7z bundle.
+    /// Maps mod name (from manifest) → extracted file path on disk.
+    /// Populated by `parse_collection_bundle` / `fetch_collection_bundle`.
+    #[serde(default, skip)]
+    pub bundled_files: std::collections::HashMap<String, std::path::PathBuf>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1009,11 +1014,18 @@ pub fn parse_collection_bundle(bundle_path: &Path) -> Result<CollectionManifest,
 
     let file = std::fs::File::open(bundle_path).map_err(CollectionsError::Io)?;
 
-    // sevenz-rust requires a destination path even when using a custom extract
-    // callback. We use a temp directory and skip writing files we don't need.
+    // Extract to a persistent temp directory — bundled mod archives need to
+    // survive until the collection install finishes.
     let temp_dir = std::env::temp_dir().join("corkscrew_collection_extract");
+    let _ = std::fs::remove_dir_all(&temp_dir); // Clean any stale extraction
+    std::fs::create_dir_all(&temp_dir)
+        .map_err(|e| CollectionsError::Io(e))?;
     let mut json_data: Option<Vec<u8>> = None;
     let mut ini_tweak_files: Vec<(String, Vec<u8>)> = Vec::new();
+    let bundled_dir = temp_dir.join("bundled");
+    std::fs::create_dir_all(&bundled_dir)
+        .map_err(|e| CollectionsError::Io(e))?;
+    let bundled_files_extracted = std::sync::Mutex::new(Vec::<(String, PathBuf)>::new());
 
     sevenz_rust2::decompress_with_extract_fn(
         file,
@@ -1039,14 +1051,37 @@ pub fn parse_collection_bundle(bundle_path: &Path) -> Result<CollectionManifest,
                 ini_tweak_files.push((entry_name.to_string(), data));
                 return Ok(false);
             }
-            // Skip all other entries (don't extract to disk)
+            // Extract bundled mod archives (anything that's not collection.json or INI tweaks).
+            // These are mod archives embedded in the collection bundle — they need to be
+            // written to disk so the installer can use them as pre-downloaded files.
+            if !entry.is_directory() && !lower.ends_with("collection.json") {
+                let mut data = Vec::new();
+                reader.read_to_end(&mut data)?;
+                // Use just the filename (strip any directory prefix)
+                let file_name = entry_name
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(entry_name);
+                let dest = bundled_dir.join(file_name);
+                if let Err(e) = std::fs::write(&dest, &data) {
+                    log::warn!("Failed to extract bundled file '{}': {}", file_name, e);
+                } else {
+                    log::info!("Extracted bundled mod archive: {} ({} bytes)", file_name, data.len());
+                    bundled_files_extracted.lock().unwrap().push((
+                        file_name.to_string(),
+                        dest,
+                    ));
+                }
+                return Ok(false);
+            }
             Ok(false)
         },
     )
     .map_err(|e| CollectionsError::Archive(format!("Failed to read 7z archive: {}", e)))?;
 
-    // Clean up temp dir (best-effort)
-    let _ = std::fs::remove_dir_all(&temp_dir);
+    // NOTE: Do NOT clean up temp_dir here — bundled files need to persist
+    // until the collection install completes. The installer is responsible
+    // for cleanup.
 
     let data = json_data
         .ok_or_else(|| CollectionsError::Archive("No collection.json found in archive".into()))?;
@@ -1096,6 +1131,57 @@ pub fn parse_collection_bundle(bundle_path: &Path) -> Result<CollectionManifest,
             "Collection bundle contains {} INI tweaks",
             manifest.ini_tweaks.len()
         );
+    }
+
+    // Populate bundled_files: map mod names to extracted archive paths.
+    // Match bundled mod entries in the manifest to extracted files by
+    // checking if the mod name appears in the filename (case-insensitive).
+    let extracted = bundled_files_extracted.into_inner().unwrap();
+    if !extracted.is_empty() {
+        log::info!(
+            "Collection bundle contains {} bundled mod archive(s)",
+            extracted.len()
+        );
+        // Build lookup: filename → path
+        let file_lookup: std::collections::HashMap<String, std::path::PathBuf> = extracted
+            .into_iter()
+            .map(|(name, path)| (name.to_lowercase(), path))
+            .collect();
+
+        for mod_entry in &manifest.mods {
+            if mod_entry.source.source_type == "bundle" || mod_entry.source.source_type == "bundled"
+            {
+                // Try exact filename match first, then partial match
+                let mod_name_lower = mod_entry.name.to_lowercase();
+                let matched = file_lookup.iter().find(|(fname, _)| {
+                    // Match if the bundled filename contains the mod name or vice versa
+                    fname.contains(&mod_name_lower)
+                        || mod_name_lower.contains(fname.trim_end_matches(".7z").trim_end_matches(".zip").trim_end_matches(".rar"))
+                });
+                if let Some((_, path)) = matched {
+                    manifest
+                        .bundled_files
+                        .insert(mod_entry.name.clone(), path.clone());
+                    log::info!(
+                        "Matched bundled mod '{}' to extracted file: {}",
+                        mod_entry.name,
+                        path.display()
+                    );
+                }
+            }
+        }
+
+        // If we couldn't match by name, just map all extracted files by their
+        // filename (useful when the manifest mod name doesn't match the archive name)
+        if manifest.bundled_files.is_empty() && !file_lookup.is_empty() {
+            for (fname, path) in &file_lookup {
+                manifest.bundled_files.insert(fname.clone(), path.clone());
+            }
+            log::info!(
+                "Mapped {} bundled files by filename (no name matches found)",
+                manifest.bundled_files.len()
+            );
+        }
     }
 
     Ok(manifest)
@@ -1176,6 +1262,7 @@ pub fn parse_collection_json(json_str: &str) -> Result<CollectionManifest, Colle
         revision: None,
         game_versions: bundle.game_versions,
         ini_tweaks: Vec::new(),
+        bundled_files: std::collections::HashMap::new(),
     })
 }
 
@@ -1301,6 +1388,10 @@ pub async fn fetch_collection_bundle(
     std::fs::write(&temp_path, &bytes)?;
 
     let result = parse_collection_bundle(&temp_path);
+    // Don't delete the bundle file yet — bundled mod archives may have been
+    // extracted to a temp dir that needs to persist until install completes.
+    // The bundle file itself can be cleaned up since bundled files are
+    // already extracted.
     let _ = std::fs::remove_file(&temp_path);
     result
 }
