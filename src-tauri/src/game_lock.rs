@@ -116,6 +116,7 @@ fn game_exe_names(game_id: &str) -> &'static [&'static str] {
         "fallout3" => &["Fallout3.exe", "fose_loader.exe"],
         "oblivion" => &["Oblivion.exe", "obse_loader.exe"],
         "starfield" => &["Starfield.exe", "sfse_loader.exe"],
+        "hogwartslegacy" => &["HogwartsLegacy.exe"],
         _ => &[], // Unknown game — fall back to PID-only check
     }
 }
