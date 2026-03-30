@@ -1093,6 +1093,39 @@ mod tests {
     }
 
     #[test]
+    fn error_events_table_works() {
+        let conn = memory_db();
+        migrate(&conn).unwrap();
+
+        // Insert an error event
+        conn.execute(
+            "INSERT INTO error_events (module, error_type, message) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["test_module", "test_error", "something broke"],
+        )
+        .unwrap();
+
+        // Verify it was inserted with defaults
+        let (count, resolved): (i64, i64) = conn
+            .prepare("SELECT count, resolved FROM error_events WHERE module = 'test_module'")
+            .unwrap()
+            .query_row([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(resolved, 0);
+
+        // Verify indexes exist
+        let indexes: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='error_events'")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(indexes.iter().any(|n| n.contains("module")));
+        assert!(indexes.iter().any(|n| n.contains("last_seen")));
+    }
+
+    #[test]
     fn migration_is_idempotent() {
         let conn = memory_db();
         migrate(&conn).unwrap();

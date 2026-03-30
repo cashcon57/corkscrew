@@ -608,6 +608,8 @@
       activeProfile.set(active);
     } catch (err) {
       console.error('loadProfilesForGame failed:', err);
+      recordErrorEvent('layout', 'load_profiles_failed', String(err).substring(0, 500))
+        .catch((e) => console.error('Failed to record error event:', e));
       profileList.set([]);
       activeProfile.set(null);
     }
@@ -629,6 +631,8 @@
       }
     } catch (err) {
       console.error('loadCollectionsForGame failed:', err);
+      recordErrorEvent('layout', 'load_collections_failed', String(err).substring(0, 500))
+        .catch((e) => console.error('Failed to record error event:', e));
       collectionList.set([]);
       activeCollection.set(null);
     }
