@@ -4269,14 +4269,21 @@ async fn stage_and_deploy(
         files_to_deploy = merged;
     }
 
-    // For Hogwarts Legacy (and UE games in general): filter out files that
-    // should NOT be deployed to the PAK data directory (~mods/). This catches
-    // mods that bundle READMEs, images, batch files, executables, and other
-    // non-game files alongside their actual PAK content.
+    // Unreal Engine PAK game filter: when the data directory is a PAK-based
+    // mod folder (contains "Paks" in path), filter out files that should NOT
+    // be deployed alongside PAK files. This catches mods that bundle READMEs,
+    // images, batch files, executables, DLLs, and ReShade alongside PAK content.
     //
-    // Files that need engine root deployment (DLLs, ASI, ReShade) are
-    // separated and deployed to Phoenix/Binaries/Win64/ instead.
-    if game_id == "hogwartslegacy" {
+    // DLLs, ASI loaders, and ReShade files are routed to the game's exe
+    // directory instead. This applies to Hogwarts Legacy, Palworld, Ready or
+    // Not, and any future UE4/5 game that uses PAK mods.
+    let data_dir_str = data_dir.to_string_lossy().to_lowercase();
+    let is_ue_pak_game = data_dir_str.contains("/paks/")
+        || data_dir_str.contains("\\paks\\")
+        || data_dir_str.ends_with("/paks")
+        || data_dir_str.ends_with("\\paks");
+
+    if is_ue_pak_game {
         let mut engine_root_files: Vec<String> = Vec::new();
         let staging_path = &staging_result.staging_path;
 
@@ -4295,33 +4302,31 @@ async fn stage_and_deploy(
                 }
 
                 // Engine root files: DLLs, ASI loaders, ReShade configs
-                // These need to go to Phoenix/Binaries/Win64/, not ~mods/
+                // These need to go to the exe directory, not the PAK dir
                 if fname.ends_with(".dll")
                     || fname.ends_with(".asi")
                     || lower.starts_with("reshade-shaders/")
                     || fname == "reshade.ini"
                     || fname == "engine.ini"
-                    || fname == "version.dll"
                 {
                     engine_root_files.push(f.clone());
-                    return false; // Don't deploy to ~mods
+                    return false;
                 }
 
-                // Lua scripts — keep (they go to ~mods for now, UE4SS picks them up)
+                // Lua scripts — keep (UE4SS loads from various locations)
                 if fname.ends_with(".lua") {
                     return true;
                 }
 
                 // Filter out non-game junk that should never be in the game directory
-                let junk_extensions = [
+                if [
                     ".txt", ".md", ".html", ".pdf", ".png", ".jpg", ".jpeg",
-                    ".gif", ".bat", ".exe", ".py", ".bat", ".json",
-                ];
-                if junk_extensions.iter().any(|ext| fname.ends_with(ext)) {
-                    log::debug!(
-                        "HL deploy filter: skipping non-game file '{}'",
-                        f
-                    );
+                    ".gif", ".bat", ".exe", ".py", ".json", ".csv",
+                ]
+                .iter()
+                .any(|ext| fname.ends_with(ext))
+                {
+                    log::debug!("UE deploy filter: skipping non-game file '{}'", f);
                     return false;
                 }
 
@@ -4330,44 +4335,74 @@ async fn stage_and_deploy(
             })
             .collect();
 
-        // Deploy engine root files to Win64 if any were found
+        // Deploy engine root files to the game's exe directory
         if !engine_root_files.is_empty() {
-            let win64 = game_path.join("Phoenix").join("Binaries").join("Win64");
-            let _ = std::fs::create_dir_all(&win64);
+            // Find the exe directory: use the game plugin's exe_path parent,
+            // or fall back to searching for common UE binary directories.
+            let exe_dir = crate::games::with_plugin(game_id, |p| {
+                // Try detect() with a dummy bottle to get exe_path — but we
+                // already have game_path, so search for the Binaries dir
+                None::<PathBuf>
+            })
+            .flatten()
+            .unwrap_or_else(|| {
+                // Search for Binaries/Win64 under game_path
+                let candidates = [
+                    game_path.join("Binaries").join("Win64"),
+                    game_path.join("Phoenix").join("Binaries").join("Win64"),
+                    game_path.join("Engine").join("Binaries").join("Win64"),
+                ];
+                for c in &candidates {
+                    if c.exists() {
+                        return c.clone();
+                    }
+                }
+                // Last resort: find any Win64 directory
+                for entry in walkdir::WalkDir::new(game_path)
+                    .max_depth(4)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                {
+                    if entry.file_type().is_dir()
+                        && entry.file_name().to_string_lossy().eq_ignore_ascii_case("Win64")
+                    {
+                        return entry.into_path();
+                    }
+                }
+                // Absolute fallback
+                game_path.join("Binaries").join("Win64")
+            });
+
+            let _ = std::fs::create_dir_all(&exe_dir);
             let mut deployed_root = 0;
             for rel_path in &engine_root_files {
                 let src = staging_path.join(rel_path);
-                let dest = win64.join(
-                    rel_path
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(rel_path),
-                );
-                // For ReShade shaders, preserve directory structure
-                if rel_path.to_lowercase().starts_with("reshade-shaders/") {
-                    let dest = win64.join(rel_path);
+                if !src.exists() {
+                    continue;
+                }
+                // For directory-structured files (ReShade shaders), preserve structure
+                if rel_path.contains('/') {
+                    let dest = exe_dir.join(rel_path);
                     if let Some(parent) = dest.parent() {
                         let _ = std::fs::create_dir_all(parent);
                     }
-                    if src.exists() {
-                        if let Err(e) = std::fs::copy(&src, &dest) {
-                            log::warn!("Failed to deploy engine root file '{}': {}", rel_path, e);
-                        } else {
-                            deployed_root += 1;
-                        }
+                    if std::fs::copy(&src, &dest).is_ok() {
+                        deployed_root += 1;
                     }
-                } else if src.exists() {
-                    if let Err(e) = std::fs::copy(&src, &dest) {
-                        log::warn!("Failed to deploy engine root file '{}': {}", rel_path, e);
-                    } else {
+                } else {
+                    let dest = exe_dir.join(
+                        rel_path.rsplit('/').next().unwrap_or(rel_path),
+                    );
+                    if std::fs::copy(&src, &dest).is_ok() {
                         deployed_root += 1;
                     }
                 }
             }
             if deployed_root > 0 {
                 log::info!(
-                    "HL deploy: routed {} engine root files to Win64/ (DLLs, ReShade, ASI)",
-                    deployed_root
+                    "UE deploy: routed {} engine root files to {} (DLLs, ReShade, ASI)",
+                    deployed_root,
+                    exe_dir.display()
                 );
             }
         }
