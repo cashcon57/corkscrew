@@ -1710,9 +1710,10 @@ async fn launch_game_cmd(
     }
 
     // Determine which executable to launch.
-    // For games with dedicated plugins (e.g. Hogwarts Legacy), the plugin's
-    // detect() returns the correct exe_path (which may be in a subdirectory
-    // like Phoenix/Binaries/Win64/). Prefer that over re-searching the root.
+    // 1. SKSE takes priority if requested
+    // 2. Plugin's launch_executable() for games with launcher stubs (e.g. HL)
+    // 3. Plugin's detected exe_path
+    // 4. Fallback: search game root for executable name
     let exe_path = if use_skse && game_id == "skyrimse" {
         let exe_name = "skse64_loader.exe";
         launcher::find_executable(&game_path, exe_name).ok_or_else(|| {
@@ -1722,31 +1723,19 @@ async fn launch_game_cmd(
                 game_path.display()
             )
         })?
-    } else if let Some(ref detected_exe) = game.exe_path {
-        // Use the exe_path from game detection — plugins like HL set this
-        // to the real binary (e.g. Phoenix/Binaries/Win64/HogwartsLegacy.exe)
-        // rather than the root launcher stub.
-        if detected_exe.exists() {
-            detected_exe.clone()
+    } else if let Some(launch_exe) = games::with_plugin(&game_id, |p| p.launch_executable(&game_path)).flatten() {
+        // Plugin specifies a dedicated launch executable (e.g. HL root launcher
+        // for DRM, vs the Phoenix binary used for detection)
+        if launch_exe.exists() {
+            launch_exe
         } else {
-            // Detected exe doesn't exist — fall back to search
-            let exe_name = games::with_plugin(&game_id, |plugin| {
-                plugin
-                    .executables()
-                    .first()
-                    .map(|s| s.to_string())
-                    .unwrap_or_default()
-            })
-            .unwrap_or_default();
-            launcher::find_executable(&game_path, &exe_name).ok_or_else(|| {
-                format!(
-                    "Game executable '{}' not found in {}",
-                    exe_name,
-                    game_path.display()
-                )
-            })?
+            return Err(format!(
+                "Launch executable not found: {}",
+                launch_exe.display()
+            ));
         }
     } else {
+        // Default: search for the first executable name from the plugin
         let exe_name = games::with_plugin(&game_id, |plugin| {
             plugin
                 .executables()

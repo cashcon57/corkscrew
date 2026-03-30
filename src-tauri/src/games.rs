@@ -98,6 +98,16 @@ pub trait GamePlugin: Send + Sync {
     ) {
     }
 
+    /// Return the executable to use for game launch, if different from the
+    /// detection executable. Some games (e.g. Hogwarts Legacy) have a root
+    /// launcher stub that invokes Steam/DRM, while the real game binary is
+    /// in a subdirectory. Detection uses the real binary, but launch must
+    /// use the root launcher for DRM to work.
+    /// Return `None` to use the detected exe_path (default behavior).
+    fn launch_executable(&self, _game_path: &Path) -> Option<PathBuf> {
+        None
+    }
+
     // -- Game directory cleaner support --
 
     /// File names (case-insensitive) that must NEVER be deleted by the cleaner.

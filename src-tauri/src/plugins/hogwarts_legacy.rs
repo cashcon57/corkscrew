@@ -191,6 +191,13 @@ impl GamePlugin for HogwartsLegacyPlugin {
         }
     }
 
+    fn launch_executable(&self, game_path: &std::path::Path) -> Option<std::path::PathBuf> {
+        // Launch the ROOT launcher (not the Phoenix binary) — the root launcher
+        // invokes Steam for DRM authentication before starting the real game.
+        // Direct launch of the Phoenix binary fails because Steam isn't running.
+        find_file_case_insensitive(game_path, "hogwartslegacy.exe")
+    }
+
     fn critical_files(&self) -> Vec<&str> {
         // The ~mods data dir doesn't contain any vanilla files — all vanilla
         // content lives in non-mod PAK files outside this directory. Nothing
