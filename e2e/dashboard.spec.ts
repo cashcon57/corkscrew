@@ -14,7 +14,7 @@ test.describe('Dashboard (functional)', () => {
 
   test('shows game count in stat pill', async ({ page }) => {
     const statValues = page.locator('.stat-value');
-    await expect(statValues.nth(1)).toHaveText('2', { timeout: 5_000 });
+    await expect(statValues.nth(1)).toHaveText('3', { timeout: 5_000 });
   });
 
   test('renders bottle cards with names', async ({ page }) => {
@@ -28,11 +28,12 @@ test.describe('Dashboard (functional)', () => {
 
   test('renders game cards with names', async ({ page }) => {
     const gameCards = page.locator('.game-card');
-    await expect(gameCards).toHaveCount(2, { timeout: 5_000 });
+    await expect(gameCards).toHaveCount(3, { timeout: 5_000 });
 
     const names = page.locator('.game-card .card-name');
     await expect(names.first()).toHaveText('Skyrim Special Edition');
     await expect(names.nth(1)).toHaveText('Fallout 4');
+    await expect(names.nth(2)).toHaveText('Hogwarts Legacy');
   });
 
   test('bottle cards show source badge', async ({ page }) => {

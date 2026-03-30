@@ -1084,5 +1084,17 @@
     "mod_path": "{documents}/Neverwinter Nights",
     "required_files": ["nwmain.exe"],
     "tools": []
+  },
+  {
+    "game_id": "hogwartslegacy",
+    "name": "Hogwarts Legacy",
+    "nexus_domain": "hogwartslegacy",
+    "steam_id": "990080",
+    "gog_id": null,
+    "epic_id": null,
+    "executable": "Phoenix/Binaries/Win64/HogwartsLegacy.exe",
+    "mod_path": "Phoenix/Content/Paks/~mods",
+    "required_files": ["Phoenix/Binaries/Win64/HogwartsLegacy.exe"],
+    "tools": []
   }
 ]

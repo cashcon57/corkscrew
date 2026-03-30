@@ -44,6 +44,15 @@ export async function injectTauriMock(
       bottle_name: "CrossOver Default",
       bottle_path: "/Users/test/Library/Application Support/CrossOver/Bottles/Default",
     },
+    {
+      game_id: "hogwartslegacy", display_name: "Hogwarts Legacy",
+      nexus_slug: "hogwartslegacy",
+      game_path: "/Users/test/Library/Application Support/CrossOver/Bottles/Default/drive_c/Program Files (x86)/Steam/steamapps/common/Hogwarts Legacy",
+      exe_path: "/Users/test/Library/Application Support/CrossOver/Bottles/Default/drive_c/Program Files (x86)/Steam/steamapps/common/Hogwarts Legacy/Phoenix/Binaries/Win64/HogwartsLegacy.exe",
+      data_dir: "/Users/test/Library/Application Support/CrossOver/Bottles/Default/drive_c/Program Files (x86)/Steam/steamapps/common/Hogwarts Legacy/Phoenix/Content/Paks/~mods",
+      bottle_name: "CrossOver Default",
+      bottle_path: "/Users/test/Library/Application Support/CrossOver/Bottles/Default",
+    },
   ];
 
   const MODS = [
@@ -53,6 +62,12 @@ export async function injectTauriMock(
     { id: 4, game_id: "skyrimse", bottle_name: "CrossOver Default", nexus_mod_id: 32444, nexus_file_id: null, source_url: null, source_type: "nexus", name: "ENB Helper SE", version: "2.2", archive_name: "ENBHelper.7z", file_count: 3, installed_at: "2026-03-01T12:03:00Z", enabled: false, staging_path: "/tmp/staging/4", install_priority: 40, collection_name: null, user_notes: null, user_tags: [], auto_category: "Visuals", collection_optional: false },
     { id: 5, game_id: "skyrimse", bottle_name: "CrossOver Default", nexus_mod_id: 32444, nexus_file_id: null, source_url: null, source_type: "nexus", name: "Address Library for SKSE Plugins", version: "11", archive_name: "AddressLibrary.7z", file_count: 1, installed_at: "2026-03-01T12:04:00Z", enabled: true, staging_path: "/tmp/staging/5", install_priority: 5, collection_name: null, user_notes: null, user_tags: ["essential"], auto_category: "Utilities", collection_optional: false },
     { id: 6, game_id: "skyrimse", bottle_name: "CrossOver Default", nexus_mod_id: null, nexus_file_id: null, source_url: null, source_type: "manual", name: "SKSE Scripts", version: "2.2.6", archive_name: "skse64_2_02_06.7z", file_count: 45, installed_at: "2026-03-01T12:05:00Z", enabled: false, staging_path: "/tmp/staging/6", install_priority: 1, collection_name: null, user_notes: "SKSE script files", user_tags: [], auto_category: "Utilities", collection_optional: false },
+    // Hogwarts Legacy mods
+    { id: 7, game_id: "hogwartslegacy", bottle_name: "CrossOver Default", nexus_mod_id: 942, nexus_file_id: null, source_url: null, source_type: "nexus", name: "RE-UE4SS", version: "2.5.1", archive_name: "UE4SS_v2.5.1.zip", file_count: 8, installed_at: "2026-03-20T10:00:00Z", enabled: true, staging_path: "/tmp/staging/7", install_priority: 1, collection_name: null, user_notes: null, user_tags: ["essential"], auto_category: "Framework", collection_optional: false },
+    { id: 8, game_id: "hogwartslegacy", bottle_name: "CrossOver Default", nexus_mod_id: 56, nexus_file_id: null, source_url: null, source_type: "nexus", name: "Blueprint Apparate Modloader", version: "1.0.1", archive_name: "BPApparate.zip", file_count: 3, installed_at: "2026-03-20T10:01:00Z", enabled: true, staging_path: "/tmp/staging/8", install_priority: 5, collection_name: null, user_notes: null, user_tags: ["essential"], auto_category: "Framework", collection_optional: false },
+    { id: 9, game_id: "hogwartslegacy", bottle_name: "CrossOver Default", nexus_mod_id: 69, nexus_file_id: null, source_url: null, source_type: "nexus", name: "Ascendio III", version: "3.0", archive_name: "Ascendio3.zip", file_count: 1, installed_at: "2026-03-20T10:02:00Z", enabled: true, staging_path: "/tmp/staging/9", install_priority: 10, collection_name: null, user_notes: null, user_tags: [], auto_category: "Performance", collection_optional: false },
+    { id: 10, game_id: "hogwartslegacy", bottle_name: "CrossOver Default", nexus_mod_id: 974, nexus_file_id: null, source_url: null, source_type: "nexus", name: "Character Editor", version: "2.0", archive_name: "CharEditor.pak", file_count: 1, installed_at: "2026-03-20T10:03:00Z", enabled: true, staging_path: "/tmp/staging/10", install_priority: 20, collection_name: "The Goblet", user_notes: null, user_tags: [], auto_category: "Cosmetics", collection_optional: false },
+    { id: 11, game_id: "hogwartslegacy", bottle_name: "CrossOver Default", nexus_mod_id: 178, nexus_file_id: null, source_url: null, source_type: "nexus", name: "Hogwarts Mod Merger Output", version: "0.12.1", archive_name: "zMergedMods_P.pak", file_count: 1, installed_at: "2026-03-20T10:04:00Z", enabled: true, staging_path: "/tmp/staging/11", install_priority: 99, collection_name: "The Goblet", user_notes: "Merged PhoenixShipData.sqlite", user_tags: [], auto_category: "Utility", collection_optional: false },
   ];
 
   const CONFIG = {
@@ -103,7 +118,9 @@ export async function injectTauriMock(
       case "get_notification_count": return 0;
       case "set_config_value": return null;
       case "list_profiles": return [{ name: "default", is_active: true, game_id: "skyrimse", bottle_name: "CrossOver Default" }];
-      case "list_installed_collections": return [];
+      case "list_installed_collections": return [
+        { slug: "uehwil", name: "The Goblet", game_domain: "hogwartslegacy", game_id: "hogwartslegacy", bottle_name: "CrossOver Default", author: "v2", latest_revision: 63, installed_revision: 63, mod_count: 132, download_size: 4294967296, status: "installed" },
+      ];
       case "get_all_interrupted_installs": return [];
       case "get_pending_wabbajack_installs": return [];
       case "check_steam_status": return { installed: false, registered: false, is_deck: false };
@@ -115,7 +132,10 @@ export async function injectTauriMock(
       case "get_bottles": return BOTTLES;
 
       // Mods page
-      case "get_installed_mods_summary": return MODS;
+      case "get_installed_mods_summary": {
+        const gid = args && args.gameId;
+        return gid ? MODS.filter(m => m.game_id === gid) : MODS;
+      }
       case "is_deploy_in_progress": return false;
       case "get_game_lock_status": return null;
       case "detect_mod_tools": return [];

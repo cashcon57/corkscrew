@@ -1720,6 +1720,7 @@
       witcher3: "Witcher 3",
       starfield: "Starfield",
       baldursgate3: "BG3",
+      hogwartslegacy: "Hogwarts Legacy",
     };
     return map[domain] || domain;
   }

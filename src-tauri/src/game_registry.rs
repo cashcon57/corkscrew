@@ -80,7 +80,7 @@ fn entries() -> &'static Vec<GameEntry> {
 
 /// Game IDs that already have dedicated plugin modules.
 /// These are skipped during auto-registration.
-const CUSTOM_PLUGIN_IDS: &[&str] = &["skyrimse", "fallout4"];
+const CUSTOM_PLUGIN_IDS: &[&str] = &["skyrimse", "fallout4", "hogwartslegacy"];
 
 /// A generic game plugin created from registry data.
 struct RegistryGamePlugin {

@@ -24,7 +24,7 @@ test.describe('Mods Page (functional)', () => {
   });
 
   test('shows mod count in header', async ({ page }) => {
-    // "4/6 mods active" or similar count text
+    // "4/6 mods active" or similar count text (Skyrim SE only — mock filters by gameId)
     await expect(page.locator('text=4/6').first()).toBeVisible({ timeout: 10_000 });
   });
 
@@ -38,7 +38,7 @@ test.describe('Mods Page (functional)', () => {
 
   test('enabled mods have toggle-on class', async ({ page }) => {
     await expect(page.locator('.toggle-switch').first()).toBeVisible({ timeout: 10_000 });
-    // Mock has 4 enabled mods
+    // Mock has 4 enabled Skyrim mods (filtered by gameId)
     const togglesOn = page.locator('.toggle-switch.toggle-on');
     await expect(togglesOn).toHaveCount(4);
   });

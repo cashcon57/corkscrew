@@ -399,6 +399,7 @@ fn builtin_tools_for_game(game_id: &str) -> Vec<ModTool> {
     let mut tools = match game_id {
         "skyrimse" => skyrim_se_tools(),
         "fallout4" => fallout4_tools(),
+        "hogwartslegacy" => hogwarts_legacy_tools(),
         _ => vec![],
     };
 
@@ -452,9 +453,14 @@ fn builtin_tools() -> Vec<ModTool> {
 /// All builtin tools across all games (for tool detection by signature).
 fn all_builtin_tools() -> Vec<ModTool> {
     let mut tools = skyrim_se_tools();
-    for fo4_tool in fallout4_tools() {
-        if !tools.iter().any(|t| t.id == fo4_tool.id) {
-            tools.push(fo4_tool);
+    for tool in fallout4_tools() {
+        if !tools.iter().any(|t| t.id == tool.id) {
+            tools.push(tool);
+        }
+    }
+    for tool in hogwarts_legacy_tools() {
+        if !tools.iter().any(|t| t.id == tool.id) {
+            tools.push(tool);
         }
     }
     tools
@@ -797,6 +803,55 @@ fn fallout4_tools() -> Vec<ModTool> {
     ];
     tools.extend(shared_tools());
     tools
+}
+
+// ---------------------------------------------------------------------------
+// Hogwarts Legacy tools
+// ---------------------------------------------------------------------------
+
+fn hogwarts_legacy_tools() -> Vec<ModTool> {
+    vec![
+        ModTool {
+            id: "ue4ss".into(),
+            name: "RE-UE4SS".into(),
+            description: "Unreal Engine scripting system — enables Lua and Blueprint mods".into(),
+            exe_names: vec!["UE4SS.dll".into(), "xinput1_3.dll".into()],
+            detected_path: None,
+            requires_wine: true,
+            category: "Framework".into(),
+            can_auto_install: true,
+            github_repo: Some("UE4SS-RE/RE-UE4SS".into()),
+            nexus_mod_id: Some(942),
+            nexus_game_slug: Some("hogwartslegacy".into()),
+            download_url: None,
+            license: "MIT".into(),
+            wine_notes: Some("DLL injection works under Wine/Proton".into()),
+            wine_compat: "good".into(),
+            recommended_alternative: None,
+            recommended_ini_edits: vec![],
+            support_url: Some("https://github.com/UE4SS-RE/RE-UE4SS".into()),
+        },
+        ModTool {
+            id: "hl-mod-merger".into(),
+            name: "Hogwarts Legacy Mod Merger".into(),
+            description: "Merge conflicting PhoenixShipData.sqlite pak mods".into(),
+            exe_names: vec!["HLModMerger.exe".into()],
+            detected_path: None,
+            requires_wine: true,
+            category: "Utility".into(),
+            can_auto_install: false,
+            github_repo: None,
+            nexus_mod_id: Some(178),
+            nexus_game_slug: Some("hogwartslegacy".into()),
+            download_url: None,
+            license: "Unknown".into(),
+            wine_notes: Some("May require .NET under Wine".into()),
+            wine_compat: "unknown".into(),
+            recommended_alternative: None,
+            recommended_ini_edits: vec![],
+            support_url: None,
+        },
+    ]
 }
 
 /// Look up a tool definition by ID (searches all games).

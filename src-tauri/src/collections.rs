@@ -321,6 +321,13 @@ const ROOT_DLLS: &[&str] = &[
     "enblocal.ini",
     "enbseries.ini",
     "enbraindrops.ini",
+    // UE4SS / ReShade / UE game injectors
+    "ue4ss.dll",
+    "ue4ss-settings.ini",
+    "xinput1_3.dll",
+    "dwmapi.dll",
+    "reshade.ini",
+    "reshade-shaders",
 ];
 
 /// Known root-level file patterns (case-insensitive prefix/suffix checks).
@@ -1475,6 +1482,7 @@ pub fn game_domain_display(domain: &str) -> &str {
         "nomanssky" => "No Man's Sky",
         "mountandblade2bannerlord" => "Bannerlord",
         "valheim" => "Valheim",
+        "hogwartslegacy" => "Hogwarts Legacy",
         other => other,
     }
 }

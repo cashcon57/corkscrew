@@ -11526,6 +11526,7 @@ pub fn run() {
     // Register game plugins (dedicated plugins first, then registry)
     plugins::skyrim_se::register();
     plugins::fallout4::register();
+    plugins::hogwarts_legacy::register();
     game_registry::register_all();
 
     // Initialize database
