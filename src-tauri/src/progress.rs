@@ -122,6 +122,19 @@ pub enum InstallProgress {
         correlation_id: String,
         installer: serde_json::Value,
     },
+    /// Hogwarts Legacy: PakChunk conflicts detected after deployment.
+    HlPakChunkWarning {
+        conflicts: Vec<crate::plugins::hogwarts_legacy::PakChunkConflict>,
+    },
+    /// Hogwarts Legacy: SQLite database merge completed.
+    HlMergeCompleted {
+        merged_paks: usize,
+        output_file: String,
+    },
+    /// Hogwarts Legacy: UE4SS framework auto-deployed.
+    HlUe4ssDeployed {
+        version: String,
+    },
 }
 
 #[cfg(test)]

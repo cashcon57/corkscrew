@@ -2734,17 +2734,68 @@ pub async fn install_collection(
             );
         }
 
+        // Auto-merge PhoenixShipData.sqlite from conflicting PAK mods
+        {
+            use crate::plugins::hl_merger;
+            let paks_with_sqlite = hl_merger::find_paks_with_sqlite(&data_dir);
+            if paks_with_sqlite.len() > 1 {
+                log::info!(
+                    "HL post-install: {} PAKs contain SQLite — auto-merging",
+                    paks_with_sqlite.len()
+                );
+                let _ = app.emit(
+                    INSTALL_PROGRESS_EVENT,
+                    InstallProgress::StepChanged {
+                        mod_index: total_mods,
+                        step: "hl_merge".to_string(),
+                        detail: Some(format!(
+                            "Merging {} mod databases...",
+                            paks_with_sqlite.len()
+                        )),
+                    },
+                );
+                match hl_merger::merge_databases(&paks_with_sqlite, &data_dir) {
+                    Ok(result) => {
+                        log::info!(
+                            "HL post-install: merged {} PAKs ({} rows across {} tables) → {}",
+                            result.merged_paks,
+                            result.rows_merged,
+                            result.tables_modified,
+                            result.output_file,
+                        );
+                        let _ = app.emit(
+                            INSTALL_PROGRESS_EVENT,
+                            InstallProgress::HlMergeCompleted {
+                                merged_paks: result.merged_paks,
+                                output_file: result.output_file,
+                            },
+                        );
+                    }
+                    Err(e) => {
+                        log::warn!("HL post-install: auto-merge failed: {}", e);
+                    }
+                }
+            } else if paks_with_sqlite.len() == 1 {
+                log::info!("HL post-install: only 1 PAK contains SQLite — no merge needed");
+            }
+        }
+
         // UE4SS auto-deploy if Lua/Logic mods are present
+        // Check installed files for Lua mod patterns (Scripts/main.lua) or
+        // Logic mod patterns (.logicmod, LogicMods/)
         let has_lua_or_logic = db
-            .get_mods(game_id, bottle_name)
+            .list_mods(game_id, bottle_name)
             .unwrap_or_default()
             .iter()
+            .filter(|m| m.collection_name.as_deref() == Some(&manifest.name))
             .any(|m| {
-                m.collection_name.as_deref() == Some(&manifest.name)
-                    && matches!(
-                        m.mod_type.as_deref(),
-                        Some("hl-lua-mod") | Some("hl-logic-mod")
-                    )
+                m.installed_files.iter().any(|f| {
+                    let fl = f.to_lowercase();
+                    fl.contains("scripts/main.lua")
+                        || fl.contains("logicmods/")
+                        || fl.ends_with(".logicmod")
+                        || fl.ends_with(".ue4sslogicmod")
+                })
             });
         if has_lua_or_logic && !hogwarts_legacy::is_ue4ss_installed(&game_path) {
             log::info!("HL post-install: Lua/Logic mods detected but UE4SS missing — auto-installing");

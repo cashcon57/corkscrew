@@ -244,6 +244,21 @@ pub const TOOL_SIGNATURES: &[ToolSignature] = &[
         name_patterns: &[],
         game_ids: &["fallout4"],
     },
+    // -- Hogwarts Legacy tools --
+    ToolSignature {
+        tool_id: "ue4ss",
+        tool_name: "RE-UE4SS",
+        nexus_mod_ids: &[942],
+        name_patterns: &["ue4ss", "re-ue4ss"],
+        game_ids: &["hogwartslegacy"],
+    },
+    ToolSignature {
+        tool_id: "hl-mod-merger",
+        tool_name: "Hogwarts Legacy Mod Merger",
+        nexus_mod_ids: &[178],
+        name_patterns: &["hlmodmerger", "mod merger"],
+        game_ids: &["hogwartslegacy"],
+    },
 ];
 
 /// A tool detected as required by a collection or wabbajack modlist.

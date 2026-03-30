@@ -5,6 +5,7 @@
 //! plugin registry.
 
 pub mod fallout4;
+pub mod hl_merger;
 pub mod hogwarts_legacy;
 pub mod skyrim_plugins;
 pub mod skyrim_se;
