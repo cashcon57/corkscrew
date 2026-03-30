@@ -308,6 +308,15 @@ impl ModDatabase {
             .map_err(|e| DatabaseError::Other(format!("Failed to lock database: {}", e)))
     }
 
+    /// Run PRAGMA integrity_check and return the result string.
+    pub fn execute_pragma_integrity_check(&self) -> Result<String> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let result: String = conn
+            .prepare("PRAGMA integrity_check")?
+            .query_row([], |row| row.get(0))?;
+        Ok(result)
+    }
+
     // -- helpers ------------------------------------------------------------
 
     /// Build an `InstalledMod` from the current row of a prepared statement.
@@ -2155,6 +2164,100 @@ impl ModDatabase {
             .prepare("SELECT COUNT(*) FROM notification_log")?
             .query_row([], |row| row.get(0))?;
         Ok(count as usize)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Error Event Diagnostics
+// ---------------------------------------------------------------------------
+
+/// A structured error event for proactive diagnostics.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ErrorEvent {
+    pub id: i64,
+    pub timestamp: String,
+    pub module: String,
+    pub error_type: String,
+    pub message: String,
+    pub count: i64,
+    pub first_seen: String,
+    pub last_seen: String,
+    pub resolved: bool,
+}
+
+impl ModDatabase {
+    /// Record a diagnostic error event. If the same (module, error_type, message) was seen
+    /// within the last hour and is unresolved, increment its count; otherwise insert a new row.
+    pub fn record_error_event(
+        &self,
+        module: &str,
+        error_type: &str,
+        message: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Try to find an existing unresolved row within the last hour
+        let existing: Option<i64> = conn
+            .prepare(
+                "SELECT id FROM error_events
+                 WHERE module = ?1 AND error_type = ?2 AND message = ?3
+                   AND resolved = 0 AND last_seen > datetime('now', '-1 hour')
+                 LIMIT 1",
+            )?
+            .query_row(params![module, error_type, message], |row| row.get(0))
+            .ok();
+
+        if let Some(id) = existing {
+            conn.execute(
+                "UPDATE error_events SET count = count + 1, last_seen = datetime('now') WHERE id = ?1",
+                params![id],
+            )?;
+        } else {
+            conn.execute(
+                "INSERT INTO error_events (module, error_type, message) VALUES (?1, ?2, ?3)",
+                params![module, error_type, message],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Get a summary of top unresolved error events by count.
+    pub fn get_error_summary(&self, limit: u32) -> Result<Vec<ErrorEvent>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT id, timestamp, module, error_type, message, count, first_seen, last_seen, resolved
+             FROM error_events
+             WHERE resolved = 0
+             ORDER BY count DESC, last_seen DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![limit], |row| {
+                Ok(ErrorEvent {
+                    id: row.get(0)?,
+                    timestamp: row.get(1)?,
+                    module: row.get(2)?,
+                    error_type: row.get(3)?,
+                    message: row.get(4)?,
+                    count: row.get(5)?,
+                    first_seen: row.get(6)?,
+                    last_seen: row.get(7)?,
+                    resolved: row.get::<_, i64>(8)? != 0,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Mark an error event as resolved.
+    pub fn resolve_error_event(&self, id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "UPDATE error_events SET resolved = 1 WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
     }
 }
 

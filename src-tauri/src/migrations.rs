@@ -19,7 +19,7 @@ pub enum MigrationError {
 pub type Result<T> = std::result::Result<T, MigrationError>;
 
 /// The current target schema version. Bump this when adding a new migration.
-const TARGET_VERSION: u32 = 20;
+const TARGET_VERSION: u32 = 21;
 
 /// Get the current schema version (0 if no version table exists).
 pub fn current_version(conn: &Connection) -> Result<u32> {
@@ -144,6 +144,11 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     if version == 19 {
         migrate_v19_to_v20(conn)?;
         version = 20;
+    }
+
+    if version == 20 {
+        migrate_v20_to_v21(conn)?;
+        version = 21;
     }
 
     let _ = version; // suppress unused warning when TARGET_VERSION == current
@@ -1019,6 +1024,36 @@ fn migrate_v19_to_v20(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Migration 20 → 21: Structured error tracking table for proactive diagnostics.
+fn migrate_v20_to_v21(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS error_events (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp   TEXT    NOT NULL DEFAULT (datetime('now')),
+            module      TEXT    NOT NULL,
+            error_type  TEXT    NOT NULL,
+            message     TEXT    NOT NULL,
+            count       INTEGER NOT NULL DEFAULT 1,
+            first_seen  TEXT    NOT NULL DEFAULT (datetime('now')),
+            last_seen   TEXT    NOT NULL DEFAULT (datetime('now')),
+            resolved    INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_error_events_module
+            ON error_events (module, error_type);
+
+        CREATE INDEX IF NOT EXISTS idx_error_events_last_seen
+            ON error_events (last_seen DESC);",
+    )?;
+
+    tx.execute("UPDATE schema_version SET version = 21", [])?;
+    tx.commit()?;
+    log::info!("Migration 20 → 21 complete (error_events table)");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1054,6 +1089,7 @@ mod tests {
         assert!(tables.contains(&"download_collection_refs".to_string()));
         assert!(tables.contains(&"collection_metadata".to_string()));
         assert!(tables.contains(&"notification_log".to_string()));
+        assert!(tables.contains(&"error_events".to_string()));
     }
 
     #[test]
@@ -1156,7 +1192,7 @@ mod tests {
     fn v13_creates_deployment_manifest_index() {
         let conn = memory_db();
         migrate(&conn).unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 20);
+        assert_eq!(current_version(&conn).unwrap(), TARGET_VERSION);
 
         // Verify the compound index exists
         let index_exists: bool = conn

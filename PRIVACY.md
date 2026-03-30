@@ -1,14 +1,14 @@
 # Corkscrew Privacy Policy
 
 **Effective Date:** March 12, 2026
-**Last Updated:** March 12, 2026
+**Last Updated:** March 30, 2026
 
 Corkscrew is an open-source mod manager for CrossOver/Wine games on macOS and Linux. Your privacy matters. This policy explains what data Corkscrew accesses, why, and what it does not do.
 
 ## Summary
 
 - Corkscrew runs entirely on your computer. It has no backend servers.
-- Corkscrew does not collect, store, or transmit any analytics, telemetry, or usage data.
+- Corkscrew offers **opt-in crash reporting** via Sentry. This is disabled by default and only sends anonymous error data if you explicitly enable it.
 - Corkscrew does not sell, share, or monetize your data in any way.
 - All user data (mod lists, settings, chat history) is stored locally on your machine and never leaves it unless you explicitly use a cloud feature described below.
 
@@ -60,6 +60,15 @@ Corkscrew integrates with the following third-party services. **All cloud featur
 
 - **What**: If you use a local AI model via Ollama, all processing happens on your machine. No data is sent to any external server.
 
+### Crash Reporting (Sentry) — Opt-In
+
+- **What**: If you choose to enable anonymous crash reporting, Corkscrew sends error data to [Sentry](https://sentry.io/) when panics or unhandled errors occur.
+- **Data sent**: Error type, stack trace, error message, app version, OS type. **No personal data, mod lists, file paths, usernames, or API keys are sent.** The `send_default_pii` option is explicitly disabled.
+- **Data NOT sent**: Mod lists, game paths, NexusMods credentials, chat history, file contents, or any user-identifiable information.
+- **Purpose**: To help developers identify and fix crashes proactively.
+- **Default**: Disabled. You are asked once on first launch and can change your preference at any time in Settings > General > Privacy & Telemetry.
+- **Privacy policy**: [Sentry Privacy Policy](https://sentry.io/privacy/)
+
 ### Auto-Updater
 
 - **What**: Corkscrew checks for updates by fetching a `latest.json` file from GitHub Releases.
@@ -68,10 +77,10 @@ Corkscrew integrates with the following third-party services. **All cloud featur
 
 ## Data We Do NOT Collect
 
-- No analytics or telemetry
-- No crash reports (crash logs are stored locally only)
+- No analytics or usage telemetry
+- No crash reports unless you opt in (crash logs are stored locally; Sentry reporting is off by default)
 - No device fingerprinting
-- No IP address logging
+- No IP address logging (Sentry may log IPs as part of standard HTTPS; we do not access or store them)
 - No advertising identifiers
 - No cookies or tracking pixels
 - No data shared with any third party beyond the explicit API calls described above
@@ -90,4 +99,4 @@ For privacy questions or concerns, open an issue on the [Corkscrew GitHub reposi
 
 ## Open Source
 
-Corkscrew is open source under the MIT license. You can audit exactly what the app does at any time by reviewing the source code at [github.com/cashcon57/corkscrew](https://github.com/cashcon57/corkscrew).
+Corkscrew is open source under the GPL-3.0-or-later license. You can audit exactly what the app does at any time by reviewing the source code at [github.com/cashcon57/corkscrew](https://github.com/cashcon57/corkscrew).

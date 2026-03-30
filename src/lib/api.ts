@@ -1705,6 +1705,19 @@ export async function getNotificationCount(): Promise<number> {
   return invoke("get_notification_count");
 }
 
+// Error Event Diagnostics
+export async function recordErrorEvent(
+  module: string,
+  errorType: string,
+  message: string
+): Promise<void> {
+  return invoke("record_error_event_cmd", { module, errorType, message });
+}
+
+export async function getErrorSummary(limit?: number): Promise<any[]> {
+  return invoke("get_error_summary", { limit: limit ?? 20 });
+}
+
 // Deploy progress events
 export function onDeployProgress(
   callback: (progress: DeployProgress) => void

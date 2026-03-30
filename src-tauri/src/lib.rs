@@ -1447,46 +1447,32 @@ async fn delete_orphaned_downloads(
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
-/// Fetch a transparent game logo PNG from Steam CDN and cache it locally.
-/// Returns a base64-encoded data URL, or null if unavailable.
-/// The PNG is cached on disk so subsequent calls are instant.
+/// Fetch a game icon and cache it locally. Returns a base64-encoded data URL.
+///
+/// Icon sources (tried in order):
+/// 1. Disk cache (instant, no network)
+/// 2. SteamGridDB Icons API — most popular transparent PNG icon
+/// 3. Steam CDN logo fallback
+///
+/// Works for ANY game with a Steam App ID in the registry (84+ games).
 #[tauri::command]
 async fn get_game_logo(game_id: String) -> Result<Option<String>, String> {
-    use std::collections::HashMap;
+    let icon_dir = config::cache_dir().join("game-icons");
+    let cached_path = icon_dir.join(format!("{game_id}.png"));
 
-    // Steam App IDs for known games
-    let steam_ids: HashMap<&str, u32> = HashMap::from([
-        ("skyrimse", 489830),
-        ("skyrim", 72850),
-        ("fallout4", 377160),
-        ("falloutnv", 22380),
-        ("fallout3", 22300),
-        ("oblivion", 22330),
-        ("morrowind", 22320),
-        ("starfield", 1716740),
-        ("enderal", 933480),
-        ("cyberpunk2077", 1091500),
-        ("baldursgate3", 1086940),
-        ("witcher3", 292030),
-    ]);
-
-    let app_id = match steam_ids.get(game_id.as_str()) {
-        Some(id) => *id,
-        None => return Ok(None),
-    };
-
-    let logo_dir = config::cache_dir().join("game-logos");
-    let cached_path = logo_dir.join(format!("{game_id}.png"));
-
-    // Return cached version if it exists (instant — no network)
+    // 1. Return cached version if it exists (instant)
     if cached_path.exists() {
         let bytes = std::fs::read(&cached_path).map_err(|e| e.to_string())?;
-        let b64 = base64_encode(&bytes);
-        return Ok(Some(format!("data:image/png;base64,{b64}")));
+        if !bytes.is_empty() {
+            let b64 = base64_encode(&bytes);
+            return Ok(Some(format!("data:image/png;base64,{b64}")));
+        }
     }
 
-    // Fetch from Steam CDN
-    let url = format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{app_id}/logo.png");
+    // Look up Steam App ID from the game registry (covers all 84+ games)
+    let steam_app_id = game_registry::get_game_entry(&game_id)
+        .and_then(|e| e.steam_id.as_deref())
+        .and_then(|s| s.parse::<u32>().ok());
 
     let client = reqwest::Client::builder()
         .user_agent(format!("Corkscrew/{}", env!("CARGO_PKG_VERSION")))
@@ -1494,25 +1480,117 @@ async fn get_game_logo(game_id: String) -> Result<Option<String>, String> {
         .build()
         .map_err(|e| e.to_string())?;
 
-    let response = client.get(&url).send().await.map_err(|e| e.to_string())?;
-
-    if !response.status().is_success() {
-        return Ok(None);
+    // 2. Try SteamGridDB Icons API (transparent PNG, sorted by popularity)
+    if let Some(app_id) = steam_app_id {
+        if let Some(bytes) = fetch_steamgriddb_icon(&client, app_id).await {
+            std::fs::create_dir_all(&icon_dir).map_err(|e| e.to_string())?;
+            std::fs::write(&cached_path, &bytes).map_err(|e| e.to_string())?;
+            let b64 = base64_encode(&bytes);
+            return Ok(Some(format!("data:image/png;base64,{b64}")));
+        }
     }
 
-    let bytes = response.bytes().await.map_err(|e| e.to_string())?;
+    // 3. Fall back to Steam CDN logo
+    if let Some(app_id) = steam_app_id {
+        let url = format!(
+            "https://cdn.cloudflare.steamstatic.com/steam/apps/{app_id}/logo.png"
+        );
+        if let Ok(response) = client.get(&url).send().await {
+            if response.status().is_success() {
+                if let Ok(bytes) = response.bytes().await {
+                    if bytes.len() >= 8 && &bytes[..4] == b"\x89PNG" {
+                        std::fs::create_dir_all(&icon_dir).map_err(|e| e.to_string())?;
+                        std::fs::write(&cached_path, &bytes).map_err(|e| e.to_string())?;
+                        let b64 = base64_encode(&bytes);
+                        return Ok(Some(format!("data:image/png;base64,{b64}")));
+                    }
+                }
+            }
+        }
+    }
 
-    // Verify it's actually a PNG (starts with PNG magic bytes)
+    Ok(None)
+}
+
+/// Fetch the most popular transparent icon from SteamGridDB for a Steam app.
+///
+/// Uses the SteamGridDB API v2:
+/// 1. Look up the SteamGridDB game ID from the Steam App ID
+/// 2. Fetch icons sorted by score, filtered to PNG only
+/// 3. Download the top-scoring icon image
+async fn fetch_steamgriddb_icon(client: &reqwest::Client, steam_app_id: u32) -> Option<Vec<u8>> {
+    let api_key = config::get_config()
+        .ok()
+        .and_then(|c| {
+            let val = c.extra.get("steamgriddb_api_key")?;
+            val.as_str().map(String::from)
+        })
+        .unwrap_or_default();
+
+    if api_key.is_empty() {
+        return None;
+    }
+
+    // Step 1: Get SteamGridDB game ID from Steam App ID
+    let game_url = format!(
+        "https://www.steamgriddb.com/api/v2/games/steam/{steam_app_id}"
+    );
+    let game_resp = client
+        .get(&game_url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .send()
+        .await
+        .ok()?;
+
+    if !game_resp.status().is_success() {
+        return None;
+    }
+
+    let game_json: serde_json::Value = game_resp.json().await.ok()?;
+    let sgdb_game_id = game_json
+        .get("data")
+        .and_then(|d| d.get("id"))
+        .and_then(|id| id.as_u64())?;
+
+    // Step 2: Fetch icons — PNG, sorted by score (most popular first)
+    let icons_url = format!(
+        "https://www.steamgriddb.com/api/v2/icons/game/{sgdb_game_id}?types=static&mimes=image/png&nsfw=false&humor=false&limit=1"
+    );
+    let icons_resp = client
+        .get(&icons_url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .send()
+        .await
+        .ok()?;
+
+    if !icons_resp.status().is_success() {
+        return None;
+    }
+
+    let icons_json: serde_json::Value = icons_resp.json().await.ok()?;
+    let icon_url = icons_json
+        .get("data")
+        .and_then(|d| d.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|icon| icon.get("url"))
+        .and_then(|u| u.as_str())?;
+
+    // Step 3: Download the actual icon image
+    let img_resp = client.get(icon_url).send().await.ok()?;
+    if !img_resp.status().is_success() {
+        return None;
+    }
+
+    let bytes = img_resp.bytes().await.ok()?;
+
+    let bytes = bytes.to_vec();
+
+    // Verify it's a valid PNG
     if bytes.len() < 8 || &bytes[..4] != b"\x89PNG" {
-        return Ok(None);
+        return None;
     }
 
-    // Cache to disk for next time
-    std::fs::create_dir_all(&logo_dir).map_err(|e| e.to_string())?;
-    std::fs::write(&cached_path, &bytes).map_err(|e| e.to_string())?;
-
-    let b64 = base64_encode(&bytes);
-    Ok(Some(format!("data:image/png;base64,{b64}")))
+    Some(bytes)
 }
 
 /// Simple base64 encoder (avoids adding a dependency).
@@ -4208,6 +4286,38 @@ async fn get_notification_count(state: State<'_, AppState>) -> Result<usize, Str
         .map_err(|e| format!("Task failed: {e}"))?
 }
 
+// --- Error Event Diagnostics ---
+
+#[tauri::command]
+async fn record_error_event_cmd(
+    module: String,
+    error_type: String,
+    message: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        db.record_error_event(&module, &error_type, &message)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
+#[tauri::command]
+async fn get_error_summary(
+    limit: Option<u32>,
+    state: State<'_, AppState>,
+) -> Result<Vec<database::ErrorEvent>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        db.get_error_summary(limit.unwrap_or(20))
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
 // --- Download Queue ---
 
 #[tauri::command]
@@ -5421,6 +5531,12 @@ async fn parse_wabbajack_file(file_path: String) -> Result<ParsedModlist, String
 
 #[tauri::command]
 async fn check_wabbajack_cache(filename: String) -> Result<String, String> {
+    // Validate filename to prevent path traversal
+    let safe_name = std::path::Path::new(&filename)
+        .file_name()
+        .ok_or_else(|| "Invalid filename".to_string())?
+        .to_string_lossy()
+        .to_string();
     let download_dir = config::get_config()
         .ok()
         .and_then(|c| c.download_dir)
@@ -5431,7 +5547,7 @@ async fn check_wabbajack_cache(filename: String) -> Result<String, String> {
                 .join("corkscrew")
                 .join("downloads")
         });
-    let dest = download_dir.join(&filename);
+    let dest = download_dir.join(&safe_name);
     if dest.exists() && std::fs::metadata(&dest).map(|m| m.len() > 0).unwrap_or(false) {
         Ok(dest.to_string_lossy().to_string())
     } else {
@@ -5441,6 +5557,17 @@ async fn check_wabbajack_cache(filename: String) -> Result<String, String> {
 
 #[tauri::command]
 async fn download_wabbajack_file(app: tauri::AppHandle, url: String, filename: String, force: Option<bool>) -> Result<String, String> {
+    // Validate URL scheme to prevent SSRF
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return Err(format!("Blocked unsafe URL scheme: {url}"));
+    }
+    // Validate filename to prevent path traversal
+    let safe_name = std::path::Path::new(&filename)
+        .file_name()
+        .ok_or_else(|| "Invalid filename".to_string())?
+        .to_string_lossy()
+        .to_string();
+
     let download_dir = config::get_config()
         .ok()
         .and_then(|c| c.download_dir)
@@ -5455,7 +5582,7 @@ async fn download_wabbajack_file(app: tauri::AppHandle, url: String, filename: S
     std::fs::create_dir_all(&download_dir)
         .map_err(|e| format!("Failed to create download directory: {e}"))?;
 
-    let dest = download_dir.join(&filename);
+    let dest = download_dir.join(&safe_name);
 
     // Check if file already exists (skip redownload)
     // TODO: Verify cached file hash matches modlist metadata.
@@ -7059,12 +7186,32 @@ fn get_system_memory() -> Result<u64, String> {
 async fn install_ollama() -> Result<String, String> {
     #[cfg(target_os = "linux")]
     {
+        // Download the install script to a temp file first, then execute it.
+        // This avoids piping arbitrary remote content directly into a shell.
+        let tmp_dir = std::env::temp_dir();
+        let script_path = tmp_dir.join("ollama-install.sh");
+
+        let download = tokio::process::Command::new("curl")
+            .args(["-fsSL", "--max-time", "30", "-o"])
+            .arg(&script_path)
+            .arg("https://ollama.com/install.sh")
+            .output()
+            .await
+            .map_err(|e| format!("Failed to download install script: {e}"))?;
+
+        if !download.status.success() {
+            let stderr = String::from_utf8_lossy(&download.stderr);
+            return Err(format!("Failed to download Ollama installer: {stderr}"));
+        }
+
         let output = tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg("curl -fsSL https://ollama.com/install.sh | sh")
+            .arg(&script_path)
             .output()
             .await
             .map_err(|e| format!("Failed to run install script: {e}"))?;
+
+        // Clean up the script regardless of outcome
+        let _ = tokio::fs::remove_file(&script_path).await;
 
         if output.status.success() {
             Ok("Ollama installed successfully. It should now be running.".into())
@@ -11615,6 +11762,78 @@ fn kill_mlx_server() {
     log::info!("Killed MLX LM server if running");
 }
 
+/// Run startup health checks after self-healing.
+/// Logs results and emits an event if issues are found.
+fn run_startup_health_check(
+    db: &Arc<database::ModDatabase>,
+    app_handle: &tauri::AppHandle,
+) {
+    let start = std::time::Instant::now();
+    let mut issues: Vec<String> = Vec::new();
+
+    // 1. DB integrity check
+    match db.execute_pragma_integrity_check() {
+        Ok(ref result) if result == "ok" => {
+            log::info!("Startup health: DB integrity OK");
+        }
+        Ok(result) => {
+            log::error!("Startup health: DB integrity issue: {}", result);
+            issues.push(format!("Database integrity: {}", result));
+        }
+        Err(e) => {
+            log::error!("Startup health: DB integrity check failed: {}", e);
+            issues.push(format!("Database integrity check error: {}", e));
+        }
+    }
+
+    // 2. Staging dir existence
+    let cfg = config::get_config().unwrap_or_default();
+    let staging_base = cfg
+        .staging_dir
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| config::data_dir().join("staging"));
+    if !staging_base.exists() {
+        log::warn!(
+            "Startup health: staging dir missing, creating: {}",
+            staging_base.display()
+        );
+        let _ = std::fs::create_dir_all(&staging_base);
+        issues.push("Staging directory was missing (recreated)".to_string());
+    }
+
+    // 3. Stale deploy journal entries
+    let stale = deploy_journal::get_incomplete().len();
+    if stale > 0 {
+        log::warn!(
+            "Startup health: {} incomplete deploy journal entries",
+            stale
+        );
+        issues.push(format!(
+            "{} incomplete deployment journal entries found",
+            stale
+        ));
+    }
+
+    let elapsed = start.elapsed();
+    log::info!(
+        "Startup health check completed in {}ms ({} issues)",
+        elapsed.as_millis(),
+        issues.len()
+    );
+
+    // Record issues as error events for diagnostics
+    for issue in &issues {
+        let _ = db.record_error_event("startup_health", "issue", issue);
+    }
+
+    if !issues.is_empty() {
+        let _ = app_handle.emit(
+            "startup-health-issues",
+            serde_json::json!({ "issues": issues }),
+        );
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Kill any leftover MLX server from a previous crash/dev restart
@@ -11641,6 +11860,19 @@ pub fn run() {
 
     // Set up logging: write to both stderr and a log file for GUI debugging.
     let log_path = config::data_dir().join("corkscrew.log");
+
+    // Rotate logs: keep 3 files at 5 MB each (corkscrew.log → .1.log → .2.log)
+    if let Ok(meta) = std::fs::metadata(&log_path) {
+        if meta.len() > 5 * 1024 * 1024 {
+            let dir = log_path.parent().unwrap();
+            let log2 = dir.join("corkscrew.2.log");
+            let log1 = dir.join("corkscrew.1.log");
+            let _ = std::fs::remove_file(&log2);
+            let _ = std::fs::rename(&log1, &log2);
+            let _ = std::fs::rename(&log_path, &log1);
+        }
+    }
+
     let log_file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -11653,12 +11885,6 @@ pub fn run() {
         .filter_module("wry", log::LevelFilter::Warn);
 
     if let Ok(file) = log_file {
-        // Truncate log if over 10 MB to avoid unbounded growth
-        if let Ok(meta) = std::fs::metadata(&log_path) {
-            if meta.len() > 10 * 1024 * 1024 {
-                let _ = std::fs::write(&log_path, b"");
-            }
-        }
         let file = std::sync::Mutex::new(file);
         builder
             .format(move |buf, record| {
@@ -11684,6 +11910,55 @@ pub fn run() {
         log::info!("Logging to file: {}", log_path.display());
     } else {
         builder.init();
+    }
+
+    // Initialize Sentry if user has opted in to telemetry
+    const SENTRY_DSN: &str = "https://de71b88287dbb157e219aff7e1ba2d9c@o4511134300045312.ingest.us.sentry.io/4511134367940608";
+    let _sentry_guard = {
+        let consent = config::get_config()
+            .ok()
+            .and_then(|c| c.extra.get("telemetry_consent").and_then(|v| v.as_str().map(String::from)));
+        if consent.as_deref() == Some("granted") {
+            log::info!("Telemetry enabled — initializing Sentry");
+            Some(sentry::init((
+                SENTRY_DSN,
+                sentry::ClientOptions {
+                    release: Some(std::borrow::Cow::Owned(
+                        env!("CARGO_PKG_VERSION").to_string(),
+                    )),
+                    sample_rate: 1.0,
+                    attach_stacktrace: true,
+                    send_default_pii: false,
+                    ..Default::default()
+                },
+            )))
+        } else {
+            None
+        }
+    };
+
+    // Global panic hook — log panics to file, record in error_events, and forward to Sentry
+    {
+        let panic_db = Arc::clone(&db);
+        // Take the current hook (which includes Sentry's if it was initialized)
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let location = info
+                .location()
+                .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+                .unwrap_or_else(|| "unknown".to_string());
+            let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = info.payload().downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "Unknown panic".to_string()
+            };
+            log::error!("PANIC at {}: {}", location, payload);
+            let _ = panic_db.record_error_event("rust_panic", &location, &payload);
+            // Forward to previous hook (Sentry's panic handler if active)
+            prev_hook(info);
+        }));
     }
 
     // --- CLI mode ---
@@ -12054,6 +12329,9 @@ pub fn run() {
         }
     }
 
+    // Clone db for setup closure access
+    let db_for_setup = Arc::clone(&db);
+
     #[allow(unused_mut)]
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -12061,11 +12339,50 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_liquid_glass::init())
-        .setup(|app| {
+        .setup(move |app| {
             // Register updater plugin in setup per Tauri docs (advanced pattern)
             app.handle()
                 .plugin(tauri_plugin_updater::Builder::new().build())?;
             app.manage(app_updates::PendingUpdate(std::sync::Mutex::new(None)));
+
+            // Run startup health check in background
+            let health_db = db_for_setup.clone();
+            let health_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                run_startup_health_check(&health_db, &health_handle);
+            });
+
+            // Periodic error reporter — every 30 min, report high-frequency errors to Sentry
+            let report_db = db_for_setup;
+            std::thread::spawn(move || {
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(30 * 60));
+                    let consent = config::get_config()
+                        .ok()
+                        .and_then(|c| {
+                            c.extra
+                                .get("telemetry_consent")
+                                .and_then(|v| v.as_str().map(String::from))
+                        });
+                    if consent.as_deref() != Some("granted") {
+                        continue;
+                    }
+                    if let Ok(errors) = report_db.get_error_summary(10) {
+                        for err in &errors {
+                            if err.count > 5 {
+                                sentry::capture_message(
+                                    &format!(
+                                        "[{}] {}: {} (count: {})",
+                                        err.module, err.error_type, err.message, err.count
+                                    ),
+                                    sentry::Level::Warning,
+                                );
+                            }
+                        }
+                    }
+                }
+            });
+
             Ok(())
         });
 
@@ -12323,6 +12640,9 @@ pub fn run() {
             clear_notification_log,
             log_notification,
             get_notification_count,
+            // Error Event Diagnostics
+            record_error_event_cmd,
+            get_error_summary,
             // Download Queue
             get_download_queue,
             get_download_queue_counts,

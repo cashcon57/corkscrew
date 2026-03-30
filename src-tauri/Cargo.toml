@@ -1,6 +1,6 @@
 [package]
 name = "corkscrew"
-version = "0.9.50"
+version = "0.9.51"
 description = "A mod manager for CrossOver/Wine games on macOS and Linux"
 authors = ["cashconway"]
 edition = "2021"
@@ -21,7 +21,7 @@ tauri-plugin-deep-link = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 tauri-plugin-liquid-glass = "0.1"
-tauri-plugin-mcp = { git = "https://github.com/P3GLEG/tauri-plugin-mcp" }
+tauri-plugin-mcp = { git = "https://github.com/P3GLEG/tauri-plugin-mcp", rev = "ac709a71d30ac2f167dd79c4f803500a236262f6" }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -61,6 +61,7 @@ anyhow = "1"
 # Logging
 log = "0.4"
 env_logger = "0.11"
+sentry = { version = "0.35", default-features = false, features = ["backtrace", "contexts", "panic", "reqwest", "rustls"] }
 
 # Date/time
 chrono = { version = "0.4", features = ["serde"] }

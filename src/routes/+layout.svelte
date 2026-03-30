@@ -17,12 +17,14 @@
   import type { DetectedGame, QueueItem } from "$lib/types";
   import NotificationLog from "$lib/components/mods/NotificationLog.svelte";
   import FirstRunWizard from "$lib/components/FirstRunWizard.svelte";
+  import TelemetryBanner from "$lib/components/TelemetryBanner.svelte";
   import SpotlightSearch from "$lib/components/SpotlightSearch.svelte";
   import TopBar from "$lib/components/topbar/TopBar.svelte";
   import { GamepadManager } from "$lib/gamepad";
   import type { GamepadAction } from "$lib/gamepad";
-  import { getNotificationCount, logNotification } from "$lib/api";
+  import { getNotificationCount, logNotification, recordErrorEvent } from "$lib/api";
   import LlmChat from "$lib/components/LlmChat.svelte";
+  import { initSentry, captureError } from "$lib/sentry";
 
   const navItems = [
     { id: "discover", label: "Discover" },
@@ -92,6 +94,7 @@
 
   // First-run wizard state
   let showFirstRunWizard = $state(false);
+  let showTelemetryBanner = $state(false);
 
   // Spotlight search
   let showSpotlight = $state(false);
@@ -229,6 +232,30 @@
 
   onMount(() => {
     initTheme();
+
+    // Initialize Sentry (no-op if user hasn't opted in)
+    initSentry();
+
+    // Global error handlers — catch unhandled rejections and runtime errors
+    function handleUnhandledRejection(event: PromiseRejectionEvent) {
+      const msg = event.reason?.message || event.reason?.toString?.() || 'Unknown promise rejection';
+      console.error('[Unhandled Rejection]', event.reason);
+      wrappedShowError(`Unhandled error: ${msg}`);
+      captureError(event.reason instanceof Error ? event.reason : msg, { source: 'unhandledrejection' });
+      recordErrorEvent('frontend', 'unhandled_rejection', msg.substring(0, 500))
+        .catch((err) => console.error('Failed to record error event:', err));
+    }
+    function handleGlobalError(event: ErrorEvent) {
+      const msg = event.error?.message || event.message || 'Unknown error';
+      console.error('[Unhandled Error]', event.error || event.message);
+      wrappedShowError(`Unhandled error: ${msg}`);
+      captureError(event.error instanceof Error ? event.error : msg, { source: 'window.onerror' });
+      recordErrorEvent('frontend', 'unhandled_error', msg.substring(0, 500))
+        .catch((err) => console.error('Failed to record error event:', err));
+    }
+    window.addEventListener('unhandledrejection', handleUnhandledRejection);
+    window.addEventListener('error', handleGlobalError);
+
     loadDetectedGames();
     getVersion().then(async (v) => {
       appVersion.set(v);
@@ -247,8 +274,13 @@
       } catch { /* config not available yet */ }
     }).catch((err) => console.error('Failed to load version info:', err));
 
-    // Check if first-run wizard should show + load game fixes preference
+    // Check if first-run wizard should show + load game fixes preference + telemetry consent
     getConfig().then(config => {
+      // Show telemetry banner if user hasn't decided yet
+      const consent = (config as Record<string, unknown>).telemetry_consent;
+      if (consent === undefined || consent === null) {
+        showTelemetryBanner = true;
+      }
       if (!config.has_completed_setup) {
         showFirstRunWizard = true;
       }
@@ -406,6 +438,8 @@
     return () => {
       document.removeEventListener("click", handleClickOutside);
       document.removeEventListener("keydown", handleKeydown);
+      window.removeEventListener('unhandledrejection', handleUnhandledRejection);
+      window.removeEventListener('error', handleGlobalError);
       gamepad.stop();
       if (queueUnlisten) queueUnlisten();
       destroyHashingListener();
@@ -1593,6 +1627,8 @@
 {#if showFirstRunWizard}
   <FirstRunWizard onComplete={() => showFirstRunWizard = false} />
 {/if}
+
+<TelemetryBanner bind:visible={showTelemetryBanner} />
 
 {#if showSpotlight}
   <SpotlightSearch onClose={() => showSpotlight = false} />

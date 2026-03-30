@@ -32,6 +32,8 @@
   let savingDownloadDir = $state(false);
   let autoDeleteArchives = $state(false);
   let savingAutoDelete = $state(false);
+  let telemetryEnabled = $state(false);
+  let savingTelemetry = $state(false);
   let installingSkse = $state(false);
   let uninstallingSkse = $state(false);
   let showComparisonDialog = $state(false);
@@ -407,6 +409,7 @@
       autoDeleteArchives = (cfg as Record<string, unknown>).auto_delete_archives === "true";
       disableGameFixes = (cfg as Record<string, unknown>).disable_game_fixes === "true";
       useOriginalEngineFixes = (cfg as Record<string, unknown>).use_original_engine_fixes === true;
+      telemetryEnabled = (cfg as Record<string, unknown>).telemetry_consent === "granted";
       // Read download threads from the same config
       const saved = (cfg as Record<string, unknown>).download_threads;
       if (saved && saved !== "auto") {
@@ -878,6 +881,29 @@
     }
   }
 
+  async function toggleTelemetry() {
+    savingTelemetry = true;
+    try {
+      telemetryEnabled = !telemetryEnabled;
+      await setConfigValue("telemetry_consent", telemetryEnabled ? "granted" : "denied");
+      config.set(await getConfig());
+      if (telemetryEnabled) {
+        const { initSentry } = await import("$lib/sentry");
+        await initSentry();
+        showSuccess("Crash reporting enabled — thank you!");
+      } else {
+        const { teardownSentry } = await import("$lib/sentry");
+        teardownSentry();
+        showSuccess("Crash reporting disabled");
+      }
+    } catch (e: unknown) {
+      telemetryEnabled = !telemetryEnabled; // revert
+      showError(`Failed to save setting: ${e}`);
+    } finally {
+      savingTelemetry = false;
+    }
+  }
+
   async function saveDownloadThreads(value: string) {
     savingThreads = true;
     try {
@@ -1218,6 +1244,33 @@
           <button class="btn-link" onclick={() => openUrl("https://github.com/cashcon57/corkscrew/blob/main/PRIVACY.md")}>Privacy Policy</button>
           <button class="btn-link" onclick={() => openUrl("https://ko-fi.com/cash508287")}>Support</button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Privacy & Telemetry -->
+  <div class="section">
+    <h2 class="section-title">Privacy & Telemetry</h2>
+    <div class="section-card">
+      <div class="card-row toggle-row">
+        <div class="toggle-info">
+          <span class="row-label">Send anonymous crash reports</span>
+          <span class="toggle-description">
+            Sends panics and unhandled errors to Sentry to help diagnose issues.
+            No personal data, mod lists, or file paths are collected.
+          </span>
+        </div>
+        <button
+          class="toggle-switch"
+          class:toggle-on={telemetryEnabled}
+          onclick={toggleTelemetry}
+          disabled={savingTelemetry}
+          type="button"
+          role="switch"
+          aria-checked={telemetryEnabled}
+        >
+          <span class="toggle-thumb"></span>
+        </button>
       </div>
     </div>
   </div>

@@ -40,6 +40,7 @@ Corkscrew has been **tested extensively with Skyrim Special Edition** on macOS (
 - NXM protocol handling (click "Download with Mod Manager" on Nexus → mod appears in Corkscrew)
 - Profiles, crash log analysis, INI editor with presets, mod tools management
 - NexusMods OAuth sign-in + API key fallback
+- Optional anonymous crash reporting via [Sentry](https://sentry.io/) (opt-in, disabled by default — see [Privacy Policy](PRIVACY.md))
 
 ### Known Issues
 - **Large modlists don't work yet.** Gate to Sovngarde (1700+ plugins) installs and reaches main menu but freezes on New Game due to hash table corruption in Skyrim's engine under Wine. **This is the current bottleneck** — we are actively iterating on [SSE Engine Fixes for Wine](https://github.com/corkscrewmodding/SSEEngineFixesForWine) to solve this. Smaller modlists like [Immersive & Pure](https://next.nexusmods.com/skyrimspecialedition/collections/vaakhi) work end-to-end including New Game and gameplay.
@@ -48,6 +49,127 @@ Corkscrew has been **tested extensively with Skyrim Special Edition** on macOS (
 ### Untested
 - **Every game except Skyrim SE.** 80+ games are auto-detected and support basic mod deployment, but only Skyrim SE and Fallout 4 have full-featured plugins (load order, LOOT, script extender, INI presets, crash logs). We haven't verified the mod workflow end-to-end for other games yet.
 - **Linux.** The app builds for Linux, handles Linux paths, and supports Proton/Lutris/SteamOS bottles. But primary development and testing happens on macOS. Community testing and feedback on Linux is very welcome.
+
+---
+
+## Game Support Status
+
+We're actively expanding support to cover the **top 80 most-modded games on NexusMods**. The architecture is game-agnostic — mod installation, staging, deployment, collections, and profiles work for any game. What varies is the depth of game-specific integration.
+
+> **Note on platform compatibility:** Corkscrew is a cross-platform app. Some games listed below may not run under Wine/CrossOver on macOS or under Proton on Linux (due to anti-cheat, DRM, VR requirements, or engine limitations). We're adding mod management support for all top 80 games regardless, because Corkscrew is designed to eventually support native Windows as well. If a game doesn't run on your platform today, the mod tooling will be ready when it does — or when you use Corkscrew on Windows.
+
+### Support Tiers
+
+| Tier | What It Means | Games |
+|------|---------------|-------|
+| **Full** | Load order, LOOT sorting, script extender auto-install, INI presets, crash logs, mod tools | Skyrim SE, Fallout 4 |
+| **Enhanced** | Dedicated plugin with custom mod routing, saves dir, deploy hooks | Hogwarts Legacy |
+| **Standard** | Auto-detection, mod install/deploy, collections, profiles, NexusMods integration | 36 games (see below) |
+| **Planned** | Not yet in registry — will be added in upcoming releases | 41 games (see below) |
+
+### Full Support
+
+| Game | Mods on Nexus | Load Order | Script Extender | Collections |
+|------|--------------|------------|-----------------|-------------|
+| Skyrim Special Edition | 129k | LOOT | SKSE (auto-install) | Full |
+| Fallout 4 | 72.2k | LOOT | — | Full |
+
+### Standard Support (In Registry)
+
+These games are auto-detected and support the full generic mod workflow. **Testing is needed** to verify the mod pipeline works end-to-end for each game. If you play any of these, please test and report issues!
+
+Skyrim LE (72.9k mods) | Fallout: New Vegas (40.4k) | Oblivion (33k) | Stardew Valley (29.8k) | Cyberpunk 2077 (20.5k) | Fallout 3 (17k) | Baldur's Gate 3 (17.3k) | Morrowind (14.7k) | Starfield (12.3k) | Blade & Sorcery (8.4k) | The Witcher 3 (8.4k) | 7 Days to Die (7.1k) | Monster Hunter: World (6.3k) | The Sims 4 (4.4k) | Dragon Age: Origins (3.9k) | No Man's Sky (2.6k) | Sekiro (1.7k) | Darkest Dungeon (1.6k) | Dark Souls 3 (1.5k) | Kingdom Come: Deliverance (1.5k) | Dragon Age 2 (1.5k) | X4: Foundations (1.5k) | Dark Souls (1.4k) | Kenshi (1.4k) | Hogwarts Legacy (1.4k) | Mount & Blade: Warband (1.4k) | War Thunder (1.2k) | Dark Souls 2 (1.2k) | Mount & Blade (2k) | Halo: MCC (1.9k)
+
+### Planned Support (Coming Soon)
+
+These are the remaining top 80 NexusMods games. Registry entries, game detection, and Vortex extension integration are being added. **Issue submissions and PRs welcome** for any of these games.
+
+| Game | Mods | Slug | Engine/Notes |
+|------|------|------|-------------|
+| Star Wars: Battlefront II (2017) | 9.3k | `starwarsbattlefront22017` | Frostbite |
+| Helldivers 2 | 9.1k | `helldivers2` | Simple file replacement |
+| Mount & Blade II: Bannerlord | 7.3k | `mountandblade2bannerlord` | Module system |
+| Elden Ring | 6.8k | `eldenring` | ModEngine2, EAC considerations |
+| Marvel Rivals | 5.4k | `marvelrivals` | UE PAK mods |
+| Red Dead Redemption 2 | 5k | `reddeadredemption2` | Script Hook |
+| My Summer Car | 4.8k | `mysummercar` | MSCLoader |
+| Resident Evil 4 (2023) | 4.6k | `residentevil42023` | RE Engine / REFramework |
+| Ready or Not | 4.3k | `readyornot` | UE4 PAK mods |
+| Marvel's Spider-Man Remastered | 4.3k | `marvelsspidermanremastered` | File replacement |
+| Oblivion Remastered | 4k | `oblivionremastered` | UE5 — mod scene evolving |
+| Devil May Cry 5 | 3.5k | `devilmaycry5` | RE Engine |
+| Monster Hunter Wilds | 3.3k | `monsterhunterwilds` | REFramework |
+| Dragon Age: Inquisition | 3.2k | `dragonageinquisition` | Frostbite / Frosty |
+| Monster Hunter Rise | 3.1k | `monsterhunterrise` | REFramework |
+| Blade & Sorcery: Nomad | 3.1k | `bladeandsorcerynomad` | Quest VR |
+| Ace Combat 7 | 3k | `acecombat7skiesunknown` | UE4 PAK mods |
+| Fallout 76 | 2.9k | `fallout76` | Online / limited modding |
+| Stellar Blade | 2.4k | `stellarblade` | UE mods |
+| Street Fighter 6 | 2.4k | `streetfighter6` | RE Engine |
+| Mass Effect Legendary Edition | 2.4k | `masseffectlegendaryedition` | ME3Tweaks format |
+| Dragon Age: The Veilguard | 2.4k | `dragonagetheveilguard` | Frostbite |
+| Guitar Hero World Tour | 2.3k | `guitarheroworldtour` | Custom songs |
+| Kingdom Come: Deliverance II | 2.3k | `kingdomcomedeliverance2` | New game |
+| Valheim | 2.3k | `valheim` | BepInEx |
+| Jurassic World Evolution 2 | 2.3k | `jurassicworldevolution2` | File mods |
+| Batman: Arkham Knight | 2.2k | `batmanarkhamknight` | UE3 mods |
+| Palworld | 2.1k | `palworld` | UE5 / BepInEx / UE4SS |
+| Kingdom Hearts III | 2k | `kingdomhearts3` | UE4 PAK mods |
+| Planet Zoo | 1.9k | `planetzoo` | File mods |
+| Final Fantasy XIV | 1.9k | `finalfantasy14` | Penumbra / online game |
+| Subnautica | 1.8k | `subnautica` | BepInEx / QMods |
+| MGSV: The Phantom Pain | 1.8k | `metalgearsolidvtpp` | SnakeBite format |
+| Final Fantasy VII Rebirth | 1.7k | `finalfantasy7rebirth` | UE4 PAK mods |
+| Final Fantasy VII Remake | 1.6k | `finalfantasy7remake` | UE4 PAK mods |
+| Resident Evil 2 (2019) | 1.5k | `residentevil22019` | RE Engine |
+| S.T.A.L.K.E.R. 2 | 1.4k | `stalker2heartofchornobyl` | UE5 |
+| Ghost Recon Breakpoint | 1.4k | `ghostreconbreakpoint` | File mods |
+| Zoo Tycoon 2 | 1.4k | `zootycoon2` | Legacy |
+| Jurassic World Evolution | 1.4k | `jurassicworldevolution` | File mods |
+| Marvel's Spider-Man 2 | 1.3k | `marvelsspiderman2` | File replacement |
+| DOOM Eternal | 1.3k | `doometernal` | File mods |
+| Sifu | 1.3k | `sifu` | UE4 PAK mods |
+| Mortal Kombat 1 | 1.2k | `mortalkombat` | UE mods |
+| My Winter Car | 1.2k | `mywintercar` | MSCLoader |
+| Dying Light 2 | 1.2k | `dyinglight2` | File mods |
+| JoJo's ASBR | 1.2k | `jojosbizarreadventureallstarbattler` | UE4 |
+| Yu-Gi-Oh Master Duel | 1.2k | `yugiohmasterduel` | Unity |
+
+### Upcoming Enhancements for Existing Games
+
+These features are in active development to bring more games up to **Full** support tier:
+
+**Load order + LOOT sorting** (all Bethesda games):
+Skyrim LE, Fallout: New Vegas, Fallout 3, Oblivion, Morrowind, Starfield, Enderal, Skyrim VR, Fallout 4 VR
+
+**Script extender auto-install:**
+
+| Extender | Game | Source |
+|----------|------|--------|
+| F4SE | Fallout 4 | [ianpatt/f4se](https://github.com/ianpatt/f4se) |
+| NVSE | Fallout: New Vegas | [xNVSE/NVSE](https://github.com/xNVSE/NVSE) |
+| MWSE | Morrowind | [MWSE/MWSE](https://github.com/MWSE/MWSE) |
+| SFSE | Starfield | [gazzamc/sfse](https://github.com/gazzamc/sfse) |
+| OBSE | Oblivion | Manual install |
+| FOSE | Fallout 3 | Manual install |
+
+**Mod framework auto-detection & install:**
+
+| Framework | Games | Source |
+|-----------|-------|--------|
+| BepInEx | Valheim, Palworld, Subnautica, Unity games | [BepInEx/BepInEx](https://github.com/BepInEx/BepInEx) |
+| REFramework | RE4, RE2, MH Rise, MH Wilds, DMC5, SF6 | [praydog/REFramework](https://github.com/praydog/REFramework) |
+| ModEngine2 | Elden Ring, Dark Souls 3 | [soulsmods/ModEngine2](https://github.com/soulsmods/ModEngine2) |
+| UE4SS | Palworld, Hogwarts Legacy, UE4/5 games | [UE4SS-RE/RE-UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) |
+| SMAPI | Stardew Valley | [Pathoschild/SMAPI](https://github.com/Pathoschild/SMAPI) |
+
+**Beyond parity — planned "it just works" features:**
+
+- **Auto-prerequisite detection** — Install a mod and Corkscrew tells you what frameworks are needed, offers one-click install
+- **One-click "Make Moddable"** — Per-game button that installs all required frameworks and configures INIs
+- **Mod bisect debugger** — Binary search wizard to find the mod causing crashes
+- **Collection health monitor** — Background checks for mod updates, breaking changes, and Wine compatibility
+- **Smart conflict resolution** — Semantic understanding of conflicts with auto-resolution suggestions
 
 ---
 
@@ -169,20 +291,7 @@ corkscrew --remove-game <id>
 
 ### Games
 
-80+ games auto-detected via the [Vortex game registry](https://github.com/Nexus-Mods/vortex-games), plus any Steam game discovered via appmanifest scanning. Custom games can be added via CLI.
-
-**Full-featured support** (load order, LOOT, script extender, INI, crash logs, mod tools):
-- Skyrim Special Edition
-- Fallout 4
-
-**Basic support** (auto-detection + mod deployment): everything else. See the full list:
-
-<details>
-<summary>View all 80+ supported games</summary>
-
-Skyrim, Fallout: New Vegas, Oblivion, Stardew Valley, Cyberpunk 2077, Fallout 3, Baldur's Gate 3, Morrowind, Starfield, Blade & Sorcery, The Witcher 3, 7 Days to Die, Monster Hunter: World, The Sims 4, Dragon Age: Origins, No Man's Sky, Enderal, Skyrim VR, Fallout 4 VR, Sekiro, Darkest Dungeon, Dragon Age 2, Kingdom Come: Deliverance, Dark Souls, Kenshi, Mount & Blade: Warband, X4: Foundations, and 50+ more.
-
-</details>
+80+ games auto-detected via the [Vortex game registry](https://github.com/Nexus-Mods/vortex-games), plus any Steam game discovered via appmanifest scanning. Custom games can be added via CLI. We're actively expanding to cover the top 80 most-modded games on NexusMods — see [Game Support Status](#game-support-status) for the full breakdown.
 
 ---
 
@@ -245,7 +354,7 @@ src/                          Svelte frontend
 │   └── settings/             Config, tools, auth, diagnostics
 └── app.css                   Design tokens + themes
 
-src-tauri/src/                Rust backend (~54 modules, 873+ tests)
+src-tauri/src/                Rust backend (~54 modules, 874+ tests)
 ├── lib.rs                    ~249 IPC commands + CLI
 ├── bottles.rs                Bottle detection (9 sources)
 ├── games.rs                  Game detection + plugin registry
@@ -279,9 +388,12 @@ cargo tauri dev    # Dev mode with hot-reload
 ```
 
 ### Help Wanted
+
+- **Game testing** — We need players to verify mod workflows for the 80 games listed in [Game Support Status](#game-support-status). If you play any of these games with mods under Wine/CrossOver/Proton, your testing and issue reports are invaluable.
 - **Linux testing** — SteamOS, Steam Deck, Fedora, Ubuntu with Proton/Lutris
-- **Non-Skyrim game testing** — Try the mod workflow for any of the 80+ supported games
-- **Enhanced game plugins** — Adding full support for Oblivion, Fallout 3/NV, Starfield, Morrowind
+- **New game registry entries** — PRs adding games to `src-tauri/data/vortex_game_registry.json` are welcome. Each entry needs: `game_id`, `name`, `nexus_domain`, `steam_id`, `executable`, `mod_path`, `required_files`.
+- **Dedicated game plugins** — Rust plugins for games needing special handling (load order, custom mod routing, script extender integration). See `src-tauri/src/plugins/` for examples.
+- **Mod framework integration** — BepInEx, REFramework, ModEngine2, SMAPI auto-detection and install
 
 ---
 
