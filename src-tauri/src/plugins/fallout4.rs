@@ -101,6 +101,61 @@ impl GamePlugin for Fallout4Plugin {
         let saves = docs.join("My Games").join("Fallout4").join("Saves");
         Some(saves)
     }
+
+    fn critical_files(&self) -> Vec<&str> {
+        vec![
+            "fallout4.esm",
+            "dlcrobot.esm",
+            "dlcworkshop01.esm",
+            "dlcworkshop02.esm",
+            "dlcworkshop03.esm",
+            "dlccoast.esm",
+            "dlcnukaworld.esm",
+        ]
+    }
+
+    fn protected_root_extensions(&self) -> Vec<&str> {
+        vec![".esm", ".bsa", ".ba2"]
+    }
+
+    fn save_file_patterns(&self) -> Vec<&str> {
+        vec![".fos", ".f4se", "saves/"]
+    }
+
+    fn categorize_mod_file(&self, rel_path: &str) -> Option<String> {
+        let lower = rel_path.to_lowercase();
+
+        if lower.ends_with(".esp") || lower.ends_with(".esm") || lower.ends_with(".esl") {
+            return Some("plugin".into());
+        }
+        if lower.ends_with(".bsa") || lower.ends_with(".ba2") {
+            return Some("bsa".into());
+        }
+        if lower.contains("meshes/") || lower.ends_with(".nif") {
+            return Some("mesh".into());
+        }
+        if lower.contains("textures/") || lower.ends_with(".dds") {
+            return Some("texture".into());
+        }
+        if lower.contains("scripts/") || lower.ends_with(".pex") || lower.ends_with(".psc") {
+            return Some("script".into());
+        }
+        if lower.contains("sound/")
+            || lower.contains("music/")
+            || lower.ends_with(".wav")
+            || lower.ends_with(".xwm")
+            || lower.ends_with(".fuz")
+        {
+            return Some("sound".into());
+        }
+        if lower.contains("interface/") || lower.ends_with(".swf") {
+            return Some("interface".into());
+        }
+        if lower.contains("f4se/") || lower.ends_with(".dll") {
+            return Some("skse".into());
+        }
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------

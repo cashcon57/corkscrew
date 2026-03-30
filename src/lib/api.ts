@@ -545,6 +545,10 @@ export async function setUseOriginalEngineFixes(enabled: boolean): Promise<void>
   return invoke("set_use_original_engine_fixes", { enabled });
 }
 
+export async function setUseWineEngineFixes(enabled: boolean): Promise<void> {
+  return invoke("set_use_wine_engine_fixes", { enabled });
+}
+
 export async function purgeDeployment(
   gameId: string,
   bottleName: string

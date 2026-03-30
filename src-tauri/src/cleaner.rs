@@ -95,9 +95,9 @@ pub struct CleanOptions {
     pub remove_archives: bool,
     /// Remove ENB files (d3d11.dll, enbseries/, etc.).
     pub remove_enb: bool,
-    /// Remove save files (.ess, .skse cosaves).
+    /// Remove save files (game-specific patterns: .ess/.skse for Skyrim, .sav for HL, etc.).
     pub remove_saves: bool,
-    /// Remove SKSE files (skse64_loader, DLLs, SKSE/Plugins/).
+    /// Remove script extender / framework files (DLLs, SKSE/Plugins/, etc.).
     pub remove_skse: bool,
     /// Only remove unmanaged/orphaned files (skip files tracked in manifest).
     pub orphans_only: bool,
@@ -139,51 +139,70 @@ pub struct CleanResult {
 // ENB / save detection patterns
 // ---------------------------------------------------------------------------
 
-/// Critical game files that must NEVER be deleted by the cleaner, regardless of
-/// baseline or snapshot state. This is a hard safety rail to prevent catastrophic
-/// game directory destruction.
-///
-/// Patterns are matched case-insensitively against relative paths.
-const CRITICAL_FILE_PATTERNS: &[&str] = &[
-    // Skyrim SE / AE master files
-    "skyrim.esm",
-    "update.esm",
-    "dawnguard.esm",
-    "hearthfires.esm",
-    "dragonborn.esm",
-    // Fallout 4 master files
-    "fallout4.esm",
-    "dlcrobot.esm",
-    "dlcworkshop01.esm",
-    "dlcworkshop02.esm",
-    "dlcworkshop03.esm",
-    "dlccoast.esm",
-    "dlcnukaworld.esm",
-];
-
-/// File extensions that should never be deleted from a game Data directory
-/// unless they are confirmed mod files (tracked in deployment manifest AND
-/// have a staging counterpart).
-const PROTECTED_EXTENSIONS: &[&str] = &[".esm", ".bsa", ".ba2"];
-
 /// Returns true if a file is a critical game file that must never be deleted.
-fn is_critical_file(rel_path: &str) -> bool {
+///
+/// Queries the game's plugin for critical file names and protected root
+/// extensions. Falls back to a built-in Bethesda list when no plugin is
+/// registered (safety net for generic registry games).
+fn is_critical_file(game_id: &str, rel_path: &str) -> bool {
     let lower = rel_path.to_lowercase();
+
+    // Query the game plugin for critical files and protected extensions.
+    // Convert to owned Strings to avoid lifetime issues with the plugin lock.
+    let (critical, protected_ext): (Vec<String>, Vec<String>) =
+        crate::games::with_plugin(game_id, |p| {
+            (
+                p.critical_files().into_iter().map(|s| s.to_string()).collect(),
+                p.protected_root_extensions()
+                    .into_iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            )
+        })
+        .unwrap_or_else(|| {
+            // Fallback for games with no dedicated plugin: use legacy Bethesda
+            // protection as a safe default since many registry games are Bethesda.
+            (
+                vec![
+                    "skyrim.esm",
+                    "update.esm",
+                    "dawnguard.esm",
+                    "hearthfires.esm",
+                    "dragonborn.esm",
+                    "fallout4.esm",
+                    "dlcrobot.esm",
+                    "dlcworkshop01.esm",
+                    "dlcworkshop02.esm",
+                    "dlcworkshop03.esm",
+                    "dlccoast.esm",
+                    "dlcnukaworld.esm",
+                ]
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect(),
+                vec![".esm", ".bsa", ".ba2"]
+                    .into_iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            )
+        });
+
     // Check exact critical filenames (top-level master files)
-    for pattern in CRITICAL_FILE_PATTERNS {
-        if lower == *pattern {
+    for pattern in &critical {
+        if lower == pattern.as_str() {
             return true;
         }
     }
-    // Any .esm/.bsa/.ba2 file at the root level (not in a subdirectory) is
-    // likely a vanilla game file and should be protected
+
+    // Root-level files with protected extensions
     if !lower.contains('/') {
-        for ext in PROTECTED_EXTENSIONS {
-            if lower.ends_with(ext) {
+        for ext in &protected_ext {
+            if lower.ends_with(ext.as_str()) {
                 return true;
             }
         }
     }
+
     false
 }
 
@@ -203,12 +222,20 @@ const ENB_PATTERNS: &[&str] = &[
     "enbpalette",
 ];
 
-/// Save file extensions and directories (case-insensitive).
-const SAVE_PATTERNS: &[&str] = &[
-    ".ess",   // Skyrim saves
-    ".skse",  // SKSE co-saves
-    "saves/", // Save directory
-];
+/// Returns save file patterns for a game. Queries the game plugin first,
+/// falls back to common Bethesda save patterns for unregistered games.
+fn save_patterns_for_game(game_id: &str) -> Vec<String> {
+    let fallback = || vec![".ess".into(), ".skse".into(), "saves/".into()];
+    crate::games::with_plugin(game_id, |p| {
+        let patterns = p.save_file_patterns();
+        if patterns.is_empty() {
+            fallback()
+        } else {
+            patterns.into_iter().map(|s| s.to_string()).collect()
+        }
+    })
+    .unwrap_or_else(fallback)
+}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -276,6 +303,9 @@ pub fn scan_game_directory(
         .filter_map(|r| r.ok())
         .collect();
 
+    // Load game-specific save patterns once before the scan loop.
+    let game_save_patterns = save_patterns_for_game(game_id);
+
     let mut non_stock_files = Vec::new();
     let mut enb_files = Vec::new();
     let mut save_files = Vec::new();
@@ -300,7 +330,7 @@ pub fn scan_game_directory(
 
         // SAFETY: Critical game files are NEVER flagged as non-stock,
         // regardless of baseline or snapshot state.
-        if is_critical_file(&rel_str) {
+        if is_critical_file(game_id, &rel_str) {
             continue;
         }
 
@@ -316,7 +346,7 @@ pub fn scan_game_directory(
             continue;
         }
 
-        let is_save = is_save_file(&rel_str);
+        let is_save = is_save_file_with_patterns(&rel_str, &game_save_patterns);
         if is_save {
             save_files.push(rel_str.clone());
         }
@@ -327,7 +357,7 @@ pub fn scan_game_directory(
         let category = if is_save {
             "save".to_string()
         } else {
-            categorize_file(&rel_str)
+            categorize_file(game_id, &rel_str)
         };
 
         if is_enb {
@@ -380,7 +410,7 @@ pub fn clean_game_directory(
     for file in &report.non_stock_files {
         // SAFETY: Double-check critical files even if they somehow made it
         // into the non_stock list. This is the last line of defense.
-        if is_critical_file(&file.relative_path) {
+        if is_critical_file(game_id, &file.relative_path) {
             warn!(
                 "SAFETY: Refusing to delete critical file: {}",
                 file.relative_path
@@ -405,8 +435,8 @@ pub fn clean_game_directory(
         let dominated_by_category = match file.category.as_str() {
             "enb" => !options.remove_enb,
             "save" => !options.remove_saves,
-            "skse" => !options.remove_skse,
-            "bsa" | "ba2" => !options.remove_archives,
+            "skse" | "framework" => !options.remove_skse,
+            "bsa" | "ba2" | "pak" => !options.remove_archives,
             _ => !options.remove_loose_files,
         };
 
@@ -522,39 +552,46 @@ pub fn clean_game_directory(
 // ---------------------------------------------------------------------------
 
 /// Categorize a file based on its extension/path.
-pub fn categorize_file(rel_path: &str) -> String {
-    let lower = rel_path.to_lowercase();
-
+///
+/// Queries the game plugin first for game-specific categorization, then
+/// falls back to generic heuristics.
+pub fn categorize_file(game_id: &str, rel_path: &str) -> String {
+    // ENB detection is universal across all games
     if is_enb_file(rel_path) {
         return "enb".to_string();
     }
 
-    // BSA/BA2 archives
+    // Ask the game plugin for a game-specific category
+    if let Some(cat) = crate::games::with_plugin(game_id, |p| p.categorize_mod_file(rel_path)) {
+        if let Some(category) = cat {
+            return category;
+        }
+    }
+
+    // Generic fallback for games without a dedicated plugin
+    let lower = rel_path.to_lowercase();
+
     if lower.ends_with(".bsa") || lower.ends_with(".ba2") {
         return "bsa".to_string();
     }
-
-    // Plugin files
     if lower.ends_with(".esp") || lower.ends_with(".esm") || lower.ends_with(".esl") {
         return "plugin".to_string();
     }
-
-    // Meshes
+    if lower.ends_with(".pak") || lower.ends_with(".ucas") || lower.ends_with(".utoc") {
+        return "pak".to_string();
+    }
+    if lower.ends_with(".dll") {
+        return "framework".to_string();
+    }
     if lower.contains("meshes/") || lower.ends_with(".nif") {
         return "mesh".to_string();
     }
-
-    // Textures
     if lower.contains("textures/") || lower.ends_with(".dds") {
         return "texture".to_string();
     }
-
-    // Scripts
     if lower.contains("scripts/") || lower.ends_with(".pex") || lower.ends_with(".psc") {
         return "script".to_string();
     }
-
-    // Sound/music
     if lower.contains("sound/")
         || lower.contains("music/")
         || lower.ends_with(".wav")
@@ -563,15 +600,8 @@ pub fn categorize_file(rel_path: &str) -> String {
     {
         return "sound".to_string();
     }
-
-    // Interface/UI
     if lower.contains("interface/") || lower.ends_with(".swf") {
         return "interface".to_string();
-    }
-
-    // SKSE plugins
-    if lower.contains("skse/") || lower.ends_with(".dll") {
-        return "skse".to_string();
     }
 
     "other".to_string()
@@ -588,15 +618,17 @@ fn is_enb_file(rel_path: &str) -> bool {
     false
 }
 
-/// Check if a file is a save file.
-fn is_save_file(rel_path: &str) -> bool {
+/// Check if a file matches any of the provided save patterns.
+fn is_save_file_with_patterns(rel_path: &str, patterns: &[String]) -> bool {
     let lower = rel_path.to_lowercase();
-    for pattern in SAVE_PATTERNS {
+    for pattern in patterns {
         if pattern.ends_with('/') {
-            if lower.starts_with(pattern) || lower.contains(&format!("/{}", pattern)) {
+            if lower.starts_with(pattern.as_str())
+                || lower.contains(&format!("/{}", pattern))
+            {
                 return true;
             }
-        } else if lower.ends_with(pattern) {
+        } else if lower.ends_with(pattern.as_str()) {
             return true;
         }
     }
@@ -880,14 +912,19 @@ mod tests {
 
     #[test]
     fn categorize_file_works() {
-        assert_eq!(categorize_file("mod.esp"), "plugin");
-        assert_eq!(categorize_file("mod.esm"), "plugin");
-        assert_eq!(categorize_file("meshes/armor.nif"), "mesh");
-        assert_eq!(categorize_file("textures/body.dds"), "texture");
-        assert_eq!(categorize_file("scripts/main.pex"), "script");
-        assert_eq!(categorize_file("d3d11.dll"), "enb");
-        assert_eq!(categorize_file("mod.bsa"), "bsa");
-        assert_eq!(categorize_file("readme.txt"), "other");
+        // Generic fallback (no plugin registered for "testgame")
+        assert_eq!(categorize_file("testgame", "mod.esp"), "plugin");
+        assert_eq!(categorize_file("testgame", "mod.esm"), "plugin");
+        assert_eq!(categorize_file("testgame", "meshes/armor.nif"), "mesh");
+        assert_eq!(categorize_file("testgame", "textures/body.dds"), "texture");
+        assert_eq!(categorize_file("testgame", "scripts/main.pex"), "script");
+        assert_eq!(categorize_file("testgame", "d3d11.dll"), "enb");
+        assert_eq!(categorize_file("testgame", "mod.bsa"), "bsa");
+        assert_eq!(categorize_file("testgame", "readme.txt"), "other");
+        // Generic fallback handles UE PAK files
+        assert_eq!(categorize_file("testgame", "MyMod_P.pak"), "pak");
+        // Generic fallback handles DLLs as framework (when not ENB)
+        assert_eq!(categorize_file("testgame", "mods/plugin.dll"), "framework");
     }
 
     #[test]
@@ -901,28 +938,31 @@ mod tests {
 
     #[test]
     fn critical_file_detection() {
-        // Master ESM files are always critical
-        assert!(is_critical_file("Skyrim.esm"));
-        assert!(is_critical_file("skyrim.esm")); // case-insensitive
-        assert!(is_critical_file("SKYRIM.ESM")); // all caps
-        assert!(is_critical_file("Update.esm"));
-        assert!(is_critical_file("Dawnguard.esm"));
-        assert!(is_critical_file("Dragonborn.esm"));
-        assert!(is_critical_file("HearthFires.esm"));
-        assert!(is_critical_file("Fallout4.esm"));
+        // Use a non-registered game ID so we get the legacy Bethesda fallback
+        let gid = "unknowngame_crit";
 
-        // Top-level .esm/.bsa/.ba2 files are protected
-        assert!(is_critical_file("SomeOther.esm"));
-        assert!(is_critical_file("Skyrim - Textures0.bsa"));
-        assert!(is_critical_file("Dawnguard.bsa"));
+        // Master ESM files are always critical (via fallback)
+        assert!(is_critical_file(gid, "Skyrim.esm"));
+        assert!(is_critical_file(gid, "skyrim.esm")); // case-insensitive
+        assert!(is_critical_file(gid, "SKYRIM.ESM")); // all caps
+        assert!(is_critical_file(gid, "Update.esm"));
+        assert!(is_critical_file(gid, "Dawnguard.esm"));
+        assert!(is_critical_file(gid, "Dragonborn.esm"));
+        assert!(is_critical_file(gid, "HearthFires.esm"));
+        assert!(is_critical_file(gid, "Fallout4.esm"));
+
+        // Top-level .esm/.bsa/.ba2 files are protected (via fallback)
+        assert!(is_critical_file(gid, "SomeOther.esm"));
+        assert!(is_critical_file(gid, "Skyrim - Textures0.bsa"));
+        assert!(is_critical_file(gid, "Dawnguard.bsa"));
 
         // Subdirectory .esm files are NOT protected (mod-specific)
-        assert!(!is_critical_file("mods/something.esm"));
+        assert!(!is_critical_file(gid, "mods/something.esm"));
 
         // Regular mod files are not critical
-        assert!(!is_critical_file("mod.esp"));
-        assert!(!is_critical_file("textures/something.dds"));
-        assert!(!is_critical_file("meshes/armor.nif"));
+        assert!(!is_critical_file(gid, "mod.esp"));
+        assert!(!is_critical_file(gid, "textures/something.dds"));
+        assert!(!is_critical_file(gid, "meshes/armor.nif"));
     }
 
     #[test]
@@ -981,5 +1021,78 @@ mod tests {
             "skyrim.esm should be recognized as stock"
         );
         assert!(paths.contains(&"mod.esp"), "mod.esp should be non-stock");
+    }
+
+    #[test]
+    fn hogwarts_legacy_categorization() {
+        // Register the Hogwarts Legacy plugin for this test
+        crate::plugins::hogwarts_legacy::register();
+
+        assert_eq!(
+            categorize_file("hogwartslegacy", "MyMod_P.pak"),
+            "pak"
+        );
+        assert_eq!(
+            categorize_file("hogwartslegacy", "Scripts/main.lua"),
+            "script"
+        );
+        assert_eq!(
+            categorize_file("hogwartslegacy", "intro.bk2"),
+            "movie"
+        );
+        assert_eq!(
+            categorize_file("hogwartslegacy", "ue4ss.dll"),
+            // ENB check runs first and d3d11.dll matches, but ue4ss.dll doesn't
+            "framework"
+        );
+        assert_eq!(
+            categorize_file("hogwartslegacy", "settings.ini"),
+            "config"
+        );
+    }
+
+    #[test]
+    fn hogwarts_legacy_cleaner_scan() {
+        crate::plugins::hogwarts_legacy::register();
+        let (db, tmp) = test_db();
+        let data_dir = tmp.path().join("mods");
+        fs::create_dir_all(&data_dir).unwrap();
+
+        // Simulate vanilla state with a placeholder file (the ~mods dir would
+        // normally be empty, but the snapshot needs at least one file to
+        // distinguish "snapshot exists with 0 stock files" from "no snapshot").
+        fs::write(data_dir.join(".gitkeep"), b"").unwrap();
+        integrity::create_game_snapshot(&db, "hogwartslegacy", "Gaming", &data_dir).unwrap();
+
+        // Add mod files after snapshot
+        fs::write(data_dir.join("CoolMod_P.pak"), b"pak mod").unwrap();
+        fs::write(data_dir.join("config.ini"), b"settings").unwrap();
+
+        let report =
+            scan_game_directory(&db, "hogwartslegacy", "Gaming", &data_dir).unwrap();
+
+        assert_eq!(report.non_stock_files.len(), 2);
+        let cats: Vec<&str> = report
+            .non_stock_files
+            .iter()
+            .map(|f| f.category.as_str())
+            .collect();
+        assert!(cats.contains(&"pak"), "PAK files should be categorized as pak");
+        assert!(
+            cats.contains(&"config"),
+            "INI files should be categorized as config"
+        );
+    }
+
+    #[test]
+    fn hogwarts_legacy_no_false_critical_protection() {
+        crate::plugins::hogwarts_legacy::register();
+
+        // HL has no critical files — nothing should be falsely protected
+        assert!(!is_critical_file("hogwartslegacy", "CoolMod_P.pak"));
+        assert!(!is_critical_file("hogwartslegacy", "ue4ss.dll"));
+        assert!(!is_critical_file("hogwartslegacy", "settings.ini"));
+        // Skyrim ESMs should NOT be protected in HL context
+        assert!(!is_critical_file("hogwartslegacy", "Skyrim.esm"));
     }
 }

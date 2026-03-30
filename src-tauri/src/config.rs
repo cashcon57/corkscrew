@@ -91,10 +91,17 @@ pub struct AppConfig {
     #[serde(default)]
     pub verification_level: VerificationLevel,
 
-    /// If true, skip deploying the Wine fork of SSE Engine Fixes and use
-    /// whatever the modlist provides (original SSE Engine Fixes or none).
+    /// Legacy field — ignored. Kept for backwards-compatible deserialization
+    /// of existing config files.
     #[serde(default)]
     pub use_original_engine_fixes: bool,
+
+    /// If true, deploy the Wine fork of SSE Engine Fixes before Skyrim SE
+    /// launches. This is opt-in because the Wine fork is in active development
+    /// and may introduce issues. May fix some Wine-specific crashes in large
+    /// modlists.
+    #[serde(default)]
+    pub use_wine_engine_fixes: bool,
 
     /// Catch-all for any additional settings that may be added in the future.
     /// Flattened so extra keys sit at the top level of the JSON object.
@@ -284,7 +291,11 @@ pub fn set_config_value(key: &str, value: &str) -> Result<()> {
             };
         }
         "use_original_engine_fixes" => {
+            // Legacy — keep for compat but no-op
             config.use_original_engine_fixes = value == "true";
+        }
+        "use_wine_engine_fixes" => {
+            config.use_wine_engine_fixes = value == "true";
         }
         _ => {
             config
@@ -318,6 +329,7 @@ pub fn get_config_value(key: &str) -> Result<Option<String>> {
             VerificationLevel::Paranoid => "Paranoid".to_string(),
         }),
         "use_original_engine_fixes" => Some(config.use_original_engine_fixes.to_string()),
+        "use_wine_engine_fixes" => Some(config.use_wine_engine_fixes.to_string()),
         _ => config.extra.get(key).map(|v| match v {
             serde_json::Value::String(s) => s.clone(),
             other => other.to_string(),
@@ -358,6 +370,7 @@ mod tests {
             controller_mode: false,
             verification_level: VerificationLevel::default(),
             use_original_engine_fixes: false,
+            use_wine_engine_fixes: false,
             extra: HashMap::new(),
         };
         config

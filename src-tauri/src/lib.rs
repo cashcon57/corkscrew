@@ -1898,8 +1898,8 @@ async fn launch_game_cmd(
         log::info!("Pre-launch: SKSE plugin conflict fix ({} swapped, {}ms)", skse_fixes, t.elapsed().as_millis());
 
         // Check if user wants Wine fork of Engine Fixes
-        let use_wine_ef = !config::get_config()
-            .map(|c| c.use_original_engine_fixes)
+        let use_wine_ef = config::get_config()
+            .map(|c| c.use_wine_engine_fixes)
             .unwrap_or(false);
 
         if use_wine_ef {
@@ -3100,12 +3100,26 @@ async fn set_verification_level(level: String) -> Result<(), String> {
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
-/// Toggle whether to use the original SSE Engine Fixes instead of the Wine fork.
+/// Legacy: Toggle whether to use the original SSE Engine Fixes instead of the Wine fork.
+/// Kept for backward compatibility — new code should use `set_use_wine_engine_fixes`.
 #[tauri::command]
 async fn set_use_original_engine_fixes(enabled: bool) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         let mut cfg = config::get_config().map_err(|e| e.to_string())?;
         cfg.use_original_engine_fixes = enabled;
+        config::save_config(&cfg).map_err(|e| e.to_string())?;
+        Ok(())
+    })
+    .await
+    .map_err(|e: tokio::task::JoinError| format!("Task failed: {e}"))?
+}
+
+/// Toggle whether to deploy SSE Engine Fixes for Wine (opt-in).
+#[tauri::command]
+async fn set_use_wine_engine_fixes(enabled: bool) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let mut cfg = config::get_config().map_err(|e| e.to_string())?;
+        cfg.use_wine_engine_fixes = enabled;
         config::save_config(&cfg).map_err(|e| e.to_string())?;
         Ok(())
     })
@@ -8631,7 +8645,7 @@ async fn execute_tool(
                     std::collections::HashMap::new();
 
                 for c in &conflicts {
-                    let file_cat = cleaner::categorize_file(&c.relative_path);
+                    let file_cat = cleaner::categorize_file(&gid3, &c.relative_path);
                     let winner_name = c
                         .mods
                         .iter()
@@ -11656,8 +11670,8 @@ fn cli_launch(game_id: &str, bottle_name: &str, use_skse: bool, db: &Arc<ModData
             println!("[corkscrew] Fixed {} SKSE plugin DLL(s)", fixes);
         }
 
-        let use_wine_ef = !config::get_config()
-            .map(|c| c.use_original_engine_fixes)
+        let use_wine_ef = config::get_config()
+            .map(|c| c.use_wine_engine_fixes)
             .unwrap_or(false);
 
         if use_wine_ef {
@@ -11666,7 +11680,7 @@ fn cli_launch(game_id: &str, bottle_name: &str, use_skse: bool, db: &Arc<ModData
                 println!("[corkscrew] Patched {} EngineFixes TOML(s) for Wine", ef);
             }
         } else {
-            println!("[corkscrew] Skipping Wine EngineFixes (user chose original)");
+            println!("[corkscrew] Skipping Wine EngineFixes (not enabled — enable in Settings)");
         }
 
         let wine_disabled =
@@ -12492,6 +12506,7 @@ pub fn run() {
             get_verification_level,
             set_verification_level,
             set_use_original_engine_fixes,
+            set_use_wine_engine_fixes,
             purge_deployment_cmd,
             verify_mod_integrity,
             sort_plugins_loot,

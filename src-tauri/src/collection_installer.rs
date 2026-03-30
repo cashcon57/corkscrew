@@ -2699,11 +2699,79 @@ pub async fn install_collection(
             log::info!("Wine compat: disabled {} — {}", name, reason);
         }
 
-        // Auto-deploy SSE Engine Fixes for Wine (Wine-safe replacement)
-        match skse::install_engine_fixes_wine(&data_dir).await {
-            Ok(true) => log::info!("Auto-deployed SSE Engine Fixes for Wine"),
-            Ok(false) => log::debug!("SSE Engine Fixes for Wine already deployed"),
-            Err(e) => log::warn!("Could not auto-deploy SSE Engine Fixes for Wine: {}", e),
+        // Auto-deploy SSE Engine Fixes for Wine (opt-in via settings)
+        let use_wine_ef = crate::config::get_config()
+            .map(|c| c.use_wine_engine_fixes)
+            .unwrap_or(false);
+        if use_wine_ef {
+            match skse::install_engine_fixes_wine(&data_dir).await {
+                Ok(true) => log::info!("Auto-deployed SSE Engine Fixes for Wine"),
+                Ok(false) => log::debug!("SSE Engine Fixes for Wine already deployed"),
+                Err(e) => log::warn!("Could not auto-deploy SSE Engine Fixes for Wine: {}", e),
+            }
+        }
+    }
+
+    // Hogwarts Legacy post-install: PakChunk conflict detection + UE4SS auto-deploy
+    if game_id == "hogwartslegacy" {
+        use crate::plugins::hogwarts_legacy;
+
+        // PakChunk conflict scan
+        let conflicts = hogwarts_legacy::scan_pakchunk_conflicts(&data_dir);
+        if !conflicts.is_empty() {
+            log::warn!(
+                "HL post-install: {} pakchunk conflict(s) detected",
+                conflicts.len()
+            );
+            for c in &conflicts {
+                log::warn!("  Chunk {}: {:?}", c.chunk_number, c.files);
+            }
+            let _ = app.emit(
+                INSTALL_PROGRESS_EVENT,
+                InstallProgress::HlPakChunkWarning {
+                    conflicts: conflicts.clone(),
+                },
+            );
+        }
+
+        // UE4SS auto-deploy if Lua/Logic mods are present
+        let has_lua_or_logic = db
+            .get_mods(game_id, bottle_name)
+            .unwrap_or_default()
+            .iter()
+            .any(|m| {
+                m.collection_name.as_deref() == Some(&manifest.name)
+                    && matches!(
+                        m.mod_type.as_deref(),
+                        Some("hl-lua-mod") | Some("hl-logic-mod")
+                    )
+            });
+        if has_lua_or_logic && !hogwarts_legacy::is_ue4ss_installed(&game_path) {
+            log::info!("HL post-install: Lua/Logic mods detected but UE4SS missing — auto-installing");
+            let _ = app.emit(
+                INSTALL_PROGRESS_EVENT,
+                InstallProgress::StepChanged {
+                    mod_index: total_mods,
+                    step: "ue4ss_deploy".to_string(),
+                    detail: Some("Installing RE-UE4SS framework...".to_string()),
+                },
+            );
+            match crate::mod_tools::install_tool("ue4ss", &data_dir, app).await {
+                Ok(_) => {
+                    log::info!("HL post-install: UE4SS installed successfully");
+                    let _ = app.emit(
+                        INSTALL_PROGRESS_EVENT,
+                        InstallProgress::HlUe4ssDeployed {
+                            version: "latest".to_string(),
+                        },
+                    );
+                }
+                Err(e) => {
+                    log::warn!("HL post-install: UE4SS install failed: {}", e);
+                }
+            }
+            // Sync Mods.txt for Lua mods
+            hogwarts_legacy::sync_mods_txt(&game_path);
         }
     }
 

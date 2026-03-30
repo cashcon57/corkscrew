@@ -97,6 +97,39 @@ pub trait GamePlugin: Send + Sync {
         _undeployed_files: &[String],
     ) {
     }
+
+    // -- Game directory cleaner support --
+
+    /// File names (case-insensitive) that must NEVER be deleted by the cleaner.
+    /// These are critical game files like master ESMs or core PAK files.
+    /// Default: empty (rely on snapshot comparison only).
+    fn critical_files(&self) -> Vec<&str> {
+        vec![]
+    }
+
+    /// File extensions (case-insensitive, including the dot) that should never
+    /// be deleted from the root of the data directory. Files in subdirectories
+    /// with these extensions are NOT protected.
+    /// Default: empty.
+    fn protected_root_extensions(&self) -> Vec<&str> {
+        vec![]
+    }
+
+    /// Patterns for detecting save files in the data directory
+    /// (case-insensitive). Extension patterns start with `.` (e.g. `".ess"`),
+    /// directory patterns end with `/` (e.g. `"saves/"`).
+    /// Default: empty (saves assumed to be outside data dir).
+    fn save_file_patterns(&self) -> Vec<&str> {
+        vec![]
+    }
+
+    /// Categorize a mod file by its relative path within the data directory.
+    /// Returns a category string (e.g. `"plugin"`, `"texture"`, `"pak"`)
+    /// used by the cleaner for selective removal. Return `None` to fall
+    /// through to the default categorizer.
+    fn categorize_mod_file(&self, _rel_path: &str) -> Option<String> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, uninstallSkse, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, findOrphanedDownloads, deleteOrphanedDownloads, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, checkModToolUpdate, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads, checkSteamStatus, addToSteam, removeFromSteam, scanGameDirectory, cleanGameDirectory, checkSkyrimVersion, downgradeSkyrim, checkDeploymentHealth, redeployAllMods, getVerificationLevel, setVerificationLevel, setUseOriginalEngineFixes, getDepotDownloadCommand, startDepotDownload, checkDepotReady, applyDowngrade, listGameVersions, swapGameVersion, listDisabledWinePlugins, reenableWinePlugin, vortexListCachedExtensions, vortexFetchExtension, vortexRefreshExtension, vortexDeleteCachedExtension, vortexListAvailableExtensions, vortexGetExtensionDetail } from "$lib/api";
+  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, uninstallSkse, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, findOrphanedDownloads, deleteOrphanedDownloads, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, checkModToolUpdate, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads, checkSteamStatus, addToSteam, removeFromSteam, scanGameDirectory, cleanGameDirectory, checkSkyrimVersion, downgradeSkyrim, checkDeploymentHealth, redeployAllMods, getVerificationLevel, setVerificationLevel, setUseWineEngineFixes, getDepotDownloadCommand, startDepotDownload, checkDepotReady, applyDowngrade, listGameVersions, swapGameVersion, listDisabledWinePlugins, reenableWinePlugin, vortexListCachedExtensions, vortexFetchExtension, vortexRefreshExtension, vortexDeleteCachedExtension, vortexListAvailableExtensions, vortexGetExtensionDetail } from "$lib/api";
   import type { CleanReport, CleanResult, DowngradeStatus, DeploymentHealth, VerificationLevel, CachedVersion, DepotDownloadInfo } from "$lib/types";
   import type { SteamStatus } from "$lib/types";
   import { config, showError, showSuccess, selectedGame, skseStatus, currentPage, appVersion, updateReady, updateVersion, updateNotes, updateChecking, updateError, triggerUpdateCheck, controllerMode } from "$lib/stores";
@@ -41,8 +41,8 @@
   // Launch fixes toggle
   let disableGameFixes = $state(false);
 
-  // Engine Fixes mode
-  let useOriginalEngineFixes = $state(false);
+  // Engine Fixes mode (opt-in Wine fork)
+  let useWineEngineFixes = $state(false);
 
   // Download concurrency
   let downloadThreads = $state("auto");
@@ -408,7 +408,7 @@
       downloadDir = cfg.download_dir ?? "";
       autoDeleteArchives = (cfg as Record<string, unknown>).auto_delete_archives === "true";
       disableGameFixes = (cfg as Record<string, unknown>).disable_game_fixes === "true";
-      useOriginalEngineFixes = (cfg as Record<string, unknown>).use_original_engine_fixes === true;
+      useWineEngineFixes = (cfg as Record<string, unknown>).use_wine_engine_fixes === true;
       telemetryEnabled = (cfg as Record<string, unknown>).telemetry_consent === "granted";
       // Read download threads from the same config
       const saved = (cfg as Record<string, unknown>).download_threads;
@@ -1629,26 +1629,26 @@
       <div class="section-card">
         <div class="card-row appearance-row">
           <div class="toggle-info">
-            <span class="row-label">Use Original SSE Engine Fixes</span>
-            <span class="toggle-description">Disable Corkscrew's Wine-compatible Engine Fixes fork. Use this if your modlist includes its own version or for testing. Not recommended for most users.</span>
+            <span class="row-label">Enable SSE Engine Fixes for Wine</span>
+            <span class="toggle-description">Deploy the Wine-compatible Engine Fixes fork before each Skyrim SE launch. May fix some Wine-specific crashes in large modlists, but is in-development. May introduce additional issues in its current state.</span>
           </div>
           <button
             class="toggle-switch"
-            class:toggle-on={useOriginalEngineFixes}
+            class:toggle-on={useWineEngineFixes}
             onclick={async () => {
-              const next = !useOriginalEngineFixes;
-              useOriginalEngineFixes = next;
+              const next = !useWineEngineFixes;
+              useWineEngineFixes = next;
               try {
-                await setUseOriginalEngineFixes(next);
+                await setUseWineEngineFixes(next);
               } catch (err) {
                 console.error('Failed to save Engine Fixes preference:', err);
-                useOriginalEngineFixes = !next;
+                useWineEngineFixes = !next;
                 showError(`Failed to save Engine Fixes preference: ${err}`);
               }
             }}
             type="button"
             role="switch"
-            aria-checked={useOriginalEngineFixes}
+            aria-checked={useWineEngineFixes}
           >
             <span class="toggle-thumb"></span>
           </button>

@@ -190,6 +190,46 @@ impl GamePlugin for HogwartsLegacyPlugin {
             }
         }
     }
+
+    fn critical_files(&self) -> Vec<&str> {
+        // The ~mods data dir doesn't contain any vanilla files — all vanilla
+        // content lives in non-mod PAK files outside this directory. Nothing
+        // in the mod directory needs hard protection.
+        vec![]
+    }
+
+    fn protected_root_extensions(&self) -> Vec<&str> {
+        // No root-level extension protection needed — the data dir only
+        // contains mod PAK files (vanilla PAKs are elsewhere).
+        vec![]
+    }
+
+    fn save_file_patterns(&self) -> Vec<&str> {
+        // HL saves are in AppData, not the game/data directory. Include .sav
+        // just in case someone copies saves into the game tree.
+        vec![".sav"]
+    }
+
+    fn categorize_mod_file(&self, rel_path: &str) -> Option<String> {
+        let lower = rel_path.to_lowercase();
+
+        if lower.ends_with(".pak") || lower.ends_with(".ucas") || lower.ends_with(".utoc") {
+            return Some("pak".into());
+        }
+        if lower.ends_with(".lua") {
+            return Some("script".into());
+        }
+        if lower.ends_with(".bk2") {
+            return Some("movie".into());
+        }
+        if lower.ends_with(".dll") {
+            return Some("framework".into());
+        }
+        if lower.ends_with(".ini") || lower.ends_with(".cfg") || lower.ends_with(".toml") {
+            return Some("config".into());
+        }
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -718,6 +758,78 @@ fn strip_vdf_quotes(s: &str) -> String {
     } else {
         s.to_string()
     }
+}
+
+// ---------------------------------------------------------------------------
+// PakChunk Conflict Detection
+// ---------------------------------------------------------------------------
+
+/// A group of PAK files that share the same pakchunk number (conflict).
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct PakChunkConflict {
+    pub chunk_number: u32,
+    pub files: Vec<String>,
+}
+
+/// Scan the `~mods` directory for PAK files with conflicting pakchunk numbers.
+///
+/// UE5 PAK files use naming like `pakchunk5-ModName_P.pak`. Two mods using
+/// the same chunk number will conflict and crash the game.
+pub fn scan_pakchunk_conflicts(mods_dir: &Path) -> Vec<PakChunkConflict> {
+    let mut chunks: std::collections::HashMap<u32, Vec<String>> =
+        std::collections::HashMap::new();
+
+    let entries = match fs::read_dir(mods_dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.to_lowercase().ends_with(".pak") {
+            continue;
+        }
+        // Extract chunk number from "pakchunkN-..." pattern
+        let lower = name.to_lowercase();
+        if let Some(rest) = lower.strip_prefix("pakchunk") {
+            if let Some(num_str) = rest.split(|c: char| !c.is_ascii_digit()).next() {
+                if let Ok(num) = num_str.parse::<u32>() {
+                    chunks.entry(num).or_default().push(name);
+                }
+            }
+        }
+    }
+
+    // Only return groups with 2+ files (actual conflicts)
+    let mut conflicts: Vec<PakChunkConflict> = chunks
+        .into_iter()
+        .filter(|(_, files)| files.len() > 1)
+        .map(|(chunk_number, mut files)| {
+            files.sort();
+            PakChunkConflict {
+                chunk_number,
+                files,
+            }
+        })
+        .collect();
+    conflicts.sort_by_key(|c| c.chunk_number);
+    conflicts
+}
+
+// ---------------------------------------------------------------------------
+// UE4SS Detection
+// ---------------------------------------------------------------------------
+
+/// Check if RE-UE4SS is installed for Hogwarts Legacy.
+pub fn is_ue4ss_installed(game_path: &Path) -> bool {
+    let win64 = game_path.join("Phoenix").join("Binaries").join("Win64");
+    // Check for any of the common UE4SS files
+    for name in &["UE4SS.dll", "xinput1_3.dll", "dwmapi.dll"] {
+        if crate::skse::find_file_case_insensitive(&win64, name).is_some() {
+            return true;
+        }
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -1365,5 +1477,53 @@ mod tests {
             plugin.detect_game_version(tmp.path()),
             Some("1235957".into())
         );
+    }
+
+    #[test]
+    fn test_pakchunk_conflict_detection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mods_dir = tmp.path();
+
+        // Create test files with conflicting chunk numbers
+        fs::write(mods_dir.join("pakchunk5-ModA_P.pak"), b"fake").unwrap();
+        fs::write(mods_dir.join("pakchunk5-ModB_P.pak"), b"fake").unwrap();
+        fs::write(mods_dir.join("pakchunk10-ModC_P.pak"), b"fake").unwrap();
+        fs::write(mods_dir.join("pakchunk20-ModD_P.pak"), b"fake").unwrap();
+        fs::write(mods_dir.join("pakchunk20-ModE_P.pak"), b"fake").unwrap();
+        fs::write(mods_dir.join("pakchunk20-ModF_P.pak"), b"fake").unwrap();
+        fs::write(mods_dir.join("SomeOtherMod_P.pak"), b"fake").unwrap();
+
+        let conflicts = scan_pakchunk_conflicts(mods_dir);
+        assert_eq!(conflicts.len(), 2);
+
+        let chunk5 = conflicts.iter().find(|c| c.chunk_number == 5).unwrap();
+        assert_eq!(chunk5.files.len(), 2);
+
+        let chunk20 = conflicts.iter().find(|c| c.chunk_number == 20).unwrap();
+        assert_eq!(chunk20.files.len(), 3);
+    }
+
+    #[test]
+    fn test_pakchunk_no_conflicts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mods_dir = tmp.path();
+
+        fs::write(mods_dir.join("pakchunk5-ModA_P.pak"), b"fake").unwrap();
+        fs::write(mods_dir.join("pakchunk10-ModB_P.pak"), b"fake").unwrap();
+
+        let conflicts = scan_pakchunk_conflicts(mods_dir);
+        assert!(conflicts.is_empty());
+    }
+
+    #[test]
+    fn test_ue4ss_detection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let win64 = tmp.path().join("Phoenix").join("Binaries").join("Win64");
+        fs::create_dir_all(&win64).unwrap();
+
+        assert!(!is_ue4ss_installed(tmp.path()));
+
+        fs::write(win64.join("UE4SS.dll"), b"fake").unwrap();
+        assert!(is_ue4ss_installed(tmp.path()));
     }
 }
