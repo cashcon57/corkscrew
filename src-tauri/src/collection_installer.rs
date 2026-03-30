@@ -4269,6 +4269,110 @@ async fn stage_and_deploy(
         files_to_deploy = merged;
     }
 
+    // For Hogwarts Legacy (and UE games in general): filter out files that
+    // should NOT be deployed to the PAK data directory (~mods/). This catches
+    // mods that bundle READMEs, images, batch files, executables, and other
+    // non-game files alongside their actual PAK content.
+    //
+    // Files that need engine root deployment (DLLs, ASI, ReShade) are
+    // separated and deployed to Phoenix/Binaries/Win64/ instead.
+    if game_id == "hogwartslegacy" {
+        let mut engine_root_files: Vec<String> = Vec::new();
+        let staging_path = &staging_result.staging_path;
+
+        files_to_deploy = files_to_deploy
+            .into_iter()
+            .filter(|f| {
+                let lower = f.to_lowercase();
+                let fname = lower.rsplit('/').next().unwrap_or(&lower);
+
+                // Always deploy PAK/UCAS/UTOC files to data dir
+                if fname.ends_with(".pak")
+                    || fname.ends_with(".ucas")
+                    || fname.ends_with(".utoc")
+                {
+                    return true;
+                }
+
+                // Engine root files: DLLs, ASI loaders, ReShade configs
+                // These need to go to Phoenix/Binaries/Win64/, not ~mods/
+                if fname.ends_with(".dll")
+                    || fname.ends_with(".asi")
+                    || lower.starts_with("reshade-shaders/")
+                    || fname == "reshade.ini"
+                    || fname == "engine.ini"
+                    || fname == "version.dll"
+                {
+                    engine_root_files.push(f.clone());
+                    return false; // Don't deploy to ~mods
+                }
+
+                // Lua scripts — keep (they go to ~mods for now, UE4SS picks them up)
+                if fname.ends_with(".lua") {
+                    return true;
+                }
+
+                // Filter out non-game junk that should never be in the game directory
+                let junk_extensions = [
+                    ".txt", ".md", ".html", ".pdf", ".png", ".jpg", ".jpeg",
+                    ".gif", ".bat", ".exe", ".py", ".bat", ".json",
+                ];
+                if junk_extensions.iter().any(|ext| fname.ends_with(ext)) {
+                    log::debug!(
+                        "HL deploy filter: skipping non-game file '{}'",
+                        f
+                    );
+                    return false;
+                }
+
+                // Keep everything else (INI configs for mods, etc.)
+                true
+            })
+            .collect();
+
+        // Deploy engine root files to Win64 if any were found
+        if !engine_root_files.is_empty() {
+            let win64 = game_path.join("Phoenix").join("Binaries").join("Win64");
+            let _ = std::fs::create_dir_all(&win64);
+            let mut deployed_root = 0;
+            for rel_path in &engine_root_files {
+                let src = staging_path.join(rel_path);
+                let dest = win64.join(
+                    rel_path
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(rel_path),
+                );
+                // For ReShade shaders, preserve directory structure
+                if rel_path.to_lowercase().starts_with("reshade-shaders/") {
+                    let dest = win64.join(rel_path);
+                    if let Some(parent) = dest.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    if src.exists() {
+                        if let Err(e) = std::fs::copy(&src, &dest) {
+                            log::warn!("Failed to deploy engine root file '{}': {}", rel_path, e);
+                        } else {
+                            deployed_root += 1;
+                        }
+                    }
+                } else if src.exists() {
+                    if let Err(e) = std::fs::copy(&src, &dest) {
+                        log::warn!("Failed to deploy engine root file '{}': {}", rel_path, e);
+                    } else {
+                        deployed_root += 1;
+                    }
+                }
+            }
+            if deployed_root > 0 {
+                log::info!(
+                    "HL deploy: routed {} engine root files to Win64/ (DLLs, ReShade, ASI)",
+                    deployed_root
+                );
+            }
+        }
+    }
+
     // Update DB with staging info (brief locks)
     let _ = app.emit(
         INSTALL_PROGRESS_EVENT,
