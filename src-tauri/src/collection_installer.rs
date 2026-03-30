@@ -2807,9 +2807,40 @@ pub async fn install_collection(
                     detail: Some("Installing RE-UE4SS framework...".to_string()),
                 },
             );
-            match crate::mod_tools::install_tool("ue4ss", &data_dir, app).await {
-                Ok(_) => {
-                    log::info!("HL post-install: UE4SS installed successfully");
+            // UE4SS must be deployed to the exe directory (Phoenix/Binaries/Win64).
+            // install_tool extracts to a Tools/ subdirectory, so we install using
+            // the exe dir as base and then copy the DLLs up to Win64/.
+            let win64_dir = game_path.join("Phoenix").join("Binaries").join("Win64");
+            match crate::mod_tools::install_tool("ue4ss", &win64_dir, app).await {
+                Ok(installed_path) => {
+                    // Copy UE4SS files from the tool subdir to Win64/ where the
+                    // game actually loads them from.
+                    let tool_dir = std::path::Path::new(&installed_path)
+                        .parent()
+                        .unwrap_or(std::path::Path::new(&installed_path));
+                    if tool_dir != win64_dir {
+                        if let Ok(entries) = std::fs::read_dir(tool_dir) {
+                            for entry in entries.flatten() {
+                                let src = entry.path();
+                                let dest = win64_dir.join(entry.file_name());
+                                if src.is_file() {
+                                    if let Err(e) = std::fs::copy(&src, &dest) {
+                                        log::warn!(
+                                            "HL post-install: failed to copy UE4SS file {} to Win64: {}",
+                                            src.display(), e
+                                        );
+                                    }
+                                } else if src.is_dir() {
+                                    // Copy directories recursively (e.g. Mods/)
+                                    let dest_dir = win64_dir.join(entry.file_name());
+                                    if !dest_dir.exists() {
+                                        let _ = crate::skse::copy_dir_recursive(&src, &dest_dir);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    log::info!("HL post-install: UE4SS deployed to {}", win64_dir.display());
                     let _ = app.emit(
                         INSTALL_PROGRESS_EVENT,
                         InstallProgress::HlUe4ssDeployed {

@@ -1704,42 +1704,66 @@ async fn launch_game_cmd(
         }
     }
 
-    // Determine which built-in executable to launch
-    let exe_name = if use_skse && game_id == "skyrimse" {
-        "skse64_loader.exe".to_string()
+    // Determine which executable to launch.
+    // For games with dedicated plugins (e.g. Hogwarts Legacy), the plugin's
+    // detect() returns the correct exe_path (which may be in a subdirectory
+    // like Phoenix/Binaries/Win64/). Prefer that over re-searching the root.
+    let exe_path = if use_skse && game_id == "skyrimse" {
+        let exe_name = "skse64_loader.exe";
+        launcher::find_executable(&game_path, exe_name).ok_or_else(|| {
+            format!(
+                "SKSE loader '{}' not found in {}. Is SKSE installed?",
+                exe_name,
+                game_path.display()
+            )
+        })?
+    } else if let Some(ref detected_exe) = game.exe_path {
+        // Use the exe_path from game detection — plugins like HL set this
+        // to the real binary (e.g. Phoenix/Binaries/Win64/HogwartsLegacy.exe)
+        // rather than the root launcher stub.
+        if detected_exe.exists() {
+            detected_exe.clone()
+        } else {
+            // Detected exe doesn't exist — fall back to search
+            let exe_name = games::with_plugin(&game_id, |plugin| {
+                plugin
+                    .executables()
+                    .first()
+                    .map(|s| s.to_string())
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+            launcher::find_executable(&game_path, &exe_name).ok_or_else(|| {
+                format!(
+                    "Game executable '{}' not found in {}",
+                    exe_name,
+                    game_path.display()
+                )
+            })?
+        }
     } else {
-        games::with_plugin(&game_id, |plugin| {
+        let exe_name = games::with_plugin(&game_id, |plugin| {
             plugin
                 .executables()
                 .first()
                 .map(|s| s.to_string())
                 .unwrap_or_default()
         })
-        .unwrap_or_default()
-    };
-
-    if exe_name.is_empty() {
-        return Err(format!(
-            "No executable configured for game '{}'. Cannot launch.",
-            game_id
-        ));
-    }
-
-    let exe_path = launcher::find_executable(&game_path, &exe_name).ok_or_else(|| {
-        if use_skse {
-            format!(
-                "SKSE loader '{}' not found in {}. Is SKSE installed?",
-                exe_name,
-                game_path.display()
-            )
-        } else {
+        .unwrap_or_default();
+        if exe_name.is_empty() {
+            return Err(format!(
+                "No executable configured for game '{}'. Cannot launch.",
+                game_id
+            ));
+        }
+        launcher::find_executable(&game_path, &exe_name).ok_or_else(|| {
             format!(
                 "Game executable '{}' not found in {}",
                 exe_name,
                 game_path.display()
             )
-        }
-    })?;
+        })?
+    };
 
     log::info!(
         "launch_game_cmd: source={} bottle={} exe={} use_skse={}",

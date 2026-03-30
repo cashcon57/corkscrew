@@ -171,9 +171,14 @@ pub fn merge_databases(
         }
     }
 
-    // Step 3: Apply all statements to the merged database
+    // Step 3: Apply all statements to the merged database.
+    // Disable foreign key enforcement during the merge — mod databases may
+    // reference rows in tables that haven't been inserted yet (e.g. child
+    // rows before parent rows). FK constraints will be valid once all
+    // statements are applied.
     if !all_statements.is_empty() {
         let conn = Connection::open(&merged_db_path)?;
+        conn.execute_batch("PRAGMA foreign_keys = OFF")?;
         conn.execute_batch("BEGIN TRANSACTION")?;
         for sql in &all_statements {
             if let Err(e) = conn.execute_batch(sql) {
@@ -183,6 +188,8 @@ pub fn merge_databases(
             }
         }
         conn.execute_batch("COMMIT")?;
+        // Re-enable FK checks and verify integrity
+        conn.execute_batch("PRAGMA foreign_keys = ON")?;
     }
 
     log::info!(
