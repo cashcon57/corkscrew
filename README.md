@@ -27,6 +27,20 @@ It works by reading and writing directly to your Wine bottle's filesystem — th
 
 ---
 
+## Quick Links
+
+- [What Works Today](#what-works-today) — Current status, tested features, known issues
+- [Game Support Status](#game-support-status) — Full breakdown of 80 games: support tiers, planned additions, upcoming enhancements
+- [Install](#install) — Download links and build-from-source instructions
+- [Features](#features) — Core features, NexusMods, load order, Wabbajack, shader compat, AI assistant
+- [Supported Platforms](#supported-platforms) — Wine sources (CrossOver, Proton, Lutris, etc.) and game list
+- [SSE Engine Fixes for Wine](#sse-engine-fixes-for-wine) — Companion SKSE plugin for large modlists under Wine
+- [Architecture](#architecture) — Tech stack, project structure, how mods are installed
+- [Contributing](#contributing) — Setup, help wanted, how to add game support
+- [Acknowledgments](#acknowledgments) — Projects and authors we build on
+
+---
+
 ## What Works Today
 
 Corkscrew has been **tested extensively with Skyrim Special Edition** on macOS (Apple Silicon, CrossOver). That's the honest baseline. Here's where things stand:
@@ -408,6 +422,7 @@ Corkscrew builds on many open-source projects:
 - **[Wine Project](https://www.winehq.org/)** / **[CrossOver](https://www.codeweavers.com/crossover)** — The foundation for running Windows games on macOS and Linux
 - **[Nexus Mods](https://www.nexusmods.com/)** — Mod hosting, API, and the modding community
 - **[Jackify](https://github.com/Omni-guides/Jackify)** — Demonstrated Wabbajack modlist installation on Linux
+- **[SulfurNitride](https://github.com/SulfurNitride)** — [NaK](https://github.com/SulfurNitride/NaK) (MO2 Linux setup automation), [Radium-Textures](https://github.com/SulfurNitride/Radium-Textures) (native Rust texture optimizer), [Nexus-Collection-To-MO2-Bridge](https://github.com/SulfurNitride/Nexus-Collection-To-MO2-Bridge) — pioneering Linux modding tooling
 
 <details>
 <summary>Modding tool authors</summary>
