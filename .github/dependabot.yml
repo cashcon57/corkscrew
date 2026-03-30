@@ -1,0 +1,37 @@
+version: 2
+updates:
+  # npm — frontend (Svelte, Tauri JS bindings)
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "deps(npm):"
+    labels:
+      - "dependencies"
+    open-pull-requests-limit: 10
+
+  # Cargo — Rust backend (Tauri, rusqlite, reqwest, etc.)
+  - package-ecosystem: "cargo"
+    directory: "/src-tauri"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "deps(cargo):"
+    labels:
+      - "dependencies"
+    open-pull-requests-limit: 10
+
+  # GitHub Actions — CI/CD workflows
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "deps(actions):"
+    labels:
+      - "dependencies"
+    open-pull-requests-limit: 5
