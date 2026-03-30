@@ -25,7 +25,7 @@
     "@tauri-apps/plugin-updater": "^2.10.0",
     "@types/dompurify": "^3.0.5",
     "dompurify": "^3.3.1",
-    "marked": "^17.0.3"
+    "marked": "^17.0.5"
   },
   "devDependencies": {
     "@playwright/test": "^1.58.2",
