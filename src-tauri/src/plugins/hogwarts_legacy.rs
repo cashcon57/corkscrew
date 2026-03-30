@@ -191,6 +191,10 @@ impl GamePlugin for HogwartsLegacyPlugin {
         }
     }
 
+    fn steam_launch_id(&self) -> Option<&str> {
+        Some("990080")
+    }
+
     fn launch_executable(&self, game_path: &std::path::Path) -> Option<std::path::PathBuf> {
         // Launch the ROOT launcher (not the Phoenix binary) — the root launcher
         // invokes Steam for DRM authentication before starting the real game.

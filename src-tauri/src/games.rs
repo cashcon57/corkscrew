@@ -98,6 +98,14 @@ pub trait GamePlugin: Send + Sync {
     ) {
     }
 
+    /// Return a Steam App ID for protocol launch (`steam://rungameid/{id}`).
+    /// When set, the launcher uses the Steam protocol URL instead of launching
+    /// the exe directly, avoiding Steam's "custom arguments" dialog.
+    /// Return `None` to launch the exe directly (default).
+    fn steam_launch_id(&self) -> Option<&str> {
+        None
+    }
+
     /// Return the executable to use for game launch, if different from the
     /// detection executable. Some games (e.g. Hogwarts Legacy) have a root
     /// launcher stub that invokes Steam/DRM, while the real game binary is
