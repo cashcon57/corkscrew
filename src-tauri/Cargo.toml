@@ -76,7 +76,7 @@ url = "2"
 futures = "0.3"
 
 # Window vibrancy (macOS)
-window-vibrancy = "0.5"
+window-vibrancy = "0.6"
 
 # Hashing (for version detection)
 sha2 = "0.11"
