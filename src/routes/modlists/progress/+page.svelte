@@ -9,12 +9,33 @@
   let status = $derived($wjInstallStatus);
   let phase = $derived(status?.phase ?? "");
   let overallProgress = $derived(status?.overallProgress ?? 0);
-  let dl = $derived(status?.downloadProgress ?? { current: 0, total: 0, bytesDownloaded: 0, totalBytes: 0, currentFile: "", speed: 0, eta: "" });
+  let dl = $derived(status?.downloadProgress ?? { current: 0, total: 0, completed: 0, bytesDownloaded: 0, totalBytes: 0, currentFile: "", speed: 0, eta: "", maxConcurrent: 0, activeDownloads: [] });
   let ext = $derived(status?.extractionProgress ?? { current: 0, total: 0, currentArchive: "", totalBytes: 0, bytesCompleted: 0 });
   let dir = $derived(status?.directiveProgress ?? { current: 0, total: 0, bytesProcessed: 0, totalBytes: 0, currentFile: "", directiveType: "files" });
   let dep = $derived(status?.deployProgress ?? { current: 0, total: 0, bytesDeployed: 0, totalBytes: 0 });
   let archives = $derived(status?.archives ?? []);
   let result = $derived(status?.result ?? null);
+  let logEntries = $derived(status?.logEntries ?? []);
+
+  let verboseLogExpanded = $state(false);
+  let verboseLogEl: HTMLDivElement | null = $state(null);
+
+  // Auto-scroll log when expanded
+  $effect(() => {
+    if (verboseLogExpanded && verboseLogEl && logEntries.length > 0) {
+      verboseLogEl.scrollTop = verboseLogEl.scrollHeight;
+    }
+  });
+
+  function dlItemPercent(item: { bytes: number; totalBytes: number }): number {
+    if (item.totalBytes <= 0) return 0;
+    return Math.min(100, (item.bytes / item.totalBytes) * 100);
+  }
+
+  function formatLogTime(ts: number): string {
+    const d = new Date(ts);
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  }
 
   const phaseLabels: Record<string, string> = {
     preflight: "Running Pre-Flight Checks",
@@ -337,7 +358,10 @@
               </svg>
               DOWNLOADS
             </h3>
-            <span class="phase-count">{dl.current} / {dl.total}</span>
+            <span class="phase-count">{dl.completed} / {dl.total}{#if phase === "downloading" && dl.activeDownloads.length > 0} <span class="phase-count-detail">({dl.activeDownloads.length} active)</span>{/if}</span>
+            {#if dl.maxConcurrent > 0 && phase === "downloading"}
+              <span class="concurrency-badge">{dl.maxConcurrent} threads</span>
+            {/if}
             {#if phase === "downloading" && status.speedLabel}
               <span class="speed-badge">{status.speedLabel}</span>
             {/if}
@@ -347,15 +371,41 @@
           </div>
           {#if dl.total > 0}
             <div class="progress-track">
-              <div class="progress-fill" style="width: {dl.totalBytes > 0 ? Math.min(100, (dl.bytesDownloaded / dl.totalBytes) * 100).toFixed(1) : (dl.total > 0 ? (dl.current / dl.total) * 100 : 0).toFixed(1)}%"></div>
+              <div class="progress-fill" style="width: {dl.totalBytes > 0 ? Math.min(100, (dl.bytesDownloaded / dl.totalBytes) * 100).toFixed(1) : (dl.total > 0 ? (dl.completed / dl.total) * 100 : 0).toFixed(1)}%"></div>
             </div>
             <div class="phase-detail-row">
               {#if dl.totalBytes > 0}
                 <span class="detail-bytes">{formatBytes(dl.bytesDownloaded)} / {formatBytes(dl.totalBytes)}</span>
               {/if}
-              {#if dl.currentFile && phase === "downloading"}
-                <span class="detail-file" title={dl.currentFile}>{dl.currentFile}</span>
-              {/if}
+            </div>
+          {/if}
+
+          <!-- Active Downloads -->
+          {#if dl.activeDownloads.length > 0 && phase === "downloading"}
+            <div class="active-downloads">
+              <div class="active-dl-header">
+                <span class="active-dl-title">Active Downloads</span>
+                <span class="active-dl-count">{dl.activeDownloads.length} active</span>
+              </div>
+              {#each dl.activeDownloads as item (item.index)}
+                <div class="download-item">
+                  <div class="dl-info">
+                    <span class="dl-icon icon-bounce">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--system-accent)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                        <polyline points="7 10 12 15 17 10" />
+                        <line x1="12" y1="15" x2="12" y2="3" />
+                      </svg>
+                    </span>
+                    <span class="dl-name" title={item.name}>{item.name}</span>
+                    <span class="dl-bytes">
+                      {formatBytes(item.bytes)}{#if item.totalBytes > 0} / {formatBytes(item.totalBytes)}{/if}
+                    </span>
+                  </div>
+                  <div class="progress-track progress-track-sm">
+                    <div class="progress-fill" style="width: {dlItemPercent(item)}%"></div>
+                  </div>
+                </div>
+              {/each}
             </div>
           {/if}
         </section>
@@ -484,6 +534,40 @@
           {/if}
         </section>
       {/if}
+    {/if}
+
+    <!-- Verbose Log -->
+    {#if logEntries.length > 0}
+      <section class="phase-section verbose-log-section">
+        <button class="collapsible-header" onclick={() => verboseLogExpanded = !verboseLogExpanded}>
+          <h3 class="phase-title">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+              <polyline points="14 2 14 8 20 8" />
+              <line x1="16" y1="13" x2="8" y2="13" />
+              <line x1="16" y1="17" x2="8" y2="17" />
+            </svg>
+            LOG
+          </h3>
+          <span class="phase-count">{logEntries.length} entries</span>
+          <svg class="collapse-chevron" class:collapse-chevron-open={verboseLogExpanded} width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
+        </button>
+        {#if verboseLogExpanded}
+          <div class="verbose-log-body" bind:this={verboseLogEl}>
+            {#each logEntries as entry, i (i)}
+              <div class="log-entry" class:log-warn={entry.level === "warn"} class:log-error={entry.level === "error"}>
+                <span class="log-time">{formatLogTime(entry.timestamp)}</span>
+                <span class="log-msg">{entry.message}</span>
+              </div>
+            {/each}
+            {#if logEntries.length === 0}
+              <div class="log-empty">No events yet</div>
+            {/if}
+          </div>
+        {/if}
+      </section>
     {/if}
 
     <!-- Featured Mods (shown during active install to fill empty space) -->
@@ -1104,6 +1188,199 @@
     border-top-color: var(--system-accent, #007AFF);
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
+  }
+
+  /* ---- Concurrency Badge ---- */
+
+  .phase-count-detail {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-tertiary);
+  }
+
+  .concurrency-badge {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    background: var(--surface-hover);
+    padding: 2px 8px;
+    border-radius: 100px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  /* ---- Active Downloads ---- */
+
+  .active-downloads {
+    margin-top: var(--space-3);
+    padding: var(--space-3);
+    background: var(--surface-secondary, rgba(255, 255, 255, 0.03));
+    border-radius: 8px;
+    border-top: 1px solid var(--separator);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .active-dl-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: var(--space-1);
+  }
+
+  .active-dl-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .active-dl-count {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--system-accent);
+  }
+
+  .download-item {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--system-accent) 5%, transparent);
+    border: 1px solid color-mix(in srgb, var(--system-accent) 12%, transparent);
+    animation: dl-item-fade-in 200ms ease-out;
+  }
+
+  @keyframes dl-item-fade-in {
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .dl-info {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: 12px;
+  }
+
+  .dl-icon {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+  }
+
+  .icon-bounce {
+    animation: bounce 1s ease-in-out infinite;
+  }
+
+  @keyframes bounce {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(2px); }
+  }
+
+  .dl-name {
+    flex: 1;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .dl-bytes {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-tertiary);
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+
+  .progress-track-sm {
+    height: 4px;
+    border-radius: 2px;
+  }
+
+  /* ---- Verbose Log ---- */
+
+  .verbose-log-section {
+    border-color: color-mix(in srgb, var(--separator) 60%, transparent);
+  }
+
+  .collapsible-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    width: 100%;
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    color: inherit;
+    font: inherit;
+  }
+
+  .collapsible-header:hover {
+    opacity: 0.8;
+  }
+
+  .collapse-chevron {
+    margin-left: auto;
+    transition: transform 200ms ease;
+    color: var(--text-tertiary);
+  }
+
+  .collapse-chevron-open {
+    transform: rotate(180deg);
+  }
+
+  .verbose-log-body {
+    max-height: 300px;
+    overflow-y: auto;
+    margin-top: var(--space-3);
+    padding: var(--space-2);
+    background: var(--bg-tertiary);
+    border-radius: 6px;
+    font-size: 11px;
+    font-family: var(--font-mono);
+  }
+
+  .log-entry {
+    display: flex;
+    gap: var(--space-2);
+    padding: 2px 4px;
+    border-radius: 2px;
+  }
+
+  .log-entry:hover {
+    background: rgba(255, 255, 255, 0.03);
+  }
+
+  .log-time {
+    color: var(--text-tertiary);
+    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .log-msg {
+    color: var(--text-secondary);
+    word-break: break-word;
+  }
+
+  .log-warn .log-msg {
+    color: #f59e0b;
+  }
+
+  .log-error .log-msg {
+    color: #ef4444;
+  }
+
+  .log-empty {
+    color: var(--text-tertiary);
+    padding: var(--space-2);
+    text-align: center;
   }
 
   /* ---- Completion Panel ---- */

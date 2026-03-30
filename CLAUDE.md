@@ -46,6 +46,15 @@ These rules exist because violating them caused real bugs. Follow them exactly.
 - **`AppState.db` is `Arc<ModDatabase>`** — internal Mutex, do NOT `.lock()` externally
 - **Symlink checks BEFORE file operations**, never after (TOCTOU prevention)
 
+### Download/Install Pipelines (CRITICAL)
+- **`collection_installer.rs` is the reference architecture** — MUST read `pipeline-architecture.md` in auto-memory before modifying `wabbajack_installer.rs` or `wabbajack_downloader.rs`
+- **Semaphore-gated `tokio::spawn`** for concurrent downloads — NOT `buffer_unordered`
+- **Dual semaphores**: downloads and extractions overlap via separate semaphores
+- **`Arc<Notify>` signaling**: install loop processes items as they complete, does NOT wait for all downloads
+- **Multi-level retry**: per-item exponential backoff → extraction re-download → global retry pass
+- **Transient vs permanent errors**: MUST distinguish (don't retry 404s)
+- **Cancellation**: `AtomicBool` checked before each major operation, not just between phases
+
 ### NexusMods (Compliance — CRITICAL)
 - **NEVER automate downloads for free users** — enforced in `nexus.rs::get_download_links()`
 - Premium-only API downloads; free users get browser links

@@ -152,6 +152,19 @@ export interface LogEntry {
 export const collectionInstallStatus = writable<CollectionInstallStatus | null>(null);
 
 // Wabbajack install progress (global — visible from any page)
+export interface WjActiveDownload {
+  name: string;
+  index: number;
+  bytes: number;
+  totalBytes: number;
+}
+
+export interface WjLogEntry {
+  timestamp: number;
+  message: string;
+  level: "info" | "warn" | "error";
+}
+
 export interface WjInstallStatus {
   active: boolean;
   modlistName: string;
@@ -160,11 +173,14 @@ export interface WjInstallStatus {
   downloadProgress: {
     current: number;
     total: number;
+    completed: number;
     bytesDownloaded: number;
     totalBytes: number;
     currentFile: string;
     speed: number; // bytes/sec
     eta: string;
+    maxConcurrent: number;
+    activeDownloads: WjActiveDownload[];
   };
   // Extraction phase
   extractionProgress: {
@@ -210,6 +226,8 @@ export interface WjInstallStatus {
   installId: number | null;
   // Preflight report
   preflightNote: string;
+  // Activity log
+  logEntries: WjLogEntry[];
   // Modlist metadata (for display during install)
   readmeHtml: string;
   description: string;

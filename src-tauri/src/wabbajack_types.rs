@@ -16,7 +16,9 @@ pub struct WjHash(pub String);
 
 impl WjHash {
     pub fn from_u64(val: u64) -> Self {
-        let bytes = val.to_be_bytes();
+        // Wabbajack (C#/.NET) uses BitConverter.GetBytes(long) which produces
+        // little-endian bytes on x86/x64, then base64-encodes them.
+        let bytes = val.to_le_bytes();
         WjHash(base64::engine::general_purpose::STANDARD.encode(bytes))
     }
 
@@ -27,7 +29,7 @@ impl WjHash {
         if bytes.len() != 8 {
             return None;
         }
-        Some(u64::from_be_bytes([
+        Some(u64::from_le_bytes([
             bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
         ]))
     }
@@ -987,6 +989,24 @@ mod tests {
         // Different input produces different hash
         let hash3 = xxhash64_bytes(b"hello world!");
         assert_ne!(hash, hash3);
+    }
+
+    #[test]
+    fn test_xxhash64_wabbajack_compatibility() {
+        // Wabbajack (C#/.NET) uses BitConverter.GetBytes(long) which is
+        // little-endian on x86/x64, then base64-encodes the result.
+        // xxh64("hello world", seed=0) = 0x45ab6734b21e6968
+        // LE bytes → base64 = "aGkesjRnq0U="
+        let hash = xxhash64_bytes(b"hello world");
+        assert_eq!(hash.0, "aGkesjRnq0U=", "Hash must match Wabbajack LE format");
+
+        // Verify round-trip through to_u64
+        let val = hash.to_u64().unwrap();
+        assert_eq!(val, 0x45ab6734b21e6968);
+
+        // Verify from_u64 produces the same base64
+        let reconstructed = WjHash::from_u64(0x45ab6734b21e6968);
+        assert_eq!(reconstructed.0, "aGkesjRnq0U=");
     }
 
     #[test]

@@ -452,8 +452,18 @@ button:focus-visible,
 
 .rendered-markdown img {
   max-width: 100%;
+  max-height: 500px;
+  height: auto;
+  object-fit: contain;
   border-radius: var(--radius);
   margin: var(--space-2) 0;
+}
+
+/* Constrain inline SVGs in rendered markdown */
+.rendered-markdown svg {
+  max-width: 100%;
+  max-height: 200px;
+  height: auto;
 }
 
 .rendered-markdown ul, .rendered-markdown ol {

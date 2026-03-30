@@ -1323,12 +1323,13 @@ export interface WjInstallResult {
 export type WjInstallProgressEvent =
   | { type: "PreFlightStarted" }
   | { type: "PreFlightCompleted"; report: WjPreflightReport }
-  | { type: "DownloadPhaseStarted"; total: number }
+  | { type: "DownloadPhaseStarted"; total: number; max_concurrent: number }
   | { type: "DownloadStarted"; name: string; index: number; total: number }
   | { type: "DownloadProgress"; name: string; bytes: number; total_bytes: number }
   | { type: "DownloadCompleted"; name: string }
   | { type: "DownloadFailed"; name: string; error: string }
   | { type: "DownloadSkipped"; name: string; reason: string }
+  | { type: "DownloadPhaseCompleted"; total: number; succeeded: number; failed: number; skipped: number; failures: string[] }
   | { type: "ExtractionStarted"; total: number; total_bytes: number }
   | { type: "ExtractionProgress"; name: string; index: number; total: number; bytes_completed: number; total_bytes: number }
   | { type: "ExtractionArchiveStarted"; name: string; index: number; total: number; size: number }

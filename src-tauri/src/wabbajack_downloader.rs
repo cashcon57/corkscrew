@@ -91,6 +91,18 @@ pub enum WjProgressEvent {
     },
 }
 
+/// Summary of the download phase result — includes both successes and failure details.
+pub struct WjDownloadPhaseResult {
+    /// Map of archive hash → downloaded file path (successes only).
+    pub paths: HashMap<String, PathBuf>,
+    /// Number of archives that failed to download.
+    pub failed_count: usize,
+    /// Number of archives skipped (cached/checkpointed).
+    pub skipped_count: usize,
+    /// Human-readable failure messages (archive name + error).
+    pub failures: Vec<String>,
+}
+
 // ---------------------------------------------------------------------------
 // WjDownloader
 // ---------------------------------------------------------------------------
@@ -458,7 +470,7 @@ impl WjDownloader {
                 .clone()
                 .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
 
-            download_cdn_concurrent(&self.http_client, &url, &dest, total_size, &cancel).await?;
+            download_cdn_concurrent(&self.http_client, app, archive_name, &url, &dest, total_size, &cancel).await?;
             Ok(dest)
         } else {
             // Fall back to normal streaming download.
@@ -688,7 +700,7 @@ impl WjDownloader {
         archives: &[WjTypedArchive],
         concurrency: usize,
         cancel_token: Arc<AtomicBool>,
-    ) -> Result<HashMap<String, PathBuf>, WjDownloadError> {
+    ) -> Result<WjDownloadPhaseResult, WjDownloadError> {
         let total = archives.len();
         let results: Arc<tokio::sync::Mutex<HashMap<String, PathBuf>>> =
             Arc::new(tokio::sync::Mutex::new(HashMap::new()));
@@ -698,6 +710,9 @@ impl WjDownloader {
         tokio::fs::create_dir_all(&checkpoint_dir).await?;
 
         let all_succeeded = Arc::new(AtomicBool::new(true));
+        let failures: Arc<tokio::sync::Mutex<Vec<String>>> =
+            Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let mut skipped_count: usize = 0;
 
         // -----------------------------------------------------------------
         // Pre-filter pass: check checkpoints and cache sequentially (fast,
@@ -739,6 +754,7 @@ impl WjDownloader {
                             None,
                         );
                         results.lock().await.insert(hash_str, dest);
+                        skipped_count += 1;
                         continue;
                     }
                     log::warn!(
@@ -773,6 +789,7 @@ impl WjDownloader {
                         );
                         let _ = write_checkpoint(&checkpoint_file).await;
                         results.lock().await.insert(hash_str, cached);
+                        skipped_count += 1;
                         continue;
                     } else {
                         log::warn!(
@@ -800,6 +817,7 @@ impl WjDownloader {
             let cancel = cancel_token.clone();
             let sem = sem.clone();
             let results = results.clone();
+            let failures = failures.clone();
             let checkpoint_dir = checkpoint_dir.clone();
             let all_succeeded = all_succeeded.clone();
 
@@ -852,6 +870,8 @@ impl WjDownloader {
                             }
                             Err(e) => {
                                 all_succeeded.store(false, Ordering::Relaxed);
+                                let err_msg = format!("{}: hash mismatch — {}", archive_name, e);
+                                failures.lock().await.push(err_msg);
                                 let _ = tokio::fs::remove_file(&path).await;
                                 let _ = app.emit(
                                     "wabbajack-install-progress",
@@ -874,6 +894,7 @@ impl WjDownloader {
                     }
                     Err(WjDownloadError::Cancelled) => {
                         all_succeeded.store(false, Ordering::Relaxed);
+                        failures.lock().await.push(format!("{}: cancelled", archive_name));
                         let _ = app.emit(
                             "wabbajack-install-progress",
                             WjProgressEvent::DownloadFailed {
@@ -886,6 +907,7 @@ impl WjDownloader {
                     }
                     Err(WjDownloadError::UserActionRequired(msg)) => {
                         all_succeeded.store(false, Ordering::Relaxed);
+                        failures.lock().await.push(format!("{}: {}", archive_name, msg));
                         let url_part = msg
                             .split_whitespace()
                             .find(|w| w.starts_with("http"))
@@ -902,6 +924,7 @@ impl WjDownloader {
                     }
                     Err(e) => {
                         all_succeeded.store(false, Ordering::Relaxed);
+                        failures.lock().await.push(format!("{}: {}", archive_name, e));
                         let _ = app.emit(
                             "wabbajack-install-progress",
                             WjProgressEvent::DownloadFailed {
@@ -919,6 +942,109 @@ impl WjDownloader {
             .collect::<Vec<()>>()
             .await;
 
+        // -----------------------------------------------------------------
+        // Secondary retry pass: any archives that failed during the
+        // concurrent wave get one more sequential attempt after a cooldown.
+        // This mirrors the collections downloader approach and handles
+        // transient CDN issues that resolve after a short wait.
+        // -----------------------------------------------------------------
+        {
+            let current_results = results.lock().await;
+            let failed_archives: Vec<(usize, WjTypedArchive)> = archives
+                .iter()
+                .enumerate()
+                .filter(|(_, a)| !current_results.contains_key(&a.hash.0))
+                .filter(|(_, a)| {
+                    // Only retry transient-type failures, not unsupported/user-action
+                    !matches!(
+                        a.state,
+                        WjArchiveState::Bethesda { .. }
+                            | WjArchiveState::LoversLab { .. }
+                            | WjArchiveState::VectorPlexus { .. }
+                            | WjArchiveState::TESAlliance { .. }
+                    )
+                })
+                .map(|(i, a)| (i, a.clone()))
+                .collect();
+            drop(current_results);
+
+            if !failed_archives.is_empty()
+                && !cancel_token.load(Ordering::Relaxed)
+            {
+                log::info!(
+                    "Secondary retry pass: {} archives to retry after 10s cooldown",
+                    failed_archives.len()
+                );
+                tokio::time::sleep(Duration::from_secs(10)).await;
+
+                for (index, archive) in &failed_archives {
+                    if cancel_token.load(Ordering::Relaxed) {
+                        break;
+                    }
+
+                    let archive_name = archive.name.clone();
+                    let hash_str = archive.hash.0.clone();
+
+                    log::info!("Retrying download: {} (archive {}/{})", archive_name, index + 1, total);
+                    let _ = app.emit(
+                        "wabbajack-install-progress",
+                        WjProgressEvent::DownloadStarted {
+                            archive_name: archive_name.clone(),
+                            index: *index,
+                            total,
+                        },
+                    );
+
+                    let mut downloader = self.clone();
+                    downloader.cancel_token = Some(cancel_token.clone());
+
+                    match downloader.download_archive(app, &archive, install_id, db).await {
+                        Ok(path) => {
+                            match verify_xxhash64(&path, &archive.hash) {
+                                Ok(()) => {
+                                    let _ = app.emit(
+                                        "wabbajack-install-progress",
+                                        WjProgressEvent::DownloadCompleted {
+                                            archive_name: archive_name.clone(),
+                                        },
+                                    );
+                                    let checkpoint_file = checkpoint_dir.join(format!(
+                                        "{}.done",
+                                        sanitize_filename(&hash_str),
+                                    ));
+                                    let _ = write_checkpoint(&checkpoint_file).await;
+                                    results.lock().await.insert(hash_str, path);
+                                    // Remove from failures list
+                                    let mut fl = failures.lock().await;
+                                    fl.retain(|f| !f.starts_with(&archive_name));
+                                }
+                                Err(e) => {
+                                    let _ = tokio::fs::remove_file(&path).await;
+                                    let _ = app.emit(
+                                        "wabbajack-install-progress",
+                                        WjProgressEvent::DownloadFailed {
+                                            archive_name: archive_name.clone(),
+                                            error: format!("Retry hash mismatch: {}", e),
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                        Err(WjDownloadError::Cancelled) => break,
+                        Err(e) => {
+                            let _ = app.emit(
+                                "wabbajack-install-progress",
+                                WjProgressEvent::DownloadFailed {
+                                    archive_name: archive_name.clone(),
+                                    error: format!("Retry failed: {}", e),
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         // Clean up checkpoint directory on successful full completion.
         if all_succeeded.load(Ordering::Relaxed) {
             let _ = tokio::fs::remove_dir_all(&checkpoint_dir).await;
@@ -932,7 +1058,20 @@ impl WjDownloader {
                 guard.clone()
             });
 
-        Ok(map)
+        let failure_list = Arc::try_unwrap(failures)
+            .map(|mutex| mutex.into_inner())
+            .unwrap_or_else(|arc| {
+                let guard = arc.blocking_lock();
+                guard.clone()
+            });
+        let failed_count = failure_list.len();
+
+        Ok(WjDownloadPhaseResult {
+            paths: map,
+            failed_count,
+            skipped_count,
+            failures: failure_list,
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -1401,6 +1540,8 @@ fn sanitize_filename(name: &str) -> String {
 /// Download a file from WJ CDN using concurrent parts.
 async fn download_cdn_concurrent(
     client: &reqwest::Client,
+    app: &AppHandle,
+    archive_name: &str,
     url: &str,
     dest_path: &Path,
     total_size: u64,
@@ -1439,8 +1580,10 @@ async fn download_cdn_concurrent(
         part_size as f64 / 1_048_576.0
     );
 
-    // Download parts concurrently, streaming each to a temp file to avoid
-    // holding entire parts in memory (a 2GB file / 16 parts = 128MB per part).
+    // Shared counter for aggregate progress across all parts
+    let bytes_downloaded = Arc::new(AtomicU64::new(0));
+    let last_emit = Arc::new(AtomicU64::new(0));
+
     let dest = dest_path.to_path_buf();
     let results: Vec<Result<(), WjDownloadError>> = futures::stream::iter(ranges)
         .map(|(start, end)| {
@@ -1448,6 +1591,10 @@ async fn download_cdn_concurrent(
             let url = url.to_string();
             let dest = dest.clone();
             let cancel = cancel_token.clone();
+            let bytes_downloaded = bytes_downloaded.clone();
+            let last_emit = last_emit.clone();
+            let app = app.clone();
+            let name = archive_name.to_string();
 
             async move {
                 if cancel.load(Ordering::Relaxed) {
@@ -1460,13 +1607,27 @@ async fn download_cdn_concurrent(
                     .send()
                     .await?;
 
-                // Stream response bytes to file at correct offset via spawn_blocking
-                // to avoid blocking the tokio runtime with synchronous I/O.
+                // Stream response bytes to buffer, emitting progress as chunks arrive.
                 let mut stream = response.bytes_stream();
-                let mut buf = Vec::with_capacity(256 * 1024); // 256KB buffer
+                let mut buf = Vec::with_capacity((end - start + 1) as usize);
                 while let Some(chunk) = stream.next().await {
                     let chunk = chunk?;
                     buf.extend_from_slice(&chunk);
+
+                    // Update aggregate byte counter and emit throttled progress
+                    let total_dl = bytes_downloaded.fetch_add(chunk.len() as u64, Ordering::Relaxed) + chunk.len() as u64;
+                    let prev = last_emit.load(Ordering::Relaxed);
+                    if total_dl - prev > 256 * 1024 {
+                        last_emit.store(total_dl, Ordering::Relaxed);
+                        let _ = app.emit(
+                            "wabbajack-install-progress",
+                            WjProgressEvent::DownloadProgress {
+                                archive_name: name.clone(),
+                                bytes_downloaded: total_dl,
+                                total_bytes: total_size,
+                            },
+                        );
+                    }
                 }
 
                 // Write buffer to file at offset (blocking I/O in spawn_blocking)
@@ -1483,7 +1644,9 @@ async fn download_cdn_concurrent(
                     Ok::<(), WjDownloadError>(())
                 })
                 .await
-                .map_err(|e| WjDownloadError::Other(format!("Task join error: {}", e)))?
+                .map_err(|e| WjDownloadError::Other(format!("Task join error: {}", e)))?;
+
+                Ok(())
             }
         })
         .buffer_unordered(MAX_CONCURRENT_PARTS)
@@ -1494,6 +1657,16 @@ async fn download_cdn_concurrent(
     for result in results {
         result?;
     }
+
+    // Emit final progress to ensure 100%
+    let _ = app.emit(
+        "wabbajack-install-progress",
+        WjProgressEvent::DownloadProgress {
+            archive_name: archive_name.to_string(),
+            bytes_downloaded: total_size,
+            total_bytes: total_size,
+        },
+    );
 
     Ok(())
 }

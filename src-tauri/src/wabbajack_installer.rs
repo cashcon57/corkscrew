@@ -13,7 +13,7 @@ use crate::database::ModDatabase;
 use crate::nexus;
 use crate::oauth;
 use crate::wabbajack_directives::DirectiveProcessor;
-use crate::wabbajack_downloader::WjDownloader;
+use crate::wabbajack_downloader::{verify_xxhash64, WjDownloader};
 use crate::wabbajack_types::*;
 
 use serde::Serialize;
@@ -95,6 +95,7 @@ pub enum WjInstallProgressEvent {
     },
     DownloadPhaseStarted {
         total: usize,
+        max_concurrent: usize,
     },
     DownloadStarted {
         name: String,
@@ -116,6 +117,13 @@ pub enum WjInstallProgressEvent {
     DownloadSkipped {
         name: String,
         reason: String,
+    },
+    DownloadPhaseCompleted {
+        total: usize,
+        succeeded: usize,
+        failed: usize,
+        skipped: usize,
+        failures: Vec<String>,
     },
     ExtractionStarted {
         total: usize,
@@ -780,7 +788,13 @@ pub async fn install_wabbajack_modlist(
     };
 
     // -----------------------------------------------------------------------
-    // Step 4: Download phase
+    // Steps 4+5: Combined download + extraction phase
+    //
+    // Each archive flows through download → verify → extract in a single
+    // task. Dual semaphores ensure download slots are released before
+    // extraction begins, so later archives can start downloading while
+    // earlier ones are still extracting. This overlaps I/O-bound downloads
+    // with CPU-bound extraction for significantly better throughput.
     // -----------------------------------------------------------------------
     let phase_start = Instant::now();
     db.update_wj_install_status(install_id, "downloading", None)
@@ -790,6 +804,7 @@ pub async fn install_wabbajack_modlist(
         app,
         &WjInstallProgressEvent::DownloadPhaseStarted {
             total: total_archives,
+            max_concurrent: download_concurrency,
         },
     );
 
@@ -811,227 +826,597 @@ pub async fn install_wabbajack_modlist(
 
     let downloader =
         WjDownloader::new(nexus_api_key, nexus_oauth_token, is_premium, download_dir.to_path_buf());
-    let archive_download_paths = downloader
-        .download_all_archives(
-            app,
-            db,
-            install_id,
-            &modlist.archives,
-            download_concurrency,
-            cancel_token.clone(),
-        )
-        .await
-        .map_err(|e| {
-            WjInstallError::Download(format!(
-                "Download phase failed for '{}' ({} archives): {}",
-                modlist.name, total_archives, e
-            ))
-        })?;
 
-    db.update_wj_install_archive_progress(install_id, archive_download_paths.len() as i64)
-        .map_err(|e| WjInstallError::Database(e.to_string()))?;
+    // Dual semaphores: download permits released before extraction starts
+    let download_sem = Arc::new(Semaphore::new(download_concurrency));
+    let extract_sem = Arc::new(Semaphore::new(extract_concurrency));
 
-    // Register downloaded archives in the download_registry for orphan tracking
-    let collection_name = format!("wj:{}", modlist.name);
-    for archive in &modlist.archives {
-        if let Some(path) = archive_download_paths.get(&archive.hash.0) {
-            let filename = path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-            let file_size = std::fs::metadata(path).map(|m| m.len() as i64).unwrap_or(0);
-            let (nexus_mod_id, nexus_file_id) = match &archive.state {
-                WjArchiveState::Nexus { mod_id, file_id, .. } => (Some(*mod_id), Some(*file_id)),
-                _ => (None, None),
-            };
-            if let Ok(download_id) = db.register_download(
-                &path.to_string_lossy(),
-                &filename,
-                nexus_mod_id,
-                nexus_file_id,
-                None, // SHA-256 not available here
-                file_size,
-            ) {
-                let _ = db.add_download_collection_ref(
-                    download_id,
-                    &collection_name,
-                    game_id,
-                    bottle_name,
-                );
-            }
-        }
-    }
+    // Shared state collected by spawned tasks
+    let extracted_dirs: Arc<std::sync::Mutex<HashMap<String, PathBuf>>> =
+        Arc::new(std::sync::Mutex::new(HashMap::new()));
+    let archive_download_paths: Arc<std::sync::Mutex<HashMap<String, PathBuf>>> =
+        Arc::new(std::sync::Mutex::new(HashMap::new()));
+    let download_failures: Arc<std::sync::Mutex<Vec<String>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let download_skipped_count = Arc::new(AtomicU64::new(0));
 
-    log_phase_metrics(app, "download", phase_start);
-
-    // Check cancellation
-    if is_cancelled(&cancel_token) {
-        mark_cancelled(db, install_id);
-        emit_progress(app, &WjInstallProgressEvent::InstallCancelled);
-        return Err(WjInstallError::Cancelled);
-    }
-
-    // -----------------------------------------------------------------------
-    // Step 5: Extraction phase
-    // -----------------------------------------------------------------------
-    let phase_start = Instant::now();
-    db.update_wj_install_status(install_id, "extracting", None)
-        .map_err(|e| WjInstallError::Database(e.to_string()))?;
-
-    // Collect into owned Vec for 'static spawned tasks
-    let archives_to_extract: Vec<(String, PathBuf)> = archive_download_paths
-        .iter()
-        .map(|(h, p)| (h.clone(), p.clone()))
-        .collect();
-    let extraction_count = archives_to_extract.len();
-
-    // Build hash→size map for byte-level progress
+    // Build hash→size map for extraction byte-level progress
     let archive_size_map: HashMap<String, u64> = modlist
         .archives
         .iter()
         .map(|a| (a.hash.0.clone(), a.size))
         .collect();
-    let total_extract_bytes: u64 = archives_to_extract
-        .iter()
-        .filter_map(|(hash, _)| archive_size_map.get(hash))
-        .sum();
-
-    emit_progress(
-        app,
-        &WjInstallProgressEvent::ExtractionStarted {
-            total: extraction_count,
-            total_bytes: total_extract_bytes,
-        },
-    );
-
-    // Map archive hash → extracted directory path
-    let mut extracted_dirs: HashMap<String, PathBuf> = HashMap::new();
-    let extraction_temp_base = install_dir.join(".wj_extraction_temp");
-
-    // Parallel extraction: scale with CPU cores
-    let extract_semaphore = Arc::new(Semaphore::new(extract_concurrency));
+    let total_extract_bytes: u64 = archive_size_map.values().sum();
     let extract_bytes_completed = Arc::new(AtomicU64::new(0));
-    let mut extract_handles = Vec::with_capacity(extraction_count);
 
-    for (idx, (hash, archive_path)) in archives_to_extract.iter().enumerate() {
-        // Check cancellation before spawning each extraction task
+    let extraction_temp_base = install_dir.join(".wj_extraction_temp");
+    let checkpoint_dir = download_dir.join(".wj_checkpoint");
+    std::fs::create_dir_all(&checkpoint_dir).ok();
+
+    let collection_name = format!("wj:{}", modlist.name);
+
+    // Inline helper: sanitize a string for use as a filename
+    fn sanitize_for_filename(s: &str) -> String {
+        s.chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' })
+            .collect()
+    }
+
+    // -----------------------------------------------------------------
+    // Pre-filter: check checkpoints and DB cache sequentially (fast
+    // filesystem metadata lookups). Only archives needing work are
+    // pushed into `to_process`.
+    // -----------------------------------------------------------------
+    let mut to_process: Vec<(usize, WjTypedArchive)> = Vec::new();
+
+    for (index, archive) in modlist.archives.iter().enumerate() {
         if is_cancelled(&cancel_token) {
             break;
         }
 
-        let sem = Arc::clone(&extract_semaphore);
+        let hash_str = archive.hash.0.clone();
+        let archive_name = archive.name.clone();
+        let checkpoint_file =
+            checkpoint_dir.join(format!("{}.done", sanitize_for_filename(&hash_str)));
+        let extract_dest = extraction_temp_base.join(&hash_str);
+
+        // Check resume checkpoint: archive downloaded + extracted previously
+        if checkpoint_file.exists() {
+            let dest = download_dir.join(sanitize_for_filename(&archive_name));
+            if dest.exists() && extract_dest.exists() {
+                // Both download and extraction present — skip entirely
+                if verify_xxhash64(&dest, &archive.hash).is_ok() {
+                    emit_progress(
+                        app,
+                        &WjInstallProgressEvent::DownloadSkipped {
+                            name: archive_name.clone(),
+                            reason: "resume checkpoint".into(),
+                        },
+                    );
+                    let _ = db.upsert_wj_archive_status(
+                        install_id,
+                        &hash_str,
+                        &archive_name,
+                        archive.state.source_type_name(),
+                        "verified",
+                        Some(&dest.to_string_lossy()),
+                        None,
+                    );
+                    archive_download_paths.lock().unwrap().insert(hash_str.clone(), dest);
+                    extracted_dirs.lock().unwrap().insert(hash_str, extract_dest);
+                    download_skipped_count.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+                log::warn!(
+                    "Checkpoint archive failed hash check, re-processing: {}",
+                    archive_name
+                );
+            }
+            // Checkpoint exists but files missing/invalid — remove and re-process
+            let _ = std::fs::remove_file(&checkpoint_file);
+        }
+
+        // Check shared cache
+        if let Ok(Some(cached_path)) = db.find_download_by_xxhash(&hash_str) {
+            let cached = PathBuf::from(&cached_path);
+            if cached.exists() && verify_xxhash64(&cached, &archive.hash).is_ok() {
+                // Have download cached but still need extraction — check if extracted dir exists
+                if extract_dest.exists() {
+                    emit_progress(
+                        app,
+                        &WjInstallProgressEvent::DownloadSkipped {
+                            name: archive_name.clone(),
+                            reason: "already cached".into(),
+                        },
+                    );
+                    let _ = db.upsert_wj_archive_status(
+                        install_id,
+                        &hash_str,
+                        &archive_name,
+                        archive.state.source_type_name(),
+                        "verified",
+                        Some(&cached_path),
+                        None,
+                    );
+                    let now_secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let _ = std::fs::write(&checkpoint_file, format!("{now_secs}"));
+                    archive_download_paths.lock().unwrap().insert(hash_str.clone(), cached);
+                    extracted_dirs.lock().unwrap().insert(hash_str, extract_dest);
+                    download_skipped_count.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+                // Cached download exists but needs extraction — still push to process
+                // but the download step will be skipped inside the task
+            }
+        }
+
+        to_process.push((index, archive.clone()));
+    }
+
+    // -----------------------------------------------------------------
+    // Spawn combined download+extract tasks for each archive
+    // -----------------------------------------------------------------
+    let process_count = to_process.len();
+    let mut handles = Vec::with_capacity(process_count);
+
+    for (index, archive) in to_process {
+        if is_cancelled(&cancel_token) {
+            break;
+        }
+
+        let mut task_downloader = downloader.clone();
+        task_downloader.set_cancel_token(cancel_token.clone());
+
+        let dl_sem = Arc::clone(&download_sem);
+        let ext_sem = Arc::clone(&extract_sem);
         let cancel = Arc::clone(&cancel_token);
-        let bytes_completed = Arc::clone(&extract_bytes_completed);
-        let hash_owned = hash.clone();
-        let archive_owned = archive_path.clone();
-        let extract_dest = extraction_temp_base.join(&hash_owned);
         let app_c = app.clone();
-        let total = extraction_count;
-        let archive_size = archive_size_map.get(hash).copied().unwrap_or(0);
+        let db_c = db.clone();
+        let extracted_dirs_c = Arc::clone(&extracted_dirs);
+        let download_paths_c = Arc::clone(&archive_download_paths);
+        let failures_c = Arc::clone(&download_failures);
+        let bytes_completed = Arc::clone(&extract_bytes_completed);
+        let extraction_temp = extraction_temp_base.clone();
+        let checkpoint_dir_c = checkpoint_dir.clone();
+        let archive_size = archive_size_map.get(&archive.hash.0).copied().unwrap_or(0);
         let total_bytes = total_extract_bytes;
+        let total = total_archives;
+        let collection_name_c = collection_name.clone();
+        let game_id_c = game_id.to_string();
+        let bottle_name_c = bottle_name.to_string();
 
         let handle = tokio::spawn(async move {
-            let _permit = sem.acquire().await.expect("semaphore closed");
+            let hash_str = archive.hash.0.clone();
+            let archive_name = archive.name.clone();
 
-            // Check cancellation after acquiring permit
+            // Check cancellation
             if cancel.load(Ordering::Relaxed) {
-                return (idx, hash_owned, Err("Cancelled".to_string()));
+                return;
             }
 
-            let archive_name = archive_owned
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| format!("archive_{}", idx));
+            // ---- Download phase (acquire download permit) ----
+            let dl_permit = dl_sem.acquire().await.expect("download semaphore closed");
+
+            if cancel.load(Ordering::Relaxed) {
+                drop(dl_permit);
+                return;
+            }
+
+            // Check if download already exists (cached but needs extraction)
+            let checkpoint_file = checkpoint_dir_c
+                .join(format!("{}.done", sanitize_for_filename(&hash_str)));
+            let cached_download = db_c
+                .find_download_by_xxhash(&hash_str)
+                .ok()
+                .flatten()
+                .map(PathBuf::from)
+                .filter(|p| p.exists())
+                .filter(|p| verify_xxhash64(p, &archive.hash).is_ok());
+
+            let download_path = if let Some(cached) = cached_download {
+                // Already have a valid download — skip downloading
+                let _ = app_c.emit(
+                    "wabbajack-install-progress",
+                    crate::wabbajack_downloader::WjProgressEvent::DownloadSkipped {
+                        archive_name: archive_name.clone(),
+                        reason: "already cached".into(),
+                    },
+                );
+                emit_progress(
+                    &app_c,
+                    &WjInstallProgressEvent::DownloadSkipped {
+                        name: archive_name.clone(),
+                        reason: "already cached".into(),
+                    },
+                );
+                drop(dl_permit); // Release download slot immediately
+                Some(cached)
+            } else {
+                // Emit download started
+                emit_progress(
+                    &app_c,
+                    &WjInstallProgressEvent::DownloadStarted {
+                        name: archive_name.clone(),
+                        index,
+                        total,
+                    },
+                );
+
+                let dl_result = task_downloader
+                    .download_archive(&app_c, &archive, install_id, &db_c)
+                    .await;
+
+                // Release download permit BEFORE extraction
+                drop(dl_permit);
+
+                match dl_result {
+                    Ok(path) => {
+                        // Verify hash
+                        match verify_xxhash64(&path, &archive.hash) {
+                            Ok(()) => {
+                                emit_progress(
+                                    &app_c,
+                                    &WjInstallProgressEvent::DownloadCompleted {
+                                        name: archive_name.clone(),
+                                    },
+                                );
+                                let _ = db_c.upsert_wj_archive_status(
+                                    install_id,
+                                    &hash_str,
+                                    &archive_name,
+                                    archive.state.source_type_name(),
+                                    "verified",
+                                    Some(&path.to_string_lossy()),
+                                    None,
+                                );
+                                Some(path)
+                            }
+                            Err(e) => {
+                                let err_msg =
+                                    format!("{}: hash mismatch — {}", archive_name, e);
+                                log::error!("{}", err_msg);
+                                let _ = tokio::fs::remove_file(&path).await;
+                                emit_progress(
+                                    &app_c,
+                                    &WjInstallProgressEvent::DownloadFailed {
+                                        name: archive_name.clone(),
+                                        error: e.to_string(),
+                                    },
+                                );
+                                failures_c.lock().unwrap().push(err_msg);
+                                None
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let err_msg = format!("{}: {}", archive_name, e);
+                        log::error!("Download failed: {}", err_msg);
+                        emit_progress(
+                            &app_c,
+                            &WjInstallProgressEvent::DownloadFailed {
+                                name: archive_name.clone(),
+                                error: e.to_string(),
+                            },
+                        );
+                        failures_c.lock().unwrap().push(err_msg);
+                        None
+                    }
+                }
+            };
+
+            // If download failed, skip extraction
+            let download_path = match download_path {
+                Some(p) => p,
+                None => return,
+            };
+
+            // Record download path
+            download_paths_c
+                .lock()
+                .unwrap()
+                .insert(hash_str.clone(), download_path.clone());
+
+            // Register in download_registry for orphan tracking
+            {
+                let filename = download_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                let file_size =
+                    std::fs::metadata(&download_path).map(|m| m.len() as i64).unwrap_or(0);
+                let (nexus_mod_id, nexus_file_id) = match &archive.state {
+                    WjArchiveState::Nexus { mod_id, file_id, .. } => {
+                        (Some(*mod_id), Some(*file_id))
+                    }
+                    _ => (None, None),
+                };
+                if let Ok(download_id) = db_c.register_download(
+                    &download_path.to_string_lossy(),
+                    &filename,
+                    nexus_mod_id,
+                    nexus_file_id,
+                    None,
+                    file_size,
+                ) {
+                    let _ = db_c.add_download_collection_ref(
+                        download_id,
+                        &collection_name_c,
+                        &game_id_c,
+                        &bottle_name_c,
+                    );
+                }
+            }
+
+            // Check cancellation before extraction
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
+
+            // ---- Extraction phase (acquire extraction permit) ----
+            let _ext_permit = ext_sem.acquire().await.expect("extract semaphore closed");
+
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
+
+            let extract_dest = extraction_temp.join(&hash_str);
 
             emit_progress(
                 &app_c,
                 &WjInstallProgressEvent::ExtractionArchiveStarted {
                     name: archive_name.clone(),
-                    index: idx,
+                    index,
                     total,
                     size: archive_size,
                 },
             );
 
-            let dest = extract_dest.clone();
-            let archive_for_blocking = archive_owned.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                crate::installer::extract_archive(&archive_for_blocking, &dest)
-            })
-            .await;
+            // Extraction with retry: on failure, delete archive, re-download, re-extract
+            let max_extract_retries = 2u32;
+            let mut extract_ok = false;
 
-            match result {
-                Ok(Ok(_files)) => {
-                    let completed =
-                        bytes_completed.fetch_add(archive_size, Ordering::Relaxed) + archive_size;
-                    emit_progress(
-                        &app_c,
-                        &WjInstallProgressEvent::ExtractionProgress {
-                            name: archive_name.clone(),
-                            index: idx,
-                            total,
-                            bytes_completed: completed,
-                            total_bytes,
-                        },
-                    );
-                    emit_progress(
-                        &app_c,
-                        &WjInstallProgressEvent::ExtractionArchiveCompleted {
-                            name: archive_name.clone(),
-                            index: idx,
-                        },
-                    );
-                    log::info!("Extracted archive {}/{}: {}", idx + 1, total, archive_name);
-                    (idx, hash_owned, Ok(extract_dest))
+            for attempt in 0..=max_extract_retries {
+                let dest_c = extract_dest.clone();
+                let archive_for_blocking = download_path.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    crate::installer::extract_archive(&archive_for_blocking, &dest_c)
+                })
+                .await;
+
+                match result {
+                    Ok(Ok(_files)) => {
+                        extract_ok = true;
+                        break;
+                    }
+                    Ok(Err(e)) => {
+                        log::error!(
+                            "Extraction attempt {}/{} failed for '{}': {}",
+                            attempt + 1,
+                            max_extract_retries + 1,
+                            archive_name,
+                            e
+                        );
+                        if attempt < max_extract_retries {
+                            // Clean up failed extraction dir and archive, then retry
+                            let _ = tokio::fs::remove_dir_all(&extract_dest).await;
+                            let _ = tokio::fs::remove_file(&download_path).await;
+                            // Re-download
+                            log::info!(
+                                "Re-downloading '{}' after extraction failure (attempt {})",
+                                archive_name,
+                                attempt + 2
+                            );
+                            // Note: we don't hold the download semaphore here, but
+                            // re-downloads after extraction failure are rare and brief
+                            match task_downloader
+                                .download_archive(&app_c, &archive, install_id, &db_c)
+                                .await
+                            {
+                                Ok(_new_path) => continue, // retry extraction
+                                Err(dl_err) => {
+                                    let err_msg = format!(
+                                        "Re-download failed for '{}': {}",
+                                        archive_name, dl_err
+                                    );
+                                    log::error!("{}", err_msg);
+                                    failures_c.lock().unwrap().push(err_msg.clone());
+                                    emit_progress(
+                                        &app_c,
+                                        &WjInstallProgressEvent::ExtractionArchiveFailed {
+                                            name: archive_name.clone(),
+                                            error: err_msg,
+                                        },
+                                    );
+                                    return;
+                                }
+                            }
+                        } else {
+                            let err_msg =
+                                format!("Failed to extract '{}': {}", archive_name, e);
+                            failures_c.lock().unwrap().push(err_msg.clone());
+                            emit_progress(
+                                &app_c,
+                                &WjInstallProgressEvent::ExtractionArchiveFailed {
+                                    name: archive_name.clone(),
+                                    error: err_msg,
+                                },
+                            );
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        let err_msg = format!(
+                            "Extraction task panicked for '{}': {}",
+                            archive_name, e
+                        );
+                        log::error!("{}", err_msg);
+                        failures_c.lock().unwrap().push(err_msg.clone());
+                        emit_progress(
+                            &app_c,
+                            &WjInstallProgressEvent::ExtractionArchiveFailed {
+                                name: archive_name.clone(),
+                                error: err_msg,
+                            },
+                        );
+                        return;
+                    }
                 }
-                Ok(Err(e)) => {
-                    let err_msg = format!("Failed to extract '{}': {}", archive_name, e);
-                    log::error!("{}", err_msg);
-                    emit_progress(
-                        &app_c,
-                        &WjInstallProgressEvent::ExtractionArchiveFailed {
-                            name: archive_name,
-                            error: err_msg.clone(),
-                        },
-                    );
-                    (idx, hash_owned, Err(err_msg))
-                }
-                Err(e) => {
-                    let err_msg = format!("Extraction task panicked for '{}': {}", archive_name, e);
-                    log::error!("{}", err_msg);
-                    emit_progress(
-                        &app_c,
-                        &WjInstallProgressEvent::ExtractionArchiveFailed {
-                            name: archive_name,
-                            error: err_msg.clone(),
-                        },
-                    );
-                    (idx, hash_owned, Err(err_msg))
-                }
+            }
+
+            if extract_ok {
+                let completed =
+                    bytes_completed.fetch_add(archive_size, Ordering::Relaxed) + archive_size;
+                emit_progress(
+                    &app_c,
+                    &WjInstallProgressEvent::ExtractionProgress {
+                        name: archive_name.clone(),
+                        index,
+                        total,
+                        bytes_completed: completed,
+                        total_bytes,
+                    },
+                );
+                emit_progress(
+                    &app_c,
+                    &WjInstallProgressEvent::ExtractionArchiveCompleted {
+                        name: archive_name.clone(),
+                        index,
+                    },
+                );
+                log::info!(
+                    "Downloaded + extracted archive {}/{}: {}",
+                    index + 1,
+                    total,
+                    archive_name
+                );
+
+                // Write checkpoint (download + extraction both succeeded)
+                let now_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let _ = tokio::fs::write(&checkpoint_file, format!("{now_secs}")).await;
+
+                extracted_dirs_c
+                    .lock()
+                    .unwrap()
+                    .insert(hash_str, extract_dest);
             }
         });
 
-        extract_handles.push(handle);
+        handles.push(handle);
     }
 
-    // Collect extraction results
-    let extract_results = futures::future::join_all(extract_handles).await;
-    for join_result in extract_results {
-        match join_result {
-            Ok((_idx, hash, Ok(extract_dir))) => {
-                extracted_dirs.insert(hash, extract_dir);
-            }
-            Ok((_idx, _hash, Err(err_msg))) => {
-                warnings.push(err_msg);
-            }
-            Err(e) => {
-                warnings.push(format!("Extraction join error: {}", e));
-            }
+    // Wait for all tasks to complete
+    futures::future::join_all(handles).await;
+
+    // Collect results from shared state
+    let archive_download_paths = Arc::try_unwrap(archive_download_paths)
+        .map(|m| m.into_inner().unwrap())
+        .unwrap_or_else(|arc| arc.lock().unwrap().clone());
+    let extracted_dirs = Arc::try_unwrap(extracted_dirs)
+        .map(|m| m.into_inner().unwrap())
+        .unwrap_or_else(|arc| arc.lock().unwrap().clone());
+    let failure_list = Arc::try_unwrap(download_failures)
+        .map(|m| m.into_inner().unwrap())
+        .unwrap_or_else(|arc| arc.lock().unwrap().clone());
+
+    let download_succeeded = archive_download_paths.len();
+    let download_failed = failure_list.len();
+    let download_skipped = download_skipped_count.load(Ordering::Relaxed) as usize;
+
+    // Emit download+extraction phase completion summary
+    emit_progress(
+        app,
+        &WjInstallProgressEvent::DownloadPhaseCompleted {
+            total: total_archives,
+            succeeded: download_succeeded,
+            failed: download_failed,
+            skipped: download_skipped,
+            failures: if failure_list.len() > 20 {
+                let mut truncated = failure_list[..20].to_vec();
+                truncated.push(format!(
+                    "... and {} more failures",
+                    failure_list.len() - 20
+                ));
+                truncated
+            } else {
+                failure_list.clone()
+            },
+        },
+    );
+
+    // Emit extraction summary events for frontend progress tracking
+    let extraction_count = extracted_dirs.len();
+    let total_extracted_bytes: u64 = extracted_dirs
+        .keys()
+        .filter_map(|hash| archive_size_map.get(hash))
+        .sum();
+    emit_progress(
+        app,
+        &WjInstallProgressEvent::ExtractionStarted {
+            total: extraction_count,
+            total_bytes: total_extracted_bytes,
+        },
+    );
+    emit_progress(
+        app,
+        &WjInstallProgressEvent::ExtractionProgress {
+            name: String::new(),
+            index: extraction_count,
+            total: extraction_count,
+            bytes_completed: total_extracted_bytes,
+            total_bytes: total_extracted_bytes,
+        },
+    );
+
+    log::info!(
+        "Download+extract phase complete: {} downloaded, {} extracted, {} failed, {} skipped (of {} total)",
+        download_succeeded, extraction_count, download_failed, download_skipped, total_archives
+    );
+
+    // If ALL downloads failed, fail the install early
+    if download_succeeded == 0 && total_archives > 0 {
+        let reason = if failure_list.is_empty() {
+            "All archives failed to download (no error details available)".to_string()
+        } else {
+            format!(
+                "All {} archives failed to download. First error: {}",
+                total_archives,
+                failure_list.first().unwrap_or(&"unknown".to_string())
+            )
+        };
+        db.update_wj_install_status(install_id, "failed", Some(&reason))
+            .map_err(|e| WjInstallError::Database(e.to_string()))?;
+        emit_progress(
+            app,
+            &WjInstallProgressEvent::InstallFailed {
+                error: reason.clone(),
+            },
+        );
+        return Err(WjInstallError::Download(reason));
+    }
+
+    // If a significant portion failed, add a prominent warning
+    if download_failed > 0 {
+        let pct = (download_failed as f64 / total_archives as f64 * 100.0) as u32;
+        warnings.push(format!(
+            "{} of {} archives failed ({}%) — files from these archives will be missing",
+            download_failed, total_archives, pct
+        ));
+        for failure in &failure_list {
+            warnings.push(format!("  Failure: {}", failure));
         }
     }
 
-    log_phase_metrics(app, "extraction", phase_start);
+    db.update_wj_install_archive_progress(install_id, archive_download_paths.len() as i64)
+        .map_err(|e| WjInstallError::Database(e.to_string()))?;
+
+    log_phase_metrics(app, "download+extraction", phase_start);
 
     // Check cancellation
     if is_cancelled(&cancel_token) {

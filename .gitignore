@@ -68,3 +68,12 @@ tools:sites icons/
 # Brand kit source (too large for git)
 brand-kit/source-highres.png
 brand-kit/*.xcf
+
+# Screenshots and media (not needed in repo)
+Screenshots/
+*.xcf
+*.mov
+playwright-report/
+test-results/
+DMG Arrow.svg
+corkscrew-state.png
