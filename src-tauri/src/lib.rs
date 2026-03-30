@@ -3816,6 +3816,72 @@ async fn delete_collection_cmd(
             let _ = sync_plugins_for_game(&game, &bottle);
         }
 
+        // Clean up game-specific framework files deployed outside data_dir.
+        // For Hogwarts Legacy: remove UE4SS from Phoenix/Binaries/Win64/ if no
+        // remaining mods need it (Lua/Logic mods).
+        if game_id == "hogwartslegacy" {
+            let remaining_mods = db.list_mods(&game_id, &bottle_name).unwrap_or_default();
+            let has_lua_or_logic = remaining_mods.iter().any(|m| {
+                m.installed_files.iter().any(|f| {
+                    let fl = f.to_lowercase();
+                    fl.contains("scripts/main.lua")
+                        || fl.contains("logicmods/")
+                        || fl.ends_with(".logicmod")
+                        || fl.ends_with(".ue4sslogicmod")
+                })
+            });
+            if !has_lua_or_logic {
+                let win64 = game.game_path.join("Phoenix").join("Binaries").join("Win64");
+                let ue4ss_files = ["dwmapi.dll", "UE4SS.dll", "UE4SS-settings.ini", "Changelog.md", "README.md"];
+                let mut removed = 0;
+                for fname in &ue4ss_files {
+                    let f = win64.join(fname);
+                    if f.exists() {
+                        if let Ok(()) = std::fs::remove_file(&f) {
+                            removed += 1;
+                        }
+                    }
+                }
+                // Remove Mods/ directory (UE4SS Lua mods)
+                let mods_dir = win64.join("Mods");
+                if mods_dir.exists() {
+                    let _ = std::fs::remove_dir_all(&mods_dir);
+                    removed += 1;
+                }
+                // Remove Tools/ue4ss/
+                let tools_dir = game.game_path.join("Phoenix").join("Binaries").join("Tools").join("ue4ss");
+                if tools_dir.exists() {
+                    let _ = std::fs::remove_dir_all(&tools_dir);
+                    removed += 1;
+                }
+                if removed > 0 {
+                    log::info!(
+                        "HL cleanup: removed {} UE4SS files/dirs (no remaining Lua/Logic mods)",
+                        removed
+                    );
+                }
+            }
+            // Remove merged PAK database if no remaining PAK mods
+            let merged_pak = data_dir.join("zMergedMods_P.pak");
+            if merged_pak.exists() {
+                let remaining_paks = std::fs::read_dir(&data_dir)
+                    .map(|entries| {
+                        entries
+                            .filter_map(|e| e.ok())
+                            .filter(|e| {
+                                let name = e.file_name().to_string_lossy().to_lowercase();
+                                name.ends_with(".pak") && name != "zmergedmods_p.pak"
+                            })
+                            .count()
+                    })
+                    .unwrap_or(0);
+                if remaining_paks == 0 {
+                    let _ = std::fs::remove_file(&merged_pak);
+                    log::info!("HL cleanup: removed zMergedMods_P.pak (no remaining PAK mods)");
+                }
+            }
+        }
+
         // Emit: uninstall completed
         let _ = app.emit(
             "uninstall-progress",
@@ -4018,6 +4084,68 @@ async fn uninstall_wabbajack_modlist(
 
         if game_id == "skyrimse" {
             let _ = sync_plugins_for_game(&game, &bottle);
+        }
+
+        // Clean up HL-specific framework files (UE4SS) if no remaining mods need them
+        if game_id == "hogwartslegacy" {
+            let remaining_mods = db.list_mods(&game_id, &bottle_name).unwrap_or_default();
+            let has_lua_or_logic = remaining_mods.iter().any(|m| {
+                m.installed_files.iter().any(|f| {
+                    let fl = f.to_lowercase();
+                    fl.contains("scripts/main.lua")
+                        || fl.contains("logicmods/")
+                        || fl.ends_with(".logicmod")
+                        || fl.ends_with(".ue4sslogicmod")
+                })
+            });
+            if !has_lua_or_logic {
+                let win64 = game.game_path.join("Phoenix").join("Binaries").join("Win64");
+                let ue4ss_files = ["dwmapi.dll", "UE4SS.dll", "UE4SS-settings.ini", "Changelog.md", "README.md"];
+                let mut removed = 0;
+                for fname in &ue4ss_files {
+                    let f = win64.join(fname);
+                    if f.exists() {
+                        if let Ok(()) = std::fs::remove_file(&f) {
+                            removed += 1;
+                        }
+                    }
+                }
+                let mods_dir = win64.join("Mods");
+                if mods_dir.exists() {
+                    let _ = std::fs::remove_dir_all(&mods_dir);
+                    removed += 1;
+                }
+                let tools_dir = game.game_path.join("Phoenix").join("Binaries").join("Tools").join("ue4ss");
+                if tools_dir.exists() {
+                    let _ = std::fs::remove_dir_all(&tools_dir);
+                    removed += 1;
+                }
+                if removed > 0 {
+                    log::info!(
+                        "HL cleanup: removed {} UE4SS files/dirs (no remaining Lua/Logic mods)",
+                        removed
+                    );
+                }
+            }
+            // Remove merged PAK database if no remaining PAK mods
+            let merged_pak = data_dir.join("zMergedMods_P.pak");
+            if merged_pak.exists() {
+                let remaining_paks = std::fs::read_dir(&data_dir)
+                    .map(|entries| {
+                        entries
+                            .filter_map(|e| e.ok())
+                            .filter(|e| {
+                                let name = e.file_name().to_string_lossy().to_lowercase();
+                                name.ends_with(".pak") && name != "zmergedmods_p.pak"
+                            })
+                            .count()
+                    })
+                    .unwrap_or(0);
+                if remaining_paks == 0 {
+                    let _ = std::fs::remove_file(&merged_pak);
+                    log::info!("HL cleanup: removed zMergedMods_P.pak (no remaining PAK mods)");
+                }
+            }
         }
 
         let _ = app.emit(
