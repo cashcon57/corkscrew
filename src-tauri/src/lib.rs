@@ -1490,19 +1490,25 @@ async fn get_game_logo(game_id: String) -> Result<Option<String>, String> {
         }
     }
 
-    // 3. Fall back to Steam CDN logo
+    // 3. Fall back to Steam CDN header capsule (square-ish, 460x215)
+    //    Skip the wide logo.png (640x360) — it looks wrong in icon slots.
     if let Some(app_id) = steam_app_id {
         let url = format!(
-            "https://cdn.cloudflare.steamstatic.com/steam/apps/{app_id}/logo.png"
+            "https://cdn.cloudflare.steamstatic.com/steam/apps/{app_id}/header.jpg"
         );
         if let Ok(response) = client.get(&url).send().await {
             if response.status().is_success() {
                 if let Ok(bytes) = response.bytes().await {
-                    if bytes.len() >= 8 && &bytes[..4] == b"\x89PNG" {
+                    if bytes.len() >= 4 {
                         std::fs::create_dir_all(&icon_dir).map_err(|e| e.to_string())?;
                         std::fs::write(&cached_path, &bytes).map_err(|e| e.to_string())?;
                         let b64 = base64_encode(&bytes);
-                        return Ok(Some(format!("data:image/png;base64,{b64}")));
+                        let mime = if &bytes[..4] == b"\x89PNG" {
+                            "image/png"
+                        } else {
+                            "image/jpeg"
+                        };
+                        return Ok(Some(format!("data:{mime};base64,{b64}")));
                     }
                 }
             }
@@ -5023,7 +5029,7 @@ async fn detect_collection_tools(
             .map_err(|e| format!("Invalid manifest JSON: {}", e))?;
         let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
         Ok(mod_tools::detect_required_tools_collection(
-            &manifest, &data_dir,
+            &manifest, &data_dir, &game_id,
         ))
     })
     .await

@@ -139,6 +139,8 @@ pub struct ToolSignature {
     pub tool_name: &'static str,
     pub nexus_mod_ids: &'static [i64],
     pub name_patterns: &'static [&'static str],
+    /// Game IDs this tool applies to. Empty = all games.
+    pub game_ids: &'static [&'static str],
 }
 
 /// Known tool signatures for detecting required tools in collections/wabbajack lists.
@@ -148,66 +150,77 @@ pub const TOOL_SIGNATURES: &[ToolSignature] = &[
         tool_name: "SKSE64",
         nexus_mod_ids: &[30379],
         name_patterns: &["skse64", "skse_"],
+        game_ids: &["skyrimse"],
     },
     ToolSignature {
         tool_id: "sseedit",
         tool_name: "SSEEdit (xEdit)",
         nexus_mod_ids: &[164],
         name_patterns: &["sseedit", "xedit", "tes5edit"],
+        game_ids: &["skyrimse"],
     },
     ToolSignature {
         tool_id: "bodyslide",
         tool_name: "BodySlide & Outfit Studio",
         nexus_mod_ids: &[201],
         name_patterns: &["bodyslide", "outfit studio"],
+        game_ids: &["skyrimse"],
     },
     ToolSignature {
         tool_id: "nemesis",
         tool_name: "Nemesis",
         nexus_mod_ids: &[60033],
         name_patterns: &["nemesis unlimited behavior"],
+        game_ids: &["skyrimse"],
     },
     ToolSignature {
         tool_id: "fnis",
         tool_name: "FNIS",
         nexus_mod_ids: &[3038],
         name_patterns: &["fnis", "generatefnis"],
+        game_ids: &["skyrimse"],
     },
     ToolSignature {
         tool_id: "pandora",
         tool_name: "Pandora Behaviour Engine+",
         nexus_mod_ids: &[],
         name_patterns: &["pandora behaviour", "pandora behavior"],
+        game_ids: &["skyrimse"],
     },
     ToolSignature {
         tool_id: "dyndolod",
         tool_name: "DynDOLOD",
         nexus_mod_ids: &[68518, 32382],
         name_patterns: &["dyndolod"],
+        game_ids: &["skyrimse"],
     },
     ToolSignature {
         tool_id: "wryebash",
         tool_name: "Wrye Bash",
         nexus_mod_ids: &[],
         name_patterns: &["wrye bash", "wryebash"],
+        game_ids: &["skyrimse", "fallout4"],
     },
     ToolSignature {
         tool_id: "cao",
         tool_name: "Cathedral Assets Optimizer",
         nexus_mod_ids: &[],
         name_patterns: &["cathedral assets optimizer"],
+        game_ids: &["skyrimse"],
     },
     ToolSignature {
         tool_id: "bethini",
         tool_name: "BethINI Pie",
         nexus_mod_ids: &[631],
         name_patterns: &["bethini"],
+        game_ids: &["skyrimse", "fallout4"],
     },
     ToolSignature {
         tool_id: "nifoptimizer",
         tool_name: "SSE NIF Optimizer",
         nexus_mod_ids: &[],
         name_patterns: &["nif optimizer", "nifoptimizer"],
+        game_ids: &["skyrimse"],
     },
     // -- Fallout 4 tools --
     ToolSignature {
@@ -215,18 +228,21 @@ pub const TOOL_SIGNATURES: &[ToolSignature] = &[
         tool_name: "F4SE",
         nexus_mod_ids: &[42147],
         name_patterns: &["f4se_", "f4se"],
+        game_ids: &["fallout4"],
     },
     ToolSignature {
         tool_id: "fo4edit",
         tool_name: "FO4Edit (xEdit)",
         nexus_mod_ids: &[2737],
         name_patterns: &["fo4edit"],
+        game_ids: &["fallout4"],
     },
     ToolSignature {
         tool_id: "bodyslide_fo4",
         tool_name: "BodySlide & Outfit Studio (FO4)",
         nexus_mod_ids: &[25],
         name_patterns: &[],
+        game_ids: &["fallout4"],
     },
 ];
 
@@ -253,6 +269,7 @@ const INTEGRATED_TOOLS: &[&str] = &["loot"];
 pub fn detect_required_tools_collection(
     manifest: &CollectionManifest,
     game_data_dir: &Path,
+    game_id: &str,
 ) -> Vec<RequiredTool> {
     let mut matched_ids: HashSet<String> = HashSet::new();
     let mut results: Vec<RequiredTool> = Vec::new();
@@ -263,6 +280,10 @@ pub fn detect_required_tools_collection(
 
         for sig in TOOL_SIGNATURES {
             if matched_ids.contains(sig.tool_id) {
+                continue;
+            }
+            // Skip tools that don't apply to this game
+            if !sig.game_ids.is_empty() && !sig.game_ids.contains(&game_id) {
                 continue;
             }
             // Skip tools integrated into Corkscrew
@@ -2073,7 +2094,7 @@ mod tests {
     fn test_detect_collection_tools_by_mod_id() {
         let manifest =
             mock_collection_manifest(vec![("SKSE64", Some(30379)), ("SkyUI", Some(12604))]);
-        let tools = detect_required_tools_collection(&manifest, Path::new("/nonexistent"));
+        let tools = detect_required_tools_collection(&manifest, Path::new("/nonexistent"), "skyrimse");
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].tool_id, "skse");
     }
@@ -2084,7 +2105,7 @@ mod tests {
             ("Nemesis Unlimited Behavior Engine", None),
             ("SkyUI", None),
         ]);
-        let tools = detect_required_tools_collection(&manifest, Path::new("/nonexistent"));
+        let tools = detect_required_tools_collection(&manifest, Path::new("/nonexistent"), "skyrimse");
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].tool_id, "nemesis");
         assert_eq!(tools[0].recommended_alternative.as_deref(), Some("pandora"));
@@ -2094,7 +2115,7 @@ mod tests {
     fn test_detect_collection_tools_dedup() {
         // Same tool matched by both mod_id and name
         let manifest = mock_collection_manifest(vec![("SSEEdit xEdit", Some(164))]);
-        let tools = detect_required_tools_collection(&manifest, Path::new("/nonexistent"));
+        let tools = detect_required_tools_collection(&manifest, Path::new("/nonexistent"), "skyrimse");
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].tool_id, "sseedit");
     }
@@ -2122,8 +2143,19 @@ mod tests {
     #[test]
     fn test_detect_no_tools() {
         let manifest = mock_collection_manifest(vec![("SkyUI", Some(12604)), ("USSEP", Some(266))]);
-        let tools = detect_required_tools_collection(&manifest, Path::new("/nonexistent"));
+        let tools = detect_required_tools_collection(&manifest, Path::new("/nonexistent"), "skyrimse");
         assert!(tools.is_empty());
+    }
+
+    #[test]
+    fn test_non_skyrim_game_skips_skyrim_tools() {
+        // BodySlide (mod_id 201) is a Skyrim tool — should NOT match for Hogwarts Legacy
+        let manifest = mock_collection_manifest(vec![
+            ("BodySlide and Outfit Studio", Some(201)),
+            ("SSEEdit", Some(164)),
+        ]);
+        let tools = detect_required_tools_collection(&manifest, Path::new("/nonexistent"), "hogwartslegacy");
+        assert!(tools.is_empty(), "Skyrim tools should not appear for hogwartslegacy");
     }
 
     #[test]
@@ -2142,7 +2174,7 @@ mod tests {
     #[test]
     fn test_required_tool_enriches_from_builtin() {
         let manifest = mock_collection_manifest(vec![("SSEEdit", Some(164))]);
-        let tools = detect_required_tools_collection(&manifest, Path::new("/nonexistent"));
+        let tools = detect_required_tools_collection(&manifest, Path::new("/nonexistent"), "skyrimse");
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].tool_name, "SSEEdit (xEdit)");
         assert!(tools[0].can_auto_install);
@@ -2164,7 +2196,7 @@ mod tests {
             ("LOOT - Load Order Optimization Tool", None),
             ("SSEEdit", Some(164)),
         ]);
-        let tools = detect_required_tools_collection(&manifest, Path::new("/nonexistent"));
+        let tools = detect_required_tools_collection(&manifest, Path::new("/nonexistent"), "skyrimse");
         assert!(!tools.iter().any(|t| t.tool_id == "loot"));
         assert!(tools.iter().any(|t| t.tool_id == "sseedit"));
     }
@@ -2176,7 +2208,7 @@ mod tests {
             ("Nemesis Unlimited Behavior Engine", None),
             ("FNIS", None),
         ]);
-        let tools = detect_required_tools_collection(&manifest, Path::new("/nonexistent"));
+        let tools = detect_required_tools_collection(&manifest, Path::new("/nonexistent"), "skyrimse");
         assert!(tools.iter().any(|t| t.tool_id == "pandora"));
         assert!(!tools.iter().any(|t| t.tool_id == "nemesis"));
         assert!(!tools.iter().any(|t| t.tool_id == "fnis"));
@@ -2185,7 +2217,7 @@ mod tests {
     #[test]
     fn test_skse_detected_enriched_from_builtin() {
         let manifest = mock_collection_manifest(vec![("SKSE64", Some(30379))]);
-        let tools = detect_required_tools_collection(&manifest, Path::new("/nonexistent"));
+        let tools = detect_required_tools_collection(&manifest, Path::new("/nonexistent"), "skyrimse");
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].tool_id, "skse");
         assert!(tools[0].can_auto_install);
