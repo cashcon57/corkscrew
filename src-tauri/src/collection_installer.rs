@@ -2892,19 +2892,26 @@ pub async fn install_collection(
                         .parent()
                         .unwrap_or(std::path::Path::new(&installed_path));
                     if tool_dir != win64_dir {
+                        // Only copy essential UE4SS runtime files to Win64.
+                        // Skip: .version (version marker), Changelog.md, README.md
+                        let ue4ss_essential = ["dwmapi.dll", "ue4ss.dll", "ue4ss-settings.ini"];
                         if let Ok(entries) = std::fs::read_dir(tool_dir) {
                             for entry in entries.flatten() {
                                 let src = entry.path();
-                                let dest = win64_dir.join(entry.file_name());
+                                let name_lower = entry.file_name().to_string_lossy().to_lowercase();
                                 if src.is_file() {
-                                    if let Err(e) = std::fs::copy(&src, &dest) {
-                                        log::warn!(
-                                            "HL post-install: failed to copy UE4SS file {} to Win64: {}",
-                                            src.display(), e
-                                        );
+                                    // Only copy DLLs and settings
+                                    if ue4ss_essential.iter().any(|e| name_lower == *e) {
+                                        let dest = win64_dir.join(entry.file_name());
+                                        if let Err(e) = std::fs::copy(&src, &dest) {
+                                            log::warn!(
+                                                "HL post-install: failed to copy UE4SS file {} to Win64: {}",
+                                                src.display(), e
+                                            );
+                                        }
                                     }
-                                } else if src.is_dir() {
-                                    // Copy directories recursively (e.g. Mods/)
+                                } else if src.is_dir() && name_lower == "mods" {
+                                    // Copy Mods/ directory (UE4SS built-in mods)
                                     let dest_dir = win64_dir.join(entry.file_name());
                                     if !dest_dir.exists() {
                                         let _ = crate::skse::copy_dir_recursive(&src, &dest_dir);
@@ -4297,8 +4304,43 @@ async fn stage_and_deploy(
         || data_dir_str.ends_with("\\paks");
 
     if is_ue_pak_game {
-        let mut engine_root_files: Vec<String> = Vec::new();
         let staging_path = &staging_result.staging_path;
+
+        // Find the exe directory for engine root file routing
+        let exe_dir = {
+            let candidates = [
+                game_path.join("Phoenix").join("Binaries").join("Win64"),
+                game_path.join("Binaries").join("Win64"),
+                game_path.join("Engine").join("Binaries").join("Win64"),
+            ];
+            candidates
+                .iter()
+                .find(|c| c.exists())
+                .cloned()
+                .unwrap_or_else(|| {
+                    walkdir::WalkDir::new(game_path)
+                        .max_depth(4)
+                        .into_iter()
+                        .filter_map(|e| e.ok())
+                        .find(|e| {
+                            e.file_type().is_dir()
+                                && e.file_name()
+                                    .to_string_lossy()
+                                    .eq_ignore_ascii_case("Win64")
+                        })
+                        .map(|e| e.into_path())
+                        .unwrap_or_else(|| game_path.join("Binaries").join("Win64"))
+                })
+        };
+
+        // Categorize every file into its correct destination:
+        //   - PAK/UCAS/UTOC → ~mods/ (flattened to root)
+        //   - Lua mods (Mods/*/Scripts/main.lua) → Win64/Mods/
+        //   - DLLs, ASI, ReShade → Win64/
+        //   - Junk (README, images, batch, exe, MANIFEST) → drop
+        let mut exe_dir_files: Vec<(String, PathBuf)> = Vec::new(); // (rel_path, dest)
+        let mut flattened_count = 0usize;
+        let mut dropped_count = 0usize;
 
         files_to_deploy = files_to_deploy
             .into_iter()
@@ -4306,7 +4348,7 @@ async fn stage_and_deploy(
                 let lower = f.to_lowercase();
                 let fname = lower.rsplit('/').next().unwrap_or(&lower);
 
-                // Always deploy PAK/UCAS/UTOC files to data dir
+                // PAK/UCAS/UTOC → keep for data_dir deployment (flattened below)
                 if fname.ends_with(".pak")
                     || fname.ends_with(".ucas")
                     || fname.ends_with(".utoc")
@@ -4314,163 +4356,99 @@ async fn stage_and_deploy(
                     return true;
                 }
 
-                // Engine root files: DLLs, ASI loaders, ReShade configs
-                // These need to go to the exe directory, not the PAK dir.
-                // Modding tool executables (MANIFEST/) are filtered as junk below.
-                if fname.ends_with(".dll")
-                    || fname.ends_with(".asi")
-                    || lower.starts_with("reshade-shaders/")
-                    || fname == "reshade.ini"
-                    || fname == "engine.ini"
+                // Lua mods: files matching Mods/*/Scripts/main.lua pattern
+                // These go to Win64/Mods/ for UE4SS to find them
+                if lower.contains("/scripts/main.lua")
+                    || (lower.starts_with("mods/") && fname.ends_with(".lua"))
                 {
-                    engine_root_files.push(f.clone());
+                    let dest = exe_dir.join(&*f);
+                    exe_dir_files.push((f.clone(), dest));
                     return false;
                 }
 
-                // Modding tool bundles — not runtime files, don't deploy
-                if lower.starts_with("manifest/") {
-                    log::debug!("UE deploy filter: skipping modding tool '{}'", f);
+                // DLLs and ASI loaders → Win64/ (flat, not in subdirs)
+                if fname.ends_with(".dll") || fname.ends_with(".asi") {
+                    let dest = exe_dir.join(fname);
+                    exe_dir_files.push((f.clone(), dest));
                     return false;
                 }
 
-                // Lua scripts — keep (UE4SS loads from various locations)
-                if fname.ends_with(".lua") {
-                    return true;
+                // ReShade shaders → Win64/reshade-shaders/ (preserve structure)
+                if lower.starts_with("reshade-shaders/") || fname == "reshade.ini" {
+                    let dest = exe_dir.join(&*f);
+                    exe_dir_files.push((f.clone(), dest));
+                    return false;
                 }
 
-                // Filter out non-game junk that should never be in the game directory
-                if [
-                    ".txt", ".md", ".html", ".pdf", ".png", ".jpg", ".jpeg",
-                    ".gif", ".bat", ".exe", ".py", ".json", ".csv",
-                ]
-                .iter()
-                .any(|ext| fname.ends_with(ext))
+                // Engine config → Win64/
+                if fname == "engine.ini" {
+                    let dest = exe_dir.join(fname);
+                    exe_dir_files.push((f.clone(), dest));
+                    return false;
+                }
+
+                // Drop: MANIFEST/, Content/, junk files
+                if lower.starts_with("manifest/")
+                    || lower.starts_with("content/")
+                    || [
+                        ".txt", ".md", ".html", ".pdf", ".png", ".jpg", ".jpeg",
+                        ".gif", ".bat", ".exe", ".py", ".json", ".csv",
+                    ]
+                    .iter()
+                    .any(|ext| fname.ends_with(ext))
                 {
-                    log::debug!("UE deploy filter: skipping non-game file '{}'", f);
+                    log::debug!("UE deploy filter: dropping '{}'", f);
+                    dropped_count += 1;
                     return false;
                 }
 
-                // Keep everything else (INI configs for mods, etc.)
                 true
             })
             .collect();
 
-        // Flatten PAK/UCAS/UTOC file paths: strip packaging directories so
-        // files deploy to the root of ~mods/ instead of nested subdirectories.
-        // UE games expect all PAK files at the same directory level.
-        // e.g., "Modern_Glasses/Style A/Normal Size/Clear/zMod_P.pak" → "zMod_P.pak"
-        //       "~mods/SomeMod_P.pak" → "SomeMod_P.pak"
-        //       "Mods/SomeMod_P.pak" → "SomeMod_P.pak"
-        {
-            let mut flattened_count = 0;
-            files_to_deploy = files_to_deploy
-                .into_iter()
-                .map(|f| {
-                    let lower = f.to_lowercase();
-                    let is_pak_file = lower.ends_with(".pak")
-                        || lower.ends_with(".ucas")
-                        || lower.ends_with(".utoc");
-                    if is_pak_file && f.contains('/') {
-                        // Extract just the filename, strip all parent directories
-                        let filename = f.rsplit('/').next().unwrap_or(&f).to_string();
-                        // Also need to move/copy the actual file in staging to match
-                        let src = staging_path.join(&f);
-                        let dest = staging_path.join(&filename);
-                        if src.exists() && src != dest {
-                            if let Some(parent) = dest.parent() {
-                                let _ = std::fs::create_dir_all(parent);
-                            }
-                            // Try rename first, fall back to copy
-                            if std::fs::rename(&src, &dest).is_err() {
-                                let _ = std::fs::copy(&src, &dest);
-                            }
+        // Flatten PAK/UCAS/UTOC paths to root level
+        files_to_deploy = files_to_deploy
+            .into_iter()
+            .map(|f| {
+                if f.contains('/') {
+                    let filename = f.rsplit('/').next().unwrap_or(&f).to_string();
+                    let src = staging_path.join(&f);
+                    let dest = staging_path.join(&filename);
+                    if src.exists() && src != dest {
+                        let _ = std::fs::create_dir_all(dest.parent().unwrap_or(staging_path));
+                        if std::fs::rename(&src, &dest).is_err() {
+                            let _ = std::fs::copy(&src, &dest);
                         }
-                        flattened_count += 1;
-                        filename
-                    } else {
-                        f
                     }
-                })
-                .collect();
-            if flattened_count > 0 {
-                log::info!(
-                    "UE deploy: flattened {} PAK/UCAS/UTOC files to root level",
-                    flattened_count
-                );
-            }
-        }
-
-        // Deploy engine root files to the game's exe directory
-        if !engine_root_files.is_empty() {
-            // Find the exe directory: use the game plugin's exe_path parent,
-            // or fall back to searching for common UE binary directories.
-            let exe_dir = crate::games::with_plugin(game_id, |p| {
-                // Try detect() with a dummy bottle to get exe_path — but we
-                // already have game_path, so search for the Binaries dir
-                None::<PathBuf>
-            })
-            .flatten()
-            .unwrap_or_else(|| {
-                // Search for Binaries/Win64 under game_path
-                let candidates = [
-                    game_path.join("Binaries").join("Win64"),
-                    game_path.join("Phoenix").join("Binaries").join("Win64"),
-                    game_path.join("Engine").join("Binaries").join("Win64"),
-                ];
-                for c in &candidates {
-                    if c.exists() {
-                        return c.clone();
-                    }
-                }
-                // Last resort: find any Win64 directory
-                for entry in walkdir::WalkDir::new(game_path)
-                    .max_depth(4)
-                    .into_iter()
-                    .filter_map(|e| e.ok())
-                {
-                    if entry.file_type().is_dir()
-                        && entry.file_name().to_string_lossy().eq_ignore_ascii_case("Win64")
-                    {
-                        return entry.into_path();
-                    }
-                }
-                // Absolute fallback
-                game_path.join("Binaries").join("Win64")
-            });
-
-            let _ = std::fs::create_dir_all(&exe_dir);
-            let mut deployed_root = 0;
-            for rel_path in &engine_root_files {
-                let src = staging_path.join(rel_path);
-                if !src.exists() {
-                    continue;
-                }
-                // For directory-structured files (ReShade shaders), preserve structure
-                if rel_path.contains('/') {
-                    let dest = exe_dir.join(rel_path);
-                    if let Some(parent) = dest.parent() {
-                        let _ = std::fs::create_dir_all(parent);
-                    }
-                    if std::fs::copy(&src, &dest).is_ok() {
-                        deployed_root += 1;
-                    }
+                    flattened_count += 1;
+                    filename
                 } else {
-                    let dest = exe_dir.join(
-                        rel_path.rsplit('/').next().unwrap_or(rel_path),
-                    );
-                    if std::fs::copy(&src, &dest).is_ok() {
-                        deployed_root += 1;
-                    }
+                    f
                 }
+            })
+            .collect();
+
+        // Deploy exe-dir files (DLLs, Lua mods, ReShade, etc.)
+        let mut deployed_exe = 0usize;
+        for (rel_path, dest) in &exe_dir_files {
+            let src = staging_path.join(rel_path);
+            if !src.exists() {
+                continue;
             }
-            if deployed_root > 0 {
-                log::info!(
-                    "UE deploy: routed {} engine root files to {} (DLLs, ReShade, ASI)",
-                    deployed_root,
-                    exe_dir.display()
-                );
+            if let Some(parent) = dest.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if std::fs::copy(&src, dest).is_ok() {
+                deployed_exe += 1;
             }
         }
+
+        log::info!(
+            "UE deploy filter: {} PAKs flattened, {} files → exe dir, {} dropped",
+            flattened_count,
+            deployed_exe,
+            dropped_count,
+        );
     }
 
     // Update DB with staging info (brief locks)

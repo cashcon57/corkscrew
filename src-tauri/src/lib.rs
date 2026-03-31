@@ -3832,7 +3832,7 @@ async fn delete_collection_cmd(
             });
             if !has_lua_or_logic {
                 let win64 = game.game_path.join("Phoenix").join("Binaries").join("Win64");
-                let ue4ss_files = ["dwmapi.dll", "UE4SS.dll", "UE4SS-settings.ini", "Changelog.md", "README.md"];
+                let ue4ss_files = ["dwmapi.dll", "UE4SS.dll", "UE4SS-settings.ini", "Changelog.md", "README.md", ".version"];
                 let mut removed = 0;
                 for fname in &ue4ss_files {
                     let f = win64.join(fname);
@@ -3861,15 +3861,20 @@ async fn delete_collection_cmd(
                     );
                 }
             }
-            // Remove toxic Tools/ directory under Paks/ (legacy UE4SS install path).
-            // The game scans Paks/ subdirectories and loads DLLs — having UE4SS
-            // DLLs here causes crashes even with zero mods.
+            // Remove Tools/ directories that may contain UE4SS DLLs.
+            // Paks/Tools/ is toxic (game scans Paks/ and loads DLLs).
+            // Binaries/Tools/ is safe but should be cleaned on full uninstall.
             if let Some(paks_dir) = data_dir.parent() {
                 let toxic_tools = paks_dir.join("Tools");
                 if toxic_tools.exists() {
                     let _ = std::fs::remove_dir_all(&toxic_tools);
                     log::info!("HL cleanup: removed toxic Tools/ directory under Paks/");
                 }
+            }
+            let binaries_tools = game.game_path.join("Phoenix").join("Binaries").join("Tools");
+            if binaries_tools.exists() {
+                let _ = std::fs::remove_dir_all(&binaries_tools);
+                log::info!("HL cleanup: removed Binaries/Tools/");
             }
 
             // Remove merged PAK database if no remaining PAK mods
@@ -4111,7 +4116,7 @@ async fn uninstall_wabbajack_modlist(
             });
             if !has_lua_or_logic {
                 let win64 = game.game_path.join("Phoenix").join("Binaries").join("Win64");
-                let ue4ss_files = ["dwmapi.dll", "UE4SS.dll", "UE4SS-settings.ini", "Changelog.md", "README.md"];
+                let ue4ss_files = ["dwmapi.dll", "UE4SS.dll", "UE4SS-settings.ini", "Changelog.md", "README.md", ".version"];
                 let mut removed = 0;
                 for fname in &ue4ss_files {
                     let f = win64.join(fname);
@@ -4138,15 +4143,20 @@ async fn uninstall_wabbajack_modlist(
                     );
                 }
             }
-            // Remove toxic Tools/ directory under Paks/ (legacy UE4SS install path).
-            // The game scans Paks/ subdirectories and loads DLLs — having UE4SS
-            // DLLs here causes crashes even with zero mods.
+            // Remove Tools/ directories that may contain UE4SS DLLs.
+            // Paks/Tools/ is toxic (game scans Paks/ and loads DLLs).
+            // Binaries/Tools/ is safe but should be cleaned on full uninstall.
             if let Some(paks_dir) = data_dir.parent() {
                 let toxic_tools = paks_dir.join("Tools");
                 if toxic_tools.exists() {
                     let _ = std::fs::remove_dir_all(&toxic_tools);
                     log::info!("HL cleanup: removed toxic Tools/ directory under Paks/");
                 }
+            }
+            let binaries_tools = game.game_path.join("Phoenix").join("Binaries").join("Tools");
+            if binaries_tools.exists() {
+                let _ = std::fs::remove_dir_all(&binaries_tools);
+                log::info!("HL cleanup: removed Binaries/Tools/");
             }
 
             // Remove merged PAK database if no remaining PAK mods
