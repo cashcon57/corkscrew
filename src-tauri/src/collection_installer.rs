@@ -2870,6 +2870,19 @@ pub async fn install_collection(
             // UE4SS must be deployed to the exe directory (Phoenix/Binaries/Win64).
             // install_tool extracts to a Tools/ subdirectory, so we install using
             // the exe dir as base and then copy the DLLs up to Win64/.
+            //
+            // CRITICAL: UE4SS must NEVER be placed under Paks/ — the game scans
+            // Paks/ subdirectories and loads any DLLs it finds, causing crashes.
+            // A previous version incorrectly used data_dir (Paks/~mods) as the
+            // base, creating Paks/Tools/ue4ss/. Clean up if present.
+            let toxic_tools = data_dir.parent().unwrap_or(&data_dir).join("Tools");
+            if toxic_tools.exists() && toxic_tools.to_string_lossy().to_lowercase().contains("paks") {
+                log::warn!(
+                    "HL: removing toxic Tools/ directory under Paks/: {}",
+                    toxic_tools.display()
+                );
+                let _ = std::fs::remove_dir_all(&toxic_tools);
+            }
             let win64_dir = game_path.join("Phoenix").join("Binaries").join("Win64");
             match crate::mod_tools::install_tool("ue4ss", &win64_dir, app).await {
                 Ok(installed_path) => {

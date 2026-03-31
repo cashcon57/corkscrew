@@ -3861,6 +3861,17 @@ async fn delete_collection_cmd(
                     );
                 }
             }
+            // Remove toxic Tools/ directory under Paks/ (legacy UE4SS install path).
+            // The game scans Paks/ subdirectories and loads DLLs — having UE4SS
+            // DLLs here causes crashes even with zero mods.
+            if let Some(paks_dir) = data_dir.parent() {
+                let toxic_tools = paks_dir.join("Tools");
+                if toxic_tools.exists() {
+                    let _ = std::fs::remove_dir_all(&toxic_tools);
+                    log::info!("HL cleanup: removed toxic Tools/ directory under Paks/");
+                }
+            }
+
             // Remove merged PAK database if no remaining PAK mods
             let merged_pak = data_dir.join("zMergedMods_P.pak");
             if merged_pak.exists() {
@@ -4127,6 +4138,17 @@ async fn uninstall_wabbajack_modlist(
                     );
                 }
             }
+            // Remove toxic Tools/ directory under Paks/ (legacy UE4SS install path).
+            // The game scans Paks/ subdirectories and loads DLLs — having UE4SS
+            // DLLs here causes crashes even with zero mods.
+            if let Some(paks_dir) = data_dir.parent() {
+                let toxic_tools = paks_dir.join("Tools");
+                if toxic_tools.exists() {
+                    let _ = std::fs::remove_dir_all(&toxic_tools);
+                    log::info!("HL cleanup: removed toxic Tools/ directory under Paks/");
+                }
+            }
+
             // Remove merged PAK database if no remaining PAK mods
             let merged_pak = data_dir.join("zMergedMods_P.pak");
             if merged_pak.exists() {
