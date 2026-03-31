@@ -4315,7 +4315,8 @@ async fn stage_and_deploy(
                 }
 
                 // Engine root files: DLLs, ASI loaders, ReShade configs
-                // These need to go to the exe directory, not the PAK dir
+                // These need to go to the exe directory, not the PAK dir.
+                // Modding tool executables (MANIFEST/) are filtered as junk below.
                 if fname.ends_with(".dll")
                     || fname.ends_with(".asi")
                     || lower.starts_with("reshade-shaders/")
@@ -4323,6 +4324,12 @@ async fn stage_and_deploy(
                     || fname == "engine.ini"
                 {
                     engine_root_files.push(f.clone());
+                    return false;
+                }
+
+                // Modding tool bundles — not runtime files, don't deploy
+                if lower.starts_with("manifest/") {
+                    log::debug!("UE deploy filter: skipping modding tool '{}'", f);
                     return false;
                 }
 
