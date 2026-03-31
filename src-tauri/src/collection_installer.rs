@@ -4355,6 +4355,51 @@ async fn stage_and_deploy(
             })
             .collect();
 
+        // Flatten PAK/UCAS/UTOC file paths: strip packaging directories so
+        // files deploy to the root of ~mods/ instead of nested subdirectories.
+        // UE games expect all PAK files at the same directory level.
+        // e.g., "Modern_Glasses/Style A/Normal Size/Clear/zMod_P.pak" → "zMod_P.pak"
+        //       "~mods/SomeMod_P.pak" → "SomeMod_P.pak"
+        //       "Mods/SomeMod_P.pak" → "SomeMod_P.pak"
+        {
+            let mut flattened_count = 0;
+            files_to_deploy = files_to_deploy
+                .into_iter()
+                .map(|f| {
+                    let lower = f.to_lowercase();
+                    let is_pak_file = lower.ends_with(".pak")
+                        || lower.ends_with(".ucas")
+                        || lower.ends_with(".utoc");
+                    if is_pak_file && f.contains('/') {
+                        // Extract just the filename, strip all parent directories
+                        let filename = f.rsplit('/').next().unwrap_or(&f).to_string();
+                        // Also need to move/copy the actual file in staging to match
+                        let src = staging_path.join(&f);
+                        let dest = staging_path.join(&filename);
+                        if src.exists() && src != dest {
+                            if let Some(parent) = dest.parent() {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
+                            // Try rename first, fall back to copy
+                            if std::fs::rename(&src, &dest).is_err() {
+                                let _ = std::fs::copy(&src, &dest);
+                            }
+                        }
+                        flattened_count += 1;
+                        filename
+                    } else {
+                        f
+                    }
+                })
+                .collect();
+            if flattened_count > 0 {
+                log::info!(
+                    "UE deploy: flattened {} PAK/UCAS/UTOC files to root level",
+                    flattened_count
+                );
+            }
+        }
+
         // Deploy engine root files to the game's exe directory
         if !engine_root_files.is_empty() {
             // Find the exe directory: use the game plugin's exe_path parent,

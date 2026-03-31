@@ -127,8 +127,10 @@ pub type Result<T> = std::result::Result<T, InstallerError>;
 // Constants
 // ---------------------------------------------------------------------------
 
-/// File extensions that are characteristic of Skyrim / Bethesda mods.
+/// File extensions that are characteristic of mod content.
+/// Used by `looks_like_mod_content()` to detect the data root inside archives.
 const MOD_FILE_EXTENSIONS: &[&str] = &[
+    // Bethesda (Skyrim, Fallout, Oblivion, Morrowind, Starfield)
     "esp", "esm", "esl", // plugin files
     "bsa", "ba2", // archives
     "nif", // meshes
@@ -142,16 +144,27 @@ const MOD_FILE_EXTENSIONS: &[&str] = &[
     "bin",  // SKSE address library data
     "ini",  // configuration files
     "json", // mod config / MCM settings
+    // Unreal Engine (Hogwarts Legacy, Palworld, Ready or Not, etc.)
+    "pak",  // UE PAK archives
+    "ucas", // UE IO Store container
+    "utoc", // UE IO Store table of contents
+    "lua",  // UE4SS Lua scripts
 ];
 
-/// Directory names that are characteristic of Skyrim / Bethesda mod content.
+/// Directory names that are characteristic of mod content.
 const MOD_FOLDER_NAMES: &[&str] = &[
+    // Bethesda
     "meshes",
     "textures",
     "scripts",
     "interface",
     "sound",
     "skse",
+    // Unreal Engine
+    "paks",
+    "content",
+    "mods",
+    "logicmods",
 ];
 
 // ---------------------------------------------------------------------------
