@@ -10,7 +10,7 @@ export const config = writable<AppConfig>({ nexus_api_key: null, download_dir: n
 // UI state
 export const selectedBottle = writable<string | null>(null);
 export const selectedGame = writable<DetectedGame | null>(null);
-export const currentPage = writable<string>("dashboard");
+export const currentPage = writable<string>("mods");
 export const isLoading = writable<boolean>(false);
 export const errorMessage = writable<string | null>(null);
 export const successMessage = writable<string | null>(null);

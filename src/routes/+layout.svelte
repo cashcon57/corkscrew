@@ -283,6 +283,14 @@
       } catch { /* config not available yet */ }
     }).catch((err) => console.error('Failed to load version info:', err));
 
+    // Restore last page (default to "mods" if not set)
+    getConfig().then(cfg => {
+      const lastPage = (cfg as Record<string, unknown>).last_page as string | undefined;
+      if (lastPage && ["mods", "collections", "plugins", "profiles", "logs", "settings"].includes(lastPage)) {
+        currentPage.set(lastPage);
+      }
+    }).catch(() => {});
+
     // Check if first-run wizard should show + load game fixes preference + telemetry consent
     getConfig().then(config => {
       // Show telemetry banner if user hasn't decided yet
@@ -559,11 +567,28 @@
   async function loadDetectedGames() {
     try {
       detectedGames = await getAllGames();
-      // Auto-select the first game if none is selected
       if (!get(selectedGame) && detectedGames.length > 0) {
-        pickGame(detectedGames[0]);
+        // Try to restore the last-selected game from config
+        let restored = false;
+        try {
+          const cfg = await getConfig();
+          const lastGameId = (cfg as Record<string, unknown>).last_selected_game as string | undefined;
+          const lastBottle = (cfg as Record<string, unknown>).last_selected_bottle as string | undefined;
+          if (lastGameId && lastBottle) {
+            const match = detectedGames.find(
+              (g) => g.game_id === lastGameId && g.bottle_name === lastBottle
+            );
+            if (match) {
+              pickGame(match);
+              restored = true;
+            }
+          }
+        } catch { /* config not available */ }
+        // Fall back to first detected game
+        if (!restored) {
+          pickGame(detectedGames[0]);
+        }
       } else {
-        // If a game was already selected (restored from store), load its profiles + collections
         const currentGame = get(selectedGame);
         if (currentGame) {
           loadProfilesForGame(currentGame);
@@ -578,6 +603,10 @@
   function pickGame(game: DetectedGame) {
     selectedGame.set(game);
     selectedBottle.set(game.bottle_name);
+    // Remember the selected game so it persists across restarts
+    setConfigValue("last_selected_game", game.game_id)
+      .then(() => setConfigValue("last_selected_bottle", game.bottle_name))
+      .catch(() => {});
     loadProfilesForGame(game);
     loadCollectionsForGame(game);
     checkGameVersion(game);
@@ -891,6 +920,8 @@
 
   function navigate(page: string) {
     currentPage.set(page);
+    // Remember the current page for next launch
+    setConfigValue("last_page", page).catch(() => {});
     // If we're on a sub-route (e.g. /collections/progress), navigate back to root
     if (window.location.pathname !== "/") {
       goto("/");
