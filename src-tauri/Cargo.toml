@@ -1,6 +1,6 @@
 [package]
 name = "corkscrew"
-version = "0.9.55"
+version = "0.9.56"
 description = "A mod manager for CrossOver/Wine games on macOS and Linux"
 authors = ["cashconway"]
 license = "GPL-3.0-or-later"
