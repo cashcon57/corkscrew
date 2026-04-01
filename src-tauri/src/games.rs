@@ -247,6 +247,18 @@ pub fn detect_all_games_with_custom(db: &crate::database::ModDatabase) -> Vec<De
         }
     }
 
+    // Auto-capture Steam depot manifests for all detected games.
+    // This builds a local version history so we can offer automated
+    // downgrades when a collection requires an older game version.
+    for game in &found {
+        let bottle = crate::bottles::Bottle {
+            name: game.bottle_name.clone(),
+            path: game.bottle_path.clone(),
+            source: String::new(),
+        };
+        crate::game_registry::capture_depot_manifests(db, &game.game_id, &bottle);
+    }
+
     found
 }
 

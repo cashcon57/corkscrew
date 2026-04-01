@@ -476,6 +476,252 @@ fn extract_acf_value(content: &str, key: &str) -> Option<String> {
     None
 }
 
+/// A depot entry extracted from a Steam appmanifest ACF file.
+#[derive(Debug, Clone)]
+pub struct SteamDepotInfo {
+    pub app_id: String,
+    pub depot_id: String,
+    pub manifest_id: String,
+    pub build_id: String,
+}
+
+/// Extract installed depot info from a Steam appmanifest ACF file.
+/// Returns a list of (depot_id, manifest_id) pairs plus the build_id.
+pub fn extract_depot_info(acf_path: &Path) -> Option<Vec<SteamDepotInfo>> {
+    let content = fs::read_to_string(acf_path).ok()?;
+    let app_id = extract_acf_value(&content, "appid")?;
+    let build_id = extract_acf_value(&content, "buildid").unwrap_or_default();
+
+    // Parse the InstalledDepots section to extract depot_id → manifest pairs
+    let mut depots = Vec::new();
+    let mut in_depots = false;
+    let mut current_depot_id: Option<String> = None;
+    let mut brace_depth = 0i32;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.contains("\"InstalledDepots\"") {
+            in_depots = true;
+            continue;
+        }
+
+        if !in_depots {
+            continue;
+        }
+
+        if trimmed == "{" {
+            brace_depth += 1;
+            continue;
+        }
+
+        if trimmed == "}" {
+            brace_depth -= 1;
+            if brace_depth <= 0 {
+                break; // End of InstalledDepots section
+            }
+            current_depot_id = None;
+            continue;
+        }
+
+        // At depth 1: depot IDs (e.g., "990081")
+        if brace_depth == 1 {
+            if let Some(depot_id) = extract_quoted_value(trimmed) {
+                current_depot_id = Some(depot_id);
+            }
+        }
+
+        // At depth 2: depot properties (manifest, size)
+        if brace_depth == 2 {
+            if let Some(ref depot_id) = current_depot_id {
+                if let Some(manifest) = try_extract_key_value(trimmed, "manifest") {
+                    depots.push(SteamDepotInfo {
+                        app_id: app_id.clone(),
+                        depot_id: depot_id.clone(),
+                        manifest_id: manifest,
+                        build_id: build_id.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    if depots.is_empty() {
+        None
+    } else {
+        Some(depots)
+    }
+}
+
+/// Extract a standalone quoted string from a line (e.g., `"990081"` → `990081`).
+fn extract_quoted_value(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 3 {
+        // Single quoted value on a line (depot ID)
+        let inner = &trimmed[1..trimmed.len() - 1];
+        if !inner.contains('"') {
+            return Some(inner.to_string());
+        }
+    }
+    None
+}
+
+/// Try to extract a key-value pair from a VDF line (e.g., `"manifest"  "123"` → Some("123")).
+fn try_extract_key_value(line: &str, key: &str) -> Option<String> {
+    let key_pat = format!("\"{}\"", key);
+    let trimmed = line.trim();
+    if let Some(rest) = trimmed.strip_prefix(&key_pat) {
+        let val = rest.trim();
+        if val.starts_with('"') && val.len() >= 2 {
+            let end = val[1..].find('"').map(|i| i + 1)?;
+            return Some(val[1..end].to_string());
+        }
+    }
+    None
+}
+
+/// Capture depot manifest info for a detected game and store in the database.
+/// Called during game detection to build a local version history.
+pub fn capture_depot_manifests(
+    db: &crate::database::ModDatabase,
+    game_id: &str,
+    bottle: &crate::bottles::Bottle,
+) {
+    // Find steamapps directory
+    let steamapps_paths = [
+        bottle.drive_c().join("Program Files (x86)").join("Steam").join("steamapps"),
+        bottle.drive_c().join("Program Files").join("Steam").join("steamapps"),
+    ];
+
+    let steamapps = match steamapps_paths.iter().find(|p| p.exists()) {
+        Some(p) => p,
+        None => return,
+    };
+
+    // Look up the Steam App ID from the game registry
+    let app_id = match get_game_entry(game_id) {
+        Some(entry) => match entry.steam_id.as_deref() {
+            Some(id) => id.to_string(),
+            None => return,
+        },
+        None => return,
+    };
+
+    // Find the ACF file
+    let acf_path = steamapps.join(format!("appmanifest_{}.acf", app_id));
+    if !acf_path.exists() {
+        return;
+    }
+
+    // Extract depot info
+    let depots = match extract_depot_info(&acf_path) {
+        Some(d) => d,
+        None => return,
+    };
+
+    // Get game version from plugin (if available)
+    let game_version = crate::games::with_plugin(game_id, |plugin| {
+        // Find the game path from the ACF install dir
+        let install_dir = extract_acf_value(
+            &fs::read_to_string(&acf_path).unwrap_or_default(),
+            "installdir",
+        )
+        .unwrap_or_default();
+        let game_path = steamapps.join("common").join(&install_dir);
+        plugin.detect_game_version(&game_path)
+    })
+    .flatten();
+
+    // Store in database
+    if let Ok(conn) = db.conn() {
+        for depot in &depots {
+            let result = conn.execute(
+                "INSERT OR IGNORE INTO steam_depot_history
+                 (game_id, app_id, depot_id, manifest_id, build_id, game_version)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    game_id,
+                    depot.app_id,
+                    depot.depot_id,
+                    depot.manifest_id,
+                    depot.build_id,
+                    game_version,
+                ],
+            );
+            if let Ok(1) = result {
+                log::info!(
+                    "Captured depot manifest: game={}, depot={}, manifest={}, build={}, version={:?}",
+                    game_id,
+                    depot.depot_id,
+                    depot.manifest_id,
+                    depot.build_id,
+                    game_version,
+                );
+            }
+        }
+    }
+}
+
+/// Look up a manifest ID for a specific game version from the captured history.
+pub fn lookup_manifest_for_version(
+    db: &crate::database::ModDatabase,
+    game_id: &str,
+    target_version: &str,
+) -> Option<SteamDepotInfo> {
+    let conn = db.conn().ok()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT app_id, depot_id, manifest_id, build_id
+             FROM steam_depot_history
+             WHERE game_id = ?1 AND game_version = ?2
+             ORDER BY captured_at DESC
+             LIMIT 1",
+        )
+        .ok()?;
+
+    stmt.query_row(rusqlite::params![game_id, target_version], |row| {
+        Ok(SteamDepotInfo {
+            app_id: row.get(0)?,
+            depot_id: row.get(1)?,
+            manifest_id: row.get(2)?,
+            build_id: row.get(3)?,
+        })
+    })
+    .ok()
+}
+
+/// Get all captured versions for a game.
+pub fn get_depot_history(
+    db: &crate::database::ModDatabase,
+    game_id: &str,
+) -> Vec<(String, String, String)> {
+    let conn = match db.conn() {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let mut stmt = match conn.prepare(
+        "SELECT game_version, build_id, manifest_id
+         FROM steam_depot_history
+         WHERE game_id = ?1 AND game_version IS NOT NULL
+         GROUP BY game_version
+         ORDER BY captured_at DESC",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+
+    stmt.query_map(rusqlite::params![game_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })
+    .ok()
+    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+    .unwrap_or_default()
+}
+
 /// Public wrapper for find_main_executable.
 pub fn find_main_executable_public(game_path: &Path) -> Option<PathBuf> {
     find_main_executable(game_path)

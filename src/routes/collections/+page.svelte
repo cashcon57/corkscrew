@@ -50,6 +50,7 @@
     startOAuthLogin,
     getCollectionRevisions,
     getGameVersion,
+    lookupVersionManifest,
   } from "$lib/api";
   import { startInstallTracking, stopInstallTracking, resumeInstallTracking } from "$lib/installService";
   import { listen } from "@tauri-apps/api/event";
@@ -4051,33 +4052,62 @@
               Download & Switch to v{versionMismatchInfo.expected[0]} (Recommended)
             </button>
           {:else}
-            <!-- Other games: guide user to Steam beta branches or SteamDB -->
-            {@const steamAppIds: Record<string, string> = {
-              hogwartslegacy: "990080",
-              skyrimse: "489830",
-              skyrim: "72850",
-              fallout4: "377160",
-              falloutnv: "22380",
-              fallout3: "22300",
-              oblivion: "22330",
-              morrowind: "22320",
-              starfield: "1716740",
-              baldursgate3: "1086940",
-              cyberpunk2077: "1091500",
-              witcher3: "292030",
-              eldenring: "1245620",
-              stardewvalley: "413150",
-            }}
-            {@const appId = steamAppIds[$selectedGame?.game_id ?? ""] ?? ""}
-            <button class="btn btn-accent" onclick={() => {
-              if (appId) {
-                openUrl(`https://www.steamdb.info/app/${appId}/depots/`);
-                showSuccess("Find the depot manifest for v" + (versionMismatchInfo?.expected[0] ?? "") + " on SteamDB, then use Steam console to download it.");
-              } else {
-                openUrl(`https://www.steamdb.info/search/?a=app&q=${encodeURIComponent($selectedGame?.display_name ?? "")}`);
+            <!-- Other games: try captured manifest first, fall back to SteamDB -->
+            <button class="btn btn-accent" disabled={depotDownloading} onclick={async () => {
+              if (!$selectedGame || !versionMismatchInfo) return;
+              const targetVer = versionMismatchInfo.expected[0];
+              depotDownloading = true;
+              try {
+                // Check if we have a captured manifest for this version
+                const cmd = await lookupVersionManifest($selectedGame.game_id, targetVer);
+                if (cmd) {
+                  // We have the manifest! Use Steam console to download
+                  const automated = await startDepotDownload($selectedGame.game_id);
+                  if (!automated) {
+                    await navigator.clipboard.writeText(cmd);
+                    showSuccess("Depot command copied! Paste it in the Steam console.");
+                  }
+                  // Poll for completion
+                  depotPollTimer = setInterval(async () => {
+                    if (!$selectedGame) return;
+                    try {
+                      const result = await checkDepotReady($selectedGame.game_id, $selectedGame.bottle_name);
+                      if (result) {
+                        if (depotPollTimer) clearInterval(depotPollTimer);
+                        depotPollTimer = null;
+                        const status = await applyDowngrade($selectedGame.game_id, $selectedGame.bottle_name);
+                        depotDownloading = false;
+                        showVersionMismatch = false;
+                        versionMismatchInfo = null;
+                        showSuccess(`Switched to v${status.current_version}. Let's go.`);
+                        if (pendingManifest) await checkPreInstallCleanup(pendingManifest);
+                      }
+                    } catch { /* keep polling */ }
+                  }, 3000);
+                } else {
+                  // No captured manifest — fall back to SteamDB
+                  depotDownloading = false;
+                  const steamAppIds: Record<string, string> = {
+                    hogwartslegacy: "990080", skyrimse: "489830", skyrim: "72850",
+                    fallout4: "377160", falloutnv: "22380", fallout3: "22300",
+                    oblivion: "22330", morrowind: "22320", starfield: "1716740",
+                    baldursgate3: "1086940", cyberpunk2077: "1091500", witcher3: "292030",
+                    eldenring: "1245620", stardewvalley: "413150",
+                  };
+                  const appId = steamAppIds[$selectedGame.game_id] ?? "";
+                  if (appId) {
+                    openUrl(`https://www.steamdb.info/app/${appId}/depots/`);
+                  } else {
+                    openUrl(`https://www.steamdb.info/search/?a=app&q=${encodeURIComponent($selectedGame.display_name)}`);
+                  }
+                  showSuccess("No cached version found. Check SteamDB for the depot manifest, then use Steam console to download it.");
+                }
+              } catch (e) {
+                depotDownloading = false;
+                showError(`Downgrade failed: ${e}`);
               }
             }}>
-              Find Older Version on SteamDB (Recommended)
+              {depotDownloading ? "Downloading..." : `Downgrade to v${versionMismatchInfo.expected[0]} (Recommended)`}
             </button>
           {/if}
         {/if}

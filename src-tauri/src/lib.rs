@@ -932,6 +932,8 @@ pub fn run() {
             commands::mods::get_games,
             commands::mods::get_all_games,
             commands::mods::get_game_version,
+            commands::mods::lookup_version_manifest,
+            commands::mods::get_depot_history_cmd,
             commands::mods::sync_lua_mods,
             commands::mods::list_supported_games,
             commands::mods::get_bottle_settings,

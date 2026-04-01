@@ -19,7 +19,7 @@ pub enum MigrationError {
 pub type Result<T> = std::result::Result<T, MigrationError>;
 
 /// The current target schema version. Bump this when adding a new migration.
-const TARGET_VERSION: u32 = 21;
+const TARGET_VERSION: u32 = 22;
 
 /// Get the current schema version (0 if no version table exists).
 pub fn current_version(conn: &Connection) -> Result<u32> {
@@ -149,6 +149,11 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     if version == 20 {
         migrate_v20_to_v21(conn)?;
         version = 21;
+    }
+
+    if version == 21 {
+        migrate_v21_to_v22(conn)?;
+        version = 22;
     }
 
     let _ = version; // suppress unused warning when TARGET_VERSION == current
@@ -1051,6 +1056,34 @@ fn migrate_v20_to_v21(conn: &Connection) -> Result<()> {
     tx.execute("UPDATE schema_version SET version = 21", [])?;
     tx.commit()?;
     log::info!("Migration 20 → 21 complete (error_events table)");
+    Ok(())
+}
+
+/// Migration 21 → 22: Steam depot manifest history for game version rollback.
+///
+/// Auto-captures (game_version, build_id, manifest_id, depot_id) from Steam
+/// ACF files every time a game is detected. Enables automated downgrade to
+/// any previously-seen version without needing external manifest databases.
+fn migrate_v21_to_v22(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS steam_depot_history (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            game_id     TEXT NOT NULL,
+            app_id      TEXT NOT NULL,
+            depot_id    TEXT NOT NULL,
+            manifest_id TEXT NOT NULL,
+            build_id    TEXT,
+            game_version TEXT,
+            captured_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(game_id, depot_id, manifest_id)
+        );",
+    )?;
+
+    tx.execute("UPDATE schema_version SET version = 22", [])?;
+    tx.commit()?;
+    log::info!("Migration 21 → 22 complete (steam_depot_history table)");
     Ok(())
 }
 

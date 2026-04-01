@@ -86,6 +86,52 @@ pub async fn get_game_version(
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
+/// Look up a captured Steam depot manifest for a specific game version.
+/// Returns the depot download command if a manifest is found.
+#[tauri::command]
+pub async fn lookup_version_manifest(
+    game_id: String,
+    target_version: String,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        match game_registry::lookup_manifest_for_version(&db, &game_id, &target_version) {
+            Some(info) => Ok(Some(format!(
+                "download_depot {} {} {}",
+                info.app_id, info.depot_id, info.manifest_id
+            ))),
+            None => Ok(None),
+        }
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
+/// Get captured depot history for a game (all versions we've seen).
+#[tauri::command]
+pub async fn get_depot_history_cmd(
+    game_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let history = game_registry::get_depot_history(&db, &game_id);
+        Ok(history
+            .into_iter()
+            .map(|(version, build_id, manifest_id)| {
+                serde_json::json!({
+                    "game_version": version,
+                    "build_id": build_id,
+                    "manifest_id": manifest_id,
+                })
+            })
+            .collect())
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
 #[tauri::command]
 pub async fn sync_lua_mods(
     game_id: String,

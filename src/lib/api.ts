@@ -122,6 +122,19 @@ export async function getGameVersion(
   return invoke("get_game_version", { gameId, bottleName });
 }
 
+export async function lookupVersionManifest(
+  gameId: string,
+  targetVersion: string
+): Promise<string | null> {
+  return invoke("lookup_version_manifest", { gameId, targetVersion });
+}
+
+export async function getDepotHistory(
+  gameId: string
+): Promise<{ game_version: string; build_id: string; manifest_id: string }[]> {
+  return invoke("get_depot_history_cmd", { gameId });
+}
+
 export async function syncLuaMods(
   gameId: string,
   bottleName: string
