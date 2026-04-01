@@ -18,6 +18,7 @@
   import NotificationLog from "$lib/components/mods/NotificationLog.svelte";
   import FirstRunWizard from "$lib/components/FirstRunWizard.svelte";
   import TelemetryBanner from "$lib/components/TelemetryBanner.svelte";
+  import WhatsNew from "$lib/components/WhatsNew.svelte";
   import SpotlightSearch from "$lib/components/SpotlightSearch.svelte";
   import TopBar from "$lib/components/topbar/TopBar.svelte";
   import { GamepadManager } from "$lib/gamepad";
@@ -95,6 +96,11 @@
   // First-run wizard state
   let showFirstRunWizard = $state(false);
   let showTelemetryBanner = $state(false);
+
+  // "What's New" popup state
+  let showWhatsNew = $state(false);
+  let whatsNewFromVersion = $state("");
+  let whatsNewToVersion = $state("");
 
   // Spotlight search
   let showSpotlight = $state(false);
@@ -264,7 +270,10 @@
         const cfg = await getConfig();
         const lastVersion = (cfg as Record<string, unknown>).last_known_version;
         if (lastVersion && lastVersion !== v) {
-          wrappedShowSuccess(`Updated from v${lastVersion} to v${v} successfully!`);
+          // Show "What's New" popup instead of just a toast
+          whatsNewFromVersion = lastVersion as string;
+          whatsNewToVersion = v;
+          showWhatsNew = true;
           // Clear any stale update state so we don't show "update available" for the version we just installed
           updateReadyStore.set(false);
           updateVersionStore.set("");
@@ -1630,6 +1639,10 @@
 
 {#if showFirstRunWizard}
   <FirstRunWizard onComplete={() => showFirstRunWizard = false} />
+{/if}
+
+{#if showWhatsNew}
+  <WhatsNew fromVersion={whatsNewFromVersion} toVersion={whatsNewToVersion} onclose={() => showWhatsNew = false} />
 {/if}
 
 <TelemetryBanner bind:visible={showTelemetryBanner} />
