@@ -3492,43 +3492,45 @@
             <option value={game}>{gameDomainDisplay(game)}</option>
           {/each}
         </select>
-        <button
-          class="nsfw-cycle-btn"
-          class:nsfw-show={nsfwFilter === "show"}
-          class:nsfw-only={nsfwFilter === "only"}
-          onclick={() => { nsfwFilter = cycleNsfwFilter(nsfwFilter); const gd = gameFilter !== "all" ? gameFilter : "skyrimspecialedition"; loadCollections(gd); }}
-          title={nsfwFilter === "hide" ? "NSFW hidden" : nsfwFilter === "show" ? "NSFW included" : "NSFW only"}
-        >
-          <span class="nsfw-indicator">{nsfwIcon(nsfwFilter)}</span>
-          {nsfwLabel(nsfwFilter)}
-        </button>
-        <div class="sort-group">
-          <select class="filter-select" bind:value={sortField} onchange={reloadWithSort}>
-            <option value="endorsements">Sort: Most Popular</option>
-            <option value="name">Sort: Name</option>
-            <option value="rating">Sort: Rating</option>
-            <option value="created">Sort: Newest</option>
-            <option value="updated">Sort: Updated</option>
-            <option value="size">Sort: Size</option>
-          </select>
+        <div class="filters-right">
           <button
-            class="sort-direction-btn"
-            onclick={() => { sortDirection = sortDirection === "asc" ? "desc" : "asc"; reloadWithSort(); }}
-            title={sortDirection === "asc" ? "Ascending" : "Descending"}
+            class="nsfw-cycle-btn"
+            class:nsfw-show={nsfwFilter === "show"}
+            class:nsfw-only={nsfwFilter === "only"}
+            onclick={() => { nsfwFilter = cycleNsfwFilter(nsfwFilter); const gd = gameFilter !== "all" ? gameFilter : "skyrimspecialedition"; loadCollections(gd); }}
+            title={nsfwFilter === "hide" ? "NSFW hidden" : nsfwFilter === "show" ? "NSFW included" : "NSFW only"}
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              {#if sortDirection === "asc"}
-                <path d="M12 5v14M5 12l7-7 7 7" />
-              {:else}
-                <path d="M12 5v14M5 12l7 7 7-7" />
-              {/if}
-            </svg>
+            <span class="nsfw-indicator">{nsfwIcon(nsfwFilter)}</span>
+            {nsfwLabel(nsfwFilter)}
+          </button>
+          <div class="sort-group">
+            <select class="filter-select" bind:value={sortField} onchange={reloadWithSort}>
+              <option value="endorsements">Sort: Most Popular</option>
+              <option value="name">Sort: Name</option>
+              <option value="rating">Sort: Rating</option>
+              <option value="created">Sort: Newest</option>
+              <option value="updated">Sort: Updated</option>
+              <option value="size">Sort: Size</option>
+            </select>
+            <button
+              class="sort-direction-btn"
+              onclick={() => { sortDirection = sortDirection === "asc" ? "desc" : "asc"; reloadWithSort(); }}
+              title={sortDirection === "asc" ? "Ascending" : "Descending"}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                {#if sortDirection === "asc"}
+                  <path d="M12 5v14M5 12l7-7 7 7" />
+                {:else}
+                  <path d="M12 5v14M5 12l7 7 7-7" />
+                {/if}
+              </svg>
+            </button>
+          </div>
+          <button class="filter-toggle" onclick={() => showCollectionsAdvancedFilters = !showCollectionsAdvancedFilters}>
+            Filters {showCollectionsAdvancedFilters ? '\u25B2' : '\u25BC'}
+            {#if collectionsActiveFilterCount > 0}<span class="filter-badge">{collectionsActiveFilterCount}</span>{/if}
           </button>
         </div>
-        <button class="filter-toggle" onclick={() => showCollectionsAdvancedFilters = !showCollectionsAdvancedFilters}>
-          Filters {showCollectionsAdvancedFilters ? '\u25B2' : '\u25BC'}
-          {#if collectionsActiveFilterCount > 0}<span class="filter-badge">{collectionsActiveFilterCount}</span>{/if}
-        </button>
       </div>
 
       {#if showCollectionsAdvancedFilters}
@@ -4869,8 +4871,9 @@
   .filters-bar {
     display: flex;
     align-items: center;
-    gap: var(--space-3);
+    gap: var(--space-2);
     margin-bottom: var(--space-6);
+    flex-wrap: wrap;
   }
 
   .search-wrapper {
@@ -4923,11 +4926,17 @@
     border-color: var(--system-accent);
   }
 
+  .filters-right {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-left: auto;
+  }
+
   .sort-group {
     display: flex;
     align-items: center;
-    gap: var(--space-1);
-    margin-left: auto;
+    gap: 2px;
   }
 
   .sort-direction-btn {
