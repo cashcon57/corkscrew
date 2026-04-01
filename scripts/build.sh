@@ -15,6 +15,9 @@ fi
 export TAURI_SIGNING_PRIVATE_KEY
 TAURI_SIGNING_PRIVATE_KEY="$(cat "$KEY_FILE")"
 
+# Google OAuth client secret (desktop app, not truly confidential per Google docs)
+export GOOGLE_CLIENT_SECRET="${GOOGLE_CLIENT_SECRET:-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}"
+
 # Signing key password: prefer env var, fall back to interactive prompt
 if [[ -z "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" ]]; then
     echo -n "Enter signing key password: "

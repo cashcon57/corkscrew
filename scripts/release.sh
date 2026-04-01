@@ -31,6 +31,9 @@ else
 fi
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$KEY_PASSWORD"
 
+# Google OAuth client secret (desktop app, not truly confidential per Google docs)
+export GOOGLE_CLIENT_SECRET="${GOOGLE_CLIENT_SECRET:-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}"
+
 # --- Preflight checks ---
 echo "=== Corkscrew Release $TAG ==="
 echo ""

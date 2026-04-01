@@ -34,7 +34,15 @@ const REFRESH_MARGIN_SECS: i64 = 60;
 
 const GOOGLE_CLIENT_ID: &str =
     "440303664335-9pgcd0u055bcjl7g03nmsaoj623s8m11.apps.googleusercontent.com";
-const GOOGLE_CLIENT_SECRET: &str = "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";
+
+/// Google OAuth client secret. Read from GOOGLE_CLIENT_SECRET env var at compile time.
+/// For desktop OAuth apps, Google considers this "not confidential" (see
+/// https://developers.google.com/identity/protocols/oauth2/native-app), but we
+/// keep it out of source for good hygiene.
+const GOOGLE_CLIENT_SECRET: &str = match option_env!("GOOGLE_CLIENT_SECRET") {
+    Some(s) => s,
+    None => "",
+};
 
 // ---------------------------------------------------------------------------
 // Error type
