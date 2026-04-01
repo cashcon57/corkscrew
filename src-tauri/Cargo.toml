@@ -86,7 +86,7 @@ sha2 = "0.11"
 libloot = "0.29"
 
 # WebSocket (Nexus Mods SSO)
-tungstenite = { version = "0.24", features = ["native-tls"] }
+tungstenite = { version = "0.29", features = ["native-tls"] }
 
 # System info (disk space)
 libc = "0.2"
