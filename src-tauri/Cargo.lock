@@ -1088,7 +1088,7 @@ dependencies = [
 
 [[package]]
 name = "corkscrew"
-version = "0.9.56"
+version = "0.9.57"
 dependencies = [
  "anyhow",
  "ba2",
@@ -3386,9 +3386,9 @@ dependencies = [
 
 [[package]]
 name = "libloadorder"
-version = "18.5.1"
+version = "18.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69b44af67e4a19561303219523bfad95f4e7d85223aa7c2f4ba91c30b96c01ab"
+checksum = "ab729022a2cf10b7c1ce24139b230936ce81176f94b871ae8f867727f7fc68e1"
 dependencies = [
  "dirs",
  "encoding_rs",
@@ -3403,9 +3403,9 @@ dependencies = [
 
 [[package]]
 name = "libloot"
-version = "0.29.0"
+version = "0.29.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57e9bfb25cafa8039778d5a9280cd10dbfa0ceb9b1d125f5b6762192e8000510"
+checksum = "d15479cea5044f195885f64a701e9a8df37f0d135a3ad6edb24448c16e22880e"
 dependencies = [
  "crc32fast",
  "esplugin",
