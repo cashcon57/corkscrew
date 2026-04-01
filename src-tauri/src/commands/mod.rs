@@ -3,6 +3,7 @@ pub mod cli;
 pub mod collections;
 pub mod config_commands;
 pub mod deployment;
+pub mod depot;
 pub mod diagnostics;
 pub mod game_state;
 pub mod mods;

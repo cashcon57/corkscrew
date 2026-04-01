@@ -13,6 +13,7 @@ pub mod database;
 pub mod deck;
 pub mod deploy_journal;
 pub mod deployer;
+pub mod depot_downloader;
 pub mod disk_budget;
 pub mod display_fix;
 pub mod downgrader;
@@ -1291,6 +1292,12 @@ pub fn run() {
             // Error Event Diagnostics
             commands::notifications::record_error_event_cmd,
             commands::notifications::get_error_summary,
+            // DepotDownloader (game version rollback)
+            commands::depot::dd_status,
+            commands::depot::dd_install,
+            commands::depot::dd_authenticate,
+            commands::depot::dd_list_manifests,
+            commands::depot::dd_download_depot,
             // Self-Update (macOS fallback)
             self_update::get_installed_app_version,
             self_update::manual_self_update,
