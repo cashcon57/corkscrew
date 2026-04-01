@@ -43,6 +43,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libgtk-3-dev
 
+      - name: Run clippy
+        working-directory: src-tauri
+        run: cargo clippy -- --allow clippy::too_many_arguments --allow clippy::type_complexity
+
       - name: Run tests
         working-directory: src-tauri
         run: cargo test
@@ -83,6 +87,9 @@ jobs:
 
       - name: Build frontend
         run: npm run build
+
+      - name: Svelte type check
+        run: npx svelte-check --threshold error
 
       - name: Check Rust compilation
         working-directory: src-tauri

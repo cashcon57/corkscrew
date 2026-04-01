@@ -1,0 +1,19 @@
+# Exclude tooling/scripts from GitHub language stats
+scripts/*.py linguist-vendored
+scripts/*.sh linguist-vendored
+brand-kit/*.py linguist-vendored
+e2e/**/*.ts linguist-vendored
+tools/**/* linguist-vendored
+test-results/**/* linguist-vendored
+
+# Ensure consistent line endings
+*.rs text eol=lf
+*.ts text eol=lf
+*.svelte text eol=lf
+*.js text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.md text eol=lf
+*.css text eol=lf
+*.html text eol=lf
