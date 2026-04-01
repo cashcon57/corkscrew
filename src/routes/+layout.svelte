@@ -286,7 +286,7 @@
     // Restore last page (default to "mods" if not set)
     getConfig().then(cfg => {
       const lastPage = (cfg as Record<string, unknown>).last_page as string | undefined;
-      if (lastPage && ["mods", "collections", "plugins", "profiles", "logs", "settings"].includes(lastPage)) {
+      if (lastPage && ["mods", "discover", "plugins", "profiles", "logs", "settings"].includes(lastPage)) {
         currentPage.set(lastPage);
       }
     }).catch(() => {});

@@ -1666,10 +1666,12 @@
           mismatch = (detectedIsSE && !targetsSE && targetsAE)
             || (!detectedIsSE && targetsSE && !targetsAE);
         } else {
-          // Generic: mismatch if detected version isn't in the target list
-          // and doesn't start with any target version prefix
+          // Generic: mismatch if detected version doesn't match any target.
+          // Use dot-boundary prefix matching to avoid "1" matching "1613387".
           mismatch = !versions.some((v: string) =>
-            detected === v || detected!.startsWith(v) || v.startsWith(detected!)
+            detected === v
+            || detected!.startsWith(v + ".")
+            || v.startsWith(detected! + ".")
           );
         }
 
@@ -2613,8 +2615,8 @@
             </div>
             {#if selectedGameVersions.length > 0}
               <div class="detail-stat">
-                <span class="detail-stat-value">{selectedGameVersions[0]}</span>
-                <span class="detail-stat-label">Game Version</span>
+                <span class="detail-stat-value">{selectedGameVersions.join(' / ')}</span>
+                <span class="detail-stat-label">{selectedGameVersions.length > 1 ? 'Game Versions' : 'Game Version'}</span>
               </div>
             {/if}
             {#if detailCacheInfo && detailCacheInfo.nexusTotal > 0}

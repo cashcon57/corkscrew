@@ -64,9 +64,22 @@
     },
   };
 
+  // Compare version strings numerically (not lexicographically)
+  function compareVersions(a: string, b: string): number {
+    const pa = a.split(".").map(Number);
+    const pb = b.split(".").map(Number);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+      const na = pa[i] ?? 0;
+      const nb = pb[i] ?? 0;
+      if (na !== nb) return na - nb;
+    }
+    return 0;
+  }
+
   // Find which versions are relevant (between from and to)
   const relevantVersions = Object.keys(changelogs).filter((v) => {
-    return v === toVersion || (v > fromVersion && v <= toVersion);
+    return v === toVersion
+      || (compareVersions(v, fromVersion) > 0 && compareVersions(v, toVersion) <= 0);
   });
 </script>
 
