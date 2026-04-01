@@ -58,6 +58,12 @@ pub async fn dd_list_manifests(
     app_id: u32,
     depot_id: u32,
 ) -> Result<Vec<depot_downloader::DepotManifest>, String> {
+    if app_id == 0 {
+        return Err("app_id cannot be 0".into());
+    }
+    if depot_id == 0 {
+        return Err("depot_id cannot be 0".into());
+    }
     depot_downloader::list_manifests(app_id, depot_id, None, None)
         .await
         .map_err(|e| e.to_string())
@@ -69,9 +75,15 @@ pub async fn dd_download_depot(
     app_id: u32,
     depot_id: u32,
     manifest_id: String,
-    game_id: String,
-    state: State<'_, AppState>,
+    _game_id: String,
+    _state: State<'_, AppState>,
 ) -> Result<String, String> {
+    if app_id == 0 || depot_id == 0 {
+        return Err("app_id and depot_id must be non-zero".into());
+    }
+    if manifest_id.is_empty() || manifest_id.len() > 30 || !manifest_id.chars().all(|c| c.is_ascii_digit()) {
+        return Err("manifest_id must be a non-empty numeric string".into());
+    }
     let download_dir = crate::config::cache_dir()
         .join("depot_downloads")
         .join(format!("{}_{}", app_id, depot_id));
@@ -91,4 +103,24 @@ pub async fn dd_download_depot(
     .map_err(|e| e.to_string())?;
 
     Ok(download_dir.to_string_lossy().to_string())
+}
+
+/// Apply a downloaded depot to a game installation.
+/// Copies all files from the depot download directory over the game files.
+#[tauri::command]
+pub async fn dd_apply_depot(
+    game_id: String,
+    bottle_name: String,
+    depot_dir: String,
+    state: State<'_, AppState>,
+) -> Result<u64, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let (_bottle, game, _data_dir) = crate::resolve_game(&game_id, &bottle_name)?;
+        let depot_path = std::path::Path::new(&depot_dir);
+        crate::downgrader::apply_depot_to_game(&game.game_path, depot_path, &game_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }

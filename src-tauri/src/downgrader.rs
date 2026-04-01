@@ -555,6 +555,73 @@ pub fn apply_depot_downgrade(
     swap_to_version(game_path, game_id, &imported.version)
 }
 
+/// Apply a depot download to a game installation.
+///
+/// Copies all files from `depot_dir` (downloaded by DepotDownloader) over the
+/// game installation at `game_path`. Backs up the current game files first.
+/// Works for ANY game, not just Skyrim SE.
+pub fn apply_depot_to_game(
+    game_path: &Path,
+    depot_dir: &Path,
+    game_id: &str,
+) -> Result<u64> {
+    use walkdir::WalkDir;
+
+    if !depot_dir.exists() || !depot_dir.is_dir() {
+        return Err(DowngraderError::Other(format!(
+            "Depot directory not found: {}",
+            depot_dir.display()
+        )));
+    }
+
+    // Back up current version before overwriting
+    info!(
+        "Applying depot to game: {} → {}",
+        depot_dir.display(),
+        game_path.display()
+    );
+    match cache_current_version(game_path, game_id) {
+        Ok(cached) => info!("Backed up current version: {}", cached.version),
+        Err(e) => warn!("Failed to back up current version: {} (continuing)", e),
+    }
+
+    // Copy all files from depot over game installation
+    let mut files_copied: u64 = 0;
+    for entry in WalkDir::new(depot_dir).into_iter().filter_map(|e| e.ok()) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        let rel_path = match entry.path().strip_prefix(depot_dir) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+
+        let dest = game_path.join(rel_path);
+        if let Some(parent) = dest.parent() {
+            if !parent.exists() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
+
+        match std::fs::copy(entry.path(), &dest) {
+            Ok(_) => files_copied += 1,
+            Err(e) => warn!(
+                "Failed to copy depot file {} → {}: {}",
+                entry.path().display(),
+                dest.display(),
+                e
+            ),
+        }
+    }
+
+    info!(
+        "Applied depot to game {}: {} files copied",
+        game_id, files_copied
+    );
+    Ok(files_copied)
+}
+
 /// Automate the depot download by opening Steam console and typing the command.
 /// macOS only — uses osascript to send keystrokes to Steam.
 /// Returns Ok(true) if the command was sent successfully, Ok(false) if automation unavailable.

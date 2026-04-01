@@ -150,6 +150,23 @@ pub(crate) fn resolve_game(
     Ok((bottle, game, data_dir))
 }
 
+/// Format a `tokio::task::JoinError` with panic details when available.
+/// Replaces the generic "Task failed: JoinError" with the actual panic message.
+pub(crate) fn format_join_error(e: tokio::task::JoinError) -> String {
+    if e.is_panic() {
+        let panic = e.into_panic();
+        if let Some(s) = panic.downcast_ref::<&str>() {
+            format!("Task panicked: {s}")
+        } else if let Some(s) = panic.downcast_ref::<String>() {
+            format!("Task panicked: {s}")
+        } else {
+            "Task panicked (unknown payload)".to_string()
+        }
+    } else {
+        format!("Task cancelled: {e}")
+    }
+}
+
 /// Create an auto-snapshot before a destructive operation.
 /// Silent on failure — logs a warning but never blocks the operation.
 pub(crate) fn auto_snapshot_before_destructive(
@@ -1298,6 +1315,7 @@ pub fn run() {
             commands::depot::dd_authenticate,
             commands::depot::dd_list_manifests,
             commands::depot::dd_download_depot,
+            commands::depot::dd_apply_depot,
             // Self-Update (macOS fallback)
             self_update::get_installed_app_version,
             self_update::manual_self_update,

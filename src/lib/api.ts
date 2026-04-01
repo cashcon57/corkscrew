@@ -135,6 +135,43 @@ export async function getDepotHistory(
   return invoke("get_depot_history_cmd", { gameId });
 }
 
+// DepotDownloader integration
+export async function ddStatus(): Promise<{
+  installed: boolean;
+  version: string | null;
+  auth_state: string;
+}> {
+  return invoke("dd_status");
+}
+
+export async function ddInstall(): Promise<string> {
+  return invoke("dd_install");
+}
+
+export async function ddAuthenticate(
+  username: string,
+  password: string,
+  steamGuardCode: string | null
+): Promise<void> {
+  return invoke("dd_authenticate", { username, password, steamGuardCode });
+}
+
+export async function ddListManifests(
+  appId: number,
+  depotId: number
+): Promise<{ manifest_id: string; date: string; depot_id: string }[]> {
+  return invoke("dd_list_manifests", { appId, depotId });
+}
+
+export async function ddDownloadDepot(
+  appId: number,
+  depotId: number,
+  manifestId: string,
+  gameId: string
+): Promise<string> {
+  return invoke("dd_download_depot", { appId, depotId, manifestId, gameId });
+}
+
 export async function syncLuaMods(
   gameId: string,
   bottleName: string
@@ -1148,9 +1185,11 @@ export async function listModVersions(
 
 export async function rollbackModVersion(
   modId: number,
-  versionId: number
+  versionId: number,
+  gameId: string,
+  bottleName: string
 ): Promise<ModVersion> {
-  return invoke("rollback_mod_version", { modId, versionId });
+  return invoke("rollback_mod_version", { modId, versionId, gameId, bottleName });
 }
 
 export async function cleanupModVersions(

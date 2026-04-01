@@ -280,6 +280,15 @@ Requires [Node.js](https://nodejs.org/) 18+ and [Rust](https://rustup.rs/). On L
 - INI editor with presets (performance, ultra, Steam Deck)
 - Crash log analysis with diagnosis and suggested fixes
 
+### Game Version Rollback
+
+- **Automatic version mismatch detection** — warns before installing a collection built for a different game version
+- **Automated downgrade** via [DepotDownloader](https://github.com/SteamRE/DepotDownloader) — downloads older game versions directly from Steam's CDN
+- **One-click version switching** — cached versions can be swapped instantly
+- **Auto-capture** — Corkscrew records your game's current version on every launch, building a local version history for future rollbacks
+- **Privacy-first** — Steam credentials are sent directly to Steam's servers via DepotDownloader and never stored by Corkscrew
+- Works for any Steam game, not just Skyrim SE
+
 ### Shader Compatibility (Wine)
 - **Community Shaders → ENB conversion wizard** — detects CS-dependent mods and helps swap to Wine-compatible ENB equivalents
 - Smart detection: config-only files (harmless without CS DLL) are kept; actual CS ecosystem mods are disabled
@@ -448,6 +457,7 @@ Corkscrew builds on many open-source projects:
 - **[Nexus Mods](https://www.nexusmods.com/)** — Mod hosting, API, and the modding community
 - **[Jackify](https://github.com/Omni-guides/Jackify)** — Demonstrated Wabbajack modlist installation on Linux
 - **[SulfurNitride](https://github.com/SulfurNitride)** — [NaK](https://github.com/SulfurNitride/NaK) (MO2 Linux setup automation), [Radium-Textures](https://github.com/SulfurNitride/Radium-Textures) (native Rust texture optimizer), [Nexus-Collection-To-MO2-Bridge](https://github.com/SulfurNitride/Nexus-Collection-To-MO2-Bridge) — pioneering Linux modding tooling
+- **[DepotDownloader](https://github.com/SteamRE/DepotDownloader)** — Steam depot downloader for automated game version rollback (GPL-2.0, by [SteamRE](https://github.com/SteamRE)). Downloaded on demand, not bundled — your Steam credentials are sent directly to Steam's servers and never stored by Corkscrew.
 
 <details>
 <summary>Modding tool authors</summary>

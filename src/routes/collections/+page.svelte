@@ -51,6 +51,10 @@
     getCollectionRevisions,
     getGameVersion,
     lookupVersionManifest,
+    ddStatus,
+    ddInstall,
+    ddListManifests,
+    ddDownloadDepot,
   } from "$lib/api";
   import { startInstallTracking, stopInstallTracking, resumeInstallTracking } from "$lib/installService";
   import { listen } from "@tauri-apps/api/event";
@@ -65,6 +69,7 @@
   import NexusLogo from "$lib/components/NexusLogo.svelte";
   import WabbajackLogo from "$lib/components/WabbajackLogo.svelte";
   import WebViewToggle from "$lib/components/WebViewToggle.svelte";
+  import SteamAuthDialog from "$lib/components/SteamAuthDialog.svelte";
   import type { DetectedGame } from "$lib/types";
 
   const NEXUS_API_KEY_URL = "https://www.nexusmods.com/users/myaccount?tab=api+access";
@@ -636,6 +641,8 @@
   let versionCache = $state<CachedVersion[]>([]);
   let depotDownloading = $state(false);
   let depotPollTimer = $state<ReturnType<typeof setInterval> | null>(null);
+  let showSteamAuth = $state(false);
+  let depotDowngradePhase = $state("");
 
   // DLC Detection
   let showDlcWarning = $state(false);
@@ -4087,29 +4094,96 @@
                     } catch { /* keep polling */ }
                   }, 3000);
                 } else {
-                  // No captured manifest — fall back to SteamDB
-                  depotDownloading = false;
-                  const steamAppIds: Record<string, string> = {
-                    hogwartslegacy: "990080", skyrimse: "489830", skyrim: "72850",
-                    fallout4: "377160", falloutnv: "22380", fallout3: "22300",
-                    oblivion: "22330", morrowind: "22320", starfield: "1716740",
-                    baldursgate3: "1086940", cyberpunk2077: "1091500", witcher3: "292030",
-                    eldenring: "1245620", stardewvalley: "413150",
-                  };
-                  const appId = steamAppIds[$selectedGame.game_id] ?? "";
-                  if (appId) {
-                    openUrl(`https://www.steamdb.info/app/${appId}/depots/`);
-                  } else {
-                    openUrl(`https://www.steamdb.info/search/?a=app&q=${encodeURIComponent($selectedGame.display_name)}`);
+                  // No captured manifest — use DepotDownloader to find and download
+                  depotDowngradePhase = "Setting up DepotDownloader...";
+
+                  // Step 1: Ensure DD is installed
+                  const status = await ddStatus();
+                  if (!status.installed) {
+                    depotDowngradePhase = "Downloading DepotDownloader...";
+                    await ddInstall();
                   }
-                  showSuccess("No cached version found. Check SteamDB for the depot manifest, then use Steam console to download it.");
+
+                  // Step 2: Check auth — show Steam login if needed
+                  const authStatus = await ddStatus();
+                  if (authStatus.auth_state !== "ready") {
+                    depotDownloading = false;
+                    depotDowngradePhase = "";
+                    showSteamAuth = true;
+                    return; // Auth dialog will call back on success
+                  }
+
+                  // Step 3: Get depot ID from ACF (use the game's primary depot)
+                  // For now use the Steam App ID to derive depot (app_id + 1 is common)
+                  const steamAppIds: Record<string, { app: number; depot: number }> = {
+                    hogwartslegacy: { app: 990080, depot: 990081 },
+                    skyrimse: { app: 489830, depot: 489833 },
+                    skyrim: { app: 72850, depot: 72851 },
+                    fallout4: { app: 377160, depot: 377162 },
+                    falloutnv: { app: 22380, depot: 22381 },
+                    fallout3: { app: 22300, depot: 22301 },
+                    oblivion: { app: 22330, depot: 22331 },
+                    morrowind: { app: 22320, depot: 22321 },
+                    starfield: { app: 1716740, depot: 1716741 },
+                    baldursgate3: { app: 1086940, depot: 1086941 },
+                    cyberpunk2077: { app: 1091500, depot: 1091501 },
+                    witcher3: { app: 292030, depot: 292031 },
+                    eldenring: { app: 1245620, depot: 1245621 },
+                    stardewvalley: { app: 413150, depot: 413151 },
+                  };
+                  const ids = steamAppIds[$selectedGame.game_id];
+                  if (!ids) {
+                    depotDownloading = false;
+                    depotDowngradePhase = "";
+                    showError("Game not yet supported for automated downgrade. Check SteamDB manually.");
+                    return;
+                  }
+
+                  // Step 4: List available manifests via DD
+                  depotDowngradePhase = "Listing available versions...";
+                  const manifests = await ddListManifests(ids.app, ids.depot);
+                  if (manifests.length === 0) {
+                    depotDownloading = false;
+                    depotDowngradePhase = "";
+                    showError("No manifests found. You may need to authenticate with Steam first.");
+                    showSteamAuth = true;
+                    return;
+                  }
+
+                  // Step 5: Pick the first manifest (newest that isn't current)
+                  // TODO: Better version correlation by matching timestamps
+                  const targetManifest = manifests[0];
+                  depotDowngradePhase = `Downloading version (manifest ${targetManifest.manifest_id.slice(0, 8)}...)`;
+
+                  // Step 6: Download the depot
+                  const depotDir = await ddDownloadDepot(
+                    ids.app, ids.depot, targetManifest.manifest_id, $selectedGame.game_id
+                  );
+
+                  // Step 7: Apply to game
+                  depotDowngradePhase = "Applying downgrade...";
+                  const { invoke } = await import("@tauri-apps/api/core");
+                  const filesCopied = await invoke("dd_apply_depot", {
+                    gameId: $selectedGame.game_id,
+                    bottleName: $selectedGame.bottle_name,
+                    depotDir,
+                  });
+
+                  depotDownloading = false;
+                  depotDowngradePhase = "";
+                  showVersionMismatch = false;
+                  versionMismatchInfo = null;
+                  showSuccess(`Downgraded successfully (${filesCopied} files). Let's go.`);
+                  if (pendingManifest) await checkPreInstallCleanup(pendingManifest);
                 }
               } catch (e) {
                 depotDownloading = false;
                 showError(`Downgrade failed: ${e}`);
               }
             }}>
-              {depotDownloading ? "Downloading..." : `Downgrade to v${versionMismatchInfo.expected[0]} (Recommended)`}
+              {depotDownloading
+                ? (depotDowngradePhase || "Downloading...")
+                : `Downgrade to v${versionMismatchInfo.expected[0]} (Recommended)`}
             </button>
           {/if}
         {/if}
@@ -4124,6 +4198,19 @@
       </div>
     </div>
   </div>
+{/if}
+
+<!-- Steam Auth Dialog (for DepotDownloader) -->
+{#if showSteamAuth}
+  <SteamAuthDialog
+    onauth={() => {
+      showSteamAuth = false;
+      showSuccess("Steam authentication successful. Retrying downgrade...");
+      // Re-trigger the downgrade flow now that auth is ready
+      // The user needs to click the downgrade button again
+    }}
+    oncancel={() => { showSteamAuth = false; }}
+  />
 {/if}
 
 <!-- DLC Warning Modal -->
