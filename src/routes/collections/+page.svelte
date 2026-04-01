@@ -5,7 +5,7 @@
   import { selectedGame, showError, showSuccess, collectionInstallStatus, collectionUninstallStatus, modStateVersion, installedMods, collectionList, activeCollection } from "$lib/stores";
   import type { CollectionUninstallStatus } from "$lib/stores";
   import type { UninstallProgressEvent } from "$lib/types";
-  import type { CollectionInfo, CollectionManifest, CollectionMod, CollectionModEntry, CollectionSearchResult, InstalledMod, NexusModInfo, NexusCategory, NexusSearchResult, NexusModFile, CollectionInstallCheckpoint } from "$lib/types";
+  import type { CollectionInfo, CollectionManifest, CollectionMod, CollectionModEntry, CollectionSearchResult, InstalledMod, NexusModInfo, NexusCategory, NexusSearchResult, NexusModFile, CollectionInstallCheckpoint, CollectionRevision } from "$lib/types";
   import {
     browseCollections,
     browseNexusMods,
@@ -48,6 +48,7 @@
     quickCsModCount,
     getAllGames,
     startOAuthLogin,
+    getCollectionRevisions,
   } from "$lib/api";
   import { startInstallTracking, stopInstallTracking, resumeInstallTracking } from "$lib/installService";
   import { listen } from "@tauri-apps/api/event";
@@ -576,6 +577,7 @@
   let selectedCollection = $state<CollectionInfo | null>(null);
   let selectedMods = $state<CollectionMod[]>([]);
   let selectedGameVersions = $state<string[]>([]);
+  let collectionRevisions = $state<CollectionRevision[]>([]);
   let loadingDetail = $state(false);
   let detailLoadStart = $state(0);
   let detailAbortController: AbortController | null = null;
@@ -1461,6 +1463,11 @@
       selectedMods = modsResult.mods;
       selectedGameVersions = modsResult.game_versions;
 
+      // Load revision history (non-blocking)
+      getCollectionRevisions(collection.slug)
+        .then((revs) => { if (!ac.signal.aborted) collectionRevisions = revs; })
+        .catch((e) => console.error("Failed to load revisions:", e));
+
       // Pre-render the description as markdown
       if (detail.description) {
         const html = await marked.parse(detail.description);
@@ -1866,6 +1873,7 @@
   function backToBrowse() {
     selectedCollection = null;
     selectedMods = [];
+    collectionRevisions = [];
     renderedDescription = "";
     renderedInstallInstructions = "";
     rawInstallInstructions = "";
@@ -1891,6 +1899,36 @@
     if (pct <= 1) return Math.round((pct / 1) * SIZE_LOG_FLOOR);
     const logVal = SIZE_LN_FLOOR + ((pct - 1) / 99) * (SIZE_LN_CEIL - SIZE_LN_FLOOR);
     return Math.round(Math.exp(logVal));
+  }
+
+  function formatDate(dateStr: string | null | undefined): string {
+    if (!dateStr) return "Unknown";
+    try {
+      const d = new Date(dateStr);
+      const now = new Date();
+      const diffMs = now.getTime() - d.getTime();
+      const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+      if (diffDays === 0) return "Today";
+      if (diffDays === 1) return "Yesterday";
+      if (diffDays < 30) return `${diffDays} days ago`;
+      if (diffDays < 365) return `${Math.floor(diffDays / 30)} months ago`;
+      return `${Math.floor(diffDays / 365)}y ${Math.floor((diffDays % 365) / 30)}m ago`;
+    } catch {
+      return dateStr;
+    }
+  }
+
+  function formatDateFull(dateStr: string | null | undefined): string {
+    if (!dateStr) return "Unknown";
+    try {
+      return new Date(dateStr).toLocaleDateString(undefined, {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+      });
+    } catch {
+      return dateStr;
+    }
   }
 
   function formatSize(bytes: number): string {
@@ -2499,8 +2537,31 @@
             <h2 class="detail-name">{selectedCollection.name}</h2>
             <span class="game-badge">{gameDomainDisplay(selectedCollection.game_domain)}</span>
           </div>
-          <p class="detail-author">by {selectedCollection.author}</p>
-          <span class="detail-revision">Revision {selectedCollection.latest_revision}</span>
+          <div class="detail-meta-row">
+            <p class="detail-author">by {selectedCollection.author}</p>
+            <span class="detail-separator">&middot;</span>
+            <span class="detail-revision">Revision {selectedCollection.latest_revision}</span>
+            {#if selectedCollection.updated_at}
+              <span class="detail-separator">&middot;</span>
+              <span class="detail-updated" title={formatDateFull(selectedCollection.updated_at)}>
+                Updated {formatDate(selectedCollection.updated_at)}
+              </span>
+            {/if}
+          </div>
+          <div class="detail-actions-row">
+            <button
+              class="btn-link"
+              onclick={() => selectedCollection && openUrl(`https://next.nexusmods.com/${selectedCollection.game_domain}/collections/${selectedCollection.slug}`)}
+              type="button"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                <polyline points="15 3 21 3 21 9" />
+                <line x1="10" y1="14" x2="21" y2="3" />
+              </svg>
+              View on Nexus Mods
+            </button>
+          </div>
         </div>
 
         <!-- Stats Bar -->
@@ -2638,6 +2699,37 @@
                   {/each}
                 </div>
               </div>
+            </div>
+          </div>
+        {/if}
+
+        <!-- Revision History -->
+        {#if collectionRevisions.length > 0}
+          <div class="detail-section">
+            <h3 class="detail-section-title">
+              Revision History
+              <span class="title-count">{collectionRevisions.length}</span>
+            </h3>
+            <div class="revision-list">
+              {#each collectionRevisions.slice(0, 10) as rev (rev.revision_number)}
+                <div class="revision-entry">
+                  <div class="revision-header">
+                    <span class="revision-number">Rev. {rev.revision_number}</span>
+                    <span class="revision-date" title={formatDateFull(rev.created_at)}>
+                      {formatDate(rev.created_at)}
+                    </span>
+                    <span class="revision-meta">{rev.mod_count} mods &middot; {formatSize(rev.download_size)}</span>
+                  </div>
+                  {#if rev.changelog}
+                    <p class="revision-changelog">{rev.changelog}</p>
+                  {/if}
+                </div>
+              {/each}
+              {#if collectionRevisions.length > 10}
+                <p class="revision-more">
+                  + {collectionRevisions.length - 10} older revisions
+                </p>
+              {/if}
             </div>
           </div>
         {/if}
@@ -5160,12 +5252,107 @@
   .detail-author {
     font-size: 14px;
     color: var(--text-secondary);
+    margin: 0;
+  }
+
+  .detail-meta-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+  }
+
+  .detail-separator {
+    color: var(--text-tertiary);
+    font-size: 12px;
   }
 
   .detail-revision {
     font-size: 12px;
     color: var(--text-tertiary);
     font-weight: 500;
+  }
+
+  .detail-updated {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    cursor: default;
+  }
+
+  .detail-actions-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-top: 4px;
+  }
+
+  .btn-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: none;
+    border: none;
+    color: var(--accent);
+    font-size: 12px;
+    cursor: pointer;
+    padding: 2px 0;
+    text-decoration: none;
+    transition: opacity 0.15s;
+  }
+  .btn-link:hover {
+    opacity: 0.8;
+    text-decoration: underline;
+  }
+
+  .revision-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .revision-entry {
+    padding: var(--space-2) var(--space-3);
+    background: var(--bg-secondary);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+  }
+
+  .revision-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+  }
+
+  .revision-number {
+    font-weight: 600;
+    font-size: 13px;
+    color: var(--text-primary);
+  }
+
+  .revision-date {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    cursor: default;
+  }
+
+  .revision-meta {
+    font-size: 12px;
+    color: var(--text-tertiary);
+  }
+
+  .revision-changelog {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin: 4px 0 0;
+    line-height: 1.4;
+  }
+
+  .revision-more {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    text-align: center;
+    padding: var(--space-1) 0;
   }
 
   .detail-stats-bar {
