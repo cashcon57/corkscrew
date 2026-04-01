@@ -157,7 +157,7 @@ pub fn run_sso_flow() -> Result<String, SsoError> {
         "token": serde_json::Value::Null,
         "protocol": 2
     });
-    socket.send(Message::Text(handshake.to_string()))?;
+    socket.send(Message::Text(handshake.to_string().into()))?;
 
     // 3. Open browser for user to authorize
     let browser_url = format!(

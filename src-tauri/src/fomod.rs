@@ -321,9 +321,9 @@ fn read_text_content(reader: &mut Reader<&[u8]>, buf: &mut Vec<u8>) -> String {
         buf.clear();
         match reader.read_event_into(buf) {
             Ok(Event::Text(e)) => {
-                if let Ok(t) = e.unescape() {
-                    text.push_str(&t);
-                }
+                // quick-xml 0.38+: text events are already unescaped
+                let t = String::from_utf8_lossy(e.as_ref());
+                text.push_str(&t);
             }
             Ok(Event::CData(e)) => {
                 // CData content does not need unescaping.
