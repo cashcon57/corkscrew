@@ -1,3 +1,5 @@
+//! Collection management: browse, install, resume, endorsements, and NexusMods search.
+
 use crate::database;
 use crate::collections;
 use crate::nexus;

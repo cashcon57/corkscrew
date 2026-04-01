@@ -1,3 +1,5 @@
+//! Plugin load order: LOOT sorting and custom ordering rules.
+
 use crate::loot;
 use crate::loot_rules;
 use crate::plugins;

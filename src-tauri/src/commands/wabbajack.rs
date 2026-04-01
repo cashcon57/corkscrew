@@ -1,3 +1,5 @@
+//! Wabbajack modlist commands: parsing, installation, and progress tracking.
+
 use crate::wabbajack;
 use crate::config;
 use crate::wabbajack::{ModlistSummary, ParsedModlist};

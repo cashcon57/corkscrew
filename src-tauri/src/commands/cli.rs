@@ -1,3 +1,5 @@
+//! CLI commands: diagnostic tools, e2e test support, shader scans, and headless launch.
+
 use crate::database;
 use crate::config;
 use crate::database::{ModDatabase};

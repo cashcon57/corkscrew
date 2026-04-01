@@ -1,3 +1,5 @@
+//! Mod management commands: CRUD, archive management, notes, tags, and categories.
+
 use crate::database;
 use crate::bottles;
 use crate::config;

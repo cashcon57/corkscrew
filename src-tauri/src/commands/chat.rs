@@ -1,5 +1,7 @@
+//! LLM chat commands: model management, message handling, tool execution, and streaming.
+
 use crate::database;
-use crate::commands::system::get_system_memory;
+use crate::commands::platform::get_system_memory;
 use crate::commands::mods::get_plugin_order;
 use crate::commands::collections::search_nexus_mods_cmd;
 use crate::commands::collections::get_nexus_mod_detail;
@@ -7,7 +9,7 @@ use crate::commands::nexus::get_nexus_mod_files;
 use crate::commands::plugins::sort_plugins_loot;
 use crate::commands::diagnostics::find_crash_logs_cmd;
 use crate::commands::diagnostics::analyze_crash_log_cmd;
-use crate::commands::system::KNOWN_FRAMEWORKS;
+use crate::commands::platform::KNOWN_FRAMEWORKS;
 use crate::crashlog;
 use crate::profiles;
 use crate::cleaner;

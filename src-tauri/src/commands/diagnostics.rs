@@ -1,3 +1,5 @@
+//! Diagnostic commands: Wine compatibility, preflight, crash logs, DXVK, and session tracking.
+
 use crate::crashlog;
 use crate::integrity;
 use crate::crashlog::{CrashLogEntry, CrashReport, NewCrashInfo};

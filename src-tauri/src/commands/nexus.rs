@@ -1,3 +1,5 @@
+//! NexusMods authentication: SSO, OAuth, Google OAuth, mod files, and NXM protocol handling.
+
 use crate::oauth;
 use crate::config;
 use crate::deployer;

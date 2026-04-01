@@ -1,3 +1,5 @@
+//! Mod tool management: detection, installation, and custom executables.
+
 use crate::collections;
 use crate::executables;
 use crate::executables::{CustomExecutable};

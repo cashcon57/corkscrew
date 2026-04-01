@@ -1,12 +1,15 @@
 pub mod chat;
 pub mod cli;
 pub mod collections;
+pub mod config_commands;
 pub mod deployment;
 pub mod diagnostics;
+pub mod game_state;
 pub mod mods;
 pub mod nexus;
+pub mod notifications;
+pub mod platform;
 pub mod plugins;
 pub mod profiles;
-pub mod system;
 pub mod tools;
 pub mod wabbajack;

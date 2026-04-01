@@ -1,3 +1,5 @@
+//! Mod profile management: create, switch, save snapshots, and manage saves.
+
 use crate::plugins;
 use crate::profiles;
 use crate::config;

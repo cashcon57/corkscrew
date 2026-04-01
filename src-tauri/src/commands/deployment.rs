@@ -1,3 +1,5 @@
+//! Deployment commands: deploy, redeploy, health checks, and background hashing.
+
 use crate::background_hash;
 use crate::config;
 use crate::conflict_resolver;
