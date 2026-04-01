@@ -49,6 +49,7 @@
     getAllGames,
     startOAuthLogin,
     getCollectionRevisions,
+    getGameVersion,
   } from "$lib/api";
   import { startInstallTracking, stopInstallTracking, resumeInstallTracking } from "$lib/installService";
   import { listen } from "@tauri-apps/api/event";
@@ -1632,34 +1633,55 @@
     if (!$selectedGame) return;
 
     const versions = manifest.gameVersions ?? [];
-    // Skip if no game versions specified or not Skyrim SE
-    if (versions.length === 0 || $selectedGame.game_id !== "skyrimse") {
+    // Skip if no game versions specified
+    if (versions.length === 0) {
       await checkPreInstallCleanup(manifest);
       return;
     }
 
     try {
-      const status = await checkSkyrimVersion($selectedGame.game_id, $selectedGame.bottle_name);
-      const detected = status.current_version;
+      // Use the generic game version detection (works for any game with a plugin)
+      let detected: string | null = null;
 
-      // Compare SE vs AE categories, not exact version strings.
-      // SE = 1.5.x, AE = 1.6.x. If both are in the same category, no mismatch.
-      const detectedIsSE = detected.startsWith("1.5.");
-      const targetsSE = versions.some(v => v.startsWith("1.5."));
-      const targetsAE = versions.some(v => v.startsWith("1.6."));
+      if ($selectedGame.game_id === "skyrimse") {
+        // Skyrim SE has special binary-level detection
+        const status = await checkSkyrimVersion($selectedGame.game_id, $selectedGame.bottle_name);
+        detected = status.current_version;
+      } else {
+        // Generic: use GamePlugin::detect_game_version()
+        const ver = await getGameVersion($selectedGame.game_id, $selectedGame.bottle_name);
+        detected = ver ?? null;
+      }
 
-      // Mismatch only when categories differ (e.g., user has AE but collection targets SE only)
-      const mismatch = (detectedIsSE && !targetsSE && targetsAE)
-        || (!detectedIsSE && targetsSE && !targetsAE);
+      if (detected) {
+        // Check if the detected version matches any of the collection's target versions.
+        // For Skyrim SE: compare SE (1.5.x) vs AE (1.6.x) categories.
+        // For other games: exact match or prefix match.
+        let mismatch = false;
 
-      if (mismatch) {
-        try {
-          versionCache = await listGameVersions($selectedGame.game_id);
-        } catch { versionCache = []; }
-        versionMismatchInfo = { expected: versions, detected };
-        pendingManifest = manifest;
-        showVersionMismatch = true;
-        return;
+        if ($selectedGame.game_id === "skyrimse") {
+          const detectedIsSE = detected.startsWith("1.5.");
+          const targetsSE = versions.some((v: string) => v.startsWith("1.5."));
+          const targetsAE = versions.some((v: string) => v.startsWith("1.6."));
+          mismatch = (detectedIsSE && !targetsSE && targetsAE)
+            || (!detectedIsSE && targetsSE && !targetsAE);
+        } else {
+          // Generic: mismatch if detected version isn't in the target list
+          // and doesn't start with any target version prefix
+          mismatch = !versions.some((v: string) =>
+            detected === v || detected!.startsWith(v) || v.startsWith(detected!)
+          );
+        }
+
+        if (mismatch) {
+          try {
+            versionCache = await listGameVersions($selectedGame.game_id);
+          } catch { versionCache = []; }
+          versionMismatchInfo = { expected: versions, detected };
+          pendingManifest = manifest;
+          showVersionMismatch = true;
+          return;
+        }
       }
     } catch {
       // Version check is best-effort; proceed if it fails
@@ -2589,6 +2611,12 @@
               <span class="detail-stat-value">Rev. {selectedCollection.latest_revision}</span>
               <span class="detail-stat-label">Latest</span>
             </div>
+            {#if selectedGameVersions.length > 0}
+              <div class="detail-stat">
+                <span class="detail-stat-value">{selectedGameVersions[0]}</span>
+                <span class="detail-stat-label">Game Version</span>
+              </div>
+            {/if}
             {#if detailCacheInfo && detailCacheInfo.nexusTotal > 0}
               {@const pct = Math.round((detailCacheInfo.cached / detailCacheInfo.nexusTotal) * 100)}
               <div class="detail-stat">
@@ -3909,56 +3937,68 @@
 
 <!-- Version Mismatch Modal -->
 {#if showVersionMismatch && versionMismatchInfo}
+  {@const gameName = $selectedGame?.display_name ?? "this game"}
+  {@const isSkyrim = $selectedGame?.game_id === "skyrimse"}
+  {@const targetsSE = isSkyrim && versionMismatchInfo.expected.some((v: string) => v.startsWith("1.5."))}
+  {@const matchingCached = isSkyrim
+    ? versionCache.filter(cv => targetsSE ? cv.version.startsWith("1.5.") : cv.version.startsWith("1.6."))
+    : versionCache.filter(cv => versionMismatchInfo!.expected.some((v: string) => cv.version === v || cv.version.startsWith(v)))
+  }
   <div class="modal-overlay" onclick={() => { showVersionMismatch = false; versionMismatchInfo = null; }} role="presentation">
     <div class="cleanup-modal" onclick={(e) => e.stopPropagation()} role="dialog" aria-label="Version mismatch warning">
       <div class="cleanup-header">
-        <h3 class="cleanup-title">Game Version Mismatch</h3>
+        <h3 class="cleanup-title">Heads Up &mdash; Wrong Game Version</h3>
         <button class="cleanup-close" onclick={() => { showVersionMismatch = false; versionMismatchInfo = null; }}>&times;</button>
       </div>
 
       <div class="cleanup-body">
-        {#if versionMismatchInfo}
-        {@const targetsSE = versionMismatchInfo.expected.some(v => v.startsWith("1.5."))}
-        {@const cachedMatch = versionCache.some(cv => targetsSE ? cv.version.startsWith("1.5.") : cv.version.startsWith("1.6."))}
         <div class="cleanup-summary">
           <p class="cleanup-info">
-            This collection was built for <strong>Skyrim {versionMismatchInfo.expected.join(' / ')}</strong>{targetsSE ? " (SE)" : " (AE)"},
-            but your game is <strong>{versionMismatchInfo.detected}</strong>{versionMismatchInfo.detected.startsWith("1.5.") ? " (SE)" : " (AE)"}.
+            This collection was built for
+            <strong>{gameName} v{versionMismatchInfo.expected.join(' / ')}</strong>{isSkyrim && targetsSE ? " (SE)" : isSkyrim ? " (AE)" : ""},
+            but you're running
+            <strong>v{versionMismatchInfo.detected}</strong>{isSkyrim ? (versionMismatchInfo.detected.startsWith("1.5.") ? " (SE)" : " (AE)") : ""}.
           </p>
-          <p class="cleanup-info" style="margin-top: 0.5rem;">
-            SKSE plugins in this collection may not be compatible with your game version.
-            {#if cachedMatch}
-              A compatible version is cached and can be swapped instantly.
+          <p class="cleanup-info version-warning-detail">
+            {#if matchingCached.length > 0}
+              Good news &mdash; you have a compatible version cached. One click and you're golden.
             {:else if depotDownloading}
-              Downloading the correct game version from Steam...
+              Downloading the correct version from Steam... grab a coffee, this might take a minute.
+            {:else if isSkyrim}
+              You can download the correct version from Steam, or roll the dice and install anyway.
+              Fair warning: mismatched versions usually end in tears (and crashes).
             {:else}
-              You can download and switch to the correct version, or continue at your own risk.
+              Installing on a different version than what the collection author tested is... brave.
+              It might work. It probably won't. Your call.
             {/if}
           </p>
           {#if depotDownloading}
-            <div style="display: flex; align-items: center; gap: 0.75rem; margin: 0.75rem 0; padding: 0.75rem; background: var(--surface-1); border-radius: 6px;">
-              <div class="spinner" style="width: 20px; height: 20px; border: 2px solid var(--border); border-top-color: var(--blue); border-radius: 50%; animation: spin 1s linear infinite;"></div>
-              <span style="font-size: 0.9rem;">Downloading via Steam depot... this may take several minutes.</span>
+            <div class="depot-download-status">
+              <div class="spinner-sm"></div>
+              <span>Downloading via Steam depot... this may take several minutes.</span>
             </div>
           {/if}
         </div>
-      {/if}
       </div>
 
       <div class="cleanup-actions">
-        {#if versionMismatchInfo}
-        {@const targetsSEBtn = versionMismatchInfo.expected.some(v => v.startsWith("1.5."))}
-        {@const matchingCached = versionCache.filter(cv => targetsSEBtn ? cv.version.startsWith("1.5.") : cv.version.startsWith("1.6."))}
-        <button class="btn btn-ghost" disabled={depotDownloading} onclick={() => { showVersionMismatch = false; versionMismatchInfo = null; pendingManifest = null; if (depotPollTimer) { clearInterval(depotPollTimer); depotPollTimer = null; } depotDownloading = false; }}>Cancel</button>
+        <button class="btn btn-ghost" disabled={depotDownloading} onclick={() => {
+          showVersionMismatch = false;
+          versionMismatchInfo = null;
+          pendingManifest = null;
+          if (depotPollTimer) { clearInterval(depotPollTimer); depotPollTimer = null; }
+          depotDownloading = false;
+        }}>Cancel</button>
+
         {#each matchingCached as matchingVersion}
-          <button class="btn btn-secondary" disabled={versionSwapping} onclick={async () => {
+          <button class="btn btn-accent" disabled={versionSwapping} onclick={async () => {
             if (!$selectedGame) return;
             versionSwapping = true;
             try {
               await swapGameVersion($selectedGame.game_id, $selectedGame.bottle_name, matchingVersion.version);
               showVersionMismatch = false;
               versionMismatchInfo = null;
-              showSuccess(`Switched to v${matchingVersion.version}`);
+              showSuccess(`Switched to v${matchingVersion.version}. Nice.`);
               if (pendingManifest) await checkPreInstallCleanup(pendingManifest);
             } catch (e) {
               showError(`Version swap failed: ${e}`);
@@ -3966,24 +4006,23 @@
               versionSwapping = false;
             }
           }}>
-            {versionSwapping ? "Switching..." : `Switch to ${matchingVersion.version.startsWith("1.5.") ? "SE" : "AE"} (v${matchingVersion.version})`}
+            {versionSwapping ? "Switching..." : `Switch to v${matchingVersion.version} (Recommended)`}
           </button>
         {/each}
-        {#if matchingCached.length === 0 && !depotDownloading && targetsSEBtn}
+
+        {#if matchingCached.length === 0 && !depotDownloading && isSkyrim}
           <button class="btn btn-secondary" onclick={async () => {
             if (!$selectedGame) return;
             depotDownloading = true;
             try {
               const automated = await startDepotDownload($selectedGame.game_id);
               if (!automated) {
-                // Fallback: open Steam console and copy command to clipboard
                 try {
                   const info = await getDepotDownloadCommand($selectedGame.game_id, $selectedGame.bottle_name);
                   await navigator.clipboard.writeText(info.command);
-                  showSuccess("Command copied! Paste it in the Steam console that was opened.");
+                  showSuccess("Command copied! Paste it in the Steam console that opened.");
                 } catch { /* ignore clipboard errors */ }
               }
-              // Start polling for depot files
               depotPollTimer = setInterval(async () => {
                 if (!$selectedGame) return;
                 try {
@@ -3991,12 +4030,11 @@
                   if (result) {
                     if (depotPollTimer) clearInterval(depotPollTimer);
                     depotPollTimer = null;
-                    // Auto-apply downgrade
                     const status = await applyDowngrade($selectedGame.game_id, $selectedGame.bottle_name);
                     depotDownloading = false;
                     showVersionMismatch = false;
                     versionMismatchInfo = null;
-                    showSuccess(`Switched to v${status.current_version}`);
+                    showSuccess(`Switched to v${status.current_version}. Let's go.`);
                     if (pendingManifest) await checkPreInstallCleanup(pendingManifest);
                   }
                 } catch { /* keep polling */ }
@@ -4006,15 +4044,17 @@
               showError(`Download failed: ${e}`);
             }
           }}>
-            Download & Switch to SE
+            Download & Switch (Recommended)
           </button>
         {/if}
-        <button class="btn btn-primary" disabled={depotDownloading} onclick={async () => {
+
+        <button class="btn btn-ghost version-yolo-btn" disabled={depotDownloading} onclick={async () => {
           showVersionMismatch = false;
           versionMismatchInfo = null;
           if (pendingManifest) await checkPreInstallCleanup(pendingManifest);
-        }}>Continue Anyway</button>
-        {/if}
+        }}>
+          Install Anyway (Good Luck)
+        </button>
       </div>
     </div>
   </div>
@@ -5353,6 +5393,27 @@
     color: var(--text-tertiary);
     text-align: center;
     padding: var(--space-1) 0;
+  }
+
+  .version-warning-detail {
+    margin-top: 0.5rem;
+    line-height: 1.5;
+  }
+
+  .depot-download-status {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin: 0.75rem 0;
+    padding: 0.75rem;
+    background: var(--bg-secondary);
+    border-radius: 6px;
+    font-size: 0.9rem;
+  }
+
+  .version-yolo-btn {
+    color: var(--text-tertiary) !important;
+    font-size: 12px !important;
   }
 
   .detail-stats-bar {
