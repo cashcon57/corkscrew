@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onMount } from "svelte";
   import { getGameLogo } from "$lib/api";
 
   interface Props {
@@ -11,15 +10,17 @@
 
   let logoUrl = $state<string | null>(null);
 
-  onMount(async () => {
-    try {
-      const dataUrl = await getGameLogo(gameId);
-      if (dataUrl) {
-        logoUrl = dataUrl;
-      }
-    } catch {
-      // Fetch failed — use SVG fallback
-    }
+  // Use $effect so the icon updates when gameId prop changes
+  $effect(() => {
+    const id = gameId; // capture for async closure
+    logoUrl = null; // reset while loading
+    getGameLogo(id)
+      .then((dataUrl) => {
+        if (dataUrl) logoUrl = dataUrl;
+      })
+      .catch(() => {
+        // Fetch failed — use SVG fallback
+      });
   });
 </script>
 
