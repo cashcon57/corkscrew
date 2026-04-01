@@ -12,6 +12,16 @@
   // Changelog entries — add new versions at the top.
   // Keep it casual, quippy, and helpful.
   const changelogs: Record<string, { headline: string; changes: string[] }> = {
+    "0.9.58": {
+      headline: "Corkscrew now remembers who you are. How thoughtful.",
+      changes: [
+        "The app remembers your last selected game and page across restarts — no more switching from Skyrim every time you open up",
+        "Version mismatch detection works for ALL games now, not just Skyrim SE. Installing a collection built for the wrong version? We'll let you know (with options)",
+        "Collection detail pages now show the required game version, 'View on Nexus Mods' link, last updated date, and full revision history",
+        "\"What's New\" popup (hey, that's this!) shows what changed when you update",
+        "Codebase spring cleaning: split the 13,000-line lib.rs into 15 focused modules. Same features, much easier to maintain",
+      ],
+    },
     "0.9.57": {
       headline: "Hogwarts Legacy got the glow-up it deserved.",
       changes: [
