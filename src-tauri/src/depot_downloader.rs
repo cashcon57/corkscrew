@@ -43,6 +43,8 @@ pub enum DDError {
     AuthRequired,
     #[error("Steam Guard code required")]
     SteamGuardRequired,
+    #[error("Steam Guard mobile confirmation required")]
+    SteamGuardMobile,
     #[error("Authentication failed: {0}")]
     AuthFailed(String),
     #[error("Download failed: {0}")]
@@ -276,25 +278,56 @@ pub async fn ensure_up_to_date() -> Result<String> {
 
 /// Check if DD has a saved session (no auth needed).
 pub fn check_auth_state() -> AuthState {
-    // DD saves sessions to its config dir. Check if login token exists.
-    let dd_config = dirs::config_dir()
-        .map(|d| d.join("DepotDownloader"))
-        .or_else(|| dirs::home_dir().map(|d| d.join(".config/DepotDownloader")))
-        .unwrap_or_else(|| PathBuf::from("/tmp/DepotDownloader"));
+    // Can't reliably detect DD's credential storage location (varies by OS,
+    // .NET version, and DD version — may use keychain, DPAPI, or files).
+    // Default to NeedCredentials; callers should use check_auth_state_live()
+    // for an accurate check when possible.
+    if !is_installed() {
+        return AuthState::NeedCredentials;
+    }
+    AuthState::NeedCredentials
+}
 
-    if dd_config.exists() {
-        // Check for any saved session files
-        if let Ok(entries) = std::fs::read_dir(&dd_config) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.ends_with(".sentryFile") || name.ends_with(".key") {
-                    return AuthState::Ready;
-                }
-            }
-        }
+/// Actually run DD to check if a saved session is valid.
+/// This is slower (spawns a process) but reliable across all platforms.
+/// DD stores credentials in a platform-specific way (keychain, DPAPI, etc.)
+/// that we can't inspect directly, so we run a harmless operation to verify.
+pub async fn check_auth_state_live(username: &str) -> AuthState {
+    if !is_installed() {
+        return AuthState::NeedCredentials;
     }
 
-    AuthState::NeedCredentials
+    let binary = dd_binary_path();
+    let mut cmd = Command::new(&binary);
+    cmd.arg("-app").arg("10")
+        .arg("-depot").arg("11")
+        .arg("-manifest-only")
+        .arg("-username").arg(username)
+        .arg("-remember-password");
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        cmd.output(),
+    ).await;
+
+    match result {
+        Ok(Ok(output)) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if stdout.contains("Logged in")
+                || (stdout.contains("Logging '") && stdout.contains("Done!"))
+                || stdout.contains("licenses for account")
+                || stdout.contains("manifest")
+            {
+                AuthState::Ready
+            } else {
+                AuthState::NeedCredentials
+            }
+        }
+        _ => AuthState::NeedCredentials,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -370,6 +403,7 @@ pub async fn list_manifests(
 }
 
 /// Download a specific depot manifest.
+/// Streams DD's stdout line by line and calls `progress_callback` with parsed progress.
 pub async fn download_depot(
     app_id: u32,
     depot_id: u32,
@@ -388,39 +422,66 @@ pub async fn download_depot(
     cmd.arg("-app").arg(app_id.to_string())
         .arg("-depot").arg(depot_id.to_string())
         .arg("-manifest").arg(manifest_id)
-        .arg("-dir").arg(output_dir.to_string_lossy().to_string());
+        .arg("-dir").arg(output_dir.to_string_lossy().to_string())
+        .arg("-validate"); // Resume interrupted downloads by skipping valid chunks
 
-    // Only pass username — password never passed as CLI arg (visible in ps).
-    // DD reuses saved session from authenticate() with -remember-password.
     if let Some(user) = username {
         cmd.arg("-username").arg(user);
     }
-    let _ = password; // Intentionally unused — kept for API compatibility
+    let _ = password;
 
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    info!(
+        "Downloading depot: app={} depot={} manifest={} → {}",
+        app_id, depot_id, manifest_id, output_dir.display()
+    );
+
     if let Some(cb) = progress_callback {
         cb(DowngradeProgress {
             phase: "downloading".into(),
-            detail: format!("Downloading depot {} manifest {}...", depot_id, manifest_id),
+            detail: "Connecting to Steam...".into(),
             percent: Some(0.0),
         });
     }
 
-    info!(
-        "Downloading depot: app={} depot={} manifest={} → {}",
-        app_id,
-        depot_id,
-        manifest_id,
-        output_dir.display()
-    );
+    let mut child = cmd.spawn()?;
+    let stdout = child.stdout.take();
 
-    let output = cmd.output().await?;
+    // Stream stdout line by line for real-time progress
+    if let Some(stdout) = stdout {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let reader = BufReader::new(stdout);
+        let mut lines = reader.lines();
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(DDError::DownloadFailed(stderr.to_string()));
+        while let Ok(Some(line)) = lines.next_line().await {
+            // Parse progress from DD output lines
+            if let Some(cb) = progress_callback {
+                if let Some(pct) = parse_dd_progress(&line) {
+                    cb(DowngradeProgress {
+                        phase: "downloading".into(),
+                        detail: line.trim().to_string(),
+                        percent: Some(pct),
+                    });
+                } else if line.contains("Downloading") || line.contains("Validating") || line.contains("Total") {
+                    cb(DowngradeProgress {
+                        phase: "downloading".into(),
+                        detail: line.trim().to_string(),
+                        percent: None,
+                    });
+                }
+            }
+        }
+    }
+
+    let status = child.wait().await?;
+
+    if !status.success() {
+        return Err(DDError::DownloadFailed(format!(
+            "DepotDownloader exited with {}",
+            status
+        )));
     }
 
     if let Some(cb) = progress_callback {
@@ -434,10 +495,51 @@ pub async fn download_depot(
     Ok(output_dir.to_path_buf())
 }
 
+/// Parse a percentage from DD output lines.
+/// DD outputs lines like:
+///   "  45.2%  depot 489833 (123 / 456)"
+///   "Downloading depot ... 67.8%"
+///   "Pre-allocating depot ... 12.3%"
+fn parse_dd_progress(line: &str) -> Option<f64> {
+    // Look for a pattern like "XX.X%" or "XX%"
+    for word in line.split_whitespace() {
+        let trimmed = word.trim_end_matches('%');
+        if word.ends_with('%') {
+            if let Ok(pct) = trimmed.parse::<f64>() {
+                if (0.0..=100.0).contains(&pct) {
+                    return Some(pct);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Authenticate with Steam via DepotDownloader.
 /// Pipes credentials via stdin (never as command-line args) so they don't
 /// appear in process listings (`ps`). Uses `-remember-password` per DD FAQ
 /// so subsequent operations reuse the saved session.
+/// Clear saved Steam credentials. Removes the saved username from config
+/// and deletes DD's internal session data by removing and reinstalling DD.
+pub fn logout() -> Result<()> {
+    // Clear saved username from Corkscrew config
+    let _ = config::set_config_value("steam_username", "");
+    info!("Cleared saved Steam username from config");
+
+    // DD stores session data internally (platform-specific: keychain, DPAPI, etc.)
+    // The most reliable way to clear it is to delete the DD binary directory
+    // and let it be re-downloaded fresh on next use.
+    let dd_dir = dd_install_dir();
+    if dd_dir.exists() {
+        std::fs::remove_dir_all(&dd_dir).map_err(|e| {
+            DDError::Other(format!("Failed to remove DD directory: {}", e))
+        })?;
+        info!("Removed DepotDownloader directory to clear session data");
+    }
+
+    Ok(())
+}
+
 pub async fn authenticate(
     username: &str,
     password: &str,
@@ -481,16 +583,19 @@ pub async fn authenticate(
         drop(stdin); // Close stdin so DD can proceed
     }
 
-    // Apply a 30-second timeout so we don't hang forever if DD stalls
+    // Longer timeout when waiting for mobile confirmation (user needs to unlock phone)
+    let timeout_secs = if steam_guard_code.is_none() { 60 } else { 30 };
     let output = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
+        std::time::Duration::from_secs(timeout_secs),
         child.wait_with_output(),
     )
     .await
-    .map_err(|_| DDError::Other("DepotDownloader authentication timed out after 30s".into()))?
+    .map_err(|_| DDError::Other("DepotDownloader authentication timed out".into()))?
     .map_err(DDError::Io)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
+
+    info!("DD auth exit_code={}, stdout={}, stderr={}", output.status, &stdout[..stdout.len().min(500)], &stderr[..stderr.len().min(500)]);
 
     if stderr.contains("InvalidPassword") || stderr.contains("InvalidLoginAuthCode") {
         return Err(DDError::AuthFailed(
@@ -498,22 +603,40 @@ pub async fn authenticate(
         ));
     }
 
+    // Check for success BEFORE checking for Steam Guard text — DD may mention
+    // Steam Guard in output even after a successful mobile confirmation.
+    // DD exits non-zero if the app isn't owned, but auth still succeeded.
+    // Match on actual login indicators from DD's output.
+    if output.status.success()
+        || stdout.contains("Logged in")
+        || stdout.contains("Logging '") && stdout.contains("Done!")
+        || stdout.contains("licenses for account")
+        || stdout.contains("manifest")
+    {
+        info!("Steam authentication successful via DepotDownloader");
+        // Save username so we can do live auth checks later
+        let _ = config::set_config_value("steam_username", username);
+        return Ok(());
+    }
+
+    // Distinguish mobile confirmation (push notification) vs code-based Steam Guard.
+    // DD outputs "confirm" / "mobile" / "phone" for push notifications,
+    // vs "Enter" / "code" for email/authenticator code prompts.
     if stderr.contains("SteamGuard") || stdout.contains("Steam Guard") {
         if steam_guard_code.is_none() {
+            let combined = format!("{} {}", stdout, stderr).to_lowercase();
+            if combined.contains("confirm") || combined.contains("mobile") || combined.contains("phone") {
+                return Err(DDError::SteamGuardMobile);
+            }
             return Err(DDError::SteamGuardRequired);
         }
     }
 
-    if output.status.success() || stdout.contains("Logged in") || stdout.contains("manifest") {
-        info!("Steam authentication successful via DepotDownloader");
-        Ok(())
-    } else {
-        Err(DDError::AuthFailed(format!(
-            "Unexpected output: stdout={}, stderr={}",
-            &stdout[..stdout.len().min(200)],
-            &stderr[..stderr.len().min(200)]
-        )))
-    }
+    Err(DDError::AuthFailed(format!(
+        "Unexpected output: stdout={}, stderr={}",
+        &stdout[..stdout.len().min(200)],
+        &stderr[..stderr.len().min(200)]
+    )))
 }
 
 // ---------------------------------------------------------------------------

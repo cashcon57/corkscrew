@@ -47,7 +47,8 @@
     ]).then(([size, snap]) => {
       deleteDownloadSize = size;
       deleteHasSnapshot = snap;
-    }).catch(() => {
+    }).catch((err) => {
+      console.warn('Failed to fetch collection delete info:', err);
       deleteDownloadSize = null;
     }).finally(() => {
       deleteDownloadSizeLoading = false;

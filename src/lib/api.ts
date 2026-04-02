@@ -136,12 +136,12 @@ export async function getDepotHistory(
 }
 
 // DepotDownloader integration
-export async function ddStatus(): Promise<{
+export async function ddStatus(username?: string): Promise<{
   installed: boolean;
   version: string | null;
   auth_state: string;
 }> {
-  return invoke("dd_status");
+  return invoke("dd_status", { username: username ?? null });
 }
 
 export async function ddInstall(): Promise<string> {
@@ -158,6 +158,24 @@ export async function ddAuthenticate(
   steamGuardCode: string | null
 ): Promise<void> {
   return invoke("dd_authenticate", { username, password, steamGuardCode });
+}
+
+export async function ddLogout(): Promise<void> {
+  return invoke("dd_logout");
+}
+
+export async function ddCheckPartialDownload(
+  appId: number,
+  depotId: number
+): Promise<{ path: string; file_count: number; total_bytes: number } | null> {
+  return invoke("dd_check_partial_download", { appId, depotId });
+}
+
+export async function ddDeletePartialDownload(
+  appId: number,
+  depotId: number
+): Promise<void> {
+  return invoke("dd_delete_partial_download", { appId, depotId });
 }
 
 export async function ddListManifests(

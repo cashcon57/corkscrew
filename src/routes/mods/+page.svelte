@@ -71,6 +71,7 @@
     modStateVersion,
   } from "$lib/stores";
   import type { InstalledMod, DetectedGame, SkseStatus, DowngradeStatus, FileConflict, ModUpdateInfo, FomodInstaller } from "$lib/types";
+  import { createModFilters } from "$lib/stores/modFilters.svelte";
   import GameIcon from "$lib/components/GameIcon.svelte";
   import DiskBudgetPanel from "$lib/components/DiskBudgetPanel.svelte";
   import PreflightPanel from "$lib/components/PreflightPanel.svelte";
@@ -139,15 +140,8 @@
   let deploymentPanelRef = $state<ReturnType<typeof DeploymentPanel> | null>(null);
   let deployStatusUnlisten: (() => void) | null = null;
 
-  // Search/filter state
-  let searchQuery = $state("");
-  let filterStatus = $state<"all" | "enabled" | "disabled" | "conflicts" | "has-updates">("all");
-  let filterSource = $state<"all" | "nexus" | "loverslab" | "moddb" | "curseforge" | "direct" | "manual">("all");
-  let filterCollection = $state<string | null>(null);
-  let sortBy = $state<"priority" | "name" | "date" | "version" | "files">("priority");
-  let sortDir = $state<"asc" | "desc">("asc");
-  let filterCategory = $state<string | null>(null);
-  let showCategoryPopover = $state(false);
+  // Search/filter/sort state (composable)
+  const filters = createModFilters();
 
   // Persistent search: restore from sessionStorage on mount
   function searchStorageKey(game: DetectedGame) {
@@ -378,183 +372,16 @@
     stopGameLockPolling();
   });
 
-  // View mode state
-  let viewMode = $state<"flat" | "collection" | "category">(
-    (() => { try { const v = localStorage.getItem("corkscrew:viewMode"); if (v === "flat" || v === "collection" || v === "category") return v; } catch {} return "flat"; })()
-  );
+  // Sorted mods — delegated to filters composable
+  let sortedMods = $derived(filters.sortMods($installedMods));
 
-  // Persist view mode preference
-  $effect(() => { try { localStorage.setItem("corkscrew:viewMode", viewMode); } catch {} });
-
-  // Semantic version comparison
-  function compareVersions(a: string, b: string): number {
-    const pa = a.split(".").map(Number);
-    const pb = b.split(".").map(Number);
-    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-      const diff = (pa[i] || 0) - (pb[i] || 0);
-      if (diff !== 0) return diff;
-    }
-    return 0;
-  }
-
-  // Toggle sort: click same column toggles direction, different column sets ascending
-  function toggleSort(key: typeof sortBy) {
-    if (sortBy === key) {
-      sortDir = sortDir === "asc" ? "desc" : "asc";
-    } else {
-      sortBy = key;
-      sortDir = "asc";
-    }
-  }
-
-  // Sorted mods with secondary sort keys for stability
-  let sortedMods = $derived((() => {
-    const mods = [...$installedMods];
-    const dir = sortDir === "asc" ? 1 : -1;
-    mods.sort((a, b) => {
-      let primary: number;
-      switch (sortBy) {
-        case "name":
-          primary = a.name.localeCompare(b.name);
-          return dir * primary || (a.install_priority - b.install_priority);
-        case "date":
-          primary = new Date(a.installed_at).getTime() - new Date(b.installed_at).getTime();
-          return dir * primary || a.name.localeCompare(b.name);
-        case "version":
-          primary = compareVersions(a.version || "0", b.version || "0");
-          return dir * primary || a.name.localeCompare(b.name);
-        case "files":
-          primary = a.file_count - b.file_count;
-          return dir * primary || a.name.localeCompare(b.name);
-        default:
-          primary = a.install_priority - b.install_priority;
-          return dir * primary || a.name.localeCompare(b.name);
-      }
-    });
-    return mods;
-  })());
-
-  // Faceted search parser
-  const FACET_PREFIXES = ["tag", "source", "enabled", "conflict", "update", "category", "collection", "priority", "files"] as const;
-  type FacetKey = typeof FACET_PREFIXES[number];
-
-  interface ParsedSearch {
-    facets: Map<FacetKey, string>;
-    freeText: string;
-  }
-
-  function parseFacets(query: string): ParsedSearch {
-    const facets = new Map<FacetKey, string>();
-    const freeWords: string[] = [];
-    const tokens = query.match(/(?:[^\s"]+|"[^"]*")+/g) ?? [];
-
-    for (const token of tokens) {
-      const colonIdx = token.indexOf(":");
-      if (colonIdx > 0) {
-        const prefix = token.slice(0, colonIdx).toLowerCase();
-        if (FACET_PREFIXES.includes(prefix as FacetKey)) {
-          facets.set(prefix as FacetKey, token.slice(colonIdx + 1).replace(/^"|"$/g, ""));
-          continue;
-        }
-      }
-      freeWords.push(token);
-    }
-
-    return { facets, freeText: freeWords.join(" ") };
-  }
-
-  // Derived parsed search for use in UI (facet pills)
-  let parsedSearch = $derived(parseFacets(searchQuery));
-
-  // Filtered mods based on faceted search and dropdown filters — single-pass filter
-  let filteredMods = $derived((() => {
-    const { facets, freeText } = parsedSearch;
-
-    // Pre-compute facet values outside the loop
-    const tagFacet = facets.get("tag")?.toLowerCase() ?? null;
-    const sourceFacet = facets.get("source")?.toLowerCase() ?? null;
-    const enabledFacet = facets.has("enabled") ? facets.get("enabled")!.toLowerCase() === "true" : null;
-    const conflictFacet = facets.get("conflict")?.toLowerCase() === "true" || false;
-    const updateFacet = facets.get("update")?.toLowerCase() === "true" || false;
-    const categoryFacet = facets.get("category")?.toLowerCase() ?? null;
-    const collectionFacet = facets.get("collection")?.toLowerCase() ?? null;
-
-    const priorityFacet = facets.get("priority");
-    let priorityOp: ">" | "<" | null = null;
-    let priorityN = 0;
-    if (priorityFacet) {
-      const match = priorityFacet.match(/^([><])(\d+)$/);
-      if (match) { priorityOp = match[1] as ">" | "<"; priorityN = parseInt(match[2]); }
-    }
-
-    const filesFacet = facets.get("files");
-    let filesOp: ">" | "<" | null = null;
-    let filesN = 0;
-    if (filesFacet) {
-      const match = filesFacet.match(/^([><])(\d+)$/);
-      if (match) { filesOp = match[1] as ">" | "<"; filesN = parseInt(match[2]); }
-    }
-
-    const q = freeText.trim() ? freeText.toLowerCase() : null;
-
-    // Local copies of dropdown filter state for the closure
-    const fStatus = filterStatus;
-    const fSource = filterSource;
-    const fCollection = filterCollection;
-    const fCategory = filterCategory;
-
-    return sortedMods.filter(m => {
-      // Facet: tag
-      if (tagFacet !== null && !m.user_tags.some(tag => tag.toLowerCase().includes(tagFacet))) return false;
-      // Facet: source
-      if (sourceFacet !== null && (m.source_type || "manual").toLowerCase() !== sourceFacet) return false;
-      // Facet: enabled
-      if (enabledFacet !== null && m.enabled !== enabledFacet) return false;
-      // Facet: conflict
-      if (conflictFacet && !conflictModIds.has(m.id)) return false;
-      // Facet: update
-      if (updateFacet && !updateMap.has(m.id)) return false;
-      // Facet: category
-      if (categoryFacet !== null && !m.auto_category?.toLowerCase().includes(categoryFacet)) return false;
-      // Facet: collection
-      if (collectionFacet !== null && !m.collection_name?.toLowerCase().includes(collectionFacet)) return false;
-      // Facet: priority
-      if (priorityOp === ">" && m.install_priority <= priorityN) return false;
-      if (priorityOp === "<" && m.install_priority >= priorityN) return false;
-      // Facet: files
-      if (filesOp === ">" && m.file_count <= filesN) return false;
-      if (filesOp === "<" && m.file_count >= filesN) return false;
-      // Free text search across name, tags, notes, collection, category
-      if (q !== null &&
-        !m.name.toLowerCase().includes(q) &&
-        !m.user_tags.some(t => t.toLowerCase().includes(q)) &&
-        !(m.user_notes && m.user_notes.toLowerCase().includes(q)) &&
-        !(m.collection_name && m.collection_name.toLowerCase().includes(q)) &&
-        !(m.auto_category && m.auto_category.toLowerCase().includes(q))
-      ) return false;
-      // Dropdown: status filter
-      if (fStatus === "enabled" && !m.enabled) return false;
-      if (fStatus === "disabled" && m.enabled) return false;
-      if (fStatus === "conflicts" && !conflictModIds.has(m.id)) return false;
-      if (fStatus === "has-updates" && !updateMap.has(m.id)) return false;
-      // Dropdown: source filter
-      if (fSource !== "all" && (m.source_type || "manual") !== fSource) return false;
-      // Dropdown: collection filter
-      if (fCollection !== null) {
-        if (fCollection === "__standalone__") { if (m.collection_name) return false; }
-        else { if (m.collection_name !== fCollection) return false; }
-      }
-      // Dropdown: category filter
-      if (fCategory !== null && (m.auto_category || "Miscellaneous") !== fCategory) return false;
-
-      return true;
-    });
-  })());
+  // Filtered mods — delegated to filters composable
+  let filteredMods = $derived(filters.filterMods(sortedMods, conflictModIds, updateMap));
 
   // Split filtered mods into enabled and disabled — single partition pass
   let disabledSectionCollapsed = $state(true);
   let partitionedFilteredMods = $derived((() => {
-    if (filterStatus !== "all") return { enabled: filteredMods, disabled: [] as typeof filteredMods };
+    if (filters.filterStatus !== "all") return { enabled: filteredMods, disabled: [] as typeof filteredMods };
     const enabled: typeof filteredMods = [];
     const disabled: typeof filteredMods = [];
     for (const m of filteredMods) {
@@ -603,7 +430,7 @@
   })());
 
   // Virtual scrolling derived — uses enabledFilteredMods in flat view to exclude disabled mods
-  let flatViewMods = $derived(viewMode === "flat" ? enabledFilteredMods : filteredMods);
+  let flatViewMods = $derived(filters.viewMode === "flat" ? enabledFilteredMods : filteredMods);
 
   type FlatViewItem =
     | { type: "mod"; mod: InstalledMod }
@@ -612,7 +439,7 @@
 
   /** Unified flat view list: enabled mods + separator + disabled mods (if expanded). */
   let flatViewItems = $derived((() => {
-    if (viewMode !== "flat") return [] as FlatViewItem[];
+    if (filters.viewMode !== "flat") return [] as FlatViewItem[];
     const items: FlatViewItem[] = enabledFilteredMods.map(mod => ({ type: "mod" as const, mod }));
     if (disabledFilteredMods.length > 0) {
       items.push({ type: "disabled-separator" as const });
@@ -626,7 +453,7 @@
   })());
 
   let visibleRange = $derived((() => {
-    const totalItems = viewMode === "flat" ? flatViewItems.length : flatViewMods.length;
+    const totalItems = filters.viewMode === "flat" ? flatViewItems.length : flatViewMods.length;
     if (totalItems === 0) return { start: 0, end: 0, paddingTop: 0, paddingBottom: 0 };
     const startRaw = Math.floor(scrollTop / ROW_HEIGHT) - SCROLL_BUFFER;
     const visibleCount = Math.ceil(containerHeight / ROW_HEIGHT) + SCROLL_BUFFER * 2;
@@ -680,7 +507,7 @@
     if (e?.shiftKey && selectionAnchorId !== null) {
       // Shift+click: select the entire range from anchor to this item.
       // Does NOT toggle — always adds the full range (standard file manager behavior).
-      const allMods = viewMode === "flat"
+      const allMods = filters.viewMode === "flat"
         ? [...flatViewMods, ...disabledFilteredMods]
         : filteredMods;
       const anchorIdx = allMods.findIndex(m => m.id === selectionAnchorId);
@@ -760,15 +587,12 @@
       const ids = Array.from(selectedModIds);
       const result = await batchToggleMods(ids, activeGame.game_id, activeGame.bottle_name, true);
       selectedModIds = new Set();
-      await loadMods(activeGame);
-      await refreshHealth(activeGame);
       const count = parseInt(result, 10);
       if (count > 0) showSuccess(`Enabled ${count} mod${count === 1 ? "" : "s"}`);
     } catch (e) {
-      await loadMods(activeGame);
-      await refreshHealth(activeGame);
       showError(`${e}`);
     } finally {
+      await Promise.all([loadMods(activeGame), refreshHealth(activeGame)]);
       stopBulkListener();
       bulkOperating = null;
     }
@@ -786,15 +610,12 @@
       const ids = Array.from(selectedModIds);
       const result = await batchToggleMods(ids, activeGame.game_id, activeGame.bottle_name, false);
       selectedModIds = new Set();
-      await loadMods(activeGame);
-      await refreshHealth(activeGame);
       const count = parseInt(result, 10);
       if (count > 0) showSuccess(`Disabled ${count} mod${count === 1 ? "" : "s"}`);
     } catch (e) {
-      await loadMods(activeGame);
-      await refreshHealth(activeGame);
       showError(`${e}`);
     } finally {
+      await Promise.all([loadMods(activeGame), refreshHealth(activeGame)]);
       stopBulkListener();
       bulkOperating = null;
     }
@@ -807,16 +628,14 @@
     }
     bulkOperating = "uninstalling";
     try {
-      for (const id of selectedModIds) {
-        if (activeGame) {
-          await uninstallMod(id, activeGame.game_id, activeGame.bottle_name);
+      await withReload(async () => {
+        for (const id of selectedModIds) {
+          if (activeGame) {
+            await uninstallMod(id, activeGame.game_id, activeGame.bottle_name);
+          }
         }
-      }
-      selectedModIds = new Set();
-      if (activeGame) {
-        await loadMods(activeGame);
-        await refreshHealth(activeGame);
-      }
+        selectedModIds = new Set();
+      });
     } finally {
       bulkOperating = null;
     }
@@ -845,7 +664,7 @@
   // Collection-grouped mods for collection view mode
   let collapsedGroups = $state<Set<string>>(new Set());
   let groupedMods = $derived((() => {
-    if (viewMode !== "collection") return null;
+    if (filters.viewMode !== "collection") return null;
     const groups = new Map<string, typeof filteredMods>();
     for (const mod of filteredMods) {
       const key = mod.collection_name || "Standalone";
@@ -996,7 +815,7 @@
   $effect(() => {
     if (activeGame) {
       const saved = sessionStorage.getItem(searchStorageKey(activeGame));
-      searchQuery = saved ?? "";
+      filters.searchQuery = saved ?? "";
       searchRestored = true;
       // Restore dismissed banners
       const bannerKey = `corkscrew-banners-${activeGame.game_id}-${activeGame.bottle_name}`;
@@ -1033,7 +852,7 @@
   // Persist search to sessionStorage
   $effect(() => {
     if (searchRestored && activeGame) {
-      sessionStorage.setItem(searchStorageKey(activeGame), searchQuery);
+      sessionStorage.setItem(searchStorageKey(activeGame), filters.searchQuery);
     }
   });
 
@@ -1240,11 +1059,11 @@
     if (!game) return;
 
     try {
-      const removed = await uninstallMod(modId, game.game_id, game.bottle_name);
-      showSuccess(`Uninstalled — ${(removed as string[]).length} files removed`);
-      confirmUninstall = null;
-      await loadMods(game);
-      await refreshHealth(game);
+      await withReload(async () => {
+        const removed = await uninstallMod(modId, game.game_id, game.bottle_name);
+        showSuccess(`Uninstalled — ${(removed as string[]).length} files removed`);
+        confirmUninstall = null;
+      });
     } catch (e: unknown) {
       showError(`Uninstall failed: ${e}`);
     }
@@ -1792,9 +1611,7 @@
     reordering = true;
 
     try {
-      await reorderMods(game.game_id, game.bottle_name, orderedIds);
-      await loadMods(game);
-      await refreshHealth(game);
+      await withReload(() => reorderMods(game.game_id, game.bottle_name, orderedIds));
     } catch (e: unknown) {
       showError(`Failed to reorder mods: ${e}`);
     } finally {
@@ -1871,15 +1688,15 @@
     showFomodWizard = false;
     deploying = true;
     try {
-      // Get the files for the new selections
-      const files = await getFomodFiles(fomodInstaller, selections);
-      // Save the recipe
-      await saveFomodRecipe(fomodTargetMod.id, fomodTargetMod.name, "", selections);
-      // Redeploy to apply changes
-      await redeployAllMods(game.game_id, game.bottle_name);
-      await loadMods(game);
-      await refreshHealth(game);
-      showSuccess(`Reconfigured FOMOD for "${fomodTargetMod.name}"`);
+      await withReload(async () => {
+        // Get the files for the new selections
+        await getFomodFiles(fomodInstaller!, selections);
+        // Save the recipe
+        await saveFomodRecipe(fomodTargetMod!.id, fomodTargetMod!.name, "", selections);
+        // Redeploy to apply changes
+        await redeployAllMods(game.game_id, game.bottle_name);
+      });
+      showSuccess(`Reconfigured FOMOD for "${fomodTargetMod!.name}"`);
     } catch (e: unknown) {
       showError(`Failed to apply FOMOD configuration: ${e}`);
     } finally {
@@ -1926,6 +1743,13 @@
         deployHealth = null;
       }
     }
+  }
+
+  /** Run an async action then reload mods + health for the active game. */
+  async function withReload(fn: () => Promise<unknown>) {
+    await fn();
+    const game = pickedGame ?? $selectedGame;
+    if (game) await Promise.all([loadMods(game), refreshHealth(game)]);
   }
 
   // --- Notes ---
@@ -2211,7 +2035,7 @@
         </div>
         {#if collectionNames.length > 0}
           <div class="modlist-selector">
-            <select class="modlist-dropdown" bind:value={filterCollection}>
+            <select class="modlist-dropdown" bind:value={filters.filterCollection}>
               <option value={null}>All Mods ({modCount})</option>
               <option value="__standalone__">Standalone ({collectionCounts.standalone})</option>
               {#each collectionNames as name}
@@ -2636,7 +2460,7 @@
             bind:visible={showConflictPanel}
             bind:showMap={showConflictMap}
             bind:deploying
-            onResolved={async () => { if (activeGame) { await loadMods(activeGame); await refreshHealth(activeGame); } }}
+            onResolved={() => withReload(async () => {})}
           />
         {/if}
 
@@ -2721,12 +2545,12 @@
             <circle cx="11" cy="11" r="8" />
             <line x1="21" y1="21" x2="16.65" y2="16.65" />
           </svg>
-          {#each [...parsedSearch.facets] as [key, value] (key)}
+          {#each [...filters.parsedSearch.facets] as [key, value] (key)}
             <button
               class="facet-pill"
               onclick={() => {
                 const regex = new RegExp(`${key}:(?:"[^"]*"|\\S+)\\s*`, "i");
-                searchQuery = searchQuery.replace(regex, "").trim();
+                filters.searchQuery = filters.searchQuery.replace(regex, "").trim();
               }}
               title="Click to remove"
             >
@@ -2738,12 +2562,12 @@
           {/each}
           <input
             type="text"
-            placeholder={parsedSearch.facets.size > 0 ? "Add more filters..." : "Search mods... (try tag: source: enabled:)"}
-            bind:value={searchQuery}
+            placeholder={filters.parsedSearch.facets.size > 0 ? "Add more filters..." : "Search mods... (try tag: source: enabled:)"}
+            bind:value={filters.searchQuery}
             class="search-input"
           />
-          {#if searchQuery}
-            <button class="search-clear" onclick={() => searchQuery = ""}>
+          {#if filters.searchQuery}
+            <button class="search-clear" onclick={() => filters.searchQuery = ""}>
               <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
                 <line x1="3" y1="3" x2="9" y2="9" />
                 <line x1="9" y1="3" x2="3" y2="9" />
@@ -2751,14 +2575,14 @@
             </button>
           {/if}
         </div>
-        <select class="filter-select" bind:value={filterStatus}>
+        <select class="filter-select" bind:value={filters.filterStatus}>
           <option value="all">All Status</option>
           <option value="enabled">Enabled</option>
           <option value="disabled">Disabled</option>
           <option value="conflicts">Has Conflicts</option>
           <option value="has-updates">Has Updates</option>
         </select>
-        <select class="filter-select" bind:value={filterSource}>
+        <select class="filter-select" bind:value={filters.filterSource}>
           <option value="all">All Sources</option>
           <option value="nexus">Nexus</option>
           <option value="loverslab">LoversLab</option>
@@ -2772,8 +2596,8 @@
           <div class="category-dropdown-wrapper">
             <button
               class="filter-select category-dropdown-btn"
-              class:has-active={filterCategory !== null}
-              onclick={() => showCategoryPopover = !showCategoryPopover}
+              class:has-active={filters.filterCategory !== null}
+              onclick={() => filters.showCategoryPopover = !filters.showCategoryPopover}
             >
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <rect x="3" y="3" width="7" height="7" /><rect x="14" y="3" width="7" height="7" />
@@ -2784,35 +2608,35 @@
                 <polyline points="6 9 12 15 18 9" />
               </svg>
             </button>
-            {#if filterCategory}
-              {@const catColor = categoryColors[filterCategory] ?? '#6b7280'}
+            {#if filters.filterCategory}
+              {@const catColor = categoryColors[filters.filterCategory] ?? '#6b7280'}
               <button
                 class="active-category-chip"
                 style="--chip-color: {catColor};"
-                onclick={() => filterCategory = null}
+                onclick={() => filters.filterCategory = null}
                 title="Clear category filter"
               >
-                {#if categoryIcons[filterCategory]}
+                {#if categoryIcons[filters.filterCategory]}
                   <!-- eslint-disable-next-line svelte/no-at-html-tags -->
-                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">{@html categoryIcons[filterCategory]}</svg>
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">{@html categoryIcons[filters.filterCategory]}</svg>
                 {/if}
-                {filterCategory}
+                {filters.filterCategory}
                 <svg width="9" height="9" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
                   <line x1="3" y1="3" x2="9" y2="9" /><line x1="9" y1="3" x2="3" y2="9" />
                 </svg>
               </button>
             {/if}
-            {#if showCategoryPopover}
+            {#if filters.showCategoryPopover}
               <!-- svelte-ignore a11y_no_static_element_interactions -->
-              <div class="category-popover-backdrop" onclick={() => showCategoryPopover = false} onkeydown={(e) => { if (e.key === 'Escape') showCategoryPopover = false; }}></div>
+              <div class="category-popover-backdrop" onclick={() => filters.showCategoryPopover = false} onkeydown={(e) => { if (e.key === 'Escape') filters.showCategoryPopover = false; }}></div>
               <div class="category-popover">
                 {#each uniqueCategories as [cat, count]}
                   {@const catColor = categoryColors[cat] ?? '#6b7280'}
                   <button
                     class="category-filter-chip"
-                    class:active={filterCategory === cat}
+                    class:active={filters.filterCategory === cat}
                     style="--chip-color: {catColor};"
-                    onclick={() => { filterCategory = filterCategory === cat ? null : cat; showCategoryPopover = false; }}
+                    onclick={() => { filters.filterCategory = filters.filterCategory === cat ? null : cat; filters.showCategoryPopover = false; }}
                     title="{cat} ({count} mods)"
                   >
                     {#if categoryIcons[cat]}
@@ -2845,8 +2669,8 @@
         <div class="view-mode-toggle">
           <button
             class="view-mode-btn"
-            class:active={viewMode === "flat"}
-            onclick={() => viewMode = "flat"}
+            class:active={filters.viewMode === "flat"}
+            onclick={() => filters.viewMode = "flat"}
             title="List View"
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -2856,8 +2680,8 @@
           </button>
           <button
             class="view-mode-btn"
-            class:active={viewMode === "collection"}
-            onclick={() => viewMode = "collection"}
+            class:active={filters.viewMode === "collection"}
+            onclick={() => filters.viewMode = "collection"}
             title="Collection View"
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -2866,8 +2690,8 @@
           </button>
           <button
             class="view-mode-btn"
-            class:active={viewMode === "category"}
-            onclick={() => viewMode = "category"}
+            class:active={filters.viewMode === "category"}
+            onclick={() => filters.viewMode = "category"}
             title="Category View"
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -2876,7 +2700,7 @@
             </svg>
           </button>
         </div>
-        {#if searchQuery || filterStatus !== "all" || filterSource !== "all" || filterCollection !== null || filterCategory !== null}
+        {#if filters.hasActiveFilters()}
           <span class="filter-count">{filteredMods.length} of {$installedMods.length}</span>
         {/if}
       </div>
@@ -2946,10 +2770,10 @@
                 <circle cx="16" cy="12" r="3" />
               </svg>
             </span>
-            <button type="button" class="col-name sortable-header" onclick={() => toggleSort("name")}>
+            <button type="button" class="col-name sortable-header" onclick={() => filters.toggleSort("name")}>
               Mod Name
-              {#if sortBy === "name"}
-                <span class="sort-arrow">{sortDir === "asc" ? "\u25B2" : "\u25BC"}</span>
+              {#if filters.sortBy === "name"}
+                <span class="sort-arrow">{filters.sortDir === "asc" ? "\u25B2" : "\u25BC"}</span>
               {/if}
               <span class="col-resize" onpointerdown={(e) => onResizeStart(e, 'name')} role="separator" aria-orientation="vertical"></span>
             </button>
@@ -2965,24 +2789,24 @@
               Installed By
               <span class="col-resize" onpointerdown={(e) => onResizeStart(e, 'source')} role="separator" aria-orientation="vertical"></span>
             </span>
-            <button type="button" class="col-version sortable-header" onclick={() => toggleSort("version")}>
+            <button type="button" class="col-version sortable-header" onclick={() => filters.toggleSort("version")}>
               Version
-              {#if sortBy === "version"}
-                <span class="sort-arrow">{sortDir === "asc" ? "\u25B2" : "\u25BC"}</span>
+              {#if filters.sortBy === "version"}
+                <span class="sort-arrow">{filters.sortDir === "asc" ? "\u25B2" : "\u25BC"}</span>
               {/if}
               <span class="col-resize" onpointerdown={(e) => onResizeStart(e, 'version')} role="separator" aria-orientation="vertical"></span>
             </button>
-            <button type="button" class="col-files sortable-header" onclick={() => toggleSort("files")}>
+            <button type="button" class="col-files sortable-header" onclick={() => filters.toggleSort("files")}>
               Files
-              {#if sortBy === "files"}
-                <span class="sort-arrow">{sortDir === "asc" ? "\u25B2" : "\u25BC"}</span>
+              {#if filters.sortBy === "files"}
+                <span class="sort-arrow">{filters.sortDir === "asc" ? "\u25B2" : "\u25BC"}</span>
               {/if}
               <span class="col-resize" onpointerdown={(e) => onResizeStart(e, 'files')} role="separator" aria-orientation="vertical"></span>
             </button>
-            <button type="button" class="col-date sortable-header" onclick={() => toggleSort("date")}>
+            <button type="button" class="col-date sortable-header" onclick={() => filters.toggleSort("date")}>
               Installed
-              {#if sortBy === "date"}
-                <span class="sort-arrow">{sortDir === "asc" ? "\u25B2" : "\u25BC"}</span>
+              {#if filters.sortBy === "date"}
+                <span class="sort-arrow">{filters.sortDir === "asc" ? "\u25B2" : "\u25BC"}</span>
               {/if}
               <span class="col-resize" onpointerdown={(e) => onResizeStart(e, 'date')} role="separator" aria-orientation="vertical"></span>
             </button>
@@ -2994,11 +2818,11 @@
             {#if filteredMods.length === 0 && disabledFilteredMods.length === 0 && $installedMods.length > 0}
               <div class="empty-filter-state">
                 <p>No mods match your filters.</p>
-                <button class="btn btn-ghost btn-sm" onclick={() => { searchQuery = ""; filterStatus = "all"; filterSource = "all"; filterCollection = null; filterCategory = null; }}>
+                <button class="btn btn-ghost btn-sm" onclick={() => filters.clearAll()}>
                   Clear Filters
                 </button>
               </div>
-            {:else if viewMode === "category"}
+            {:else if filters.viewMode === "category"}
               <ModCategoryView
                 mods={filteredMods}
                 {categoryColors}
@@ -3009,7 +2833,7 @@
                 onselect={(mod) => { selectedModId = selectedModId === mod.id ? undefined : mod.id; detailMod = detailMod?.id === mod.id ? null : mod; }}
                 ontoggle={handleToggle}
               />
-            {:else if viewMode === "collection" && groupedMods}
+            {:else if filters.viewMode === "collection" && groupedMods}
               <div style="height: {collectionVisibleRange.paddingTop}px;" aria-hidden="true"></div>
               {#each collectionFlatItems.slice(collectionVisibleRange.start, collectionVisibleRange.end) as item, sliceIdx (collectionVisibleRange.start + sliceIdx)}
                 {#if item.type === "group-header"}
@@ -3259,7 +3083,7 @@
                 <!-- Name -->
                 <span class="col-name">
                   <!-- eslint-disable-next-line svelte/no-at-html-tags -->
-                  <span class="mod-name">{@html highlightMatch(mod.name, searchQuery)}</span>
+                  <span class="mod-name">{@html highlightMatch(mod.name, filters.searchQuery)}</span>
                   {#if conflictModIds.has(mod.id)}
                     <span class="conflict-icon" title={getConflictTooltip(mod.id)}>
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -3644,10 +3468,8 @@
   onConfirm={async () => {
     if (duplicateDialog && activeGame) {
       try {
-        await uninstallMod(duplicateDialog.oldMod.id, activeGame.game_id, activeGame.bottle_name);
+        await withReload(() => uninstallMod(duplicateDialog!.oldMod.id, activeGame!.game_id, activeGame!.bottle_name));
         showSuccess(`Removed old version of "${duplicateDialog.oldMod.name}"`);
-        await loadMods(activeGame);
-        await refreshHealth(activeGame);
       } catch (e) {
         showError(`Failed to uninstall old version: ${e}`);
       }
@@ -3662,7 +3484,7 @@
 {#if showImportWizard}
   <ModlistImportWizard
     onclose={() => showImportWizard = false}
-    oncomplete={() => { showImportWizard = false; const g = pickedGame ?? $selectedGame; if (g) { loadMods(g); refreshHealth(g); } }}
+    oncomplete={() => { showImportWizard = false; withReload(async () => {}); }}
   />
 {/if}
 
@@ -3677,10 +3499,10 @@
       if (g) {
         deploying = true;
         try {
-          await toggleMod(culprit.id, g.game_id, g.bottle_name, false);
-          await redeployAllMods(g.game_id, g.bottle_name);
-          await loadMods(g);
-          await refreshHealth(g);
+          await withReload(async () => {
+            await toggleMod(culprit.id, g.game_id, g.bottle_name, false);
+            await redeployAllMods(g.game_id, g.bottle_name);
+          });
           showSuccess(`Disabled "${culprit.name}" — the likely culprit.`);
         } finally {
           deploying = false;

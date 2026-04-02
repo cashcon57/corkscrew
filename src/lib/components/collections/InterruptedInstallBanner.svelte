@@ -34,9 +34,7 @@
           interruptedInstall = incomplete[0];
         }
       })
-      .catch(() => {
-        // Silently ignore -- not critical
-      });
+      .catch((err) => console.warn('Failed to check for interrupted installs:', err));
   });
 
   async function handleResumeInstall() {

@@ -17,6 +17,7 @@
   import type { ShaderScanResult } from "$lib/types";
   import ShaderConversionWizard from "$lib/components/ShaderConversionWizard.svelte";
   import SteamAuthDialog from "$lib/components/SteamAuthDialog.svelte";
+  import { ddLogout } from "$lib/api";
 
   let manualCheckDone = $state(false);
   let settingsNotesExpanded = $state(false);
@@ -285,6 +286,8 @@
   let ddAuthed = $state(false);
   let showSteamAuth = $state(false);
   let ddDownloading = $state(false);
+  let ddLoggingOut = $state(false);
+  let ddSavedUsername = $state<string | null>(null);
   let ddDepotVersions = $state<Array<{ game_version: string; app_id: number; depot_id: number; manifest_id: string; build_id: string }>>([]);
   let ddSelectedVersion = $state<{ game_version: string; app_id: number; depot_id: number; manifest_id: string } | null>(null);
   let depotAutoFailed = $state(false);
@@ -421,6 +424,8 @@
       disableGameFixes = (cfg as Record<string, unknown>).disable_game_fixes === "true";
       useWineEngineFixes = (cfg as Record<string, unknown>).use_wine_engine_fixes === true;
       telemetryEnabled = (cfg as Record<string, unknown>).telemetry_consent === "granted";
+      const savedSteamUser = (cfg as Record<string, unknown>).steam_username;
+      ddSavedUsername = (savedSteamUser && savedSteamUser !== "") ? String(savedSteamUser) : null;
       // Read download threads from the same config
       const saved = (cfg as Record<string, unknown>).download_threads;
       if (saved && saved !== "auto") {
@@ -2996,6 +3001,49 @@
       </div>
     </div>
   {/if}
+
+  <!-- Downgrader -->
+  <div class="section">
+    <h2 class="section-title">Downgrader</h2>
+    <div class="section-card">
+      <div class="card-row">
+        <span class="row-label">DepotDownloader</span>
+        <span class="row-value">{ddReady ? "Installed" : "Not installed"}</span>
+      </div>
+      <div class="card-row">
+        <span class="row-label">Steam Account</span>
+        <div class="row-value" style="display: flex; align-items: center; gap: 8px;">
+          {#if ddSavedUsername}
+            <span style="color: var(--green);">{ddSavedUsername}</span>
+            <button
+              class="btn-ghost btn-sm"
+              onclick={async () => {
+                ddLoggingOut = true;
+                try {
+                  await ddLogout();
+                  ddSavedUsername = null;
+                  ddAuthed = false;
+                  showSuccess("Steam credentials cleared. DepotDownloader will be reinstalled on next use.");
+                } catch (e) {
+                  showError(`Failed to clear credentials: ${e}`);
+                } finally {
+                  ddLoggingOut = false;
+                }
+              }}
+              disabled={ddLoggingOut}
+              type="button"
+            >{ddLoggingOut ? "Clearing..." : "Sign Out"}</button>
+          {:else}
+            <span style="color: var(--text-tertiary);">Not signed in</span>
+          {/if}
+        </div>
+      </div>
+      <p style="font-size: 11px; color: var(--text-tertiary); margin: 8px 0 0; line-height: 1.5;">
+        DepotDownloader connects to Steam to download older game versions for modlist compatibility.
+        Signing out clears saved credentials and removes the local installation.
+      </p>
+    </div>
+  </div>
 
   </div>
   {/if}

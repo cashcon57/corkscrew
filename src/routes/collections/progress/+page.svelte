@@ -52,7 +52,7 @@
       if (game && game.game_id === "skyrimse") {
         scanSksePlugins(game.game_id, game.bottle_name)
           .then(r => { skseScanResult = r; })
-          .catch(() => { /* best-effort */ });
+          .catch((err) => console.warn('Failed to scan SKSE plugins:', err));
       }
     }
   });

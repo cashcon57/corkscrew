@@ -2,7 +2,7 @@
 
 use crate::depot_downloader;
 use serde::Serialize;
-use tauri::State;
+use tauri::{State, Emitter};
 use crate::AppState;
 
 #[derive(Serialize)]
@@ -13,12 +13,23 @@ pub struct DDStatus {
 }
 
 /// Check if DepotDownloader is installed and auth status.
+/// If a username is provided (or was previously saved), does a live auth check.
 #[tauri::command]
-pub async fn dd_status() -> Result<DDStatus, String> {
+pub async fn dd_status(username: Option<String>) -> Result<DDStatus, String> {
+    let user = username.or_else(|| {
+        crate::config::get_config_value("steam_username").ok().flatten()
+    });
+
+    let auth_state = if let Some(ref u) = user {
+        depot_downloader::check_auth_state_live(u).await
+    } else {
+        depot_downloader::check_auth_state()
+    };
+
     Ok(DDStatus {
         installed: depot_downloader::is_installed(),
         version: depot_downloader::installed_version(),
-        auth_state: match depot_downloader::check_auth_state() {
+        auth_state: match auth_state {
             depot_downloader::AuthState::Ready => "ready".into(),
             depot_downloader::AuthState::NeedCredentials => "need_credentials".into(),
             depot_downloader::AuthState::NeedSteamGuard => "need_steam_guard".into(),
@@ -55,9 +66,86 @@ pub async fn dd_authenticate(
     .await
     .map_err(|e| match e {
         depot_downloader::DDError::SteamGuardRequired => "STEAM_GUARD_REQUIRED".into(),
+        depot_downloader::DDError::SteamGuardMobile => "STEAM_GUARD_MOBILE".into(),
         depot_downloader::DDError::AuthFailed(msg) => format!("AUTH_FAILED: {}", msg),
         other => other.to_string(),
     })
+}
+
+/// Clear saved Steam credentials for DepotDownloader.
+#[tauri::command]
+pub async fn dd_logout() -> Result<(), String> {
+    depot_downloader::logout().map_err(|e| e.to_string())
+}
+
+/// Check for a partial (interrupted) depot download.
+/// Returns the directory path and file count if a partial download exists.
+#[tauri::command]
+pub async fn dd_check_partial_download(
+    app_id: u32,
+    depot_id: u32,
+) -> Result<Option<PartialDownloadInfo>, String> {
+    let download_dir = crate::config::cache_dir()
+        .join("depot_downloads")
+        .join(format!("{}_{}", app_id, depot_id));
+
+    if !download_dir.exists() {
+        return Ok(None);
+    }
+
+    // Count files and total size
+    let mut file_count: u64 = 0;
+    let mut total_bytes: u64 = 0;
+    fn walk(dir: &std::path::Path, count: &mut u64, bytes: &mut u64) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                if let Ok(meta) = entry.metadata() {
+                    if meta.is_file() {
+                        *count += 1;
+                        *bytes += meta.len();
+                    } else if meta.is_dir() {
+                        walk(&entry.path(), count, bytes);
+                    }
+                }
+            }
+        }
+    }
+    walk(&download_dir, &mut file_count, &mut total_bytes);
+
+    if file_count == 0 {
+        // Empty dir — clean it up
+        let _ = std::fs::remove_dir_all(&download_dir);
+        return Ok(None);
+    }
+
+    Ok(Some(PartialDownloadInfo {
+        path: download_dir.to_string_lossy().to_string(),
+        file_count,
+        total_bytes,
+    }))
+}
+
+/// Delete a partial depot download.
+#[tauri::command]
+pub async fn dd_delete_partial_download(
+    app_id: u32,
+    depot_id: u32,
+) -> Result<(), String> {
+    let download_dir = crate::config::cache_dir()
+        .join("depot_downloads")
+        .join(format!("{}_{}", app_id, depot_id));
+
+    if download_dir.exists() {
+        std::fs::remove_dir_all(&download_dir).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[derive(Serialize)]
+pub struct PartialDownloadInfo {
+    pub path: String,
+    pub file_count: u64,
+    pub total_bytes: u64,
 }
 
 /// List available manifests for a depot.
@@ -77,7 +165,7 @@ pub async fn dd_list_manifests(
         .map_err(|e| e.to_string())
 }
 
-/// Download a specific depot version.
+/// Download a specific depot version. Emits `dd-download-progress` events.
 #[tauri::command]
 pub async fn dd_download_depot(
     app_id: u32,
@@ -85,6 +173,7 @@ pub async fn dd_download_depot(
     manifest_id: String,
     _game_id: String,
     _state: State<'_, AppState>,
+    app_handle: tauri::AppHandle,
 ) -> Result<String, String> {
     if app_id == 0 || depot_id == 0 {
         return Err("app_id and depot_id must be non-zero".into());
@@ -98,6 +187,13 @@ pub async fn dd_download_depot(
 
     std::fs::create_dir_all(&download_dir).map_err(|e| e.to_string())?;
 
+    let progress_cb = {
+        let handle = app_handle.clone();
+        move |progress: depot_downloader::DowngradeProgress| {
+            let _ = handle.emit("dd-download-progress", &progress);
+        }
+    };
+
     depot_downloader::download_depot(
         app_id,
         depot_id,
@@ -105,7 +201,7 @@ pub async fn dd_download_depot(
         &download_dir,
         None,
         None,
-        None,
+        Some(&progress_cb),
     )
     .await
     .map_err(|e| e.to_string())?;
@@ -164,7 +260,7 @@ pub async fn dd_apply_depot(
     depot_dir: String,
     state: State<'_, AppState>,
 ) -> Result<u64, String> {
-    let db = state.db.clone();
+    let _db = state.db.clone();
     tokio::task::spawn_blocking(move || {
         let (_bottle, game, _data_dir) = crate::resolve_game(&game_id, &bottle_name)?;
         let depot_path = std::path::Path::new(&depot_dir);
