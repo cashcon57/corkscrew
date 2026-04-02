@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 /// DLL override mode in Wine.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum DllOverride {
     /// Use native (Windows) DLL only
     Native,

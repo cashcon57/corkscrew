@@ -21,6 +21,8 @@ import type {
   DeployResult,
   SortResult,
   PluginWarning,
+  MasterlistStatus,
+  FileTreeNode,
   Profile,
   ModUpdateInfo,
   IntegrityReport,
@@ -679,6 +681,18 @@ export async function updateLootMasterlist(
   gameId: string
 ): Promise<string> {
   return invoke("update_loot_masterlist", { gameId });
+}
+
+export async function forceRefreshLootMasterlist(
+  gameId: string
+): Promise<string> {
+  return invoke("force_refresh_loot_masterlist", { gameId });
+}
+
+export async function getMasterlistStatus(
+  gameId: string
+): Promise<MasterlistStatus> {
+  return invoke("get_masterlist_status", { gameId });
 }
 
 export async function reorderPlugins(
@@ -1406,6 +1420,13 @@ export async function getDeploymentStats(
   bottleName: string
 ): Promise<DeploymentHealth> {
   return invoke("get_deployment_stats", { gameId, bottleName });
+}
+
+export async function getMergedFileTree(
+  gameId: string,
+  bottleName: string
+): Promise<FileTreeNode[]> {
+  return invoke("get_merged_file_tree", { gameId, bottleName });
 }
 
 /** Re-sync Plugins.txt, enabling all deployed plugin files. */

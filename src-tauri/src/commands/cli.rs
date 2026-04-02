@@ -1050,7 +1050,7 @@ pub fn cli_launch(game_id: &str, bottle_name: &str, use_skse: bool, db: &Arc<Mod
     }
 
     println!("[corkscrew] Launching {} ...", exe_path.display());
-    match launcher::launch_game(&bottle, &exe_path, Some(&game_path)) {
+    match launcher::launch_game(&bottle, &exe_path, Some(&game_path), Some(game_id), None) {
         Ok(r) => {
             println!("[corkscrew] Launched OK (pid={:?})", r.pid);
             if let Some(w) = r.warning {

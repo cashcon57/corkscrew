@@ -1790,7 +1790,7 @@ pub fn launch_tool(
     exe_path: &Path,
     bottle: &crate::bottles::Bottle,
 ) -> std::result::Result<crate::launcher::LaunchResult, String> {
-    crate::launcher::launch_game(bottle, exe_path, exe_path.parent()).map_err(|e| e.to_string())
+    crate::launcher::launch_game(bottle, exe_path, exe_path.parent(), None, None).map_err(|e| e.to_string())
 }
 
 /// Launch a tool and log the result to the notification/crash log system.

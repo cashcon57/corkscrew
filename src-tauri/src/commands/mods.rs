@@ -1561,7 +1561,7 @@ pub async fn launch_game_cmd(
                 exe_path.display()
             );
 
-            return launcher::launch_game(&bottle, &exe_path, work_dir.or(Some(&game_path)))
+            return launcher::launch_game(&bottle, &exe_path, work_dir.or(Some(&game_path)), Some(&game_id), None)
                 .map_err(|e| format!("Launch failed ({}): {}", bottle.source, e));
         }
     }
@@ -1828,7 +1828,7 @@ pub async fn launch_game_cmd(
 
     log::info!("Pre-launch: total pre-launch pipeline: {}ms", launch_start.elapsed().as_millis());
 
-    let mut result = launcher::launch_game(&bottle, &exe_path, Some(&game_path))
+    let mut result = launcher::launch_game(&bottle, &exe_path, Some(&game_path), Some(&game_id), None)
         .map_err(|e| format!("Launch failed ({}): {}", bottle.source, e))?;
 
     // Cursor fix is now handled by Wine registry keys (set in auto_fix_display

@@ -42,7 +42,8 @@
     "deep-link": {
       "desktop": {
         "schemes": [
-          "nxm"
+          "nxm",
+          "corkscrew"
         ]
       }
     },

@@ -846,3 +846,128 @@ pub fn cancel_background_hashing() {
     background_hash::cancel();
 }
 
+// --- Merged File Tree ---
+
+/// A node in the merged file tree showing what the game "sees" after deployment.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FileTreeNode {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    pub children: Vec<FileTreeNode>,
+    /// Which mod currently provides this file (the "winner").
+    pub source_mod_id: Option<i64>,
+    pub source_mod_name: Option<String>,
+    /// Other mods that also provide this file (losers in conflict).
+    pub conflict_mod_names: Vec<String>,
+    /// File size in bytes (for files, not dirs).
+    pub file_size: Option<u64>,
+}
+
+/// Build a merged file tree from the deployment manifest.
+///
+/// Shows what the game directory looks like after all mods are deployed,
+/// with per-file conflict highlighting.
+#[tauri::command]
+pub async fn get_merged_file_tree(
+    game_id: String,
+    bottle_name: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<FileTreeNode>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let manifest = db.get_deployment_manifest(&game_id, &bottle_name)
+            .map_err(|e| e.to_string())?;
+        let conflicts = db.find_all_conflicts(&game_id, &bottle_name)
+            .map_err(|e| e.to_string())?;
+
+        // Build conflict lookup: relative_path → list of (mod_id, mod_name)
+        let mut conflict_map: std::collections::HashMap<String, Vec<(i64, String)>> =
+            std::collections::HashMap::new();
+        for c in &conflicts {
+            let mods: Vec<(i64, String)> = c.mods.iter().map(|m| (m.mod_id, m.mod_name.clone())).collect();
+            conflict_map.insert(c.relative_path.clone(), mods);
+        }
+
+        // Build flat file list from manifest
+        let mut tree_map: std::collections::BTreeMap<String, FileTreeNode> =
+            std::collections::BTreeMap::new();
+
+        for entry in &manifest {
+            let conflict_mods: Vec<String> = conflict_map
+                .get(&entry.relative_path)
+                .map(|mods| {
+                    mods.iter()
+                        .filter(|(id, _)| *id != entry.mod_id)
+                        .map(|(_, name)| name.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            tree_map.insert(entry.relative_path.clone(), FileTreeNode {
+                name: entry.relative_path.rsplit('/').next()
+                    .or_else(|| entry.relative_path.rsplit('\\').next())
+                    .unwrap_or(&entry.relative_path)
+                    .to_string(),
+                path: entry.relative_path.clone(),
+                is_dir: false,
+                children: vec![],
+                source_mod_id: Some(entry.mod_id),
+                source_mod_name: Some(entry.mod_name.clone()),
+                conflict_mod_names: conflict_mods,
+                file_size: None,
+            });
+        }
+
+        // Build tree structure from flat paths
+        let entries: Vec<FileTreeNode> = tree_map.into_values().collect();
+        Ok(build_tree_from_flat(entries))
+    })
+    .await
+    .map_err(|e| format!("File tree task failed: {e}"))?
+}
+
+/// Convert flat file entries into a nested tree.
+fn build_tree_from_flat(entries: Vec<FileTreeNode>) -> Vec<FileTreeNode> {
+    let mut root_children: std::collections::BTreeMap<String, FileTreeNode> =
+        std::collections::BTreeMap::new();
+
+    for entry in entries {
+        let parts: Vec<&str> = entry.path.split('/').collect();
+        if parts.len() == 1 {
+            // Root-level file
+            root_children.insert(entry.path.clone(), entry);
+        } else {
+            // Nested file — ensure parent directories exist
+            let dir_name = parts[0].to_string();
+            let _sub_path = parts[1..].join("/");
+
+            let dir = root_children.entry(dir_name.clone()).or_insert_with(|| FileTreeNode {
+                name: dir_name.clone(),
+                path: dir_name.clone(),
+                is_dir: true,
+                children: vec![],
+                source_mod_id: None,
+                source_mod_name: None,
+                conflict_mod_names: vec![],
+                file_size: None,
+            });
+
+            // For simplicity, flatten to one level of nesting in this first pass
+            // Deep nesting can be added later with recursive insertion
+            dir.children.push(FileTreeNode {
+                name: entry.name.clone(),
+                path: entry.path.clone(),
+                is_dir: false,
+                children: vec![],
+                source_mod_id: entry.source_mod_id,
+                source_mod_name: entry.source_mod_name,
+                conflict_mod_names: entry.conflict_mod_names,
+                file_size: entry.file_size,
+            });
+        }
+    }
+
+    root_children.into_values().collect()
+}
+

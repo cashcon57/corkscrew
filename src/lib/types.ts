@@ -347,6 +347,25 @@ export interface PluginWarning {
   message: string;
 }
 
+export interface FileTreeNode {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  children: FileTreeNode[];
+  source_mod_id: number | null;
+  source_mod_name: string | null;
+  conflict_mod_names: string[];
+  file_size: number | null;
+}
+
+export interface MasterlistStatus {
+  cached: boolean;
+  fresh: boolean;
+  updated_at: string | null;
+  age_secs: number | null;
+  age_display: string | null;
+}
+
 export interface CustomExecutable {
   id: number;
   game_id: string;

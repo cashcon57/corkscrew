@@ -85,6 +85,9 @@ sha2 = "0.11"
 # LOOT integration (plugin sorting + load order)
 libloot = "0.29"
 
+# ESP/ESM/ESL record-level parsing (conflict detection)
+esplugin = "6"
+
 # WebSocket (Nexus Mods SSO)
 tungstenite = { version = "0.29", features = ["native-tls"] }
 
@@ -100,6 +103,7 @@ regex = "1"
 # Wabbajack install pipeline
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 base64 = "0.22"
+zstd = "0.13"
 mega = "0.8"
 scraper = "0.26"
 qbsdiff = "1"

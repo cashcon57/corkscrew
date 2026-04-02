@@ -3,12 +3,14 @@
     getPluginOrder,
     sortPluginsLoot,
     updateLootMasterlist,
+    forceRefreshLootMasterlist,
+    getMasterlistStatus,
     togglePlugin,
     movePlugin,
     reorderPlugins,
   } from "$lib/api";
   import { selectedGame, showError } from "$lib/stores";
-  import type { PluginEntry, DetectedGame, PluginWarning } from "$lib/types";
+  import type { PluginEntry, DetectedGame, PluginWarning, MasterlistStatus } from "$lib/types";
   import PluginRulesPanel from "$lib/components/PluginRulesPanel.svelte";
   import HelpTooltip from "$lib/components/HelpTooltip.svelte";
 
@@ -19,6 +21,7 @@
   let updatingMasterlist = $state(false);
   let togglingPlugin = $state<string | null>(null);
   let sortMessage = $state<string | null>(null);
+  let masterlistInfo = $state<MasterlistStatus | null>(null);
 
   // Drag-and-drop reorder state
   let dragIndex = $state<number | null>(null);
@@ -81,6 +84,10 @@
     sortMessage = null;
     try {
       plugins = await getPluginOrder(game.game_id, game.bottle_name);
+      // Load masterlist freshness info in parallel (non-blocking)
+      getMasterlistStatus(game.game_id)
+        .then(s => masterlistInfo = s)
+        .catch(err => console.error("masterlist status:", err));
     } catch (e: unknown) {
       showError(`Failed to load plugins: ${e}`);
       plugins = [];
@@ -118,12 +125,19 @@
     }
   }
 
-  async function handleUpdateMasterlist() {
+  async function handleUpdateMasterlist(force = false) {
     if (!$selectedGame || updatingMasterlist) return;
     updatingMasterlist = true;
     try {
-      await updateLootMasterlist($selectedGame.game_id);
-      sortMessage = "Masterlist updated";
+      if (force) {
+        await forceRefreshLootMasterlist($selectedGame.game_id);
+        sortMessage = "Masterlist force-refreshed";
+      } else {
+        await updateLootMasterlist($selectedGame.game_id);
+        sortMessage = "Masterlist updated";
+      }
+      // Refresh status badge
+      masterlistInfo = await getMasterlistStatus($selectedGame.game_id);
     } catch (e: unknown) {
       showError(`Masterlist update failed: ${e}`);
     } finally {
@@ -271,7 +285,7 @@
         <HelpTooltip text="LOOT automatically sorts plugins into an optimal load order based on community rules. Master files (.esm/.esl) are always loaded first." />
         <button
           class="btn btn-secondary"
-          onclick={handleUpdateMasterlist}
+          onclick={() => handleUpdateMasterlist(false)}
           disabled={updatingMasterlist}
         >
           {#if updatingMasterlist}
@@ -284,6 +298,20 @@
             Update Masterlist
           {/if}
         </button>
+        {#if masterlistInfo}
+          <span class="masterlist-status" class:stale={!masterlistInfo.fresh}>
+            {#if masterlistInfo.cached}
+              {masterlistInfo.fresh ? "✓" : "⚠"} {masterlistInfo.age_display ?? "unknown age"}
+            {:else}
+              No masterlist cached
+            {/if}
+          </span>
+          {#if !masterlistInfo.fresh}
+            <button class="btn btn-ghost btn-sm" onclick={() => handleUpdateMasterlist(true)} disabled={updatingMasterlist}>
+              Force Refresh
+            </button>
+          {/if}
+        {/if}
       </div>
       <div class="toolbar-right">
         <div class="plugin-search-box">
@@ -584,6 +612,18 @@
     display: flex;
     align-items: center;
     gap: var(--space-2);
+  }
+
+  .masterlist-status {
+    font-size: 12px;
+    color: var(--text-secondary);
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: var(--surface-subtle);
+  }
+  .masterlist-status.stale {
+    color: var(--amber);
+    background: color-mix(in srgb, var(--amber) 10%, transparent);
   }
 
   .plugin-search-box {

@@ -364,6 +364,8 @@ pub fn launch_game(
     bottle: &Bottle,
     exe_path: &Path,
     working_dir: Option<&Path>,
+    game_id: Option<&str>,
+    modlist_name: Option<&str>,
 ) -> Result<LaunchResult> {
     // Validate the bottle exists.
     if !bottle.exists() {
@@ -391,7 +393,37 @@ pub fn launch_game(
         .unwrap_or_else(|| bottle.drive_c());
 
     // Resolve the Wine binary and environment.
-    let wine_cmd = resolve_wine_binary(bottle)?;
+    let mut wine_cmd = resolve_wine_binary(bottle)?;
+
+    // Apply pre-launch fixes if game_id is known.
+    // This injects env vars and DLL overrides from the builtin + user fix database.
+    if let Some(gid) = game_id {
+        let fixes = crate::launch_fixes::resolve_fixes(gid, modlist_name, &[]);
+        let applied = crate::launch_fixes::apply_fixes(&fixes);
+
+        if applied.total_applied > 0 {
+            info!("Applying {} pre-launch fixes for '{}'", applied.total_applied, gid);
+        }
+
+        // Inject env vars
+        for (k, v) in &applied.env_vars {
+            wine_cmd.env_vars.push((k.clone(), v.clone()));
+        }
+
+        // Merge DLL overrides into WINEDLLOVERRIDES env var
+        if !applied.dll_overrides.is_empty() {
+            let existing = wine_cmd.env_vars.iter()
+                .find(|(k, _)| k == "WINEDLLOVERRIDES")
+                .map(|(_, v)| v.as_str());
+            let merged = crate::launch_fixes::build_dll_override_env(
+                &applied.dll_overrides,
+                existing,
+            );
+            // Remove existing WINEDLLOVERRIDES if present, then add merged
+            wine_cmd.env_vars.retain(|(k, _)| k != "WINEDLLOVERRIDES");
+            wine_cmd.env_vars.push(("WINEDLLOVERRIDES".into(), merged));
+        }
+    }
 
     info!(
         "Launching game: wine={} prefix_args={:?} exe={} prefix={} workdir={}",
@@ -659,7 +691,7 @@ mod tests {
             source: "Wine".to_string(),
         };
 
-        let result = launch_game(&bottle, Path::new("/tmp/some.exe"), None);
+        let result = launch_game(&bottle, Path::new("/tmp/some.exe"), None, None, None);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -674,7 +706,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let bottle = create_fake_bottle(tmp.path(), "TestBottle", "Wine");
 
-        let result = launch_game(&bottle, Path::new("/tmp/corkscrew_no_such_game.exe"), None);
+        let result = launch_game(&bottle, Path::new("/tmp/corkscrew_no_such_game.exe"), None, None, None);
         assert!(result.is_err());
     }
 

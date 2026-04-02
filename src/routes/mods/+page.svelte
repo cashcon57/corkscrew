@@ -83,6 +83,7 @@
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import ModDetailPanel from "$lib/components/mods/ModDetailPanel.svelte";
   import DeploymentPanel from "$lib/components/mods/DeploymentPanel.svelte";
+  import ActionQueue from "$lib/components/mods/ActionQueue.svelte";
   import ConflictResolutionPanel from "$lib/components/mods/ConflictResolutionPanel.svelte";
   import ModInstallFlow from "$lib/components/mods/ModInstallFlow.svelte";
 
@@ -2758,6 +2759,17 @@
       </div>
     {:else}
       <div class="mod-layout" class:has-detail={detailMod !== null}>
+      <!-- Actionable notification cards -->
+      <ActionQueue
+        {deployHealth}
+        {conflicts}
+        {modUpdates}
+        {deploying}
+        onDeploy={() => { if (deploymentPanelRef) deploymentPanelRef.handleDeploy(); }}
+        onOpenConflicts={() => { filters.filterStatus = "conflicts"; }}
+        onOpenUpdates={() => { filters.filterStatus = "has-updates"; }}
+        onSort={() => {}}
+      />
       <div class="mod-table-container" class:reordering-active={reordering}>
         <div class="mod-table" style="--grid-cols: {gridTemplate}">
           <!-- Sticky Header — click to sort -->

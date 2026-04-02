@@ -1161,6 +1161,7 @@ dependencies = [
  "ddsfile",
  "dirs",
  "env_logger",
+ "esplugin",
  "flate2",
  "futures",
  "image 0.25.10",
@@ -1210,6 +1211,7 @@ dependencies = [
  "xxhash-rust",
  "xz2",
  "zip 2.4.2",
+ "zstd",
 ]
 
 [[package]]

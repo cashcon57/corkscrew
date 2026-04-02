@@ -101,6 +101,42 @@
   let loadingLocalDetail = $state(false);
   let localDiff = $state<CollectionDiff | "loading" | "error" | null>(null);
 
+  // Virtual scrolling for local collection mods table
+  const LOCAL_ROW_HEIGHT = 36;
+  const LOCAL_SCROLL_BUFFER = 8;
+  let localTableEl = $state<HTMLDivElement | null>(null);
+  let localScrollTop = $state(0);
+  let localContainerHeight = $state(400);
+
+  let localVisibleRange = $derived((() => {
+    const total = localCollectionMods.length;
+    if (total === 0) return { start: 0, end: 0, paddingTop: 0, paddingBottom: 0 };
+    const startRaw = Math.floor(localScrollTop / LOCAL_ROW_HEIGHT) - LOCAL_SCROLL_BUFFER;
+    const visibleCount = Math.ceil(localContainerHeight / LOCAL_ROW_HEIGHT) + LOCAL_SCROLL_BUFFER * 2;
+    const start = Math.max(0, startRaw);
+    const end = Math.min(total, start + visibleCount);
+    return {
+      start,
+      end,
+      paddingTop: start * LOCAL_ROW_HEIGHT,
+      paddingBottom: Math.max(0, (total - end) * LOCAL_ROW_HEIGHT),
+    };
+  })());
+
+  function handleLocalTableScroll(e: Event) {
+    localScrollTop = (e.target as HTMLDivElement).scrollTop;
+  }
+
+  $effect(() => {
+    if (!localTableEl) return;
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) localContainerHeight = entry.contentRect.height;
+    });
+    ro.observe(localTableEl);
+    localContainerHeight = localTableEl.clientHeight;
+    return () => ro.disconnect();
+  });
+
   async function viewLocalCollection(col: CollectionSummary) {
     const game = $selectedGame;
     if (!game) return;
@@ -1206,8 +1242,9 @@
                     <span class="col-local-status">Status</span>
                     <span class="col-local-priority">Priority</span>
                   </div>
-                  <div class="mods-table-body">
-                    {#each localCollectionMods as mod}
+                  <div class="mods-table-body" bind:this={localTableEl} onscroll={handleLocalTableScroll}>
+                    <div style="height: {localVisibleRange.paddingTop}px;" aria-hidden="true"></div>
+                    {#each localCollectionMods.slice(localVisibleRange.start, localVisibleRange.end) as mod, sliceIdx (mod.id)}
                       <div class="mods-table-row local-mods-row">
                         <span class="col-mod-name">
                           <span class="mod-name-text">{mod.name}</span>
@@ -1223,6 +1260,7 @@
                         <span class="col-local-priority">{mod.install_priority}</span>
                       </div>
                     {/each}
+                    <div style="height: {localVisibleRange.paddingBottom}px;" aria-hidden="true"></div>
                   </div>
                 </div>
               </div>

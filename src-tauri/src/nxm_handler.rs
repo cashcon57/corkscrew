@@ -10,15 +10,15 @@ use std::path::PathBuf;
 #[cfg(target_os = "linux")]
 use std::process::Command;
 
-/// The .desktop file content for NXM handler registration.
+/// The .desktop file content for NXM and corkscrew:// handler registration.
 #[allow(dead_code)]
 const DESKTOP_FILE_CONTENT: &str = r#"[Desktop Entry]
 Type=Application
-Name=Corkscrew NXM Handler
-Comment=Handle NexusMods download links
-Exec=corkscrew --nxm %u
+Name=Corkscrew URL Handler
+Comment=Handle NexusMods and Corkscrew protocol links
+Exec=corkscrew --url %u
 Terminal=false
-MimeType=x-scheme-handler/nxm;
+MimeType=x-scheme-handler/nxm;x-scheme-handler/corkscrew;
 NoDisplay=true
 Categories=Game;
 "#;
@@ -50,17 +50,19 @@ pub fn register_nxm_handler() -> Result<(), String> {
             desktop_path.display()
         );
 
-        // Register via xdg-mime
-        let output = Command::new("xdg-mime")
-            .arg("default")
-            .arg(DESKTOP_FILE_NAME)
-            .arg("x-scheme-handler/nxm")
-            .output()
-            .map_err(|e| format!("Failed to run xdg-mime: {}", e))?;
+        // Register via xdg-mime for both nxm:// and corkscrew://
+        for scheme in &["x-scheme-handler/nxm", "x-scheme-handler/corkscrew"] {
+            let output = Command::new("xdg-mime")
+                .arg("default")
+                .arg(DESKTOP_FILE_NAME)
+                .arg(scheme)
+                .output()
+                .map_err(|e| format!("Failed to run xdg-mime: {}", e))?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("xdg-mime failed: {}", stderr));
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(format!("xdg-mime failed for {}: {}", scheme, stderr));
+            }
         }
 
         // Update desktop database
@@ -140,6 +142,104 @@ pub struct NxmUrl {
     pub file_id: i64,
     pub key: Option<String>,
     pub expires: Option<i64>,
+}
+
+// ---------------------------------------------------------------------------
+// Corkscrew protocol handler
+// ---------------------------------------------------------------------------
+
+/// Parsed `corkscrew://` URL action.
+///
+/// Supported schemes:
+/// - `corkscrew://install/nexus/{game}/{mod_id}` — open install dialog
+/// - `corkscrew://launch/{game_id}/{bottle}` — launch a game
+/// - `corkscrew://profile/{code}` — import a shared profile code
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "action")]
+pub enum CorkscrewAction {
+    #[serde(rename = "install_nexus")]
+    InstallNexus {
+        game_domain: String,
+        mod_id: i64,
+    },
+    #[serde(rename = "launch")]
+    Launch {
+        game_id: String,
+        bottle_name: String,
+    },
+    #[serde(rename = "import_profile")]
+    ImportProfile {
+        code: String,
+    },
+}
+
+/// Parse a `corkscrew://` URL into an action.
+#[allow(dead_code)]
+pub fn parse_corkscrew_url(url: &str) -> Result<CorkscrewAction, String> {
+    let path = url
+        .strip_prefix("corkscrew://")
+        .ok_or("Not a corkscrew:// URL")?;
+    let path = path.trim_end_matches('/');
+    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+
+    if parts.is_empty() {
+        return Err("Empty corkscrew:// URL".to_string());
+    }
+
+    match parts[0] {
+        "install" => {
+            // corkscrew://install/nexus/{game}/{mod_id}
+            if parts.len() < 4 || parts[1] != "nexus" {
+                return Err("Expected corkscrew://install/nexus/{game}/{mod_id}".to_string());
+            }
+            let game_domain = parts[2].to_string();
+            let mod_id: i64 = parts[3]
+                .parse()
+                .map_err(|_| format!("Invalid mod ID: {}", parts[3]))?;
+            Ok(CorkscrewAction::InstallNexus { game_domain, mod_id })
+        }
+        "launch" => {
+            // corkscrew://launch/{game_id}/{bottle}
+            if parts.len() < 3 {
+                return Err("Expected corkscrew://launch/{game_id}/{bottle}".to_string());
+            }
+            let game_id = parts[1].to_string();
+            // Bottle name may contain URL-encoded spaces
+            let bottle_name = urlencoding_decode(parts[2]);
+            Ok(CorkscrewAction::Launch { game_id, bottle_name })
+        }
+        "profile" => {
+            // corkscrew://profile/{code}
+            if parts.len() < 2 {
+                return Err("Expected corkscrew://profile/{code}".to_string());
+            }
+            let code = parts[1..].join("/");
+            Ok(CorkscrewAction::ImportProfile { code })
+        }
+        other => Err(format!("Unknown corkscrew:// action: {}", other)),
+    }
+}
+
+/// Simple percent-decoding for URL path segments.
+fn urlencoding_decode(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.bytes();
+    while let Some(b) = chars.next() {
+        if b == b'%' {
+            let hi = chars.next().and_then(|c| (c as char).to_digit(16));
+            let lo = chars.next().and_then(|c| (c as char).to_digit(16));
+            if let (Some(h), Some(l)) = (hi, lo) {
+                result.push((h * 16 + l) as u8 as char);
+            } else {
+                result.push('%');
+            }
+        } else if b == b'+' {
+            result.push(' ');
+        } else {
+            result.push(b as char);
+        }
+    }
+    result
 }
 
 #[allow(dead_code)]
@@ -256,5 +356,47 @@ mod tests {
     fn test_parse_nxm_url_invalid() {
         assert!(parse_nxm_url("https://nexusmods.com").is_err());
         assert!(parse_nxm_url("nxm://game").is_err());
+    }
+
+    #[test]
+    fn test_parse_corkscrew_url_install() {
+        let action = parse_corkscrew_url("corkscrew://install/nexus/skyrimspecialedition/12345").unwrap();
+        match action {
+            CorkscrewAction::InstallNexus { game_domain, mod_id } => {
+                assert_eq!(game_domain, "skyrimspecialedition");
+                assert_eq!(mod_id, 12345);
+            }
+            _ => panic!("Expected InstallNexus action"),
+        }
+    }
+
+    #[test]
+    fn test_parse_corkscrew_url_launch() {
+        let action = parse_corkscrew_url("corkscrew://launch/skyrimse/My%20Bottle").unwrap();
+        match action {
+            CorkscrewAction::Launch { game_id, bottle_name } => {
+                assert_eq!(game_id, "skyrimse");
+                assert_eq!(bottle_name, "My Bottle");
+            }
+            _ => panic!("Expected Launch action"),
+        }
+    }
+
+    #[test]
+    fn test_parse_corkscrew_url_profile() {
+        let action = parse_corkscrew_url("corkscrew://profile/CRKS-7x9Km-4pQw").unwrap();
+        match action {
+            CorkscrewAction::ImportProfile { code } => {
+                assert_eq!(code, "CRKS-7x9Km-4pQw");
+            }
+            _ => panic!("Expected ImportProfile action"),
+        }
+    }
+
+    #[test]
+    fn test_parse_corkscrew_url_invalid() {
+        assert!(parse_corkscrew_url("https://example.com").is_err());
+        assert!(parse_corkscrew_url("corkscrew://").is_err());
+        assert!(parse_corkscrew_url("corkscrew://unknown/action").is_err());
     }
 }

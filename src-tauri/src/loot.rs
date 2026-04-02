@@ -284,6 +284,73 @@ async fn download_file(url: &str, dest: &Path) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Masterlist status
+// ---------------------------------------------------------------------------
+
+/// Information about the cached masterlist state.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MasterlistStatus {
+    /// Whether a cached masterlist exists for this game.
+    pub cached: bool,
+    /// Whether the cached masterlist is still fresh (< 24h old).
+    pub fresh: bool,
+    /// ISO 8601 timestamp of when the masterlist was last modified, if available.
+    pub updated_at: Option<String>,
+    /// Seconds since the masterlist was last updated, if available.
+    pub age_secs: Option<u64>,
+    /// Human-readable age string (e.g., "2 hours ago").
+    pub age_display: Option<String>,
+}
+
+/// Get the status of the cached LOOT masterlist for a game.
+pub fn get_masterlist_status(game_id: &str) -> MasterlistStatus {
+    let ml_path = masterlist_path(game_id);
+    if !ml_path.exists() {
+        return MasterlistStatus {
+            cached: false,
+            fresh: false,
+            updated_at: None,
+            age_secs: None,
+            age_display: None,
+        };
+    }
+
+    let metadata = std::fs::metadata(&ml_path).ok();
+    let modified = metadata.and_then(|m| m.modified().ok());
+    let elapsed = modified.and_then(|m| SystemTime::now().duration_since(m).ok());
+    let fresh = elapsed
+        .map(|e| e < MASTERLIST_MAX_AGE)
+        .unwrap_or(false);
+
+    let updated_at = modified.map(|m| {
+        let datetime: chrono::DateTime<chrono::Utc> = m.into();
+        datetime.to_rfc3339()
+    });
+
+    let age_secs = elapsed.map(|e| e.as_secs());
+
+    let age_display = age_secs.map(|secs| {
+        if secs < 60 {
+            "just now".to_string()
+        } else if secs < 3600 {
+            format!("{} min ago", secs / 60)
+        } else if secs < 86400 {
+            format!("{} hours ago", secs / 3600)
+        } else {
+            format!("{} days ago", secs / 86400)
+        }
+    });
+
+    MasterlistStatus {
+        cached: true,
+        fresh,
+        updated_at,
+        age_secs,
+        age_display,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Sorting
 // ---------------------------------------------------------------------------
 

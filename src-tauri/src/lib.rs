@@ -1,3 +1,4 @@
+pub mod archive_preview;
 pub mod background_hash;
 pub mod baselines;
 pub mod bottle_config;
@@ -19,12 +20,14 @@ pub mod display_fix;
 pub mod downgrader;
 pub mod download_queue;
 pub mod dxvk;
+pub mod esp_analyzer;
 pub mod executables;
 pub mod fomod;
 pub mod fomod_recipes;
 pub mod game_lock;
 pub mod game_registry;
 pub mod games;
+pub mod graphics_backend;
 pub mod google_oauth;
 pub mod gpu_encoder;
 pub mod ini_manager;
@@ -33,6 +36,7 @@ pub mod instruction_parser;
 pub mod instruction_types;
 pub mod instruction_validator;
 pub mod integrity;
+pub mod launch_fixes;
 pub mod launcher;
 pub mod llm_chat;
 pub mod llm_parser;
@@ -51,6 +55,7 @@ pub mod platform;
 pub mod plugins;
 pub mod preflight;
 pub mod prefix_setup;
+pub mod profile_sharing;
 pub mod profiles;
 pub mod progress;
 pub mod proton;
@@ -59,6 +64,7 @@ pub mod session_tracker;
 pub mod skse;
 pub mod staging;
 pub mod steam_integration;
+pub mod umu;
 pub mod vortex_fetcher;
 pub mod vortex_plugin;
 pub mod vortex_registry;
@@ -71,9 +77,11 @@ pub mod wabbajack_installer;
 pub mod wabbajack_types;
 pub mod wine_compat;
 pub mod wine_dll_overrides;
+pub mod tool_automation;
 pub mod app_updates;
 pub mod self_update;
 pub mod shader_conversion;
+pub mod texture_optimizer;
 pub mod wine_diagnostic;
 pub mod commands;
 
@@ -1044,6 +1052,7 @@ pub fn run() {
             // Background Hashing
             commands::deployment::start_background_hashing,
             commands::deployment::cancel_background_hashing,
+            commands::deployment::get_merged_file_tree,
             // Collection Management
             commands::collections::list_installed_collections_cmd,
             commands::collections::set_mod_collection_name_cmd,
@@ -1086,6 +1095,7 @@ pub fn run() {
             commands::plugins::sort_plugins_loot,
             commands::plugins::update_loot_masterlist,
             commands::plugins::force_refresh_loot_masterlist,
+            commands::plugins::get_masterlist_status,
             commands::plugins::reorder_plugins_cmd,
             commands::plugins::toggle_plugin_cmd,
             commands::plugins::move_plugin_cmd,
