@@ -387,38 +387,67 @@ For **Collections**, the orchestrator resolves install order, downloads mods, ap
 <summary>Project structure</summary>
 
 ```
-src/                          Svelte frontend
+src/                          Svelte 5 frontend (~57K lines)
 ├── lib/
 │   ├── api.ts                Tauri IPC bindings (~223 commands)
-│   ├── types.ts              TypeScript interfaces
-│   └── components/           UI components (FOMOD wizard, conflict panel, etc.)
+│   ├── types.ts              TypeScript interfaces (~149 types)
+│   ├── stores.ts             Svelte writable stores (global state)
+│   └── components/
+│       ├── mods/             Mod page workflow components (16 files)
+│       │   ├── DeploymentPanel         Deploy/purge/health
+│       │   ├── ConflictResolutionPanel AI conflict analysis + resolution
+│       │   ├── SkseGameLaunchPanel     Game launch, SKSE, downgrade
+│       │   ├── ModInstallFlow          Archive install + modlist naming
+│       │   ├── ModBatchOperations      Bulk enable/disable/uninstall
+│       │   ├── FomodReconfigurePanel   FOMOD recipe reconfiguration
+│       │   ├── ModUpdatePanel          Update checking
+│       │   ├── ModDetailPanel          Mod detail sidebar
+│       │   └── ...                     Table row, header, filter, context menu
+│       ├── collections/      Collection page workflow components (4 files)
+│       │   ├── CollectionInstallWizard 6-step install flow
+│       │   ├── NexusBrowsePanel        Nexus search/browse/download
+│       │   ├── CollectionDeleteDialog  Multi-step delete confirmation
+│       │   └── InterruptedInstallBanner Resume/dismiss partial installs
+│       └── ...               Shared components (FOMOD wizard, shader wizard, etc.)
 ├── routes/
-│   ├── mods/                 Mod management (table, batch ops, keyboard nav)
+│   ├── mods/                 Mod management (~5.5K lines, orchestrator)
 │   ├── plugins/              Plugin load order editor
-│   ├── collections/          NexusMods Collections browser + installer
+│   ├── collections/          Collections browser + installer (~5K lines, orchestrator)
 │   ├── modlists/             Wabbajack gallery + installer
 │   ├── profiles/             Mod profiles
 │   ├── logs/                 Crash log analysis
 │   └── settings/             Config, tools, auth, diagnostics
 └── app.css                   Design tokens + themes
 
-src-tauri/src/                Rust backend (~54 modules, 874+ tests)
+src-tauri/src/                Rust backend (~92K lines, 101 modules, 938 tests)
 ├── lib.rs                    ~249 IPC commands + CLI
 ├── bottles.rs                Bottle detection (9 sources)
 ├── games.rs                  Game detection + plugin registry
 ├── installer.rs              Archive extraction + data root detection
 ├── deployer.rs               Hardlink deployment + atomic rollback
-├── database.rs               SQLite with versioned migrations (v1→v19)
+├── database.rs               SQLite with versioned migrations (v1→v22)
 ├── collections.rs            NexusMods Collections GraphQL client
 ├── collection_installer.rs   Collection install orchestrator
 ├── wabbajack_installer.rs    Wabbajack modlist pipeline
+├── wabbajack_downloader.rs   Multi-source downloads (Nexus, CDN, MediaFire, etc.)
 ├── nexus.rs                  NexusMods REST API client
+├── oauth.rs                  OAuth 2.0 + PKCE authentication
+├── depot_downloader.rs       Steam game version rollback
 ├── loot.rs                   libloot integration
 ├── skse.rs                   Script extender management + Engine Fixes deploy
 ├── llm_chat.rs               Local LLM chat engine
 ├── vortex_runtime.rs         QuickJS sandbox for Vortex game extensions
 └── plugins/                  Game-specific plugins (Skyrim SE, FO4)
+
+Total: ~155K lines of code across 178 files
 ```
+
+> **April 2, 2026 — Codebase structure refactor.** Decomposed two god components
+> (mods page: 7,109→5,483 lines; collections page: 7,847→5,024 lines) into 11
+> purpose-built workflow components. Applied 27 security and reliability fixes
+> from a senior-engineer audit covering concurrent file writes, credential
+> handling, path traversal, OAuth flow, JWT validation, and error propagation.
+> Backend: 938 tests, 0 failures. Frontend: 0 type errors.
 
 </details>
 

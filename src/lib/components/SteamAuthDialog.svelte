@@ -11,7 +11,7 @@
   let username = $state("");
   let password = $state("");
   let steamGuardCode = $state("");
-  let phase = $state<"credentials" | "steam_guard" | "authenticating" | "error">("credentials");
+  let phase = $state<"credentials" | "steam_guard" | "mobile_confirm" | "authenticating" | "error">("credentials");
   let errorMessage = $state("");
 
   async function handleLogin() {
@@ -25,19 +25,46 @@
         password: password.trim(),
         steamGuardCode: null,
       });
-      // Auth succeeded without Steam Guard — clear credentials before callback
       password = "";
       onauth();
     } catch (e: unknown) {
       const msg = String(e);
       if (msg === "STEAM_GUARD_REQUIRED" || msg.includes("STEAM_GUARD")) {
         phase = "steam_guard";
+      } else if (msg === "STEAM_GUARD_MOBILE" || msg.includes("STEAM_GUARD_MOBILE")) {
+        phase = "mobile_confirm";
+        handleMobileConfirm();
       } else if (msg.includes("AUTH_FAILED")) {
         password = "";
         phase = "error";
         errorMessage = "Invalid username or password. Double-check and try again.";
       } else {
         password = "";
+        phase = "error";
+        errorMessage = msg;
+      }
+    }
+  }
+
+  async function handleMobileConfirm() {
+    phase = "mobile_confirm";
+    errorMessage = "";
+
+    try {
+      await invoke("dd_authenticate", {
+        username: username.trim(),
+        password: password.trim(),
+        steamGuardCode: null,
+      });
+      password = "";
+      onauth();
+    } catch (e: unknown) {
+      const msg = String(e);
+      password = "";
+      if (msg.includes("AUTH_FAILED") || msg.includes("timed out")) {
+        phase = "error";
+        errorMessage = "Steam Guard confirmation timed out or was denied. Try again.";
+      } else {
         phase = "error";
         errorMessage = msg;
       }
@@ -55,7 +82,6 @@
         password: password.trim(),
         steamGuardCode: steamGuardCode.trim(),
       });
-      // Clear credentials before callback
       password = "";
       steamGuardCode = "";
       onauth();
@@ -74,17 +100,17 @@
   }
 </script>
 
-<div class="auth-overlay" onclick={oncancel} role="presentation">
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="auth-modal" onclick={(e) => e.stopPropagation()}>
-    <div class="auth-header">
-      <h3 class="auth-title">Steam Login</h3>
-      <button class="auth-close" onclick={oncancel}>&times;</button>
+<!-- svelte-ignore a11y_click_events_have_key_events -->
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="modal-overlay" onclick={oncancel} role="presentation">
+  <div class="cleanup-modal" onclick={(e) => e.stopPropagation()} role="dialog" aria-label="Steam Login">
+    <div class="cleanup-header">
+      <h3 class="cleanup-title">Steam Login</h3>
+      <button class="cleanup-close" onclick={oncancel}>&times;</button>
     </div>
 
-    <div class="auth-body">
-      <p class="auth-description">
+    <div class="cleanup-body">
+      <p class="cleanup-info">
         Corkscrew needs to connect to Steam to download older game versions.
         Your credentials are sent directly to Steam's servers via
         <a href="https://github.com/SteamRE/DepotDownloader" target="_blank" rel="noopener">DepotDownloader</a>
@@ -92,43 +118,53 @@
       </p>
 
       {#if phase === "credentials" || phase === "error"}
-        <div class="auth-form">
-          <label class="auth-label">
-            Steam Username
+        <div class="form-fields">
+          <label class="form-label">
+            <span class="form-label-text">Steam Username</span>
             <input
               type="text"
-              class="auth-input"
+              class="form-input"
               bind:value={username}
               placeholder="Your Steam username"
               onkeydown={(e) => { if (e.key === "Enter") handleLogin(); }}
               autofocus
             />
           </label>
-          <label class="auth-label">
-            Password
+          <label class="form-label">
+            <span class="form-label-text">Password</span>
             <input
               type="password"
-              class="auth-input"
+              class="form-input"
               bind:value={password}
               placeholder="Your Steam password"
               onkeydown={(e) => { if (e.key === "Enter") handleLogin(); }}
             />
           </label>
           {#if errorMessage}
-            <p class="auth-error">{errorMessage}</p>
+            <p class="form-error">{errorMessage}</p>
           {/if}
         </div>
-      {:else if phase === "steam_guard"}
-        <div class="auth-form">
-          <p class="auth-steam-guard-hint">
-            Steam sent a verification code to your email or authenticator app.
-            Enter it below.
+      {:else if phase === "mobile_confirm"}
+        <div class="form-fields">
+          <p class="cleanup-info">
+            Steam sent a confirmation to your phone. Open the <strong>Steam mobile app</strong> and approve the login request.
           </p>
-          <label class="auth-label">
-            Steam Guard Code
+          <div class="form-loading">
+            <div class="spinner-sm"></div>
+            <span>Waiting for approval...</span>
+          </div>
+        </div>
+      {:else if phase === "steam_guard"}
+        <div class="form-fields">
+          <p class="cleanup-info">
+            Enter the code from your Steam Guard email or authenticator app.
+            If you got a push notification on your phone instead, approve it there &mdash; Corkscrew will detect it automatically.
+          </p>
+          <label class="form-label">
+            <span class="form-label-text">Steam Guard Code</span>
             <input
               type="text"
-              class="auth-input auth-input-code"
+              class="form-input form-input-code"
               bind:value={steamGuardCode}
               placeholder="XXXXX"
               maxlength="5"
@@ -138,43 +174,41 @@
           </label>
         </div>
       {:else if phase === "authenticating"}
-        <div class="auth-loading">
+        <div class="form-loading">
           <div class="spinner-sm"></div>
           <span>Connecting to Steam...</span>
         </div>
       {/if}
     </div>
 
-    <div class="auth-footer">
-      <p class="auth-credit">
-        Downgrades powered by <a href="https://github.com/SteamRE/DepotDownloader" target="_blank" rel="noopener">DepotDownloader</a> (GPL-2.0)
-      </p>
-      <div class="auth-actions">
-        <button class="btn btn-ghost" onclick={oncancel}>Cancel</button>
-        {#if phase === "credentials" || phase === "error"}
-          <button
-            class="btn btn-accent"
-            onclick={handleLogin}
-            disabled={!username.trim() || !password.trim()}
-          >
-            Sign In
-          </button>
-        {:else if phase === "steam_guard"}
-          <button
-            class="btn btn-accent"
-            onclick={handleSteamGuard}
-            disabled={!steamGuardCode.trim()}
-          >
-            Verify
-          </button>
-        {/if}
-      </div>
+    <div class="cleanup-actions">
+      <span class="dd-credit">
+        Powered by <a href="https://github.com/SteamRE/DepotDownloader" target="_blank" rel="noopener">DepotDownloader</a> (GPL-2.0)
+      </span>
+      <button class="btn btn-ghost" onclick={oncancel}>Cancel</button>
+      {#if phase === "credentials" || phase === "error"}
+        <button
+          class="btn btn-accent"
+          onclick={handleLogin}
+          disabled={!username.trim() || !password.trim()}
+        >
+          Sign In
+        </button>
+      {:else if phase === "steam_guard"}
+        <button
+          class="btn btn-accent"
+          onclick={handleSteamGuard}
+          disabled={!steamGuardCode.trim()}
+        >
+          Verify
+        </button>
+      {/if}
     </div>
   </div>
 </div>
 
 <style>
-  .auth-overlay {
+  .modal-overlay {
     position: fixed;
     inset: 0;
     z-index: 10000;
@@ -185,134 +219,149 @@
     backdrop-filter: blur(4px);
   }
 
-  .auth-modal {
-    background: var(--bg-primary);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-lg, 12px);
-    width: min(440px, 90vw);
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+  .cleanup-modal {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-primary);
+    border-radius: 12px;
+    width: 480px;
+    max-width: 90vw;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+    display: flex;
+    flex-direction: column;
   }
 
-  .auth-header {
+  .cleanup-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: var(--space-4, 16px) var(--space-5, 20px);
-    border-bottom: 1px solid var(--border);
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border-primary);
   }
 
-  .auth-title {
+  .cleanup-title {
     font-size: 16px;
     font-weight: 600;
     margin: 0;
+    color: var(--text-primary);
   }
 
-  .auth-close {
+  .cleanup-close {
     background: none;
     border: none;
-    color: var(--text-tertiary);
-    font-size: 22px;
+    color: var(--text-secondary);
+    font-size: 20px;
     cursor: pointer;
     line-height: 1;
+    padding: 4px 8px;
+    border-radius: 6px;
+    transition: all 0.15s;
+  }
+  .cleanup-close:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
   }
 
-  .auth-body {
-    padding: var(--space-4, 16px) var(--space-5, 20px);
+  .cleanup-body {
+    padding: 20px;
   }
 
-  .auth-description {
+  .cleanup-info {
     font-size: 13px;
     color: var(--text-secondary);
+    margin: 0 0 12px 0;
     line-height: 1.5;
-    margin: 0 0 var(--space-4, 16px);
   }
-
-  .auth-description a {
+  .cleanup-info strong {
+    color: var(--text-primary);
+  }
+  .cleanup-info a {
     color: var(--accent);
     text-decoration: none;
   }
-  .auth-description a:hover {
+  .cleanup-info a:hover {
     text-decoration: underline;
   }
 
-  .auth-form {
+  .cleanup-actions {
     display: flex;
-    flex-direction: column;
-    gap: var(--space-3, 12px);
+    align-items: center;
+    gap: 8px;
+    justify-content: flex-end;
+    padding: 12px 20px;
+    border-top: 1px solid var(--border-primary);
   }
 
-  .auth-label {
+  .form-fields {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 12px;
+  }
+
+  .form-label {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .form-label-text {
     font-size: 12px;
     font-weight: 500;
     color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
   }
 
-  .auth-input {
-    padding: 8px 12px;
-    border-radius: var(--radius, 6px);
-    border: 1px solid var(--border);
-    background: var(--bg-secondary);
+  .form-input {
+    padding: 10px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border-primary);
+    background: var(--bg-primary);
     color: var(--text-primary);
     font-size: 14px;
     outline: none;
     transition: border-color 0.15s;
   }
-  .auth-input:focus {
+  .form-input:focus {
     border-color: var(--accent);
   }
-
-  .auth-input-code {
-    font-size: 20px;
-    letter-spacing: 4px;
-    text-align: center;
-    font-family: monospace;
-    max-width: 160px;
+  .form-input::placeholder {
+    color: var(--text-tertiary);
   }
 
-  .auth-steam-guard-hint {
+  .form-input-code {
+    font-size: 20px;
+    letter-spacing: 6px;
+    text-align: center;
+    font-family: var(--font-mono, monospace);
+    max-width: 180px;
+  }
+
+  .form-error {
+    font-size: 12px;
+    color: var(--red, #ef4444);
+    margin: 0;
+    padding: 8px 12px;
+    background: rgba(239, 68, 68, 0.1);
+    border-radius: 6px;
+    border: 1px solid rgba(239, 68, 68, 0.2);
+  }
+
+  .form-loading {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 16px 0;
     font-size: 13px;
     color: var(--text-secondary);
-    margin: 0 0 var(--space-2, 8px);
   }
 
-  .auth-error {
-    font-size: 12px;
-    color: var(--red, #f44);
-    margin: 0;
-  }
-
-  .auth-loading {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3, 12px);
-    padding: var(--space-4, 16px) 0;
-    font-size: 14px;
-    color: var(--text-secondary);
-  }
-
-  .auth-footer {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: var(--space-3, 12px) var(--space-5, 20px);
-    border-top: 1px solid var(--border);
-  }
-
-  .auth-credit {
+  .dd-credit {
     font-size: 11px;
     color: var(--text-tertiary);
-    margin: 0;
+    margin-right: auto;
   }
-  .auth-credit a {
+  .dd-credit a {
     color: var(--text-tertiary);
     text-decoration: underline;
-  }
-
-  .auth-actions {
-    display: flex;
-    gap: var(--space-2, 8px);
   }
 </style>

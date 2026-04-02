@@ -1,10 +1,8 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { get } from "svelte/store";
-  import { open } from "@tauri-apps/plugin-dialog";
   import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
   import ModlistImportWizard from "$lib/components/ModlistImportWizard.svelte";
-  import FomodWizard from "$lib/components/FomodWizard.svelte";
   import ShaderConversionWizard from "$lib/components/ShaderConversionWizard.svelte";
   import {
     getInstalledMods,
@@ -13,41 +11,24 @@
     installMod,
     uninstallMod,
     toggleMod,
-    batchToggleMods,
-    launchGame,
-    checkSkse,
-    getSkseDownloadUrl,
-    installSkseFromArchive,
-    installSkseAuto,
-    setSksePreference,
-    checkSkyrimVersion,
-    downgradeSkyrim,
     reorderMods,
     getConflicts,
     checkModUpdates,
-    fixSkyrimDisplay,
     onInstallProgress,
     redeployAllMods,
     getDeploymentStats,
     setModNotes,
     setModTags,
     setModPriority,
-    onBulkOperationProgress,
     backfillCategories,
     exportModlist,
     detectFomod,
-    getFomodRecipe,
-    getFomodFiles,
-    saveFomodRecipe,
     detectModTools,
     launchModTool,
     endorseMod,
     abstainMod,
     getUserEndorsements,
     getConfig,
-    setConfigValue,
-    getGameLockStatus,
-    forceUnlockGame,
     quickCsModCount,
     isDeployInProgress,
     onDeployStatusChanged,
@@ -70,7 +51,7 @@
     wjInstallGeneration,
     modStateVersion,
   } from "$lib/stores";
-  import type { InstalledMod, DetectedGame, SkseStatus, DowngradeStatus, FileConflict, ModUpdateInfo, FomodInstaller } from "$lib/types";
+  import type { InstalledMod, DetectedGame, SkseStatus, FileConflict, ModUpdateInfo } from "$lib/types";
   import GameIcon from "$lib/components/GameIcon.svelte";
   import DiskBudgetPanel from "$lib/components/DiskBudgetPanel.svelte";
   import PreflightPanel from "$lib/components/PreflightPanel.svelte";
@@ -84,6 +65,10 @@
   import DeploymentPanel from "$lib/components/mods/DeploymentPanel.svelte";
   import ConflictResolutionPanel from "$lib/components/mods/ConflictResolutionPanel.svelte";
   import ModInstallFlow from "$lib/components/mods/ModInstallFlow.svelte";
+  import ModUpdatePanel from "$lib/components/mods/ModUpdatePanel.svelte";
+  import FomodReconfigurePanel from "$lib/components/mods/FomodReconfigurePanel.svelte";
+  import ModBatchOperations from "$lib/components/mods/ModBatchOperations.svelte";
+  import SkseGameLaunchPanel from "$lib/components/mods/SkseGameLaunchPanel.svelte";
 
   // Game launch fixes opt-out (display fix + cursor clamp)
   let disableGameFixes = $state(false);
@@ -97,18 +82,9 @@
   let confirmUninstall = $state<number | null>(null);
   let togglingMod = $state<number | null>(null);
   let launching = $state(false);
-  let gameLockPollInterval: ReturnType<typeof setInterval> | null = null;
-  let gameLockPollFailCount = 0;
-  let skse = $state<SkseStatus | null>(null);
-  let showSksePrompt = $state(false);
-  let installingSkse = $state(false);
-  let showSkseMenu = $state(false);
-  let showSkseInstallPrompt = $state(false);
-  let downgradeStatus = $state<DowngradeStatus | null>(null);
-  let downgrading = $state(false);
-  let showDowngradeBanner = $state(false);
   let draggingOver = $state(false);
-  let fixingDisplay = $state(false);
+  // skse/launch/downgrade/gameLock state moved to SkseGameLaunchPanel
+  let skse = $state<SkseStatus | null>(null); // kept for banner meta display
   let installUnlisten: (() => void) | null = null;
 
   // Drag reorder state
@@ -120,17 +96,14 @@
   let showImportWizard = $state(false);
   let exporting = $state(false);
 
-  // FOMOD wizard state
-  let showFomodWizard = $state(false);
-  let fomodInstaller = $state<FomodInstaller | null>(null);
-  let fomodTargetMod = $state<InstalledMod | null>(null);
+  // FOMOD wizard state (managed by FomodReconfigurePanel component)
+  let fomodPanelRef = $state<ReturnType<typeof FomodReconfigurePanel> | null>(null);
 
   // Conflict state
   let conflicts = $state<FileConflict[]>([]);
 
-  // Update check state
+  // Update check state (modUpdates kept here for updateMap derived)
   let modUpdates = $state<ModUpdateInfo[]>([]);
-  let checkingUpdates = $state(false);
 
   // Deploy/purge state
   let deploying = $state(false);
@@ -357,25 +330,15 @@
       backendDeployInProgress = inProgress;
     }).then(unlisten => { deployStatusUnlisten = unlisten; }).catch((err) => console.error('deploy status listener:', err));
 
-    // Check if a game is already running (e.g., launched before navigating here)
-    {
-      const game = get(selectedGame);
-      if (game) {
-        getGameLockStatus(game.game_id, game.bottle_name).then(lock => {
-          gameLock.set(lock);
-          if (lock) startGameLockPolling(game.game_id, game.bottle_name);
-        }).catch((err) => console.error('Initial game lock check failed:', err));
-      }
-    }
+    // Game lock initial check and polling moved to SkseGameLaunchPanel
 
     return () => document.removeEventListener("click", closeOverflow);
   });
 
   onDestroy(() => {
     if (installUnlisten) { installUnlisten(); installUnlisten = null; }
-    if (bulkProgressUnlisten) { bulkProgressUnlisten(); bulkProgressUnlisten = null; }
+    batchOpsRef?.cleanup();
     if (deployStatusUnlisten) { deployStatusUnlisten(); deployStatusUnlisten = null; }
-    stopGameLockPolling();
   });
 
   // View mode state
@@ -732,95 +695,8 @@
     focusedIndex = index;
   }
 
-  let bulkOperating = $state<"enabling" | "disabling" | "uninstalling" | null>(null);
-  let bulkProgress = $state<{ phase: string; current: number; total: number; message: string } | null>(null);
-  let bulkProgressUnlisten: (() => void) | null = null;
-
-  async function startBulkListener() {
-    bulkProgress = null;
-    bulkProgressUnlisten = await onBulkOperationProgress((p) => {
-      bulkProgress = p;
-    });
-  }
-
-  function stopBulkListener() {
-    if (bulkProgressUnlisten) { bulkProgressUnlisten(); bulkProgressUnlisten = null; }
-    bulkProgress = null;
-  }
-
-  async function batchEnable() {
-    if (!activeGame) return;
-    if ($gameLock && !$gameLockOverridden) {
-      showError('Cannot modify mods while the game is running. Close the game or click "Unlock Anyway".');
-      return;
-    }
-    bulkOperating = "enabling";
-    await startBulkListener();
-    try {
-      const ids = Array.from(selectedModIds);
-      const result = await batchToggleMods(ids, activeGame.game_id, activeGame.bottle_name, true);
-      selectedModIds = new Set();
-      await loadMods(activeGame);
-      await refreshHealth(activeGame);
-      const count = parseInt(result, 10);
-      if (count > 0) showSuccess(`Enabled ${count} mod${count === 1 ? "" : "s"}`);
-    } catch (e) {
-      await loadMods(activeGame);
-      await refreshHealth(activeGame);
-      showError(`${e}`);
-    } finally {
-      stopBulkListener();
-      bulkOperating = null;
-    }
-  }
-
-  async function batchDisable() {
-    if (!activeGame) return;
-    if ($gameLock && !$gameLockOverridden) {
-      showError('Cannot modify mods while the game is running. Close the game or click "Unlock Anyway".');
-      return;
-    }
-    bulkOperating = "disabling";
-    await startBulkListener();
-    try {
-      const ids = Array.from(selectedModIds);
-      const result = await batchToggleMods(ids, activeGame.game_id, activeGame.bottle_name, false);
-      selectedModIds = new Set();
-      await loadMods(activeGame);
-      await refreshHealth(activeGame);
-      const count = parseInt(result, 10);
-      if (count > 0) showSuccess(`Disabled ${count} mod${count === 1 ? "" : "s"}`);
-    } catch (e) {
-      await loadMods(activeGame);
-      await refreshHealth(activeGame);
-      showError(`${e}`);
-    } finally {
-      stopBulkListener();
-      bulkOperating = null;
-    }
-  }
-
-  async function batchUninstall() {
-    if ($gameLock && !$gameLockOverridden) {
-      showError('Cannot uninstall mods while the game is running. Close the game or click "Unlock Anyway".');
-      return;
-    }
-    bulkOperating = "uninstalling";
-    try {
-      for (const id of selectedModIds) {
-        if (activeGame) {
-          await uninstallMod(id, activeGame.game_id, activeGame.bottle_name);
-        }
-      }
-      selectedModIds = new Set();
-      if (activeGame) {
-        await loadMods(activeGame);
-        await refreshHealth(activeGame);
-      }
-    } finally {
-      bulkOperating = null;
-    }
-  }
+  // Bulk operations (batchEnable/batchDisable/batchUninstall) moved to ModBatchOperations component
+  let batchOpsRef = $state<ReturnType<typeof ModBatchOperations> | null>(null);
 
   // Unique collection names for filter dropdown
   let collectionNames = $derived((() => {
@@ -959,28 +835,7 @@
 
   const activeGame = $derived(pickedGame ?? $selectedGame);
 
-  // Re-check game lock when the active game changes
-  $effect(() => {
-    const game = activeGame;
-    if (game) {
-      getGameLockStatus(game.game_id, game.bottle_name).then(lock => {
-        if (!get(gameLockOverridden)) {
-          gameLock.set(lock);
-          if (lock) {
-            startGameLockPolling(game.game_id, game.bottle_name);
-          } else {
-            stopGameLockPolling();
-          }
-        }
-      }).catch((err) => console.error('Game lock status check failed:', err));
-    } else {
-      gameLock.set(null);
-      stopGameLockPolling();
-    }
-    return () => {
-      stopGameLockPolling();
-    };
-  });
+  // Game lock polling moved to SkseGameLaunchPanel
 
   // Track the current load to avoid stale race conditions
   let loadGeneration = 0;
@@ -1295,281 +1150,11 @@
     selectedGame.set(game);
   }
 
-  // SKSE & version detection
-  let skseCheckGeneration = 0;
+  // SKSE & version detection moved to SkseGameLaunchPanel
 
-  $effect(() => {
-    const game = activeGame;
-    const gen = ++skseCheckGeneration;
-    if (game && game.game_id === "skyrimse") {
-      checkSkseStatus(game, gen);
-      checkVersionStatus(game, gen);
-    } else {
-      skse = null;
-      showSksePrompt = false;
-      downgradeStatus = null;
-      showDowngradeBanner = false;
-    }
-  });
+  // handlePlay, doLaunch, startGameLockPolling, stopGameLockPolling moved to SkseGameLaunchPanel
 
-  async function checkSkseStatus(game: DetectedGame, gen: number) {
-    try {
-      const status = await checkSkse(game.game_id, game.bottle_name);
-      if (gen !== skseCheckGeneration) return; // stale
-      skse = status;
-      skseStatus.set(skse);
-      if (!skse.installed) {
-        const dismissed = localStorage.getItem(`skse_dismissed:${game.game_id}:${game.bottle_name}`);
-        if (!dismissed) showSksePrompt = true;
-      }
-    } catch {
-      // Non-critical
-    }
-  }
-
-  async function handlePlay() {
-    const game = pickedGame ?? $selectedGame;
-    if (!game) return;
-
-    const wantsSkse = !!(skse?.use_skse && game.game_id === "skyrimse");
-
-    if (wantsSkse && !skse?.installed) {
-      // SKSE preference is on but not installed — prompt to install
-      showSkseInstallPrompt = true;
-      return;
-    }
-
-    doLaunch(wantsSkse);
-  }
-
-  async function doLaunch(useSkse: boolean) {
-    const game = pickedGame ?? $selectedGame;
-    if (!game) return;
-    launching = true;
-    try {
-      const result = await launchGame(game.game_id, game.bottle_name, useSkse);
-      if (result.success) {
-        showSuccess(`Launched ${game.display_name}${useSkse ? " via SKSE" : ""} — Wine cursor fix applied`);
-        if (result.warning) {
-          showError(`SKSE warning: ${result.warning}`);
-        }
-        // Start polling game lock status
-        gameLockOverridden.set(false);
-        startGameLockPolling(game.game_id, game.bottle_name);
-      }
-    } catch (e: unknown) {
-      showError(`Failed to launch: ${e}`);
-    } finally {
-      launching = false;
-    }
-  }
-
-  function startGameLockPolling(gameId: string, bottleName: string) {
-    stopGameLockPolling();
-    gameLockPollFailCount = 0;
-    // Initial check
-    pollGameLock(gameId, bottleName);
-    // Poll every 5 seconds
-    gameLockPollInterval = setInterval(() => pollGameLock(gameId, bottleName), 5000);
-  }
-
-  function stopGameLockPolling() {
-    if (gameLockPollInterval) {
-      clearInterval(gameLockPollInterval);
-      gameLockPollInterval = null;
-    }
-  }
-
-  async function pollGameLock(gameId: string, bottleName: string) {
-    try {
-      // If user force-unlocked, don't re-lock from an in-flight poll
-      if (get(gameLockOverridden)) return;
-      const lock = await getGameLockStatus(gameId, bottleName);
-      // Double-check after await — user may have unlocked while we were waiting
-      if (get(gameLockOverridden)) return;
-      gameLockPollFailCount = 0;
-      gameLock.set(lock);
-      if (!lock) {
-        // Game exited — stop polling, clear override
-        stopGameLockPolling();
-        gameLockOverridden.set(false);
-      }
-    } catch (e) {
-      // Poll failed — require 3 consecutive failures before clearing lock
-      // to avoid transient errors (e.g. brief backend hiccup) hiding the banner.
-      gameLockPollFailCount++;
-      if (gameLockPollFailCount >= 3) {
-        console.warn('Game lock poll failed 3 times, clearing lock:', e);
-        gameLock.set(null);
-        stopGameLockPolling();
-        gameLockOverridden.set(false);
-        gameLockPollFailCount = 0;
-      }
-    }
-  }
-
-  async function handleForceUnlock() {
-    const game = pickedGame ?? $selectedGame;
-    if (!game) return;
-    await forceUnlockGame(game.game_id, game.bottle_name);
-    gameLock.set(null);
-    gameLockOverridden.set(true);
-    stopGameLockPolling();
-  }
-
-  async function toggleGameFixes() {
-    disableGameFixes = !disableGameFixes;
-    try {
-      await setConfigValue("disable_game_fixes", disableGameFixes ? "true" : "false");
-    } catch { /* best-effort */ }
-  }
-
-  async function handleFixDisplay() {
-    const game = pickedGame ?? $selectedGame;
-    if (!game) return;
-    fixingDisplay = true;
-    try {
-      const result = await fixSkyrimDisplay(game.bottle_name);
-      if (result.fixed) {
-        showSuccess(`Display fixed: ${result.applied.width}x${result.applied.height} fullscreen — game will open in its own Space (swipe to switch)`);
-      } else {
-        showSuccess(`Display settings already correct: ${result.applied.width}x${result.applied.height}`);
-      }
-    } catch (e: unknown) {
-      showError(`Display fix failed: ${e}`);
-    } finally {
-      fixingDisplay = false;
-    }
-  }
-
-  async function handleOpenSkseDownload() {
-    try {
-      const url = await getSkseDownloadUrl();
-      await openUrl(url);
-    } catch (e: unknown) {
-      showError(`Failed to open SKSE download page: ${e}`);
-    }
-  }
-
-  async function handleInstallSkse() {
-    const game = pickedGame ?? $selectedGame;
-    if (!game) return;
-    try {
-      const selected = await open({
-        title: "Select SKSE Archive (.7z or .zip)",
-        filters: [{ name: "Archives", extensions: ["7z", "zip"] }],
-      });
-      if (!selected) return;
-
-      const archivePath = typeof selected === "string" ? selected : String(selected);
-      installingSkse = true;
-      skse = await installSkseFromArchive(game.game_id, game.bottle_name, archivePath);
-      skseStatus.set(skse);
-      showSksePrompt = false;
-      showSuccess("SKSE installed successfully");
-    } catch (e: unknown) {
-      showError(`SKSE installation failed: ${e}`);
-    } finally {
-      installingSkse = false;
-    }
-  }
-
-  async function handleAutoInstallSkse() {
-    const game = pickedGame ?? $selectedGame;
-    if (!game) return;
-    try {
-      installingSkse = true;
-      skse = await installSkseAuto(game.game_id, game.bottle_name);
-      skseStatus.set(skse);
-      showSksePrompt = false;
-      showSuccess("SKSE auto-installed successfully");
-    } catch (e: unknown) {
-      showError(`SKSE auto-install failed: ${e}`);
-    } finally {
-      installingSkse = false;
-    }
-  }
-
-  async function handleInstallSkseAndLaunch() {
-    const game = pickedGame ?? $selectedGame;
-    if (!game) return;
-    try {
-      installingSkse = true;
-      showSkseInstallPrompt = false;
-      skse = await installSkseAuto(game.game_id, game.bottle_name);
-      skseStatus.set(skse);
-      showSksePrompt = false;
-      showSuccess("SKSE installed — launching game");
-      doLaunch(true);
-    } catch (e: unknown) {
-      showError(`SKSE auto-install failed: ${e}`);
-    } finally {
-      installingSkse = false;
-    }
-  }
-
-  async function handleInstallSkseArchiveAndLaunch() {
-    const game = pickedGame ?? $selectedGame;
-    if (!game) return;
-    try {
-      const selected = await open({
-        title: "Select SKSE Archive (.7z or .zip)",
-        filters: [{ name: "Archives", extensions: ["7z", "zip"] }],
-      });
-      if (!selected) return;
-
-      const archivePath = typeof selected === "string" ? selected : String(selected);
-      installingSkse = true;
-      showSkseInstallPrompt = false;
-      skse = await installSkseFromArchive(game.game_id, game.bottle_name, archivePath);
-      skseStatus.set(skse);
-      showSksePrompt = false;
-      showSuccess("SKSE installed — launching game");
-      doLaunch(true);
-    } catch (e: unknown) {
-      showError(`SKSE installation failed: ${e}`);
-    } finally {
-      installingSkse = false;
-    }
-  }
-
-  async function checkVersionStatus(game: DetectedGame, gen: number) {
-    try {
-      const status = await checkSkyrimVersion(game.game_id, game.bottle_name);
-      if (gen !== skseCheckGeneration) return; // stale
-      downgradeStatus = status;
-      if (!status.is_downgraded) {
-        const dismissed = localStorage.getItem(`downgrade_dismissed:${game.game_id}:${game.bottle_name}`);
-        if (!dismissed) showDowngradeBanner = true;
-      }
-    } catch {
-      // Non-critical
-    }
-  }
-
-  async function handleDowngrade() {
-    const game = pickedGame ?? $selectedGame;
-    if (!game) return;
-    downgrading = true;
-    try {
-      const status = await downgradeSkyrim(game.game_id, game.bottle_name, "full");
-      downgradeStatus = status;
-      showDowngradeBanner = false;
-      showSuccess(`Game downgraded to v${status.target_version}`);
-    } catch (e: unknown) {
-      showError(`Downgrade failed: ${e}`);
-    } finally {
-      downgrading = false;
-    }
-  }
-
-  function dismissDowngradeBanner() {
-    const game = pickedGame ?? $selectedGame;
-    if (game) {
-      localStorage.setItem(`downgrade_dismissed:${game.game_id}:${game.bottle_name}`, "true");
-    }
-    showDowngradeBanner = false;
-  }
+  // pollGameLock through dismissDowngradeBanner moved to SkseGameLaunchPanel
 
   // Drag-and-drop mod install
   function handleDragOver(e: DragEvent) {
@@ -1640,10 +1225,8 @@
       if (installed.staging_path) {
         try {
           const installer = await detectFomod(installed.staging_path);
-          if (installer) {
-            fomodInstaller = installer;
-            fomodTargetMod = installed;
-            showFomodWizard = true;
+          if (installer && fomodPanelRef) {
+            fomodPanelRef.triggerFomod(installed, installer);
           }
         } catch {
           // FOMOD detection is optional
@@ -1659,27 +1242,7 @@
     }
   }
 
-  function dismissSksePrompt() {
-    const game = pickedGame ?? $selectedGame;
-    if (game) {
-      localStorage.setItem(`skse_dismissed:${game.game_id}:${game.bottle_name}`, "true");
-    }
-    showSksePrompt = false;
-  }
-
-  async function toggleSksePreference() {
-    const game = pickedGame ?? $selectedGame;
-    if (!game || !skse) return;
-    const newValue = !skse.use_skse;
-    try {
-      await setSksePreference(game.game_id, game.bottle_name, newValue);
-      skse = { ...skse, use_skse: newValue };
-      skseStatus.set(skse);
-    } catch (e: unknown) {
-      showError(`Failed to update SKSE preference: ${e}`);
-    }
-    showSkseMenu = false;
-  }
+  // dismissSksePrompt + toggleSksePreference moved to SkseGameLaunchPanel
 
   function formatDate(iso: string): string {
     return new Date(iso).toLocaleDateString(undefined, {
@@ -1802,91 +1365,11 @@
     }
   }
 
-  // --- Check for updates ---
-  async function handleCheckUpdates() {
-    const game = pickedGame ?? $selectedGame;
-    if (!game) return;
-    checkingUpdates = true;
-    try {
-      modUpdates = await checkModUpdates(game.game_id, game.bottle_name);
-      if (modUpdates.length === 0) {
-        showSuccess("All mods are up to date");
-      } else {
-        showSuccess(`${modUpdates.length} update${modUpdates.length > 1 ? "s" : ""} available`);
-      }
-    } catch (e: unknown) {
-      showError(`Failed to check for updates: ${e}`);
-    } finally {
-      checkingUpdates = false;
-    }
-  }
+  // handleCheckUpdates + handleUpdateAll moved to ModUpdatePanel component
 
-  // --- Batch Update All ---
-  async function handleUpdateAll() {
-    const game = pickedGame ?? $selectedGame;
-    if (!game || modUpdates.length === 0) return;
-    // NexusMods compliance: open browser pages for each update
-    // Free users must manually download from the Nexus website
-    const gameSlug = game.nexus_slug || game.game_id;
-    let opened = 0;
-    for (const update of modUpdates) {
-      try {
-        await openUrl(`https://www.nexusmods.com/${gameSlug}/mods/${update.nexus_mod_id}?tab=files`);
-        opened++;
-      } catch {
-        // Skip mods that fail to open
-      }
-    }
-    if (opened > 0) {
-      showSuccess(`Opened ${opened} Nexus mod page${opened !== 1 ? "s" : ""} for updating`);
-    }
-  }
-
-  // --- FOMOD Reconfigure ---
-  async function handleReconfigureFomod(mod: InstalledMod) {
-    if (!mod.staging_path) return;
-    try {
-      const installer = await detectFomod(mod.staging_path);
-      if (!installer) {
-        showError("No FOMOD installer found in this mod's staging folder.");
-        return;
-      }
-      // Load previous recipe to pre-populate selections
-      const recipe = await getFomodRecipe(mod.id);
-      if (recipe) {
-        // Pre-apply saved selections into the installer (the wizard's loadDefaults will handle this)
-      }
-      fomodInstaller = installer;
-      fomodTargetMod = mod;
-      showFomodWizard = true;
-    } catch (e: unknown) {
-      showError(`Failed to detect FOMOD: ${e}`);
-    }
-  }
-
-  async function handleFomodComplete(selections: Record<string, string[]>) {
-    const game = pickedGame ?? $selectedGame;
-    if (!game || !fomodTargetMod || !fomodInstaller) return;
-    if (deploying) return;
-    showFomodWizard = false;
-    deploying = true;
-    try {
-      // Get the files for the new selections
-      const files = await getFomodFiles(fomodInstaller, selections);
-      // Save the recipe
-      await saveFomodRecipe(fomodTargetMod.id, fomodTargetMod.name, "", selections);
-      // Redeploy to apply changes
-      await redeployAllMods(game.game_id, game.bottle_name);
-      await loadMods(game);
-      await refreshHealth(game);
-      showSuccess(`Reconfigured FOMOD for "${fomodTargetMod.name}"`);
-    } catch (e: unknown) {
-      showError(`Failed to apply FOMOD configuration: ${e}`);
-    } finally {
-      deploying = false;
-      fomodInstaller = null;
-      fomodTargetMod = null;
-    }
+  // handleReconfigureFomod + handleFomodComplete moved to FomodReconfigurePanel component
+  function handleReconfigureFomod(mod: InstalledMod) {
+    fomodPanelRef?.reconfigure(mod);
   }
 
   // --- Import / Export ---
@@ -2031,7 +1514,7 @@
     }
     if ((e.key === "Delete" || e.key === "Backspace") && selectedModIds.size > 0) {
       e.preventDefault();
-      batchUninstall();
+      batchOpsRef?.batchUninstallFromParent();
       return;
     }
   }
@@ -2123,7 +1606,7 @@
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<svelte:window onkeydown={handleKeydown} onclick={() => { showToolsMenu = false; showSkseMenu = false; }} />
+<svelte:window onkeydown={handleKeydown} onclick={() => { showToolsMenu = false; }} />
 <div
   class="mods-page"
   class:drag-active={draggingOver}
@@ -2222,40 +1705,10 @@
         {/if}
       </div>
       <div class="game-banner-actions">
-        <button
-          class="btn btn-ghost"
-          onclick={handleCheckUpdates}
-          disabled={checkingUpdates}
-          title="Check Nexus for mod updates"
-        >
-          {#if checkingUpdates}
-            <span class="spinner spinner-sm"></span>
-            Checking...
-          {:else}
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="23 4 23 10 17 10" />
-              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
-            </svg>
-            Updates
-            {#if modUpdates.length > 0}
-              <span class="update-count-badge">{modUpdates.length}</span>
-            {/if}
-          {/if}
-        </button>
-        {#if modUpdates.length > 0}
-          <button
-            class="btn btn-accent btn-sm"
-            onclick={handleUpdateAll}
-            title="Open Nexus download pages for all outdated mods"
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-              <polyline points="7 10 12 15 17 10" />
-              <line x1="12" y1="15" x2="12" y2="3" />
-            </svg>
-            Update All ({modUpdates.length})
-          </button>
-        {/if}
+        <ModUpdatePanel
+          game={activeGame}
+          onUpdatesChecked={(updates) => { modUpdates = updates; }}
+        />
         <a
           href="https://www.nexusmods.com/{activeGame.nexus_slug}"
           target="_blank"
@@ -2270,25 +1723,6 @@
           </svg>
           Nexus
         </a>
-        {#if activeGame.game_id === "skyrimse"}
-          <button
-            class="btn btn-ghost"
-            onclick={handleFixDisplay}
-            disabled={fixingDisplay}
-            title="Fix display: native resolution, fullscreen in its own Space (3-finger swipe to switch)"
-          >
-            {#if fixingDisplay}
-              <span class="spinner spinner-sm"></span>
-            {:else}
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
-                <line x1="8" y1="21" x2="16" y2="21" />
-                <line x1="12" y1="17" x2="12" y2="21" />
-              </svg>
-            {/if}
-            Fix Display
-          </button>
-        {/if}
         <button class="btn btn-ghost" onclick={() => { pickedGame = null; selectedGame.set(null); }}>
           Change Game
         </button>
@@ -2321,10 +1755,8 @@
             if (installed.staging_path) {
               try {
                 const installer = await detectFomod(installed.staging_path);
-                if (installer) {
-                  fomodInstaller = installer;
-                  fomodTargetMod = installed;
-                  showFomodWizard = true;
+                if (installer && fomodPanelRef) {
+                  fomodPanelRef.triggerFomod(installed, installer);
                 }
               } catch {
                 // FOMOD detection is optional, don't show errors
@@ -2349,7 +1781,7 @@
       <div class="tools-dropdown-wrap">
         <button
           class="btn btn-ghost"
-          onclick={(e) => { e.stopPropagation(); showToolsMenu = !showToolsMenu; showSkseMenu = false; }}
+          onclick={(e) => { e.stopPropagation(); showToolsMenu = !showToolsMenu; }}
           disabled={launchingToolId !== null}
           title="Tools"
         >
@@ -2439,111 +1871,17 @@
           </div>
         {/if}
       </div>
-      <div class="play-button-group">
-        <button class="btn btn-play" onclick={handlePlay} disabled={launching || installingSkse}>
-          {#if launching}
-            <span class="spinner spinner-play"></span>
-            Launching...
-          {:else if installingSkse}
-            <span class="spinner spinner-play"></span>
-            Installing SKSE...
-          {:else}
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
-              <path d="M3 1.5v11l9-5.5L3 1.5z" />
-            </svg>
-            Play{#if skse?.use_skse && activeGame?.game_id === "skyrimse"} (SKSE){/if}
-          {/if}
-        </button>
-        {#if activeGame?.game_id === "skyrimse"}
-          <button
-            class="btn btn-play-dropdown"
-            onclick={(e) => { e.stopPropagation(); showSkseMenu = !showSkseMenu; showToolsMenu = false; showSkseInstallPrompt = false; }}
-            aria-label="Launch options"
-          >
-            <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
-              <path d="M2 3.5L5 7L8 3.5H2z" />
-            </svg>
-          </button>
-        {/if}
-        {#if showSkseMenu}
-          <div class="skse-dropdown">
-            <button class="dropdown-item" onclick={toggleSksePreference}>
-              <span class="dropdown-check">
-                {#if skse?.use_skse}
-                  <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M10 3L4.5 8.5L2 6" />
-                  </svg>
-                {/if}
-              </span>
-              Launch via SKSE
-            </button>
-            <button class="dropdown-item" onclick={() => { showSkseMenu = false; doLaunch(false); }}>
-              <span class="dropdown-check"></span>
-              Launch Game Directly
-            </button>
-            <div class="dropdown-divider"></div>
-            <div class="dropdown-info">
-              {#if skse?.installed}
-                SKSE {skse.version ?? ""} installed
-              {:else}
-                SKSE not installed
-              {/if}
-            </div>
-          </div>
-        {/if}
-        {#if showSkseInstallPrompt}
-          <div class="skse-dropdown skse-install-prompt">
-            <div class="dropdown-info" style="font-weight: 600; color: var(--text-primary);">SKSE is not installed</div>
-            <div class="dropdown-divider"></div>
-            <button class="dropdown-item" onclick={handleInstallSkseAndLaunch} disabled={installingSkse}>
-              <span class="dropdown-check">
-                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M6 2v8M2 6l4 4 4-4" />
-                </svg>
-              </span>
-              {installingSkse ? "Installing..." : "Auto Install SKSE"}
-            </button>
-            <button class="dropdown-item" onclick={handleInstallSkseArchiveAndLaunch} disabled={installingSkse}>
-              <span class="dropdown-check">
-                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                  <rect x="2" y="2" width="8" height="8" rx="1" />
-                </svg>
-              </span>
-              Install from Archive
-            </button>
-            <div class="dropdown-divider"></div>
-            <button class="dropdown-item dropdown-item-muted" onclick={() => { showSkseInstallPrompt = false; doLaunch(false); }}>
-              <span class="dropdown-check"></span>
-              Launch Without SKSE
-            </button>
-          </div>
-        {/if}
-      </div>
+      {#if activeGame}
+        <SkseGameLaunchPanel
+          game={activeGame}
+          bind:launching
+          bind:disableGameFixes
+          onSkseStatusChange={(status) => { skse = status; }}
+        />
+      {/if}
     </div>
 
     <!-- Banners (full-width, above the main content grid) -->
-    {#if $gameLock && !$gameLockOverridden}
-      <div class="game-lock-banner">
-        <div class="skse-banner-icon game-lock-icon">
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="4" y="9" width="12" height="9" rx="1.5" />
-            <path d="M7 9V6a3 3 0 0 1 6 0v3" />
-          </svg>
-        </div>
-        <div class="skse-banner-content">
-          <p class="skse-banner-title">Game Is Running</p>
-          <p class="skse-banner-text">
-            Mod changes are locked while the game is running (pid {$gameLock.pid}).
-            Close the game to make changes, or unlock to override.
-          </p>
-        </div>
-        <div class="skse-banner-actions">
-          <button class="btn btn-ghost-danger btn-sm" onclick={handleForceUnlock}>
-            Unlock Anyway
-          </button>
-        </div>
-      </div>
-    {/if}
 
     {#if csModCount > 0 && csCheckDone && !dismissedBanners.has("cs-warning")}
       <div class="cs-warning-banner">
@@ -2571,57 +1909,7 @@
       </div>
     {/if}
 
-    {#if showSksePrompt && activeGame?.game_id === "skyrimse"}
-      <div class="skse-banner">
-        <div class="skse-banner-icon">
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="10" cy="10" r="9" />
-            <path d="M10 6v4" />
-            <circle cx="10" cy="14" r="0.5" fill="currentColor" />
-          </svg>
-        </div>
-        <div class="skse-banner-content">
-          <p class="skse-banner-title">SKSE Not Installed</p>
-          <p class="skse-banner-text">
-            SKSE is required by most Skyrim mods.
-          </p>
-        </div>
-        <div class="skse-banner-actions">
-          <button class="btn btn-primary btn-sm" onclick={handleAutoInstallSkse} disabled={installingSkse}>
-            {installingSkse ? "Installing..." : "Auto Install"}
-          </button>
-          <button class="btn btn-secondary btn-sm" onclick={handleInstallSkse} disabled={installingSkse}>
-            From Archive
-          </button>
-          <button class="btn btn-ghost btn-sm" onclick={dismissSksePrompt}>Dismiss</button>
-        </div>
-      </div>
-    {/if}
-
-    {#if showDowngradeBanner && activeGame?.game_id === "skyrimse" && downgradeStatus && !downgradeStatus.is_downgraded}
-      <div class="downgrade-banner">
-        <div class="skse-banner-icon">
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M10 2v12" />
-            <polyline points="6 10 10 14 14 10" />
-            <path d="M4 18h12" />
-          </svg>
-        </div>
-        <div class="skse-banner-content">
-          <p class="skse-banner-title">
-            Skyrim SE {downgradeStatus.current_version}
-            {#if downgradeStatus.current_version !== "1.5.97"} — Downgrade Available{/if}
-          </p>
-          <p class="skse-banner-text">Most mods target v1.5.97.</p>
-        </div>
-        <div class="skse-banner-actions">
-          <button class="btn btn-primary btn-sm" onclick={handleDowngrade} disabled={downgrading}>
-            {downgrading ? "Downgrading..." : "Downgrade"}
-          </button>
-          <button class="btn btn-ghost btn-sm" onclick={dismissDowngradeBanner}>Dismiss</button>
-        </div>
-      </div>
-    {/if}
+    <!-- SKSE banner + Downgrade banner rendered by SkseGameLaunchPanel -->
 
     <!-- Two-column content area -->
     <div class="content-grid">
@@ -2663,54 +1951,17 @@
             </button>
           </div>
         {/if}
-        {#if $skseStatus && !$skseStatus.installed && activeGame?.game_id === "skyrimse" && !dismissedBanners.has("skse")}
-          <div class="issue-banner issue-banner-blue">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" />
-            </svg>
-            <span>SKSE not detected — many mods require it</span>
-            <button class="banner-action" onclick={() => { showSksePrompt = true; }}>Install SKSE</button>
-            <button class="banner-dismiss" onclick={() => dismissBanner("skse")}>
-              <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-                <line x1="3" y1="3" x2="9" y2="9" /><line x1="9" y1="3" x2="3" y2="9" />
-              </svg>
-            </button>
-          </div>
-        {/if}
+        <!-- SKSE inline issue banner removed — SkseGameLaunchPanel handles SKSE prompt -->
 
         <!-- Bulk Action Bar -->
-        {#if selectedModIds.size > 0}
-          <div class="bulk-action-bar">
-            {#if bulkOperating && bulkProgress}
-              <div class="bulk-progress">
-                <div class="bulk-progress-header">
-                  <span class="bulk-progress-label">{bulkProgress.message}</span>
-                  {#if bulkProgress.phase === "toggle"}
-                    <span class="bulk-progress-count">{bulkProgress.current}/{bulkProgress.total}</span>
-                  {/if}
-                </div>
-                <div class="bulk-progress-bar">
-                  <div
-                    class="bulk-progress-fill"
-                    class:indeterminate={bulkProgress.phase === "redeploy" || bulkProgress.phase === "plugins"}
-                    style="width: {bulkProgress.phase === 'toggle' ? (bulkProgress.current / bulkProgress.total) * 100 : 100}%"
-                  ></div>
-                </div>
-              </div>
-            {:else}
-              <span class="bulk-count">{selectedModIds.size} selected</span>
-              <button class="btn btn-sm btn-secondary" disabled={bulkOperating !== null} onclick={batchEnable}>
-                {bulkOperating === "enabling" ? "Enabling..." : "Enable All"}
-              </button>
-              <button class="btn btn-sm btn-secondary" disabled={bulkOperating !== null} onclick={batchDisable}>
-                {bulkOperating === "disabling" ? "Disabling..." : "Disable All"}
-              </button>
-              <button class="btn btn-sm btn-ghost-danger" disabled={bulkOperating !== null} onclick={batchUninstall}>
-                {bulkOperating === "uninstalling" ? "Uninstalling..." : "Uninstall"}
-              </button>
-              <button class="btn btn-sm btn-ghost" disabled={bulkOperating !== null} onclick={() => selectedModIds = new Set()}>Clear</button>
-            {/if}
-          </div>
+        {#if activeGame}
+          <ModBatchOperations
+            bind:this={batchOpsRef}
+            game={activeGame}
+            {selectedModIds}
+            onComplete={async () => { if (activeGame) { await loadMods(activeGame); await refreshHealth(activeGame); } }}
+            onClearSelection={() => { selectedModIds = new Set(); }}
+          />
         {/if}
 
         <!-- Search & Filter Bar -->
@@ -3615,14 +2866,13 @@
   {/if}
 </div>
 
-{#if showFomodWizard && fomodInstaller}
-  <div class="fomod-wizard-overlay">
-    <FomodWizard
-      installer={fomodInstaller}
-      onComplete={handleFomodComplete}
-      onCancel={() => { showFomodWizard = false; fomodInstaller = null; fomodTargetMod = null; }}
-    />
-  </div>
+{#if activeGame}
+  <FomodReconfigurePanel
+    bind:this={fomodPanelRef}
+    game={activeGame}
+    bind:deploying
+    onComplete={async () => { if (activeGame) { await loadMods(activeGame); await refreshHealth(activeGame); } }}
+  />
 {/if}
 
 {#if showShaderWizard && activeGame}
@@ -3692,36 +2942,6 @@
 
 
 <style>
-  .game-fixes-toggle {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 12px;
-    color: var(--text-secondary);
-    cursor: pointer;
-    user-select: none;
-  }
-
-  .game-fixes-toggle input[type="checkbox"] {
-    accent-color: var(--accent);
-    cursor: pointer;
-  }
-
-  /* ============================
-     FOMOD Wizard Overlay
-     ============================ */
-  .fomod-wizard-overlay {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.5);
-    backdrop-filter: var(--glass-blur-light);
-    -webkit-backdrop-filter: var(--glass-blur-light);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 2000;
-  }
-
   /* ============================
      Page Layout
      ============================ */
