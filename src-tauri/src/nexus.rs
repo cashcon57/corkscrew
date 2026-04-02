@@ -653,29 +653,14 @@ impl NexusClient {
             });
         }
 
-        // Attach query parameters when present (URL-encoded for safety).
+        // Attach query parameters when present (properly URL-encoded via `url` crate).
         if let (Some(k), Some(e)) = (key, expires) {
-            let encoded_key: String = k
-                .chars()
-                .map(|c| {
-                    if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '~' {
-                        c.to_string()
-                    } else {
-                        format!("%{:02X}", c as u8)
-                    }
-                })
-                .collect();
-            let encoded_expires: String = e
-                .chars()
-                .map(|c| {
-                    if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '~' {
-                        c.to_string()
-                    } else {
-                        format!("%{:02X}", c as u8)
-                    }
-                })
-                .collect();
-            url.push_str(&format!("?key={encoded_key}&expires={encoded_expires}"));
+            let query = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("key", k)
+                .append_pair("expires", e)
+                .finish();
+            url.push('?');
+            url.push_str(&query);
         }
 
         // Enforce minimum spacing between requests
@@ -828,6 +813,21 @@ impl NexusClient {
             })
             .filter(|n| !n.is_empty())
             .unwrap_or(url_file_name);
+
+        // Sanitize filename from Content-Disposition to prevent path traversal
+        let file_name = file_name
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(&file_name)
+            .replace("..", "")
+            .to_string();
+        let file_name = file_name.trim_matches('.').to_string();
+        if file_name.is_empty() {
+            return Err(NexusError::Api {
+                status: 0,
+                message: "Server returned empty or unsafe filename".to_string(),
+            });
+        }
 
         let file_path = dest.join(&file_name);
 

@@ -25,7 +25,7 @@ pub async fn run_wine_diagnostics(
         Ok(wine_diagnostic::run_diagnostics(&bottle, &game_id))
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -35,7 +35,7 @@ pub async fn fix_wine_appdata(bottle_name: String) -> Result<(), String> {
         wine_diagnostic::fix_appdata(&bottle).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -50,7 +50,7 @@ pub async fn fix_wine_dll_override(
             .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -60,7 +60,7 @@ pub async fn fix_wine_retina_mode(bottle_name: String) -> Result<(), String> {
         wine_diagnostic::fix_retina_mode(&bottle).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -73,7 +73,7 @@ pub async fn check_prefix_health_linux(
         Ok(wine_diagnostic::check_prefix_health_linux(&bottle.path, &game_id))
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 
@@ -129,7 +129,7 @@ pub async fn add_mod_dependency(
         )
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -137,7 +137,7 @@ pub async fn remove_mod_dependency(dep_id: i64, state: State<'_, AppState>) -> R
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || mod_dependencies::remove_dependency(&db, dep_id))
         .await
-        .map_err(|e| format!("Task failed: {e}"))?
+        .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -148,7 +148,7 @@ pub async fn get_mod_dependencies(
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || mod_dependencies::get_dependencies(&db, mod_id))
         .await
-        .map_err(|e| format!("Task failed: {e}"))?
+        .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -159,7 +159,7 @@ pub async fn get_mod_dependents(
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || mod_dependencies::get_dependents(&db, mod_id))
         .await
-        .map_err(|e| format!("Task failed: {e}"))?
+        .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -191,7 +191,7 @@ pub async fn get_mod_recommendations(
         mod_recommendations::get_recommendations(&db, &game_id, &bottle_name, target_mod_id)
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -205,7 +205,7 @@ pub async fn get_popular_mods(
         mod_recommendations::get_popular_mods(&db, &game_id, &bottle_name)
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 
@@ -227,7 +227,7 @@ pub async fn find_crash_logs_cmd(
         ))
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -236,7 +236,7 @@ pub async fn analyze_crash_log_cmd(log_path: String) -> Result<CrashReport, Stri
         crashlog::analyze_crash_log(Path::new(&log_path)).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 /// Check for new (unseen) crash logs since the last check.
@@ -250,7 +250,7 @@ pub async fn chat_check_new_crashes(
         Ok(crashlog::check_new_crashes(&PathBuf::from(&bottle.path), &game_id))
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 
@@ -269,7 +269,7 @@ pub async fn create_game_snapshot(
             .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -285,7 +285,7 @@ pub async fn check_game_integrity(
             .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -299,7 +299,7 @@ pub async fn has_game_snapshot(
         integrity::has_snapshot(&db, &game_id, &bottle_name).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 
@@ -317,7 +317,7 @@ pub async fn start_game_session(
         session_tracker::start_session(&db, &game_id, &bottle_name, profile_name.as_deref())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -332,7 +332,7 @@ pub async fn end_game_session(
         session_tracker::end_session(&db, session_id, clean_exit, crash_log_path.as_deref())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -356,7 +356,7 @@ pub async fn record_session_mod_change(
         )
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]

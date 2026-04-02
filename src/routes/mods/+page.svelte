@@ -28,17 +28,10 @@
     fixSkyrimDisplay,
     onInstallProgress,
     redeployAllMods,
-    deployIncremental,
-    purgeDeployment,
-    getDeploymentHealth,
     getDeploymentStats,
     setModNotes,
     setModTags,
     setModPriority,
-    analyzeConflicts,
-    resolveAllConflicts,
-    recordConflictWinner,
-    onDeployProgress,
     onBulkOperationProgress,
     backfillCategories,
     exportModlist,
@@ -48,9 +41,6 @@
     saveFomodRecipe,
     detectModTools,
     launchModTool,
-    getAvailableDiskSpace,
-    setModCollectionName,
-    listInstalledCollections,
     endorseMod,
     abstainMod,
     getUserEndorsements,
@@ -62,7 +52,7 @@
     isDeployInProgress,
     onDeployStatusChanged,
   } from "$lib/api";
-  import type { InstallProgressEvent, DeploymentHealth, IncrementalDeployResult, ConflictSuggestion, ResolutionResult, DeployProgress, ModTool, UserEndorsement, IdenticalContentStats } from "$lib/types";
+  import type { InstallProgressEvent, DeploymentHealth, ModTool, UserEndorsement } from "$lib/types";
   import {
     selectedGame,
     installedMods,
@@ -90,18 +80,19 @@
   import ModBisect from "$lib/components/ModBisect.svelte";
   import SkeletonRows from "$lib/components/SkeletonRows.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
-  import ConflictMap from "$lib/components/ConflictMap.svelte";
   import ModDetailPanel from "$lib/components/mods/ModDetailPanel.svelte";
+  import DeploymentPanel from "$lib/components/mods/DeploymentPanel.svelte";
+  import ConflictResolutionPanel from "$lib/components/mods/ConflictResolutionPanel.svelte";
+  import ModInstallFlow from "$lib/components/mods/ModInstallFlow.svelte";
 
   // Game launch fixes opt-out (display fix + cursor clamp)
   let disableGameFixes = $state(false);
 
+  // Install flow state (shared with ModInstallFlow via $bindable and drag-drop handler)
   let installing = $state(false);
   let installStep = $state("");
   let installDetail = $state("");
-  let showModlistNamePrompt = $state(false);
-  let modlistNameInput = $state("User");
-  let pendingInstallFilePath = $state<string | null>(null);
+  let installFlowRef = $state<ReturnType<typeof ModInstallFlow> | null>(null);
   let loadingMods = $state(false);
   let confirmUninstall = $state<number | null>(null);
   let togglingMod = $state<number | null>(null);
@@ -143,10 +134,9 @@
 
   // Deploy/purge state
   let deploying = $state(false);
-  let purging = $state(false);
   let deployHealth = $state<DeploymentHealth | null>(null);
-  let showHealthPanel = $state(false);
   let backendDeployInProgress = $state(false);
+  let deploymentPanelRef = $state<ReturnType<typeof DeploymentPanel> | null>(null);
   let deployStatusUnlisten: (() => void) | null = null;
 
   // Search/filter state
@@ -172,7 +162,7 @@
   // Conflict panel state
   let showConflictPanel = $state(false);
   let showConflictMap = $state(false);
-  let makingWinner = $state<number | null>(null);
+  // makingWinner moved to ConflictResolutionPanel
 
   // Mod overflow menu state
   let overflowMenuModId = $state<number | null>(null);
@@ -204,11 +194,7 @@
 
   // Bulk selection state (functions defined after filteredMods)
   let selectedModIds = $state<Set<number>>(new Set());
-  let suggestions = $state<ConflictSuggestion[]>([]);
-  let analyzingConflicts = $state(false);
-  let resolvingAll = $state(false);
-  let resolutionResult = $state<ResolutionResult | null>(null);
-  let identicalStats = $state<IdenticalContentStats | null>(null);
+  // Conflict analysis state managed by ConflictResolutionPanel component
 
   // Selected mod for dependency panel
   let selectedModId = $state<number | undefined>(undefined);
@@ -220,10 +206,7 @@
   let scrollTop = $state(0);
   let containerHeight = $state(600);
 
-  // Deploy progress
-  let deployProgress = $state(0);
-  let deployProgressText = $state("");
-  let deployUnlisten: (() => void) | null = null;
+  // Deploy progress managed by DeploymentPanel component
 
   // Keyboard focus tracking
   let focusedIndex = $state<number>(-1);
@@ -390,7 +373,6 @@
 
   onDestroy(() => {
     if (installUnlisten) { installUnlisten(); installUnlisten = null; }
-    if (deployUnlisten) { deployUnlisten(); deployUnlisten = null; }
     if (bulkProgressUnlisten) { bulkProgressUnlisten(); bulkProgressUnlisten = null; }
     if (deployStatusUnlisten) { deployStatusUnlisten(); deployStatusUnlisten = null; }
     stopGameLockPolling();
@@ -849,6 +831,17 @@
     return [...names].sort();
   })());
 
+  // Precomputed collection mod counts (avoids O(n*m) in dropdown template)
+  let collectionCounts = $derived((() => {
+    const counts = new Map<string, number>();
+    let standalone = 0;
+    for (const m of $installedMods) {
+      if (!m.collection_name) { standalone++; continue; }
+      counts.set(m.collection_name, (counts.get(m.collection_name) ?? 0) + 1);
+    }
+    return { standalone, collections: counts };
+  })());
+
   // Collection-grouped mods for collection view mode
   let collapsedGroups = $state<Set<string>>(new Set());
   let groupedMods = $derived((() => {
@@ -1222,6 +1215,9 @@
     }
   }
 
+  // handleInstall, confirmModlistName, doInstallMod, stepLabels moved to ModInstallFlow component
+
+  // Step labels for drag-and-drop install progress display (kept for drag-drop handler)
   const stepLabels: Record<string, string> = {
     preparing: "Preparing...",
     extracting: "Extracting archive...",
@@ -1229,155 +1225,6 @@
     deploying: "Deploying to game...",
     "syncing-plugins": "Syncing plugins...",
   };
-
-  async function handleInstall() {
-    const installStatus = get(collectionInstallStatus);
-    if (installStatus?.active) {
-      showError('Cannot modify mods while a collection is being installed');
-      return;
-    }
-    const game = pickedGame ?? $selectedGame;
-    if (!game) return;
-
-    const filePath = await open({
-      multiple: false,
-      filters: [
-        {
-          name: "Mod Archives",
-          extensions: ["zip", "7z", "rar"],
-        },
-      ],
-    });
-
-    if (!filePath) return;
-
-    // If no modlist is active, prompt the user to name their current modlist
-    if (!$activeCollection) {
-      pendingInstallFilePath = filePath as string;
-      modlistNameInput = "User";
-      showModlistNamePrompt = true;
-      return;
-    }
-
-    await doInstallMod(filePath as string);
-  }
-
-  async function confirmModlistName() {
-    const name = modlistNameInput.trim();
-    if (!name) return;
-    showModlistNamePrompt = false;
-    const game = pickedGame ?? $selectedGame;
-    if (!game) return;
-    activeCollection.set({ name, mod_count: 0, enabled_count: 0, slug: null, author: null, image_url: null, game_domain: null, installed_revision: null, original_mod_count: null, game_versions: [] });
-    if (pendingInstallFilePath) {
-      await doInstallMod(pendingInstallFilePath);
-      pendingInstallFilePath = null;
-      // Reload collections for the top bar
-      try {
-        const collections = await listInstalledCollections(game.game_id, game.bottle_name);
-        collectionList.set(collections);
-      } catch { /* non-critical */ }
-    }
-  }
-
-  async function doInstallMod(filePath: string) {
-    if ($gameLock && !$gameLockOverridden) {
-      showError('Cannot install mods while the game is running. Close the game or click "Unlock Anyway".');
-      return;
-    }
-    const game = pickedGame ?? $selectedGame;
-    if (!game) return;
-
-    // Check available disk space before installing
-    try {
-      const homeDir = filePath as string;
-      const parentDir = homeDir.substring(0, homeDir.lastIndexOf("/")) || "/";
-      const freeBytes = await getAvailableDiskSpace(parentDir);
-      const GB = 1024 * 1024 * 1024;
-      if (freeBytes < 0.5 * GB) {
-        showError("Not enough disk space (< 500 MB free). Free up space before installing.");
-        return;
-      }
-      if (freeBytes < 2 * GB) {
-        showError("Low disk space warning: less than 2 GB free. Install will proceed, but consider freeing space.");
-      }
-    } catch {
-      // Non-critical — proceed even if space check fails
-    }
-
-    installing = true;
-    installStep = "preparing";
-    installDetail = "";
-
-    // Subscribe to progress events
-    try {
-      installUnlisten = await onInstallProgress((event: InstallProgressEvent) => {
-        if (event.kind === "stepChanged") {
-          installStep = event.step;
-          installDetail = event.detail ?? "";
-        } else if (event.kind === "modCompleted") {
-          installStep = "complete";
-          installDetail = "";
-        } else if (event.kind === "modFailed") {
-          installStep = "failed";
-          installDetail = event.error;
-        }
-      });
-
-      const mod = await installMod(
-        filePath,
-        game.game_id,
-        game.bottle_name
-      );
-      if (!mod || typeof mod !== 'object' || !('nexus_mod_id' in (mod as any))) {
-        console.error('Unexpected install result:', mod);
-        return;
-      }
-      const installed = mod as InstalledMod;
-
-      // Associate mod with the active modlist
-      if ($activeCollection) {
-        try {
-          await setModCollectionName(installed.id, $activeCollection.name);
-        } catch { /* non-critical */ }
-      }
-
-      showSuccess(`Installed "${installed.name}" successfully`);
-      await loadMods(game);
-      await refreshHealth(game);
-
-      // Check for duplicate mod (same nexus_mod_id)
-      if (installed.nexus_mod_id) {
-        const existing = $installedMods.find(
-          m => m.nexus_mod_id === installed.nexus_mod_id && m.id !== installed.id
-        );
-        if (existing) {
-          duplicateDialog = { newMod: installed, oldMod: existing };
-        }
-      }
-
-      // Auto-detect FOMOD after install
-      if (installed.staging_path) {
-        try {
-          const installer = await detectFomod(installed.staging_path);
-          if (installer) {
-            fomodInstaller = installer;
-            fomodTargetMod = installed;
-            showFomodWizard = true;
-          }
-        } catch {
-          // FOMOD detection is optional, don't show errors
-        }
-      }
-    } catch (e: unknown) {
-      showError(`Install failed: ${e}`);
-    } finally {
-      installing = false;
-      installStep = "";
-      installDetail = "";
-      if (installUnlisten) { installUnlisten(); installUnlisten = null; }
-    }
-  }
 
   async function handleUninstall(modId: number) {
     if ($gameLock && !$gameLockOverridden) {
@@ -1415,6 +1262,8 @@
     }
     const game = pickedGame ?? $selectedGame;
     if (!game) return;
+    // Prevent double-toggle race condition: skip if this mod is already in-flight
+    if (togglingMod === mod.id) return;
     togglingMod = mod.id;
     const newEnabled = !mod.enabled;
 
@@ -1612,7 +1461,7 @@
       });
       if (!selected) return;
 
-      const archivePath = typeof selected === "string" ? selected : (selected as any).path;
+      const archivePath = typeof selected === "string" ? selected : String(selected);
       installingSkse = true;
       skse = await installSkseFromArchive(game.game_id, game.bottle_name, archivePath);
       skseStatus.set(skse);
@@ -1669,7 +1518,7 @@
       });
       if (!selected) return;
 
-      const archivePath = typeof selected === "string" ? selected : (selected as any).path;
+      const archivePath = typeof selected === "string" ? selected : String(selected);
       installingSkse = true;
       showSkseInstallPrompt = false;
       skse = await installSkseFromArchive(game.game_id, game.bottle_name, archivePath);
@@ -1752,8 +1601,8 @@
     }
 
     // Tauri needs the file path from the drop event
-    // dataTransfer.files[0].path is available in Tauri webview
-    const filePath = (file as any).path;
+    // Tauri webview adds a `path` property to File objects in drop events
+    const filePath = (file as File & { path?: string }).path;
     if (!filePath) {
       showError("Could not read file path from drop event.");
       return;
@@ -1778,7 +1627,7 @@
       });
 
       const mod = await installMod(filePath, game.game_id, game.bottle_name);
-      if (!mod || typeof mod !== 'object' || !('nexus_mod_id' in (mod as any))) {
+      if (!mod) {
         console.error('Unexpected install result:', mod);
         return;
       }
@@ -2062,101 +1911,22 @@
   }
 
   // --- Deploy / Purge / Health ---
-  async function handleDeploy() {
-    if ($gameLock && !$gameLockOverridden) {
-      showError('Cannot deploy while the game is running. Close the game or click "Unlock Anyway".');
-      return;
-    }
-    const installStatus = get(collectionInstallStatus);
-    if (installStatus?.active) {
-      showError('Cannot modify mods while a collection is being installed');
-      return;
-    }
-    const game = pickedGame ?? $selectedGame;
-    if (!game) return;
-    deploying = true;
-    deployProgress = 0;
-    deployProgressText = "Computing diff...";
-    try {
-      // Try incremental deployment first (much faster for small changes)
-      const incrResult = await deployIncremental(game.game_id, game.bottle_name);
-      const totalChanged = incrResult.files_added + incrResult.files_removed + incrResult.files_updated;
-      if (incrResult.fallback_used) {
-        // Incremental fell back to full redeploy internally
-        showSuccess(`Deployed ${incrResult.files_added} files (full redeploy)${incrResult.fallback_used ? " (copy fallback used)" : ""}`);
-      } else if (totalChanged === 0) {
-        showSuccess("Deployment is already up to date");
-      } else {
-        const parts: string[] = [];
-        if (incrResult.files_added > 0) parts.push(`${incrResult.files_added} added`);
-        if (incrResult.files_updated > 0) parts.push(`${incrResult.files_updated} updated`);
-        if (incrResult.files_removed > 0) parts.push(`${incrResult.files_removed} removed`);
-        parts.push(`${incrResult.files_unchanged} unchanged`);
-        showSuccess(`Incremental deploy: ${parts.join(", ")}`);
-      }
-      if (incrResult.verification_failures.length > 0) {
-        showError(`${incrResult.verification_failures.length} file(s) failed to deploy`);
-      }
-      await refreshHealth(game);
-    } catch {
-      // Incremental failed — fall back to full redeploy
-      deployProgressText = "Falling back to full deploy...";
-      try {
-        deployUnlisten = await onDeployProgress((p: DeployProgress) => {
-          if (p.total_files > 0) {
-            deployProgress = Math.round((p.files_deployed / p.total_files) * 100);
-            deployProgressText = `${p.mod_name} (${p.files_deployed}/${p.total_files} files)`;
-          } else {
-            deployProgress = p.total > 0 ? Math.round((p.current / p.total) * 100) : 0;
-            deployProgressText = `${p.current}/${p.total} ${p.mod_name}`;
-          }
-        });
-        const result = await redeployAllMods(game.game_id, game.bottle_name);
-        showSuccess(`Deployed ${result.deployed_count} files (full redeploy)${result.fallback_used ? " (copy fallback used)" : ""}`);
-        await refreshHealth(game);
-      } catch (e2: unknown) {
-        showError(`Deploy failed: ${e2}`);
-      }
-    } finally {
-      deploying = false;
-      deployProgress = 0;
-      deployProgressText = "";
-      if (deployUnlisten) { deployUnlisten(); deployUnlisten = null; }
-    }
-  }
-
-  async function handlePurge() {
-    if ($gameLock && !$gameLockOverridden) {
-      showError('Cannot purge while the game is running. Close the game or click "Unlock Anyway".');
-      return;
-    }
-    const game = pickedGame ?? $selectedGame;
-    if (!game) return;
-    purging = true;
-    try {
-      const removed = await purgeDeployment(game.game_id, game.bottle_name);
-      showSuccess(`Purged ${removed.length} deployed files`);
-      await refreshHealth(game);
-    } catch (e: unknown) {
-      showError(`Purge failed: ${e}`);
-    } finally {
-      purging = false;
-    }
-  }
+  // Deploy/purge logic and UI moved to DeploymentPanel component.
+  // refreshHealth delegates to the component via bind:this.
 
   async function refreshHealth(game: DetectedGame) {
-    const t0 = performance.now();
-    try {
-      const stats = await getDeploymentStats(game.game_id, game.bottle_name);
-      deployHealth = { ...stats, conflict_count: conflicts.length };
-    } catch {
-      deployHealth = null;
-    } finally {
-      console.log(`[perf] refreshHealth: ${(performance.now() - t0).toFixed(0)}ms`);
+    if (deploymentPanelRef) {
+      await deploymentPanelRef.refreshHealth(conflicts.length);
+    } else {
+      // Fallback if component not yet mounted
+      try {
+        const stats = await getDeploymentStats(game.game_id, game.bottle_name);
+        deployHealth = { ...stats, conflict_count: conflicts.length };
+      } catch {
+        deployHealth = null;
+      }
     }
   }
-
-  // Health is now loaded in parallel with mods in the activeGame $effect above
 
   // --- Notes ---
   async function handleSaveNotes(modId: number, value: string) {
@@ -2172,7 +1942,7 @@
   async function handleInstallOverMod(mod: InstalledMod) {
     // Re-install: open file picker and install over the same mod
     showSuccess(`Select a new archive to reinstall "${mod.name}"`);
-    await handleInstall();
+    if (installFlowRef) await installFlowRef.handleInstall();
   }
 
   async function handleCheckSingleUpdate(mod: InstalledMod) {
@@ -2191,72 +1961,7 @@
     }
   }
 
-  async function handleMakeWinner(conflict: FileConflict, modId: number) {
-    const game = pickedGame ?? $selectedGame;
-    if (!game) return;
-    if (deploying) return;
-    makingWinner = modId;
-    deploying = true;
-    try {
-      // Find current winner's priority and set this mod 1 higher
-      const winner = conflict.mods.find(m => m.mod_id === conflict.winner_mod_id);
-      const newPriority = winner ? winner.priority + 1 : 999;
-      await setModPriority(modId, newPriority);
-      // Record this resolution so the conflict disappears from the list
-      const loserIds = conflict.mods
-        .filter(m => m.mod_id !== modId)
-        .map(m => m.mod_id);
-      await recordConflictWinner(game.game_id, game.bottle_name, modId, loserIds);
-      await redeployAllMods(game.game_id, game.bottle_name);
-      await loadMods(game);
-      await refreshHealth(game);
-    } catch (e: unknown) {
-      showError(`Failed to set winner: ${e}`);
-    } finally {
-      deploying = false;
-      makingWinner = null;
-    }
-  }
-
-  async function handleAnalyzeConflicts() {
-    const game = pickedGame ?? $selectedGame;
-    if (!game) return;
-    analyzingConflicts = true;
-    resolutionResult = null;
-    identicalStats = null;
-    try {
-      const response = await analyzeConflicts(game.game_id, game.bottle_name);
-      suggestions = response.suggestions;
-      identicalStats = response.identical_stats;
-    } catch (e: unknown) {
-      showError(`Conflict analysis failed: ${e}`);
-    } finally {
-      analyzingConflicts = false;
-    }
-  }
-
-  async function handleMagicResolve() {
-    const game = pickedGame ?? $selectedGame;
-    if (!game) return;
-    resolvingAll = true;
-    resolutionResult = null;
-    identicalStats = null;
-    try {
-      resolutionResult = await resolveAllConflicts(game.game_id, game.bottle_name);
-      await loadMods(game);
-      await refreshHealth(game);
-      // Re-analyze to show updated state
-      const response = await analyzeConflicts(game.game_id, game.bottle_name);
-      suggestions = response.suggestions;
-      identicalStats = response.identical_stats;
-      const autoCount = resolutionResult.author_resolved + resolutionResult.auto_suggested + resolutionResult.identical_content;
-      showSuccess(`Resolved ${autoCount} conflicts automatically`);
-    } catch (e: unknown) {
-      showError(`Magic resolver failed: ${e}`);
-    } finally {
-      resolvingAll = false;
-    }
-  }
+  // handleMakeWinner, handleAnalyzeConflicts, handleMagicResolve moved to ConflictResolutionPanel
 
   function getConflictTooltip(modId: number): string {
     const names = conflictDetails.get(modId);
@@ -2282,7 +1987,7 @@
     }
     if (isCmd && e.key === "d") {
       e.preventDefault();
-      handleDeploy();
+      if (deploymentPanelRef) deploymentPanelRef.handleDeploy();
       return;
     }
     if (e.key === "Escape") {
@@ -2508,9 +2213,9 @@
           <div class="modlist-selector">
             <select class="modlist-dropdown" bind:value={filterCollection}>
               <option value={null}>All Mods ({modCount})</option>
-              <option value="__standalone__">Standalone ({$installedMods.filter(m => !m.collection_name).length})</option>
+              <option value="__standalone__">Standalone ({collectionCounts.standalone})</option>
               {#each collectionNames as name}
-                <option value={name}>{name} ({$installedMods.filter(m => m.collection_name === name).length})</option>
+                <option value={name}>{name} ({collectionCounts.collections.get(name) ?? 0})</option>
               {/each}
             </select>
           </div>
@@ -2592,67 +2297,54 @@
 
     <!-- Action Bar -->
     <div class="action-bar">
-      <button class="btn btn-primary" onclick={handleInstall} disabled={installing}>
-        {#if installing}
-          <span class="spinner"></span>
-          {stepLabels[installStep] ?? "Installing..."}
-        {:else}
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-            <line x1="7" y1="2" x2="7" y2="12" />
-            <line x1="2" y1="7" x2="12" y2="7" />
-          </svg>
-          Install Mod
-        {/if}
-      </button>
+      {#if activeGame}
+        <ModInstallFlow
+          bind:this={installFlowRef}
+          game={activeGame}
+          bind:installing
+          bind:installStep
+          bind:installDetail
+          onInstallComplete={async (installed) => {
+            if (!activeGame) return;
+            await loadMods(activeGame);
+            await refreshHealth(activeGame);
+            // Check for duplicate mod (same nexus_mod_id)
+            if (installed.nexus_mod_id) {
+              const existing = $installedMods.find(
+                m => m.nexus_mod_id === installed.nexus_mod_id && m.id !== installed.id
+              );
+              if (existing) {
+                duplicateDialog = { newMod: installed, oldMod: existing };
+              }
+            }
+            // Auto-detect FOMOD after install
+            if (installed.staging_path) {
+              try {
+                const installer = await detectFomod(installed.staging_path);
+                if (installer) {
+                  fomodInstaller = installer;
+                  fomodTargetMod = installed;
+                  showFomodWizard = true;
+                }
+              } catch {
+                // FOMOD detection is optional, don't show errors
+              }
+            }
+          }}
+        />
+      {/if}
 
       <!-- Deploy / Purge Buttons -->
-      {#if $installedMods.length > 0}
-        <button
-          class="btn btn-secondary btn-deploy"
-          class:deploying
-          onclick={handleDeploy}
-          disabled={deploying || purging}
-          title="Deploy all enabled mods to the game directory"
-        >
-          {#if deploying}
-            <div class="deploy-progress-track">
-              <div class="deploy-progress-fill" style="width: {deployProgress}%"></div>
-            </div>
-            <span class="deploy-progress-text">{deployProgressText || "Deploying..."}</span>
-          {:else}
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="20 6 9 17 4 12" />
-            </svg>
-            Deploy
-          {/if}
-        </button>
-        <button
-          class="btn btn-ghost-danger"
-          onclick={handlePurge}
-          disabled={deploying || purging}
-          title="Remove all deployed files from the game directory"
-        >
-          {#if purging}
-            <span class="spinner spinner-sm"></span>
-            Purging...
-          {:else}
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="3 6 5 6 21 6" />
-              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-            </svg>
-            Purge
-          {/if}
-        </button>
-        {#if backendDeployInProgress && !deploying}
-          <span class="deploy-in-progress-badge">
-            <span class="deploy-pulse-dot"></span>
-            Deploying...
-          </span>
-        {:else if deployHealth}
-          <span class="deploy-status" class:status-deployed={deployHealth.is_deployed} class:status-purged={!deployHealth.is_deployed}>
-            {deployHealth.is_deployed ? "Deployed" : "Purged"}
-          </span>
-        {/if}
+      {#if activeGame}
+        <DeploymentPanel
+          bind:this={deploymentPanelRef}
+          game={activeGame}
+          modCount={$installedMods.length}
+          {backendDeployInProgress}
+          bind:deploying
+          bind:deployHealth
+          onDeployComplete={async () => { if (activeGame) { await refreshHealth(activeGame); } }}
+        />
       {/if}
       <div class="tools-dropdown-wrap">
         <button
@@ -2935,171 +2627,17 @@
     <div class="content-grid">
       <!-- LEFT: Mod list (primary focus) -->
       <div class="content-main">
-        <!-- Visual Conflict Map -->
-        {#if showConflictMap}
-          <ConflictMap visible={showConflictMap} onclose={() => { showConflictMap = false; }} />
-        {/if}
-
-        <!-- Smart Conflict Resolution Panel -->
-        {#if showConflictPanel && conflicts.length > 0}
-          <div class="conflict-panel">
-            <div class="conflict-panel-header">
-              <h3 class="conflict-panel-title">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-                  <line x1="12" y1="9" x2="12" y2="13" />
-                  <line x1="12" y1="17" x2="12.01" y2="17" />
-                </svg>
-                File Conflicts ({conflicts.length})
-              </h3>
-              <div class="conflict-panel-actions">
-                <button
-                  class="btn btn-accent btn-sm magic-resolve-btn"
-                  onclick={handleMagicResolve}
-                  disabled={resolvingAll || analyzingConflicts}
-                  title="Automatically resolve all conflicts using LOOT data and collection authorship"
-                >
-                  {#if resolvingAll}
-                    <span class="spinner spinner-sm"></span>
-                    Resolving...
-                  {:else}
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                      <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
-                    </svg>
-                    Magic Resolver
-                  {/if}
-                </button>
-                <button
-                  class="btn btn-ghost btn-sm"
-                  onclick={handleAnalyzeConflicts}
-                  disabled={analyzingConflicts}
-                  title="Analyze conflicts without applying changes"
-                >
-                  {#if analyzingConflicts}
-                    <span class="spinner spinner-sm"></span>
-                  {:else}
-                    Analyze
-                  {/if}
-                </button>
-                <button class="btn btn-ghost btn-sm" onclick={() => { showConflictPanel = false; suggestions = []; resolutionResult = null; identicalStats = null; }}>
-                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-                    <line x1="3" y1="3" x2="11" y2="11" />
-                    <line x1="11" y1="3" x2="3" y2="11" />
-                  </svg>
-                </button>
-              </div>
-            </div>
-
-            <!-- Resolution summary banner -->
-            {#if resolutionResult}
-              <div class="resolution-banner">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
-                  <polyline points="22 4 12 14.01 9 11.01" />
-                </svg>
-                <span>
-                  {resolutionResult.author_resolved} author-resolved,
-                  {resolutionResult.auto_suggested} auto-fixed,
-                  {#if resolutionResult.identical_content > 0}
-                    {resolutionResult.identical_content} identical files,
-                  {/if}
-                  {resolutionResult.manual_needed} need review
-                  {#if resolutionResult.priorities_changed > 0}
-                    &mdash; {resolutionResult.priorities_changed} priorities adjusted
-                  {/if}
-                </span>
-              </div>
-            {/if}
-
-            <!-- Identical content auto-resolution banner -->
-            {#if identicalStats && identicalStats.identical_files_total > 0}
-              <div class="identical-banner">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
-                  <circle cx="8.5" cy="7" r="4" />
-                  <polyline points="17 11 19 13 23 9" />
-                </svg>
-                <span>
-                  {identicalStats.fully_identical} conflict{identicalStats.fully_identical === 1 ? "" : "s"} auto-resolved (identical files across mods){#if identicalStats.partially_identical > 0}, {identicalStats.partially_identical} partially identical{/if}
-                </span>
-              </div>
-            {/if}
-
-            <!-- Smart suggestions view -->
-            {#if suggestions.length > 0}
-              <div class="conflict-list">
-                {#each suggestions as s (s.relative_path)}
-                  <div class="conflict-item" class:conflict-resolved={s.status === "AuthorResolved"} class:conflict-suggested={s.status === "Suggested"} class:conflict-identical={s.status === "IdenticalContent"}>
-                    <div class="conflict-path">
-                      <span class="conflict-status-badge" class:status-author={s.status === "AuthorResolved"} class:status-suggested={s.status === "Suggested"} class:status-manual={s.status === "Manual"} class:status-identical={s.status === "IdenticalContent"}>
-                        {#if s.status === "AuthorResolved"}OK
-                        {:else if s.status === "Suggested"}Auto
-                        {:else if s.status === "IdenticalContent"}Same
-                        {:else}Manual{/if}
-                      </span>
-                      <span class="conflict-filepath">{s.relative_path}</span>
-                    </div>
-                    <div class="conflict-reason">{s.reason}</div>
-                    <div class="conflict-mods">
-                      {#each s.mods as mod (mod.mod_id)}
-                        <div class="conflict-mod" class:conflict-winner={mod.mod_id === s.suggested_winner_id}>
-                          <span class="conflict-mod-name">
-                            {mod.mod_name}
-                            {#if mod.mod_id === s.suggested_winner_id}
-                              <span class="winner-badge">{s.status === "AuthorResolved" ? "Author" : s.status === "Suggested" ? "Suggested" : s.status === "IdenticalContent" ? "Identical" : "Winner"}</span>
-                            {/if}
-                          </span>
-                          <span class="conflict-mod-priority">Priority {mod.priority}</span>
-                        </div>
-                      {/each}
-                    </div>
-                  </div>
-                {/each}
-              </div>
-
-            <!-- Fallback: raw conflict view (before analysis) -->
-            {:else}
-              <div class="conflict-list">
-                {#each conflicts as conflict (conflict.relative_path)}
-                  <div class="conflict-item">
-                    <div class="conflict-path">
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
-                        <polyline points="13 2 13 9 20 9" />
-                      </svg>
-                      <span class="conflict-filepath">{conflict.relative_path}</span>
-                    </div>
-                    <div class="conflict-mods">
-                      {#each conflict.mods as mod (mod.mod_id)}
-                        <div class="conflict-mod" class:conflict-winner={mod.mod_id === conflict.winner_mod_id}>
-                          <span class="conflict-mod-name">
-                            {mod.mod_name}
-                            {#if mod.mod_id === conflict.winner_mod_id}
-                              <span class="winner-badge">Winner</span>
-                            {/if}
-                          </span>
-                          <span class="conflict-mod-priority">Priority {mod.priority}</span>
-                          {#if mod.mod_id !== conflict.winner_mod_id}
-                            <button
-                              class="btn btn-ghost btn-sm make-winner-btn"
-                              onclick={() => handleMakeWinner(conflict, mod.mod_id)}
-                              disabled={makingWinner !== null}
-                            >
-                              {#if makingWinner === mod.mod_id}
-                                <span class="spinner spinner-sm"></span>
-                              {:else}
-                                Make Winner
-                              {/if}
-                            </button>
-                          {/if}
-                        </div>
-                      {/each}
-                    </div>
-                  </div>
-                {/each}
-              </div>
-            {/if}
-          </div>
+        <!-- Conflict Resolution Panel + Map -->
+        {#if activeGame}
+          <ConflictResolutionPanel
+            game={activeGame}
+            {conflicts}
+            installedMods={$installedMods}
+            bind:visible={showConflictPanel}
+            bind:showMap={showConflictMap}
+            bind:deploying
+            onResolved={async () => { if (activeGame) { await loadMods(activeGame); await refreshHealth(activeGame); } }}
+          />
         {/if}
 
         <!-- Proactive Issue Banners -->
@@ -3366,7 +2904,7 @@
           Install mods from .zip, .7z, or .rar archives, or use NXM links via Settings.
         </p>
         <div class="empty-actions">
-          <button class="btn btn-primary" onclick={handleInstall}>
+          <button class="btn btn-primary" onclick={() => { if (installFlowRef) installFlowRef.handleInstall(); }}>
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
               <line x1="7" y1="2" x2="7" y2="12" />
               <line x1="2" y1="7" x2="12" y2="7" />
@@ -4119,30 +3657,7 @@
   onCancel={() => duplicateDialog = null}
 />
 
-{#if showModlistNamePrompt}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="modlist-prompt-overlay" onclick={() => { showModlistNamePrompt = false; pendingInstallFilePath = null; }}>
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="modlist-prompt-card" onclick={(e) => e.stopPropagation()}>
-      <h3 class="modlist-prompt-title">Name Your Modlist</h3>
-      <p class="modlist-prompt-desc">You don't have an active modlist. Name your current mod setup so new mods are grouped together.</p>
-      <form onsubmit={(e) => { e.preventDefault(); confirmModlistName(); }}>
-        <input
-          class="modlist-prompt-input"
-          type="text"
-          bind:value={modlistNameInput}
-          placeholder="Modlist name..."
-          autofocus
-          onkeydown={(e) => { if (e.key === "Escape") { showModlistNamePrompt = false; pendingInstallFilePath = null; } }}
-        />
-        <div class="modlist-prompt-actions">
-          <button type="button" class="btn btn-ghost" onclick={() => { showModlistNamePrompt = false; pendingInstallFilePath = null; }}>Cancel</button>
-          <button type="submit" class="btn btn-primary" disabled={!modlistNameInput.trim()}>Continue</button>
-        </div>
-      </form>
-    </div>
-  </div>
-{/if}
+<!-- Modlist name prompt is now rendered by ModInstallFlow component -->
 
 {#if showImportWizard}
   <ModlistImportWizard
@@ -5623,53 +5138,7 @@
   /* ============================
      Deploy Status Badge
      ============================ */
-  .deploy-status {
-    display: inline-flex;
-    align-items: center;
-    padding: 2px 8px;
-    border-radius: 100px;
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-  }
-
-  .status-deployed {
-    background: color-mix(in srgb, var(--green) 15%, transparent);
-    color: var(--green);
-  }
-
-  .status-purged {
-    background: color-mix(in srgb, var(--yellow) 15%, transparent);
-    color: var(--yellow);
-  }
-
-  .deploy-in-progress-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 2px 10px;
-    border-radius: 100px;
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-    background: color-mix(in srgb, var(--blue, #58a6ff) 15%, transparent);
-    color: var(--blue, #58a6ff);
-  }
-
-  .deploy-pulse-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--blue, #58a6ff);
-    animation: deploy-pulse 1.4s ease-in-out infinite;
-  }
-
-  @keyframes deploy-pulse {
-    0%, 100% { opacity: 1; transform: scale(1); }
-    50% { opacity: 0.4; transform: scale(0.75); }
-  }
+  /* Deploy status styles moved to DeploymentPanel.svelte */
 
   /* ============================
      Deployment Health Panel
@@ -6145,227 +5614,7 @@
     color: #ffcc00 !important;
   }
 
-  .conflict-panel {
-    background: var(--surface);
-    border: 1px solid var(--separator);
-    border-radius: var(--radius);
-    max-height: 360px;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    margin-bottom: var(--space-3);
-  }
-
-  .conflict-panel-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: var(--space-3) var(--space-4);
-    border-bottom: 1px solid var(--separator);
-    flex-shrink: 0;
-  }
-
-  .conflict-panel-title {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--yellow);
-  }
-
-  .conflict-list {
-    overflow-y: auto;
-    padding: var(--space-2);
-  }
-
-  .conflict-item {
-    padding: var(--space-2) var(--space-3);
-    border-radius: var(--radius-sm);
-    margin-bottom: var(--space-1);
-  }
-
-  .conflict-item:hover {
-    background: var(--surface-hover);
-  }
-
-  .conflict-path {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    color: var(--text-tertiary);
-    margin-bottom: var(--space-2);
-  }
-
-  .conflict-filepath {
-    font-size: 11px;
-    font-family: var(--font-mono);
-    word-break: break-all;
-  }
-
-  .conflict-mods {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
-    padding-left: var(--space-5);
-  }
-
-  .conflict-mod {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    padding: var(--space-1) var(--space-2);
-    border-radius: var(--radius-sm);
-    font-size: 12px;
-  }
-
-  .conflict-winner {
-    background: color-mix(in srgb, var(--green) 8%, transparent);
-  }
-
-  .conflict-mod-name {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    color: var(--text-primary);
-    font-weight: 500;
-    flex: 1;
-    min-width: 0;
-  }
-
-  .winner-badge {
-    display: inline-flex;
-    align-items: center;
-    padding: 0 5px;
-    border-radius: 3px;
-    background: color-mix(in srgb, var(--green) 15%, transparent);
-    color: var(--green);
-    font-size: 9px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    flex-shrink: 0;
-  }
-
-  .conflict-mod-priority {
-    color: var(--text-tertiary);
-    font-size: 11px;
-    font-variant-numeric: tabular-nums;
-    flex-shrink: 0;
-  }
-
-  .make-winner-btn {
-    flex-shrink: 0;
-    color: var(--accent) !important;
-  }
-
-  .make-winner-btn:hover {
-    background: var(--accent-subtle) !important;
-  }
-
-  .conflict-panel-actions {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-  }
-
-  .magic-resolve-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    background: var(--accent);
-    color: #fff;
-    border-radius: var(--radius-sm);
-    padding: 4px 10px;
-    font-size: 12px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: opacity var(--duration-fast) var(--ease);
-  }
-
-  .magic-resolve-btn:hover:not(:disabled) {
-    opacity: 0.85;
-  }
-
-  .magic-resolve-btn:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
-
-  .resolution-banner {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-4);
-    background: color-mix(in srgb, var(--green) 8%, transparent);
-    border-bottom: 1px solid color-mix(in srgb, var(--green) 20%, transparent);
-    color: var(--green);
-    font-size: 12px;
-    font-weight: 500;
-    flex-shrink: 0;
-  }
-
-  .conflict-status-badge {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    padding: 1px 6px;
-    border-radius: 3px;
-    font-size: 9px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    flex-shrink: 0;
-  }
-
-  .status-author {
-    background: color-mix(in srgb, var(--green) 15%, transparent);
-    color: var(--green);
-  }
-
-  .status-suggested {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent);
-  }
-
-  .status-manual {
-    background: color-mix(in srgb, var(--yellow) 15%, transparent);
-    color: var(--yellow);
-  }
-
-  .status-identical {
-    background: color-mix(in srgb, var(--text-tertiary) 15%, transparent);
-    color: var(--text-tertiary);
-  }
-
-  .conflict-resolved {
-    opacity: 0.6;
-  }
-
-  .conflict-identical {
-    opacity: 0.45;
-  }
-
-  .identical-banner {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-4);
-    background: color-mix(in srgb, var(--text-tertiary) 8%, transparent);
-    border-bottom: 1px solid color-mix(in srgb, var(--text-tertiary) 20%, transparent);
-    color: var(--text-secondary);
-    font-size: 12px;
-    font-weight: 500;
-    flex-shrink: 0;
-  }
-
-  .conflict-reason {
-    font-size: 11px;
-    color: var(--text-tertiary);
-    padding-left: var(--space-5);
-    margin-bottom: var(--space-1);
-    font-style: italic;
-  }
+  /* Conflict panel styles moved to ConflictResolutionPanel.svelte */
 
   /* ============================
      Sort Direction Button
@@ -6642,34 +5891,7 @@
   /* ============================
      Deploy Progress
      ============================ */
-  .btn-deploy {
-    position: relative;
-    overflow: hidden;
-    min-width: 100px;
-  }
-
-  .btn-deploy.deploying {
-    min-width: 160px;
-  }
-
-  .deploy-progress-track {
-    position: absolute;
-    inset: 0;
-    background: transparent;
-  }
-
-  .deploy-progress-fill {
-    height: 100%;
-    background: var(--accent-subtle);
-    transition: width 0.2s var(--ease);
-  }
-
-  .deploy-progress-text {
-    position: relative;
-    z-index: 1;
-    font-size: 12px;
-    white-space: nowrap;
-  }
+  /* Deploy progress styles moved to DeploymentPanel.svelte */
 
   /* ============================
      Row Focus + Hover Actions
@@ -7036,61 +6258,6 @@
     margin-right: var(--space-2);
   }
 
-  .modlist-prompt-overlay {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.5);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 200;
-    backdrop-filter: var(--glass-blur-light);
-    animation: fadeIn 0.15s ease-out;
-  }
-
-  .modlist-prompt-card {
-    background: var(--bg-grouped);
-    border: 1px solid var(--separator-opaque);
-    border-radius: var(--radius-lg, 12px);
-    padding: 24px;
-    max-width: 400px;
-    width: 90%;
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
-  }
-
-  .modlist-prompt-title {
-    font-size: 16px;
-    font-weight: 600;
-    margin: 0 0 8px;
-  }
-
-  .modlist-prompt-desc {
-    font-size: 13px;
-    color: var(--text-secondary);
-    margin: 0 0 16px;
-    line-height: 1.5;
-  }
-
-  .modlist-prompt-input {
-    width: 100%;
-    padding: 8px 12px;
-    font-size: 14px;
-    background: var(--surface);
-    border: 1px solid var(--separator-opaque);
-    border-radius: var(--radius);
-    color: var(--text-primary);
-    outline: none;
-    margin-bottom: 16px;
-  }
-
-  .modlist-prompt-input:focus {
-    border-color: var(--accent);
-  }
-
-  .modlist-prompt-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 8px;
-  }
+  /* Modlist prompt styles moved to ModInstallFlow.svelte */
 
 </style>

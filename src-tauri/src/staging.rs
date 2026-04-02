@@ -146,6 +146,20 @@ pub fn is_safe_relative_path(path: &str) -> bool {
             && path.as_bytes()[1] == b':')
 }
 
+/// Post-join validation: verify that a resolved path is still within the
+/// expected base directory. This catches bypasses that `is_safe_relative_path`
+/// might miss (e.g. symlink escapes on case-insensitive filesystems).
+///
+/// Note: requires `joined` to exist on disk (uses `canonicalize()`). Use
+/// `is_safe_relative_path()` for pre-extraction checks where paths don't
+/// yet exist, and this function as defense-in-depth after extraction.
+pub fn validate_path_within_base(base: &std::path::Path, joined: &std::path::Path) -> bool {
+    match (base.canonicalize(), joined.canonicalize()) {
+        (Ok(canonical_base), Ok(canonical_joined)) => canonical_joined.starts_with(&canonical_base),
+        _ => false, // If either can't be canonicalized, reject
+    }
+}
+
 // ---------------------------------------------------------------------------
 // StagingResult
 // ---------------------------------------------------------------------------

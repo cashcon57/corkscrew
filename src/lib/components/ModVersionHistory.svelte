@@ -54,7 +54,7 @@
     if (!confirmRollback || !game) return;
     rollingBack = true;
     try {
-      await rollbackModVersion(mod.id, confirmRollback.id);
+      await rollbackModVersion(mod.id, confirmRollback.id, game.game_id, game.bottle_name);
 
       showSuccess(`Rolled back "${mod.name}" to version ${confirmRollback.version}`);
 

@@ -41,7 +41,7 @@ use tauri::{AppHandle, State};
 pub async fn get_bottles() -> Result<Vec<Bottle>, String> {
     tokio::task::spawn_blocking(move || Ok(bottles::detect_bottles()))
         .await
-        .map_err(|e| format!("Task failed: {e}"))?
+        .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -54,14 +54,14 @@ pub async fn get_games(bottle_name: Option<String>) -> Result<Vec<DetectedGame>,
         None => Ok(games::detect_all_games()),
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
 pub async fn get_all_games() -> Result<Vec<DetectedGame>, String> {
     tokio::task::spawn_blocking(move || Ok(games::detect_all_games()))
         .await
-        .map_err(|e| format!("Task failed: {e}"))?
+        .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -83,7 +83,7 @@ pub async fn get_game_version(
         Ok(version)
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 /// Look up a captured Steam depot manifest for a specific game version.
@@ -105,7 +105,7 @@ pub async fn lookup_version_manifest(
         }
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 /// Get captured depot history for a game (all versions we've seen).
@@ -129,7 +129,7 @@ pub async fn get_depot_history_cmd(
             .collect())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -146,7 +146,7 @@ pub async fn sync_lua_mods(
         }
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -156,7 +156,7 @@ pub async fn get_bottle_settings(bottle_name: String) -> Result<bottle_config::B
         bottle_config::get_bottle_settings(&bottle).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -169,7 +169,7 @@ pub async fn get_bottle_setting_defs(
         Ok(bottle_config::get_setting_definitions(&settings))
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -179,7 +179,7 @@ pub async fn set_bottle_setting(bottle_name: String, key: String, value: String)
         bottle_config::set_bottle_setting(&bottle, &key, &value).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -194,7 +194,7 @@ pub async fn get_installed_mods(
             .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -222,7 +222,7 @@ pub async fn get_mod_detail(mod_id: i64, state: State<'_, AppState>) -> Result<I
             .ok_or_else(|| format!("Mod {} not found", mod_id))
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -464,7 +464,7 @@ pub async fn install_mod_cmd(
             .ok_or_else(|| "Failed to retrieve installed mod".to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -530,7 +530,7 @@ pub async fn uninstall_mod(
         Ok(removed)
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -604,7 +604,7 @@ pub async fn toggle_mod(
         Ok(())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 /// Batch enable/disable mods. For bulk operations (>=5 mods), updates all DB
@@ -797,7 +797,7 @@ pub async fn batch_toggle_mods(
         }
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -831,7 +831,7 @@ pub async fn get_plugin_order(
         plugins::skyrim_plugins::read_plugins_txt(&plugins_file).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -980,7 +980,7 @@ pub async fn is_nexus_premium() -> Result<bool, String> {
 pub async fn get_config() -> Result<AppConfig, String> {
     tokio::task::spawn_blocking(move || config::get_config().map_err(|e| e.to_string()))
         .await
-        .map_err(|e| format!("Task failed: {e}"))?
+        .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -989,7 +989,7 @@ pub async fn set_config_value(key: String, value: String) -> Result<(), String> 
         config::set_config_value(&key, &value).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 
@@ -1050,7 +1050,7 @@ pub async fn list_download_archives() -> Result<Vec<serde_json::Value>, String> 
         Ok(archives)
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -1082,7 +1082,7 @@ pub async fn delete_download_archive(path: String) -> Result<(), String> {
         std::fs::remove_file(&canonical_archive).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -1128,7 +1128,7 @@ pub async fn get_downloads_stats() -> Result<serde_json::Value, String> {
         }))
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -1164,7 +1164,7 @@ pub async fn clear_all_download_archives() -> Result<u64, String> {
         Ok(deleted)
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1250,7 +1250,7 @@ pub async fn find_orphaned_downloads(
         Ok(orphans)
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -1301,7 +1301,7 @@ pub async fn delete_orphaned_downloads(
         Ok(deleted)
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 /// Fetch a game icon and cache it locally. Returns a base64-encoded data URL.
@@ -1855,7 +1855,7 @@ pub async fn launch_game_cmd(
     }
 
     Ok(result)
-    }).await.map_err(|e| format!("Task failed: {e}"))?
+    }).await.map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -1878,7 +1878,7 @@ pub async fn check_skse(game_id: String, bottle_name: String) -> Result<SkseStat
         Ok(status)
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -1913,7 +1913,7 @@ pub async fn install_skse_from_archive_cmd(
         Ok(status)
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -1937,7 +1937,7 @@ pub async fn uninstall_skse_cmd(game_id: String, bottle_name: String) -> Result<
         Ok(status)
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -1950,7 +1950,7 @@ pub async fn set_skse_preference_cmd(
         skse::set_skse_preference(&game_id, &bottle_name, enabled).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -1967,7 +1967,7 @@ pub async fn check_skyrim_version(
         downgrader::detect_skyrim_version(Path::new(&game.game_path)).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -1992,7 +1992,7 @@ pub async fn check_skse_compatibility_cmd(
         ))
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -2015,7 +2015,7 @@ pub async fn get_skse_builds(
         ))
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -2060,7 +2060,7 @@ pub async fn scan_skse_plugins_cmd(
         Ok(skse::scan_skse_plugins(&data_dir, &version))
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -2082,7 +2082,7 @@ pub async fn fix_skse_plugins_cmd(
         ))
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 /// List SKSE plugins that have been auto-disabled for Wine compatibility.
@@ -2099,7 +2099,7 @@ pub async fn list_disabled_wine_plugins_cmd(
         Ok(skse::list_disabled_wine_plugins(&data_dir))
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 /// Re-enable a Wine-incompatible plugin that was auto-disabled (user override).
@@ -2117,7 +2117,7 @@ pub async fn reenable_wine_plugin_cmd(
         skse::reenable_wine_plugin(&data_dir, &dll_name)
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -2127,7 +2127,7 @@ pub async fn fix_skyrim_display(bottle_name: String) -> Result<display_fix::Disp
         display_fix::auto_fix_display(&bottle)
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -2173,7 +2173,7 @@ pub async fn get_depot_download_command(
         downgrader::get_depot_download_info(&game_id, &bottle.path).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -2185,7 +2185,7 @@ pub async fn start_depot_download(game_id: String) -> Result<bool, String> {
         downgrader::send_depot_command_to_steam()
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -2203,7 +2203,7 @@ pub async fn check_depot_ready(game_id: String, bottle_name: String) -> Result<O
         .map(|p| p.to_string_lossy().into_owned()))
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -2230,14 +2230,14 @@ pub async fn apply_downgrade_cmd(
             .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
 pub async fn list_game_versions(game_id: String) -> Result<Vec<downgrader::CachedVersion>, String> {
     tokio::task::spawn_blocking(move || Ok(downgrader::list_cached_versions(&game_id)))
         .await
-        .map_err(|e| format!("Task failed: {e}"))?
+        .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -2318,7 +2318,7 @@ pub async fn set_mod_notes(
             .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -2334,7 +2334,7 @@ pub async fn set_mod_source(
             .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -2346,7 +2346,7 @@ pub async fn set_mod_tags(
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || db.set_user_tags(mod_id, &tags).map_err(|e| e.to_string()))
         .await
-        .map_err(|e| format!("Task failed: {e}"))?
+        .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -2361,7 +2361,7 @@ pub async fn get_all_tags(
             .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 
@@ -2381,6 +2381,6 @@ pub async fn backfill_categories(
             .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 

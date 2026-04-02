@@ -1096,6 +1096,7 @@ impl WjDownloader {
     ) -> Result<PathBuf, WjDownloadError> {
         let dest = self.download_dir.join(sanitize_filename(archive_name));
         let partial = dest.with_extension("partial");
+        let meta_file = dest.with_extension("partial.meta");
 
         // --- HTTP Range resume: check for a partial file from a prior attempt ---
         let partial_size = if partial.exists() {
@@ -1107,6 +1108,13 @@ impl WjDownloader {
             0
         };
 
+        // Load saved ETag from previous download attempt for resume validation
+        let saved_etag = if partial_size > 0 && meta_file.exists() {
+            tokio::fs::read_to_string(&meta_file).await.ok()
+        } else {
+            None
+        };
+
         let mut request = self.http_client.get(url).headers(extra_headers.clone());
         if partial_size > 0 {
             log::info!(
@@ -1115,10 +1123,35 @@ impl WjDownloader {
                 partial_size
             );
             request = request.header("Range", format!("bytes={}-", partial_size));
+            // Validate the file hasn't changed on the server
+            if let Some(ref etag) = saved_etag {
+                request = request.header("If-Match", etag.trim());
+            }
         }
 
         let resp = request.send().await?;
         let status = resp.status();
+
+        // If the server returned 412 Precondition Failed (ETag mismatch via If-Match),
+        // the file changed on the server — delete partial/meta and re-issue a fresh request.
+        let (resp, status) = if status == reqwest::StatusCode::PRECONDITION_FAILED && partial_size > 0 {
+            log::warn!(
+                "Server file changed (ETag mismatch) for '{}', restarting download",
+                archive_name
+            );
+            let _ = tokio::fs::remove_file(&partial).await;
+            let _ = tokio::fs::remove_file(&meta_file).await;
+            let fresh = self.http_client.get(url).headers(extra_headers.clone()).send().await?;
+            let st = fresh.status();
+            (fresh, st)
+        } else {
+            (resp, status)
+        };
+
+        // Save ETag from fresh responses for future resume validation
+        if let Some(etag) = resp.headers().get("etag").and_then(|v| v.to_str().ok()) {
+            let _ = tokio::fs::write(&meta_file, etag).await;
+        }
 
         // Determine whether we're resuming or starting fresh.
         let (mut file, offset) = if status == reqwest::StatusCode::PARTIAL_CONTENT
@@ -1239,8 +1272,9 @@ impl WjDownloader {
             Ok(()) => {
                 file.flush().await?;
                 drop(file);
-                // Rename .partial -> final name.
+                // Rename .partial -> final name and clean up meta file.
                 tokio::fs::rename(&partial, &dest).await?;
+                let _ = tokio::fs::remove_file(&meta_file).await;
                 Ok(dest)
             }
             Err(WjDownloadError::Cancelled) => {
@@ -1559,10 +1593,15 @@ async fn download_cdn_concurrent(
     const MAX_CONCURRENT_PARTS: usize = 16;
     const MIN_PART_SIZE: u64 = 1024 * 1024; // 1MB minimum per part
 
-    // Pre-allocate the file
-    let file = std::fs::File::create(dest_path).map_err(WjDownloadError::Io)?;
+    // Pre-allocate the file and keep a shared handle for all part writers
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(dest_path)
+        .map_err(WjDownloadError::Io)?;
     file.set_len(total_size).map_err(WjDownloadError::Io)?;
-    drop(file);
+    let shared_file = Arc::new(std::sync::Mutex::new(file));
 
     // Calculate part ranges
     let num_parts = if total_size / MIN_PART_SIZE > MAX_CONCURRENT_PARTS as u64 {
@@ -1593,12 +1632,11 @@ async fn download_cdn_concurrent(
     let bytes_downloaded = Arc::new(AtomicU64::new(0));
     let last_emit = Arc::new(AtomicU64::new(0));
 
-    let dest = dest_path.to_path_buf();
     let results: Vec<Result<(), WjDownloadError>> = futures::stream::iter(ranges)
         .map(|(start, end)| {
             let client = client.clone();
             let url = url.to_string();
-            let dest = dest.clone();
+            let shared_file = shared_file.clone();
             let cancel = cancel_token.clone();
             let bytes_downloaded = bytes_downloaded.clone();
             let last_emit = last_emit.clone();
@@ -1620,6 +1658,9 @@ async fn download_cdn_concurrent(
                 let mut stream = response.bytes_stream();
                 let mut buf = Vec::with_capacity((end - start + 1) as usize);
                 while let Some(chunk) = stream.next().await {
+                    if cancel.load(Ordering::Relaxed) {
+                        return Err(WjDownloadError::Cancelled);
+                    }
                     let chunk = chunk?;
                     buf.extend_from_slice(&chunk);
 
@@ -1639,21 +1680,22 @@ async fn download_cdn_concurrent(
                     }
                 }
 
-                // Write buffer to file at offset (blocking I/O in spawn_blocking)
+                // Write buffer to file at offset using shared file handle
+                // (prevents concurrent open/seek/write race conditions)
                 let offset = start;
+                let file_handle = shared_file.clone();
                 tokio::task::spawn_blocking(move || {
                     use std::io::{Seek, SeekFrom, Write};
-                    let mut file = std::fs::OpenOptions::new()
-                        .write(true)
-                        .open(&dest)
-                        .map_err(WjDownloadError::Io)?;
+                    let mut file = file_handle
+                        .lock()
+                        .map_err(|e| WjDownloadError::Other(format!("File lock poisoned: {e}")))?;
                     file.seek(SeekFrom::Start(offset))
                         .map_err(WjDownloadError::Io)?;
                     file.write_all(&buf).map_err(WjDownloadError::Io)?;
                     Ok::<(), WjDownloadError>(())
                 })
                 .await
-                .map_err(|e| WjDownloadError::Other(format!("Task join error: {}", e)))?;
+                .map_err(|e| WjDownloadError::Other(format!("Task join error: {}", e)))??;
 
                 Ok(())
             }

@@ -50,7 +50,7 @@ pub async fn uninstall_mod_tool(
             .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -84,7 +84,7 @@ pub async fn launch_mod_tool(
         mod_tools::launch_tool_with_logging(Path::new(exe_path), &bottle, &tool_id, &tool.name, &db)
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -149,7 +149,7 @@ pub async fn apply_tool_ini_edits_cmd(
         mod_tools::apply_tool_ini_edits(&tool_id, &data_dir).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 
@@ -170,7 +170,7 @@ pub async fn detect_collection_tools(
         ))
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -188,7 +188,7 @@ pub async fn detect_wabbajack_tools(
         ))
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 
@@ -217,7 +217,7 @@ pub async fn add_custom_exe(
         )
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -225,7 +225,7 @@ pub async fn remove_custom_exe(exe_id: i64, state: State<'_, AppState>) -> Resul
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || executables::remove_executable(&db, exe_id))
         .await
-        .map_err(|e| format!("Task failed: {e}"))?
+        .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -237,7 +237,7 @@ pub async fn list_custom_exes(
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || executables::list_executables(&db, &game_id, &bottle_name))
         .await
-        .map_err(|e| format!("Task failed: {e}"))?
+        .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -253,6 +253,6 @@ pub async fn set_default_exe(
         None => executables::clear_default_executable(&db, &game_id, &bottle_name),
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 

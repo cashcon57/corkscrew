@@ -25,16 +25,19 @@
         password: password.trim(),
         steamGuardCode: null,
       });
-      // Auth succeeded without Steam Guard
+      // Auth succeeded without Steam Guard — clear credentials before callback
+      password = "";
       onauth();
     } catch (e: unknown) {
       const msg = String(e);
       if (msg === "STEAM_GUARD_REQUIRED" || msg.includes("STEAM_GUARD")) {
         phase = "steam_guard";
       } else if (msg.includes("AUTH_FAILED")) {
+        password = "";
         phase = "error";
         errorMessage = "Invalid username or password. Double-check and try again.";
       } else {
+        password = "";
         phase = "error";
         errorMessage = msg;
       }
@@ -52,13 +55,18 @@
         password: password.trim(),
         steamGuardCode: steamGuardCode.trim(),
       });
+      // Clear credentials before callback
+      password = "";
+      steamGuardCode = "";
       onauth();
     } catch (e: unknown) {
       const msg = String(e);
+      steamGuardCode = "";
       if (msg.includes("AUTH_FAILED")) {
         phase = "error";
         errorMessage = "Invalid Steam Guard code. Check your email or authenticator app.";
       } else {
+        password = "";
         phase = "error";
         errorMessage = msg;
       }

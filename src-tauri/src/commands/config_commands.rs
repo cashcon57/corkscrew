@@ -38,7 +38,7 @@ pub async fn get_disk_budget(
         ))
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -55,7 +55,7 @@ pub async fn estimate_install_impact_cmd(
         ))
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -64,7 +64,7 @@ pub async fn get_available_disk_space_cmd(path: String) -> Result<u64, String> {
         Ok(disk_budget::available_space(std::path::Path::new(&path)))
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 
@@ -99,7 +99,7 @@ pub async fn get_staging_info(
         }))
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -124,7 +124,7 @@ pub async fn set_staging_directory(path: Option<String>) -> Result<(), String> {
         }
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 
@@ -140,7 +140,7 @@ pub async fn get_ini_settings(
         Ok(ini_manager::read_all_ini(&bottle, &game_id))
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -155,14 +155,14 @@ pub async fn set_ini_setting(
             .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
 pub async fn get_ini_presets(game_id: String) -> Result<Vec<ini_manager::IniPreset>, String> {
     tokio::task::spawn_blocking(move || Ok(ini_manager::builtin_presets(&game_id)))
         .await
-        .map_err(|e| format!("Task failed: {e}"))?
+        .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -181,7 +181,7 @@ pub async fn apply_ini_preset(
         ini_manager::apply_preset(&bottle, &game_id, preset).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 /// Read a text file from a mod's staging directory.
@@ -204,7 +204,7 @@ pub async fn read_mod_file(staging_path: String, relative_path: String) -> Resul
         std::fs::read_to_string(&canon).map_err(|e| format!("Failed to read file: {}", e))
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 /// Write a text file in a mod's staging directory.
@@ -231,7 +231,7 @@ pub async fn write_mod_file(
         std::fs::write(&full, content).map_err(|e| format!("Failed to write file: {}", e))
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 
@@ -259,7 +259,7 @@ pub async fn detect_fomod(
         Ok(installer)
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -268,7 +268,7 @@ pub async fn get_fomod_defaults(
 ) -> Result<std::collections::HashMap<String, Vec<String>>, String> {
     tokio::task::spawn_blocking(move || Ok(fomod::get_default_selections(&installer, None, None)))
         .await
-        .map_err(|e| format!("Task failed: {e}"))?
+        .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -285,7 +285,7 @@ pub async fn get_fomod_files(
         ))
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 
@@ -310,7 +310,7 @@ pub async fn save_fomod_recipe(
         )
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -321,7 +321,7 @@ pub async fn get_fomod_recipe(
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || fomod_recipes::get_recipe(&db, mod_id))
         .await
-        .map_err(|e| format!("Task failed: {e}"))?
+        .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -333,7 +333,7 @@ pub async fn list_fomod_recipes(
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || fomod_recipes::list_recipes(&db, &game_id, &bottle_name))
         .await
-        .map_err(|e| format!("Task failed: {e}"))?
+        .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -341,7 +341,7 @@ pub async fn delete_fomod_recipe(mod_id: i64, state: State<'_, AppState>) -> Res
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || fomod_recipes::delete_recipe(&db, mod_id))
         .await
-        .map_err(|e| format!("Task failed: {e}"))?
+        .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -355,7 +355,7 @@ pub async fn has_compatible_fomod_recipe(
         fomod_recipes::has_compatible_recipe(&db, mod_id, current_hash.as_deref())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 
@@ -374,7 +374,7 @@ pub async fn parse_instructions_cmd(
         ))
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 /// Parse instructions using a local Ollama model (Tier 2a).
@@ -452,7 +452,7 @@ pub async fn validate_instruction_actions_cmd(
         ))
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 /// Check Ollama status (installed, running, available models).
@@ -522,7 +522,7 @@ pub async fn export_modlist_cmd(
         Ok(output_path)
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -541,7 +541,7 @@ pub async fn import_modlist_plan(
         modlist_io::plan_import(&db, &modlist, &game_id, &bottle_name).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -565,7 +565,7 @@ pub async fn diff_modlists_cmd(
         Ok(modlist_io::diff_modlists(&current, &imported))
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -583,7 +583,7 @@ pub async fn execute_modlist_import(
             .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 
@@ -614,7 +614,7 @@ pub async fn vortex_list_cached_extensions(
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || Ok(vortex_registry::list_cached(&db)))
         .await
-        .map_err(|e| format!("Task failed: {e}"))?
+        .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -633,7 +633,7 @@ pub async fn vortex_delete_cached_extension(
         Ok(())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -644,7 +644,7 @@ pub async fn vortex_get_extension_detail(
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || Ok(vortex_registry::load_cached(&db, &game_id)))
         .await
-        .map_err(|e| format!("Task failed: {e}"))?
+        .map_err(crate::format_join_error)?
 }
 
 

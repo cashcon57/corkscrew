@@ -79,7 +79,7 @@ pub async fn analyze_conflicts_cmd(
         })
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -158,7 +158,7 @@ pub async fn resolve_all_conflicts_cmd(
         Ok(result)
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -178,7 +178,7 @@ pub async fn record_conflict_winner(
         Ok(())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -193,7 +193,7 @@ pub async fn get_deployment_manifest_cmd(
             .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -208,7 +208,7 @@ pub async fn set_mod_priority(
             .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -238,7 +238,7 @@ pub async fn reorder_mods(
         Ok(())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -344,7 +344,7 @@ pub async fn redeploy_all_mods(
         }))
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 /// Check whether a deployment operation is currently in progress.
@@ -422,7 +422,7 @@ pub async fn deploy_incremental_cmd(
         Ok(result)
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 /// Check deployment health: verify mods have staging dirs and deployed files.
@@ -600,7 +600,7 @@ pub async fn check_deployment_health(
         }))
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 /// Get the current verification level from config.
@@ -616,7 +616,7 @@ pub async fn get_verification_level() -> Result<String, String> {
         Ok(level.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 /// Set the verification level in config.
@@ -626,7 +626,7 @@ pub async fn set_verification_level(level: String) -> Result<(), String> {
         config::set_config_value("verification_level", &level).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 /// Legacy: Toggle whether to use the original SSE Engine Fixes instead of the Wine fork.
@@ -640,7 +640,7 @@ pub async fn set_use_original_engine_fixes(enabled: bool) -> Result<(), String> 
         Ok(())
     })
     .await
-    .map_err(|e: tokio::task::JoinError| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 /// Toggle whether to deploy SSE Engine Fixes for Wine (opt-in).
@@ -653,7 +653,7 @@ pub async fn set_use_wine_engine_fixes(enabled: bool) -> Result<(), String> {
         Ok(())
     })
     .await
-    .map_err(|e: tokio::task::JoinError| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -686,7 +686,7 @@ pub async fn purge_deployment_cmd(
         Ok(removed)
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -711,7 +711,7 @@ pub async fn verify_mod_integrity(
             .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 

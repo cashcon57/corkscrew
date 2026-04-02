@@ -351,7 +351,7 @@ pub async fn detect_steam() -> Option<steam_integration::SteamInfo> {
 pub async fn check_steam_status() -> Result<steam_integration::SteamStatus, String> {
     tokio::task::spawn_blocking(move || steam_integration::get_steam_status())
         .await
-        .map_err(|e| format!("Task failed: {e}"))
+        .map_err(crate::format_join_error)
 }
 
 #[tauri::command]
@@ -360,7 +360,7 @@ pub async fn add_to_steam() -> Result<steam_integration::SteamStatus, String> {
         steam_integration::setup_steam_integration().map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -371,7 +371,7 @@ pub async fn remove_from_steam() -> Result<(), String> {
         steam_integration::remove_from_steam(&info).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -383,7 +383,7 @@ pub fn is_steam_deck() -> bool {
 pub async fn steam_deck_warnings() -> Result<Vec<String>, String> {
     tokio::task::spawn_blocking(move || steam_integration::steam_deck_warnings())
         .await
-        .map_err(|e| format!("Task failed: {e}"))
+        .map_err(crate::format_join_error)
 }
 
 
@@ -393,14 +393,14 @@ pub async fn steam_deck_warnings() -> Result<Vec<String>, String> {
 pub async fn list_proton_versions() -> Result<Vec<proton::ProtonVersion>, String> {
     tokio::task::spawn_blocking(move || Ok(proton::detect_proton_versions()))
         .await
-        .map_err(|e| format!("Task failed: {e}"))?
+        .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
 pub async fn get_recommended_proton() -> Result<Option<proton::ProtonVersion>, String> {
     tokio::task::spawn_blocking(move || Ok(proton::get_recommended_proton()))
         .await
-        .map_err(|e| format!("Task failed: {e}"))?
+        .map_err(crate::format_join_error)?
 }
 
 
@@ -547,7 +547,7 @@ pub async fn check_dlc_status(game_id: String, bottle_name: String) -> Result<Dl
         })
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 

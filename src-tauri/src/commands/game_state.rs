@@ -71,7 +71,7 @@ pub async fn heal_deployment(
         Ok(())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 
@@ -118,7 +118,7 @@ pub async fn save_mod_version_cmd(
         rollback::save_mod_version(&db, mod_id, &version, &staging_path, &archive_name)
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -129,19 +129,58 @@ pub async fn list_mod_versions_cmd(
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || rollback::list_mod_versions(&db, mod_id))
         .await
-        .map_err(|e| format!("Task failed: {e}"))?
+        .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
 pub async fn rollback_mod_version(
     mod_id: i64,
     version_id: i64,
+    game_id: String,
+    bottle_name: String,
     state: State<'_, AppState>,
 ) -> Result<ModVersion, String> {
     let db = state.db.clone();
-    tokio::task::spawn_blocking(move || rollback::rollback_to_version(&db, mod_id, version_id))
-        .await
-        .map_err(|e| format!("Task failed: {e}"))?
+    tokio::task::spawn_blocking(move || {
+        // 1. Update database to mark the target version as current
+        let version = rollback::rollback_to_version(&db, mod_id, version_id)?;
+
+        // 2. Resolve game paths for undeploy + redeploy
+        let (_bottle, game, data_dir) = crate::resolve_game(&game_id, &bottle_name)?;
+        let game_path = game.game_path.clone();
+
+        // 3. Undeploy current files for this mod
+        let _ = deployer::undeploy_mod(&db, &game_id, &bottle_name, mod_id, &data_dir, &game_path);
+
+        // 4. Redeploy from the rolled-back version's staging path
+        let staging_path = Path::new(&version.staging_path);
+        if staging_path.exists() {
+            // Get the file list from the mod's DB record
+            let files = db
+                .get_mod(mod_id)
+                .ok()
+                .flatten()
+                .map(|m| m.installed_files)
+                .unwrap_or_default();
+
+            if !files.is_empty() {
+                let _ = deployer::deploy_mod_atomic(
+                    &db,
+                    &game_id,
+                    &bottle_name,
+                    mod_id,
+                    staging_path,
+                    &data_dir,
+                    &files,
+                    &game_path,
+                );
+            }
+        }
+
+        Ok(version)
+    })
+    .await
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -153,7 +192,7 @@ pub async fn cleanup_mod_versions(
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || rollback::cleanup_old_versions(&db, mod_id, keep_count))
         .await
-        .map_err(|e| format!("Task failed: {e}"))?
+        .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -169,7 +208,7 @@ pub async fn create_mod_snapshot(
         rollback::create_snapshot(&db, &game_id, &bottle_name, &name, description.as_deref())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -181,7 +220,7 @@ pub async fn list_mod_snapshots(
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || rollback::list_snapshots(&db, &game_id, &bottle_name))
         .await
-        .map_err(|e| format!("Task failed: {e}"))?
+        .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -189,7 +228,7 @@ pub async fn delete_mod_snapshot(snapshot_id: i64, state: State<'_, AppState>) -
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || rollback::delete_snapshot(&db, snapshot_id))
         .await
-        .map_err(|e| format!("Task failed: {e}"))?
+        .map_err(crate::format_join_error)?
 }
 
 
@@ -208,7 +247,7 @@ pub async fn scan_game_directory(
             .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -273,6 +312,6 @@ pub async fn clean_game_directory(
         Ok(result)
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 

@@ -61,7 +61,7 @@ pub async fn list_installed_collections_cmd(
             .collect())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -76,7 +76,7 @@ pub async fn set_mod_collection_name_cmd(
             .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -165,7 +165,7 @@ pub async fn switch_collection_cmd(
         }))
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -181,7 +181,7 @@ pub async fn collection_download_size_cmd(
             .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -594,7 +594,7 @@ pub async fn delete_collection_cmd(
         }))
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -875,7 +875,7 @@ pub async fn uninstall_wabbajack_modlist(
         }))
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -916,7 +916,7 @@ pub async fn restore_mod_snapshot(
         }))
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -984,7 +984,7 @@ pub async fn return_to_vanilla(
         }))
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -1403,7 +1403,7 @@ pub async fn parse_collection_bundle_cmd(bundle_path: String) -> Result<Collecti
         collections::parse_collection_bundle(Path::new(&bundle_path)).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -1449,7 +1449,7 @@ pub async fn submit_fomod_choices(
         collection_installer::submit_fomod_choices(&correlation_id, selections)
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 
@@ -1466,7 +1466,7 @@ pub async fn check_cached_files(
             .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 
@@ -1485,5 +1485,5 @@ pub async fn sync_plugins_cmd(
         Ok(serde_json::json!({ "ok": true }))
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }

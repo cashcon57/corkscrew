@@ -273,9 +273,9 @@ export const updateNotes = writable<string | null>(null);
 export const updateChecking = writable(false);
 export const updateError = writable<string | null>(null);
 // Set by layout to allow settings page to trigger a manual check
-export let triggerUpdateCheck: (() => Promise<void>) | null = null;
+export const triggerUpdateCheck = writable<(() => Promise<void>) | null>(null);
 export function setUpdateCheckFn(fn: () => Promise<void>) {
-  triggerUpdateCheck = fn;
+  triggerUpdateCheck.set(fn);
 }
 
 // Sidebar collapse state (persisted to localStorage)

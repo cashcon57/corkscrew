@@ -899,13 +899,15 @@ impl ModDatabase {
     pub fn bulk_remove_mods(&self, mod_ids: &[i64]) -> Result<usize> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let placeholders: String = mod_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        // Clean related tables first (same as remove_mod but in batch)
-        for table in &[
+        // Clean related tables first (same as remove_mod but in batch).
+        // Table names are hardcoded constants — NOT user input.
+        const RELATED_TABLES: &[&str] = &[
             "file_hashes",
             "deployment_manifest",
             "mod_dependencies",
             "profile_mods",
-        ] {
+        ];
+        for table in RELATED_TABLES {
             let q = format!("DELETE FROM {} WHERE mod_id IN ({})", table, placeholders);
             let mut stmt = conn.prepare(&q)?;
             let p: Vec<&dyn rusqlite::types::ToSql> = mod_ids

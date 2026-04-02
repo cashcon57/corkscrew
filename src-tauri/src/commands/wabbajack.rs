@@ -18,7 +18,7 @@ pub async fn parse_wabbajack_file(file_path: String) -> Result<ParsedModlist, St
         wabbajack::parse_wabbajack_file(std::path::Path::new(&file_path))
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]

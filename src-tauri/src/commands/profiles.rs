@@ -24,7 +24,7 @@ pub async fn list_profiles_cmd(
         profiles::list_profiles(&db, &game_id, &bottle_name).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -39,7 +39,7 @@ pub async fn create_profile_cmd(
         profiles::create_profile(&db, &game_id, &bottle_name, &name).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -49,7 +49,7 @@ pub async fn delete_profile_cmd(profile_id: i64, state: State<'_, AppState>) -> 
         profiles::delete_profile(&db, profile_id).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -63,7 +63,7 @@ pub async fn deactivate_profile_cmd(
         profiles::deactivate_profile(&db, &game_id, &bottle_name).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -77,7 +77,7 @@ pub async fn rename_profile_cmd(
         profiles::rename_profile(&db, profile_id, &new_name).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -111,7 +111,7 @@ pub async fn save_profile_snapshot(
         .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -230,7 +230,7 @@ pub async fn activate_profile(
         Ok(())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -247,7 +247,7 @@ pub async fn get_profile_save_info(
         ))
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -268,7 +268,7 @@ pub async fn backup_profile_saves(
             .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -289,6 +289,6 @@ pub async fn restore_profile_saves(
             .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 

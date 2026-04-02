@@ -1188,7 +1188,14 @@ pub async fn install_collection(
 
         let handle = tokio::spawn(async move {
             // ---- Download Phase ----
-            let _dl_permit = dl_sem_c.acquire().await.expect("download semaphore closed");
+            let _dl_permit = match dl_sem_c.acquire().await {
+                Ok(permit) => permit,
+                Err(_) => {
+                    done_c.lock().unwrap_or_else(|e| e.into_inner()).insert(order_pos);
+                    notify_c.notify_waiters();
+                    return (order_pos, Err(InstallError::Failed("download semaphore closed".into())));
+                }
+            };
 
             if is_cancelled() {
                 // Mark extraction done so install loop doesn't hang
@@ -1300,7 +1307,14 @@ pub async fn install_collection(
                         },
                     );
 
-                    let _ext_permit = ext_sem_c.acquire().await.expect("extract semaphore closed");
+                    let _ext_permit = match ext_sem_c.acquire().await {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            done_c.lock().unwrap_or_else(|e| e.into_inner()).insert(order_pos);
+                            notify_c.notify_waiters();
+                            return (order_pos, Err(InstallError::Failed("extract semaphore closed".into())));
+                        }
+                    };
 
                     if !is_cancelled() {
                         let extract_start = std::time::Instant::now();

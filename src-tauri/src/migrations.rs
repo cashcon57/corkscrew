@@ -232,10 +232,11 @@ fn migrate_v1_to_v2(conn: &Connection) -> Result<()> {
         match tx.execute_batch(sql) {
             Ok(_) => {}
             Err(e) => {
-                // Ignore "duplicate column name" errors (column already exists)
+                // Ignore "duplicate column name" errors (column already exists).
+                // Match the exact SQLite error phrasing to avoid masking other errors.
                 let msg = e.to_string();
-                if msg.contains("duplicate column") {
-                    log::debug!("Column already exists, skipping: {}", sql);
+                if msg.contains("duplicate column name") {
+                    log::warn!("Column already exists, skipping: {}", sql);
                 } else {
                     return Err(MigrationError::Sqlite(e));
                 }

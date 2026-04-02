@@ -59,21 +59,21 @@ pub async fn refresh_nexus_tokens(
 pub async fn save_oauth_tokens(tokens: TokenPair) -> Result<(), String> {
     tokio::task::spawn_blocking(move || oauth::save_tokens(&tokens).map_err(|e| e.to_string()))
         .await
-        .map_err(|e| format!("Task failed: {e}"))?
+        .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
 pub async fn load_oauth_tokens() -> Result<Option<TokenPair>, String> {
     tokio::task::spawn_blocking(move || oauth::load_tokens().map_err(|e| e.to_string()))
         .await
-        .map_err(|e| format!("Task failed: {e}"))?
+        .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
 pub async fn clear_oauth_tokens() -> Result<(), String> {
     tokio::task::spawn_blocking(move || oauth::clear_tokens().map_err(|e| e.to_string()))
         .await
-        .map_err(|e| format!("Task failed: {e}"))?
+        .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -82,7 +82,7 @@ pub async fn get_nexus_user_info(access_token: String) -> Result<NexusUserInfo, 
         oauth::parse_user_info(&access_token).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -104,7 +104,7 @@ pub async fn get_auth_method_cmd() -> Result<serde_json::Value, String> {
         }
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]

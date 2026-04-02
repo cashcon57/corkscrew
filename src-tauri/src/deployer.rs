@@ -278,9 +278,16 @@ fn deploy_mod_inner(
     let results: Vec<Option<(String, &str)>> = files
         .par_iter()
         .map(|rel_path| {
-            // Defense-in-depth: reject path traversal
+            // Defense-in-depth: reject path traversal (string-level check)
             if !crate::staging::is_safe_relative_path(rel_path) {
                 warn!("Deploy: skipping unsafe relative path: {}", rel_path);
+                return None;
+            }
+
+            // Defense-in-depth: post-join canonicalization check
+            let src = staging_path.join(rel_path);
+            if src.exists() && !crate::staging::validate_path_within_base(staging_path, &src) {
+                warn!("Deploy: path escaped staging after join: {}", rel_path);
                 return None;
             }
 
@@ -355,9 +362,28 @@ fn deploy_mod_inner(
                 let _ = fs::create_dir_all(parent); // idempotent, safe for parallel calls
             }
 
+            // Symlink re-check immediately before file operation to minimize TOCTOU window
+            if let Ok(meta) = fs::symlink_metadata(&dst) {
+                if meta.file_type().is_symlink() {
+                    warn!("Pre-deploy symlink detected: {}", dst.display());
+                    skipped_count.fetch_add(1, Ordering::Relaxed);
+                    return None;
+                }
+            }
+
             let method = if can_hardlink {
                 match fs::hard_link(&src, &dst) {
-                    Ok(_) => "hardlink",
+                    Ok(_) => {
+                        // Post-deploy symlink check to tighten TOCTOU window
+                        if let Ok(meta) = fs::symlink_metadata(&dst) {
+                            if meta.file_type().is_symlink() {
+                                let _ = fs::remove_file(&dst);
+                                warn!("Post-deploy symlink detected, removed: {}", dst.display());
+                                return None;
+                            }
+                        }
+                        "hardlink"
+                    }
                     Err(e) => {
                         warn!(
                             "Hardlink failed for {} → {}: {} (falling back to copy)",

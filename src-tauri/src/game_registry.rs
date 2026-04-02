@@ -268,7 +268,13 @@ fn find_child_case_insensitive(parent: &Path, target: &str) -> Option<PathBuf> {
 
 /// Parse Steam's `libraryfolders.vdf` to extract library paths.
 fn parse_library_folders_vdf(vdf_path: &Path) -> Option<Vec<PathBuf>> {
-    let content = fs::read_to_string(vdf_path).ok()?;
+    let content = match fs::read_to_string(vdf_path) {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("Failed to read Steam VDF {}: {}", vdf_path.display(), e);
+            return None;
+        }
+    };
     let mut paths = Vec::new();
     for line in content.lines() {
         let trimmed = line.trim();

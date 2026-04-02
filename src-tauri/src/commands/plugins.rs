@@ -114,7 +114,7 @@ pub async fn reorder_plugins_cmd(
             .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -147,7 +147,7 @@ pub async fn toggle_plugin_cmd(
         .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -180,7 +180,7 @@ pub async fn move_plugin_cmd(
         .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -200,7 +200,7 @@ pub async fn get_plugin_messages(
             .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 
@@ -227,7 +227,7 @@ pub async fn add_plugin_rule(
         )
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -235,7 +235,7 @@ pub async fn remove_plugin_rule(rule_id: i64, state: State<'_, AppState>) -> Res
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || loot_rules::remove_rule(&db, rule_id))
         .await
-        .map_err(|e| format!("Task failed: {e}"))?
+        .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -247,7 +247,7 @@ pub async fn list_plugin_rules(
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || loot_rules::list_rules(&db, &game_id, &bottle_name))
         .await
-        .map_err(|e| format!("Task failed: {e}"))?
+        .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -259,6 +259,6 @@ pub async fn clear_plugin_rules(
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || loot_rules::clear_rules(&db, &game_id, &bottle_name))
         .await
-        .map_err(|e| format!("Task failed: {e}"))?
+        .map_err(crate::format_join_error)?
 }
 

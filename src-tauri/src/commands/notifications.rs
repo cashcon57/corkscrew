@@ -24,7 +24,7 @@ pub async fn retry_download(id: u64, state: State<'_, AppState>) -> Result<bool,
     let queue = state.download_queue.clone();
     tokio::task::spawn_blocking(move || Ok(queue.mark_for_retry(id)))
         .await
-        .map_err(|e| format!("Task failed: {e}"))?
+        .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -52,7 +52,7 @@ pub async fn get_notification_log(
             .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -60,7 +60,7 @@ pub async fn clear_notification_log(state: State<'_, AppState>) -> Result<(), St
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || db.clear_notifications().map_err(|e| e.to_string()))
         .await
-        .map_err(|e| format!("Task failed: {e}"))?
+        .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -76,7 +76,7 @@ pub async fn log_notification(
             .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -84,7 +84,7 @@ pub async fn get_notification_count(state: State<'_, AppState>) -> Result<usize,
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || db.notification_count().map_err(|e| e.to_string()))
         .await
-        .map_err(|e| format!("Task failed: {e}"))?
+        .map_err(crate::format_join_error)?
 }
 
 
@@ -103,7 +103,7 @@ pub async fn record_error_event_cmd(
             .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
@@ -117,7 +117,7 @@ pub async fn get_error_summary(
             .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(crate::format_join_error)?
 }
 
 
