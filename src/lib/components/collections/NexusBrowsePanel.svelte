@@ -1,22 +1,19 @@
 <script lang="ts">
-  import { selectedGame, showError, showSuccess } from "$lib/stores";
-  import type { DetectedGame, NexusModInfo, NexusCategory, NexusModFile, NexusSearchResult } from "$lib/types";
+  import { showError, showSuccess } from "$lib/stores";
+  import type { DetectedGame, NexusModInfo, NexusCategory, NexusModFile } from "$lib/types";
   import {
     browseNexusMods,
     searchNexusMods,
     getGameCategories,
     getInstalledMods,
-    getModFiles,
-    getNexusModDetail,
     downloadAndInstallNexusMod,
   } from "$lib/api";
   import { listen } from "@tauri-apps/api/event";
   import { goto } from "$app/navigation";
-  import { openUrl } from "@tauri-apps/plugin-opener";
-  import DOMPurify from "dompurify";
-  import { bbcodeToHtml } from "$lib/bbcode";
   import NexusLogo from "$lib/components/NexusLogo.svelte";
   import WebViewToggle from "$lib/components/WebViewToggle.svelte";
+  import BrowseModDetail from "$lib/components/collections/BrowseModDetail.svelte";
+  import BrowseFilePicker from "$lib/components/collections/BrowseFilePicker.svelte";
 
   interface Props {
     game: DetectedGame;
@@ -110,16 +107,10 @@
 
   // Mod detail view state
   let selectedBrowseMod = $state<NexusModInfo | null>(null);
-  let browseModDetail = $state<NexusModInfo | null>(null);
-  let browseModFiles = $state<NexusModFile[]>([]);
-  let loadingModDetail = $state(false);
-  let renderedModDescription = $state("");
 
   // Download & file picker state
   let showFilePicker = $state(false);
   let filePickerMod = $state<NexusModInfo | null>(null);
-  let filePickerFiles = $state<NexusModFile[]>([]);
-  let loadingFiles = $state(false);
   let downloadingFile = $state<number | null>(null);
   let downloadProgress = $state<{ downloaded: number; total: number } | null>(null);
 
@@ -289,54 +280,8 @@
     return n.toString();
   }
 
-  function formatFileSize(kb: number): string {
-    if (kb >= 1_048_576) return `${(kb / 1_048_576).toFixed(1)} GB`;
-    if (kb >= 1024) return `${(kb / 1024).toFixed(1)} MB`;
-    return `${kb} KB`;
-  }
-
-  /** Validate that a URL is a safe HTTP(S) URL before opening in browser. */
-  function safeOpenUrl(url: string | null | undefined) {
-    if (!url) return;
-    try {
-      const parsed = new URL(url);
-      if (parsed.protocol === "http:" || parsed.protocol === "https:") {
-        openUrl(url);
-      } else {
-        showError(`Blocked unsafe URL scheme: ${parsed.protocol}`);
-      }
-    } catch {
-      showError("Invalid URL");
-    }
-  }
-
-  async function openModDetail(mod: NexusModInfo) {
-    const slug = getGameSlug();
-    if (!slug) return;
+  function openModDetail(mod: NexusModInfo) {
     selectedBrowseMod = mod;
-    browseModDetail = null;
-    browseModFiles = [];
-    renderedModDescription = "";
-    loadingModDetail = true;
-    try {
-      const [detail, files] = await Promise.all([
-        getNexusModDetail(slug, mod.mod_id),
-        getModFiles(slug, mod.mod_id).catch(() => [] as NexusModFile[]),
-      ]);
-      browseModDetail = detail;
-      const categoryOrder: Record<string, number> = { main: 0, update: 1, optional: 2, miscellaneous: 3, old_version: 4 };
-      browseModFiles = files
-        .filter((f: NexusModFile) => f.category !== "deleted" && f.category !== "archived")
-        .sort((a: NexusModFile, b: NexusModFile) => (categoryOrder[a.category] ?? 5) - (categoryOrder[b.category] ?? 5));
-      if (detail.description) {
-        renderedModDescription = DOMPurify.sanitize(bbcodeToHtml(detail.description));
-      }
-    } catch (e) {
-      showError(`Failed to load mod details: ${e}`);
-      selectedBrowseMod = null;
-    } finally {
-      loadingModDetail = false;
-    }
   }
 
   /** Public method: open a mod detail view by mod stub (used for LLM events). */
@@ -346,21 +291,6 @@
 
   function backToBrowseModList() {
     selectedBrowseMod = null;
-    browseModDetail = null;
-    browseModFiles = [];
-    renderedModDescription = "";
-  }
-
-  /** Intercept clicks on links inside rendered markdown/HTML and open them externally. */
-  function handleRenderedLinkClick(e: MouseEvent) {
-    const target = (e.target as HTMLElement)?.closest("a");
-    if (!target) return;
-    const href = target.getAttribute("href");
-    if (href) {
-      e.preventDefault();
-      e.stopPropagation();
-      safeOpenUrl(href);
-    }
   }
 
   function cycleNsfwFilter(current: "hide" | "show" | "only"): "hide" | "show" | "only" {
@@ -382,31 +312,14 @@
   }
 
   // --- Download & File Picker ---
-  async function openFilePicker(mod: NexusModInfo) {
-    const slug = getGameSlug();
-    if (!slug) return;
+  function openFilePicker(mod: NexusModInfo) {
     filePickerMod = mod;
     showFilePicker = true;
-    loadingFiles = true;
-    try {
-      const files = await getModFiles(slug, mod.mod_id);
-      const categoryOrder: Record<string, number> = { main: 0, update: 1, optional: 2, miscellaneous: 3, old_version: 4 };
-      filePickerFiles = files
-        .filter(f => f.category !== "deleted" && f.category !== "archived")
-        .sort((a, b) => (categoryOrder[a.category] ?? 5) - (categoryOrder[b.category] ?? 5));
-    } catch (e) {
-      showError(`Failed to load mod files: ${e}`);
-      showFilePicker = false;
-      filePickerMod = null;
-    } finally {
-      loadingFiles = false;
-    }
   }
 
   function closeFilePicker() {
     showFilePicker = false;
     filePickerMod = null;
-    filePickerFiles = [];
     downloadingFile = null;
     downloadProgress = null;
   }
@@ -438,6 +351,12 @@
       downloadingFile = null;
       downloadProgress = null;
     }
+  }
+
+  /** Handle download from the detail view's file table (no separate picker needed). */
+  async function handleDetailDownloadFile(mod: NexusModInfo, file: NexusModFile) {
+    filePickerMod = mod;
+    await handleDownloadFile(file);
   }
 
   /** Cleanup timers on destroy. */
@@ -486,155 +405,16 @@
   </div>
 {:else}
   {#if selectedBrowseMod}
-    <!-- Mod Detail View -->
-    <div class="detail-view">
-      <div class="detail-header">
-        <button class="btn btn-ghost" onclick={backToBrowseModList}>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M19 12H5" />
-            <polyline points="12 19 5 12 12 5" />
-          </svg>
-          Back to Browse
-        </button>
-        <button class="btn btn-ghost btn-sm" onclick={() => safeOpenUrl(`https://www.nexusmods.com/${getGameSlug()}/mods/${selectedBrowseMod?.mod_id}`)}>
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
-            <polyline points="15 3 21 3 21 9" />
-            <line x1="10" y1="14" x2="21" y2="3" />
-          </svg>
-          View on NexusMods
-        </button>
-      </div>
-
-      {#if loadingModDetail}
-        <div class="loading-container">
-          <div class="loading-card">
-            <div class="spinner"><div class="spinner-ring"></div></div>
-            <div class="loading-text">
-              <p class="loading-title">Loading mod details</p>
-              <p class="loading-detail">{selectedBrowseMod.name}</p>
-            </div>
-          </div>
-        </div>
-      {:else if browseModDetail}
-        <div class="detail-content">
-          {#if browseModDetail.picture_url}
-            <div class="mod-detail-hero" style="background-image: url({browseModDetail.picture_url})"></div>
-          {/if}
-
-          <div class="detail-title-section">
-            <div class="detail-title-row">
-              <h2 class="detail-name">{browseModDetail.name}</h2>
-            </div>
-            <p class="detail-author">by {browseModDetail.author}</p>
-            {#if browseModDetail.summary}
-              <p class="detail-summary">{browseModDetail.summary}</p>
-            {/if}
-          </div>
-
-          <!-- Stats Bar -->
-          <div class="detail-stats-bar">
-            <div class="detail-stats-left">
-              <div class="detail-stat">
-                <span class="detail-stat-value">{formatDownloads(browseModDetail.endorsement_count)}</span>
-                <span class="detail-stat-label">Endorsements</span>
-              </div>
-              <div class="detail-stat">
-                <span class="detail-stat-value">{formatDownloads(browseModDetail.unique_downloads)}</span>
-                <span class="detail-stat-label">Downloads</span>
-              </div>
-              <div class="detail-stat">
-                <span class="detail-stat-value">v{browseModDetail.version}</span>
-                <span class="detail-stat-label">Version</span>
-              </div>
-              {#if browseModDetail.updated_at}
-                <div class="detail-stat">
-                  <span class="detail-stat-value">{browseModDetail.updated_at}</span>
-                  <span class="detail-stat-label">Updated</span>
-                </div>
-              {/if}
-            </div>
-            {#if account?.is_premium && !browseInstalledNexusIds.has(browseModDetail.mod_id)}
-              <button
-                class="btn btn-primary stats-install-btn"
-                onclick={() => { if (browseModDetail) openFilePicker(browseModDetail); }}
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                  <polyline points="7 10 12 15 17 10" />
-                  <line x1="12" y1="15" x2="12" y2="3" />
-                </svg>
-                Install
-              </button>
-            {:else if browseInstalledNexusIds.has(browseModDetail.mod_id)}
-              <span class="badge badge-success">Installed</span>
-            {/if}
-          </div>
-
-          <!-- Description -->
-          {#if renderedModDescription}
-            <div class="detail-section">
-              <h3 class="detail-section-title">Description</h3>
-              <div class="rendered-markdown" onclick={handleRenderedLinkClick}>
-                {@html renderedModDescription}
-              </div>
-            </div>
-          {/if}
-
-          <!-- Files Table (premium only) -->
-          {#if account?.is_premium && browseModFiles.length > 0}
-            <div class="detail-section">
-              <h3 class="detail-section-title">
-                Files
-                <span class="title-count">{browseModFiles.length}</span>
-              </h3>
-              <div class="mods-table-container">
-                <div class="mods-table">
-                  <div class="mods-table-header">
-                    <span class="col-name">Name</span>
-                    <span class="col-version">Version</span>
-                    <span class="col-size">Size</span>
-                    <span class="col-category">Category</span>
-                    <span class="col-actions">Actions</span>
-                  </div>
-                  {#each browseModFiles as file}
-                    <div class="mods-table-row">
-                      <span class="col-name" title={file.name}>{file.name}</span>
-                      <span class="col-version">{file.version}</span>
-                      <span class="col-size">{formatFileSize(file.size_kb)}</span>
-                      <span class="col-category"><span class="tag">{file.category}</span></span>
-                      <span class="col-actions">
-                        <button
-                          class="btn btn-accent btn-sm"
-                          onclick={() => {
-                            if (browseModDetail) {
-                              filePickerMod = browseModDetail;
-                              handleDownloadFile(file);
-                            }
-                          }}
-                          disabled={downloadingFile === file.file_id}
-                        >
-                          {#if downloadingFile === file.file_id}
-                            <div class="spinner-sm-ring"></div>
-                          {:else}
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                              <polyline points="7 10 12 15 17 10" />
-                              <line x1="12" y1="15" x2="12" y2="3" />
-                            </svg>
-                            Install
-                          {/if}
-                        </button>
-                      </span>
-                    </div>
-                  {/each}
-                </div>
-              </div>
-            </div>
-          {/if}
-        </div>
-      {/if}
-    </div>
+    <BrowseModDetail
+      mod={selectedBrowseMod}
+      gameSlug={getGameSlug()}
+      {account}
+      installedNexusIds={browseInstalledNexusIds}
+      onback={backToBrowseModList}
+      oninstall={openFilePicker}
+      ondownloadfile={handleDetailDownloadFile}
+      downloadingFileId={downloadingFile}
+    />
   {:else}
   <div class="filters-bar">
     {#if allDetectedGames.length > 1}
@@ -882,67 +662,14 @@
 
 <!-- File Picker Modal -->
 {#if showFilePicker && filePickerMod}
-  <div class="modal-overlay" onclick={closeFilePicker} role="presentation">
-    <div class="file-picker-modal" onclick={(e) => e.stopPropagation()} role="dialog" aria-label="Select file to download">
-      <div class="file-picker-header">
-        <h3 class="file-picker-title">Download: {filePickerMod.name}</h3>
-        <button class="file-picker-close" onclick={closeFilePicker}>&times;</button>
-      </div>
-
-      {#if loadingFiles}
-        <div class="file-picker-loading">
-          <div class="spinner-sm"></div>
-          <span>Loading available files...</span>
-        </div>
-      {:else if filePickerFiles.length === 0}
-        <div class="file-picker-empty">
-          <p>No downloadable files found for this mod.</p>
-        </div>
-      {:else}
-        <div class="file-picker-list">
-          {#each filePickerFiles as file}
-            <div class="file-picker-item" class:file-downloading={downloadingFile === file.file_id}>
-              <div class="file-picker-info">
-                <div class="file-picker-name">{file.name}</div>
-                <div class="file-picker-meta">
-                  <span class="file-category-badge" class:file-cat-main={file.category === "main"} class:file-cat-optional={file.category === "optional"} class:file-cat-update={file.category === "update"}>
-                    {file.category}
-                  </span>
-                  {#if file.version}<span class="file-version">v{file.version}</span>{/if}
-                  <span class="file-size">{formatFileSize(file.size_kb)}</span>
-                </div>
-                {#if file.description}
-                  <p class="file-picker-desc">{file.description}</p>
-                {/if}
-              </div>
-              <div class="file-picker-action">
-                {#if downloadingFile === file.file_id}
-                  <div class="download-progress-bar">
-                    <div class="download-progress-fill" style="width: {downloadProgress && downloadProgress.total > 0 ? Math.round((downloadProgress.downloaded / downloadProgress.total) * 100) : 0}%"></div>
-                  </div>
-                  <span class="download-progress-text">
-                    {#if downloadProgress && downloadProgress.total > 0}
-                      {Math.round((downloadProgress.downloaded / downloadProgress.total) * 100)}%
-                    {:else}
-                      Starting...
-                    {/if}
-                  </span>
-                {:else}
-                  <button
-                    class="btn btn-accent btn-sm"
-                    disabled={downloadingFile !== null}
-                    onclick={() => handleDownloadFile(file)}
-                  >
-                    Install
-                  </button>
-                {/if}
-              </div>
-            </div>
-          {/each}
-        </div>
-      {/if}
-    </div>
-  </div>
+  <BrowseFilePicker
+    mod={filePickerMod}
+    gameSlug={getGameSlug()}
+    downloadingFileId={downloadingFile}
+    {downloadProgress}
+    ondownload={handleDownloadFile}
+    onclose={closeFilePicker}
+  />
 {/if}
 
 <style>
@@ -1083,215 +810,4 @@
     justify-content: center;
   }
 
-  .mod-detail-hero {
-    width: 100%;
-    height: 280px;
-    background-size: cover;
-    background-position: center;
-    border-radius: var(--radius-lg);
-    border: 1px solid var(--border-primary);
-  }
-
-  .modal-overlay {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.6);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 1000;
-    backdrop-filter: var(--glass-blur-light);
-  }
-
-  .file-picker-modal {
-    background: color-mix(in srgb, var(--bg-grouped) 75%, transparent);
-    backdrop-filter: blur(40px) saturate(1.5);
-    -webkit-backdrop-filter: blur(40px) saturate(1.5);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: var(--radius-lg, 12px);
-    width: min(560px, 90vw);
-    max-height: 70vh;
-    display: flex;
-    flex-direction: column;
-    box-shadow: var(--glass-refraction),
-                var(--glass-edge-shadow),
-                0 8px 32px rgba(0, 0, 0, 0.4);
-  }
-
-  .file-picker-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: var(--space-4) var(--space-6);
-    border-bottom: 1px solid var(--separator);
-    flex-shrink: 0;
-  }
-
-  .file-picker-title {
-    font-size: 16px;
-    font-weight: 600;
-    color: var(--text-primary);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 420px;
-  }
-
-  .file-picker-close {
-    width: 28px;
-    height: 28px;
-    border-radius: var(--radius-sm);
-    background: transparent;
-    border: none;
-    color: var(--text-tertiary);
-    font-size: 18px;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .file-picker-close:hover {
-    background: var(--surface-hover);
-    color: var(--text-primary);
-  }
-
-  .file-picker-loading {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: var(--space-3);
-    padding: var(--space-10);
-    color: var(--text-secondary);
-    font-size: 13px;
-  }
-
-  .file-picker-empty {
-    padding: var(--space-10);
-    text-align: center;
-    color: var(--text-tertiary);
-    font-size: 13px;
-  }
-
-  .file-picker-list {
-    overflow-y: auto;
-    padding: var(--space-2);
-  }
-
-  .file-picker-item {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-4);
-    padding: var(--space-3) var(--space-4);
-    border-radius: var(--radius);
-    transition: background var(--duration-fast) var(--ease);
-  }
-
-  .file-picker-item:hover {
-    background: var(--surface-hover);
-  }
-
-  .file-picker-item.file-downloading {
-    background: rgba(0, 122, 255, 0.05);
-  }
-
-  .file-picker-info {
-    flex: 1;
-    min-width: 0;
-  }
-
-  .file-picker-name {
-    font-size: 14px;
-    font-weight: 500;
-    color: var(--text-primary);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .file-picker-meta {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    margin-top: var(--space-1);
-    font-size: 12px;
-    color: var(--text-tertiary);
-  }
-
-  .file-category-badge {
-    font-size: 10px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-    padding: 1px 5px;
-    border-radius: 100px;
-    background: var(--surface-hover);
-    color: var(--text-secondary);
-  }
-
-  .file-cat-main {
-    background: rgba(48, 209, 88, 0.15);
-    color: #30d158;
-  }
-
-  .file-cat-optional {
-    background: rgba(0, 122, 255, 0.15);
-    color: var(--system-accent);
-  }
-
-  .file-cat-update {
-    background: rgba(255, 159, 10, 0.15);
-    color: #ff9f0a;
-  }
-
-  .file-version {
-    color: var(--text-tertiary);
-  }
-
-  .file-size {
-    color: var(--text-tertiary);
-  }
-
-  .file-picker-desc {
-    font-size: 12px;
-    color: var(--text-tertiary);
-    margin-top: var(--space-1);
-    line-height: 1.4;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
-  }
-
-  .file-picker-action {
-    flex-shrink: 0;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: var(--space-1);
-    min-width: 80px;
-  }
-
-  .download-progress-bar {
-    width: 80px;
-    height: 4px;
-    background: var(--separator);
-    border-radius: 2px;
-    overflow: hidden;
-  }
-
-  .download-progress-fill {
-    height: 100%;
-    background: var(--system-accent);
-    border-radius: 2px;
-    transition: width 0.3s ease;
-  }
-
-  .download-progress-text {
-    font-size: 11px;
-    color: var(--text-tertiary);
-    font-variant-numeric: tabular-nums;
-  }
 </style>

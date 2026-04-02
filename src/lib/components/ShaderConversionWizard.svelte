@@ -156,7 +156,7 @@
     // Detect macOS
     isMacOS = navigator.userAgent.includes('Mac') || navigator.platform.includes('Mac');
     // Check NexusMods premium status
-    isNexusPremium().then(v => { isPremium = v; }).catch(() => { isPremium = false; });
+    isNexusPremium().then(v => { isPremium = v; }).catch((err) => { console.warn('Failed to check NexusMods premium status:', err); isPremium = false; });
     // Auto-scan on mount
     runScan();
 

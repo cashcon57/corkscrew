@@ -86,7 +86,7 @@
   function handleResize() {
     if (!webviewActive) return;
     const b = getContentBounds();
-    resizeBrowserWebview(b.x, b.y, b.width, b.height).catch(() => {});
+    resizeBrowserWebview(b.x, b.y, b.width, b.height).catch((err) => console.warn('Failed to resize browser webview:', err));
   }
 
   // React to anchor element or sidebar changes — reposition webview
@@ -103,7 +103,7 @@
   // Cleanup on destroy
   onDestroy(() => {
     if (webviewActive) {
-      closeBrowserWebview().catch(() => {});
+      closeBrowserWebview().catch((err) => console.warn('Failed to close browser webview on destroy:', err));
     }
   });
 

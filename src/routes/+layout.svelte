@@ -289,7 +289,7 @@
       if (lastPage && ["mods", "discover", "plugins", "profiles", "logs", "settings"].includes(lastPage)) {
         currentPage.set(lastPage);
       }
-    }).catch(() => {});
+    }).catch((err) => console.warn('Failed to restore last page from config:', err));
 
     // Check if first-run wizard should show + load game fixes preference + telemetry consent
     getConfig().then(config => {
@@ -606,7 +606,7 @@
     // Remember the selected game so it persists across restarts
     setConfigValue("last_selected_game", game.game_id)
       .then(() => setConfigValue("last_selected_bottle", game.bottle_name))
-      .catch(() => {});
+      .catch((err) => console.warn('Failed to persist selected game to config:', err));
     loadProfilesForGame(game);
     loadCollectionsForGame(game);
     checkGameVersion(game);
@@ -921,7 +921,7 @@
   function navigate(page: string) {
     currentPage.set(page);
     // Remember the current page for next launch
-    setConfigValue("last_page", page).catch(() => {});
+    setConfigValue("last_page", page).catch((err) => console.warn('Failed to persist current page to config:', err));
     // If we're on a sub-route (e.g. /collections/progress), navigate back to root
     if (window.location.pathname !== "/") {
       goto("/");

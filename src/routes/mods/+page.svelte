@@ -1,8 +1,10 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { get } from "svelte/store";
+  import { open } from "@tauri-apps/plugin-dialog";
   import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
   import ModlistImportWizard from "$lib/components/ModlistImportWizard.svelte";
+  import FomodWizard from "$lib/components/FomodWizard.svelte";
   import ShaderConversionWizard from "$lib/components/ShaderConversionWizard.svelte";
   import {
     getInstalledMods,
@@ -11,24 +13,41 @@
     installMod,
     uninstallMod,
     toggleMod,
+    batchToggleMods,
+    launchGame,
+    checkSkse,
+    getSkseDownloadUrl,
+    installSkseFromArchive,
+    installSkseAuto,
+    setSksePreference,
+    checkSkyrimVersion,
+    downgradeSkyrim,
     reorderMods,
     getConflicts,
     checkModUpdates,
+    fixSkyrimDisplay,
     onInstallProgress,
     redeployAllMods,
     getDeploymentStats,
     setModNotes,
     setModTags,
     setModPriority,
+    onBulkOperationProgress,
     backfillCategories,
     exportModlist,
     detectFomod,
+    getFomodRecipe,
+    getFomodFiles,
+    saveFomodRecipe,
     detectModTools,
     launchModTool,
     endorseMod,
     abstainMod,
     getUserEndorsements,
     getConfig,
+    setConfigValue,
+    getGameLockStatus,
+    forceUnlockGame,
     quickCsModCount,
     isDeployInProgress,
     onDeployStatusChanged,
@@ -51,7 +70,8 @@
     wjInstallGeneration,
     modStateVersion,
   } from "$lib/stores";
-  import type { InstalledMod, DetectedGame, SkseStatus, FileConflict, ModUpdateInfo } from "$lib/types";
+  import type { InstalledMod, DetectedGame, SkseStatus, DowngradeStatus, FileConflict, ModUpdateInfo, FomodInstaller } from "$lib/types";
+  import { createModFilters } from "$lib/stores/modFilters.svelte";
   import GameIcon from "$lib/components/GameIcon.svelte";
   import DiskBudgetPanel from "$lib/components/DiskBudgetPanel.svelte";
   import PreflightPanel from "$lib/components/PreflightPanel.svelte";
@@ -65,10 +85,6 @@
   import DeploymentPanel from "$lib/components/mods/DeploymentPanel.svelte";
   import ConflictResolutionPanel from "$lib/components/mods/ConflictResolutionPanel.svelte";
   import ModInstallFlow from "$lib/components/mods/ModInstallFlow.svelte";
-  import ModUpdatePanel from "$lib/components/mods/ModUpdatePanel.svelte";
-  import FomodReconfigurePanel from "$lib/components/mods/FomodReconfigurePanel.svelte";
-  import ModBatchOperations from "$lib/components/mods/ModBatchOperations.svelte";
-  import SkseGameLaunchPanel from "$lib/components/mods/SkseGameLaunchPanel.svelte";
 
   // Game launch fixes opt-out (display fix + cursor clamp)
   let disableGameFixes = $state(false);
@@ -82,9 +98,18 @@
   let confirmUninstall = $state<number | null>(null);
   let togglingMod = $state<number | null>(null);
   let launching = $state(false);
+  let gameLockPollInterval: ReturnType<typeof setInterval> | null = null;
+  let gameLockPollFailCount = 0;
+  let skse = $state<SkseStatus | null>(null);
+  let showSksePrompt = $state(false);
+  let installingSkse = $state(false);
+  let showSkseMenu = $state(false);
+  let showSkseInstallPrompt = $state(false);
+  let downgradeStatus = $state<DowngradeStatus | null>(null);
+  let downgrading = $state(false);
+  let showDowngradeBanner = $state(false);
   let draggingOver = $state(false);
-  // skse/launch/downgrade/gameLock state moved to SkseGameLaunchPanel
-  let skse = $state<SkseStatus | null>(null); // kept for banner meta display
+  let fixingDisplay = $state(false);
   let installUnlisten: (() => void) | null = null;
 
   // Drag reorder state
@@ -96,14 +121,17 @@
   let showImportWizard = $state(false);
   let exporting = $state(false);
 
-  // FOMOD wizard state (managed by FomodReconfigurePanel component)
-  let fomodPanelRef = $state<ReturnType<typeof FomodReconfigurePanel> | null>(null);
+  // FOMOD wizard state
+  let showFomodWizard = $state(false);
+  let fomodInstaller = $state<FomodInstaller | null>(null);
+  let fomodTargetMod = $state<InstalledMod | null>(null);
 
   // Conflict state
   let conflicts = $state<FileConflict[]>([]);
 
-  // Update check state (modUpdates kept here for updateMap derived)
+  // Update check state
   let modUpdates = $state<ModUpdateInfo[]>([]);
+  let checkingUpdates = $state(false);
 
   // Deploy/purge state
   let deploying = $state(false);
@@ -112,15 +140,8 @@
   let deploymentPanelRef = $state<ReturnType<typeof DeploymentPanel> | null>(null);
   let deployStatusUnlisten: (() => void) | null = null;
 
-  // Search/filter state
-  let searchQuery = $state("");
-  let filterStatus = $state<"all" | "enabled" | "disabled" | "conflicts" | "has-updates">("all");
-  let filterSource = $state<"all" | "nexus" | "loverslab" | "moddb" | "curseforge" | "direct" | "manual">("all");
-  let filterCollection = $state<string | null>(null);
-  let sortBy = $state<"priority" | "name" | "date" | "version" | "files">("priority");
-  let sortDir = $state<"asc" | "desc">("asc");
-  let filterCategory = $state<string | null>(null);
-  let showCategoryPopover = $state(false);
+  // Search/filter/sort state (composable)
+  const filters = createModFilters();
 
   // Persistent search: restore from sessionStorage on mount
   function searchStorageKey(game: DetectedGame) {
@@ -330,194 +351,37 @@
       backendDeployInProgress = inProgress;
     }).then(unlisten => { deployStatusUnlisten = unlisten; }).catch((err) => console.error('deploy status listener:', err));
 
-    // Game lock initial check and polling moved to SkseGameLaunchPanel
+    // Check if a game is already running (e.g., launched before navigating here)
+    {
+      const game = get(selectedGame);
+      if (game) {
+        getGameLockStatus(game.game_id, game.bottle_name).then(lock => {
+          gameLock.set(lock);
+          if (lock) startGameLockPolling(game.game_id, game.bottle_name);
+        }).catch((err) => console.error('Initial game lock check failed:', err));
+      }
+    }
 
     return () => document.removeEventListener("click", closeOverflow);
   });
 
   onDestroy(() => {
     if (installUnlisten) { installUnlisten(); installUnlisten = null; }
-    batchOpsRef?.cleanup();
+    if (bulkProgressUnlisten) { bulkProgressUnlisten(); bulkProgressUnlisten = null; }
     if (deployStatusUnlisten) { deployStatusUnlisten(); deployStatusUnlisten = null; }
+    stopGameLockPolling();
   });
 
-  // View mode state
-  let viewMode = $state<"flat" | "collection" | "category">(
-    (() => { try { const v = localStorage.getItem("corkscrew:viewMode"); if (v === "flat" || v === "collection" || v === "category") return v; } catch {} return "flat"; })()
-  );
+  // Sorted mods — delegated to filters composable
+  let sortedMods = $derived(filters.sortMods($installedMods));
 
-  // Persist view mode preference
-  $effect(() => { try { localStorage.setItem("corkscrew:viewMode", viewMode); } catch {} });
-
-  // Semantic version comparison
-  function compareVersions(a: string, b: string): number {
-    const pa = a.split(".").map(Number);
-    const pb = b.split(".").map(Number);
-    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-      const diff = (pa[i] || 0) - (pb[i] || 0);
-      if (diff !== 0) return diff;
-    }
-    return 0;
-  }
-
-  // Toggle sort: click same column toggles direction, different column sets ascending
-  function toggleSort(key: typeof sortBy) {
-    if (sortBy === key) {
-      sortDir = sortDir === "asc" ? "desc" : "asc";
-    } else {
-      sortBy = key;
-      sortDir = "asc";
-    }
-  }
-
-  // Sorted mods with secondary sort keys for stability
-  let sortedMods = $derived((() => {
-    const mods = [...$installedMods];
-    const dir = sortDir === "asc" ? 1 : -1;
-    mods.sort((a, b) => {
-      let primary: number;
-      switch (sortBy) {
-        case "name":
-          primary = a.name.localeCompare(b.name);
-          return dir * primary || (a.install_priority - b.install_priority);
-        case "date":
-          primary = new Date(a.installed_at).getTime() - new Date(b.installed_at).getTime();
-          return dir * primary || a.name.localeCompare(b.name);
-        case "version":
-          primary = compareVersions(a.version || "0", b.version || "0");
-          return dir * primary || a.name.localeCompare(b.name);
-        case "files":
-          primary = a.file_count - b.file_count;
-          return dir * primary || a.name.localeCompare(b.name);
-        default:
-          primary = a.install_priority - b.install_priority;
-          return dir * primary || a.name.localeCompare(b.name);
-      }
-    });
-    return mods;
-  })());
-
-  // Faceted search parser
-  const FACET_PREFIXES = ["tag", "source", "enabled", "conflict", "update", "category", "collection", "priority", "files"] as const;
-  type FacetKey = typeof FACET_PREFIXES[number];
-
-  interface ParsedSearch {
-    facets: Map<FacetKey, string>;
-    freeText: string;
-  }
-
-  function parseFacets(query: string): ParsedSearch {
-    const facets = new Map<FacetKey, string>();
-    const freeWords: string[] = [];
-    const tokens = query.match(/(?:[^\s"]+|"[^"]*")+/g) ?? [];
-
-    for (const token of tokens) {
-      const colonIdx = token.indexOf(":");
-      if (colonIdx > 0) {
-        const prefix = token.slice(0, colonIdx).toLowerCase();
-        if (FACET_PREFIXES.includes(prefix as FacetKey)) {
-          facets.set(prefix as FacetKey, token.slice(colonIdx + 1).replace(/^"|"$/g, ""));
-          continue;
-        }
-      }
-      freeWords.push(token);
-    }
-
-    return { facets, freeText: freeWords.join(" ") };
-  }
-
-  // Derived parsed search for use in UI (facet pills)
-  let parsedSearch = $derived(parseFacets(searchQuery));
-
-  // Filtered mods based on faceted search and dropdown filters — single-pass filter
-  let filteredMods = $derived((() => {
-    const { facets, freeText } = parsedSearch;
-
-    // Pre-compute facet values outside the loop
-    const tagFacet = facets.get("tag")?.toLowerCase() ?? null;
-    const sourceFacet = facets.get("source")?.toLowerCase() ?? null;
-    const enabledFacet = facets.has("enabled") ? facets.get("enabled")!.toLowerCase() === "true" : null;
-    const conflictFacet = facets.get("conflict")?.toLowerCase() === "true" || false;
-    const updateFacet = facets.get("update")?.toLowerCase() === "true" || false;
-    const categoryFacet = facets.get("category")?.toLowerCase() ?? null;
-    const collectionFacet = facets.get("collection")?.toLowerCase() ?? null;
-
-    const priorityFacet = facets.get("priority");
-    let priorityOp: ">" | "<" | null = null;
-    let priorityN = 0;
-    if (priorityFacet) {
-      const match = priorityFacet.match(/^([><])(\d+)$/);
-      if (match) { priorityOp = match[1] as ">" | "<"; priorityN = parseInt(match[2]); }
-    }
-
-    const filesFacet = facets.get("files");
-    let filesOp: ">" | "<" | null = null;
-    let filesN = 0;
-    if (filesFacet) {
-      const match = filesFacet.match(/^([><])(\d+)$/);
-      if (match) { filesOp = match[1] as ">" | "<"; filesN = parseInt(match[2]); }
-    }
-
-    const q = freeText.trim() ? freeText.toLowerCase() : null;
-
-    // Local copies of dropdown filter state for the closure
-    const fStatus = filterStatus;
-    const fSource = filterSource;
-    const fCollection = filterCollection;
-    const fCategory = filterCategory;
-
-    return sortedMods.filter(m => {
-      // Facet: tag
-      if (tagFacet !== null && !m.user_tags.some(tag => tag.toLowerCase().includes(tagFacet))) return false;
-      // Facet: source
-      if (sourceFacet !== null && (m.source_type || "manual").toLowerCase() !== sourceFacet) return false;
-      // Facet: enabled
-      if (enabledFacet !== null && m.enabled !== enabledFacet) return false;
-      // Facet: conflict
-      if (conflictFacet && !conflictModIds.has(m.id)) return false;
-      // Facet: update
-      if (updateFacet && !updateMap.has(m.id)) return false;
-      // Facet: category
-      if (categoryFacet !== null && !m.auto_category?.toLowerCase().includes(categoryFacet)) return false;
-      // Facet: collection
-      if (collectionFacet !== null && !m.collection_name?.toLowerCase().includes(collectionFacet)) return false;
-      // Facet: priority
-      if (priorityOp === ">" && m.install_priority <= priorityN) return false;
-      if (priorityOp === "<" && m.install_priority >= priorityN) return false;
-      // Facet: files
-      if (filesOp === ">" && m.file_count <= filesN) return false;
-      if (filesOp === "<" && m.file_count >= filesN) return false;
-      // Free text search across name, tags, notes, collection, category
-      if (q !== null &&
-        !m.name.toLowerCase().includes(q) &&
-        !m.user_tags.some(t => t.toLowerCase().includes(q)) &&
-        !(m.user_notes && m.user_notes.toLowerCase().includes(q)) &&
-        !(m.collection_name && m.collection_name.toLowerCase().includes(q)) &&
-        !(m.auto_category && m.auto_category.toLowerCase().includes(q))
-      ) return false;
-      // Dropdown: status filter
-      if (fStatus === "enabled" && !m.enabled) return false;
-      if (fStatus === "disabled" && m.enabled) return false;
-      if (fStatus === "conflicts" && !conflictModIds.has(m.id)) return false;
-      if (fStatus === "has-updates" && !updateMap.has(m.id)) return false;
-      // Dropdown: source filter
-      if (fSource !== "all" && (m.source_type || "manual") !== fSource) return false;
-      // Dropdown: collection filter
-      if (fCollection !== null) {
-        if (fCollection === "__standalone__") { if (m.collection_name) return false; }
-        else { if (m.collection_name !== fCollection) return false; }
-      }
-      // Dropdown: category filter
-      if (fCategory !== null && (m.auto_category || "Miscellaneous") !== fCategory) return false;
-
-      return true;
-    });
-  })());
+  // Filtered mods — delegated to filters composable
+  let filteredMods = $derived(filters.filterMods(sortedMods, conflictModIds, updateMap));
 
   // Split filtered mods into enabled and disabled — single partition pass
   let disabledSectionCollapsed = $state(true);
   let partitionedFilteredMods = $derived((() => {
-    if (filterStatus !== "all") return { enabled: filteredMods, disabled: [] as typeof filteredMods };
+    if (filters.filterStatus !== "all") return { enabled: filteredMods, disabled: [] as typeof filteredMods };
     const enabled: typeof filteredMods = [];
     const disabled: typeof filteredMods = [];
     for (const m of filteredMods) {
@@ -566,7 +430,7 @@
   })());
 
   // Virtual scrolling derived — uses enabledFilteredMods in flat view to exclude disabled mods
-  let flatViewMods = $derived(viewMode === "flat" ? enabledFilteredMods : filteredMods);
+  let flatViewMods = $derived(filters.viewMode === "flat" ? enabledFilteredMods : filteredMods);
 
   type FlatViewItem =
     | { type: "mod"; mod: InstalledMod }
@@ -575,7 +439,7 @@
 
   /** Unified flat view list: enabled mods + separator + disabled mods (if expanded). */
   let flatViewItems = $derived((() => {
-    if (viewMode !== "flat") return [] as FlatViewItem[];
+    if (filters.viewMode !== "flat") return [] as FlatViewItem[];
     const items: FlatViewItem[] = enabledFilteredMods.map(mod => ({ type: "mod" as const, mod }));
     if (disabledFilteredMods.length > 0) {
       items.push({ type: "disabled-separator" as const });
@@ -589,7 +453,7 @@
   })());
 
   let visibleRange = $derived((() => {
-    const totalItems = viewMode === "flat" ? flatViewItems.length : flatViewMods.length;
+    const totalItems = filters.viewMode === "flat" ? flatViewItems.length : flatViewMods.length;
     if (totalItems === 0) return { start: 0, end: 0, paddingTop: 0, paddingBottom: 0 };
     const startRaw = Math.floor(scrollTop / ROW_HEIGHT) - SCROLL_BUFFER;
     const visibleCount = Math.ceil(containerHeight / ROW_HEIGHT) + SCROLL_BUFFER * 2;
@@ -643,7 +507,7 @@
     if (e?.shiftKey && selectionAnchorId !== null) {
       // Shift+click: select the entire range from anchor to this item.
       // Does NOT toggle — always adds the full range (standard file manager behavior).
-      const allMods = viewMode === "flat"
+      const allMods = filters.viewMode === "flat"
         ? [...flatViewMods, ...disabledFilteredMods]
         : filteredMods;
       const anchorIdx = allMods.findIndex(m => m.id === selectionAnchorId);
@@ -695,8 +559,87 @@
     focusedIndex = index;
   }
 
-  // Bulk operations (batchEnable/batchDisable/batchUninstall) moved to ModBatchOperations component
-  let batchOpsRef = $state<ReturnType<typeof ModBatchOperations> | null>(null);
+  let bulkOperating = $state<"enabling" | "disabling" | "uninstalling" | null>(null);
+  let bulkProgress = $state<{ phase: string; current: number; total: number; message: string } | null>(null);
+  let bulkProgressUnlisten: (() => void) | null = null;
+
+  async function startBulkListener() {
+    bulkProgress = null;
+    bulkProgressUnlisten = await onBulkOperationProgress((p) => {
+      bulkProgress = p;
+    });
+  }
+
+  function stopBulkListener() {
+    if (bulkProgressUnlisten) { bulkProgressUnlisten(); bulkProgressUnlisten = null; }
+    bulkProgress = null;
+  }
+
+  async function batchEnable() {
+    if (!activeGame) return;
+    if ($gameLock && !$gameLockOverridden) {
+      showError('Cannot modify mods while the game is running. Close the game or click "Unlock Anyway".');
+      return;
+    }
+    bulkOperating = "enabling";
+    await startBulkListener();
+    try {
+      const ids = Array.from(selectedModIds);
+      const result = await batchToggleMods(ids, activeGame.game_id, activeGame.bottle_name, true);
+      selectedModIds = new Set();
+      const count = parseInt(result, 10);
+      if (count > 0) showSuccess(`Enabled ${count} mod${count === 1 ? "" : "s"}`);
+    } catch (e) {
+      showError(`${e}`);
+    } finally {
+      await Promise.all([loadMods(activeGame), refreshHealth(activeGame)]);
+      stopBulkListener();
+      bulkOperating = null;
+    }
+  }
+
+  async function batchDisable() {
+    if (!activeGame) return;
+    if ($gameLock && !$gameLockOverridden) {
+      showError('Cannot modify mods while the game is running. Close the game or click "Unlock Anyway".');
+      return;
+    }
+    bulkOperating = "disabling";
+    await startBulkListener();
+    try {
+      const ids = Array.from(selectedModIds);
+      const result = await batchToggleMods(ids, activeGame.game_id, activeGame.bottle_name, false);
+      selectedModIds = new Set();
+      const count = parseInt(result, 10);
+      if (count > 0) showSuccess(`Disabled ${count} mod${count === 1 ? "" : "s"}`);
+    } catch (e) {
+      showError(`${e}`);
+    } finally {
+      await Promise.all([loadMods(activeGame), refreshHealth(activeGame)]);
+      stopBulkListener();
+      bulkOperating = null;
+    }
+  }
+
+  async function batchUninstall() {
+    if ($gameLock && !$gameLockOverridden) {
+      showError('Cannot uninstall mods while the game is running. Close the game or click "Unlock Anyway".');
+      return;
+    }
+    bulkOperating = "uninstalling";
+    try {
+      await withReload(async () => {
+        for (const id of selectedModIds) {
+          if (activeGame) {
+            await uninstallMod(id, activeGame.game_id, activeGame.bottle_name);
+          }
+        }
+        selectedModIds = new Set();
+      });
+    } finally {
+      bulkOperating = null;
+    }
+  }
 
   // Unique collection names for filter dropdown
   let collectionNames = $derived((() => {
@@ -721,7 +664,7 @@
   // Collection-grouped mods for collection view mode
   let collapsedGroups = $state<Set<string>>(new Set());
   let groupedMods = $derived((() => {
-    if (viewMode !== "collection") return null;
+    if (filters.viewMode !== "collection") return null;
     const groups = new Map<string, typeof filteredMods>();
     for (const mod of filteredMods) {
       const key = mod.collection_name || "Standalone";
@@ -835,7 +778,28 @@
 
   const activeGame = $derived(pickedGame ?? $selectedGame);
 
-  // Game lock polling moved to SkseGameLaunchPanel
+  // Re-check game lock when the active game changes
+  $effect(() => {
+    const game = activeGame;
+    if (game) {
+      getGameLockStatus(game.game_id, game.bottle_name).then(lock => {
+        if (!get(gameLockOverridden)) {
+          gameLock.set(lock);
+          if (lock) {
+            startGameLockPolling(game.game_id, game.bottle_name);
+          } else {
+            stopGameLockPolling();
+          }
+        }
+      }).catch((err) => console.error('Game lock status check failed:', err));
+    } else {
+      gameLock.set(null);
+      stopGameLockPolling();
+    }
+    return () => {
+      stopGameLockPolling();
+    };
+  });
 
   // Track the current load to avoid stale race conditions
   let loadGeneration = 0;
@@ -851,7 +815,7 @@
   $effect(() => {
     if (activeGame) {
       const saved = sessionStorage.getItem(searchStorageKey(activeGame));
-      searchQuery = saved ?? "";
+      filters.searchQuery = saved ?? "";
       searchRestored = true;
       // Restore dismissed banners
       const bannerKey = `corkscrew-banners-${activeGame.game_id}-${activeGame.bottle_name}`;
@@ -888,7 +852,7 @@
   // Persist search to sessionStorage
   $effect(() => {
     if (searchRestored && activeGame) {
-      sessionStorage.setItem(searchStorageKey(activeGame), searchQuery);
+      sessionStorage.setItem(searchStorageKey(activeGame), filters.searchQuery);
     }
   });
 
@@ -1095,11 +1059,11 @@
     if (!game) return;
 
     try {
-      const removed = await uninstallMod(modId, game.game_id, game.bottle_name);
-      showSuccess(`Uninstalled — ${(removed as string[]).length} files removed`);
-      confirmUninstall = null;
-      await loadMods(game);
-      await refreshHealth(game);
+      await withReload(async () => {
+        const removed = await uninstallMod(modId, game.game_id, game.bottle_name);
+        showSuccess(`Uninstalled — ${(removed as string[]).length} files removed`);
+        confirmUninstall = null;
+      });
     } catch (e: unknown) {
       showError(`Uninstall failed: ${e}`);
     }
@@ -1150,11 +1114,281 @@
     selectedGame.set(game);
   }
 
-  // SKSE & version detection moved to SkseGameLaunchPanel
+  // SKSE & version detection
+  let skseCheckGeneration = 0;
 
-  // handlePlay, doLaunch, startGameLockPolling, stopGameLockPolling moved to SkseGameLaunchPanel
+  $effect(() => {
+    const game = activeGame;
+    const gen = ++skseCheckGeneration;
+    if (game && game.game_id === "skyrimse") {
+      checkSkseStatus(game, gen);
+      checkVersionStatus(game, gen);
+    } else {
+      skse = null;
+      showSksePrompt = false;
+      downgradeStatus = null;
+      showDowngradeBanner = false;
+    }
+  });
 
-  // pollGameLock through dismissDowngradeBanner moved to SkseGameLaunchPanel
+  async function checkSkseStatus(game: DetectedGame, gen: number) {
+    try {
+      const status = await checkSkse(game.game_id, game.bottle_name);
+      if (gen !== skseCheckGeneration) return; // stale
+      skse = status;
+      skseStatus.set(skse);
+      if (!skse.installed) {
+        const dismissed = localStorage.getItem(`skse_dismissed:${game.game_id}:${game.bottle_name}`);
+        if (!dismissed) showSksePrompt = true;
+      }
+    } catch {
+      // Non-critical
+    }
+  }
+
+  async function handlePlay() {
+    const game = pickedGame ?? $selectedGame;
+    if (!game) return;
+
+    const wantsSkse = !!(skse?.use_skse && game.game_id === "skyrimse");
+
+    if (wantsSkse && !skse?.installed) {
+      // SKSE preference is on but not installed — prompt to install
+      showSkseInstallPrompt = true;
+      return;
+    }
+
+    doLaunch(wantsSkse);
+  }
+
+  async function doLaunch(useSkse: boolean) {
+    const game = pickedGame ?? $selectedGame;
+    if (!game) return;
+    launching = true;
+    try {
+      const result = await launchGame(game.game_id, game.bottle_name, useSkse);
+      if (result.success) {
+        showSuccess(`Launched ${game.display_name}${useSkse ? " via SKSE" : ""} — Wine cursor fix applied`);
+        if (result.warning) {
+          showError(`SKSE warning: ${result.warning}`);
+        }
+        // Start polling game lock status
+        gameLockOverridden.set(false);
+        startGameLockPolling(game.game_id, game.bottle_name);
+      }
+    } catch (e: unknown) {
+      showError(`Failed to launch: ${e}`);
+    } finally {
+      launching = false;
+    }
+  }
+
+  function startGameLockPolling(gameId: string, bottleName: string) {
+    stopGameLockPolling();
+    gameLockPollFailCount = 0;
+    // Initial check
+    pollGameLock(gameId, bottleName);
+    // Poll every 5 seconds
+    gameLockPollInterval = setInterval(() => pollGameLock(gameId, bottleName), 5000);
+  }
+
+  function stopGameLockPolling() {
+    if (gameLockPollInterval) {
+      clearInterval(gameLockPollInterval);
+      gameLockPollInterval = null;
+    }
+  }
+
+  async function pollGameLock(gameId: string, bottleName: string) {
+    try {
+      // If user force-unlocked, don't re-lock from an in-flight poll
+      if (get(gameLockOverridden)) return;
+      const lock = await getGameLockStatus(gameId, bottleName);
+      // Double-check after await — user may have unlocked while we were waiting
+      if (get(gameLockOverridden)) return;
+      gameLockPollFailCount = 0;
+      gameLock.set(lock);
+      if (!lock) {
+        // Game exited — stop polling, clear override
+        stopGameLockPolling();
+        gameLockOverridden.set(false);
+      }
+    } catch (e) {
+      // Poll failed — require 3 consecutive failures before clearing lock
+      // to avoid transient errors (e.g. brief backend hiccup) hiding the banner.
+      gameLockPollFailCount++;
+      if (gameLockPollFailCount >= 3) {
+        console.warn('Game lock poll failed 3 times, clearing lock:', e);
+        gameLock.set(null);
+        stopGameLockPolling();
+        gameLockOverridden.set(false);
+        gameLockPollFailCount = 0;
+      }
+    }
+  }
+
+  async function handleForceUnlock() {
+    const game = pickedGame ?? $selectedGame;
+    if (!game) return;
+    await forceUnlockGame(game.game_id, game.bottle_name);
+    gameLock.set(null);
+    gameLockOverridden.set(true);
+    stopGameLockPolling();
+  }
+
+  async function toggleGameFixes() {
+    disableGameFixes = !disableGameFixes;
+    try {
+      await setConfigValue("disable_game_fixes", disableGameFixes ? "true" : "false");
+    } catch { /* best-effort */ }
+  }
+
+  async function handleFixDisplay() {
+    const game = pickedGame ?? $selectedGame;
+    if (!game) return;
+    fixingDisplay = true;
+    try {
+      const result = await fixSkyrimDisplay(game.bottle_name);
+      if (result.fixed) {
+        showSuccess(`Display fixed: ${result.applied.width}x${result.applied.height} fullscreen — game will open in its own Space (swipe to switch)`);
+      } else {
+        showSuccess(`Display settings already correct: ${result.applied.width}x${result.applied.height}`);
+      }
+    } catch (e: unknown) {
+      showError(`Display fix failed: ${e}`);
+    } finally {
+      fixingDisplay = false;
+    }
+  }
+
+  async function handleOpenSkseDownload() {
+    try {
+      const url = await getSkseDownloadUrl();
+      await openUrl(url);
+    } catch (e: unknown) {
+      showError(`Failed to open SKSE download page: ${e}`);
+    }
+  }
+
+  async function handleInstallSkse() {
+    const game = pickedGame ?? $selectedGame;
+    if (!game) return;
+    try {
+      const selected = await open({
+        title: "Select SKSE Archive (.7z or .zip)",
+        filters: [{ name: "Archives", extensions: ["7z", "zip"] }],
+      });
+      if (!selected) return;
+
+      const archivePath = typeof selected === "string" ? selected : String(selected);
+      installingSkse = true;
+      skse = await installSkseFromArchive(game.game_id, game.bottle_name, archivePath);
+      skseStatus.set(skse);
+      showSksePrompt = false;
+      showSuccess("SKSE installed successfully");
+    } catch (e: unknown) {
+      showError(`SKSE installation failed: ${e}`);
+    } finally {
+      installingSkse = false;
+    }
+  }
+
+  async function handleAutoInstallSkse() {
+    const game = pickedGame ?? $selectedGame;
+    if (!game) return;
+    try {
+      installingSkse = true;
+      skse = await installSkseAuto(game.game_id, game.bottle_name);
+      skseStatus.set(skse);
+      showSksePrompt = false;
+      showSuccess("SKSE auto-installed successfully");
+    } catch (e: unknown) {
+      showError(`SKSE auto-install failed: ${e}`);
+    } finally {
+      installingSkse = false;
+    }
+  }
+
+  async function handleInstallSkseAndLaunch() {
+    const game = pickedGame ?? $selectedGame;
+    if (!game) return;
+    try {
+      installingSkse = true;
+      showSkseInstallPrompt = false;
+      skse = await installSkseAuto(game.game_id, game.bottle_name);
+      skseStatus.set(skse);
+      showSksePrompt = false;
+      showSuccess("SKSE installed — launching game");
+      doLaunch(true);
+    } catch (e: unknown) {
+      showError(`SKSE auto-install failed: ${e}`);
+    } finally {
+      installingSkse = false;
+    }
+  }
+
+  async function handleInstallSkseArchiveAndLaunch() {
+    const game = pickedGame ?? $selectedGame;
+    if (!game) return;
+    try {
+      const selected = await open({
+        title: "Select SKSE Archive (.7z or .zip)",
+        filters: [{ name: "Archives", extensions: ["7z", "zip"] }],
+      });
+      if (!selected) return;
+
+      const archivePath = typeof selected === "string" ? selected : String(selected);
+      installingSkse = true;
+      showSkseInstallPrompt = false;
+      skse = await installSkseFromArchive(game.game_id, game.bottle_name, archivePath);
+      skseStatus.set(skse);
+      showSksePrompt = false;
+      showSuccess("SKSE installed — launching game");
+      doLaunch(true);
+    } catch (e: unknown) {
+      showError(`SKSE installation failed: ${e}`);
+    } finally {
+      installingSkse = false;
+    }
+  }
+
+  async function checkVersionStatus(game: DetectedGame, gen: number) {
+    try {
+      const status = await checkSkyrimVersion(game.game_id, game.bottle_name);
+      if (gen !== skseCheckGeneration) return; // stale
+      downgradeStatus = status;
+      if (!status.is_downgraded) {
+        const dismissed = localStorage.getItem(`downgrade_dismissed:${game.game_id}:${game.bottle_name}`);
+        if (!dismissed) showDowngradeBanner = true;
+      }
+    } catch {
+      // Non-critical
+    }
+  }
+
+  async function handleDowngrade() {
+    const game = pickedGame ?? $selectedGame;
+    if (!game) return;
+    downgrading = true;
+    try {
+      const status = await downgradeSkyrim(game.game_id, game.bottle_name, "full");
+      downgradeStatus = status;
+      showDowngradeBanner = false;
+      showSuccess(`Game downgraded to v${status.target_version}`);
+    } catch (e: unknown) {
+      showError(`Downgrade failed: ${e}`);
+    } finally {
+      downgrading = false;
+    }
+  }
+
+  function dismissDowngradeBanner() {
+    const game = pickedGame ?? $selectedGame;
+    if (game) {
+      localStorage.setItem(`downgrade_dismissed:${game.game_id}:${game.bottle_name}`, "true");
+    }
+    showDowngradeBanner = false;
+  }
 
   // Drag-and-drop mod install
   function handleDragOver(e: DragEvent) {
@@ -1225,8 +1459,10 @@
       if (installed.staging_path) {
         try {
           const installer = await detectFomod(installed.staging_path);
-          if (installer && fomodPanelRef) {
-            fomodPanelRef.triggerFomod(installed, installer);
+          if (installer) {
+            fomodInstaller = installer;
+            fomodTargetMod = installed;
+            showFomodWizard = true;
           }
         } catch {
           // FOMOD detection is optional
@@ -1242,7 +1478,27 @@
     }
   }
 
-  // dismissSksePrompt + toggleSksePreference moved to SkseGameLaunchPanel
+  function dismissSksePrompt() {
+    const game = pickedGame ?? $selectedGame;
+    if (game) {
+      localStorage.setItem(`skse_dismissed:${game.game_id}:${game.bottle_name}`, "true");
+    }
+    showSksePrompt = false;
+  }
+
+  async function toggleSksePreference() {
+    const game = pickedGame ?? $selectedGame;
+    if (!game || !skse) return;
+    const newValue = !skse.use_skse;
+    try {
+      await setSksePreference(game.game_id, game.bottle_name, newValue);
+      skse = { ...skse, use_skse: newValue };
+      skseStatus.set(skse);
+    } catch (e: unknown) {
+      showError(`Failed to update SKSE preference: ${e}`);
+    }
+    showSkseMenu = false;
+  }
 
   function formatDate(iso: string): string {
     return new Date(iso).toLocaleDateString(undefined, {
@@ -1355,9 +1611,7 @@
     reordering = true;
 
     try {
-      await reorderMods(game.game_id, game.bottle_name, orderedIds);
-      await loadMods(game);
-      await refreshHealth(game);
+      await withReload(() => reorderMods(game.game_id, game.bottle_name, orderedIds));
     } catch (e: unknown) {
       showError(`Failed to reorder mods: ${e}`);
     } finally {
@@ -1365,11 +1619,91 @@
     }
   }
 
-  // handleCheckUpdates + handleUpdateAll moved to ModUpdatePanel component
+  // --- Check for updates ---
+  async function handleCheckUpdates() {
+    const game = pickedGame ?? $selectedGame;
+    if (!game) return;
+    checkingUpdates = true;
+    try {
+      modUpdates = await checkModUpdates(game.game_id, game.bottle_name);
+      if (modUpdates.length === 0) {
+        showSuccess("All mods are up to date");
+      } else {
+        showSuccess(`${modUpdates.length} update${modUpdates.length > 1 ? "s" : ""} available`);
+      }
+    } catch (e: unknown) {
+      showError(`Failed to check for updates: ${e}`);
+    } finally {
+      checkingUpdates = false;
+    }
+  }
 
-  // handleReconfigureFomod + handleFomodComplete moved to FomodReconfigurePanel component
-  function handleReconfigureFomod(mod: InstalledMod) {
-    fomodPanelRef?.reconfigure(mod);
+  // --- Batch Update All ---
+  async function handleUpdateAll() {
+    const game = pickedGame ?? $selectedGame;
+    if (!game || modUpdates.length === 0) return;
+    // NexusMods compliance: open browser pages for each update
+    // Free users must manually download from the Nexus website
+    const gameSlug = game.nexus_slug || game.game_id;
+    let opened = 0;
+    for (const update of modUpdates) {
+      try {
+        await openUrl(`https://www.nexusmods.com/${gameSlug}/mods/${update.nexus_mod_id}?tab=files`);
+        opened++;
+      } catch {
+        // Skip mods that fail to open
+      }
+    }
+    if (opened > 0) {
+      showSuccess(`Opened ${opened} Nexus mod page${opened !== 1 ? "s" : ""} for updating`);
+    }
+  }
+
+  // --- FOMOD Reconfigure ---
+  async function handleReconfigureFomod(mod: InstalledMod) {
+    if (!mod.staging_path) return;
+    try {
+      const installer = await detectFomod(mod.staging_path);
+      if (!installer) {
+        showError("No FOMOD installer found in this mod's staging folder.");
+        return;
+      }
+      // Load previous recipe to pre-populate selections
+      const recipe = await getFomodRecipe(mod.id);
+      if (recipe) {
+        // Pre-apply saved selections into the installer (the wizard's loadDefaults will handle this)
+      }
+      fomodInstaller = installer;
+      fomodTargetMod = mod;
+      showFomodWizard = true;
+    } catch (e: unknown) {
+      showError(`Failed to detect FOMOD: ${e}`);
+    }
+  }
+
+  async function handleFomodComplete(selections: Record<string, string[]>) {
+    const game = pickedGame ?? $selectedGame;
+    if (!game || !fomodTargetMod || !fomodInstaller) return;
+    if (deploying) return;
+    showFomodWizard = false;
+    deploying = true;
+    try {
+      await withReload(async () => {
+        // Get the files for the new selections
+        await getFomodFiles(fomodInstaller!, selections);
+        // Save the recipe
+        await saveFomodRecipe(fomodTargetMod!.id, fomodTargetMod!.name, "", selections);
+        // Redeploy to apply changes
+        await redeployAllMods(game.game_id, game.bottle_name);
+      });
+      showSuccess(`Reconfigured FOMOD for "${fomodTargetMod!.name}"`);
+    } catch (e: unknown) {
+      showError(`Failed to apply FOMOD configuration: ${e}`);
+    } finally {
+      deploying = false;
+      fomodInstaller = null;
+      fomodTargetMod = null;
+    }
   }
 
   // --- Import / Export ---
@@ -1409,6 +1743,13 @@
         deployHealth = null;
       }
     }
+  }
+
+  /** Run an async action then reload mods + health for the active game. */
+  async function withReload(fn: () => Promise<unknown>) {
+    await fn();
+    const game = pickedGame ?? $selectedGame;
+    if (game) await Promise.all([loadMods(game), refreshHealth(game)]);
   }
 
   // --- Notes ---
@@ -1514,7 +1855,7 @@
     }
     if ((e.key === "Delete" || e.key === "Backspace") && selectedModIds.size > 0) {
       e.preventDefault();
-      batchOpsRef?.batchUninstallFromParent();
+      batchUninstall();
       return;
     }
   }
@@ -1606,7 +1947,7 @@
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<svelte:window onkeydown={handleKeydown} onclick={() => { showToolsMenu = false; }} />
+<svelte:window onkeydown={handleKeydown} onclick={() => { showToolsMenu = false; showSkseMenu = false; }} />
 <div
   class="mods-page"
   class:drag-active={draggingOver}
@@ -1694,7 +2035,7 @@
         </div>
         {#if collectionNames.length > 0}
           <div class="modlist-selector">
-            <select class="modlist-dropdown" bind:value={filterCollection}>
+            <select class="modlist-dropdown" bind:value={filters.filterCollection}>
               <option value={null}>All Mods ({modCount})</option>
               <option value="__standalone__">Standalone ({collectionCounts.standalone})</option>
               {#each collectionNames as name}
@@ -1705,10 +2046,40 @@
         {/if}
       </div>
       <div class="game-banner-actions">
-        <ModUpdatePanel
-          game={activeGame}
-          onUpdatesChecked={(updates) => { modUpdates = updates; }}
-        />
+        <button
+          class="btn btn-ghost"
+          onclick={handleCheckUpdates}
+          disabled={checkingUpdates}
+          title="Check Nexus for mod updates"
+        >
+          {#if checkingUpdates}
+            <span class="spinner spinner-sm"></span>
+            Checking...
+          {:else}
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="23 4 23 10 17 10" />
+              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+            </svg>
+            Updates
+            {#if modUpdates.length > 0}
+              <span class="update-count-badge">{modUpdates.length}</span>
+            {/if}
+          {/if}
+        </button>
+        {#if modUpdates.length > 0}
+          <button
+            class="btn btn-accent btn-sm"
+            onclick={handleUpdateAll}
+            title="Open Nexus download pages for all outdated mods"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="7 10 12 15 17 10" />
+              <line x1="12" y1="15" x2="12" y2="3" />
+            </svg>
+            Update All ({modUpdates.length})
+          </button>
+        {/if}
         <a
           href="https://www.nexusmods.com/{activeGame.nexus_slug}"
           target="_blank"
@@ -1723,6 +2094,25 @@
           </svg>
           Nexus
         </a>
+        {#if activeGame.game_id === "skyrimse"}
+          <button
+            class="btn btn-ghost"
+            onclick={handleFixDisplay}
+            disabled={fixingDisplay}
+            title="Fix display: native resolution, fullscreen in its own Space (3-finger swipe to switch)"
+          >
+            {#if fixingDisplay}
+              <span class="spinner spinner-sm"></span>
+            {:else}
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+                <line x1="8" y1="21" x2="16" y2="21" />
+                <line x1="12" y1="17" x2="12" y2="21" />
+              </svg>
+            {/if}
+            Fix Display
+          </button>
+        {/if}
         <button class="btn btn-ghost" onclick={() => { pickedGame = null; selectedGame.set(null); }}>
           Change Game
         </button>
@@ -1755,8 +2145,10 @@
             if (installed.staging_path) {
               try {
                 const installer = await detectFomod(installed.staging_path);
-                if (installer && fomodPanelRef) {
-                  fomodPanelRef.triggerFomod(installed, installer);
+                if (installer) {
+                  fomodInstaller = installer;
+                  fomodTargetMod = installed;
+                  showFomodWizard = true;
                 }
               } catch {
                 // FOMOD detection is optional, don't show errors
@@ -1781,7 +2173,7 @@
       <div class="tools-dropdown-wrap">
         <button
           class="btn btn-ghost"
-          onclick={(e) => { e.stopPropagation(); showToolsMenu = !showToolsMenu; }}
+          onclick={(e) => { e.stopPropagation(); showToolsMenu = !showToolsMenu; showSkseMenu = false; }}
           disabled={launchingToolId !== null}
           title="Tools"
         >
@@ -1871,17 +2263,111 @@
           </div>
         {/if}
       </div>
-      {#if activeGame}
-        <SkseGameLaunchPanel
-          game={activeGame}
-          bind:launching
-          bind:disableGameFixes
-          onSkseStatusChange={(status) => { skse = status; }}
-        />
-      {/if}
+      <div class="play-button-group">
+        <button class="btn btn-play" onclick={handlePlay} disabled={launching || installingSkse}>
+          {#if launching}
+            <span class="spinner spinner-play"></span>
+            Launching...
+          {:else if installingSkse}
+            <span class="spinner spinner-play"></span>
+            Installing SKSE...
+          {:else}
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
+              <path d="M3 1.5v11l9-5.5L3 1.5z" />
+            </svg>
+            Play{#if skse?.use_skse && activeGame?.game_id === "skyrimse"} (SKSE){/if}
+          {/if}
+        </button>
+        {#if activeGame?.game_id === "skyrimse"}
+          <button
+            class="btn btn-play-dropdown"
+            onclick={(e) => { e.stopPropagation(); showSkseMenu = !showSkseMenu; showToolsMenu = false; showSkseInstallPrompt = false; }}
+            aria-label="Launch options"
+          >
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
+              <path d="M2 3.5L5 7L8 3.5H2z" />
+            </svg>
+          </button>
+        {/if}
+        {#if showSkseMenu}
+          <div class="skse-dropdown">
+            <button class="dropdown-item" onclick={toggleSksePreference}>
+              <span class="dropdown-check">
+                {#if skse?.use_skse}
+                  <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M10 3L4.5 8.5L2 6" />
+                  </svg>
+                {/if}
+              </span>
+              Launch via SKSE
+            </button>
+            <button class="dropdown-item" onclick={() => { showSkseMenu = false; doLaunch(false); }}>
+              <span class="dropdown-check"></span>
+              Launch Game Directly
+            </button>
+            <div class="dropdown-divider"></div>
+            <div class="dropdown-info">
+              {#if skse?.installed}
+                SKSE {skse.version ?? ""} installed
+              {:else}
+                SKSE not installed
+              {/if}
+            </div>
+          </div>
+        {/if}
+        {#if showSkseInstallPrompt}
+          <div class="skse-dropdown skse-install-prompt">
+            <div class="dropdown-info" style="font-weight: 600; color: var(--text-primary);">SKSE is not installed</div>
+            <div class="dropdown-divider"></div>
+            <button class="dropdown-item" onclick={handleInstallSkseAndLaunch} disabled={installingSkse}>
+              <span class="dropdown-check">
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M6 2v8M2 6l4 4 4-4" />
+                </svg>
+              </span>
+              {installingSkse ? "Installing..." : "Auto Install SKSE"}
+            </button>
+            <button class="dropdown-item" onclick={handleInstallSkseArchiveAndLaunch} disabled={installingSkse}>
+              <span class="dropdown-check">
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="2" y="2" width="8" height="8" rx="1" />
+                </svg>
+              </span>
+              Install from Archive
+            </button>
+            <div class="dropdown-divider"></div>
+            <button class="dropdown-item dropdown-item-muted" onclick={() => { showSkseInstallPrompt = false; doLaunch(false); }}>
+              <span class="dropdown-check"></span>
+              Launch Without SKSE
+            </button>
+          </div>
+        {/if}
+      </div>
     </div>
 
     <!-- Banners (full-width, above the main content grid) -->
+    {#if $gameLock && !$gameLockOverridden}
+      <div class="game-lock-banner">
+        <div class="skse-banner-icon game-lock-icon">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="4" y="9" width="12" height="9" rx="1.5" />
+            <path d="M7 9V6a3 3 0 0 1 6 0v3" />
+          </svg>
+        </div>
+        <div class="skse-banner-content">
+          <p class="skse-banner-title">Game Is Running</p>
+          <p class="skse-banner-text">
+            Mod changes are locked while the game is running (pid {$gameLock.pid}).
+            Close the game to make changes, or unlock to override.
+          </p>
+        </div>
+        <div class="skse-banner-actions">
+          <button class="btn btn-ghost-danger btn-sm" onclick={handleForceUnlock}>
+            Unlock Anyway
+          </button>
+        </div>
+      </div>
+    {/if}
 
     {#if csModCount > 0 && csCheckDone && !dismissedBanners.has("cs-warning")}
       <div class="cs-warning-banner">
@@ -1909,7 +2395,57 @@
       </div>
     {/if}
 
-    <!-- SKSE banner + Downgrade banner rendered by SkseGameLaunchPanel -->
+    {#if showSksePrompt && activeGame?.game_id === "skyrimse"}
+      <div class="skse-banner">
+        <div class="skse-banner-icon">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="10" cy="10" r="9" />
+            <path d="M10 6v4" />
+            <circle cx="10" cy="14" r="0.5" fill="currentColor" />
+          </svg>
+        </div>
+        <div class="skse-banner-content">
+          <p class="skse-banner-title">SKSE Not Installed</p>
+          <p class="skse-banner-text">
+            SKSE is required by most Skyrim mods.
+          </p>
+        </div>
+        <div class="skse-banner-actions">
+          <button class="btn btn-primary btn-sm" onclick={handleAutoInstallSkse} disabled={installingSkse}>
+            {installingSkse ? "Installing..." : "Auto Install"}
+          </button>
+          <button class="btn btn-secondary btn-sm" onclick={handleInstallSkse} disabled={installingSkse}>
+            From Archive
+          </button>
+          <button class="btn btn-ghost btn-sm" onclick={dismissSksePrompt}>Dismiss</button>
+        </div>
+      </div>
+    {/if}
+
+    {#if showDowngradeBanner && activeGame?.game_id === "skyrimse" && downgradeStatus && !downgradeStatus.is_downgraded}
+      <div class="downgrade-banner">
+        <div class="skse-banner-icon">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M10 2v12" />
+            <polyline points="6 10 10 14 14 10" />
+            <path d="M4 18h12" />
+          </svg>
+        </div>
+        <div class="skse-banner-content">
+          <p class="skse-banner-title">
+            Skyrim SE {downgradeStatus.current_version}
+            {#if downgradeStatus.current_version !== "1.5.97"} — Downgrade Available{/if}
+          </p>
+          <p class="skse-banner-text">Most mods target v1.5.97.</p>
+        </div>
+        <div class="skse-banner-actions">
+          <button class="btn btn-primary btn-sm" onclick={handleDowngrade} disabled={downgrading}>
+            {downgrading ? "Downgrading..." : "Downgrade"}
+          </button>
+          <button class="btn btn-ghost btn-sm" onclick={dismissDowngradeBanner}>Dismiss</button>
+        </div>
+      </div>
+    {/if}
 
     <!-- Two-column content area -->
     <div class="content-grid">
@@ -1924,7 +2460,7 @@
             bind:visible={showConflictPanel}
             bind:showMap={showConflictMap}
             bind:deploying
-            onResolved={async () => { if (activeGame) { await loadMods(activeGame); await refreshHealth(activeGame); } }}
+            onResolved={() => withReload(async () => {})}
           />
         {/if}
 
@@ -1951,17 +2487,54 @@
             </button>
           </div>
         {/if}
-        <!-- SKSE inline issue banner removed — SkseGameLaunchPanel handles SKSE prompt -->
+        {#if $skseStatus && !$skseStatus.installed && activeGame?.game_id === "skyrimse" && !dismissedBanners.has("skse")}
+          <div class="issue-banner issue-banner-blue">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" />
+            </svg>
+            <span>SKSE not detected — many mods require it</span>
+            <button class="banner-action" onclick={() => { showSksePrompt = true; }}>Install SKSE</button>
+            <button class="banner-dismiss" onclick={() => dismissBanner("skse")}>
+              <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+                <line x1="3" y1="3" x2="9" y2="9" /><line x1="9" y1="3" x2="3" y2="9" />
+              </svg>
+            </button>
+          </div>
+        {/if}
 
         <!-- Bulk Action Bar -->
-        {#if activeGame}
-          <ModBatchOperations
-            bind:this={batchOpsRef}
-            game={activeGame}
-            {selectedModIds}
-            onComplete={async () => { if (activeGame) { await loadMods(activeGame); await refreshHealth(activeGame); } }}
-            onClearSelection={() => { selectedModIds = new Set(); }}
-          />
+        {#if selectedModIds.size > 0}
+          <div class="bulk-action-bar">
+            {#if bulkOperating && bulkProgress}
+              <div class="bulk-progress">
+                <div class="bulk-progress-header">
+                  <span class="bulk-progress-label">{bulkProgress.message}</span>
+                  {#if bulkProgress.phase === "toggle"}
+                    <span class="bulk-progress-count">{bulkProgress.current}/{bulkProgress.total}</span>
+                  {/if}
+                </div>
+                <div class="bulk-progress-bar">
+                  <div
+                    class="bulk-progress-fill"
+                    class:indeterminate={bulkProgress.phase === "redeploy" || bulkProgress.phase === "plugins"}
+                    style="width: {bulkProgress.phase === 'toggle' ? (bulkProgress.current / bulkProgress.total) * 100 : 100}%"
+                  ></div>
+                </div>
+              </div>
+            {:else}
+              <span class="bulk-count">{selectedModIds.size} selected</span>
+              <button class="btn btn-sm btn-secondary" disabled={bulkOperating !== null} onclick={batchEnable}>
+                {bulkOperating === "enabling" ? "Enabling..." : "Enable All"}
+              </button>
+              <button class="btn btn-sm btn-secondary" disabled={bulkOperating !== null} onclick={batchDisable}>
+                {bulkOperating === "disabling" ? "Disabling..." : "Disable All"}
+              </button>
+              <button class="btn btn-sm btn-ghost-danger" disabled={bulkOperating !== null} onclick={batchUninstall}>
+                {bulkOperating === "uninstalling" ? "Uninstalling..." : "Uninstall"}
+              </button>
+              <button class="btn btn-sm btn-ghost" disabled={bulkOperating !== null} onclick={() => selectedModIds = new Set()}>Clear</button>
+            {/if}
+          </div>
         {/if}
 
         <!-- Search & Filter Bar -->
@@ -1972,12 +2545,12 @@
             <circle cx="11" cy="11" r="8" />
             <line x1="21" y1="21" x2="16.65" y2="16.65" />
           </svg>
-          {#each [...parsedSearch.facets] as [key, value] (key)}
+          {#each [...filters.parsedSearch.facets] as [key, value] (key)}
             <button
               class="facet-pill"
               onclick={() => {
                 const regex = new RegExp(`${key}:(?:"[^"]*"|\\S+)\\s*`, "i");
-                searchQuery = searchQuery.replace(regex, "").trim();
+                filters.searchQuery = filters.searchQuery.replace(regex, "").trim();
               }}
               title="Click to remove"
             >
@@ -1989,12 +2562,12 @@
           {/each}
           <input
             type="text"
-            placeholder={parsedSearch.facets.size > 0 ? "Add more filters..." : "Search mods... (try tag: source: enabled:)"}
-            bind:value={searchQuery}
+            placeholder={filters.parsedSearch.facets.size > 0 ? "Add more filters..." : "Search mods... (try tag: source: enabled:)"}
+            bind:value={filters.searchQuery}
             class="search-input"
           />
-          {#if searchQuery}
-            <button class="search-clear" onclick={() => searchQuery = ""}>
+          {#if filters.searchQuery}
+            <button class="search-clear" onclick={() => filters.searchQuery = ""}>
               <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
                 <line x1="3" y1="3" x2="9" y2="9" />
                 <line x1="9" y1="3" x2="3" y2="9" />
@@ -2002,14 +2575,14 @@
             </button>
           {/if}
         </div>
-        <select class="filter-select" bind:value={filterStatus}>
+        <select class="filter-select" bind:value={filters.filterStatus}>
           <option value="all">All Status</option>
           <option value="enabled">Enabled</option>
           <option value="disabled">Disabled</option>
           <option value="conflicts">Has Conflicts</option>
           <option value="has-updates">Has Updates</option>
         </select>
-        <select class="filter-select" bind:value={filterSource}>
+        <select class="filter-select" bind:value={filters.filterSource}>
           <option value="all">All Sources</option>
           <option value="nexus">Nexus</option>
           <option value="loverslab">LoversLab</option>
@@ -2023,8 +2596,8 @@
           <div class="category-dropdown-wrapper">
             <button
               class="filter-select category-dropdown-btn"
-              class:has-active={filterCategory !== null}
-              onclick={() => showCategoryPopover = !showCategoryPopover}
+              class:has-active={filters.filterCategory !== null}
+              onclick={() => filters.showCategoryPopover = !filters.showCategoryPopover}
             >
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <rect x="3" y="3" width="7" height="7" /><rect x="14" y="3" width="7" height="7" />
@@ -2035,35 +2608,35 @@
                 <polyline points="6 9 12 15 18 9" />
               </svg>
             </button>
-            {#if filterCategory}
-              {@const catColor = categoryColors[filterCategory] ?? '#6b7280'}
+            {#if filters.filterCategory}
+              {@const catColor = categoryColors[filters.filterCategory] ?? '#6b7280'}
               <button
                 class="active-category-chip"
                 style="--chip-color: {catColor};"
-                onclick={() => filterCategory = null}
+                onclick={() => filters.filterCategory = null}
                 title="Clear category filter"
               >
-                {#if categoryIcons[filterCategory]}
+                {#if categoryIcons[filters.filterCategory]}
                   <!-- eslint-disable-next-line svelte/no-at-html-tags -->
-                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">{@html categoryIcons[filterCategory]}</svg>
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">{@html categoryIcons[filters.filterCategory]}</svg>
                 {/if}
-                {filterCategory}
+                {filters.filterCategory}
                 <svg width="9" height="9" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
                   <line x1="3" y1="3" x2="9" y2="9" /><line x1="9" y1="3" x2="3" y2="9" />
                 </svg>
               </button>
             {/if}
-            {#if showCategoryPopover}
+            {#if filters.showCategoryPopover}
               <!-- svelte-ignore a11y_no_static_element_interactions -->
-              <div class="category-popover-backdrop" onclick={() => showCategoryPopover = false} onkeydown={(e) => { if (e.key === 'Escape') showCategoryPopover = false; }}></div>
+              <div class="category-popover-backdrop" onclick={() => filters.showCategoryPopover = false} onkeydown={(e) => { if (e.key === 'Escape') filters.showCategoryPopover = false; }}></div>
               <div class="category-popover">
                 {#each uniqueCategories as [cat, count]}
                   {@const catColor = categoryColors[cat] ?? '#6b7280'}
                   <button
                     class="category-filter-chip"
-                    class:active={filterCategory === cat}
+                    class:active={filters.filterCategory === cat}
                     style="--chip-color: {catColor};"
-                    onclick={() => { filterCategory = filterCategory === cat ? null : cat; showCategoryPopover = false; }}
+                    onclick={() => { filters.filterCategory = filters.filterCategory === cat ? null : cat; filters.showCategoryPopover = false; }}
                     title="{cat} ({count} mods)"
                   >
                     {#if categoryIcons[cat]}
@@ -2096,8 +2669,8 @@
         <div class="view-mode-toggle">
           <button
             class="view-mode-btn"
-            class:active={viewMode === "flat"}
-            onclick={() => viewMode = "flat"}
+            class:active={filters.viewMode === "flat"}
+            onclick={() => filters.viewMode = "flat"}
             title="List View"
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -2107,8 +2680,8 @@
           </button>
           <button
             class="view-mode-btn"
-            class:active={viewMode === "collection"}
-            onclick={() => viewMode = "collection"}
+            class:active={filters.viewMode === "collection"}
+            onclick={() => filters.viewMode = "collection"}
             title="Collection View"
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -2117,8 +2690,8 @@
           </button>
           <button
             class="view-mode-btn"
-            class:active={viewMode === "category"}
-            onclick={() => viewMode = "category"}
+            class:active={filters.viewMode === "category"}
+            onclick={() => filters.viewMode = "category"}
             title="Category View"
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -2127,7 +2700,7 @@
             </svg>
           </button>
         </div>
-        {#if searchQuery || filterStatus !== "all" || filterSource !== "all" || filterCollection !== null || filterCategory !== null}
+        {#if filters.hasActiveFilters()}
           <span class="filter-count">{filteredMods.length} of {$installedMods.length}</span>
         {/if}
       </div>
@@ -2197,10 +2770,10 @@
                 <circle cx="16" cy="12" r="3" />
               </svg>
             </span>
-            <button type="button" class="col-name sortable-header" onclick={() => toggleSort("name")}>
+            <button type="button" class="col-name sortable-header" onclick={() => filters.toggleSort("name")}>
               Mod Name
-              {#if sortBy === "name"}
-                <span class="sort-arrow">{sortDir === "asc" ? "\u25B2" : "\u25BC"}</span>
+              {#if filters.sortBy === "name"}
+                <span class="sort-arrow">{filters.sortDir === "asc" ? "\u25B2" : "\u25BC"}</span>
               {/if}
               <span class="col-resize" onpointerdown={(e) => onResizeStart(e, 'name')} role="separator" aria-orientation="vertical"></span>
             </button>
@@ -2216,24 +2789,24 @@
               Installed By
               <span class="col-resize" onpointerdown={(e) => onResizeStart(e, 'source')} role="separator" aria-orientation="vertical"></span>
             </span>
-            <button type="button" class="col-version sortable-header" onclick={() => toggleSort("version")}>
+            <button type="button" class="col-version sortable-header" onclick={() => filters.toggleSort("version")}>
               Version
-              {#if sortBy === "version"}
-                <span class="sort-arrow">{sortDir === "asc" ? "\u25B2" : "\u25BC"}</span>
+              {#if filters.sortBy === "version"}
+                <span class="sort-arrow">{filters.sortDir === "asc" ? "\u25B2" : "\u25BC"}</span>
               {/if}
               <span class="col-resize" onpointerdown={(e) => onResizeStart(e, 'version')} role="separator" aria-orientation="vertical"></span>
             </button>
-            <button type="button" class="col-files sortable-header" onclick={() => toggleSort("files")}>
+            <button type="button" class="col-files sortable-header" onclick={() => filters.toggleSort("files")}>
               Files
-              {#if sortBy === "files"}
-                <span class="sort-arrow">{sortDir === "asc" ? "\u25B2" : "\u25BC"}</span>
+              {#if filters.sortBy === "files"}
+                <span class="sort-arrow">{filters.sortDir === "asc" ? "\u25B2" : "\u25BC"}</span>
               {/if}
               <span class="col-resize" onpointerdown={(e) => onResizeStart(e, 'files')} role="separator" aria-orientation="vertical"></span>
             </button>
-            <button type="button" class="col-date sortable-header" onclick={() => toggleSort("date")}>
+            <button type="button" class="col-date sortable-header" onclick={() => filters.toggleSort("date")}>
               Installed
-              {#if sortBy === "date"}
-                <span class="sort-arrow">{sortDir === "asc" ? "\u25B2" : "\u25BC"}</span>
+              {#if filters.sortBy === "date"}
+                <span class="sort-arrow">{filters.sortDir === "asc" ? "\u25B2" : "\u25BC"}</span>
               {/if}
               <span class="col-resize" onpointerdown={(e) => onResizeStart(e, 'date')} role="separator" aria-orientation="vertical"></span>
             </button>
@@ -2245,11 +2818,11 @@
             {#if filteredMods.length === 0 && disabledFilteredMods.length === 0 && $installedMods.length > 0}
               <div class="empty-filter-state">
                 <p>No mods match your filters.</p>
-                <button class="btn btn-ghost btn-sm" onclick={() => { searchQuery = ""; filterStatus = "all"; filterSource = "all"; filterCollection = null; filterCategory = null; }}>
+                <button class="btn btn-ghost btn-sm" onclick={() => filters.clearAll()}>
                   Clear Filters
                 </button>
               </div>
-            {:else if viewMode === "category"}
+            {:else if filters.viewMode === "category"}
               <ModCategoryView
                 mods={filteredMods}
                 {categoryColors}
@@ -2260,7 +2833,7 @@
                 onselect={(mod) => { selectedModId = selectedModId === mod.id ? undefined : mod.id; detailMod = detailMod?.id === mod.id ? null : mod; }}
                 ontoggle={handleToggle}
               />
-            {:else if viewMode === "collection" && groupedMods}
+            {:else if filters.viewMode === "collection" && groupedMods}
               <div style="height: {collectionVisibleRange.paddingTop}px;" aria-hidden="true"></div>
               {#each collectionFlatItems.slice(collectionVisibleRange.start, collectionVisibleRange.end) as item, sliceIdx (collectionVisibleRange.start + sliceIdx)}
                 {#if item.type === "group-header"}
@@ -2510,7 +3083,7 @@
                 <!-- Name -->
                 <span class="col-name">
                   <!-- eslint-disable-next-line svelte/no-at-html-tags -->
-                  <span class="mod-name">{@html highlightMatch(mod.name, searchQuery)}</span>
+                  <span class="mod-name">{@html highlightMatch(mod.name, filters.searchQuery)}</span>
                   {#if conflictModIds.has(mod.id)}
                     <span class="conflict-icon" title={getConflictTooltip(mod.id)}>
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -2866,13 +3439,14 @@
   {/if}
 </div>
 
-{#if activeGame}
-  <FomodReconfigurePanel
-    bind:this={fomodPanelRef}
-    game={activeGame}
-    bind:deploying
-    onComplete={async () => { if (activeGame) { await loadMods(activeGame); await refreshHealth(activeGame); } }}
-  />
+{#if showFomodWizard && fomodInstaller}
+  <div class="fomod-wizard-overlay">
+    <FomodWizard
+      installer={fomodInstaller}
+      onComplete={handleFomodComplete}
+      onCancel={() => { showFomodWizard = false; fomodInstaller = null; fomodTargetMod = null; }}
+    />
+  </div>
 {/if}
 
 {#if showShaderWizard && activeGame}
@@ -2894,10 +3468,8 @@
   onConfirm={async () => {
     if (duplicateDialog && activeGame) {
       try {
-        await uninstallMod(duplicateDialog.oldMod.id, activeGame.game_id, activeGame.bottle_name);
+        await withReload(() => uninstallMod(duplicateDialog!.oldMod.id, activeGame!.game_id, activeGame!.bottle_name));
         showSuccess(`Removed old version of "${duplicateDialog.oldMod.name}"`);
-        await loadMods(activeGame);
-        await refreshHealth(activeGame);
       } catch (e) {
         showError(`Failed to uninstall old version: ${e}`);
       }
@@ -2912,7 +3484,7 @@
 {#if showImportWizard}
   <ModlistImportWizard
     onclose={() => showImportWizard = false}
-    oncomplete={() => { showImportWizard = false; const g = pickedGame ?? $selectedGame; if (g) { loadMods(g); refreshHealth(g); } }}
+    oncomplete={() => { showImportWizard = false; withReload(async () => {}); }}
   />
 {/if}
 
@@ -2927,10 +3499,10 @@
       if (g) {
         deploying = true;
         try {
-          await toggleMod(culprit.id, g.game_id, g.bottle_name, false);
-          await redeployAllMods(g.game_id, g.bottle_name);
-          await loadMods(g);
-          await refreshHealth(g);
+          await withReload(async () => {
+            await toggleMod(culprit.id, g.game_id, g.bottle_name, false);
+            await redeployAllMods(g.game_id, g.bottle_name);
+          });
           showSuccess(`Disabled "${culprit.name}" — the likely culprit.`);
         } finally {
           deploying = false;
@@ -2942,6 +3514,36 @@
 
 
 <style>
+  .game-fixes-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .game-fixes-toggle input[type="checkbox"] {
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+
+  /* ============================
+     FOMOD Wizard Overlay
+     ============================ */
+  .fomod-wizard-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    backdrop-filter: var(--glass-blur-light);
+    -webkit-backdrop-filter: var(--glass-blur-light);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2000;
+  }
+
   /* ============================
      Page Layout
      ============================ */

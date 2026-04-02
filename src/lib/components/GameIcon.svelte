@@ -18,9 +18,7 @@
       .then((dataUrl) => {
         if (dataUrl) logoUrl = dataUrl;
       })
-      .catch(() => {
-        // Fetch failed — use SVG fallback
-      });
+      .catch((err) => console.warn('Failed to fetch game logo:', err));
   });
 </script>
 

@@ -576,9 +576,9 @@
   async function checkAccount() {
     checkingAuth = true;
     try {
-      account = await getNexusAccountStatus();
-      if (account.connected && activeTab === "nexus") {
-        // Use game-specific slug if available, not the hardcoded default
+      const status = await getNexusAccountStatus();
+      account = status;
+      if (status.connected && activeTab === "nexus") {
         const game = $selectedGame;
         const slug = game ? (gameSlugMap[game.game_id] ?? game.game_id) : "skyrimspecialedition";
         collectionsInitializedForGame = slug;
@@ -598,6 +598,17 @@
     } catch { /* fallback: link is visible in UI */ }
   }
 
+  /** After successful auth, initialize collections for the current game. */
+  async function initCollectionsAfterAuth(status: AccountStatus) {
+    account = status;
+    showSuccess(`Signed in as ${status.name}`);
+    const game = $selectedGame;
+    const slug = game ? (gameSlugMap[game.game_id] ?? game.game_id) : "skyrimspecialedition";
+    collectionsInitializedForGame = slug;
+    gameFilter = slug;
+    await loadCollections(slug);
+  }
+
   async function handleOAuthLogin() {
     oauthConnecting = true;
     validationError = null;
@@ -605,13 +616,7 @@
       await startOAuthLogin();
       const status = await getNexusAccountStatus();
       if (status.connected) {
-        account = status;
-        showSuccess(`Signed in as ${status.name}`);
-        const game = $selectedGame;
-        const slug = game ? (gameSlugMap[game.game_id] ?? game.game_id) : "skyrimspecialedition";
-        collectionsInitializedForGame = slug;
-        gameFilter = slug;
-        await loadCollections(slug);
+        await initCollectionsAfterAuth(status);
       } else {
         validationError = "Authorization completed but account check failed. Try again.";
       }
@@ -635,14 +640,8 @@
       config.set(cfg);
       const status = await getNexusAccountStatus();
       if (status.connected) {
-        account = status;
         apiKeyInput = "";
-        showSuccess(`Connected as ${status.name}`);
-        const game = $selectedGame;
-        const slug = game ? (gameSlugMap[game.game_id] ?? game.game_id) : "skyrimspecialedition";
-        collectionsInitializedForGame = slug;
-        gameFilter = slug;
-        await loadCollections(slug);
+        await initCollectionsAfterAuth(status);
       } else {
         await setConfigValue("nexus_api_key", "");
         const cfg2 = await getConfig();
@@ -773,15 +772,18 @@
     }
   }
 
+  /** Get the active game domain for collections API calls. */
+  function activeGameDomain(): string {
+    return gameFilter !== "all" ? gameFilter : "skyrimspecialedition";
+  }
+
   function reloadWithSort() {
-    const gd = gameFilter !== "all" ? gameFilter : "skyrimspecialedition";
-    loadCollections(gd);
+    loadCollections(activeGameDomain());
   }
 
   function collectionsGoToPage(page: number) {
     collectionsOffset = (page - 1) * collectionsPerPage;
-    const gd = gameFilter !== "all" ? gameFilter : "skyrimspecialedition";
-    loadCollections(gd, false);
+    loadCollections(activeGameDomain(), false);
   }
 
   function setCollectionsPerPage(n: number) {
@@ -790,8 +792,7 @@
       localStorage.setItem('corkscrew-collections-per-page', String(n));
     }
     collectionsOffset = 0;
-    const gd = gameFilter !== "all" ? gameFilter : "skyrimspecialedition";
-    loadCollections(gd, false);
+    loadCollections(activeGameDomain(), false);
   }
 
   function cancelDetailLoad() {
