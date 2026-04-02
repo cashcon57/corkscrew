@@ -12,6 +12,24 @@
   // Changelog entries — add new versions at the top.
   // Keep it casual, quippy, and helpful.
   const changelogs: Record<string, { headline: string; changes: string[] }> = {
+    "0.10.0": {
+      headline: "13 new features. Corkscrew just grew up.",
+      changes: [
+        "Pre-launch hooks: Wine tweaks (DXVK_ASYNC, WINE_LARGE_ADDRESS_AWARE, d3d11 override) applied automatically before game launch, per-game and per-modlist",
+        "Graphics backend selector: choose between DXVK, DXMT, D3DMetal, or wined3d per game on macOS — auto-recommends the best option for your hardware",
+        "Profile code sharing: generate compact shareable codes (CRKS-xxxxx) that encode entire mod profiles for easy sharing",
+        "UMU integration: launch games through Valve's umu-run on Linux/Steam Deck for automatic protonfixes and Proton runtime",
+        "ESP record conflict detection: see which plugins modify the same records, powered by the esplugin crate",
+        "Texture optimization: one-click batch DDS downscaling (4K to 2K) to recover performance under Wine/DXVK",
+        "Automated Wine tool execution: headless configs for xEdit, BodySlide, Synthesis, and Wrye Bash with auto-detection of when they're needed",
+        "Archive preview: browse BSA/BA2/ZIP/7z contents and preview DDS textures without extracting",
+        "Action queue: proactive notification cards — 'Deploy needed', 'Conflicts detected', 'Updates available' — with one-click actions",
+        "Merged file tree view: see exactly what the game directory looks like after deployment, with per-file conflict highlighting",
+        "corkscrew:// deep link protocol for install, launch, and profile import actions",
+        "LOOT masterlist freshness badge with force-refresh on the plugins page",
+        "Virtual scrolling added to collections page for smooth performance with large mod lists",
+      ],
+    },
     "0.9.58": {
       headline: "Corkscrew now remembers who you are. How thoughtful.",
       changes: [
@@ -122,7 +140,7 @@
       {/each}
 
       {#if relevantVersions.length === 0}
-        <p class="version-headline">Bug fixes and improvements. Nothing too exciting, but everything's a little better now.</p>
+        <p class="version-headline">New version installed! Check the GitHub release for full details.</p>
       {/if}
     </div>
 
