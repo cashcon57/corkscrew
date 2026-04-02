@@ -861,7 +861,15 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_liquid_glass::init())
+        .plugin(tauri_plugin_liquid_glass::init());
+
+    // WebDriver E2E testing — debug builds only (port 4445)
+    #[cfg(debug_assertions)]
+    {
+        builder = builder.plugin(tauri_plugin_webdriver::init());
+    }
+
+    let mut builder = builder
         .setup(move |app| {
             // Register updater plugin in setup per Tauri docs (advanced pattern)
             app.handle()
@@ -1312,9 +1320,11 @@ pub fn run() {
             // DepotDownloader (game version rollback)
             commands::depot::dd_status,
             commands::depot::dd_install,
+            commands::depot::dd_ensure_updated,
             commands::depot::dd_authenticate,
             commands::depot::dd_list_manifests,
             commands::depot::dd_download_depot,
+            commands::depot::dd_get_depot_versions,
             commands::depot::dd_apply_depot,
             // Self-Update (macOS fallback)
             self_update::get_installed_app_version,

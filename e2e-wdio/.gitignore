@@ -1,0 +1,6 @@
+node_modules/
+dist/
+logs/*.log
+allure-results/
+screenshots/
+fixtures/test-mods.db

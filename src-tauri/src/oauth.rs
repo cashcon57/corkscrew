@@ -453,7 +453,47 @@ pub(crate) fn wait_for_callback(
                     continue;
                 }
 
-                // Ensure only the first valid callback is processed.
+                let params = parse_query_params(&path);
+
+                // Validate state BEFORE consuming callback_received flag to
+                // prevent DoS where an attacker's bad-state request blocks
+                // the legitimate callback.
+                let state = match params.get("state").cloned() {
+                    Some(s) if !s.is_empty() => s,
+                    _ => {
+                        // Missing state — don't consume callback, just reject
+                        let body = "<html><body><h1>Authorization Failed</h1>\
+                                    <p>Missing or empty state parameter.</p>\
+                                    <p>You can close this tab.</p></body></html>";
+                        let response = format!(
+                            "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let mut writer = stream.try_clone()?;
+                        let _ = writer.write_all(response.as_bytes());
+                        let _ = writer.flush();
+                        continue; // Don't consume callback — keep listening
+                    }
+                };
+
+                if state != expected_state {
+                    // Wrong state — possible CSRF. Don't consume callback.
+                    let body = "<html><body><h1>Authorization Failed</h1>\
+                                <p>State mismatch - possible CSRF attack.</p>\
+                                <p>You can close this tab.</p></body></html>";
+                    let response = format!(
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let mut writer = stream.try_clone()?;
+                    let _ = writer.write_all(response.as_bytes());
+                    let _ = writer.flush();
+                    continue; // Don't consume callback — keep listening
+                }
+
+                // State validated — now consume the callback flag
                 if callback_received.swap(true, Ordering::SeqCst) {
                     let body = "<html><body><h1>Already Processed</h1>\
                                 <p>This callback has already been handled. You can close this tab.</p></body></html>";
@@ -469,8 +509,6 @@ pub(crate) fn wait_for_callback(
                         "duplicate callback received".to_string(),
                     ));
                 }
-
-                let params = parse_query_params(&path);
 
                 // Check for errors from the OAuth provider
                 if let Some(error) = params.get("error") {
@@ -505,44 +543,7 @@ pub(crate) fn wait_for_callback(
                     OAuthError::TokenExchange("no authorization code in callback".to_string())
                 })?;
 
-                let state = match params.get("state").cloned() {
-                    Some(s) if !s.is_empty() => s,
-                    _ => {
-                        let body = "<html><body><h1>Authorization Failed</h1>\
-                                    <p>Missing or empty state parameter.</p>\
-                                    <p>You can close this tab.</p></body></html>";
-                        let response = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                            body.len(),
-                            body
-                        );
-                        let mut writer = stream.try_clone()?;
-                        let _ = writer.write_all(response.as_bytes());
-                        let _ = writer.flush();
-                        return Err(OAuthError::TokenExchange(
-                            "missing or empty state parameter in OAuth callback".to_string(),
-                        ));
-                    }
-                };
-
-                // Verify state parameter matches
-                if state != expected_state {
-                    let body = "<html><body><h1>Authorization Failed</h1>\
-                                <p>State mismatch - possible CSRF attack.</p>\
-                                <p>You can close this tab.</p></body></html>";
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        body.len(),
-                        body
-                    );
-                    let mut writer = stream.try_clone()?;
-                    let _ = writer.write_all(response.as_bytes());
-                    let _ = writer.flush();
-
-                    return Err(OAuthError::TokenExchange(
-                        "state parameter mismatch".to_string(),
-                    ));
-                }
+                // State was already validated above (before callback_received flag).
 
                 // Send success page
                 let body = "<html><body style=\"font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; \
@@ -776,9 +777,11 @@ pub fn clear_tokens() -> Result<(), OAuthError> {
 
 /// Parse user information from a JWT access token.
 ///
-/// This performs a simple base64 decode of the JWT payload (middle segment)
-/// without cryptographic signature verification, since we trust the token
-/// came directly from the Nexus Mods token endpoint over HTTPS.
+/// Performs base64 decode of the JWT payload and validates structural claims
+/// (issuer, expiry, audience) without full cryptographic signature verification.
+/// The token is trusted because it comes directly from the Nexus Mods token
+/// endpoint over HTTPS — but claim validation catches stale, malformed, or
+/// misdirected tokens.
 pub fn parse_user_info(access_token: &str) -> Result<NexusUserInfo, OAuthError> {
     let parts: Vec<&str> = access_token.split('.').collect();
     if parts.len() != 3 {
@@ -792,6 +795,42 @@ pub fn parse_user_info(access_token: &str) -> Result<NexusUserInfo, OAuthError> 
         .map_err(|e| OAuthError::InvalidToken(format!("JWT payload is not valid UTF-8: {}", e)))?;
 
     let claims: serde_json::Value = serde_json::from_str(&payload_str)?;
+
+    // Structural claim validation (without full signature verification):
+
+    // 1. Validate issuer if present
+    // NexusMods JWTs may come from "nexusmods.com" (production) or
+    // "nexus-user-service" (internal auth service / SSO).
+    const VALID_ISSUERS: &[&str] = &["nexusmods.com", "nexus-user-service"];
+    if let Some(iss) = claims.get("iss").and_then(|v| v.as_str()) {
+        if !VALID_ISSUERS.iter().any(|valid| iss.contains(valid)) {
+            log::warn!("JWT issuer mismatch: expected nexusmods.com or nexus-user-service, got '{}'", iss);
+            return Err(OAuthError::InvalidToken(format!(
+                "JWT issuer mismatch: {}",
+                iss
+            )));
+        }
+    }
+
+    // 2. Validate token hasn't expired
+    if let Some(exp) = claims.get("exp").and_then(|v| v.as_i64()) {
+        let now = chrono::Utc::now().timestamp();
+        if exp < now {
+            log::warn!("JWT expired: exp={}, now={}", exp, now);
+            return Err(OAuthError::InvalidToken("JWT has expired".to_string()));
+        }
+    }
+
+    // 3. Validate audience matches our client if present
+    if let Some(aud) = claims.get("aud").and_then(|v| v.as_str()) {
+        if aud != CLIENT_ID && !aud.contains(CLIENT_ID) {
+            log::warn!("JWT audience mismatch: expected '{}', got '{}'", CLIENT_ID, aud);
+            return Err(OAuthError::InvalidToken(format!(
+                "JWT audience mismatch: {}",
+                aud
+            )));
+        }
+    }
 
     // NexusMods JWT nests user info under a "user" key.
     // Fall back to top-level claims for forward compatibility.
@@ -1090,6 +1129,43 @@ mod tests {
         assert!(info.avatar.is_none());
         assert!(!info.is_premium);
         assert!(info.membership_roles.is_empty());
+    }
+
+    #[test]
+    fn test_parse_jwt_nexus_user_service_issuer() {
+        // NexusMods SSO tokens use "nexus-user-service" as issuer.
+        let header = base64url_encode(b"{\"alg\":\"RS256\",\"typ\":\"JWT\"}");
+        let payload_json = serde_json::json!({
+            "iss": "nexus-user-service",
+            "sub": "55555",
+            "user": {
+                "username": "SSOUser",
+                "email": "sso@example.com",
+                "membership_roles": ["member"]
+            }
+        });
+        let payload = base64url_encode(payload_json.to_string().as_bytes());
+        let signature = base64url_encode(b"fake-signature");
+        let fake_jwt = format!("{}.{}.{}", header, payload, signature);
+
+        let info = parse_user_info(&fake_jwt).expect("nexus-user-service issuer should be accepted");
+        assert_eq!(info.name, "SSOUser");
+    }
+
+    #[test]
+    fn test_parse_jwt_rejects_unknown_issuer() {
+        let header = base64url_encode(b"{\"alg\":\"RS256\",\"typ\":\"JWT\"}");
+        let payload_json = serde_json::json!({
+            "iss": "evil-server.example.com",
+            "sub": "99999",
+            "user": { "username": "Hacker" }
+        });
+        let payload = base64url_encode(payload_json.to_string().as_bytes());
+        let signature = base64url_encode(b"fake-signature");
+        let fake_jwt = format!("{}.{}.{}", header, payload, signature);
+
+        let result = parse_user_info(&fake_jwt);
+        assert!(result.is_err(), "unknown issuer should be rejected");
     }
 
     #[test]

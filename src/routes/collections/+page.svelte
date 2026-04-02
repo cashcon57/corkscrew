@@ -3,9 +3,7 @@
   import { goto } from "$app/navigation";
   import InstructionParser from "$lib/components/InstructionParser.svelte";
   import { selectedGame, showError, showSuccess, collectionInstallStatus, collectionUninstallStatus, modStateVersion, installedMods, collectionList, activeCollection } from "$lib/stores";
-  import type { CollectionUninstallStatus } from "$lib/stores";
-  import type { UninstallProgressEvent } from "$lib/types";
-  import type { CollectionInfo, CollectionManifest, CollectionMod, CollectionModEntry, CollectionSearchResult, InstalledMod, NexusModInfo, NexusCategory, NexusSearchResult, NexusModFile, CollectionInstallCheckpoint, CollectionRevision } from "$lib/types";
+  import type { CollectionInfo, CollectionManifest, CollectionMod, CollectionModEntry, CollectionSearchResult, InstalledMod, NexusModInfo, NexusCategory, NexusSearchResult, NexusModFile, CollectionRevision } from "$lib/types";
   import {
     browseCollections,
     browseNexusMods,
@@ -19,8 +17,6 @@
     installCollection,
     listInstalledCollections,
     switchCollection,
-    deleteCollection,
-    getCollectionDownloadSize,
     getCollectionDiff,
     getInstalledMods,
     detectCollectionTools,
@@ -36,9 +32,6 @@
     checkDepotReady,
     applyDowngrade,
     getDepotDownloadCommand,
-    getIncompleteCollectionInstalls,
-    resumeCollectionInstall,
-    abandonCollectionInstall,
     checkCachedFiles,
     scanGameDirectory,
     cleanGameDirectory,
@@ -56,7 +49,7 @@
     ddListManifests,
     ddDownloadDepot,
   } from "$lib/api";
-  import { startInstallTracking, stopInstallTracking, resumeInstallTracking } from "$lib/installService";
+  import { startInstallTracking, stopInstallTracking } from "$lib/installService";
   import { listen } from "@tauri-apps/api/event";
   import type { CollectionSummary, CollectionDiff, RequiredTool, CleanReport, CleanOptions, DlcStatus, DeploymentHealth, CachedVersion, DepotDownloadInfo } from "$lib/types";
   import { config } from "$lib/stores";
@@ -70,6 +63,8 @@
   import WabbajackLogo from "$lib/components/WabbajackLogo.svelte";
   import WebViewToggle from "$lib/components/WebViewToggle.svelte";
   import SteamAuthDialog from "$lib/components/SteamAuthDialog.svelte";
+  import CollectionDeleteDialog from "$lib/components/collections/CollectionDeleteDialog.svelte";
+  import InterruptedInstallBanner from "$lib/components/collections/InterruptedInstallBanner.svelte";
   import type { DetectedGame } from "$lib/types";
 
   const NEXUS_API_KEY_URL = "https://www.nexusmods.com/users/myaccount?tab=api+access";
@@ -99,14 +94,7 @@
   let myCollections = $state<CollectionSummary[]>([]);
   let loadingMyCollections = $state(false);
   let switchingCollection = $state<string | null>(null);
-  let deletingCollection = $state<string | null>(null);
   let confirmDeleteCollection = $state<string | null>(null);
-  let deleteDownloads = $state(false);
-  let deleteRemoveAllMods = $state(false);
-  let deleteCleanGameDir = $state(false);
-  let deleteHasSnapshot = $state(false);
-  let deleteDownloadSize = $state<number | null>(null);
-  let deleteDownloadSizeLoading = $state(false);
   let collectionDiffs = $state<Record<string, CollectionDiff | "loading" | "error">>({});
   let collectionHealth = $state<Record<string, DeploymentHealth | "loading" | "error">>({});
   let deployProgress = $state<{ current: number; total: number; mod_name: string; files_deployed: number; total_files: number } | null>(null);
@@ -291,8 +279,6 @@
     }
   }
 
-  let unlistenUninstall: (() => void) | null = null;
-
   function humanizeUninstallStep(step: string): string {
     switch (step) {
       case "undeploying": return "Removing deployed files...";
@@ -303,158 +289,8 @@
     }
   }
 
-  function formatDiskSize(bytes: number): string {
-    if (bytes >= 1_073_741_824) return (bytes / 1_073_741_824).toFixed(1) + " GB";
-    if (bytes >= 1_048_576) return (bytes / 1_048_576).toFixed(1) + " MB";
-    if (bytes >= 1024) return (bytes / 1024).toFixed(1) + " KB";
-    return bytes + " B";
-  }
-
-  async function showDeleteConfirmation(name: string) {
-    const game = $selectedGame;
-    if (!game) return;
+  function showDeleteConfirmation(name: string) {
     confirmDeleteCollection = name;
-    deleteDownloads = false;
-    deleteCleanGameDir = false;
-    deleteHasSnapshot = false;
-    deleteDownloadSize = null;
-    deleteDownloadSizeLoading = true;
-    try {
-      const [size, snap] = await Promise.all([
-        getCollectionDownloadSize(game.game_id, game.bottle_name, name).catch(() => null),
-        hasGameSnapshot(game.game_id, game.bottle_name).catch(() => false),
-      ]);
-      deleteDownloadSize = size;
-      deleteHasSnapshot = snap;
-    } catch {
-      deleteDownloadSize = null;
-    } finally {
-      deleteDownloadSizeLoading = false;
-    }
-  }
-
-  async function handleDeleteCollection(name: string) {
-    const game = $selectedGame;
-    if (!game) return;
-    const shouldCleanGameDir = deleteCleanGameDir;
-    deletingCollection = name;
-    confirmDeleteCollection = null;
-
-    // Initialize uninstall status
-    collectionUninstallStatus.set({
-      active: true,
-      collectionName: name,
-      totalMods: 0,
-      currentMod: 0,
-      currentModName: "",
-      currentStep: "",
-      completed: 0,
-      failed: 0,
-      phase: "removing",
-      errors: [],
-      result: null,
-    });
-
-    // Listen for progress events
-    unlistenUninstall = await listen<UninstallProgressEvent>("uninstall-progress", (event) => {
-      const e = event.payload;
-      collectionUninstallStatus.update((s) => {
-        if (!s) return s;
-        const next = { ...s };
-
-        switch (e.kind) {
-          case "uninstallStarted":
-            next.totalMods = e.total_mods;
-            break;
-          case "modUninstalling":
-            next.currentMod = e.mod_index + 1;
-            next.currentModName = e.mod_name;
-            next.currentStep = e.step;
-            break;
-          case "modUninstalled":
-            next.completed = next.completed + 1;
-            break;
-          case "modUninstallFailed":
-            next.failed = next.failed + 1;
-            next.errors = [...next.errors, `${e.mod_name}: ${e.error}`];
-            break;
-          case "redeployStarted":
-            next.phase = "redeploying";
-            next.currentModName = "";
-            next.currentStep = "Redeploying remaining mods...";
-            break;
-          case "redeployCompleted":
-            break;
-          case "uninstallCompleted":
-            next.phase = "complete";
-            next.result = { modsRemoved: e.mods_removed, downloadsRemoved: e.downloads_removed };
-            if (e.errors.length > 0) {
-              next.errors = e.errors;
-            }
-            break;
-        }
-        return next;
-      });
-    });
-
-    try {
-      await deleteCollection(game.game_id, game.bottle_name, name, deleteDownloads, deleteRemoveAllMods);
-
-      // After successful uninstall, optionally clean non-stock files (preserving SKSE)
-      if (shouldCleanGameDir) {
-        collectionUninstallStatus.update((s) => {
-          if (!s) return s;
-          return { ...s, currentStep: "Cleaning non-stock files from game directory...", phase: "redeploying" };
-        });
-        try {
-          const cleanResult = await cleanGameDirectory(game.game_id, game.bottle_name, {
-            remove_loose_files: true,
-            remove_archives: true,
-            remove_enb: false,
-            remove_saves: false,
-            remove_skse: false,
-            orphans_only: false,
-            dry_run: false,
-            exclude_patterns: [],
-          });
-          collectionUninstallStatus.update((s) => {
-            if (!s) return s;
-            return { ...s, currentStep: `Cleaned ${cleanResult.removed_files.length} non-stock files` };
-          });
-        } catch (cleanErr: unknown) {
-          collectionUninstallStatus.update((s) => {
-            if (!s) return s;
-            return { ...s, errors: [...s.errors, `Game dir cleanup: ${cleanErr}`] };
-          });
-        }
-      }
-    } catch (e: unknown) {
-      showError(`Failed to delete: ${e}`);
-      collectionUninstallStatus.set(null);
-    } finally {
-      unlistenUninstall?.();
-      unlistenUninstall = null;
-      deletingCollection = null;
-
-      // Refresh global state so Mods page and top bar reflect the uninstall
-      const g = $selectedGame;
-      if (g) {
-        listInstalledCollections(g.game_id, g.bottle_name)
-          .then(cols => {
-            collectionList.set(cols);
-            // Clear active collection if the deleted one was active
-            if ($activeCollection?.name === name) {
-              activeCollection.set(null);
-            }
-          })
-          .catch((err) => console.error('Failed to refresh collections after uninstall:', err));
-
-        // Refresh the installed mods store so Mods page updates immediately
-        getInstalledMods(g.game_id, g.bottle_name)
-          .then(mods => installedMods.set(mods))
-          .catch((err) => console.error('Failed to refresh mods after uninstall:', err));
-      }
-    }
   }
 
   function dismissUninstall() {
@@ -606,10 +442,6 @@
   let statsBarEl = $state<HTMLElement | null>(null);
   let showFloatingInstall = $state(false);
   let statsBarObserver: IntersectionObserver | null = null;
-
-  // Resume interrupted install
-  let interruptedInstall = $state<CollectionInstallCheckpoint | null>(null);
-  let resuming = $state(false);
 
   // Tool requirement detection
   let pendingTools = $state<RequiredTool[]>([]);
@@ -1081,18 +913,9 @@
     window.addEventListener("corkscrew-open-nexus-mod", handleOpenNexusMod);
 
     await checkAccount();
-    // Check for interrupted collection installs
+    // Smart default tab: if user has no installed collections, show Nexus browse tab
     const game = $selectedGame;
     if (game) {
-      try {
-        const incomplete = await getIncompleteCollectionInstalls(game.game_id, game.bottle_name);
-        if (incomplete.length > 0) {
-          interruptedInstall = incomplete[0];
-        }
-      } catch {
-        // Silently ignore — not critical
-      }
-      // Smart default tab: if user has no installed collections, show Nexus browse tab
       try {
         const installed = await listInstalledCollections(game.game_id, game.bottle_name);
         if (installed.length === 0) {
@@ -1156,64 +979,6 @@
     // Close any active webviews when navigating away
     closeBrowserWebview().catch((err) => console.error('closeBrowserWebview:', err));
   });
-
-  async function handleResumeInstall() {
-    if (!interruptedInstall) return;
-    resuming = true;
-    try {
-      const modStatuses = JSON.parse(interruptedInstall.mod_statuses) as Record<string, string>;
-      await resumeInstallTracking(
-        interruptedInstall.collection_name,
-        interruptedInstall.total_mods,
-        interruptedInstall.completed_mods,
-        modStatuses,
-      );
-      goto("/collections/progress");
-      resumeCollectionInstall(interruptedInstall.id).catch((err) => console.error('Failed to resume collection install:', err));
-    } catch (e: unknown) {
-      showError(`Failed to resume: ${e}`);
-      resuming = false;
-    }
-  }
-
-  let showDismissConfirm = $state(false);
-  let dismissCleanup = $state(true);
-  let dismissing = $state(false);
-
-  async function handleDismissInstall() {
-    if (!interruptedInstall) return;
-    showDismissConfirm = true;
-  }
-
-  async function confirmDismissInstall() {
-    if (!interruptedInstall) return;
-    const checkpoint = interruptedInstall;
-    dismissing = true;
-    try {
-      // Always abandon the checkpoint so it never comes back
-      await abandonCollectionInstall(checkpoint.id);
-
-      // Optionally clean up partially installed mods
-      if (dismissCleanup && $selectedGame) {
-        try {
-          await deleteCollection(
-            $selectedGame.game_id,
-            $selectedGame.bottle_name,
-            checkpoint.collection_name,
-            true, // delete unique downloads
-          );
-        } catch (err) {
-          console.error("Cleanup of partial install failed (non-fatal):", err);
-        }
-      }
-    } catch (err) {
-      console.error("Failed to abandon checkpoint:", err);
-    } finally {
-      interruptedInstall = null;
-      showDismissConfirm = false;
-      dismissing = false;
-    }
-  }
 
   async function checkAccount() {
     checkingAuth = true;
@@ -2056,60 +1821,12 @@
     </button>
   </div>
 
-  {#if interruptedInstall}
-    <div class="resume-banner">
-      <div class="resume-info">
-        <div class="resume-icon-wrap">
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-            <line x1="12" y1="9" x2="12" y2="13" />
-            <line x1="12" y1="17" x2="12.01" y2="17" />
-          </svg>
-        </div>
-        <div class="resume-text">
-          <span class="resume-title">Interrupted Installation Detected</span>
-          <span class="resume-detail">
-            "{interruptedInstall.collection_name}" — {interruptedInstall.completed_mods} of {interruptedInstall.total_mods} mods completed
-            {#if interruptedInstall.failed_mods > 0}
-              <span class="resume-failed">({interruptedInstall.failed_mods} failed)</span>
-            {/if}
-          </span>
-          <div class="resume-progress-mini">
-            <div class="resume-progress-fill" style="width: {Math.round((interruptedInstall.completed_mods / interruptedInstall.total_mods) * 100)}%"></div>
-          </div>
-        </div>
-      </div>
-      <div class="resume-actions">
-        <button class="btn btn-primary" onclick={handleResumeInstall} disabled={resuming}>
-          {#if resuming}
-            <span class="spinner spinner-sm"></span> Resuming...
-          {:else}
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3" /></svg>
-            Resume Installation
-          {/if}
-        </button>
-        <button class="btn btn-ghost" onclick={handleDismissInstall} disabled={dismissing}>Dismiss</button>
-      </div>
-      {#if showDismissConfirm}
-        <div class="resume-dismiss-confirm">
-          <p class="dismiss-title">Permanently dismiss this installation?</p>
-          <label class="dismiss-option">
-            <input type="checkbox" bind:checked={dismissCleanup} />
-            <span>Remove partially installed mods and downloaded files</span>
-          </label>
-          <div class="dismiss-actions">
-            <button class="btn btn-danger btn-sm" onclick={confirmDismissInstall} disabled={dismissing}>
-              {#if dismissing}
-                <span class="spinner spinner-sm"></span> Cleaning up...
-              {:else}
-                Confirm
-              {/if}
-            </button>
-            <button class="btn btn-ghost btn-sm" onclick={() => showDismissConfirm = false} disabled={dismissing}>Cancel</button>
-          </div>
-        </div>
-      {/if}
-    </div>
+  {#if $selectedGame}
+    <InterruptedInstallBanner
+      game={$selectedGame}
+      onresume={() => {}}
+      ondismiss={() => { loadMyCollections(); }}
+    />
   {/if}
 
   {#if activeTab === "my"}
@@ -4518,108 +4235,13 @@
 {/if}
 
 <!-- Delete Confirmation Modal -->
-{#if confirmDeleteCollection}
-  <div class="modal-overlay" onclick={() => { if (!deletingCollection) confirmDeleteCollection = null; }} role="dialog" aria-modal="true" aria-label="Confirm deletion">
-    <div class="modal-dialog" onclick={(e) => e.stopPropagation()} role="document">
-      <div class="modal-icon">
-        <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-          <line x1="12" y1="9" x2="12" y2="13" />
-          <line x1="12" y1="17" x2="12.01" y2="17" />
-        </svg>
-      </div>
-      <h3 class="modal-title">Delete '{confirmDeleteCollection}'?</h3>
-      <p class="modal-desc">This will uninstall all mods in this collection, remove staging files, and clean up the database. This cannot be undone.</p>
-
-      <div class="modal-option">
-        <label class="modal-checkbox-label">
-          <input type="checkbox" bind:checked={deleteDownloads} />
-          <span class="modal-checkbox-text">
-            Also delete downloaded archives
-            {#if deleteDownloadSizeLoading}
-              <span class="modal-size-loading">calculating...</span>
-            {:else if deleteDownloadSize != null && deleteDownloadSize > 0}
-              <span class="modal-size-badge">saves {formatDiskSize(deleteDownloadSize)}</span>
-            {:else if deleteDownloadSize === 0}
-              <span class="modal-size-note">no unique downloads</span>
-            {/if}
-          </span>
-        </label>
-        {#if deleteDownloads}
-          <p class="modal-option-hint modal-option-hint-warn">Archives unique to this collection will be permanently deleted.</p>
-        {:else}
-          <p class="modal-option-hint">Downloaded archives are kept so you can reinstall later without re-downloading.</p>
-        {/if}
-      </div>
-
-      <div class="modal-option">
-        <label class="modal-checkbox-label">
-          <input type="checkbox" bind:checked={deleteRemoveAllMods} />
-          <span class="modal-checkbox-text">
-            Remove ALL mods, not just this collection
-            <span class="modal-size-note">fastest</span>
-          </span>
-        </label>
-        {#if deleteRemoveAllMods}
-          <p class="modal-option-hint modal-option-hint-warn">Removes every installed mod for this game, including any manually installed mods outside the collection.</p>
-        {:else}
-          <p class="modal-option-hint">Only removes mods that belong to this collection.</p>
-        {/if}
-      </div>
-
-      {#if deleteHasSnapshot}
-        <div class="modal-option">
-          <label class="modal-checkbox-label">
-            <input type="checkbox" bind:checked={deleteCleanGameDir} />
-            <span class="modal-checkbox-text">
-              Clean non-stock files from game directory
-              <span class="modal-size-note">preserves SKSE</span>
-            </span>
-          </label>
-          {#if deleteCleanGameDir}
-            <p class="modal-option-hint modal-option-hint-warn">Removes leftover loose files (meshes, textures, scripts, plugins) that aren't part of the original game. SKSE files are preserved.</p>
-          {:else}
-            <p class="modal-option-hint">Leave the game directory as-is after uninstalling the collection.</p>
-          {/if}
-        </div>
-      {/if}
-
-      <div class="modal-actions">
-        <button
-          class="btn btn-danger"
-          onclick={() => handleDeleteCollection(confirmDeleteCollection!)}
-          disabled={deletingCollection === confirmDeleteCollection}
-        >
-          {#if deletingCollection === confirmDeleteCollection}
-            <svg class="icon-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-              <line x1="12" y1="2" x2="12" y2="6" />
-              <line x1="12" y1="18" x2="12" y2="22" />
-              <line x1="4.93" y1="4.93" x2="7.76" y2="7.76" />
-              <line x1="16.24" y1="16.24" x2="19.07" y2="19.07" />
-              <line x1="2" y1="12" x2="6" y2="12" />
-              <line x1="18" y1="12" x2="22" y2="12" />
-              <line x1="4.93" y1="19.07" x2="7.76" y2="16.24" />
-              <line x1="16.24" y1="7.76" x2="19.07" y2="4.93" />
-            </svg>
-            Deleting...
-          {:else}
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="3 6 5 6 21 6" />
-              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-            </svg>
-            Delete Collection
-          {/if}
-        </button>
-        <button
-          class="btn btn-ghost"
-          onclick={() => confirmDeleteCollection = null}
-          disabled={deletingCollection === confirmDeleteCollection}
-        >
-          Cancel
-        </button>
-      </div>
-    </div>
-  </div>
+{#if confirmDeleteCollection && $selectedGame}
+  <CollectionDeleteDialog
+    collectionName={confirmDeleteCollection}
+    game={$selectedGame}
+    ondelete={async () => { confirmDeleteCollection = null; await loadMyCollections(); }}
+    oncancel={() => { confirmDeleteCollection = null; }}
+  />
 {/if}
 
 <style>
@@ -4628,70 +4250,6 @@
   .collections-page {
     padding: var(--space-2) 0 var(--space-12) 0;
   }
-
-  /* ---- Resume Banner ---- */
-
-  .resume-banner {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    flex-wrap: wrap;
-    gap: var(--space-4);
-    padding: var(--space-4) var(--space-5);
-    background: rgba(255, 159, 10, 0.08);
-    border: 2px solid rgba(255, 159, 10, 0.4);
-    border-radius: var(--radius-md);
-    margin-bottom: var(--space-4);
-    animation: resume-attention 2s ease-in-out 2;
-  }
-
-  @keyframes resume-attention {
-    0%, 100% { border-color: rgba(255, 159, 10, 0.4); }
-    50% { border-color: rgba(255, 159, 10, 0.8); background: rgba(255, 159, 10, 0.12); }
-  }
-
-  .resume-info { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
-  .resume-icon-wrap { flex-shrink: 0; }
-  .resume-text { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-  .resume-title { font-weight: 700; color: var(--text-primary); font-size: 14px; }
-  .resume-detail { font-size: 12px; color: var(--text-secondary); }
-  .resume-failed { color: #ef4444; font-weight: 600; }
-  .resume-progress-mini {
-    width: 100%;
-    max-width: 200px;
-    height: 4px;
-    background: rgba(255, 159, 10, 0.15);
-    border-radius: 2px;
-    overflow: hidden;
-  }
-  .resume-progress-fill {
-    height: 100%;
-    background: #f59e0b;
-    border-radius: 2px;
-    transition: width 300ms ease;
-  }
-  .resume-actions { display: flex; gap: var(--space-2); flex-shrink: 0; align-items: center; }
-
-  .resume-dismiss-confirm {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-    width: 100%;
-    padding-top: var(--space-3);
-    border-top: 1px solid rgba(255, 159, 10, 0.2);
-    margin-top: var(--space-2);
-  }
-  .dismiss-title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
-  .dismiss-option {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    font-size: 12px;
-    color: var(--text-secondary);
-    cursor: pointer;
-  }
-  .dismiss-option input[type="checkbox"] { accent-color: #f59e0b; }
-  .dismiss-actions { display: flex; gap: var(--space-2); margin-top: var(--space-1); }
 
   /* ---- Connect Prompt ---- */
 

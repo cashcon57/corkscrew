@@ -12,7 +12,9 @@
     "tauri": "tauri",
     "release": "./scripts/release.sh",
     "test:e2e": "npx playwright test",
-    "test:e2e:ui": "npx playwright test --ui"
+    "test:e2e:ui": "npx playwright test --ui",
+    "test:e2e:wdio": "cd e2e-wdio && npm test",
+    "test:e2e:all": "npx playwright test && cd e2e-wdio && npm test"
   },
   "license": "GPL-3.0-or-later",
   "dependencies": {

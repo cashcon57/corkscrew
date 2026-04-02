@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, uninstallSkse, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, findOrphanedDownloads, deleteOrphanedDownloads, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, checkModToolUpdate, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads, checkSteamStatus, addToSteam, removeFromSteam, scanGameDirectory, cleanGameDirectory, checkSkyrimVersion, downgradeSkyrim, checkDeploymentHealth, redeployAllMods, getVerificationLevel, setVerificationLevel, setUseWineEngineFixes, getDepotDownloadCommand, startDepotDownload, checkDepotReady, applyDowngrade, listGameVersions, swapGameVersion, listDisabledWinePlugins, reenableWinePlugin, vortexListCachedExtensions, vortexFetchExtension, vortexRefreshExtension, vortexDeleteCachedExtension, vortexListAvailableExtensions, vortexGetExtensionDetail } from "$lib/api";
+  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, uninstallSkse, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, findOrphanedDownloads, deleteOrphanedDownloads, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, checkModToolUpdate, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads, checkSteamStatus, addToSteam, removeFromSteam, scanGameDirectory, cleanGameDirectory, checkSkyrimVersion, downgradeSkyrim, checkDeploymentHealth, redeployAllMods, getVerificationLevel, setVerificationLevel, setUseWineEngineFixes, getDepotDownloadCommand, startDepotDownload, checkDepotReady, applyDowngrade, listGameVersions, swapGameVersion, listDisabledWinePlugins, reenableWinePlugin, vortexListCachedExtensions, vortexFetchExtension, vortexRefreshExtension, vortexDeleteCachedExtension, vortexListAvailableExtensions, vortexGetExtensionDetail, ddStatus, ddEnsureUpdated, ddAuthenticate, ddDownloadDepot, ddApplyDepot, ddGetDepotVersions } from "$lib/api";
   import type { CleanReport, CleanResult, DowngradeStatus, DeploymentHealth, VerificationLevel, CachedVersion, DepotDownloadInfo } from "$lib/types";
   import type { SteamStatus } from "$lib/types";
   import { config, showError, showSuccess, selectedGame, skseStatus, currentPage, appVersion, updateReady, updateVersion, updateNotes, updateChecking, updateError, triggerUpdateCheck, controllerMode } from "$lib/stores";
@@ -16,14 +16,16 @@
   import { scanShaderCompatibility } from "$lib/api";
   import type { ShaderScanResult } from "$lib/types";
   import ShaderConversionWizard from "$lib/components/ShaderConversionWizard.svelte";
+  import SteamAuthDialog from "$lib/components/SteamAuthDialog.svelte";
 
   let manualCheckDone = $state(false);
   let settingsNotesExpanded = $state(false);
 
   async function handleCheckForUpdates() {
     manualCheckDone = false;
-    if (triggerUpdateCheck) {
-      await triggerUpdateCheck();
+    const checkFn = $triggerUpdateCheck;
+    if (checkFn) {
+      await checkFn();
     }
     manualCheckDone = true;
   }
@@ -269,13 +271,22 @@
   let checkingDowngrade = $state(false);
   let cachedVersions = $state<CachedVersion[]>([]);
   let showDowngradeWizard = $state(false);
-  type WizardStep = "detect" | "downloading" | "guide" | "wait" | "apply" | "done";
+  type WizardStep = "detect" | "dd_setup" | "dd_auth" | "dd_download" | "downloading" | "guide" | "wait" | "apply" | "done";
   let wizardStep = $state<WizardStep>("detect");
   let depotInfo = $state<DepotDownloadInfo | null>(null);
   let depotPolling = $state(false);
   let depotPollTimer = $state<ReturnType<typeof setInterval> | null>(null);
   let depotExePath = $state<string | null>(null);
   let swapping = $state(false);
+
+  // DepotDownloader state
+  let ddReady = $state(false);
+  let ddUpdating = $state(false);
+  let ddAuthed = $state(false);
+  let showSteamAuth = $state(false);
+  let ddDownloading = $state(false);
+  let ddDepotVersions = $state<Array<{ game_version: string; app_id: number; depot_id: number; manifest_id: string; build_id: string }>>([]);
+  let ddSelectedVersion = $state<{ game_version: string; app_id: number; depot_id: number; manifest_id: string } | null>(null);
   let depotAutoFailed = $state(false);
 
   // Deployment health
@@ -504,11 +515,103 @@
     showDowngradeWizard = true;
     wizardStep = "detect";
     depotExePath = null;
+    ddSelectedVersion = null;
 
     try {
       downgradeStatus = await checkSkyrimVersion(game.game_id, game.bottle_name);
       cachedVersions = await listGameVersions(game.game_id);
     } catch { /* ignore */ }
+
+    // Load depot versions from captured Steam history
+    try {
+      ddDepotVersions = await ddGetDepotVersions(game.game_id);
+    } catch (e: unknown) {
+      console.error("Failed to load depot versions:", e);
+      ddDepotVersions = [];
+    }
+
+    // Check DD status
+    try {
+      const status = await ddStatus();
+      ddReady = status.installed;
+      ddAuthed = status.auth_state === "ready";
+    } catch {
+      ddReady = false;
+      ddAuthed = false;
+    }
+  }
+
+  /** Start the DD-powered downgrade: ensure DD installed/updated → auth → download → apply */
+  async function wizardStartDDDowngrade(version: { game_version: string; app_id: number; depot_id: number; manifest_id: string }) {
+    ddSelectedVersion = version;
+    wizardStep = "dd_setup";
+    ddUpdating = true;
+
+    try {
+      // Step 1: Ensure DD is installed and up-to-date
+      await ddEnsureUpdated();
+      ddReady = true;
+    } catch (e: unknown) {
+      showError(`Failed to install/update DepotDownloader: ${e}`);
+      wizardStep = "detect";
+      ddUpdating = false;
+      return;
+    }
+    ddUpdating = false;
+
+    // Step 2: Check auth state
+    try {
+      const status = await ddStatus();
+      ddAuthed = status.auth_state === "ready";
+    } catch {
+      ddAuthed = false;
+    }
+
+    if (!ddAuthed) {
+      wizardStep = "dd_auth";
+      showSteamAuth = true;
+    } else {
+      // Already authenticated — proceed to download
+      await wizardDDDownload();
+    }
+  }
+
+  function handleSteamAuthSuccess() {
+    showSteamAuth = false;
+    ddAuthed = true;
+    wizardDDDownload();
+  }
+
+  function handleSteamAuthCancel() {
+    showSteamAuth = false;
+    wizardStep = "detect";
+  }
+
+  async function wizardDDDownload() {
+    if (!game || !ddSelectedVersion) return;
+    wizardStep = "dd_download";
+    ddDownloading = true;
+
+    try {
+      const depotDir = await ddDownloadDepot(
+        ddSelectedVersion.app_id,
+        ddSelectedVersion.depot_id,
+        ddSelectedVersion.manifest_id,
+        game.game_id
+      );
+
+      // Apply the downloaded depot
+      const filesApplied = await ddApplyDepot(game.game_id, game.bottle_name, depotDir);
+      downgradeStatus = await checkSkyrimVersion(game.game_id, game.bottle_name);
+      cachedVersions = await listGameVersions(game.game_id);
+      wizardStep = "done";
+      showSuccess(`Downgrade complete — ${filesApplied} files applied (v${ddSelectedVersion.game_version})`);
+    } catch (e: unknown) {
+      showError(`DD download/apply failed: ${e}`);
+      wizardStep = "detect";
+    } finally {
+      ddDownloading = false;
+    }
   }
 
   async function wizardStartDownload() {
@@ -1416,6 +1519,9 @@
           <div class="cleanup-header">
             <h3 class="cleanup-title">
               {#if wizardStep === "detect"}Manage Game Version
+              {:else if wizardStep === "dd_setup"}Setting Up DepotDownloader
+              {:else if wizardStep === "dd_auth"}Steam Login Required
+              {:else if wizardStep === "dd_download"}Downloading Game Files
               {:else if wizardStep === "downloading"}Downloading v1.5.97
               {:else if wizardStep === "guide"}Download Old Version
               {:else if wizardStep === "wait"}Waiting for Download
@@ -1452,9 +1558,63 @@
                   {/each}
                 {:else}
                   <p class="cleanup-info" style="margin-top: 0.5rem; opacity: 0.7;">
-                    No cached versions yet. Download v1.5.97 using Steam's depot system.
+                    No cached versions yet.
                   </p>
                 {/if}
+                {#if ddDepotVersions.length > 0}
+                  <p class="cleanup-info" style="margin-top: 0.75rem;">
+                    <strong>Available via DepotDownloader:</strong>
+                  </p>
+                  <p class="cleanup-info" style="font-size: 0.8rem; opacity: 0.7; margin-bottom: 0.5rem;">
+                    These versions were captured from your Steam install history. Download directly from Steam's servers.
+                  </p>
+                  {#each ddDepotVersions as dv}
+                    <div style="display: flex; align-items: center; gap: 0.5rem; margin: 0.25rem 0; padding: 0.5rem; background: var(--surface-1); border-radius: 6px;">
+                      <span style="flex: 1;">v{dv.game_version} <span style="font-size: 0.75rem; opacity: 0.5;">manifest {dv.manifest_id.slice(0, 10)}...</span></span>
+                      <button
+                        class="btn-ghost"
+                        style="font-size: 0.8rem; color: var(--blue);"
+                        disabled={downgradeStatus?.current_version === dv.game_version || ddDownloading || ddUpdating}
+                        onclick={() => wizardStartDDDowngrade(dv)}
+                        type="button"
+                      >
+                        {downgradeStatus?.current_version === dv.game_version ? "Active" : "Download & Apply"}
+                      </button>
+                    </div>
+                  {/each}
+                {/if}
+              </div>
+
+            {:else if wizardStep === "dd_setup"}
+              <div class="cleanup-summary">
+                <div style="display: flex; align-items: center; gap: 0.75rem; margin: 1rem 0; padding: 1rem; background: var(--surface-1); border-radius: 6px;">
+                  <div class="spinner" style="width: 24px; height: 24px; border: 2px solid var(--border); border-top-color: var(--blue); border-radius: 50%; animation: spin 1s linear infinite;"></div>
+                  <span>Checking DepotDownloader...</span>
+                </div>
+                <p class="cleanup-info" style="font-size: 0.8rem; opacity: 0.7;">
+                  DepotDownloader is an open-source tool that downloads game files directly from Steam's servers.
+                </p>
+              </div>
+
+            {:else if wizardStep === "dd_auth"}
+              <div class="cleanup-summary">
+                <p class="cleanup-info">
+                  Steam login is required to download game files via DepotDownloader.
+                </p>
+                <p class="cleanup-info" style="margin-top: 0.5rem; font-size: 0.85rem; opacity: 0.7;">
+                  Your credentials are sent directly to Steam — never stored by Corkscrew.
+                </p>
+              </div>
+
+            {:else if wizardStep === "dd_download"}
+              <div class="cleanup-summary">
+                <div style="display: flex; align-items: center; gap: 0.75rem; margin: 1rem 0; padding: 1rem; background: var(--surface-1); border-radius: 6px;">
+                  <div class="spinner" style="width: 24px; height: 24px; border: 2px solid var(--border); border-top-color: var(--blue); border-radius: 50%; animation: spin 1s linear infinite;"></div>
+                  <span>Downloading game files{ddSelectedVersion ? ` (v${ddSelectedVersion.game_version})` : ''}...</span>
+                </div>
+                <p class="cleanup-info" style="font-size: 0.85rem; opacity: 0.7;">
+                  This downloads the selected version's depot files from Steam, then applies them to your game installation. This may take several minutes depending on game size.
+                </p>
               </div>
 
             {:else if wizardStep === "downloading"}
@@ -1537,11 +1697,17 @@
           <div class="cleanup-actions">
             {#if wizardStep === "detect"}
               <button class="btn btn-ghost" onclick={closeWizard} type="button">Close</button>
-              {#if !downgradeStatus?.is_downgraded}
-                <button class="btn btn-primary" onclick={wizardStartDownload} type="button">
-                  Download v1.5.97
+              {#if !downgradeStatus?.is_downgraded && game?.game_id === "skyrimse"}
+                <button class="btn btn-ghost" onclick={wizardStartDownload} type="button">
+                  Steam Console Method
                 </button>
               {/if}
+
+            {:else if wizardStep === "dd_setup" || wizardStep === "dd_download"}
+              <button class="btn btn-ghost" onclick={() => { wizardStep = "detect"; ddDownloading = false; ddUpdating = false; }} type="button">Cancel</button>
+
+            {:else if wizardStep === "dd_auth"}
+              <button class="btn btn-ghost" onclick={() => { showSteamAuth = false; wizardStep = "detect"; }} type="button">Cancel</button>
 
             {:else if wizardStep === "downloading"}
               <button class="btn btn-ghost" onclick={() => { if (depotPollTimer) clearInterval(depotPollTimer); depotPollTimer = null; depotPolling = false; wizardStep = "detect"; }} type="button">Cancel</button>
@@ -1578,6 +1744,14 @@
           </div>
         </div>
       </div>
+    {/if}
+
+    <!-- Steam Auth Dialog (for DepotDownloader) -->
+    {#if showSteamAuth}
+      <SteamAuthDialog
+        onauth={handleSteamAuthSuccess}
+        oncancel={handleSteamAuthCancel}
+      />
     {/if}
 
     <!-- Wine-Incompatible Plugins -->

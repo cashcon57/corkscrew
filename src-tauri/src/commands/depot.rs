@@ -32,6 +32,14 @@ pub async fn dd_install() -> Result<String, String> {
     depot_downloader::install().await.map_err(|e| e.to_string())
 }
 
+/// Ensure DD is installed and up-to-date. Installs or updates as needed.
+#[tauri::command]
+pub async fn dd_ensure_updated() -> Result<String, String> {
+    depot_downloader::ensure_up_to_date()
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Authenticate with Steam via DepotDownloader.
 #[tauri::command]
 pub async fn dd_authenticate(
@@ -103,6 +111,48 @@ pub async fn dd_download_depot(
     .map_err(|e| e.to_string())?;
 
     Ok(download_dir.to_string_lossy().to_string())
+}
+
+/// Get depot history for a game (all captured versions with app/depot/manifest IDs).
+#[tauri::command]
+pub async fn dd_get_depot_versions(
+    game_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<DepotVersion>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let conn = db.conn().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT game_version, app_id, depot_id, manifest_id, build_id
+             FROM steam_depot_history
+             WHERE game_id = ?1 AND game_version IS NOT NULL
+             GROUP BY game_version
+             ORDER BY captured_at DESC"
+        ).map_err(|e| e.to_string())?;
+
+        let rows = stmt.query_map(rusqlite::params![&game_id], |row| {
+            Ok(DepotVersion {
+                game_version: row.get(0)?,
+                app_id: row.get::<_, String>(1)?.parse().unwrap_or(0),
+                depot_id: row.get::<_, String>(2)?.parse().unwrap_or(0),
+                manifest_id: row.get(3)?,
+                build_id: row.get(4)?,
+            })
+        }).map_err(|e| e.to_string())?;
+
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
+#[derive(Serialize)]
+pub struct DepotVersion {
+    pub game_version: String,
+    pub app_id: u32,
+    pub depot_id: u32,
+    pub manifest_id: String,
+    pub build_id: String,
 }
 
 /// Apply a downloaded depot to a game installation.

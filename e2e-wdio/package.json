@@ -1,0 +1,22 @@
+{
+  "name": "corkscrew-e2e-wdio",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Tier 2 E2E tests: WebdriverIO + tauri-driver against the real compiled binary",
+  "type": "module",
+  "scripts": {
+    "test": "wdio run wdio.conf.ts",
+    "test:harness": "GAME_HARNESS=1 wdio run wdio.conf.ts --spec specs/game-harness/",
+    "build-and-test": "npm run --prefix .. tauri build -- --debug --no-bundle && wdio run wdio.conf.ts",
+    "seed-db": "./fixtures/create-fixture-db.sh"
+  },
+  "devDependencies": {
+    "@wdio/cli": "^9.0.0",
+    "@wdio/local-runner": "^9.0.0",
+    "@wdio/mocha-framework": "^9.0.0",
+    "@wdio/spec-reporter": "^9.0.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.7.0",
+    "@types/mocha": "^10.0.0"
+  }
+}

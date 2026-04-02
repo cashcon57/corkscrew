@@ -154,6 +154,19 @@ export async function injectTauriMock(
       case "get_verification_level": return "Balanced";
       case "vortex_list_cached_extensions": return [];
 
+      // DepotDownloader
+      case "dd_status": return { installed: true, version: "2.7.4", auth_state: "need_credentials" };
+      case "dd_install": return "2.7.4";
+      case "dd_ensure_updated": return "2.7.4";
+      case "dd_authenticate": return null;
+      case "dd_list_manifests": return [];
+      case "dd_download_depot": return "/tmp/depot_downloads/489830_489833";
+      case "dd_get_depot_versions": return [
+        { game_version: "1.5.97", app_id: 489830, depot_id: 489833, manifest_id: "4063321535627579835", build_id: "7940292" },
+        { game_version: "1.6.1170", app_id: 489830, depot_id: 489833, manifest_id: "8260459358764089032", build_id: "14805699" },
+      ];
+      case "dd_apply_depot": return 47;
+
       // Chat
       case "check_ollama_status_cmd": return { installed: false, running: false, available_models: [] };
       case "check_mlx_status": return false;

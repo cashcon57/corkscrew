@@ -148,6 +148,10 @@ export async function ddInstall(): Promise<string> {
   return invoke("dd_install");
 }
 
+export async function ddEnsureUpdated(): Promise<string> {
+  return invoke("dd_ensure_updated");
+}
+
 export async function ddAuthenticate(
   username: string,
   password: string,
@@ -170,6 +174,28 @@ export async function ddDownloadDepot(
   gameId: string
 ): Promise<string> {
   return invoke("dd_download_depot", { appId, depotId, manifestId, gameId });
+}
+
+export async function ddGetDepotVersions(
+  gameId: string
+): Promise<
+  Array<{
+    game_version: string;
+    app_id: number;
+    depot_id: number;
+    manifest_id: string;
+    build_id: string;
+  }>
+> {
+  return invoke("dd_get_depot_versions", { gameId });
+}
+
+export async function ddApplyDepot(
+  gameId: string,
+  bottleName: string,
+  depotDir: string
+): Promise<number> {
+  return invoke("dd_apply_depot", { gameId, bottleName, depotDir });
 }
 
 export async function syncLuaMods(

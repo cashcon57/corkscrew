@@ -1,0 +1,13 @@
+{
+  "has_completed_setup": true,
+  "last_known_version": "0.9.58",
+  "download_dir": "/tmp/corkscrew-e2e-downloads",
+  "disable_game_fixes": "false",
+  "nexus_api_key": null,
+  "nexus_premium": false,
+  "theme": "dark",
+  "controller_mode": false,
+  "per_profile_saves": false,
+  "send_crash_reports": false,
+  "download_threads": 4
+}

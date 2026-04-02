@@ -7,6 +7,7 @@ on:
       - 'v*'
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 # Cancel in-progress runs for the same PR/branch
 concurrency:
@@ -95,3 +96,108 @@ jobs:
       - name: Check Rust compilation
         working-directory: src-tauri
         run: cargo check
+
+  # Tier 1 E2E: Playwright with mocked Tauri IPC
+  # Fast (~30s), no build needed, catches frontend regressions.
+  # Runs on EVERY commit.
+  e2e-playwright:
+    name: E2E Playwright (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium webkit
+
+      - name: Run Playwright E2E tests
+        run: npx playwright test
+        env:
+          CI: true
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ matrix.os }}
+          path: playwright-report/
+          retention-days: 7
+
+  # Tier 2 E2E: WebdriverIO + tauri-plugin-webdriver (real binary)
+  # Tests real IPC + backend + native webview (WKWebView on macOS, WebKitGTK on Linux).
+  # The plugin embeds a W3C WebDriver server on port 4445 in debug builds.
+  # Runs on PRs to main only.
+  e2e-webdriverio:
+    name: E2E WebdriverIO (${{ matrix.os }})
+    if: github.event_name == 'pull_request'
+    needs: [build-check]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true  # Advisory until suite is stable
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libgtk-3-dev
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Install E2E dependencies
+        run: cd e2e-wdio && npm ci
+
+      - name: Build Tauri app (debug)
+        working-directory: src-tauri
+        run: cargo build
+
+      - name: Run WebdriverIO E2E tests (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run --auto-servernum npx wdio run e2e-wdio/wdio.conf.ts
+        env:
+          CI: true
+
+      - name: Run WebdriverIO E2E tests (macOS)
+        if: runner.os == 'macOS'
+        run: cd e2e-wdio && npx wdio run wdio.conf.ts
+        env:
+          CI: true
+
+      - name: Upload WDIO logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wdio-logs-${{ matrix.os }}
+          path: e2e-wdio/logs/
+          retention-days: 7

@@ -118,9 +118,10 @@ pub struct AppConfig {
 /// - macOS:  `~/Library/Application Support/corkscrew/config.json`
 /// - Linux:  `~/.config/corkscrew/config.json`
 pub fn config_path() -> PathBuf {
-    // dirs::config_dir() returns None only on truly exotic platforms; for a
-    // desktop app we treat that as a hard failure elsewhere, but here we
-    // provide a best-effort fallback so the function stays infallible.
+    // E2E tests can override with CORKSCREW_DATA_DIR to use fixture data.
+    if let Ok(test_dir) = std::env::var("CORKSCREW_DATA_DIR") {
+        return PathBuf::from(&test_dir).join("config.json");
+    }
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("corkscrew")
@@ -133,6 +134,9 @@ pub fn config_path() -> PathBuf {
 /// - macOS:  `~/Library/Application Support/corkscrew/mods.db`
 /// - Linux:  `~/.local/share/corkscrew/mods.db`
 pub fn db_path() -> PathBuf {
+    if let Ok(test_dir) = std::env::var("CORKSCREW_DATA_DIR") {
+        return PathBuf::from(&test_dir).join("mods.db");
+    }
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("corkscrew")
@@ -144,6 +148,9 @@ pub fn db_path() -> PathBuf {
 /// - macOS:  `~/Library/Application Support/corkscrew`
 /// - Linux:  `~/.local/share/corkscrew`
 pub fn data_dir() -> PathBuf {
+    if let Ok(test_dir) = std::env::var("CORKSCREW_DATA_DIR") {
+        return PathBuf::from(test_dir);
+    }
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("corkscrew")

@@ -19,7 +19,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
-use log::{debug, error, info, warn};
+use log::{debug, info};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
@@ -198,6 +198,14 @@ pub async fn install() -> Result<String> {
             continue; // skip directories
         }
 
+        // Prevent ZIP path traversal (Zip Slip)
+        if name.contains("..") || name.starts_with('/') || name.starts_with('\\') {
+            return Err(DDError::Other(format!(
+                "ZIP contains unsafe path: {}",
+                name
+            )));
+        }
+
         let dest = install_dir.join(&name);
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
@@ -226,6 +234,42 @@ pub async fn install() -> Result<String> {
     Ok(tag)
 }
 
+/// Ensure DD is installed and up-to-date. Installs or updates as needed.
+/// Returns the installed version string.
+pub async fn ensure_up_to_date() -> Result<String> {
+    let client = reqwest::Client::builder()
+        .user_agent(format!("Corkscrew/{}", env!("CARGO_PKG_VERSION")))
+        .build()?;
+
+    // Get latest release tag
+    let url = format!(
+        "https://api.github.com/repos/{}/releases/latest",
+        DD_GITHUB_REPO
+    );
+    let release: serde_json::Value = client.get(&url).send().await?.json().await?;
+    let latest_tag = release["tag_name"]
+        .as_str()
+        .ok_or_else(|| DDError::Other("No tag_name in release".into()))?
+        .to_string();
+
+    // Compare with installed version
+    if is_installed() {
+        if let Some(ref current) = installed_version() {
+            if current == &latest_tag {
+                info!("DepotDownloader {} is up-to-date", current);
+                return Ok(latest_tag);
+            }
+            info!(
+                "DepotDownloader update available: {} → {}",
+                current, latest_tag
+            );
+        }
+    }
+
+    // Install (or update) to latest
+    install().await
+}
+
 // ---------------------------------------------------------------------------
 // Auth check
 // ---------------------------------------------------------------------------
@@ -235,7 +279,8 @@ pub fn check_auth_state() -> AuthState {
     // DD saves sessions to its config dir. Check if login token exists.
     let dd_config = dirs::config_dir()
         .map(|d| d.join("DepotDownloader"))
-        .unwrap_or_else(|| PathBuf::from("~/.config/DepotDownloader"));
+        .or_else(|| dirs::home_dir().map(|d| d.join(".config/DepotDownloader")))
+        .unwrap_or_else(|| PathBuf::from("/tmp/DepotDownloader"));
 
     if dd_config.exists() {
         // Check for any saved session files
@@ -274,17 +319,18 @@ pub async fn list_manifests(
         .arg("-depot").arg(depot_id.to_string())
         .arg("-manifest-only");
 
+    // Only pass username — password is never passed as a CLI arg (visible in ps).
+    // After initial authenticate() with -remember-password, DD reuses the saved session.
     if let Some(user) = username {
         cmd.arg("-username").arg(user);
     }
-    if let Some(pass) = password {
-        cmd.arg("-password").arg(pass);
-    }
+    // password parameter kept for API compatibility but intentionally unused
+    let _ = password;
 
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    debug!("Running DD: {:?}", cmd);
+    debug!("Running DepotDownloader for app={}, depot={}", app_id, depot_id);
 
     let output = cmd.output().await?;
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -344,12 +390,12 @@ pub async fn download_depot(
         .arg("-manifest").arg(manifest_id)
         .arg("-dir").arg(output_dir.to_string_lossy().to_string());
 
+    // Only pass username — password never passed as CLI arg (visible in ps).
+    // DD reuses saved session from authenticate() with -remember-password.
     if let Some(user) = username {
         cmd.arg("-username").arg(user);
     }
-    if let Some(pass) = password {
-        cmd.arg("-password").arg(pass);
-    }
+    let _ = password; // Intentionally unused — kept for API compatibility
 
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -389,8 +435,9 @@ pub async fn download_depot(
 }
 
 /// Authenticate with Steam via DepotDownloader.
-/// Runs DD with just -username/-password to establish a session.
-/// Returns Ok if auth succeeded, or an error indicating what's needed.
+/// Pipes credentials via stdin (never as command-line args) so they don't
+/// appear in process listings (`ps`). Uses `-remember-password` per DD FAQ
+/// so subsequent operations reuse the saved session.
 pub async fn authenticate(
     username: &str,
     password: &str,
@@ -402,34 +449,46 @@ pub async fn authenticate(
 
     let binary = dd_binary_path();
     let mut cmd = Command::new(&binary);
-    // Use a harmless operation (list manifests for Steam itself) to trigger auth
+    // Use a harmless operation (list manifests for Steam itself) to trigger auth.
+    // Omit -password so credentials don't appear in process args — pipe via stdin.
     cmd.arg("-app").arg("10") // Steam app ID (always accessible)
         .arg("-depot").arg("11")
         .arg("-manifest-only")
         .arg("-username").arg(username)
-        .arg("-password").arg(password);
+        .arg("-remember-password");
 
-    if let Some(code) = steam_guard_code {
-        // DD accepts Steam Guard codes via stdin when prompted
-        cmd.stdin(Stdio::piped());
-    }
-
+    // Always pipe stdin — DD prompts for password when -password is omitted
+    cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
     let mut child = cmd.spawn()?;
 
-    // If we have a Steam Guard code, write it to stdin when prompted
-    if let Some(code) = steam_guard_code {
-        if let Some(mut stdin) = child.stdin.take() {
-            // Give DD a moment to prompt for the code
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    // Pipe password via stdin. DD prompts immediately when -username is given
+    // without -password. Then pipe Steam Guard code if needed.
+    if let Some(mut stdin) = child.stdin.take() {
+        // Write password (DD prompts for it right away)
+        stdin.write_all(format!("{}\n", password).as_bytes()).await?;
+        stdin.flush().await?;
+
+        // If we have a Steam Guard code, write it after a delay for DD to process
+        // the password and prompt for the code
+        if let Some(code) = steam_guard_code {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             stdin.write_all(format!("{}\n", code).as_bytes()).await?;
             stdin.flush().await?;
         }
+        drop(stdin); // Close stdin so DD can proceed
     }
 
-    let output = child.wait_with_output().await?;
+    // Apply a 30-second timeout so we don't hang forever if DD stalls
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        child.wait_with_output(),
+    )
+    .await
+    .map_err(|_| DDError::Other("DepotDownloader authentication timed out after 30s".into()))?
+    .map_err(DDError::Io)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
