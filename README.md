@@ -111,11 +111,13 @@ Most of this implementation is being generalized into a reusable `UnrealEnginePl
 
 Ready or Not | Palworld | Kingdom Hearts III | Ace Combat 7 | Sifu | FF VII Remake | FF VII Rebirth | S.T.A.L.K.E.R. 2 | Dying Light 2 | Oblivion Remastered
 
+<!-- GAME_SUPPORT_TABLE_START -->
 ### Standard Support (In Registry)
 
 These games are auto-detected and support the full generic mod workflow. **Testing is needed** to verify the mod pipeline works end-to-end for each game. If you play any of these, please test and report issues!
 
 Skyrim LE (72.9k mods) | Fallout: New Vegas (40.4k) | Oblivion (33k) | Stardew Valley (29.8k) | Cyberpunk 2077 (20.5k) | Fallout 3 (17k) | Baldur's Gate 3 (17.3k) | Morrowind (14.7k) | Starfield (12.3k) | Blade & Sorcery (8.4k) | The Witcher 3 (8.4k) | 7 Days to Die (7.1k) | Monster Hunter: World (6.3k) | The Sims 4 (4.4k) | Dragon Age: Origins (3.9k) | No Man's Sky (2.6k) | Sekiro (1.7k) | Darkest Dungeon (1.6k) | Dark Souls 3 (1.5k) | Kingdom Come: Deliverance (1.5k) | Dragon Age 2 (1.5k) | X4: Foundations (1.5k) | Dark Souls (1.4k) | Kenshi (1.4k) | Hogwarts Legacy (1.4k) | Mount & Blade: Warband (1.4k) | War Thunder (1.2k) | Dark Souls 2 (1.2k) | Mount & Blade (2k) | Halo: MCC (1.9k)
+<!-- GAME_SUPPORT_TABLE_END -->
 
 ### Planned Support (Coming Soon)
 
