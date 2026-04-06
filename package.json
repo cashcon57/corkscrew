@@ -20,11 +20,11 @@
   "dependencies": {
     "@sentry/browser": "^10.46.0",
     "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-deep-link": "^2.4.7",
-    "@tauri-apps/plugin-dialog": "^2.6.0",
+    "@tauri-apps/plugin-deep-link": "^2.4.8",
+    "@tauri-apps/plugin-dialog": "^2.7.0",
     "@tauri-apps/plugin-opener": "^2",
     "@tauri-apps/plugin-process": "^2.3.1",
-    "@tauri-apps/plugin-updater": "^2.10.0",
+    "@tauri-apps/plugin-updater": "^2.10.1",
     "@types/dompurify": "^3.2.0",
     "dompurify": "^3.3.3",
     "marked": "^17.0.5"
