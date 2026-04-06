@@ -103,6 +103,7 @@ jobs:
   e2e-playwright:
     name: E2E Playwright (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 50
     strategy:
       fail-fast: false
       matrix:
@@ -144,6 +145,7 @@ jobs:
     if: github.event_name == 'pull_request'
     needs: [build-check]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     continue-on-error: true  # Advisory until suite is stable
     strategy:
       fail-fast: false
@@ -184,13 +186,15 @@ jobs:
 
       - name: Run WebdriverIO E2E tests (Linux)
         if: runner.os == 'Linux'
-        run: xvfb-run --auto-servernum npx wdio run e2e-wdio/wdio.conf.ts
+        working-directory: e2e-wdio
+        run: xvfb-run --auto-servernum npx wdio run wdio.conf.ts
         env:
           CI: true
 
       - name: Run WebdriverIO E2E tests (macOS)
         if: runner.os == 'macOS'
-        run: cd e2e-wdio && npx wdio run wdio.conf.ts
+        working-directory: e2e-wdio
+        run: npx wdio run wdio.conf.ts
         env:
           CI: true
 
