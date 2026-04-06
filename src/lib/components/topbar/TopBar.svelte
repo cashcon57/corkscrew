@@ -149,6 +149,15 @@
       0 1px 4px rgba(0, 0, 0, 0.05);
   }
 
+  /* Linux / non-macOS: opaque pill without backdrop-filter */
+  :global(html:not(.vibrancy-active)) .topbar-pill {
+    background: var(--bg-grouped);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    border: 1px solid var(--separator);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+  }
+
   .topbar-separator {
     color: var(--text-quaternary);
     font-size: 16px;

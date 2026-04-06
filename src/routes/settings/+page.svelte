@@ -4574,4 +4574,11 @@
     opacity: 0.5;
     cursor: not-allowed;
   }
+
+  /* Linux / non-macOS: opaque dialog background */
+  :global(html:not(.vibrancy-active)) .dialog {
+    background: var(--bg-elevated);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
 </style>

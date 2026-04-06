@@ -2385,4 +2385,11 @@
     gap: var(--space-2);
     flex-shrink: 0;
   }
+
+  /* Linux / non-macOS: opaque header toolbar */
+  :global(html:not(.vibrancy-active)) .header-right {
+    background: var(--surface-subtle);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
 </style>

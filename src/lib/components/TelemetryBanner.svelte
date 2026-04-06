@@ -130,4 +130,10 @@
       transform: translateY(0);
     }
   }
+
+  :global(html:not(.vibrancy-active)) .telemetry-banner {
+    background: var(--bg-elevated);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
 </style>

@@ -5066,4 +5066,16 @@
     line-height: 1.4;
   }
 
+  /* Linux / non-macOS: opaque backgrounds */
+  :global(html:not(.vibrancy-active)) .header-toolbar {
+    background: var(--surface-subtle);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+  :global(html:not(.vibrancy-active)) .modal-dialog {
+    background: var(--bg-grouped);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+
 </style>

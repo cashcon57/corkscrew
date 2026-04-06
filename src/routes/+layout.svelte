@@ -1826,6 +1826,12 @@
     flex-shrink: 0;
   }
 
+  /* Linux: no traffic lights — collapse the spacer */
+  :global(html:not(.vibrancy-active)) .sidebar-traffic-zone {
+    height: 0;
+    display: none;
+  }
+
   /* --- Brand lockup (below traffic lights) --- */
 
   .sidebar-brand-section {
@@ -3152,5 +3158,34 @@
     background: #34c759;
     transition: width 0.4s ease-out;
     border-radius: 0 2px 2px 0;
+  }
+
+  /* ============================================================
+     Linux / non-macOS fallbacks
+     Replace translucent glass backgrounds with opaque equivalents
+     when there's no compositor-backed vibrancy behind them.
+     ============================================================ */
+  :global(html:not(.vibrancy-active)) .nav-item.active {
+    background: var(--surface-hover);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+  :global(html:not(.vibrancy-active)) .toast {
+    background: var(--bg-grouped);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    border-color: var(--separator);
+  }
+  :global(html:not(.vibrancy-active)) .queue-popover {
+    background: var(--bg-grouped);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    border-color: var(--separator);
+  }
+  :global(html:not(.vibrancy-active)) .shortcuts-card {
+    background: var(--bg-grouped);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    border-color: var(--separator);
   }
 </style>

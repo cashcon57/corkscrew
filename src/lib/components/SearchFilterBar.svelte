@@ -213,4 +213,21 @@
   .sfb-controls-strip :global(.nsfw-indicator) {
     font-size: 10px;
   }
+
+  /* Linux / non-macOS: opaque backgrounds without backdrop-filter */
+  :global(html:not(.vibrancy-active)) .sfb-search-combo {
+    background: var(--surface);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    border-color: var(--separator);
+  }
+  :global(html:not(.vibrancy-active)) .sfb-game-prefix {
+    background: var(--surface-subtle);
+  }
+  :global(html:not(.vibrancy-active)) .sfb-controls-strip {
+    background: var(--surface-subtle);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    border-color: var(--separator);
+  }
 </style>

@@ -280,4 +280,10 @@
     font-size: 13px;
     color: var(--text-tertiary);
   }
+
+  :global(html:not(.vibrancy-active)) .spotlight-card {
+    background: var(--bg-base);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
 </style>
