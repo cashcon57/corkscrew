@@ -1924,13 +1924,19 @@
     position: relative;
   }
 
+  .nav-list li {
+    height: 34px;
+    flex-shrink: 0;
+  }
+
   .nav-list::before {
     content: '';
     position: absolute;
     left: var(--space-2);
     right: var(--space-2);
-    height: 36px;
-    top: calc(var(--active-idx) * 39px);
+    height: 34px;
+    /* 34px item height + 3px gap = 37px stride */
+    top: calc(var(--active-idx) * 37px);
     background: color-mix(in srgb, var(--accent) 15%, transparent);
     backdrop-filter: blur(12px) saturate(1.3);
     -webkit-backdrop-filter: blur(12px) saturate(1.3);
@@ -1946,7 +1952,8 @@
     align-items: center;
     gap: 10px;
     width: 100%;
-    padding: 8px 12px;
+    height: 100%;
+    padding: 0 12px;
     border-radius: var(--radius);
     color: var(--text-secondary);
     font-size: 13px;

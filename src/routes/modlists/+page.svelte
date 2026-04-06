@@ -1525,7 +1525,7 @@
   }
 
   .modlist-card:hover {
-    border-color: var(--separator);
+    border-color: var(--accent);
     transform: translateY(-2px) rotate(-0.3deg);
     box-shadow: var(--glass-refraction), var(--glass-edge-shadow), 0 4px 12px rgba(0, 0, 0, 0.15);
   }

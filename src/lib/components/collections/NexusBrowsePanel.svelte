@@ -81,6 +81,20 @@
   const BROWSE_PAGE_SIZE = 20;
   let browseMods = $state<NexusModInfo[]>([]);
   let browseModsLoading = $state(false);
+  let browseModsLoadingVisible = $state(false);
+  let browseLoadingTimer: ReturnType<typeof setTimeout> | null = null;
+
+  $effect(() => {
+    if (browseModsLoading) {
+      browseLoadingTimer = setTimeout(() => { browseModsLoadingVisible = true; }, 300);
+    } else {
+      if (browseLoadingTimer) clearTimeout(browseLoadingTimer);
+      browseLoadingTimer = null;
+      browseModsLoadingVisible = false;
+    }
+    return () => { if (browseLoadingTimer) clearTimeout(browseLoadingTimer); };
+  });
+
   let browseModsSearch = $state("");
   let browseNsfwFilter = $state<"hide" | "show" | "only">("hide");
   let browseModsSort = $state<"endorsements" | "downloads" | "name" | "updated" | "createdAt">("endorsements");
@@ -555,7 +569,7 @@
     </div>
   {/if}
 
-  {#if browseModsLoading}
+  {#if browseModsLoadingVisible}
     <div class="loading-container">
       <div class="loading-card">
         <div class="spinner"><div class="spinner-ring"></div></div>
@@ -565,7 +579,7 @@
         </div>
       </div>
     </div>
-  {:else if browseMods.length === 0}
+  {:else if !browseModsLoading && browseMods.length === 0}
     <div class="empty-state">
       <p class="empty-title">No mods found</p>
       <p class="empty-detail">{browseModsSearch ? "Try a different search term." : "No mods available for this selection."}</p>
@@ -614,7 +628,7 @@
             </div>
             <div class="card-actions">
               <button
-                class="btn-view-details"
+                class="btn btn-sm btn-view-details"
                 onclick={(e) => { e.stopPropagation(); openModDetail(mod); }}
               >
                 View Details

@@ -4277,7 +4277,7 @@
   .table-row:hover {
     background: var(--surface-hover);
     transform: translateY(-1px);
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
   }
 
   .table-row.row-disabled {
@@ -4372,7 +4372,7 @@
     border-radius: 50%;
     background: #fff;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
-    transition: transform var(--duration) var(--ease-spring),
+    transition: transform var(--duration-fast) var(--ease-spring, cubic-bezier(0.34, 1.56, 0.64, 1)),
                 width var(--duration-fast) var(--ease);
   }
 

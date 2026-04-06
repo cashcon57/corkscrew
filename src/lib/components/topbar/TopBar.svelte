@@ -112,7 +112,6 @@
 
   .topbar-pill {
     position: relative;
-    overflow: hidden;
     display: flex;
     align-items: center;
     gap: 2px;
