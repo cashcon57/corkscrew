@@ -112,6 +112,9 @@
   // Keyboard shortcuts modal
   let showShortcuts = $state(false);
 
+  // Platform-aware modifier key label (Cmd on macOS, Ctrl on Linux/other)
+  const modKey = typeof navigator !== "undefined" && /Mac/i.test(navigator.userAgent) ? "Cmd" : "Ctrl";
+
   // Interrupted install resume state
   let interruptedInstall = $state<CollectionInstallCheckpoint | null>(null);
   let interruptedWj = $state<WabbajackInstallStatus | null>(null);
@@ -1199,7 +1202,7 @@
       <button
         class="sidebar-collapse-btn"
         onclick={() => sidebarCollapsed.update(v => !v)}
-        title={$sidebarCollapsed ? "Expand sidebar (Cmd+B)" : "Collapse sidebar (Cmd+B)"}
+        title={$sidebarCollapsed ? `Expand sidebar (${modKey}+B)` : `Collapse sidebar (${modKey}+B)`}
       >
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="transform: {$sidebarCollapsed ? 'rotate(180deg)' : 'none'}">
           <rect x="3" y="3" width="18" height="18" rx="2" />
@@ -1234,7 +1237,7 @@
         <button
           class="sidebar-gh-btn"
           onclick={() => showShortcuts = true}
-          title="Keyboard Shortcuts (Cmd+/)"
+          title={`Keyboard Shortcuts (${modKey}+/)`}
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <rect x="2" y="4" width="20" height="16" rx="2" /><line x1="6" y1="8" x2="6" y2="8" /><line x1="10" y1="8" x2="10" y2="8" /><line x1="14" y1="8" x2="14" y2="8" /><line x1="18" y1="8" x2="18" y2="8" /><line x1="8" y1="12" x2="16" y2="12" /><line x1="6" y1="16" x2="6" y2="16" /><line x1="18" y1="16" x2="18" y2="16" />
@@ -1698,11 +1701,11 @@
         </button>
       </div>
       <div class="shortcuts-grid">
-        <div class="shortcut-row"><kbd>Cmd</kbd><kbd>K</kbd><span>Spotlight Search</span></div>
-        <div class="shortcut-row"><kbd>Cmd</kbd><kbd>B</kbd><span>Toggle Sidebar</span></div>
-        <div class="shortcut-row"><kbd>Cmd</kbd><kbd>,</kbd><span>Settings</span></div>
-        <div class="shortcut-row"><kbd>Cmd</kbd><kbd>1</kbd>-<kbd>6</kbd><span>Navigate Pages</span></div>
-        <div class="shortcut-row"><kbd>Cmd</kbd><kbd>/</kbd><span>This Modal</span></div>
+        <div class="shortcut-row"><kbd>{modKey}</kbd><kbd>K</kbd><span>Spotlight Search</span></div>
+        <div class="shortcut-row"><kbd>{modKey}</kbd><kbd>B</kbd><span>Toggle Sidebar</span></div>
+        <div class="shortcut-row"><kbd>{modKey}</kbd><kbd>,</kbd><span>Settings</span></div>
+        <div class="shortcut-row"><kbd>{modKey}</kbd><kbd>1</kbd>-<kbd>6</kbd><span>Navigate Pages</span></div>
+        <div class="shortcut-row"><kbd>{modKey}</kbd><kbd>/</kbd><span>This Modal</span></div>
         <div class="shortcut-row"><kbd>Esc</kbd><span>Close Panel / Dismiss</span></div>
       </div>
     </div>

@@ -405,7 +405,7 @@
                       class="open-folder-btn"
                       role="button"
                       tabindex="-1"
-                      title="Reveal game executable in Finder"
+                      title="Reveal game executable in file manager"
                       onclick={(e) => { e.stopPropagation(); revealItemInDir(game.exe_path!); }}
                     >
                       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
