@@ -183,7 +183,7 @@
     left: 0;
     min-width: 240px;
     max-width: 320px;
-    background: color-mix(in srgb, var(--bg-elevated) 75%, transparent);
+    background: color-mix(in srgb, var(--bg-elevated) 92%, transparent);
     backdrop-filter: var(--glass-blur-heavy);
     -webkit-backdrop-filter: var(--glass-blur-heavy);
     border: 1px solid rgba(255, 255, 255, 0.10);
@@ -275,6 +275,13 @@
   .dropdown-action:hover {
     background: var(--surface-hover);
     color: var(--text-primary);
+  }
+
+  :global(html:not(.vibrancy-active)) .topbar-dropdown {
+    background: var(--bg-elevated);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    border-color: var(--separator);
   }
 
 </style>

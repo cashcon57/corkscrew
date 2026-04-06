@@ -258,7 +258,7 @@
     left: 0;
     min-width: 220px;
     max-width: 300px;
-    background: color-mix(in srgb, var(--bg-elevated) 75%, transparent);
+    background: color-mix(in srgb, var(--bg-elevated) 92%, transparent);
     backdrop-filter: var(--glass-blur-heavy);
     -webkit-backdrop-filter: var(--glass-blur-heavy);
     border: 1px solid rgba(255, 255, 255, 0.10);
@@ -439,6 +439,13 @@
   .new-profile-submit:disabled {
     opacity: 0.3;
     cursor: default;
+  }
+
+  :global(html:not(.vibrancy-active)) .topbar-dropdown {
+    background: var(--bg-elevated);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    border-color: var(--separator);
   }
 
 </style>
