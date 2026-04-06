@@ -586,7 +586,7 @@ pub fn create_desktop_entry(exe_path: &str) -> Result<PathBuf> {
         "[Desktop Entry]\n\
          Name=Corkscrew\n\
          Comment=Mod manager for CrossOver/Wine games on macOS and Linux\n\
-         Exec={exe_path} %u\n\
+         Exec=env WEBKIT_DISABLE_DMABUF_RENDERER=1 {exe_path} %u\n\
          Icon={icon_value}\n\
          Type=Application\n\
          Categories=Game;Utility;\n\
