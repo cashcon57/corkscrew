@@ -12,6 +12,7 @@
   import { goto } from "$app/navigation";
   import NexusLogo from "$lib/components/NexusLogo.svelte";
   import WebViewToggle from "$lib/components/WebViewToggle.svelte";
+  import SearchFilterBar from "$lib/components/SearchFilterBar.svelte";
   import BrowseModDetail from "$lib/components/collections/BrowseModDetail.svelte";
   import BrowseFilePicker from "$lib/components/collections/BrowseFilePicker.svelte";
 
@@ -367,12 +368,9 @@
   });
 </script>
 
-<header class="page-header">
-  <div class="header-text">
-    <h2 class="page-title"><NexusLogo size={22} /> Browse Nexus</h2>
-    <p class="page-subtitle">Discover mods on NexusMods for {getBrowseGameName()}</p>
-  </div>
-  <div class="header-right">
+<header class="browse-header">
+  <h2 class="browse-title"><NexusLogo size={18} /> Browse Nexus</h2>
+  <div class="browse-toolbar">
     <WebViewToggle
       bind:this={browseWebviewToggle}
       url={`https://www.nexusmods.com/${getGameSlug()}/mods/`}
@@ -381,17 +379,15 @@
       anchorEl={browseWebviewAnchor}
     />
     {#if !browseModsLoading && browseModsTotalCount > 0 && browseViewMode === "app"}
-      <div class="stat-pill">
-        <span class="stat-value">{browseModsTotalCount.toLocaleString()}</span>
-        <span class="stat-label">{browseModsTotalCount === 1 ? "mod" : "mods"}</span>
-      </div>
+      <div class="browse-toolbar-sep"></div>
+      <span class="browse-stat-badge">{browseModsTotalCount.toLocaleString()} {browseModsTotalCount === 1 ? "mod" : "mods"}</span>
     {/if}
   </div>
 </header>
 
 {#if browseViewMode === "website"}
-  <div class="webview-placeholder" bind:this={browseWebviewAnchor}>
-    <p class="webview-hint">Browsing NexusMods directly. Switch to "In-App" to use built-in search and filters.</p>
+  <div class="browse-webview-anchor" bind:this={browseWebviewAnchor}>
+    <p class="browse-webview-hint">Browsing NexusMods directly. Switch to "In-App" to use built-in search and filters.</p>
   </div>
 {:else if !account?.connected}
   <div class="premium-gate">
@@ -416,58 +412,57 @@
       downloadingFileId={downloadingFile}
     />
   {:else}
-  <div class="filters-bar">
-    {#if allDetectedGames.length > 1}
-      <select class="filter-select" bind:value={browseGameOverride} onchange={() => { browseInitializedForGame = ""; loadBrowseMods(); loadBrowseCategories(); }}>
-        <option value={null}>{game.display_name ?? "Current Game"}</option>
-        {#each allDetectedGames as g}
-          {@const slug = gameSlugMap[g.game_id] ?? g.game_id}
-          {#if slug !== getGameSlug() || browseGameOverride}
-            <option value={slug}>{g.display_name}</option>
-          {/if}
-        {/each}
-      </select>
-    {/if}
-    <div class="search-wrapper">
-      <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <circle cx="11" cy="11" r="8" />
-        <line x1="21" y1="21" x2="16.65" y2="16.65" />
-      </svg>
-      <input type="text" class="search-input" placeholder="Search NexusMods..." bind:value={browseModsSearch} oninput={browseSearchDebounced} />
-    </div>
-    {#if browseCategoryOptions.length > 0}
-      <div class="filter-group">
-        <select class="filter-select" bind:value={browseCategoryId} onchange={() => loadBrowseMods()}>
+  <SearchFilterBar
+    searchPlaceholder="Search NexusMods..."
+    bind:searchValue={browseModsSearch}
+    onsearch={() => browseSearchDebounced()}
+  >
+    {#snippet gameSelector()}
+      {#if allDetectedGames.length > 1}
+        <select bind:value={browseGameOverride} onchange={() => { browseInitializedForGame = ""; loadBrowseMods(); loadBrowseCategories(); }}>
+          <option value={null}>{game.display_name ?? "Current Game"}</option>
+          {#each allDetectedGames as g}
+            {@const slug = gameSlugMap[g.game_id] ?? g.game_id}
+            {#if slug !== getGameSlug() || browseGameOverride}
+              <option value={slug}>{g.display_name}</option>
+            {/if}
+          {/each}
+        </select>
+      {/if}
+    {/snippet}
+    {#snippet controls()}
+      {#if browseCategoryOptions.length > 0}
+        <select bind:value={browseCategoryId} onchange={() => loadBrowseMods()}>
           <option value={null}>All Categories</option>
           {#each browseCategoryOptions as cat}
             <option value={cat.id}>{cat.depth > 0 ? "\u00A0\u00A0" : ""}{cat.name}</option>
           {/each}
         </select>
-      </div>
-    {/if}
-    <div class="filter-group">
-      <select class="filter-select" bind:value={browseModsSort} onchange={() => loadBrowseMods()}>
-        <option value="endorsements">Sort: Most Popular</option>
-        <option value="name">Sort: Name</option>
-        <option value="updated">Sort: Updated</option>
-        <option value="createdAt">Sort: Recently Added</option>
+        <div class="strip-sep"></div>
+      {/if}
+      <select bind:value={browseModsSort} onchange={() => loadBrowseMods()}>
+        <option value="endorsements">Most Popular</option>
+        <option value="name">Name</option>
+        <option value="updated">Updated</option>
+        <option value="createdAt">Recently Added</option>
       </select>
-    </div>
-    <button
-      class="nsfw-cycle-btn"
-      class:nsfw-show={browseNsfwFilter === "show"}
-      class:nsfw-only={browseNsfwFilter === "only"}
-      onclick={() => { browseNsfwFilter = cycleNsfwFilter(browseNsfwFilter); loadBrowseMods(); }}
-      title={browseNsfwFilter === "hide" ? "NSFW hidden" : browseNsfwFilter === "show" ? "NSFW included" : "NSFW only"}
-    >
-      <span class="nsfw-indicator">{nsfwIcon(browseNsfwFilter)}</span>
-      {nsfwLabel(browseNsfwFilter)}
-    </button>
-    <button class="filter-toggle" onclick={() => showBrowseAdvancedFilters = !showBrowseAdvancedFilters}>
-      Filters {showBrowseAdvancedFilters ? '\u25B2' : '\u25BC'}
-      {#if browseActiveFilterCount > 0}<span class="filter-badge">{browseActiveFilterCount}</span>{/if}
-    </button>
-  </div>
+      <div class="strip-sep"></div>
+      <button
+        class:nsfw-show={browseNsfwFilter === "show"}
+        class:nsfw-only={browseNsfwFilter === "only"}
+        onclick={() => { browseNsfwFilter = cycleNsfwFilter(browseNsfwFilter); loadBrowseMods(); }}
+        title={browseNsfwFilter === "hide" ? "NSFW hidden" : browseNsfwFilter === "show" ? "NSFW included" : "NSFW only"}
+      >
+        <span class="nsfw-indicator">{nsfwIcon(browseNsfwFilter)}</span>
+        {nsfwLabel(browseNsfwFilter)}
+      </button>
+      <div class="strip-sep"></div>
+      <button onclick={() => showBrowseAdvancedFilters = !showBrowseAdvancedFilters}>
+        Filters {showBrowseAdvancedFilters ? '\u25B2' : '\u25BC'}
+        {#if browseActiveFilterCount > 0}<span class="filter-badge">{browseActiveFilterCount}</span>{/if}
+      </button>
+    {/snippet}
+  </SearchFilterBar>
 
   {#if showBrowseAdvancedFilters}
     <div class="advanced-filters">
@@ -673,6 +668,71 @@
 {/if}
 
 <style>
+  /* --- Browse Header (matches collections page-header) --- */
+  .browse-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    margin-top: var(--space-4);
+    margin-bottom: var(--space-4);
+    flex-wrap: wrap;
+  }
+
+  .browse-title {
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--text-primary);
+    letter-spacing: -0.02em;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+    margin: 0;
+  }
+
+  .browse-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+    background: color-mix(in srgb, var(--surface-subtle) 60%, transparent);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid color-mix(in srgb, var(--separator) 30%, transparent);
+    border-radius: 8px;
+    padding: 4px 10px;
+  }
+
+  .browse-toolbar-sep {
+    width: 1px;
+    height: 16px;
+    background: color-mix(in srgb, var(--separator) 50%, transparent);
+    flex-shrink: 0;
+  }
+
+  .browse-stat-badge {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-tertiary);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .browse-webview-anchor {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: 1;
+    min-height: calc(100vh - 200px);
+    padding: var(--space-8);
+  }
+
+  .browse-webview-hint {
+    font-size: 13px;
+    color: var(--text-tertiary);
+    text-align: center;
+  }
+
   .mod-browse-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
@@ -808,6 +868,77 @@
     gap: var(--space-1);
     width: 100%;
     justify-content: center;
+  }
+
+  /* Strip separator used inside SearchFilterBar controls snippet */
+  .strip-sep {
+    width: 1px;
+    height: 16px;
+    background: var(--separator);
+    flex-shrink: 0;
+  }
+
+  .advanced-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-4);
+    padding: var(--space-3) var(--space-4);
+    margin-bottom: var(--space-4);
+    background: var(--surface-subtle);
+    border-radius: var(--radius);
+    border: 1px solid var(--separator);
+  }
+
+  .filter-section {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    min-width: 120px;
+  }
+
+  .filter-label {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-tertiary);
+  }
+
+  .filter-input {
+    padding: var(--space-1) var(--space-2);
+    background: var(--surface);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-size: 12px;
+    outline: none;
+  }
+  .filter-input:focus { border-color: var(--system-accent); }
+
+  .filter-pills {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+
+  .filter-pill {
+    padding: 2px 8px;
+    font-size: 11px;
+    border-radius: 100px;
+    background: var(--surface);
+    border: 1px solid var(--separator);
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-family: inherit;
+    transition: all var(--duration-fast) var(--ease);
+  }
+  .filter-pill.active {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+  }
+  .filter-pill:not(.active):hover {
+    border-color: var(--text-tertiary);
   }
 
 </style>

@@ -258,9 +258,10 @@
     left: 0;
     min-width: 220px;
     max-width: 300px;
-    background: var(--bg-elevated);
-    backdrop-filter: var(--glass-blur);
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: color-mix(in srgb, var(--bg-elevated) 75%, transparent);
+    backdrop-filter: var(--glass-blur-heavy);
+    -webkit-backdrop-filter: var(--glass-blur-heavy);
+    border: 1px solid rgba(255, 255, 255, 0.10);
     border-radius: var(--radius-lg);
     padding: 4px;
     z-index: 100;

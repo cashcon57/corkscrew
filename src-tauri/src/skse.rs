@@ -1586,6 +1586,14 @@ pub fn fix_engine_fixes_for_wine(
     game_id: &str,
     bottle_name: &str,
 ) -> usize {
+    // SSEEngineFixesForWine patches macOS-specific Wine bugs (CrossOver).
+    // On Linux, native Wine/Proton does not have these issues.
+    #[cfg(target_os = "linux")]
+    {
+        debug!("Skipping SSEEngineFixesForWine on Linux (not needed for Proton/native Wine)");
+        return 0;
+    }
+
     let mut patched = 0;
 
     // Disable the d3dx9_42.dll preloader — it crashes Wine because it hooks
@@ -2013,7 +2021,14 @@ pub fn is_engine_fixes_wine_installed(data_dir: &Path) -> bool {
 /// to `Data/SKSE/Plugins/`.
 ///
 /// Returns Ok(true) if newly installed, Ok(false) if already present.
+/// On Linux, this is a no-op — SSEEngineFixesForWine addresses macOS-specific
+/// Wine bugs that don't exist in Proton/native Linux Wine.
 pub async fn install_engine_fixes_wine(data_dir: &Path) -> Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        info!("Skipping SSEEngineFixesForWine install on Linux (macOS-only fix)");
+        return Ok(false);
+    }
     let plugins_dir = data_dir.join("SKSE").join("Plugins");
 
     let client = reqwest::Client::builder()
@@ -2190,6 +2205,12 @@ pub async fn install_engine_fixes_wine(data_dir: &Path) -> Result<bool> {
 ///
 /// Returns Ok(true) if newly installed, Ok(false) if already present.
 pub fn install_engine_fixes_wine_blocking(data_dir: &Path) -> Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        info!("Skipping SSEEngineFixesForWine install on Linux (macOS-only fix)");
+        return Ok(false);
+    }
+
     let plugins_dir = data_dir.join("SKSE").join("Plugins");
 
     let client = reqwest::blocking::Client::builder()

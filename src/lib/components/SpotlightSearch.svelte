@@ -145,16 +145,14 @@
     justify-content: center;
     padding-top: 15vh;
     background: rgba(0, 0, 0, 0.5);
-    backdrop-filter: var(--glass-blur-light);
-    -webkit-backdrop-filter: var(--glass-blur-light);
   }
 
   .spotlight-card {
     width: 520px;
     max-height: 440px;
     background: color-mix(in srgb, var(--bg-base) 72%, transparent);
-    backdrop-filter: blur(40px) saturate(1.5);
-    -webkit-backdrop-filter: blur(40px) saturate(1.5);
+    backdrop-filter: var(--glass-blur-heavy);
+    -webkit-backdrop-filter: var(--glass-blur-heavy);
     border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: var(--radius-lg);
     box-shadow: var(--glass-refraction),

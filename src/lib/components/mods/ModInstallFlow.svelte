@@ -220,7 +220,6 @@
     align-items: center;
     justify-content: center;
     z-index: 200;
-    backdrop-filter: var(--glass-blur-light);
     animation: fadeIn 0.15s ease-out;
   }
 

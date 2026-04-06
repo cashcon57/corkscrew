@@ -5,9 +5,11 @@
     getAllGames,
     setConfigValue,
     isNexusPremium,
+    checkSteamStatus,
+    addToSteam,
   } from "$lib/api";
   import { bottles, games, selectedGame, currentPage } from "$lib/stores";
-  import type { Bottle, DetectedGame } from "$lib/types";
+  import type { Bottle, DetectedGame, SteamStatus } from "$lib/types";
 
   let { onComplete }: { onComplete: () => void } = $props();
 
@@ -19,7 +21,16 @@
   let apiKeyValid = $state<boolean | null>(null);
   let validating = $state(false);
 
-  const steps = ["Welcome", "Detect Games", "Nexus Mods", "Ready"];
+  // Steam integration (Linux only)
+  let steamStatus = $state<SteamStatus | null>(null);
+  let steamRegistering = $state(false);
+  let isLinux = $state(false);
+
+  const steps = $derived(isLinux && steamStatus?.installed
+    ? ["Welcome", "Detect Games", "Steam", "Nexus Mods", "Ready"]
+    : ["Welcome", "Detect Games", "Nexus Mods", "Ready"]
+  );
+  const currentStep = $derived(steps[step] ?? "Welcome");
 
   async function handleScan() {
     scanning = true;
@@ -69,8 +80,25 @@
     if (step > 0) step--;
   }
 
-  onMount(() => {
-    // Auto-scan on step 1
+  async function handleSteamRegister() {
+    steamRegistering = true;
+    try {
+      steamStatus = await addToSteam();
+    } catch (e) {
+      console.error("Steam registration failed:", e);
+    }
+    steamRegistering = false;
+  }
+
+  onMount(async () => {
+    // Detect platform for conditional Steam step
+    try {
+      const status = await checkSteamStatus();
+      steamStatus = status;
+      isLinux = status.installed; // Steam detection only works on Linux
+    } catch {
+      // Not on Linux or Steam not available
+    }
   });
 </script>
 
@@ -100,8 +128,8 @@
       {/each}
     </div>
 
-    <!-- Step 0: Welcome -->
-    {#if step === 0}
+    <!-- Step: Welcome -->
+    {#if currentStep === "Welcome"}
       <div class="wizard-step">
         <div class="welcome-icon">
           <svg width="48" height="48" viewBox="0 0 48 48" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -138,8 +166,8 @@
         </div>
       </div>
 
-    <!-- Step 1: Detect Games -->
-    {:else if step === 1}
+    <!-- Step: Detect Games -->
+    {:else if currentStep === "Detect Games"}
       <div class="wizard-step">
         <h2 class="wizard-title">Detect Games</h2>
         <p class="wizard-desc">
@@ -196,8 +224,53 @@
         {/if}
       </div>
 
-    <!-- Step 2: Nexus Mods API Key -->
-    {:else if step === 2}
+    <!-- Step: Steam Integration (Linux only) -->
+    {:else if currentStep === "Steam"}
+      <div class="wizard-step">
+        <div class="welcome-icon">
+          <svg width="48" height="48" viewBox="0 0 48 48" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="24" cy="24" r="20" />
+            <path d="M24 12v24" />
+            <path d="M12 24h24" />
+            <circle cx="24" cy="24" r="6" fill="none" />
+          </svg>
+        </div>
+        <h2 class="wizard-title">Steam Integration</h2>
+        <p class="wizard-desc">
+          Add Corkscrew to your Steam library so you can launch it from Gaming Mode on Steam Deck or from Steam's Big Picture.
+        </p>
+
+        {#if steamStatus?.registered}
+          <div class="steam-status registered">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--green)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+              <polyline points="22 4 12 14.01 9 11.01" />
+            </svg>
+            <span>Corkscrew is registered in Steam</span>
+          </div>
+        {:else}
+          <button
+            class="btn-primary btn-lg"
+            onclick={handleSteamRegister}
+            disabled={steamRegistering}
+          >
+            {#if steamRegistering}
+              <span class="spinner-xs"></span> Registering...
+            {:else}
+              Add to Steam Library
+            {/if}
+          </button>
+        {/if}
+
+        {#if steamStatus?.is_deck}
+          <p class="hint">Steam Deck detected — this will make Corkscrew accessible in Gaming Mode.</p>
+        {:else}
+          <p class="hint">Optional — you can also do this later from Settings.</p>
+        {/if}
+      </div>
+
+    <!-- Step: Nexus Mods API Key -->
+    {:else if currentStep === "Nexus Mods"}
       <div class="wizard-step">
         <h2 class="wizard-title">Nexus Mods (Optional)</h2>
         <p class="wizard-desc">
@@ -235,8 +308,8 @@
         </p>
       </div>
 
-    <!-- Step 3: Ready -->
-    {:else if step === 3}
+    <!-- Step: Ready -->
+    {:else if currentStep === "Ready"}
       <div class="wizard-step">
         <div class="ready-icon">
           <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--green)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -273,9 +346,9 @@
       {#if step < steps.length - 1}
         <button
           class="btn-primary"
-          onclick={() => { if (step === 1 && detectedBottles.length === 0) handleScan().then(nextStep); else nextStep(); }}
+          onclick={() => { if (currentStep === "Detect Games" && detectedBottles.length === 0) handleScan().then(nextStep); else nextStep(); }}
         >
-          {step === 0 ? "Get Started" : "Continue"}
+          {currentStep === "Welcome" ? "Get Started" : "Continue"}
         </button>
       {:else}
         <button class="btn-primary" onclick={finishSetup}>
@@ -295,8 +368,6 @@
     align-items: center;
     justify-content: center;
     background: rgba(0, 0, 0, 0.7);
-    backdrop-filter: var(--glass-blur-light);
-    -webkit-backdrop-filter: var(--glass-blur-light);
   }
 
   .wizard-card {
@@ -549,6 +620,21 @@
 
   .api-status.error {
     color: var(--red);
+  }
+
+  /* Steam step */
+  .steam-status {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-3) var(--space-4);
+    border-radius: var(--radius);
+    font-size: 14px;
+    font-weight: 500;
+  }
+  .steam-status.registered {
+    background: color-mix(in srgb, var(--green) 12%, transparent);
+    color: var(--green);
   }
 
   /* Ready tips */

@@ -10,6 +10,7 @@
     onLaunchGame: () => void;
     onNavigate: (page: string) => void;
     launching: boolean;
+    scrolled?: boolean;
   }
 
   let {
@@ -18,6 +19,7 @@
     onLaunchGame,
     onNavigate,
     launching,
+    scrolled = false,
   }: Props = $props();
 
   let openDropdown = $state<"game" | "modlist" | "profile" | null>(null);
@@ -44,7 +46,7 @@
 />
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="top-bar" data-tauri-drag-region>
+<div class="top-bar" class:scrolled data-tauri-drag-region>
   <div class="topbar-pill">
     <TopBarGameSelector
       {detectedGames}
@@ -81,32 +83,70 @@
     display: flex;
     align-items: center;
     gap: 2px;
-    height: 52px;
+    height: 64px;
     flex-shrink: 0;
     -webkit-app-region: drag;
     position: sticky;
     top: 0;
     z-index: 10;
     /* Extend edge-to-edge within .content padding */
-    margin: 0 calc(-1 * var(--space-6));
-    padding: 0 calc(var(--space-6) + 4px);
-    /* Transparent — glass lives on the pill only */
+    margin: 0 calc(-1 * var(--space-4));
+    padding: 0 calc(var(--space-4) + 4px);
     background: transparent;
+    border-bottom: 1px solid transparent;
+    transition: border-color var(--duration-fast) var(--ease);
+  }
+
+  .top-bar.scrolled {
+    border-bottom-color: var(--separator);
   }
 
   @media (max-width: 800px) {
     .top-bar {
       margin: 0 calc(-1 * var(--space-3));
-      padding: 0 calc(var(--space-3) + 4px);
+      padding: 0 var(--space-3);
     }
   }
+
+  /* --- Liquid Glass pill --- */
 
   .topbar-pill {
     display: flex;
     align-items: center;
     gap: 2px;
-    padding: 2px 0;
+    padding: 4px 6px;
     -webkit-app-region: no-drag;
+    border-radius: 100px;
+    /* Glass material: minimal tint so content shows through with distortion */
+    background: rgba(255, 255, 255, 0.04);
+    /* Light blur + brightness/contrast shift = refractive look, not smeared */
+    backdrop-filter: blur(4px) saturate(1.8) brightness(1.1) contrast(1.05);
+    -webkit-backdrop-filter: blur(4px) saturate(1.8) brightness(1.1) contrast(1.05);
+    /* Crisp edge — the border IS the refraction boundary */
+    border: 0.5px solid rgba(255, 255, 255, 0.22);
+    box-shadow:
+      /* Top specular — strongest catch light */
+      inset 0 1px 0 0 rgba(255, 255, 255, 0.25),
+      /* Bottom counter-highlight */
+      inset 0 -1px 0 0 rgba(255, 255, 255, 0.08),
+      /* Outer refraction ring */
+      0 0 0 0.5px rgba(255, 255, 255, 0.08),
+      /* Subtle drop shadow for depth */
+      0 1px 4px rgba(0, 0, 0, 0.10);
+    transition: box-shadow var(--duration-fast) var(--ease),
+                background var(--duration-fast) var(--ease);
+  }
+
+  :global([data-theme="light"]) .topbar-pill {
+    background: rgba(255, 255, 255, 0.25);
+    border-color: rgba(255, 255, 255, 0.50);
+    backdrop-filter: blur(6px) saturate(1.4) brightness(1.05);
+    -webkit-backdrop-filter: blur(6px) saturate(1.4) brightness(1.05);
+    box-shadow:
+      inset 0 1px 0 0 rgba(255, 255, 255, 0.50),
+      inset 0 -1px 0 0 rgba(255, 255, 255, 0.20),
+      0 0 0 0.5px rgba(0, 0, 0, 0.04),
+      0 1px 4px rgba(0, 0, 0, 0.05);
   }
 
   .topbar-separator {

@@ -387,6 +387,42 @@ pub async fn steam_deck_warnings() -> Result<Vec<String>, String> {
 }
 
 
+// --- Steam Launch Options (Script Extenders) ---
+
+#[tauri::command]
+pub async fn get_launch_options_status(
+) -> Result<Vec<steam_integration::LaunchOptionsStatus>, String> {
+    tokio::task::spawn_blocking(move || {
+        let info = steam_integration::detect_steam_installation()
+            .ok_or_else(|| "Steam not found".to_string())?;
+        Ok(steam_integration::get_launch_options_status(&info))
+    })
+    .await
+    .map_err(crate::format_join_error)?
+}
+
+#[tauri::command]
+pub async fn patch_steam_launch_options(game_id: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let info = steam_integration::detect_steam_installation()
+            .ok_or_else(|| "Steam not found".to_string())?;
+        steam_integration::patch_launch_options(&info, &game_id).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(crate::format_join_error)?
+}
+
+#[tauri::command]
+pub async fn unpatch_steam_launch_options(game_id: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let info = steam_integration::detect_steam_installation()
+            .ok_or_else(|| "Steam not found".to_string())?;
+        steam_integration::unpatch_launch_options(&info, &game_id).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(crate::format_join_error)?
+}
+
 // --- Proton Detection ---
 
 #[tauri::command]

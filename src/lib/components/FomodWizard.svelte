@@ -414,8 +414,6 @@
     position: fixed;
     inset: 0;
     background: rgba(0, 0, 0, 0.55);
-    backdrop-filter: var(--glass-blur-light);
-    -webkit-backdrop-filter: var(--glass-blur-light);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -432,8 +430,8 @@
 
   .fomod-wizard {
     background: color-mix(in srgb, var(--bg-elevated) 75%, transparent);
-    backdrop-filter: blur(40px) saturate(1.5);
-    -webkit-backdrop-filter: blur(40px) saturate(1.5);
+    backdrop-filter: var(--glass-blur-heavy);
+    -webkit-backdrop-filter: var(--glass-blur-heavy);
     border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: var(--radius-xl);
     box-shadow: var(--glass-refraction),

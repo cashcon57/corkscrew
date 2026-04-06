@@ -89,6 +89,7 @@ import type {
   IncrementalDeployResult,
   GameLock,
   ProtonVersion,
+  LaunchOptionsStatus,
 } from "./types";
 
 // Bottles
@@ -2020,6 +2021,20 @@ export async function removeFromSteam(): Promise<void> {
 
 export async function isSteamDeck(): Promise<boolean> {
   return invoke("is_steam_deck");
+}
+
+// --- Steam Launch Options (Script Extenders) ---
+
+export async function getLaunchOptionsStatus(): Promise<LaunchOptionsStatus[]> {
+  return invoke("get_launch_options_status");
+}
+
+export async function patchSteamLaunchOptions(gameId: string): Promise<void> {
+  return invoke("patch_steam_launch_options", { gameId });
+}
+
+export async function unpatchSteamLaunchOptions(gameId: string): Promise<void> {
+  return invoke("unpatch_steam_launch_options", { gameId });
 }
 
 // --- NXM Handler ---

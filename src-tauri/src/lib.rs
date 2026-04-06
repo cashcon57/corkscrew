@@ -1271,6 +1271,9 @@ pub fn run() {
             commands::platform::remove_from_steam,
             commands::platform::is_steam_deck,
             commands::platform::steam_deck_warnings,
+            commands::platform::get_launch_options_status,
+            commands::platform::patch_steam_launch_options,
+            commands::platform::unpatch_steam_launch_options,
             // Steam Deck Profile
             commands::platform::get_deck_profile,
             commands::platform::get_deck_defaults,

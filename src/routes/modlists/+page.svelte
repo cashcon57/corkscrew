@@ -25,6 +25,7 @@
   import CompatibilityPanel from "$lib/components/CompatibilityPanel.svelte";
   import RequiredToolsPrompt from "$lib/components/RequiredToolsPrompt.svelte";
   import WabbajackLogo from "$lib/components/WabbajackLogo.svelte";
+  import SearchFilterBar from "$lib/components/SearchFilterBar.svelte";
   import WebViewToggle from "$lib/components/WebViewToggle.svelte";
 
   let modlists = $state<ModlistSummary[]>([]);
@@ -940,9 +941,6 @@
     <header class="page-header">
       <div class="header-text">
         <h2 class="page-title"><WabbajackLogo size={22} /> Wabbajack Lists</h2>
-        <p class="page-subtitle">
-          Browse Wabbajack modlists — curated, pre-configured mod setups
-        </p>
       </div>
       <div class="header-right">
         <WebViewToggle
@@ -970,68 +968,33 @@
       <div class="webview-placeholder" bind:this={webviewAnchor}>
         <p class="webview-hint">Browsing Wabbajack Gallery directly. Switch to "In-App" to use built-in search and filters.</p>
       </div>
-    {:else if loading}
-      <div class="loading-container">
-        <div class="loading-card">
-          <div class="spinner"><div class="spinner-ring"></div></div>
-          <div class="loading-text">
-            <p class="loading-title">Fetching modlists</p>
-            <p class="loading-detail">Loading gallery from Wabbajack repositories...</p>
-          </div>
-        </div>
-      </div>
     {:else}
-      <!-- Filters -->
-      <div class="filters-bar">
-        <input
-          type="text"
-          class="search-input"
-          placeholder="Search modlists..."
-          bind:value={searchQuery}
-        />
-        <select class="filter-select" bind:value={gameFilter}>
-          <option value="all">All Games</option>
-          {#each gameOptions as game}
-            <option value={game}>{gameDomainDisplay(game)}</option>
-          {/each}
-        </select>
-        <label class="unofficial-toggle" title="Show community-submitted (unofficial) modlists">
-          <input type="checkbox" bind:checked={showUnofficial} />
-          Unofficial
-        </label>
-        <button
-          class="nsfw-cycle-btn"
-          class:nsfw-show={nsfwFilter === "show"}
-          class:nsfw-only={nsfwFilter === "only"}
-          onclick={() => nsfwFilter = cycleNsfwFilter(nsfwFilter)}
-          title={nsfwFilter === "hide" ? "NSFW hidden" : nsfwFilter === "show" ? "NSFW included" : "NSFW only"}
-        >
-          <span class="nsfw-indicator">{nsfwIcon(nsfwFilter)}</span>
-          {nsfwLabel(nsfwFilter)}
-        </button>
-        <button class="filter-toggle" onclick={() => showAdvancedFilters = !showAdvancedFilters}>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <line x1="4" y1="6" x2="20" y2="6" />
-            <line x1="8" y1="12" x2="20" y2="12" />
-            <line x1="12" y1="18" x2="20" y2="18" />
-          </svg>
-          Filters {showAdvancedFilters ? '\u25B2' : '\u25BC'}
-          {#if activeFilterCount > 0}<span class="filter-badge">{activeFilterCount}</span>{/if}
-        </button>
-        <div class="sort-group">
-          <select class="filter-select" bind:value={sortField}>
-            <option value="title">Sort: Name</option>
-            <option value="author">Sort: Author</option>
-            <option value="download_size">Sort: Download Size</option>
-            <option value="install_size">Sort: Install Size</option>
-            <option value="github_stars">Sort: Stars</option>
+      <!-- Filters (always visible, even while loading) -->
+      <SearchFilterBar
+        searchPlaceholder="Search modlists..."
+        bind:searchValue={searchQuery}
+      >
+        {#snippet gameSelector()}
+          <select bind:value={gameFilter}>
+            <option value="all">All Games</option>
+            {#each gameOptions as game}
+              <option value={game}>{gameDomainDisplay(game)}</option>
+            {/each}
+          </select>
+        {/snippet}
+        {#snippet controls()}
+          <select bind:value={sortField}>
+            <option value="title">Name</option>
+            <option value="author">Author</option>
+            <option value="download_size">Download Size</option>
+            <option value="install_size">Install Size</option>
+            <option value="github_stars">Stars</option>
           </select>
           <button
-            class="sort-direction-btn"
             onclick={() => sortDirection = sortDirection === "asc" ? "desc" : "asc"}
             title={sortDirection === "asc" ? "Ascending" : "Descending"}
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               {#if sortDirection === "asc"}
                 <path d="M12 5v14M5 12l7-7 7 7" />
               {:else}
@@ -1039,9 +1002,40 @@
               {/if}
             </svg>
           </button>
-        </div>
-      </div>
+          <div class="strip-sep"></div>
+          <label class="unofficial-toggle" title="Show community-submitted (unofficial) modlists">
+            <input type="checkbox" bind:checked={showUnofficial} />
+            Unofficial
+          </label>
+          <div class="strip-sep"></div>
+          <button
+            class:nsfw-show={nsfwFilter === "show"}
+            class:nsfw-only={nsfwFilter === "only"}
+            onclick={() => nsfwFilter = cycleNsfwFilter(nsfwFilter)}
+            title={nsfwFilter === "hide" ? "NSFW hidden" : nsfwFilter === "show" ? "NSFW included" : "NSFW only"}
+          >
+            <span class="nsfw-indicator">{nsfwIcon(nsfwFilter)}</span>
+            {nsfwLabel(nsfwFilter)}
+          </button>
+          <div class="strip-sep"></div>
+          <button onclick={() => showAdvancedFilters = !showAdvancedFilters}>
+            Filters {showAdvancedFilters ? '\u25B2' : '\u25BC'}
+            {#if activeFilterCount > 0}<span class="filter-badge">{activeFilterCount}</span>{/if}
+          </button>
+        {/snippet}
+      </SearchFilterBar>
 
+      {#if loading}
+        <div class="loading-container">
+          <div class="loading-card">
+            <div class="spinner"><div class="spinner-ring"></div></div>
+            <div class="loading-text">
+              <p class="loading-title">Fetching modlists</p>
+              <p class="loading-detail">Loading gallery from Wabbajack repositories...</p>
+            </div>
+          </div>
+        </div>
+      {:else}
       {#if showAdvancedFilters}
         <div class="advanced-filters">
           <!-- Install Size -->
@@ -1176,6 +1170,7 @@
           {/each}
         </div>
       {/if}
+      {/if}
     {/if}
   {/if}
 </div>
@@ -1238,47 +1233,39 @@
 
   .page-header {
     display: flex;
-    align-items: flex-end;
+    align-items: center;
     justify-content: space-between;
-    margin-bottom: var(--space-8);
-    padding-bottom: var(--space-4);
-    border-bottom: 1px solid var(--separator);
+    margin-bottom: var(--space-4);
   }
 
   .page-title {
-    font-size: 28px;
+    font-size: 20px;
     font-weight: 700;
     color: var(--text-primary);
-    letter-spacing: -0.025em;
-  }
-
-  .page-subtitle {
-    font-size: 14px;
-    color: var(--text-secondary);
-    margin-top: var(--space-1);
+    letter-spacing: -0.02em;
+    display: flex;
+    align-items: center;
+    gap: 6px;
   }
 
   .stat-pill {
     display: flex;
     align-items: baseline;
-    gap: var(--space-1);
-    background: var(--surface);
-    border: 1px solid var(--separator);
-    border-radius: var(--radius);
-    padding: var(--space-2) var(--space-4);
+    gap: 4px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-tertiary);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
   }
 
   .stat-value {
-    font-size: 18px;
-    font-weight: 700;
-    color: var(--text-primary);
-    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    color: var(--text-secondary);
   }
 
   .stat-label {
-    font-size: 12px;
     color: var(--text-tertiary);
-    font-weight: 500;
   }
 
   /* Loading */
@@ -2148,7 +2135,13 @@
   .header-right {
     display: flex;
     align-items: center;
-    gap: var(--space-3);
+    gap: 8px;
+    background: color-mix(in srgb, var(--surface-subtle) 60%, transparent);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid color-mix(in srgb, var(--separator) 30%, transparent);
+    border-radius: 8px;
+    padding: 4px 10px;
   }
 
   /* Source breakdown */

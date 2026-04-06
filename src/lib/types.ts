@@ -1605,6 +1605,14 @@ export interface SteamStatus {
   is_deck: boolean;
 }
 
+export interface LaunchOptionsStatus {
+  game_id: string;
+  steam_app_id: number;
+  extender_name: string;
+  patched: boolean;
+  current_options: string | null;
+}
+
 export interface GameLock {
   game_id: string;
   bottle_name: string;

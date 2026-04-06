@@ -1577,11 +1577,19 @@ pub async fn launch_game_cmd(
     // 2. Plugin's launch_executable() for games with launcher stubs (e.g. HL)
     // 3. Plugin's detected exe_path
     // 4. Fallback: search game root for executable name
-    let exe_path = if use_skse && game_id == "skyrimse" {
-        let exe_name = "skse64_loader.exe";
+    // Map game IDs to their script extender loader executables
+    let script_extender_exe = match game_id.as_str() {
+        "skyrimse" => Some("skse64_loader.exe"),
+        "fallout4" => Some("f4se_loader.exe"),
+        "oblivion" => Some("obse_loader.exe"),
+        _ => None,
+    };
+
+    let exe_path = if use_skse && script_extender_exe.is_some() {
+        let exe_name = script_extender_exe.unwrap();
         launcher::find_executable(&game_path, exe_name).ok_or_else(|| {
             format!(
-                "SKSE loader '{}' not found in {}. Is SKSE installed?",
+                "Script extender loader '{}' not found in {}. Is it installed?",
                 exe_name,
                 game_path.display()
             )

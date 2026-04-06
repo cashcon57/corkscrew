@@ -40,6 +40,7 @@
   import CollectionDeleteDialog from "$lib/components/collections/CollectionDeleteDialog.svelte";
   import InterruptedInstallBanner from "$lib/components/collections/InterruptedInstallBanner.svelte";
   import NexusBrowsePanel from "$lib/components/collections/NexusBrowsePanel.svelte";
+  import SearchFilterBar from "$lib/components/SearchFilterBar.svelte";
   import CollectionInstallWizard from "$lib/components/collections/CollectionInstallWizard.svelte";
   import type { DetectedGame } from "$lib/types";
 
@@ -1295,7 +1296,6 @@
     <header class="page-header">
       <div class="header-text">
         <h2 class="page-title">My Collections</h2>
-        <p class="page-subtitle">Manage installed mod collections — switch between them or remove ones you no longer need</p>
       </div>
     </header>
 
@@ -1310,11 +1310,13 @@
       </div>
     {:else if myCollections.length === 0}
       <div class="my-collections-empty">
-        <p>No collections installed yet.</p>
-        <p class="muted">Install a collection from Nexus Mods Collections to get started.</p>
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="color: var(--text-quaternary);">
+          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+        </svg>
+        <h3 class="empty-heading">No Collections Yet</h3>
+        <p class="muted">Browse Nexus Mods Collections to find and install curated mod setups for your games.</p>
         <button class="btn btn-secondary" onclick={() => activeTab = "nexus"}>
-          <NexusLogo size={14} />
-          Browse Nexus Mods Collections
+          Browse Collections
         </button>
       </div>
     {:else}
@@ -1448,7 +1450,6 @@
     <header class="page-header">
       <div class="header-text">
         <h2 class="page-title">Collections</h2>
-        <p class="page-subtitle">Browse and install curated mod collections from Nexus Mods</p>
       </div>
     </header>
     <div class="loading-container">
@@ -1465,7 +1466,6 @@
     <header class="page-header">
       <div class="header-text">
         <h2 class="page-title">Collections</h2>
-        <p class="page-subtitle">Browse and install curated mod collections from Nexus Mods</p>
       </div>
     </header>
     <div class="connect-prompt">
@@ -1975,11 +1975,8 @@
   {:else if activeTab === "nexus"}
     <!-- Nexus Mods Collections -->
     <header class="page-header">
-      <div class="header-text">
-        <h2 class="page-title"><NexusLogo size={22} /> Nexus Mods Collections</h2>
-        <p class="page-subtitle">Browse and install curated mod collections from Nexus Mods</p>
-      </div>
-      <div class="header-right">
+      <h2 class="page-title"><NexusLogo size={18} /> Nexus Mods Collections</h2>
+      <div class="header-toolbar">
         <WebViewToggle
           bind:this={collectionsWebviewToggle}
           url={`https://next.nexusmods.com/${getGameSlug()}/collections`}
@@ -1988,24 +1985,21 @@
           anchorEl={collectionsWebviewAnchor}
         />
         {#if account?.connected}
+          <div class="toolbar-sep"></div>
           <div class="account-badge">
-            <div class="account-avatar-sm">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
-                <circle cx="12" cy="7" r="4" />
-              </svg>
-            </div>
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+              <circle cx="12" cy="7" r="4" />
+            </svg>
             <span class="account-name">{account.name}</span>
             {#if account.is_premium}
-              <span class="premium-pill">Premium</span>
+              <span class="premium-pill">PRO</span>
             {/if}
           </div>
         {/if}
         {#if !loading}
-          <div class="stat-pill">
-            <span class="stat-value">{filtered.length}</span>
-            <span class="stat-label">{filtered.length === 1 ? "Collection" : "Collections"}</span>
-          </div>
+          <div class="toolbar-sep"></div>
+          <span class="stat-badge">{filtered.length} {filtered.length === 1 ? "collection" : "collections"}</span>
         {/if}
       </div>
     </header>
@@ -2039,32 +2033,45 @@
       </div>
     {:else}
       <!-- Filters -->
-      <div class="filters-bar">
-        <div class="search-wrapper">
-          <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="11" cy="11" r="8" />
-            <line x1="21" y1="21" x2="16.65" y2="16.65" />
-          </svg>
-          <input
-            type="text"
-            class="search-input"
-            placeholder="Search collections..."
-            bind:value={searchQuery}
-            oninput={() => {
-              if (collectionsSearchTimer) clearTimeout(collectionsSearchTimer);
-              collectionsSearchTimer = setTimeout(() => reloadWithSort(), 400);
-            }}
-          />
-        </div>
-        <select class="filter-select" bind:value={gameFilter} onchange={() => { if (gameFilter !== "all") loadCollections(gameFilter); }}>
-          <option value="all">All Games</option>
-          {#each gameOptions as game}
-            <option value={game}>{gameDomainDisplay(game)}</option>
-          {/each}
-        </select>
-        <div class="filters-right">
+      <SearchFilterBar
+        searchPlaceholder="Search collections..."
+        bind:searchValue={searchQuery}
+        onsearch={() => {
+          if (collectionsSearchTimer) clearTimeout(collectionsSearchTimer);
+          collectionsSearchTimer = setTimeout(() => reloadWithSort(), 400);
+        }}
+      >
+        {#snippet gameSelector()}
+          <select bind:value={gameFilter} onchange={() => { if (gameFilter !== "all") loadCollections(gameFilter); }}>
+            <option value="all">All Games</option>
+            {#each gameOptions as game}
+              <option value={game}>{gameDomainDisplay(game)}</option>
+            {/each}
+          </select>
+        {/snippet}
+        {#snippet controls()}
+          <select bind:value={sortField} onchange={reloadWithSort}>
+            <option value="endorsements">Most Popular</option>
+            <option value="name">Name</option>
+            <option value="rating">Rating</option>
+            <option value="created">Newest</option>
+            <option value="updated">Updated</option>
+            <option value="size">Size</option>
+          </select>
           <button
-            class="nsfw-cycle-btn"
+            onclick={() => { sortDirection = sortDirection === "asc" ? "desc" : "asc"; reloadWithSort(); }}
+            title={sortDirection === "asc" ? "Ascending" : "Descending"}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              {#if sortDirection === "asc"}
+                <path d="M12 5v14M5 12l7-7 7 7" />
+              {:else}
+                <path d="M12 5v14M5 12l7 7 7-7" />
+              {/if}
+            </svg>
+          </button>
+          <div class="strip-sep"></div>
+          <button
             class:nsfw-show={nsfwFilter === "show"}
             class:nsfw-only={nsfwFilter === "only"}
             onclick={() => { nsfwFilter = cycleNsfwFilter(nsfwFilter); const gd = gameFilter !== "all" ? gameFilter : "skyrimspecialedition"; loadCollections(gd); }}
@@ -2073,35 +2080,13 @@
             <span class="nsfw-indicator">{nsfwIcon(nsfwFilter)}</span>
             {nsfwLabel(nsfwFilter)}
           </button>
-          <div class="sort-group">
-            <select class="filter-select" bind:value={sortField} onchange={reloadWithSort}>
-              <option value="endorsements">Sort: Most Popular</option>
-              <option value="name">Sort: Name</option>
-              <option value="rating">Sort: Rating</option>
-              <option value="created">Sort: Newest</option>
-              <option value="updated">Sort: Updated</option>
-              <option value="size">Sort: Size</option>
-            </select>
-            <button
-              class="sort-direction-btn"
-              onclick={() => { sortDirection = sortDirection === "asc" ? "desc" : "asc"; reloadWithSort(); }}
-              title={sortDirection === "asc" ? "Ascending" : "Descending"}
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                {#if sortDirection === "asc"}
-                  <path d="M12 5v14M5 12l7-7 7 7" />
-                {:else}
-                  <path d="M12 5v14M5 12l7 7 7-7" />
-                {/if}
-              </svg>
-            </button>
-          </div>
-          <button class="filter-toggle" onclick={() => showCollectionsAdvancedFilters = !showCollectionsAdvancedFilters}>
+          <div class="strip-sep"></div>
+          <button onclick={() => showCollectionsAdvancedFilters = !showCollectionsAdvancedFilters}>
             Filters {showCollectionsAdvancedFilters ? '\u25B2' : '\u25BC'}
             {#if collectionsActiveFilterCount > 0}<span class="filter-badge">{collectionsActiveFilterCount}</span>{/if}
           </button>
-        </div>
-      </div>
+        {/snippet}
+      </SearchFilterBar>
 
       {#if showCollectionsAdvancedFilters}
         <div class="advanced-filters">
@@ -2303,9 +2288,12 @@
 
                 {#if collection.tags.length > 0}
                   <div class="card-tags">
-                    {#each collection.tags.slice(0, 5) as tag}
+                    {#each collection.tags.slice(0, 3) as tag}
                       <span class="tag">{tag}</span>
                     {/each}
+                    {#if collection.tags.length > 3}
+                      <span class="tag tag-overflow">+{collection.tags.length - 3}</span>
+                    {/if}
                   </div>
                 {/if}
 
@@ -2638,51 +2626,63 @@
 
   .page-header {
     display: flex;
-    align-items: flex-end;
-    justify-content: space-between;
-    margin-bottom: var(--space-8);
-    padding-bottom: var(--space-4);
-    border-bottom: 1px solid var(--separator);
+    align-items: baseline;
+    gap: var(--space-2);
+    margin-top: 20px;
+    margin-bottom: var(--space-4);
+    flex-wrap: wrap;
+    row-gap: var(--space-2);
   }
 
   .page-title {
-    font-size: 28px;
+    font-size: 20px;
     font-weight: 700;
     color: var(--text-primary);
-    letter-spacing: -0.025em;
+    letter-spacing: -0.02em;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+    margin: 0;
   }
 
   .page-subtitle {
-    font-size: 14px;
-    color: var(--text-secondary);
-    margin-top: var(--space-1);
+    font-size: 13px;
+    color: var(--text-quaternary);
+    white-space: nowrap;
   }
 
-  .header-right {
+  .header-toolbar {
     display: flex;
     align-items: center;
-    gap: var(--space-3);
+    gap: 8px;
+    margin-left: auto;
+    font-size: 12px;
+    color: var(--text-tertiary);
+    background: color-mix(in srgb, var(--surface-subtle) 60%, transparent);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid color-mix(in srgb, var(--separator) 30%, transparent);
+    border-radius: 8px;
+    padding: 4px 10px;
+  }
+
+  .toolbar-sep {
+    width: 1px;
+    height: 14px;
+    background: color-mix(in srgb, var(--separator) 50%, transparent);
+    flex-shrink: 0;
   }
 
   .account-badge {
     display: flex;
     align-items: center;
-    gap: var(--space-2);
-    background: var(--surface);
-    border: 1px solid var(--separator);
-    border-radius: var(--radius);
-    padding: var(--space-2) var(--space-3);
+    gap: 5px;
+    color: var(--text-secondary);
   }
 
-  .account-avatar-sm {
-    width: 20px;
-    height: 20px;
-    border-radius: 50%;
-    background: var(--surface-hover);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--text-tertiary);
+  .account-badge svg {
+    opacity: 0.5;
     flex-shrink: 0;
   }
 
@@ -2703,27 +2703,12 @@
     letter-spacing: 0.03em;
   }
 
-  .stat-pill {
-    display: flex;
-    align-items: baseline;
-    gap: var(--space-1);
-    background: var(--surface);
-    border: 1px solid var(--separator);
-    border-radius: var(--radius);
-    padding: var(--space-2) var(--space-4);
-  }
-
-  .stat-value {
-    font-size: 18px;
-    font-weight: 700;
-    color: var(--text-primary);
-    font-variant-numeric: tabular-nums;
-  }
-
-  .stat-label {
+  .stat-badge {
     font-size: 12px;
-    color: var(--text-tertiary);
     font-weight: 500;
+    color: var(--text-tertiary);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
   }
 
   /* ---- Loading ---- */
@@ -2865,19 +2850,21 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 32px;
-    height: 32px;
+    width: 28px;
+    height: 28px;
     border-radius: var(--radius-sm);
     background: var(--surface);
     border: 1px solid var(--separator);
     color: var(--text-secondary);
     cursor: pointer;
     transition: all var(--duration-fast) var(--ease);
+    opacity: 0.75;
   }
 
   .sort-direction-btn:hover {
     background: var(--surface-hover);
     color: var(--text-primary);
+    opacity: 1;
   }
 
   /* ---- Grid ---- */
@@ -2897,7 +2884,8 @@
     overflow: hidden;
     box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
     transition: border-color var(--duration-fast) var(--ease),
-                box-shadow var(--duration-fast) var(--ease);
+                box-shadow var(--duration-fast) var(--ease),
+                transform var(--duration-fast) var(--ease);
     animation: cardFadeIn var(--duration-slow) var(--ease) both;
     display: flex;
     flex-direction: column;
@@ -2905,7 +2893,8 @@
 
   .collection-card:hover {
     border-color: var(--separator);
-    box-shadow: var(--glass-refraction), var(--glass-edge-shadow), var(--shadow-sm);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow), 0 4px 12px rgba(0, 0, 0, 0.15);
+    transform: translateY(-2px);
   }
 
   @keyframes cardFadeIn {
@@ -3042,6 +3031,12 @@
     background: var(--surface);
     padding: 1px 6px;
     border-radius: var(--radius-sm);
+  }
+
+  .tag-overflow {
+    color: var(--text-tertiary);
+    font-style: italic;
+    opacity: 0.7;
   }
 
   .card-stats {
@@ -3895,6 +3890,7 @@
     display: flex;
     gap: var(--space-1);
     padding: var(--space-1);
+    margin-top: 0;
     background: var(--surface);
     border: 1px solid var(--separator);
     border-radius: var(--radius);
@@ -3959,9 +3955,17 @@
     font-size: 14px;
   }
 
+  .my-collections-empty .empty-heading {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0;
+  }
+
   .my-collections-empty .muted {
     color: var(--text-tertiary);
     font-size: 13px;
+    max-width: 360px;
   }
 
   .my-collections-grid {
@@ -4118,8 +4122,8 @@
 
   .modal-dialog {
     background: color-mix(in srgb, var(--bg-grouped) 75%, transparent);
-    backdrop-filter: blur(40px) saturate(1.5);
-    -webkit-backdrop-filter: blur(40px) saturate(1.5);
+    backdrop-filter: var(--glass-blur-heavy);
+    -webkit-backdrop-filter: var(--glass-blur-heavy);
     border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: var(--radius-lg, 12px);
     width: min(440px, 90vw);
@@ -4798,7 +4802,7 @@
     align-items: center;
     justify-content: center;
     flex: 1;
-    min-height: 120px;
+    min-height: calc(100vh - 200px);
     padding: var(--space-8);
   }
 
@@ -4814,21 +4818,23 @@
     display: flex;
     align-items: center;
     gap: var(--space-1);
-    padding: var(--space-2) var(--space-3);
+    padding: 2px var(--space-2);
     background: var(--bg-tertiary);
     border: 1px solid var(--separator);
     border-radius: var(--radius);
     color: var(--text-secondary);
-    font-size: 12px;
+    font-size: 11px;
     font-weight: 500;
     cursor: pointer;
     transition: all var(--duration-fast) var(--ease);
     white-space: nowrap;
+    opacity: 0.75;
   }
 
   .nsfw-cycle-btn:hover {
     background: var(--surface-hover);
     color: var(--text-primary);
+    opacity: 1;
   }
 
   .nsfw-cycle-btn.nsfw-show {
@@ -4860,7 +4866,6 @@
     align-items: center;
     justify-content: center;
     z-index: 1000;
-    backdrop-filter: var(--glass-blur-light);
   }
 
   /* ---- Uninstall Progress Modal ---- */
@@ -4870,7 +4875,6 @@
     inset: 0;
     z-index: 1000;
     background: rgba(0, 0, 0, 0.6);
-    backdrop-filter: var(--glass-blur-light);
     display: flex;
     align-items: center;
     justify-content: center;

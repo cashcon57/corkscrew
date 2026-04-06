@@ -145,6 +145,7 @@
   let chatCrashCount = $state(0);
   let sidebarWidth = $state(300);
   let resizing = $state(false);
+  let contentScrolled = $state(false);
 
   function onResizeStart(e: MouseEvent) {
     e.preventDefault();
@@ -1371,13 +1372,14 @@
   </nav>
 
   <div class="content-column">
-    <main class="content">
+    <main class="content" onscroll={(e) => { contentScrolled = (e.currentTarget as HTMLElement).scrollTop > 8; }}>
     <TopBar
       {detectedGames}
       onPickGame={pickGame}
       onLaunchGame={() => handleLaunchGame(false)}
       onNavigate={navigate}
       {launching}
+      scrolled={contentScrolled}
     />
       {#if $errorMessage}
         <div class="toast toast-error" role="alert">
@@ -1717,7 +1719,7 @@
     background: var(--bg-base);
   }
 
-  :global(html.vibrancy-active:not([data-theme="light"])) .app-shell {
+  :global(html.vibrancy-active) .app-shell {
     background: transparent;
   }
 
@@ -1789,10 +1791,19 @@
       0 4px 16px rgba(0, 0, 0, 0.04);
   }
 
-  :global(html.vibrancy-active:not([data-theme="light"])) .sidebar {
-    backdrop-filter: var(--glass-blur);
-    -webkit-backdrop-filter: var(--glass-blur);
+  :global(html.vibrancy-active) .sidebar {
+    /* Remove backdrop-filter — native window effect provides desktop blur.
+       Nested backdrop-filters break in WebKit, blocking child glass elements
+       (nav pills, etc.) from rendering their own blur. */
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background: color-mix(in srgb, var(--bg-grouped) 55%, transparent);
     border-color: var(--separator);
+  }
+
+  :global(html.vibrancy-active) .sidebar.collapsed {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
   }
 
   /* Traffic light spacer — clears macOS window controls.
@@ -1862,6 +1873,8 @@
     flex-direction: column;
     gap: 3px;
     overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-y: auto;
     min-height: 0;
   }
 
@@ -1885,8 +1898,12 @@
   }
 
   .nav-item.active {
-    background: var(--accent-subtle);
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    backdrop-filter: blur(12px) saturate(1.3);
+    -webkit-backdrop-filter: blur(12px) saturate(1.3);
     color: var(--accent);
+    box-shadow: inset 0 0.5px 0 0 rgba(255, 255, 255, 0.1),
+                inset 0 -0.5px 0 0 rgba(255, 255, 255, 0.04);
   }
 
   .nav-icon {
@@ -2444,9 +2461,12 @@
     box-shadow: inset 0 1px 0 0 var(--surface);
   }
 
-  :global(html.vibrancy-active:not([data-theme="light"])) .content-column {
-    backdrop-filter: var(--glass-blur);
-    -webkit-backdrop-filter: var(--glass-blur);
+  :global(html.vibrancy-active) .content-column {
+    /* No backdrop-filter here — the native window effect (sidebar) provides
+       desktop blur. Adding one here would create a backdrop filter group that
+       prevents child elements (topbar pill, etc.) from using their own
+       backdrop-filter (WebKit limitation with nested backdrop-filters). */
+    background: color-mix(in srgb, var(--bg-base) 65%, transparent);
   }
 
   /* --- Content area --- */
@@ -2454,7 +2474,9 @@
   .content {
     flex: 1;
     overflow-y: auto;
-    padding: 0 var(--space-6) var(--space-6);
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-y: auto;
+    padding: 0 var(--space-4) var(--space-4);
     position: relative;
   }
 
@@ -2468,7 +2490,7 @@
 
   .toast {
     position: fixed;
-    top: calc(52px + var(--space-2));
+    top: calc(44px + var(--space-2));
     right: var(--space-4);
     padding: 10px var(--space-4);
     border-radius: var(--radius);
@@ -2968,14 +2990,13 @@
     align-items: center;
     justify-content: center;
     z-index: 1000;
-    backdrop-filter: var(--glass-blur-light);
     animation: shortcutsFadeIn 150ms ease-out;
   }
 
   .shortcuts-card {
     background: color-mix(in srgb, var(--bg-secondary) 75%, transparent);
-    backdrop-filter: blur(40px) saturate(1.5);
-    -webkit-backdrop-filter: blur(40px) saturate(1.5);
+    backdrop-filter: var(--glass-blur-heavy);
+    -webkit-backdrop-filter: var(--glass-blur-heavy);
     border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: var(--radius);
     padding: var(--space-6);

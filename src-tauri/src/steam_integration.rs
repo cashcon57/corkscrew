@@ -682,6 +682,355 @@ pub fn get_steam_status() -> SteamStatus {
 }
 
 // ---------------------------------------------------------------------------
+// Steam launch options patching (SKSE / F4SE / script extenders)
+// ---------------------------------------------------------------------------
+
+/// Script extender info for a game.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ScriptExtenderInfo {
+    pub game_id: String,
+    pub display_name: String,
+    pub exe_name: String,
+    pub steam_app_id: u32,
+}
+
+/// Known script extenders and their Steam app IDs.
+pub fn known_script_extenders() -> Vec<ScriptExtenderInfo> {
+    vec![
+        ScriptExtenderInfo {
+            game_id: "skyrimse".into(),
+            display_name: "SKSE64".into(),
+            exe_name: "skse64_loader.exe".into(),
+            steam_app_id: 489830,
+        },
+        ScriptExtenderInfo {
+            game_id: "fallout4".into(),
+            display_name: "F4SE".into(),
+            exe_name: "f4se_loader.exe".into(),
+            steam_app_id: 377160,
+        },
+        ScriptExtenderInfo {
+            game_id: "oblivion".into(),
+            display_name: "OBSE".into(),
+            exe_name: "obse_loader.exe".into(),
+            steam_app_id: 22330,
+        },
+    ]
+}
+
+/// Status of Steam launch options for a game.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LaunchOptionsStatus {
+    pub game_id: String,
+    pub steam_app_id: u32,
+    pub extender_name: String,
+    /// true if launch options are currently set to use the script extender
+    pub patched: bool,
+    /// The current launch options string (if any)
+    pub current_options: Option<String>,
+}
+
+/// Parse a text-format VDF file into nested sections.
+/// Steam's localconfig.vdf uses indented key-value pairs with quoted strings.
+///
+/// We use a lightweight approach: read the file line-by-line and track the
+/// current path to find/modify `apps/{appid}/LaunchOptions`.
+fn parse_text_vdf_launch_options(content: &str, app_id: u32) -> Option<String> {
+    let app_id_str = app_id.to_string();
+    let mut in_apps = false;
+    let mut in_target_app = false;
+    let mut depth = 0u32;
+    let mut app_depth = 0u32;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        if trimmed == "{" {
+            depth += 1;
+            if in_apps && !in_target_app && depth == app_depth + 1 {
+                // We just entered the target app's block — but only if
+                // the previous line was the app ID key
+            }
+            continue;
+        }
+        if trimmed == "}" {
+            if in_target_app && depth == app_depth + 1 {
+                // Leaving target app block without finding LaunchOptions
+                return None;
+            }
+            depth -= 1;
+            if in_apps && depth < app_depth {
+                in_apps = false;
+            }
+            continue;
+        }
+
+        // Parse quoted key-value pairs: "key" "value" or just "key"
+        let parts: Vec<&str> = trimmed
+            .split('"')
+            .filter(|s| !s.trim().is_empty())
+            .collect();
+
+        if parts.is_empty() {
+            continue;
+        }
+
+        let key = parts[0];
+
+        // Track section entry
+        if key.eq_ignore_ascii_case("apps") || key == "Apps" {
+            in_apps = true;
+            app_depth = depth;
+        } else if in_apps && key == app_id_str && !in_target_app {
+            in_target_app = true;
+            app_depth = depth;
+        } else if in_target_app && key.eq_ignore_ascii_case("LaunchOptions") {
+            if parts.len() >= 2 {
+                return Some(parts[1].to_string());
+            }
+            return Some(String::new());
+        }
+    }
+
+    None
+}
+
+/// Set or clear launch options for a Steam game in localconfig.vdf.
+fn set_text_vdf_launch_options(
+    content: &str,
+    app_id: u32,
+    new_options: Option<&str>,
+) -> Result<String> {
+    let app_id_str = app_id.to_string();
+    let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+    let mut in_apps = false;
+    let mut in_target_app = false;
+    let mut depth = 0u32;
+    let mut app_depth = 0u32;
+    let mut found_launch_options = false;
+    let mut target_app_close_line: Option<usize> = None;
+    let mut prev_was_app_id = false;
+
+    for i in 0..lines.len() {
+        let trimmed = lines[i].trim().to_string();
+
+        if trimmed == "{" {
+            depth += 1;
+            if prev_was_app_id {
+                in_target_app = true;
+            }
+            prev_was_app_id = false;
+            continue;
+        }
+        if trimmed == "}" {
+            if in_target_app && depth == app_depth + 1 {
+                target_app_close_line = Some(i);
+                in_target_app = false;
+                break;
+            }
+            if depth > 0 {
+                depth -= 1;
+            }
+            if in_apps && depth < app_depth {
+                in_apps = false;
+            }
+            prev_was_app_id = false;
+            continue;
+        }
+
+        let parts: Vec<&str> = trimmed
+            .split('"')
+            .filter(|s| !s.trim().is_empty())
+            .collect();
+
+        if parts.is_empty() {
+            prev_was_app_id = false;
+            continue;
+        }
+
+        let key = parts[0];
+
+        if key.eq_ignore_ascii_case("apps") || key == "Apps" {
+            in_apps = true;
+            app_depth = depth;
+            prev_was_app_id = false;
+        } else if in_apps && key == app_id_str && !in_target_app {
+            app_depth = depth;
+            prev_was_app_id = true;
+        } else if in_target_app && key.eq_ignore_ascii_case("LaunchOptions") {
+            if let Some(ref opts) = new_options {
+                // Replace existing line
+                let indent = lines[i].len() - lines[i].trim_start().len();
+                let indent_str: String = std::iter::repeat(' ').take(indent).collect();
+                lines[i] = format!("{}\"LaunchOptions\"\t\t\"{}\"", indent_str, opts);
+            } else {
+                // Remove the line
+                lines.remove(i);
+            }
+            found_launch_options = true;
+            break;
+        } else {
+            prev_was_app_id = false;
+        }
+    }
+
+    // If we didn't find LaunchOptions but need to set it, insert before the closing brace
+    if !found_launch_options {
+        if let Some(ref opts) = new_options {
+            if let Some(close_line) = target_app_close_line {
+                // Insert before the closing brace of the app section
+                let indent = lines[close_line].len() - lines[close_line].trim_start().len();
+                let indent_str: String = std::iter::repeat(' ').take(indent + 1).collect();
+                lines.insert(
+                    close_line,
+                    format!("{}\"LaunchOptions\"\t\t\"{}\"", indent_str, opts),
+                );
+            } else {
+                anyhow::bail!(
+                    "Could not find app {} section in localconfig.vdf to insert launch options",
+                    app_id
+                );
+            }
+        }
+        // If new_options is None and we didn't find it, nothing to do — already cleared
+    }
+
+    Ok(lines.join("\n"))
+}
+
+/// Get launch options status for all known script extenders.
+pub fn get_launch_options_status(steam_info: &SteamInfo) -> Vec<LaunchOptionsStatus> {
+    let extenders = known_script_extenders();
+    let mut results = Vec::new();
+
+    // Read localconfig.vdf from the first available userdata dir
+    let config_content = steam_info
+        .userdata_dirs
+        .iter()
+        .find_map(|dir| {
+            let path = dir.join("config").join("localconfig.vdf");
+            std::fs::read_to_string(&path).ok()
+        });
+
+    for ext in &extenders {
+        let current = config_content
+            .as_ref()
+            .and_then(|c| parse_text_vdf_launch_options(c, ext.steam_app_id));
+
+        let patched = current
+            .as_ref()
+            .map(|opts| opts.contains(&ext.exe_name))
+            .unwrap_or(false);
+
+        results.push(LaunchOptionsStatus {
+            game_id: ext.game_id.clone(),
+            steam_app_id: ext.steam_app_id,
+            extender_name: ext.display_name.clone(),
+            patched,
+            current_options: current,
+        });
+    }
+
+    results
+}
+
+/// Patch Steam launch options so the game launches through the script extender.
+///
+/// For Proton/Wine on Linux, this uses the standard `%command%` substitution:
+/// e.g., `skse64_loader.exe %command%` makes Steam launch SKSE instead of the
+/// default game executable.
+pub fn patch_launch_options(
+    steam_info: &SteamInfo,
+    game_id: &str,
+) -> Result<()> {
+    let extender = known_script_extenders()
+        .into_iter()
+        .find(|e| e.game_id == game_id)
+        .ok_or_else(|| anyhow::anyhow!("No known script extender for game '{}'", game_id))?;
+
+    for user_dir in &steam_info.userdata_dirs {
+        let config_path = user_dir.join("config").join("localconfig.vdf");
+        if !config_path.exists() {
+            continue;
+        }
+
+        // Backup
+        let backup = config_path.with_extension("vdf.bak");
+        std::fs::copy(&config_path, &backup)
+            .context("Failed to back up localconfig.vdf")?;
+
+        let content = std::fs::read_to_string(&config_path)
+            .context("Failed to read localconfig.vdf")?;
+
+        // Set launch options to use the script extender
+        let launch_opt = format!("{} %command%", extender.exe_name);
+        let updated = set_text_vdf_launch_options(&content, extender.steam_app_id, Some(&launch_opt))?;
+
+        std::fs::write(&config_path, &updated)
+            .context("Failed to write localconfig.vdf")?;
+
+        log::info!(
+            "Patched Steam launch options for {} (app {}): {}",
+            extender.display_name,
+            extender.steam_app_id,
+            launch_opt
+        );
+    }
+
+    Ok(())
+}
+
+/// Remove script extender from Steam launch options (restore to default).
+pub fn unpatch_launch_options(
+    steam_info: &SteamInfo,
+    game_id: &str,
+) -> Result<()> {
+    let extender = known_script_extenders()
+        .into_iter()
+        .find(|e| e.game_id == game_id)
+        .ok_or_else(|| anyhow::anyhow!("No known script extender for game '{}'", game_id))?;
+
+    for user_dir in &steam_info.userdata_dirs {
+        let config_path = user_dir.join("config").join("localconfig.vdf");
+        if !config_path.exists() {
+            continue;
+        }
+
+        let content = std::fs::read_to_string(&config_path)
+            .context("Failed to read localconfig.vdf")?;
+
+        // Check if the current options contain our script extender
+        let current = parse_text_vdf_launch_options(&content, extender.steam_app_id);
+        if let Some(ref opts) = current {
+            if !opts.contains(&extender.exe_name) {
+                continue; // Not patched by us
+            }
+        } else {
+            continue; // No launch options set
+        }
+
+        // Backup
+        let backup = config_path.with_extension("vdf.bak");
+        std::fs::copy(&config_path, &backup)
+            .context("Failed to back up localconfig.vdf")?;
+
+        // Remove our launch options (set to None to clear the key)
+        let updated = set_text_vdf_launch_options(&content, extender.steam_app_id, None)?;
+
+        std::fs::write(&config_path, &updated)
+            .context("Failed to write localconfig.vdf")?;
+
+        log::info!(
+            "Unpatched Steam launch options for {} (app {})",
+            extender.display_name,
+            extender.steam_app_id
+        );
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -737,5 +1086,140 @@ mod tests {
         let id = generate_app_id("/opt/Corkscrew.AppImage", "Corkscrew");
         // Should have the high bit set
         assert!(id & 0x80000000 != 0);
+    }
+
+    #[test]
+    fn test_parse_text_vdf_launch_options() {
+        let vdf = r#"
+"UserLocalConfigStore"
+{
+    "Software"
+    {
+        "Valve"
+        {
+            "Steam"
+            {
+                "apps"
+                {
+                    "489830"
+                    {
+                        "LastPlayed"		"1711234567"
+                        "LaunchOptions"		"skse64_loader.exe %command%"
+                    }
+                    "377160"
+                    {
+                        "LastPlayed"		"1711234568"
+                    }
+                }
+            }
+        }
+    }
+}
+"#;
+        // Should find SKSE launch options for Skyrim SE
+        let result = parse_text_vdf_launch_options(vdf, 489830);
+        assert_eq!(result, Some("skse64_loader.exe %command%".to_string()));
+
+        // FO4 has no launch options
+        let result2 = parse_text_vdf_launch_options(vdf, 377160);
+        assert_eq!(result2, None);
+
+        // Unknown app
+        let result3 = parse_text_vdf_launch_options(vdf, 999999);
+        assert_eq!(result3, None);
+    }
+
+    #[test]
+    fn test_set_text_vdf_launch_options_replace() {
+        let vdf = r#""UserLocalConfigStore"
+{
+    "Software"
+    {
+        "Valve"
+        {
+            "Steam"
+            {
+                "apps"
+                {
+                    "489830"
+                    {
+                        "LastPlayed"		"1711234567"
+                        "LaunchOptions"		"old_option %command%"
+                    }
+                }
+            }
+        }
+    }
+}"#;
+        let updated =
+            set_text_vdf_launch_options(vdf, 489830, Some("skse64_loader.exe %command%"))
+                .expect("Failed to set launch options");
+        let opts = parse_text_vdf_launch_options(&updated, 489830);
+        assert_eq!(opts, Some("skse64_loader.exe %command%".to_string()));
+    }
+
+    #[test]
+    fn test_set_text_vdf_launch_options_insert() {
+        let vdf = r#""UserLocalConfigStore"
+{
+    "Software"
+    {
+        "Valve"
+        {
+            "Steam"
+            {
+                "apps"
+                {
+                    "489830"
+                    {
+                        "LastPlayed"		"1711234567"
+                    }
+                }
+            }
+        }
+    }
+}"#;
+        let updated =
+            set_text_vdf_launch_options(vdf, 489830, Some("skse64_loader.exe %command%"))
+                .expect("Failed to insert launch options");
+        let opts = parse_text_vdf_launch_options(&updated, 489830);
+        assert_eq!(opts, Some("skse64_loader.exe %command%".to_string()));
+    }
+
+    #[test]
+    fn test_set_text_vdf_launch_options_remove() {
+        let vdf = r#""UserLocalConfigStore"
+{
+    "Software"
+    {
+        "Valve"
+        {
+            "Steam"
+            {
+                "apps"
+                {
+                    "489830"
+                    {
+                        "LastPlayed"		"1711234567"
+                        "LaunchOptions"		"skse64_loader.exe %command%"
+                    }
+                }
+            }
+        }
+    }
+}"#;
+        let updated = set_text_vdf_launch_options(vdf, 489830, None)
+            .expect("Failed to remove launch options");
+        let opts = parse_text_vdf_launch_options(&updated, 489830);
+        assert_eq!(opts, None);
+    }
+
+    #[test]
+    fn test_known_script_extenders() {
+        let extenders = known_script_extenders();
+        assert!(extenders.len() >= 3);
+        assert!(extenders.iter().any(|e| e.game_id == "skyrimse"));
+        assert!(extenders.iter().any(|e| e.game_id == "fallout4"));
+        assert!(extenders.iter().any(|e| e.game_id == "oblivion"));
     }
 }

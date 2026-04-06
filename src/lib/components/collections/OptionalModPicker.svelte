@@ -114,13 +114,12 @@
     align-items: center;
     justify-content: center;
     z-index: 1000;
-    backdrop-filter: var(--glass-blur-light);
   }
 
   .optional-picker-modal {
     background: color-mix(in srgb, var(--bg-grouped) 75%, transparent);
-    backdrop-filter: blur(40px) saturate(1.5);
-    -webkit-backdrop-filter: blur(40px) saturate(1.5);
+    backdrop-filter: var(--glass-blur-heavy);
+    -webkit-backdrop-filter: var(--glass-blur-heavy);
     border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: var(--radius-lg, 12px);
     width: min(600px, 90vw);

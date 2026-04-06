@@ -49,19 +49,25 @@
 <style>
   .telemetry-banner {
     position: fixed;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    background: var(--bg-elevated);
-    backdrop-filter: var(--glass-blur);
-    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    bottom: var(--space-3);
+    left: var(--space-4);
+    right: var(--space-4);
+    background: color-mix(in srgb, var(--bg-elevated) 75%, transparent);
+    backdrop-filter: var(--glass-blur-heavy);
+    -webkit-backdrop-filter: var(--glass-blur-heavy);
+    border: 0.5px solid rgba(255, 255, 255, 0.12);
+    border-radius: var(--radius-lg);
     padding: 12px 20px;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 16px;
     z-index: 9999;
-    box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.3);
+    box-shadow:
+      inset 0 1px 0 0 rgba(255, 255, 255, 0.12),
+      inset 0 -1px 0 0 rgba(255, 255, 255, 0.04),
+      0 8px 32px rgba(0, 0, 0, 0.3),
+      0 2px 8px rgba(0, 0, 0, 0.15);
     animation: bannerSlideUp 0.3s ease-out;
   }
 

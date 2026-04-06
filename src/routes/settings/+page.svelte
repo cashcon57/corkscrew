@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, uninstallSkse, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, findOrphanedDownloads, deleteOrphanedDownloads, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, checkModToolUpdate, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads, checkSteamStatus, addToSteam, removeFromSteam, scanGameDirectory, cleanGameDirectory, checkSkyrimVersion, downgradeSkyrim, checkDeploymentHealth, redeployAllMods, getVerificationLevel, setVerificationLevel, setUseWineEngineFixes, getDepotDownloadCommand, startDepotDownload, checkDepotReady, applyDowngrade, listGameVersions, swapGameVersion, listDisabledWinePlugins, reenableWinePlugin, vortexListCachedExtensions, vortexFetchExtension, vortexRefreshExtension, vortexDeleteCachedExtension, vortexListAvailableExtensions, vortexGetExtensionDetail, ddStatus, ddEnsureUpdated, ddAuthenticate, ddDownloadDepot, ddApplyDepot, ddGetDepotVersions } from "$lib/api";
-  import type { CleanReport, CleanResult, DowngradeStatus, DeploymentHealth, VerificationLevel, CachedVersion, DepotDownloadInfo } from "$lib/types";
+  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, uninstallSkse, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, findOrphanedDownloads, deleteOrphanedDownloads, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, checkModToolUpdate, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads, checkSteamStatus, addToSteam, removeFromSteam, scanGameDirectory, cleanGameDirectory, checkSkyrimVersion, downgradeSkyrim, checkDeploymentHealth, redeployAllMods, getVerificationLevel, setVerificationLevel, setUseWineEngineFixes, getDepotDownloadCommand, startDepotDownload, checkDepotReady, applyDowngrade, listGameVersions, swapGameVersion, listDisabledWinePlugins, reenableWinePlugin, vortexListCachedExtensions, vortexFetchExtension, vortexRefreshExtension, vortexDeleteCachedExtension, vortexListAvailableExtensions, vortexGetExtensionDetail, ddStatus, ddEnsureUpdated, ddAuthenticate, ddDownloadDepot, ddApplyDepot, ddGetDepotVersions, getLaunchOptionsStatus, patchSteamLaunchOptions, unpatchSteamLaunchOptions } from "$lib/api";
+  import type { CleanReport, CleanResult, DowngradeStatus, DeploymentHealth, VerificationLevel, CachedVersion, DepotDownloadInfo, LaunchOptionsStatus } from "$lib/types";
   import type { SteamStatus } from "$lib/types";
   import { config, showError, showSuccess, selectedGame, skseStatus, currentPage, appVersion, updateReady, updateVersion, updateNotes, updateChecking, updateError, triggerUpdateCheck, controllerMode } from "$lib/stores";
   import type { AppConfig, ModTool, PlatformInfo, ToolInstallProgress, ToolUpdateInfo, VortexExtensionSummary, VortexGameRegistration } from "$lib/types";
@@ -254,6 +254,8 @@
   // Steam integration (Linux only)
   let steamStatus = $state<SteamStatus | null>(null);
   let steamLoading = $state(false);
+  let launchOptionsStatus = $state<LaunchOptionsStatus[]>([]);
+  let patchingGame = $state<string | null>(null);
 
   // Mod tools
   let modTools = $state<ModTool[]>([]);
@@ -467,6 +469,7 @@
     // Check Steam integration status (Linux only)
     try {
       steamStatus = await checkSteamStatus();
+      launchOptionsStatus = await getLaunchOptionsStatus();
     } catch { /* not on Linux or Steam not available */ }
 
     // Check Skyrim version / downgrade status + cached versions
@@ -2999,6 +3002,60 @@
           </div>
         </div>
       </div>
+
+      <!-- Steam Launch Options (Script Extenders) -->
+      {#if launchOptionsStatus.length > 0}
+        <h3 class="subsection-title">Script Extender Launch Options</h3>
+        <p class="subsection-desc">Patch Steam's launch options so games launch through their script extender (SKSE, F4SE, etc.) directly from Steam's Play button or Gaming Mode.</p>
+        <div class="section-card">
+          {#each launchOptionsStatus as ext}
+            <div class="card-row">
+              <div>
+                <span class="row-label">{ext.extender_name}</span>
+                <span class="row-hint">App ID: {ext.steam_app_id}</span>
+              </div>
+              <div class="row-value" style="display: flex; align-items: center; gap: 8px;">
+                {#if ext.patched}
+                  <span style="color: var(--green);">Patched</span>
+                  <button
+                    class="btn-ghost btn-sm"
+                    onclick={async () => {
+                      patchingGame = ext.game_id;
+                      try {
+                        await unpatchSteamLaunchOptions(ext.game_id);
+                        launchOptionsStatus = await getLaunchOptionsStatus();
+                        showSuccess(`Removed ${ext.extender_name} from Steam launch options`);
+                      } catch (e) { showError(`Failed: ${e}`); }
+                      finally { patchingGame = null; }
+                    }}
+                    disabled={patchingGame === ext.game_id}
+                    type="button"
+                  >Unpatch</button>
+                {:else}
+                  <span style="color: var(--text-tertiary);">Default</span>
+                  <button
+                    class="btn btn-accent btn-sm"
+                    onclick={async () => {
+                      patchingGame = ext.game_id;
+                      try {
+                        await patchSteamLaunchOptions(ext.game_id);
+                        launchOptionsStatus = await getLaunchOptionsStatus();
+                        showSuccess(`Steam will now launch ${ext.extender_name} for this game`);
+                      } catch (e) { showError(`Failed: ${e}`); }
+                      finally { patchingGame = null; }
+                    }}
+                    disabled={patchingGame === ext.game_id}
+                    type="button"
+                  >Patch</button>
+                {/if}
+                {#if ext.current_options}
+                  <span class="row-hint" title={ext.current_options}>({ext.current_options})</span>
+                {/if}
+              </div>
+            </div>
+          {/each}
+        </div>
+      {/if}
     </div>
   {/if}
 
@@ -3132,6 +3189,34 @@
     letter-spacing: 0.02em;
     padding: 0 var(--space-4);
     margin-bottom: var(--space-2);
+  }
+
+  .subsection-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    padding: 0 var(--space-4);
+    margin-top: var(--space-4);
+    margin-bottom: var(--space-1);
+  }
+
+  .subsection-desc {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    padding: 0 var(--space-4);
+    margin-bottom: var(--space-2);
+    line-height: 1.5;
+  }
+
+  .row-hint {
+    font-size: 11px;
+    color: var(--text-quaternary);
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .section-card {
@@ -3540,8 +3625,6 @@
     position: fixed;
     inset: 0;
     background: rgba(0, 0, 0, 0.5);
-    backdrop-filter: var(--glass-blur-light);
-    -webkit-backdrop-filter: var(--glass-blur-light);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -3551,8 +3634,8 @@
 
   .dialog {
     background: color-mix(in srgb, var(--bg-elevated) 75%, transparent);
-    backdrop-filter: blur(40px) saturate(1.5);
-    -webkit-backdrop-filter: blur(40px) saturate(1.5);
+    backdrop-filter: var(--glass-blur-heavy);
+    -webkit-backdrop-filter: var(--glass-blur-heavy);
     border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: var(--radius-xl);
     box-shadow: var(--glass-refraction), var(--glass-edge-shadow), var(--shadow-lg);

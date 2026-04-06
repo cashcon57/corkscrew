@@ -207,10 +207,19 @@ html.vibrancy-active:not([data-theme="light"]) body {
   background: transparent !important;
 }
 
-/* Light mode on macOS: opaque backgrounds, no vibrancy bleed-through */
+/* Light mode on macOS: translucent backgrounds with higher opacity for readability */
+html.vibrancy-active[data-theme="light"] {
+  --bg-base: var(--bg-base-vibrancy);
+  --bg-primary: var(--bg-primary-vibrancy);
+  --bg-grouped: var(--bg-grouped-vibrancy);
+  --bg-grouped-secondary: var(--bg-grouped-secondary-vibrancy);
+  --surface: var(--surface-vibrancy);
+  --surface-glass: rgba(255, 255, 255, 0.50);
+}
+
 html.vibrancy-active[data-theme="light"],
 html.vibrancy-active[data-theme="light"] body {
-  background: var(--bg-base) !important;
+  background: transparent !important;
 }
 
 /* ==============================
