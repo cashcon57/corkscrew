@@ -223,6 +223,17 @@ html.vibrancy-active[data-theme="light"] body {
 }
 
 /* ==============================
+   Non-Vibrancy Fallback (Linux / non-macOS)
+   Ensure fully opaque backgrounds when window transparency has no
+   compositor-backed vibrancy behind it.
+   ============================== */
+
+html:not(.vibrancy-active),
+html:not(.vibrancy-active) body {
+  background-color: var(--bg-base) !important;
+}
+
+/* ==============================
    Shared Design Tokens
    ============================== */
 

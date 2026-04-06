@@ -283,4 +283,25 @@
   .btn-link-footer:hover {
     text-decoration-color: var(--text-tertiary);
   }
+
+  .whats-new-footer :global(.btn) {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 16px;
+    border: none;
+    border-radius: var(--radius, 6px);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: inherit;
+    transition: background 0.15s, opacity 0.15s;
+  }
+  .whats-new-footer :global(.btn-accent) {
+    background: var(--accent, #3b82f6);
+    color: white;
+  }
+  .whats-new-footer :global(.btn-accent:hover) {
+    opacity: 0.9;
+  }
 </style>

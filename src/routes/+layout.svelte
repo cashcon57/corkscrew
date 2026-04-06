@@ -1723,6 +1723,11 @@
     background: transparent;
   }
 
+  /* Linux / non-macOS: ensure fully opaque backgrounds (no vibrancy compositor) */
+  :global(html:not(.vibrancy-active)) .app-shell {
+    background: var(--bg-base);
+  }
+
   /* --- Sidebar --- */
 
   .sidebar {
@@ -1802,6 +1807,13 @@
   }
 
   :global(html.vibrancy-active) .sidebar.collapsed {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+
+  /* Linux / non-macOS: opaque sidebar (no compositor backdrop-filter support) */
+  :global(html:not(.vibrancy-active)) .sidebar {
+    background: var(--bg-grouped);
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
   }
