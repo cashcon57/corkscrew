@@ -11,6 +11,16 @@ updates:
     labels:
       - "dependencies"
     open-pull-requests-limit: 10
+    groups:
+      tauri-plugins:
+        patterns:
+          - "@tauri-apps/*"
+      svelte:
+        patterns:
+          - "svelte*"
+          - "@sveltejs/*"
+      dev-deps:
+        dependency-type: "development"
 
   # Cargo — Rust backend (Tauri, rusqlite, reqwest, etc.)
   - package-ecosystem: "cargo"
@@ -23,6 +33,26 @@ updates:
     labels:
       - "dependencies"
     open-pull-requests-limit: 10
+    groups:
+      tauri:
+        patterns:
+          - "tauri"
+          - "tauri-*"
+      serde:
+        patterns:
+          - "serde"
+          - "serde_*"
+      async-runtime:
+        patterns:
+          - "tokio"
+          - "tokio-*"
+          - "futures"
+          - "async-*"
+      network:
+        patterns:
+          - "reqwest"
+          - "tungstenite"
+          - "url"
 
   # GitHub Actions — CI/CD workflows
   - package-ecosystem: "github-actions"
