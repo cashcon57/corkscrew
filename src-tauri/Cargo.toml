@@ -134,4 +134,13 @@ tempfile = "3"
 [target.'cfg(debug_assertions)'.dependencies]
 tauri-plugin-webdriver = "0.2"
 
+# ── Release profile optimizations ─────────────────────────
+# Default Cargo release: fat LTO + 16 codegen units = very slow builds.
+# thin-lto is 2-3x faster with negligible runtime difference.
+# strip removes debug symbols (smaller binary, faster link).
+[profile.release]
+lto = "thin"
+strip = true
+codegen-units = 16
+
 [dev-dependencies]

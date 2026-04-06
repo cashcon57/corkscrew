@@ -1,0 +1,5 @@
+# Use mold linker on Linux (3-5x faster linking than ld/gold).
+# mold is installed in CI via apt-get. Falls back to default ld if missing.
+[target.x86_64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
