@@ -1,6 +1,6 @@
 {
   "name": "corkscrew-app",
-  "version": "0.11.3",
+  "version": "0.11.4",
   "description": "",
   "type": "module",
   "scripts": {
@@ -28,6 +28,9 @@
     "@types/dompurify": "^3.2.0",
     "dompurify": "^3.3.3",
     "marked": "^17.0.5"
+  },
+  "overrides": {
+    "cookie": ">=0.7.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.58.2",

@@ -3,11 +3,13 @@
   "app": {
     "windows": [
       {
-        "transparent": false,
-        "titleBarStyle": "Visible",
-        "hiddenTitle": false,
-        "trafficLightPosition": null,
-        "windowEffects": null
+        "title": "Corkscrew",
+        "width": 1100,
+        "height": 750,
+        "minWidth": 800,
+        "minHeight": 600,
+        "decorations": true,
+        "transparent": false
       }
     ]
   }

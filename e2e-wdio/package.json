@@ -10,6 +10,9 @@
     "build-and-test": "npm run --prefix .. tauri build -- --debug --no-bundle && wdio run wdio.conf.ts",
     "seed-db": "./fixtures/create-fixture-db.sh"
   },
+  "overrides": {
+    "serialize-javascript": ">=7.0.5"
+  },
   "devDependencies": {
     "@wdio/cli": "^9.0.0",
     "@wdio/local-runner": "^9.0.0",
