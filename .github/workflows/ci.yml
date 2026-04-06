@@ -86,12 +86,17 @@ jobs:
   # Tier 1 E2E: Playwright (mocked IPC, no build needed)
   # WebKit only — that's the actual engine Tauri uses.
   # Chromium is irrelevant (Corkscrew never runs in Chrome).
-  # Single OS to keep fast; Linux is cheaper (no 10x macOS multiplier).
+  # Both OS: WKWebView (macOS) and WebKitGTK (Linux) have
+  # real rendering differences worth catching.
   # ────────────────────────────────────────────────────────
   e2e-playwright:
-    name: E2E Playwright
-    runs-on: ubuntu-latest
+    name: E2E Playwright (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
     steps:
       - uses: actions/checkout@v6
 
@@ -116,7 +121,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-report
+          name: playwright-report-${{ matrix.os }}
           path: playwright-report/
           retention-days: 7
 
