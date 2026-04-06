@@ -5,8 +5,8 @@ export default defineConfig({
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
-  workers: process.env.CI ? 2 : undefined,
-  globalTimeout: process.env.CI ? 45 * 60 * 1000 : undefined,
+  workers: process.env.CI ? 4 : undefined,
+  globalTimeout: process.env.CI ? 30 * 60 * 1000 : undefined,
   timeout: 30_000,
   reporter: [['html', { open: 'never' }]],
 
@@ -19,13 +19,15 @@ export default defineConfig({
 
   projects: [
     {
-      name: 'chromium',
-      use: { ...devices['Desktop Chrome'] },
-    },
-    {
       name: 'webkit',
       use: { ...devices['Desktop Safari'] },
     },
+    // Chromium available for local debugging but not run in CI
+    // (Corkscrew renders in WebKit via Tauri, not Chrome)
+    ...(!process.env.CI ? [{
+      name: 'chromium',
+      use: { ...devices['Desktop Chrome'] },
+    }] : []),
   ],
 
   webServer: {
