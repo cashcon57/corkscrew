@@ -33,14 +33,14 @@
     "cookie": ">=0.7.0"
   },
   "devDependencies": {
-    "@playwright/test": "^1.58.2",
+    "@playwright/test": "^1.59.1",
     "@sveltejs/adapter-static": "^3.0.6",
-    "@sveltejs/kit": "^2.9.0",
+    "@sveltejs/kit": "^2.56.1",
     "@sveltejs/vite-plugin-svelte": "^7.0.0",
     "@tauri-apps/cli": "^2",
     "svelte": "^5.55.1",
-    "svelte-check": "^4.0.0",
-    "typescript": "^5.9.3",
+    "svelte-check": "^4.4.6",
+    "typescript": "^6.0.2",
     "vite": "^8.0.3"
   }
 }
