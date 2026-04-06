@@ -21,7 +21,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Fetch NexusMods stats and update README
+      - name: Fetch NexusMods stats and generate reports
         env:
           NEXUS_API_KEY: ${{ secrets.NEXUS_API_KEY }}
         run: python3 scripts/update-game-stats.py
@@ -29,7 +29,9 @@ jobs:
       - name: Check for changes
         id: changes
         run: |
-          if git diff --quiet README.md; then
+          if git diff --quiet README.md GAME_SUPPORT_REPORT.md && \
+             git diff --quiet --cached && \
+             [ -z "$(git ls-files --others --exclude-standard stats/)" ]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
@@ -40,6 +42,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add README.md
+          git add README.md GAME_SUPPORT_REPORT.md stats/
           git commit -m "Update game support stats from NexusMods API"
           git push

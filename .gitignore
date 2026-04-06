@@ -62,6 +62,9 @@ noun-arrow-right-*.png
 # Raw icon sources (processed into static/icons/)
 tools:sites icons/
 
+# DepotDownloader cache (game version downloads)
+depots/
+
 # Playwright MCP
 .playwright-mcp/
 
