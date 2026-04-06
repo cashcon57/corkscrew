@@ -367,6 +367,26 @@ fn run_startup_health_check(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Fix WebKitGTK EGL/DMABuf crash on SteamOS/Gamescope and some Wayland compositors.
+    //
+    // WebKitGTK's DMABuf renderer fails with "Could not create default EGL display:
+    // EGL_BAD_PARAMETER" under Gamescope (Steam Deck) and some Wayland sessions.
+    // WEBKIT_DISABLE_DMABUF_RENDERER=1 falls back to shared-memory rendering, which
+    // works everywhere. Performance impact is negligible for a UI app.
+    //
+    // This is the same workaround used by Heroic Games Launcher, Lutris, and most
+    // Electron/WebKitGTK apps shipping on Steam Deck.
+    //
+    // We apply it on ALL Linux to avoid the crash, since:
+    // - The SHM fallback is fast enough for a mod manager UI
+    // - Users who want DMABuf can override: WEBKIT_DISABLE_DMABUF_RENDERER=0 corkscrew
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var("WEBKIT_DISABLE_DMABUF_RENDERER").is_err() {
+            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        }
+    }
+
     // Kill any leftover MLX server from a previous crash/dev restart
     kill_mlx_server();
     // Register game plugins (dedicated plugins first, then registry)
