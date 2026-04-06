@@ -40,8 +40,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libgtk-3-dev
 
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@main
+
       - name: Install Tauri CLI
-        run: cargo install tauri-cli --version 2.10.0 --locked
+        run: cargo binstall tauri-cli@2.10.0 --no-confirm
 
       - name: Build
         env:
@@ -101,8 +104,11 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@main
+
       - name: Install Tauri CLI
-        run: cargo install tauri-cli --version 2.10.0 --locked
+        run: cargo binstall tauri-cli@2.10.0 --no-confirm
 
       - name: Import Apple Developer certificate
         env:
