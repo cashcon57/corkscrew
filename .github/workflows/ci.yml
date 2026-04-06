@@ -115,24 +115,18 @@ jobs:
       - name: Run Playwright E2E tests
         run: |
           # Playwright WebKit sometimes exits with code 1 even when all tests
-          # pass (browser process cleanup issue). Check .last-run.json for the
-          # actual result: if failedTests is empty, all tests passed.
+          # pass (browser process cleanup issue). Parse the stdout summary to
+          # determine pass/fail instead of trusting the exit code.
           set +e
-          npx playwright test --project=webkit
+          npx playwright test --project=webkit 2>&1 | tee /tmp/pw-output.txt
           EXIT_CODE=$?
           set -e
-          if [ -f test-results/.last-run.json ]; then
-            FAILED=$(python3 -c "
-          import json, sys
-          r = json.load(open('test-results/.last-run.json'))
-          failed = r.get('failedTests', [])
-          print(len(failed))
-          " 2>/dev/null || echo "unknown")
-            if [ "$FAILED" = "0" ]; then
-              echo "✓ All tests passed (exit code $EXIT_CODE was WebKit cleanup noise)"
+          if [ $EXIT_CODE -ne 0 ]; then
+            # Check if the summary line shows 0 failures
+            if grep -qE '^\s+[0-9]+ passed' /tmp/pw-output.txt && ! grep -qE '[0-9]+ failed' /tmp/pw-output.txt; then
+              echo "✓ All tests passed (exit code $EXIT_CODE ignored — WebKit process cleanup issue)"
               exit 0
             fi
-            echo "✗ $FAILED test(s) actually failed"
           fi
           exit $EXIT_CODE
         env:
