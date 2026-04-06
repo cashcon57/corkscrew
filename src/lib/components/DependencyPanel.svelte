@@ -186,7 +186,7 @@
     {:else}
       <!-- Add Dependency Form -->
       {#if showAddForm}
-        <div class="add-form">
+        <div class="add-form panel-transition-enter">
           <div class="form-row">
             <label class="form-label" for="dep-target">Target Mod (optional)</label>
             <select

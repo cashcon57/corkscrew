@@ -323,7 +323,7 @@
           <span class="overall-percent">{overallProgress}%</span>
         </div>
         <div class="progress-track progress-track-lg">
-          <div class="progress-fill progress-fill-overall" class:progress-active={status.active} style="width: {overallProgress}%"></div>
+          <div class="progress-fill progress-fill-overall" class:progress-active={status.active} class:complete={overallProgress >= 100} style="width: {overallProgress}%"></div>
         </div>
       </section>
 
@@ -798,6 +798,7 @@
   .timeline-step.active .timeline-dot {
     border-color: var(--system-accent);
     background: color-mix(in srgb, var(--system-accent) 15%, transparent);
+    animation: glass-scale-pop var(--duration-fast) var(--ease-spring);
   }
 
   .timeline-label {
@@ -824,7 +825,7 @@
     margin-bottom: 20px;
     min-width: 16px;
     max-width: 48px;
-    transition: background 300ms ease;
+    transition: background var(--duration-slow) var(--ease);
   }
 
   .timeline-connector.done {
@@ -974,6 +975,11 @@
 
   .progress-fill-overall {
     background: linear-gradient(90deg, var(--system-accent), color-mix(in srgb, var(--system-accent) 70%, #22c55e));
+  }
+
+  .progress-fill.complete {
+    animation: glass-scale-pop var(--duration) var(--ease-spring);
+    box-shadow: 0 0 12px rgba(48, 209, 88, 0.4);
   }
 
   .progress-active {

@@ -1780,7 +1780,17 @@
     border-radius: 50%;
     background: white;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
-    transition: transform var(--duration-fast) var(--ease);
+    transition: transform var(--duration-fast) var(--ease-spring, cubic-bezier(0.34, 1.56, 0.64, 1)),
+                width var(--duration-fast) var(--ease);
+  }
+
+  .toggle-switch:active .toggle-knob {
+    width: 18px;
+    border-radius: 9px;
+  }
+
+  .toggle-switch.toggle-on:active .toggle-knob {
+    transform: translateX(16px);
   }
 
   .toggle-on .toggle-knob {

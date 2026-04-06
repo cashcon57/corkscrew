@@ -82,7 +82,7 @@
                 var(--glass-edge-shadow),
                 0 8px 32px rgba(0, 0, 0, 0.4);
     padding: var(--space-1) 0;
-    animation: contextFadeIn 0.1s var(--ease-out);
+    animation: contextFadeIn 0.1s var(--ease-spring);
   }
 
   @keyframes contextFadeIn {

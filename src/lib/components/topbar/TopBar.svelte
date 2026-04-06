@@ -111,6 +111,8 @@
   /* --- Liquid Glass pill --- */
 
   .topbar-pill {
+    position: relative;
+    overflow: hidden;
     display: flex;
     align-items: center;
     gap: 2px;
@@ -156,6 +158,17 @@
     -webkit-backdrop-filter: none;
     border: 1px solid var(--separator);
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+  }
+
+  .top-bar.scrolled .topbar-pill::after {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    border-radius: inherit;
+    background: linear-gradient(90deg, transparent 30%, rgba(255,255,255,0.04) 50%, transparent 70%);
+    background-size: 200% 100%;
+    animation: glass-shimmer 3s var(--ease) infinite;
+    pointer-events: none;
   }
 
   .topbar-separator {

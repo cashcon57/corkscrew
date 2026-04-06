@@ -169,7 +169,7 @@
               <button
                 class="card bottle-card"
                 class:selected={selectedBottle?.name === bottle.name}
-                style="animation-delay: {i * 40}ms"
+                style="animation-delay: {Math.min(i, 15) * 30}ms"
                 onclick={() => openBottleSettings(bottle)}
               >
                 <svg class="card-chevron bottle-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -364,7 +364,7 @@
             {#each $games as game, i}
               <button
                 class="card game-card"
-                style="animation-delay: {($bottles.length + i) * 40}ms"
+                style="animation-delay: {Math.min(i, 15) * 30}ms"
                 onclick={() => selectGame(game)}
               >
                 <div class="card-top-row">
@@ -666,7 +666,7 @@
       border-color var(--duration) var(--ease),
       box-shadow var(--duration) var(--ease),
       transform var(--duration-fast) var(--ease);
-    animation: cardFadeIn var(--duration-slow) var(--ease) both;
+    animation: glass-fade-in var(--duration-slow) var(--ease) both;
     position: relative;
     overflow: hidden;
   }
@@ -682,17 +682,6 @@
     z-index: 1;
   }
 
-  @keyframes cardFadeIn {
-    from {
-      opacity: 0;
-      transform: translateY(6px);
-    }
-    to {
-      opacity: 1;
-      transform: translateY(0);
-    }
-  }
-
   /* ============================================
      Bottle Cards
      ============================================ */
@@ -701,6 +690,7 @@
     background: var(--surface-hover);
     border-color: var(--accent);
     box-shadow: 0 0 0 1px rgba(232, 128, 42, 0.08);
+    transform: translateY(-2px) rotate(-0.3deg);
   }
 
   .bottle-chevron {
@@ -773,6 +763,7 @@
     background: var(--surface-hover);
     border-color: var(--accent);
     box-shadow: 0 0 0 1px rgba(232, 128, 42, 0.08);
+    transform: translateY(-2px) rotate(-0.3deg);
   }
 
   .game-card:hover .card-action-label {
@@ -1110,11 +1101,19 @@
     border-radius: 50%;
     background: white;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
-    transition: transform var(--duration-fast) var(--ease);
+    transition: transform var(--duration-fast) var(--ease-spring, cubic-bezier(0.34, 1.56, 0.64, 1)), width var(--duration-fast) var(--ease);
   }
 
   .toggle-switch.active .toggle-knob {
     transform: translateX(18px);
+  }
+
+  .toggle-switch:active .toggle-knob {
+    width: 18px;
+  }
+
+  .toggle-switch.active:active .toggle-knob {
+    transform: translateX(16px);
   }
 
   /* Select dropdown */

@@ -572,8 +572,8 @@
     </div>
   {:else}
     <div class="mod-browse-grid">
-      {#each browseMods as mod (mod.mod_id)}
-        <div class="mod-browse-card" onclick={() => openModDetail(mod)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === "Enter") openModDetail(mod); }}>
+      {#each browseMods as mod, i (mod.mod_id)}
+        <div class="mod-browse-card" onclick={() => openModDetail(mod)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === "Enter") openModDetail(mod); }} style="animation: glass-fade-in var(--duration-slow) var(--ease) both; animation-delay: {Math.min(i, 15) * 30}ms">
           {#if browseInstalledNexusIds.has(mod.mod_id)}
             <div class="browse-installed-badge">Installed</div>
           {/if}
@@ -612,20 +612,14 @@
                 <span class="mod-browse-stat mod-browse-version">v{mod.version}</span>
               {/if}
             </div>
-            {#if account?.is_premium && !browseInstalledNexusIds.has(mod.mod_id)}
+            <div class="card-actions">
               <button
-                class="btn btn-accent btn-sm mod-download-btn"
-                onclick={(e) => { e.stopPropagation(); openFilePicker(mod); }}
-                title="Download & Install"
+                class="btn-view-details"
+                onclick={(e) => { e.stopPropagation(); openModDetail(mod); }}
               >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                  <polyline points="7 10 12 15 17 10" />
-                  <line x1="12" y1="15" x2="12" y2="3" />
-                </svg>
-                Install
+                View Details
               </button>
-            {/if}
+            </div>
           </div>
         </div>
       {/each}
@@ -766,8 +760,8 @@
 
   .mod-browse-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-    gap: var(--space-3);
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: var(--space-4);
     padding: 0 0 var(--space-4);
   }
 
@@ -780,18 +774,20 @@
     border-radius: var(--radius-lg);
     overflow: hidden;
     cursor: pointer;
-    transition: border-color var(--duration-fast) var(--ease), box-shadow var(--duration-fast) var(--ease);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
+    transition: border-color var(--duration-fast) var(--ease), box-shadow var(--duration-fast) var(--ease), transform var(--duration-fast) var(--ease);
     text-align: left;
   }
 
   .mod-browse-card:hover {
     border-color: var(--accent);
     box-shadow: 0 2px 12px rgba(0, 0, 0, 0.2);
+    transform: translateY(-2px) rotate(-0.3deg);
   }
 
   .mod-browse-img {
     width: 100%;
-    height: 120px;
+    height: 140px;
     background-size: cover;
     background-position: center;
     background-color: var(--bg-base);
@@ -804,7 +800,7 @@
   }
 
   .mod-browse-body {
-    padding: var(--space-3);
+    padding: var(--space-4) var(--space-5);
     display: flex;
     flex-direction: column;
     gap: 4px;
@@ -812,8 +808,8 @@
   }
 
   .mod-browse-name {
-    font-size: 13px;
-    font-weight: 600;
+    font-size: 15px;
+    font-weight: 700;
     color: var(--text-primary);
     margin: 0;
     display: -webkit-box;
@@ -823,15 +819,15 @@
   }
 
   .mod-browse-author {
-    font-size: 11px;
-    color: var(--text-tertiary);
+    font-size: 12px;
+    color: var(--text-secondary);
     margin: 0;
   }
 
   .mod-browse-summary {
-    font-size: 11px;
-    color: var(--text-secondary);
-    line-height: 1.4;
+    font-size: 12px;
+    color: var(--text-tertiary);
+    line-height: 1.5;
     margin: 2px 0 0;
     display: -webkit-box;
     -webkit-line-clamp: 3;
@@ -841,17 +837,20 @@
 
   .mod-browse-stats {
     display: flex;
-    gap: var(--space-3);
+    align-items: center;
+    gap: var(--space-4);
     margin-top: auto;
-    padding-top: var(--space-2);
+    padding-top: var(--space-3);
+    border-top: 1px solid var(--separator);
   }
 
   .mod-browse-stat {
     display: flex;
     align-items: center;
     gap: 4px;
-    font-size: 11px;
-    color: var(--text-tertiary);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
   }
 
   .mod-browse-version {
@@ -990,14 +989,14 @@
     background: var(--accent);
   }
 
-  .mod-download-btn {
-    margin-top: var(--space-2);
+  .card-actions {
     display: flex;
-    align-items: center;
-    gap: var(--space-1);
-    width: 100%;
-    justify-content: center;
+    gap: var(--space-2);
+    margin-top: auto;
+    padding-top: var(--space-2);
   }
+
+  /* btn-view-details inherits from global app.css */
 
   /* Strip separator used inside SearchFilterBar controls snippet */
   .strip-sep {

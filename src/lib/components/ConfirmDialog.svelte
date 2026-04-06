@@ -21,11 +21,22 @@
     onCancel,
   }: Props = $props();
 
+  let dismissing = $state(false);
+
+  function handleDismiss(callback: () => void) {
+    if (dismissing) return;
+    dismissing = true;
+    setTimeout(() => {
+      dismissing = false;
+      callback();
+    }, 200);
+  }
+
   function handleKeydown(e: KeyboardEvent) {
     if (!open) return;
     if (e.key === "Escape") {
       e.preventDefault();
-      onCancel();
+      handleDismiss(onCancel);
     }
   }
 </script>
@@ -34,9 +45,9 @@
 
 {#if open}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="confirm-overlay" onclick={onCancel} role="dialog" aria-label={title}>
+  <div class="confirm-overlay" onclick={() => handleDismiss(onCancel)} role="dialog" aria-label={title}>
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="confirm-card" onclick={(e) => e.stopPropagation()}>
+    <div class="confirm-card" class:confirm-dismissing={dismissing} onclick={(e) => e.stopPropagation()}>
       <h3 class="confirm-title">{title}</h3>
       <p class="confirm-message">{message}</p>
 
@@ -49,10 +60,10 @@
       {/if}
 
       <div class="confirm-actions">
-        <button class="btn btn-ghost" onclick={onCancel}>Cancel</button>
+        <button class="btn btn-ghost" onclick={() => handleDismiss(onCancel)}>Cancel</button>
         <button
           class="btn {confirmDanger ? 'btn-danger' : 'btn-primary'}"
-          onclick={onConfirm}
+          onclick={() => handleDismiss(onConfirm)}
         >
           {confirmLabel}
         </button>
@@ -116,9 +127,29 @@
     justify-content: flex-end;
   }
 
+  .confirm-title {
+    animation: glass-fade-in var(--duration) var(--ease-out) both;
+  }
+
+  .confirm-message {
+    animation: glass-fade-in var(--duration) var(--ease-out) 50ms both;
+  }
+
+  .confirm-actions {
+    animation: glass-fade-in var(--duration) var(--ease-out) 100ms both;
+  }
+
+  .confirm-card.confirm-dismissing {
+    animation: glass-dialog-dismiss 0.2s var(--ease-in) forwards;
+  }
+
+  .confirm-actions :global(.btn-danger):hover {
+    box-shadow: 0 0 12px rgba(255, 69, 58, 0.3);
+  }
+
   @keyframes fadeIn {
-    from { opacity: 0; }
-    to { opacity: 1; }
+    from { opacity: 0; backdrop-filter: blur(0); }
+    to { opacity: 1; backdrop-filter: blur(8px); }
   }
 
   @keyframes slideUp {
@@ -130,5 +161,9 @@
     background: var(--bg-secondary);
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
+  }
+
+  :global(html:not(.vibrancy-active)) .confirm-overlay {
+    backdrop-filter: none;
   }
 </style>

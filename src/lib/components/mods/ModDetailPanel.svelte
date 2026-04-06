@@ -277,12 +277,12 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    animation: slideIn 0.15s var(--ease-out);
+    animation: slideIn 0.2s var(--ease-spring);
   }
 
   @keyframes slideIn {
-    from { opacity: 0; transform: translateX(8px); }
-    to { opacity: 1; transform: translateX(0); }
+    from { opacity: 0; transform: translateX(12px) scale(0.99); }
+    to { opacity: 1; transform: translateX(0) scale(1); }
   }
 
   /* ==========================================

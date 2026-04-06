@@ -621,7 +621,7 @@
           <span class="overall-percent">{overallProgress}%</span>
         </div>
         <div class="progress-track progress-track-lg">
-          <div class="progress-fill progress-fill-overall" class:progress-active={pulseDuration > 0} style="width: {overallProgress}%"></div>
+          <div class="progress-fill progress-fill-overall" class:progress-active={pulseDuration > 0} class:complete={overallProgress >= 100} style="width: {overallProgress}%"></div>
         </div>
       </section>
 
@@ -1317,6 +1317,7 @@
     border-color: var(--system-accent);
     background: var(--system-accent);
     color: white;
+    animation: glass-scale-pop var(--duration-fast) var(--ease-spring);
   }
 
   .timeline-step.done .timeline-dot {
@@ -1345,7 +1346,7 @@
     background: var(--separator);
     margin: 0 var(--space-1);
     margin-top: 12px;
-    transition: background 0.3s ease;
+    transition: background var(--duration-slow) var(--ease);
   }
 
   .timeline-connector.done {
@@ -1460,6 +1461,11 @@
 
   .progress-fill-overall {
     background: linear-gradient(90deg, var(--system-accent), color-mix(in srgb, var(--system-accent) 70%, #22c55e));
+  }
+
+  .progress-fill.complete {
+    animation: glass-scale-pop var(--duration) var(--ease-spring);
+    box-shadow: 0 0 12px rgba(48, 209, 88, 0.4);
   }
 
   /* ---- Phase Sections ---- */

@@ -42,12 +42,14 @@
     max-width: 360px;
     margin: 0 auto;
     text-align: center;
+    animation: glass-fade-in var(--duration-slow) var(--ease-out);
   }
 
   .empty-icon {
     color: var(--text-quaternary);
     width: 48px;
     height: 48px;
+    animation: glass-float 3s var(--ease) infinite;
   }
 
   .empty-icon :global(svg) {

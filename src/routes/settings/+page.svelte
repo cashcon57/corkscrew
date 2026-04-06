@@ -3840,12 +3840,20 @@
     height: 18px;
     background: #fff;
     border-radius: 50%;
-    transition: transform var(--duration-fast) var(--ease);
+    transition: transform var(--duration-fast) var(--ease-spring, cubic-bezier(0.34, 1.56, 0.64, 1)), width var(--duration-fast) var(--ease);
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
   }
 
   .toggle-on .toggle-thumb {
     transform: translateX(18px);
+  }
+
+  .toggle-switch:active .toggle-thumb {
+    width: 20px;
+  }
+
+  .toggle-on:active .toggle-thumb {
+    transform: translateX(16px);
   }
 
   /* --- Archives Management --- */

@@ -148,7 +148,7 @@
 </script>
 
 {#if visible}
-  <div class="conflict-panel" role="region" aria-label="File Conflicts" onkeydown={handleKeydown}>
+  <div class="conflict-panel panel-transition-enter" role="region" aria-label="File Conflicts" onkeydown={handleKeydown}>
     <!-- Header -->
     <div class="panel-header">
       <div class="panel-title-row">

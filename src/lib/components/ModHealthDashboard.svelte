@@ -17,6 +17,7 @@
 
   // ---- State ----
 
+  let displayScore = $state(0);
   let loading = $state(true);
   let health = $state<DeploymentHealth | null>(null);
   let conflicts = $state<FileConflict[]>([]);
@@ -81,6 +82,28 @@
     "Issues Found"
   );
 
+  // Animate displayScore toward overallScore over 800ms
+  $effect(() => {
+    const target = overallScore ?? 0;
+    const start = displayScore;
+    if (start === target) return;
+    const duration = 800;
+    const startTime = performance.now();
+    let raf: number;
+    function tick(now: number) {
+      const elapsed = now - startTime;
+      const t = Math.min(elapsed / duration, 1);
+      // ease-out cubic
+      const eased = 1 - Math.pow(1 - t, 3);
+      displayScore = Math.round(start + (target - start) * eased);
+      if (t < 1) {
+        raf = requestAnimationFrame(tick);
+      }
+    }
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  });
+
   function formatBytes(bytes: number): string {
     if (bytes === 0) return "0 B";
     const k = 1024;
@@ -115,7 +138,7 @@
     {#if overallScore !== null}
       <div class="score-card">
         <div class="score-ring" style="--score-color: {scoreColor}">
-          <span class="score-value">{overallScore}</span>
+          <span class="score-value" style="color: {scoreColor}; transition: color 0.4s var(--ease)">{displayScore}</span>
         </div>
         <div class="score-info">
           <span class="score-label" style="color: {scoreColor}">{scoreLabel}</span>
@@ -239,6 +262,7 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-3);
+    animation: glass-fade-in var(--duration-slow) var(--ease-out);
   }
 
   .health-header {

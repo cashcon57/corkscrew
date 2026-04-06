@@ -166,7 +166,7 @@
         </div>
         {#if account?.is_premium && !installedNexusIds.has(modDetail.mod_id)}
           <button
-            class="btn btn-primary stats-install-btn"
+            class="btn stats-install-btn"
             onclick={() => { if (modDetail) oninstall(modDetail); }}
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -242,12 +242,251 @@
 </div>
 
 <style>
+  .detail-view {
+    animation: glass-fade-in var(--duration-slow) var(--ease-out);
+  }
+
+  .detail-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    margin-bottom: var(--space-4);
+  }
+
+  /* --- Button overrides (base .btn / variants from global app.css) --- */
+
+  .detail-header .btn-ghost {
+    background: var(--surface);
+    border: 1px solid var(--separator);
+  }
+
+  .detail-header .btn-ghost:hover {
+    border-color: var(--text-quaternary);
+  }
+
+  .stats-install-btn {
+    background: var(--accent);
+    color: #fff;
+    padding: var(--space-2) var(--space-5);
+  }
+
+  .stats-install-btn:hover:not(:disabled) {
+    filter: brightness(1.1);
+    box-shadow: 0 1px 6px rgba(232, 128, 42, 0.3);
+  }
+
+  /* --- Hero Image --- */
+
   .mod-detail-hero {
     width: 100%;
     height: 280px;
     background-size: cover;
     background-position: center;
     border-radius: var(--radius-lg);
-    border: 1px solid var(--border-primary);
+    border: 1px solid var(--separator);
+    margin-bottom: var(--space-4);
+  }
+
+  /* --- Title Section --- */
+
+  .detail-title-section {
+    margin-bottom: var(--space-4);
+  }
+
+  .detail-name {
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin: 0 0 var(--space-1) 0;
+    letter-spacing: -0.02em;
+  }
+
+  .detail-author {
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin: 0 0 var(--space-2) 0;
+  }
+
+  .detail-summary {
+    font-size: 13px;
+    color: var(--text-tertiary);
+    line-height: 1.5;
+    margin: 0;
+  }
+
+  /* --- Stats Bar --- */
+
+  .detail-stats-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-3) 0;
+    border-top: 1px solid var(--separator);
+    border-bottom: 1px solid var(--separator);
+    margin-bottom: var(--space-5);
+  }
+
+  .detail-stats-left {
+    display: flex;
+    gap: var(--space-5);
+  }
+
+  .detail-stat {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .detail-stat-value {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .detail-stat-label {
+    font-size: 11px;
+    color: var(--text-tertiary);
+  }
+
+  .stats-install-btn {
+    flex-shrink: 0;
+  }
+
+  /* .badge / .badge-success inherited from global app.css */
+
+  /* --- Sections --- */
+
+  .detail-section {
+    margin-bottom: var(--space-6);
+  }
+
+  .detail-section-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0 0 var(--space-3) 0;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .title-count {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    background: var(--surface);
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+  }
+
+  /* --- Files Table --- */
+
+  .mods-table-container {
+    border: 1px solid var(--separator);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+
+  .mods-table-header {
+    display: grid;
+    grid-template-columns: 1fr 80px 80px 100px 80px;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--surface);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
+  .mods-table-row {
+    display: grid;
+    grid-template-columns: 1fr 80px 80px 100px 80px;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border-top: 1px solid var(--separator);
+    font-size: 12px;
+    color: var(--text-secondary);
+    align-items: center;
+    transition: background var(--duration-fast) var(--ease);
+  }
+
+  .mods-table-row:hover {
+    background: var(--surface-hover);
+  }
+
+  .col-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-primary);
+    font-weight: 500;
+  }
+
+  .tag {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+    font-size: 11px;
+    font-weight: 500;
+    background: var(--surface);
+    color: var(--text-secondary);
+  }
+
+  .spinner-sm-ring {
+    width: 12px;
+    height: 12px;
+    border: 2px solid rgba(255, 255, 255, 0.3);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin 0.6s linear infinite;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  /* --- Loading State --- */
+
+  .loading-container {
+    display: flex;
+    justify-content: center;
+    padding: var(--space-12) 0;
+  }
+
+  .loading-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-3);
+  }
+
+  .spinner {
+    width: 32px;
+    height: 32px;
+  }
+
+  .spinner-ring {
+    width: 100%;
+    height: 100%;
+    border: 3px solid var(--separator);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+
+  .loading-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0;
+  }
+
+  .loading-detail {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    margin: 0;
   }
 </style>

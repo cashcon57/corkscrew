@@ -13,7 +13,12 @@
 <!-- Phase 3 will implement this floating batch action toolbar -->
 {#if selectedCount > 0}
   <div class="batch-bar">
-    <span class="batch-count">{selectedCount} mod{selectedCount === 1 ? "" : "s"} selected</span>
+    <span class="batch-count">
+      {#key selectedCount}
+        <span class="batch-count-num">{selectedCount}</span>
+      {/key}
+      mod{selectedCount === 1 ? "" : "s"} selected
+    </span>
     <div class="batch-actions">
       <button class="btn btn-sm btn-secondary" onclick={onEnableAll}>Enable All</button>
       <button class="btn btn-sm btn-secondary" onclick={onDisableAll}>Disable All</button>
@@ -59,6 +64,11 @@
     font-weight: 600;
     color: var(--text-primary);
     white-space: nowrap;
+  }
+
+  .batch-count-num {
+    display: inline-block;
+    animation: glass-scale-pop var(--duration-fast) var(--ease-out);
   }
 
   .batch-actions {

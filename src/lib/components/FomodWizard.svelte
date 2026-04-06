@@ -261,6 +261,7 @@
       </div>
 
       <!-- Content -->
+      {#key currentStep}
       <div class="wizard-content">
         {#each step.groups as group (group.name)}
           <div class="group-section">
@@ -350,6 +351,7 @@
           </div>
         {/each}
       </div>
+      {/key}
 
       <!-- Footer -->
       <div class="wizard-footer">
@@ -619,6 +621,7 @@
     overflow-y: auto;
     padding: var(--space-5) var(--space-6);
     scroll-behavior: smooth;
+    animation: glass-fade-in var(--duration) var(--ease-out);
   }
 
   /* ---- Group Sections ---- */

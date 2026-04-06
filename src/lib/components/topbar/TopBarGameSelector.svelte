@@ -195,7 +195,7 @@
       var(--glass-edge-shadow),
       0 8px 32px rgba(0, 0, 0, 0.3),
       0 1px 4px rgba(0, 0, 0, 0.15);
-    animation: dropdownIn 0.2s var(--ease-out);
+    animation: glass-dropdown-in 0.2s var(--ease-spring);
     max-height: 320px;
     overflow-y: auto;
   }
@@ -277,8 +277,4 @@
     color: var(--text-primary);
   }
 
-  @keyframes dropdownIn {
-    from { opacity: 0; transform: translateY(-4px); }
-    to { opacity: 1; transform: translateY(0); }
-  }
 </style>

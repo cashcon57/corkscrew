@@ -37,7 +37,7 @@
   $effect(() => { if (gameId && bottleName) load(); });
 </script>
 
-<div class="session-panel">
+<div class="session-panel panel-transition-enter">
   <!-- Stability Summary -->
   <div class="section-card">
     <div class="card-header">

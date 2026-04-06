@@ -274,9 +274,10 @@
     <div class="logs-layout" class:has-selection={selectedLog !== null}>
       <!-- Crash Log Timeline -->
       <div class="logs-list" role="listbox" aria-label="Crash log entries">
-        {#each logs as log (log.filename)}
+        {#each logs as log, i (log.filename)}
           <button
             class="log-entry"
+            style="animation: glass-fade-in var(--duration-slow) var(--ease) both; animation-delay: {Math.min(i, 15) * 30}ms"
             class:log-entry-selected={selectedLogFilename === log.filename}
             onclick={() => selectLog(log)}
             role="option"
@@ -682,6 +683,8 @@
   .log-entry:hover {
     background: var(--surface-hover);
     border-color: var(--separator-opaque);
+    transform: translateY(-1px);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
   }
 
   .log-entry-selected {

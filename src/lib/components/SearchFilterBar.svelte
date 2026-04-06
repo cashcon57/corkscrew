@@ -89,6 +89,7 @@
   }
   .sfb-search-combo:focus-within {
     border-color: var(--system-accent);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--system-accent) 30%, transparent);
   }
 
   .sfb-game-prefix {

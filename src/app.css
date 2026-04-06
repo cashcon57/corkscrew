@@ -336,6 +336,12 @@ button {
   letter-spacing: inherit;
   background: transparent;
   color: inherit;
+  transition: transform 80ms var(--ease);
+}
+
+button:active:not(:disabled):not(.toggle-switch):not(.toggle-switch-mini):not(.toggle-btn),
+[role="button"]:active:not(:disabled) {
+  transform: scale(0.97);
 }
 
 input, select, textarea {
@@ -365,6 +371,156 @@ a:hover {
 button:focus-visible,
 [role="radio"]:focus-visible {
   outline-offset: -1px;
+}
+
+/* --- Global Button & Badge Utilities --- */
+/* Shared across all components — no per-component duplication needed */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border: none;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--duration-fast) var(--ease);
+  white-space: nowrap;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-sm {
+  padding: var(--space-1) var(--space-3);
+  font-size: 12px;
+  min-height: 28px;
+}
+
+.btn-xs {
+  padding: 2px var(--space-2);
+  font-size: 11px;
+  min-height: 22px;
+}
+
+.btn-lg {
+  padding: var(--space-3) var(--space-6);
+  font-size: 14px;
+}
+
+.btn-primary {
+  background: var(--system-accent);
+  color: var(--system-accent-on);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--system-accent-hover);
+  box-shadow: 0 1px 6px rgba(0, 122, 255, 0.25);
+}
+
+.btn-secondary {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+  border: 1px solid var(--separator);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: var(--surface-active);
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text-secondary);
+  padding: var(--space-2) var(--space-3);
+  font-weight: 500;
+}
+
+.btn-ghost:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.btn-danger {
+  background: var(--red-subtle);
+  color: var(--red);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: rgba(255, 69, 58, 0.25);
+}
+
+.btn-ghost-danger {
+  background: transparent;
+  color: var(--text-tertiary);
+}
+
+.btn-ghost-danger:hover:not(:disabled) {
+  background: var(--red-subtle);
+  color: var(--red);
+}
+
+.btn-accent {
+  background: var(--system-accent);
+  color: #fff;
+}
+
+.btn-accent:hover:not(:disabled) {
+  filter: brightness(1.1);
+  box-shadow: 0 1px 6px rgba(0, 122, 255, 0.25);
+}
+
+.btn-view-details {
+  background: var(--accent);
+  color: #fff;
+  flex: 1;
+  justify-content: center;
+}
+
+.btn-view-details:hover:not(:disabled) {
+  filter: brightness(1.1);
+  box-shadow: 0 1px 6px rgba(232, 128, 42, 0.3);
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: var(--radius-sm);
+  font-weight: 500;
+  background: var(--surface);
+  color: var(--text-secondary);
+}
+
+.badge-blue {
+  background: var(--blue-subtle);
+  color: var(--blue);
+}
+
+.badge-red {
+  background: var(--red-subtle);
+  color: var(--red);
+}
+
+.badge-yellow {
+  background: var(--yellow-subtle);
+  color: var(--yellow);
+}
+
+.badge-green, .badge-success {
+  background: var(--green-subtle);
+  color: var(--green);
+}
+
+.badge-accent {
+  background: var(--accent-subtle);
+  color: var(--accent);
 }
 
 /* --- Selection --- */
@@ -594,12 +750,10 @@ button:focus-visible,
   from {
     opacity: 0;
     transform: translateY(6px) scale(0.99);
-    filter: blur(4px);
   }
   to {
     opacity: 1;
     transform: translateY(0) scale(1);
-    filter: blur(0);
   }
 }
 
@@ -608,19 +762,17 @@ button:focus-visible,
   from {
     opacity: 0;
     transform: translateY(12px);
-    filter: blur(6px);
   }
   to {
     opacity: 1;
     transform: translateY(0);
-    filter: blur(0);
   }
 }
 
-/* Glass glow pulse — pulsing glow for active/ready states */
+/* Glass glow pulse — pulsing glow for active/ready states (color configurable via --glow-color) */
 @keyframes glass-glow-pulse {
-  0%, 100% { box-shadow: 0 0 8px rgba(52, 199, 89, 0.3), var(--glass-refraction); }
-  50% { box-shadow: 0 0 20px rgba(52, 199, 89, 0.5), 0 0 40px rgba(52, 199, 89, 0.15), var(--glass-refraction); }
+  0%, 100% { box-shadow: 0 0 8px var(--glow-color, rgba(52, 199, 89, 0.3)), var(--glass-refraction); }
+  50% { box-shadow: 0 0 20px var(--glow-color, rgba(52, 199, 89, 0.5)), 0 0 40px var(--glow-color-outer, rgba(52, 199, 89, 0.15)), var(--glass-refraction); }
 }
 
 /* Glass checkmark draw — stroke-dashoffset animation for SVG checkmarks */
@@ -640,6 +792,72 @@ button:focus-visible,
 @keyframes glass-progress-shimmer {
   0% { transform: translateX(-100%); }
   100% { transform: translateX(250%); }
+}
+
+/* Glass dropdown entrance — scale + translate for menus/popovers */
+@keyframes glass-dropdown-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97) translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+/* Glass toast exit — slide up + fade + blur for toast dismissal */
+@keyframes glass-toast-exit {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+}
+
+/* Glass dialog dismiss — scale down + fade for modal exit */
+@keyframes glass-dialog-dismiss {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+}
+
+/* Glass float — gentle idle bobbing for empty state icons */
+@keyframes glass-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
+
+/* Glass page enter — subtle entrance for route transitions */
+@keyframes glass-page-enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Glass danger glow — pulsing red glow for danger/conflict states */
+@keyframes glass-danger-glow {
+  0%, 100% { box-shadow: 0 0 6px rgba(255, 69, 58, 0.2); }
+  50% { box-shadow: 0 0 14px rgba(255, 69, 58, 0.4), 0 0 28px rgba(255, 69, 58, 0.1); }
+}
+
+/* Toast timer shrink — countdown bar for auto-dismiss toasts */
+@keyframes toast-timer-shrink {
+  from { transform: scaleX(1); }
+  to { transform: scaleX(0); }
 }
 
 /* Glass banner entrance — slide down + fade for update/notification banners */

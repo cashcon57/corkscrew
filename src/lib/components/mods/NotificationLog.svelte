@@ -81,8 +81,8 @@
       {:else if notifications.length === 0}
         <div class="notif-empty">No notifications yet</div>
       {:else}
-        {#each notifications as notif (notif.id)}
-          <div class="notif-entry">
+        {#each notifications as notif, i (notif.id)}
+          <div class="notif-entry" style="animation: glass-fade-in var(--duration-slow) var(--ease) both; animation-delay: {Math.min(i, 15) * 30}ms">
             <span class="notif-icon" style="color: {levelColor(notif.level)}">{levelIcon(notif.level)}</span>
             <div class="notif-content">
               <span class="notif-message">{notif.message}</span>

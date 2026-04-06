@@ -96,6 +96,7 @@
   let installDetail = $state("");
   let installFlowRef = $state<ReturnType<typeof ModInstallFlow> | null>(null);
   let loadingMods = $state(false);
+  let initialAnimDone = $state(false);
   let confirmUninstall = $state<number | null>(null);
   let togglingMod = $state<number | null>(null);
   let launching = $state(false);
@@ -472,6 +473,9 @@
     const el = e.target as HTMLDivElement;
     scrollTop = el.scrollTop;
   }
+
+  // Disable stagger entrance animation after initial load
+  $effect(() => { if ($installedMods.length > 0) setTimeout(() => { initialAnimDone = true; }, 500); });
 
   // Measure container height on mount and resize
   $effect(() => {
@@ -2916,6 +2920,7 @@
                     ondragover={(e) => handleRowDragOver(e, globalIndex)}
                     ondragend={handleRowDragEnd}
                     ondrop={(e) => handleRowDrop(e, globalIndex)}
+                    style={!initialAnimDone ? `animation: glass-fade-in var(--duration-slow) var(--ease) both; animation-delay: ${Math.min(sliceIdx, 15) * 30}ms` : ''}
                   >
                     <span class="col-check" role="checkbox" aria-checked={selectedModIds.has(mod.id)} onclick={(e) => { e.stopPropagation(); toggleSelectMod(mod.id, e); }}><span class="check-box" class:check-box-checked={selectedModIds.has(mod.id)}>{#if selectedModIds.has(mod.id)}<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12" /></svg>{/if}</span></span>
                     <span class="col-grip"><span class="drag-handle" title="Drag to reorder" aria-label="Drag to reorder {mod.name}"><svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><circle cx="4" cy="2.5" r="1" /><circle cx="8" cy="2.5" r="1" /><circle cx="4" cy="6" r="1" /><circle cx="8" cy="6" r="1" /><circle cx="4" cy="9.5" r="1" /><circle cx="8" cy="9.5" r="1" /></svg></span></span>
@@ -3014,6 +3019,7 @@
                   class:row-checked={selectedModIds.has(mod.id)}
                   class:row-has-conflict={conflictModIds.has(mod.id)}
                   onclick={(e) => handleRowClick(e, mod, -1 - item.disabledIndex)}
+                  style={!initialAnimDone ? `animation: glass-fade-in var(--duration-slow) var(--ease) both; animation-delay: ${Math.min(sliceIdx, 15) * 30}ms` : ''}
                 >
                   <span class="col-check" role="checkbox" aria-checked={selectedModIds.has(mod.id)} onclick={(e) => { e.stopPropagation(); toggleSelectMod(mod.id, e); }}><span class="check-box" class:check-box-checked={selectedModIds.has(mod.id)}>{#if selectedModIds.has(mod.id)}<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12" /></svg>{/if}</span></span>
                   <span class="col-grip"></span>
@@ -3056,6 +3062,7 @@
                 ondragover={(e) => handleRowDragOver(e, i)}
                 ondragend={handleRowDragEnd}
                 ondrop={(e) => handleRowDrop(e, i)}
+                style={!initialAnimDone ? `animation: glass-fade-in var(--duration-slow) var(--ease) both; animation-delay: ${Math.min(sliceIdx, 15) * 30}ms` : ''}
               >
                 <!-- Bulk Select Checkbox -->
                 <span class="col-check" role="checkbox" aria-checked={selectedModIds.has(mod.id)} onclick={(e) => { e.stopPropagation(); toggleSelectMod(mod.id, e); }}><span class="check-box" class:check-box-checked={selectedModIds.has(mod.id)}>{#if selectedModIds.has(mod.id)}<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12" /></svg>{/if}</span></span>
@@ -4243,9 +4250,10 @@
     height: 36px;
     box-sizing: border-box;
     transition:
+      transform var(--duration-fast) var(--ease),
+      box-shadow var(--duration-fast) var(--ease),
       background var(--duration-fast) var(--ease),
-      opacity var(--duration-fast) var(--ease),
-      box-shadow var(--duration-fast) var(--ease);
+      opacity var(--duration-fast) var(--ease);
   }
 
   /* Narrow window: hide Category, Origin, Source, Files, Date columns */
@@ -4268,6 +4276,8 @@
 
   .table-row:hover {
     background: var(--surface-hover);
+    transform: translateY(-1px);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
   }
 
   .table-row.row-disabled {
@@ -4281,8 +4291,10 @@
   /* --- Drag reorder visual feedback --- */
 
   .table-row.row-dragging {
-    opacity: 0.35;
-    background: var(--surface-active);
+    opacity: 0.8;
+    transform: scale(1.02);
+    box-shadow: var(--shadow-lg);
+    z-index: 10;
   }
 
   .table-row.row-drag-above {
@@ -4360,7 +4372,8 @@
     border-radius: 50%;
     background: #fff;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
-    transition: transform var(--duration) var(--ease);
+    transition: transform var(--duration) var(--ease-spring),
+                width var(--duration-fast) var(--ease);
   }
 
   .toggle-on .toggle-thumb {
@@ -4369,6 +4382,14 @@
 
   .toggle-busy .toggle-track {
     opacity: 0.6;
+  }
+
+  .toggle-switch:active .toggle-thumb {
+    width: 16px;
+    border-radius: 7px;
+  }
+  .toggle-on:active .toggle-thumb {
+    transform: translateX(12px);
   }
 
   /* ============================
@@ -4410,6 +4431,7 @@
      ============================ */
   .table-row.row-has-conflict {
     border-left: 2px solid var(--yellow);
+    animation: glass-danger-glow 2s var(--ease) 1;
   }
 
   .conflict-icon {
@@ -4480,6 +4502,7 @@
     letter-spacing: 0.03em;
     cursor: help;
     transition: background var(--duration-fast) var(--ease);
+    animation: glass-scale-pop var(--duration) var(--ease-out);
   }
 
   .update-badge:hover {
@@ -4599,12 +4622,7 @@
     box-shadow: var(--shadow-lg);
     z-index: 100;
     padding: 4px;
-    animation: dropdownIn var(--duration-fast) var(--ease-out);
-  }
-
-  @keyframes dropdownIn {
-    from { transform: translateY(-4px); opacity: 0; }
-    to { transform: translateY(0); opacity: 1; }
+    animation: glass-dropdown-in 0.2s var(--ease-spring);
   }
 
   .overflow-item {

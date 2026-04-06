@@ -149,7 +149,7 @@
 
           <!-- Expanded Detail -->
           {#if check.detail && isExpanded(check.name)}
-            <div class="check-detail">
+            <div class="check-detail panel-transition-enter">
               <p class="check-detail-text">{check.detail}</p>
             </div>
           {/if}

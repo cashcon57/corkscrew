@@ -245,7 +245,7 @@
 
             <!-- File Content (expanded) -->
             {#if expandedFile === file.file_name}
-              <div class="file-content">
+              <div class="file-content panel-transition-enter">
                 {#each Object.entries(file.sections) as [sectionName, entries], sIdx}
                   {#if sIdx > 0}
                     <div class="section-divider"></div>

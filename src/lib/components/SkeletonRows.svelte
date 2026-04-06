@@ -11,7 +11,7 @@
 
 <div class="skeleton-rows">
   {#each Array(rows) as _, r}
-    <div class="skeleton-row">
+    <div class="skeleton-row" style="animation-delay: {r * 80}ms">
       {#each Array(columns) as _, c}
         <div
           class="skeleton skeleton-cell"

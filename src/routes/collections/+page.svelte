@@ -1323,7 +1323,7 @@
       <div class="my-collections-grid">
         {#each myCollections as col, i (col.name + ':' + i)}
           <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <div class="my-collection-card" role="button" tabindex="0" onclick={() => viewLocalCollection(col)} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') viewLocalCollection(col); }}>
+          <div class="my-collection-card" role="button" tabindex="0" onclick={() => viewLocalCollection(col)} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') viewLocalCollection(col); }} style="animation: glass-fade-in var(--duration-slow) var(--ease) both; animation-delay: {Math.min(i, 15) * 30}ms">
             <div class="my-card-image">
               {#if col.image_url}
                 <img src={col.image_url} alt={col.name} loading="lazy" />
@@ -2242,7 +2242,7 @@
           {#each filtered as collection, i (collection.slug)}
             <div
               class="collection-card"
-              style="animation-delay: {Math.min(i, 20) * 30}ms"
+              style="animation-delay: {Math.min(i, 15) * 30}ms"
             >
               {#if collection.image_url}
                 <div class="card-image">
@@ -2345,7 +2345,7 @@
 
                 <div class="card-actions">
                   <button
-                    class="btn btn-accent btn-sm"
+                    class="btn btn-view-details btn-sm"
                     onclick={() => viewCollectionDetail(collection)}
                   >
                     View Details
@@ -2886,7 +2886,7 @@
     transition: border-color var(--duration-fast) var(--ease),
                 box-shadow var(--duration-fast) var(--ease),
                 transform var(--duration-fast) var(--ease);
-    animation: cardFadeIn var(--duration-slow) var(--ease) both;
+    animation: glass-fade-in var(--duration-slow) var(--ease) both;
     display: flex;
     flex-direction: column;
   }
@@ -2894,12 +2894,7 @@
   .collection-card:hover {
     border-color: var(--separator);
     box-shadow: var(--glass-refraction), var(--glass-edge-shadow), 0 4px 12px rgba(0, 0, 0, 0.15);
-    transform: translateY(-2px);
-  }
-
-  @keyframes cardFadeIn {
-    from { opacity: 0; transform: translateY(6px); }
-    to { opacity: 1; transform: translateY(0); }
+    transform: translateY(-2px) rotate(-0.3deg);
   }
 
   .card-image {
@@ -3104,6 +3099,7 @@
     display: flex;
     gap: var(--space-2);
     margin-top: auto;
+    padding-top: var(--space-2);
   }
 
   /* ---- Buttons ---- */
@@ -3148,6 +3144,8 @@
     filter: brightness(1.1);
     box-shadow: 0 1px 6px rgba(0, 122, 255, 0.25);
   }
+
+  /* .btn-view-details inherited from global app.css */
 
   .btn-primary {
     background: var(--system-accent);
@@ -3983,12 +3981,13 @@
     overflow: hidden;
     cursor: pointer;
     text-align: left;
-    transition: background var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease);
+    transition: background var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease), transform var(--duration-fast) var(--ease);
   }
 
   .my-collection-card:hover {
     background: var(--surface-hover);
     border-color: var(--accent-muted);
+    transform: translateY(-2px) rotate(-0.3deg);
   }
 
   .my-card-image {

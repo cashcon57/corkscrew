@@ -93,6 +93,21 @@
     return `~${hrs}h ${mins}m`;
   });
 
+  // Toast exit animation state
+  let toastExiting = $state(false);
+  let toastErrorExiting = $state(false);
+
+  function dismissError() {
+    if (toastErrorExiting) return;
+    toastErrorExiting = true;
+    setTimeout(() => { errorMessage.set(null); toastErrorExiting = false; }, 300);
+  }
+  function dismissSuccess() {
+    if (toastExiting) return;
+    toastExiting = true;
+    setTimeout(() => { successMessage.set(null); toastExiting = false; }, 300);
+  }
+
   // First-run wizard state
   let showFirstRunWizard = $state(false);
   let showTelemetryBanner = $state(false);
@@ -958,7 +973,7 @@
   $effect(() => {
     if ($successMessage) {
       if (successTimer) clearTimeout(successTimer);
-      successTimer = setTimeout(() => successMessage.set(null), 4000);
+      successTimer = setTimeout(() => dismissSuccess(), 4000);
     }
     return () => { if (successTimer) clearTimeout(successTimer); };
   });
@@ -993,7 +1008,7 @@
       </button>
     </div>
 
-    <ul class="nav-list">
+    <ul class="nav-list" style="--active-idx: {navItems.findIndex(i => i.id === $currentPage)}">
       {#each navItems as item}
         <li>
           <button
@@ -1262,7 +1277,9 @@
             <line x1="12" y1="15" x2="12" y2="3" />
           </svg>
           {#if activeDownloads > 0}
-            <span class="queue-badge queue-badge-active">{activeDownloads}</span>
+            {#key activeDownloads}
+              <span class="queue-badge queue-badge-active">{activeDownloads}</span>
+            {/key}
           {:else if failedDownloads > 0}
             <span class="queue-badge queue-badge-error">{failedDownloads}</span>
           {/if}
@@ -1279,7 +1296,9 @@
             <path d="M13.73 21a2 2 0 0 1-3.46 0" />
           </svg>
           {#if $notificationCount > 0}
-            <span class="queue-badge queue-badge-active">{$notificationCount}</span>
+            {#key $notificationCount}
+              <span class="queue-badge queue-badge-active">{$notificationCount}</span>
+            {/key}
           {/if}
         </button>
       </div>
@@ -1385,14 +1404,14 @@
       scrolled={contentScrolled}
     />
       {#if $errorMessage}
-        <div class="toast toast-error" role="alert">
+        <div class="toast toast-error" class:toast-exiting={toastErrorExiting} role="alert">
           <svg class="toast-icon" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="7" cy="7" r="6" />
             <line x1="7" y1="4" x2="7" y2="7.5" />
             <circle cx="7" cy="10" r="0.5" fill="currentColor" />
           </svg>
           <span class="toast-text">{$errorMessage}</span>
-          <button class="toast-dismiss" onclick={() => errorMessage.set(null)} aria-label="Dismiss error">
+          <button class="toast-dismiss" onclick={dismissError} aria-label="Dismiss error">
             <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
               <line x1="2" y1="2" x2="8" y2="8" />
               <line x1="8" y1="2" x2="2" y2="8" />
@@ -1402,18 +1421,19 @@
       {/if}
 
       {#if $successMessage}
-        <div class="toast toast-success" role="status">
+        <div class="toast toast-success" class:toast-exiting={toastExiting} role="status">
           <svg class="toast-icon" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="7" cy="7" r="6" />
             <path d="M4.5 7l2 2 3-3.5" />
           </svg>
           <span class="toast-text">{$successMessage}</span>
-          <button class="toast-dismiss" onclick={() => successMessage.set(null)} aria-label="Dismiss notification">
+          <button class="toast-dismiss" onclick={dismissSuccess} aria-label="Dismiss notification">
             <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
               <line x1="2" y1="2" x2="8" y2="8" />
               <line x1="8" y1="2" x2="2" y2="8" />
             </svg>
           </button>
+          <div class="toast-timer"></div>
         </div>
       {/if}
 
@@ -1612,7 +1632,11 @@
         </div>
       {/if}
 
-      <slot />
+      {#key $currentPage}
+        <div class="page-transition-wrapper">
+          <slot />
+        </div>
+      {/key}
     </main>
   </div>
 
@@ -1744,7 +1768,7 @@
     flex-direction: column;
     overflow: hidden;
     position: relative;
-    transition: width 0.2s var(--ease), min-width 0.2s var(--ease);
+    transition: width var(--duration-slow) var(--ease-spring), min-width var(--duration-slow) var(--ease-spring);
     border: 0.5px solid rgba(255, 255, 255, 0.06);
   }
 
@@ -1897,6 +1921,24 @@
     -webkit-overflow-scrolling: touch;
     overscroll-behavior-y: auto;
     min-height: 0;
+    position: relative;
+  }
+
+  .nav-list::before {
+    content: '';
+    position: absolute;
+    left: var(--space-2);
+    right: var(--space-2);
+    height: 36px;
+    top: calc(var(--active-idx) * 39px);
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    backdrop-filter: blur(12px) saturate(1.3);
+    -webkit-backdrop-filter: blur(12px) saturate(1.3);
+    border-radius: var(--radius);
+    transition: top var(--duration) var(--ease-spring);
+    box-shadow: inset 0 0.5px 0 0 rgba(255,255,255,0.1), inset 0 -0.5px 0 0 rgba(255,255,255,0.04);
+    z-index: 0;
+    pointer-events: none;
   }
 
   .nav-item {
@@ -1911,6 +1953,8 @@
     font-weight: 500;
     transition: all var(--duration-fast) var(--ease);
     text-align: left;
+    position: relative;
+    z-index: 1;
   }
 
   .nav-item:hover {
@@ -1919,12 +1963,7 @@
   }
 
   .nav-item.active {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
-    backdrop-filter: blur(12px) saturate(1.3);
-    -webkit-backdrop-filter: blur(12px) saturate(1.3);
     color: var(--accent);
-    box-shadow: inset 0 0.5px 0 0 rgba(255, 255, 255, 0.1),
-                inset 0 -0.5px 0 0 rgba(255, 255, 255, 0.04);
   }
 
   .nav-icon {
@@ -1934,6 +1973,11 @@
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
+    transition: transform var(--duration-fast) var(--ease-spring);
+  }
+
+  .nav-item:active .nav-icon {
+    transform: scale(0.85);
   }
 
   /* --- Download mini-bar --- */
@@ -1950,6 +1994,17 @@
     background: var(--system-accent);
     transition: width 0.3s var(--ease);
     min-width: 2%;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .download-mini-fill::after {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; bottom: 0;
+    width: 40%;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
+    animation: glass-progress-shimmer 1.5s var(--ease) infinite;
   }
 
   /* --- Sidebar footer --- */
@@ -2501,6 +2556,10 @@
     position: relative;
   }
 
+  .page-transition-wrapper {
+    animation: glass-page-enter 200ms var(--ease-out);
+  }
+
   @media (max-width: 800px) {
     .content {
       padding: 0 var(--space-3) var(--space-3);
@@ -2525,6 +2584,7 @@
     backdrop-filter: var(--glass-blur-heavy);
     -webkit-backdrop-filter: var(--glass-blur-heavy);
     max-width: 400px;
+    overflow: hidden;
   }
 
   .toast-error {
@@ -2538,6 +2598,10 @@
     border: 1px solid rgba(48, 209, 88, 0.25);
     color: var(--green);
     top: calc(52px + var(--space-2) + 52px);
+    animation: toastIn var(--duration-slow) var(--ease-out),
+               glass-glow-pulse 1.5s var(--ease) 0.4s 2;
+    --glow-color: rgba(52, 199, 89, 0.3);
+    --glow-color-outer: rgba(52, 199, 89, 0.15);
   }
 
   .toast-icon {
@@ -2566,12 +2630,39 @@
     opacity: 1;
   }
 
+  .toast-exiting {
+    animation: glass-toast-exit 0.3s var(--ease-in) forwards !important;
+  }
+
+  .toast-timer {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: currentColor;
+    opacity: 0.2;
+    transform-origin: left;
+    animation: toast-timer-shrink 4s linear forwards;
+    border-radius: 0 0 var(--radius) var(--radius);
+  }
+
+  .toast-success .toast-icon path {
+    stroke-dasharray: 24;
+    stroke-dashoffset: 24;
+    animation: glass-checkmark-draw 0.5s var(--ease-out) 0.15s forwards;
+  }
+
   .toast-nxm {
     background: rgba(10, 132, 255, 0.18);
     border: 1px solid rgba(10, 132, 255, 0.3);
     color: var(--text-primary);
     max-width: 480px;
     flex-wrap: wrap;
+    animation: toastIn var(--duration-slow) var(--ease-out),
+               glass-glow-pulse 1.5s var(--ease) 0.4s 1;
+    --glow-color: rgba(10, 132, 255, 0.3);
+    --glow-color-outer: rgba(10, 132, 255, 0.15);
   }
 
   .toast-nxm .toast-text {
@@ -2683,6 +2774,7 @@
     align-items: center;
     justify-content: center;
     padding: 0 3px;
+    animation: glass-scale-pop var(--duration) var(--ease-out);
   }
 
   .queue-badge-active {
@@ -3168,10 +3260,13 @@
      Replace translucent glass backgrounds with opaque equivalents
      when there's no compositor-backed vibrancy behind them.
      ============================================================ */
-  :global(html:not(.vibrancy-active)) .nav-item.active {
+  :global(html:not(.vibrancy-active)) .nav-list::before {
     background: var(--surface-hover);
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
+  }
+  :global(html:not(.vibrancy-active)) .nav-item.active {
+    background: transparent;
   }
   :global(html:not(.vibrancy-active)) .toast {
     background: var(--bg-grouped);

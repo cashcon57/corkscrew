@@ -118,6 +118,7 @@
             class:selected={selectedIndex === i}
             onclick={() => result.action()}
             onmouseenter={() => selectedIndex = i}
+            style="animation: glass-fade-in var(--duration-fast) var(--ease) both; animation-delay: {Math.min(i, 10) * 25}ms"
           >
             <span class="result-type-badge" class:type-page={result.type === "page"} class:type-mod={result.type === "mod"} class:type-action={result.type === "action"}>
               {typeLabels[result.type]}
@@ -188,6 +189,10 @@
     font-size: 15px;
     color: var(--text-primary);
     font-weight: 400;
+  }
+
+  .spotlight-input:focus {
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--system-accent) 30%, transparent);
   }
 
   .spotlight-input::placeholder {

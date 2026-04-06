@@ -315,11 +315,19 @@
     height: 10px;
     border-radius: 50%;
     background: white;
-    transition: transform var(--duration-fast) var(--ease);
+    transition: transform var(--duration-fast) var(--ease-spring, cubic-bezier(0.34, 1.56, 0.64, 1)), width var(--duration-fast) var(--ease);
   }
 
   .toggle-on .toggle-thumb-mini {
     transform: translateX(10px);
+  }
+
+  .toggle-switch-mini:active .toggle-thumb-mini {
+    width: 12px;
+  }
+
+  .toggle-on:active .toggle-thumb-mini {
+    transform: translateX(8px);
   }
 
   .category-chip-disabled {

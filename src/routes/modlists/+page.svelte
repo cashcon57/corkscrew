@@ -1102,7 +1102,7 @@
       {:else}
         <div class="modlist-grid">
           {#each filtered as modlist, i}
-            <div class="modlist-card" style="animation-delay: {Math.min(i, 20) * 30}ms">
+            <div class="modlist-card" style="animation-delay: {Math.min(i, 15) * 30}ms">
               {#if modlist.image_url}
                 <div class="card-image">
                   <img src={modlist.image_url} alt={modlist.title} loading="lazy" />
@@ -1159,7 +1159,7 @@
 
                 <div class="card-actions">
                   <button
-                    class="btn btn-accent btn-sm"
+                    class="btn btn-view-details btn-sm"
                     onclick={() => viewModlistDetail(modlist)}
                   >
                     View Details
@@ -1505,7 +1505,7 @@
   /* Grid */
   .modlist-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
     gap: var(--space-4);
   }
 
@@ -1517,19 +1517,17 @@
     overflow: hidden;
     box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
     transition: border-color var(--duration-fast) var(--ease),
-                box-shadow var(--duration-fast) var(--ease);
-    animation: cardFadeIn var(--duration-slow) var(--ease) both;
+                box-shadow var(--duration-fast) var(--ease),
+                transform var(--duration-fast) var(--ease);
+    animation: glass-fade-in var(--duration-slow) var(--ease) both;
     display: flex;
     flex-direction: column;
   }
 
   .modlist-card:hover {
     border-color: var(--separator);
-  }
-
-  @keyframes cardFadeIn {
-    from { opacity: 0; transform: translateY(6px); }
-    to { opacity: 1; transform: translateY(0); }
+    transform: translateY(-2px) rotate(-0.3deg);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow), 0 4px 12px rgba(0, 0, 0, 0.15);
   }
 
   .card-image {
@@ -1647,8 +1645,8 @@
 
   .stat-num {
     font-size: 12px;
-    font-weight: 700;
-    color: var(--text-primary);
+    font-weight: 600;
+    color: var(--text-secondary);
     font-variant-numeric: tabular-nums;
   }
 
@@ -1662,6 +1660,7 @@
     display: flex;
     gap: var(--space-2);
     margin-top: auto;
+    padding-top: var(--space-2);
   }
 
   .btn {
@@ -1700,6 +1699,8 @@
   .btn-accent:hover:not(:disabled) {
     filter: brightness(1.1);
   }
+
+  /* .btn-view-details inherited from global app.css */
 
   .btn-primary {
     background: var(--system-accent);

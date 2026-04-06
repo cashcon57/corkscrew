@@ -1150,7 +1150,11 @@ dependencies = [
 
 [[package]]
 name = "corkscrew"
+<<<<<<< Updated upstream
 version = "0.11.3"
+=======
+version = "0.11.4"
+>>>>>>> Stashed changes
 dependencies = [
  "anyhow",
  "ba2",

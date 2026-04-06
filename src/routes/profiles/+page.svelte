@@ -194,8 +194,8 @@
       </div>
     {:else}
       <div class="profile-list">
-        {#each profiles as profile}
-          <div class="profile-card" class:active={profile.is_active}>
+        {#each profiles as profile, i}
+          <div class="profile-card" class:active={profile.is_active} style="animation: glass-fade-in var(--duration-slow) var(--ease) both; animation-delay: {Math.min(i, 15) * 30}ms">
             <div class="profile-info">
               {#if editingId === profile.id}
                 <input
@@ -360,7 +360,12 @@
     border: 1px solid var(--separator);
     border-radius: var(--radius-lg);
     box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
-    transition: border-color var(--duration-fast) var(--ease);
+    transition: border-color var(--duration-fast) var(--ease), transform var(--duration-fast) var(--ease), box-shadow var(--duration-fast) var(--ease);
+  }
+
+  .profile-card:hover {
+    transform: translateY(-2px) rotate(-0.3deg);
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow), 0 4px 12px rgba(0, 0, 0, 0.15);
   }
 
   .profile-card.active {

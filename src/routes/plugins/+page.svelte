@@ -411,6 +411,7 @@
             ondragend={handleDragEnd}
             ondrop={(e) => pluginSearch ? null : handleDrop(e, realIndex)}
             role="listitem"
+            style="animation: glass-fade-in var(--duration-slow) var(--ease) both; animation-delay: {Math.min(i, 15) * 30}ms"
           >
             <span class="col-drag">
               <svg class="drag-handle" width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-label="Drag to reorder {plugin.filename}">
@@ -782,7 +783,7 @@
     grid-template-columns: 24px 40px 44px 1fr 56px 60px;
     padding: var(--space-2) var(--space-4);
     align-items: center;
-    transition: background var(--duration-fast) var(--ease);
+    transition: background var(--duration-fast) var(--ease), transform var(--duration-fast) var(--ease), box-shadow var(--duration-fast) var(--ease);
     cursor: grab;
   }
 
@@ -804,6 +805,8 @@
 
   .list-row:hover {
     background: var(--surface-hover);
+    transform: translateY(-1px);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
   }
 
   .list-row.row-disabled {
@@ -849,12 +852,20 @@
     height: 14px;
     background: white;
     border-radius: 50%;
-    transition: transform var(--duration-fast) var(--ease);
+    transition: transform var(--duration-fast) var(--ease-spring, cubic-bezier(0.34, 1.56, 0.64, 1)), width var(--duration-fast) var(--ease);
     box-shadow: 0 1px 2px rgba(0,0,0,0.2);
   }
 
   .toggle-on .toggle-thumb {
     transform: translateX(14px);
+  }
+
+  .toggle-btn:active .toggle-thumb {
+    width: 16px;
+  }
+
+  .toggle-on:active .toggle-thumb {
+    transform: translateX(12px);
   }
 
   /* ---- Columns ---- */

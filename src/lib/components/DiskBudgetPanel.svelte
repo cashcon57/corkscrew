@@ -102,7 +102,7 @@
 
   <!-- Expanded Details -->
   {#if expanded}
-    <div class="budget-details">
+    <div class="budget-details panel-transition-enter">
       {#if loading}
         <div class="budget-loading">
           <div class="budget-spinner"></div>
