@@ -113,7 +113,7 @@ ba2 = "3"
 
 # DDS texture transformation
 image = "0.25"
-ddsfile = "0.5"
+ddsfile = "0.6"
 image_dds = { version = "0.7", features = ["ddsfile", "image"] }
 
 # PE parsing (SKSE plugin version detection)
