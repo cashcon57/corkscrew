@@ -5,9 +5,20 @@
     <link rel="icon" href="%sveltekit.assets%/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Corkscrew</title>
+    <!-- Inline fallback: ensures a dark background even if CSS/JS fails to load.
+         On macOS, vibrancy overrides this to transparent. On Linux, this prevents
+         a white flash or permanent white screen if the frontend crashes. -->
+    <style>html,body{background:#1c1c1f;color:#e5e5e7;margin:0;height:100%}</style>
     %sveltekit.head%
   </head>
   <body data-sveltekit-preload-data="hover">
-    <div style="display: contents">%sveltekit.body%</div>
+    <div style="display: contents" id="app">%sveltekit.body%</div>
+    <!-- Fallback loading indicator: visible until SvelteKit hydrates.
+         If this stays visible, JS failed to load or crashed on init. -->
+    <noscript>
+      <div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:system-ui,sans-serif;color:#999">
+        JavaScript is required to run Corkscrew.
+      </div>
+    </noscript>
   </body>
 </html>
