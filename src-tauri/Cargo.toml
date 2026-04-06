@@ -1,6 +1,6 @@
 [package]
 name = "corkscrew"
-version = "0.11.1"
+version = "0.11.2"
 description = "A mod manager for CrossOver/Wine games on macOS and Linux"
 authors = ["cashconway"]
 license = "GPL-3.0-or-later"
@@ -76,8 +76,7 @@ url = "2"
 # Futures/streams for downloads
 futures = "0.3"
 
-# Window vibrancy (macOS only — no-op on Linux)
-[target.'cfg(target_os = "macos")'.dependencies]
+# Window vibrancy (macOS only — compiled but unused on Linux; usage is cfg-gated)
 window-vibrancy = "0.7"
 
 # Hashing (for version detection)
