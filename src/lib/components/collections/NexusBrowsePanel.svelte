@@ -198,13 +198,23 @@
           updated: "updated",
           createdAt: "createdAt",
         };
+
+        // When "NSFW Only" is active, we need to over-fetch because the API
+        // has no "adult-only" filter — it returns mixed results that we filter
+        // client-side.  Fetch multiple batches until we have a full page.
+        const isNsfwOnly = browseNsfwFilter === "only";
+        const fetchSize = isNsfwOnly ? BROWSE_PAGE_SIZE * 4 : BROWSE_PAGE_SIZE;
+        let offset = browseModsOffset;
+        // For NSFW Only, scale the offset to account for the ~ratio of adult content
+        if (isNsfwOnly) offset = browseModsOffset * 4;
+
         const result = await searchNexusMods(
           slug,
           browseModsSearch.trim() || null,
           sortMap[browseModsSort] ?? "endorsements",
           browseModsSort === "name" ? "ASC" : "DESC",
-          BROWSE_PAGE_SIZE,
-          browseModsOffset,
+          fetchSize,
+          offset,
           browseNsfwFilter !== "hide",
           browseCategoryId || null,
           browseAuthorFilter.trim() || null,
@@ -213,12 +223,14 @@
           browseMinEndorsements,
         );
         let mods = result.mods;
-        if (browseNsfwFilter === "only") {
+        if (isNsfwOnly) {
           mods = mods.filter(m => m.adult_content);
+          // Trim to page size
+          mods = mods.slice(0, BROWSE_PAGE_SIZE);
         }
         browseMods = mods;
         browseModsTotalCount = result.total_count;
-        browseModsHasMore = result.has_more;
+        browseModsHasMore = isNsfwOnly ? mods.length >= BROWSE_PAGE_SIZE : result.has_more;
       } else {
         let mods = await browseNexusMods(slug, "all");
         if (browseNsfwFilter === "only") {
@@ -268,6 +280,8 @@
   function browseGoToPage(page: number) {
     browseModsOffset = (page - 1) * BROWSE_PAGE_SIZE;
     loadBrowseMods(false);
+    // Smooth scroll the content area to the top
+    document.querySelector('.content')?.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
   function browseSearchDebounced() {
@@ -619,35 +633,52 @@
 
     <!-- Pagination -->
     {#if browseTotalPages > 1}
-      <div class="browse-pagination">
+      {@const pageNumbers = Array.from({ length: Math.min(browseTotalPages, 7) }, (_, i) => {
+        const total = browseTotalPages;
+        const current = browseCurrentPage;
+        if (total <= 7) return i + 1;
+        if (i === 0) return 1;
+        if (i === 6) return total;
+        if (current <= 4) return i + 1;
+        if (current >= total - 3) return total - 6 + i;
+        return current - 3 + i;
+      })}
+      {@const activeIdx = pageNumbers.indexOf(browseCurrentPage)}
+      <nav class="glass-pagination" aria-label="Page navigation">
         <button
-          class="btn btn-ghost btn-sm"
+          class="page-arrow"
           disabled={browseCurrentPage <= 1}
           onclick={() => browseGoToPage(browseCurrentPage - 1)}
-        >Previous</button>
-        {#each Array.from({ length: Math.min(browseTotalPages, 7) }, (_, i) => {
-          const total = browseTotalPages;
-          const current = browseCurrentPage;
-          if (total <= 7) return i + 1;
-          if (i === 0) return 1;
-          if (i === 6) return total;
-          if (current <= 4) return i + 1;
-          if (current >= total - 3) return total - 6 + i;
-          return current - 3 + i;
-        }) as page}
-          <button
-            class="btn btn-sm"
-            class:btn-primary={page === browseCurrentPage}
-            class:btn-ghost={page !== browseCurrentPage}
-            onclick={() => browseGoToPage(page)}
-          >{page}</button>
-        {/each}
+          aria-label="Previous page"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+        </button>
+        <div class="page-track">
+          <!-- Sliding glass pill -->
+          {#if activeIdx >= 0}
+            <div
+              class="glass-pill"
+              style="transform: translateX({activeIdx * 32}px);"
+            ></div>
+          {/if}
+          {#each pageNumbers as page}
+            <button
+              class="page-num"
+              class:active={page === browseCurrentPage}
+              onclick={() => browseGoToPage(page)}
+              aria-current={page === browseCurrentPage ? "page" : undefined}
+            >{page}</button>
+          {/each}
+        </div>
         <button
-          class="btn btn-ghost btn-sm"
+          class="page-arrow"
           disabled={!browseModsHasMore}
           onclick={() => browseGoToPage(browseCurrentPage + 1)}
-        >Next</button>
-      </div>
+          aria-label="Next page"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+        </button>
+      </nav>
     {/if}
 
     <p class="browse-mods-hint">Click a mod to view details. Use the Install button to download and install directly.</p>
@@ -853,12 +884,110 @@
     z-index: 1;
   }
 
-  .browse-pagination {
+  /* --- Glass Pagination --- */
+  .glass-pagination {
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: var(--space-1);
+    gap: 6px;
     padding: var(--space-4) 0 var(--space-2);
+  }
+
+  .page-arrow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: background var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease);
+  }
+  .page-arrow:hover:not(:disabled) {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+  }
+  .page-arrow:disabled {
+    opacity: 0.25;
+    cursor: default;
+  }
+
+  .page-track {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 0;
+    padding: 3px;
+    background: color-mix(in srgb, var(--surface-subtle) 50%, transparent);
+    backdrop-filter: blur(12px) saturate(1.4);
+    -webkit-backdrop-filter: blur(12px) saturate(1.4);
+    border-radius: 100px;
+    border: 0.5px solid rgba(255, 255, 255, 0.12);
+    box-shadow:
+      inset 0 1px 0 0 rgba(255, 255, 255, 0.10),
+      inset 0 -0.5px 0 0 rgba(255, 255, 255, 0.04),
+      0 1px 3px rgba(0, 0, 0, 0.08);
+  }
+
+  /* Sliding glass pill indicator */
+  .glass-pill {
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow:
+      inset 0 1px 0 0 rgba(255, 255, 255, 0.25),
+      0 0 0 0.5px rgba(255, 255, 255, 0.10),
+      0 2px 6px rgba(0, 0, 0, 0.15);
+    transition: transform 0.35s cubic-bezier(0.34, 1.4, 0.64, 1);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .page-num {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border: none;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 600;
+    font-family: inherit;
+    font-variant-numeric: tabular-nums;
+    cursor: pointer;
+    transition: color var(--duration-fast) var(--ease);
+    padding: 0;
+  }
+  .page-num:hover:not(.active) {
+    color: var(--text-primary);
+  }
+  .page-num.active {
+    color: white;
+  }
+
+  /* Linux / non-macOS fallback: opaque track, no backdrop-filter */
+  :global(html:not(.vibrancy-active)) .page-track {
+    background: var(--surface-subtle);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    border-color: var(--separator);
+  }
+  :global(html:not(.vibrancy-active)) .glass-pill {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background: var(--accent);
   }
 
   .mod-download-btn {

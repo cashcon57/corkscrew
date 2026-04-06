@@ -884,21 +884,6 @@ pub fn run() {
                 .plugin(tauri_plugin_updater::Builder::new().build())?;
             app.manage(app_updates::PendingUpdate(std::sync::Mutex::new(None)));
 
-            // On Linux, inject an opaque background into the webview.
-            // tauri.conf.json sets transparent:true for macOS vibrancy, but on Linux
-            // there is no compositor-backed vibrancy — the window would be see-through.
-            #[cfg(target_os = "linux")]
-            {
-                use tauri::Manager;
-                if let Some(window) = app.get_webview_window("main") {
-                    use tauri::Emitter;
-                    // Execute JS to force opaque background on the html element
-                    let _ = window.eval(
-                        "document.documentElement.style.backgroundColor = '#1c1c1f';"
-                    );
-                }
-            }
-
             // Run startup health check in background
             let health_db = db_for_setup.clone();
             let health_handle = app.handle().clone();
