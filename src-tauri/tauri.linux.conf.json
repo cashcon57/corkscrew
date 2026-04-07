@@ -4,12 +4,13 @@
     "windows": [
       {
         "title": "Corkscrew",
-        "width": 1100,
-        "height": 750,
+        "width": 1280,
+        "height": 800,
         "minWidth": 800,
         "minHeight": 600,
         "decorations": true,
-        "transparent": false
+        "transparent": false,
+        "maximizable": true
       }
     ]
   }
