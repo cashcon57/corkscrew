@@ -72,6 +72,7 @@ export async function injectTauriMock(
 
   const CONFIG = {
     has_completed_setup: true,
+    telemetry_consent: "granted",
     last_known_version: "0.9.43",
     download_dir: "/Users/test/Downloads/Corkscrew",
     disable_game_fixes: "false",

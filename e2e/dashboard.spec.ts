@@ -3,7 +3,10 @@ import { test, expect } from './fixtures/test-fixtures';
 test.describe('Dashboard (functional)', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
-    await page.waitForSelector('.dashboard', { timeout: 15_000 });
+    await page.waitForSelector('.app-shell', { timeout: 15_000 });
+    // Navigate to dashboard by clicking the sidebar brand
+    await page.locator('.sidebar-brand-btn').click();
+    await page.waitForSelector('.dashboard', { timeout: 10_000 });
   });
 
   test('shows bottle count in stat pill', async ({ page }) => {
@@ -63,7 +66,9 @@ test.describe('Dashboard empty states', () => {
       };
     `);
     await page.goto('/');
-    await page.waitForSelector('.dashboard', { timeout: 15_000 });
+    await page.waitForSelector('.app-shell', { timeout: 15_000 });
+    await page.locator('.sidebar-brand-btn').click();
+    await page.waitForSelector('.dashboard', { timeout: 10_000 });
 
     await expect(page.locator('.empty-title').first()).toHaveText('No bottles found', { timeout: 5_000 });
   });

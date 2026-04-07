@@ -3,7 +3,9 @@ import { test, expect } from './fixtures/test-fixtures';
 test.describe('Hogwarts Legacy — Dashboard', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
-    await page.waitForSelector('.dashboard', { timeout: 15_000 });
+    await page.waitForSelector('.app-shell', { timeout: 15_000 });
+    await page.locator('.sidebar-brand-btn').click();
+    await page.waitForSelector('.dashboard', { timeout: 10_000 });
   });
 
   test('game count reflects 3 detected games', async ({ page }) => {
@@ -32,7 +34,9 @@ test.describe('Hogwarts Legacy — Dashboard', () => {
 test.describe('Hogwarts Legacy — Mods Page (via game card)', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
-    await page.waitForSelector('.dashboard', { timeout: 15_000 });
+    await page.waitForSelector('.app-shell', { timeout: 15_000 });
+    await page.locator('.sidebar-brand-btn').click();
+    await page.waitForSelector('.dashboard', { timeout: 10_000 });
 
     // Select HL by clicking its game card (sets game context)
     const hlCard = page.locator('.game-card', { hasText: 'Hogwarts Legacy' });
@@ -73,7 +77,9 @@ test.describe('Hogwarts Legacy — Mods Page (via game card)', () => {
 test.describe('Hogwarts Legacy — Data Integrity', () => {
   test('HL game data has correct paths', async ({ page }) => {
     await page.goto('/');
-    await page.waitForSelector('.dashboard', { timeout: 15_000 });
+    await page.waitForSelector('.app-shell', { timeout: 15_000 });
+    await page.locator('.sidebar-brand-btn').click();
+    await page.waitForSelector('.dashboard', { timeout: 10_000 });
 
     const games = await page.evaluate(() => {
       return (window as any).__TAURI_INTERNALS__.invoke('get_all_games');
@@ -89,7 +95,9 @@ test.describe('Hogwarts Legacy — Data Integrity', () => {
 
   test('HL mods have correct metadata', async ({ page }) => {
     await page.goto('/');
-    await page.waitForSelector('.dashboard', { timeout: 15_000 });
+    await page.waitForSelector('.app-shell', { timeout: 15_000 });
+    await page.locator('.sidebar-brand-btn').click();
+    await page.waitForSelector('.dashboard', { timeout: 10_000 });
 
     const mods = await page.evaluate(() => {
       return (window as any).__TAURI_INTERNALS__.invoke('get_installed_mods_summary');
@@ -118,7 +126,9 @@ test.describe('Hogwarts Legacy — Data Integrity', () => {
 
   test('installed HL collection has correct metadata', async ({ page }) => {
     await page.goto('/');
-    await page.waitForSelector('.dashboard', { timeout: 15_000 });
+    await page.waitForSelector('.app-shell', { timeout: 15_000 });
+    await page.locator('.sidebar-brand-btn').click();
+    await page.waitForSelector('.dashboard', { timeout: 10_000 });
 
     const collections = await page.evaluate(() => {
       return (window as any).__TAURI_INTERNALS__.invoke('list_installed_collections');
