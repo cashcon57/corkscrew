@@ -42,10 +42,10 @@ test.describe('Hogwarts Legacy — Mods Page (via game card)', () => {
     const hlCard = page.locator('.game-card', { hasText: 'Hogwarts Legacy' });
     await hlCard.click();
 
-    // Wait for mods page to load
+    // Wait for mods page to load with HL context
     await expect(page.locator('.nav-item').nth(1)).toHaveClass(/active/, { timeout: 5_000 });
-    // Wait for toggle switches to appear (mods loaded)
-    await expect(page.locator('.toggle-switch').first()).toBeVisible({ timeout: 10_000 });
+    // Wait for HL mods to appear (game context switch + mod load)
+    await expect(page.locator('text=RE-UE4SS').first()).toBeAttached({ timeout: 15_000 });
   });
 
   test('shows Hogwarts Legacy in game selector', async ({ page }) => {

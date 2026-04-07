@@ -82,7 +82,9 @@ test.describe('Dashboard empty states', () => {
       };
     `);
     await page.goto('/');
-    await page.waitForSelector('.dashboard', { timeout: 15_000 });
+    await page.waitForSelector('.app-shell', { timeout: 15_000 });
+    await page.locator('.sidebar-brand-btn').click();
+    await page.waitForSelector('.dashboard', { timeout: 10_000 });
 
     await expect(page.locator('.empty-title').last()).toHaveText('No games detected', { timeout: 5_000 });
   });

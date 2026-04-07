@@ -15,9 +15,10 @@ test.describe('Navigation', () => {
     { label: 'Settings', index: 5 },
   ];
 
-  test('no nav-item is active by default (dashboard is home)', async ({ page }) => {
+  test('Mods nav-item is active by default', async ({ page }) => {
     const activeItems = page.locator('.nav-item.active');
-    await expect(activeItems).toHaveCount(0);
+    await expect(activeItems).toHaveCount(1);
+    await expect(page.locator('.nav-item').nth(1)).toHaveClass(/active/);
   });
 
   for (const nav of navPages) {
