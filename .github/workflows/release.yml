@@ -54,6 +54,42 @@ jobs:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-fuse-ld=mold
         run: cargo tauri build --target x86_64-unknown-linux-gnu
 
+      - name: Fix AppImage — strip bundled EGL/Wayland libs that conflict with host GPU drivers
+        run: |
+          sudo apt-get install -y libfuse2
+          APPIMAGE=$(find src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage -name '*.AppImage' | head -1)
+          echo "Patching AppImage: $APPIMAGE"
+
+          # Extract
+          chmod +x "$APPIMAGE"
+          "$APPIMAGE" --appimage-extract
+
+          # Remove bundled graphics libs that conflict with system GPU drivers.
+          # The AppImage bundles Ubuntu CI's Mesa/EGL which crashes on SteamOS,
+          # NVIDIA, and other systems with different GPU stacks.
+          cd squashfs-root/usr/lib
+          rm -f libEGL.so* libEGL_mesa.so* libGLESv2.so* libGLX.so* libGLX_mesa.so*
+          rm -f libwayland-client.so* libwayland-egl.so* libwayland-server.so*
+          echo "Stripped conflicting libs"
+          cd -
+
+          # Repack with appimagetool
+          wget -q https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage -O /tmp/appimagetool
+          chmod +x /tmp/appimagetool
+          ARCH=x86_64 /tmp/appimagetool --no-appstream squashfs-root "$APPIMAGE"
+          rm -rf squashfs-root
+
+          # Re-sign the patched AppImage for Tauri updater
+          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "Re-signing patched AppImage..."
+            TARBALL="${APPIMAGE}.tar.gz"
+            tar czf "$TARBALL" -C "$(dirname "$APPIMAGE")" "$(basename "$APPIMAGE")"
+            cargo tauri signer sign --private-key "$TAURI_SIGNING_PRIVATE_KEY" --password "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "$TARBALL" 2>/dev/null || true
+          fi
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
       - name: Collect artifacts to flat directory
         run: |
           mkdir -p flat-artifacts
