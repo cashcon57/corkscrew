@@ -2733,8 +2733,8 @@
           Install mods from .zip, .7z, or .rar archives, or use NXM links via Settings.
         </p>
         <div class="empty-actions">
-          <button class="btn btn-primary" onclick={() => { if (installFlowRef) installFlowRef.handleInstall(); }}>
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <button class="btn empty-action-btn" onclick={() => { if (installFlowRef) installFlowRef.handleInstall(); }}>
+            <svg width="16" height="16" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
               <line x1="7" y1="2" x2="7" y2="12" />
               <line x1="2" y1="7" x2="12" y2="7" />
             </svg>
@@ -2745,16 +2745,16 @@
               href="https://www.nexusmods.com/{activeGame.nexus_slug}"
               target="_blank"
               rel="noopener noreferrer"
-              class="btn btn-secondary"
+              class="btn empty-action-btn"
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" />
               </svg>
               Browse NexusMods
             </a>
           {/if}
-          <button class="btn btn-ghost" onclick={() => currentPage.set("collections")}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <button class="btn empty-action-btn" onclick={() => currentPage.set("collections")}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
             </svg>
             Install a Collection
@@ -5940,9 +5940,33 @@
   .empty-actions {
     display: flex;
     align-items: center;
-    gap: var(--space-2);
+    gap: var(--space-3);
     flex-wrap: wrap;
     justify-content: center;
+  }
+
+  .empty-action-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 20px;
+    border-radius: var(--radius);
+    border: 1px solid var(--separator);
+    background: var(--surface);
+    color: var(--text-primary);
+    font-size: 13px;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    transition: background var(--duration-fast) var(--ease),
+                border-color var(--duration-fast) var(--ease),
+                box-shadow var(--duration-fast) var(--ease);
+    text-decoration: none;
+  }
+  .empty-action-btn:hover {
+    background: var(--surface-hover);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent);
   }
 
   /* Bulk Select Checkbox Column */
