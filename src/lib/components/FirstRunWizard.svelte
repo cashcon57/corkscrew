@@ -4,7 +4,8 @@
     getBottles,
     getAllGames,
     setConfigValue,
-    isNexusPremium,
+    startOAuthLogin,
+    getNexusAccountStatus,
     checkSteamStatus,
     addToSteam,
   } from "$lib/api";
@@ -17,9 +18,12 @@
   let scanning = $state(false);
   let detectedBottles = $state<Bottle[]>([]);
   let detectedGames = $state<DetectedGame[]>([]);
-  let apiKey = $state("");
-  let apiKeyValid = $state<boolean | null>(null);
-  let validating = $state(false);
+
+  // NexusMods OAuth
+  let nexusConnected = $state(false);
+  let nexusName = $state<string | null>(null);
+  let nexusConnecting = $state(false);
+  let nexusError = $state<string | null>(null);
 
   // Steam integration (Linux only)
   let steamStatus = $state<SteamStatus | null>(null);
@@ -46,18 +50,26 @@
     scanning = false;
   }
 
-  async function validateApiKey() {
-    if (!apiKey.trim()) return;
-    validating = true;
-    apiKeyValid = null;
+  async function handleNexusOAuth() {
+    nexusConnecting = true;
+    nexusError = null;
     try {
-      await setConfigValue("nexus_api_key", apiKey.trim());
-      await isNexusPremium(); // will throw if key is invalid
-      apiKeyValid = true;
-    } catch {
-      apiKeyValid = false;
+      await startOAuthLogin();
+      const status = await getNexusAccountStatus();
+      if (status.connected) {
+        nexusConnected = true;
+        nexusName = status.name ?? null;
+      } else {
+        nexusError = "Authorization completed but account check failed.";
+      }
+    } catch (e: unknown) {
+      const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
+      if (!msg.includes("Cancelled") && !msg.includes("timed out")) {
+        nexusError = `Sign-in failed: ${msg}`;
+      }
+    } finally {
+      nexusConnecting = false;
     }
-    validating = false;
   }
 
   function selectGame(game: DetectedGame) {
@@ -269,42 +281,42 @@
         {/if}
       </div>
 
-    <!-- Step: Nexus Mods API Key -->
+    <!-- Step: Nexus Mods OAuth Sign-In -->
     {:else if currentStep === "Nexus Mods"}
       <div class="wizard-step">
         <h2 class="wizard-title">Nexus Mods (Optional)</h2>
         <p class="wizard-desc">
-          Add your NexusMods API key to enable mod downloads, update checking, and collection browsing. You can add this later in Settings.
+          Connect your NexusMods account to browse mods, download, and install collections. Opens your browser for a secure sign-in.
         </p>
 
-        <div class="api-key-input">
-          <input
-            type="password"
-            placeholder="Paste your API key here"
-            bind:value={apiKey}
-            class="input-field"
-          />
+        {#if nexusConnected}
+          <div class="steam-status registered">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--green)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+              <polyline points="22 4 12 14.01 9 11.01" />
+            </svg>
+            <span>Signed in{nexusName ? ` as ${nexusName}` : ''}</span>
+          </div>
+        {:else}
           <button
-            class="btn-secondary"
-            onclick={validateApiKey}
-            disabled={!apiKey.trim() || validating}
+            class="btn-primary btn-lg"
+            onclick={handleNexusOAuth}
+            disabled={nexusConnecting}
           >
-            {#if validating}
-              <span class="spinner-xs"></span>
+            {#if nexusConnecting}
+              <span class="spinner-xs"></span> Connecting...
             {:else}
-              Validate
+              Sign in with NexusMods
             {/if}
           </button>
-        </div>
+        {/if}
 
-        {#if apiKeyValid === true}
-          <p class="api-status success">API key is valid</p>
-        {:else if apiKeyValid === false}
-          <p class="api-status error">Invalid API key. Check your key and try again.</p>
+        {#if nexusError}
+          <p class="api-status error">{nexusError}</p>
         {/if}
 
         <p class="hint">
-          Find your API key at nexusmods.com &gt; Site preferences &gt; API Key
+          You can also do this later from Settings.
         </p>
       </div>
 

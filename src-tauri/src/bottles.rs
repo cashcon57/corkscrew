@@ -295,7 +295,7 @@ fn platform_search_locations(home: &Path) -> Vec<SearchLocation> {
     // Normalize for Fedora Atomic / Bazzite (/var/home -> /home)
     let home = normalize_container_path(home);
     let home = home.as_path();
-    vec![
+    let mut locations = vec![
         // Native Wine default prefix
         SearchLocation {
             source: "Wine",
@@ -337,7 +337,7 @@ fn platform_search_locations(home: &Path) -> Vec<SearchLocation> {
                 .join("bottles")
                 .join("bottles"),
         },
-        // Steam / Proton
+        // Steam / Proton (primary library)
         SearchLocation {
             source: "Proton",
             path: home
@@ -347,7 +347,67 @@ fn platform_search_locations(home: &Path) -> Vec<SearchLocation> {
                 .join("steamapps")
                 .join("compatdata"),
         },
-    ]
+        // Steam via symlink (common on SteamOS)
+        SearchLocation {
+            source: "Proton",
+            path: home
+                .join(".steam")
+                .join("steam")
+                .join("steamapps")
+                .join("compatdata"),
+        },
+        // Flatpak Steam
+        SearchLocation {
+            source: "Proton",
+            path: home
+                .join(".var")
+                .join("app")
+                .join("com.valvesoftware.Steam")
+                .join(".local")
+                .join("share")
+                .join("Steam")
+                .join("steamapps")
+                .join("compatdata"),
+        },
+    ];
+
+    // Also scan secondary Steam library folders (e.g. SD card on Steam Deck)
+    let steam_dirs = [
+        home.join(".local/share/Steam"),
+        home.join(".steam/steam"),
+    ];
+    for steam_dir in &steam_dirs {
+        for vdf_name in &["steamapps/libraryfolders.vdf", "config/libraryfolders.vdf"] {
+            let vdf_path = steam_dir.join(vdf_name);
+            if let Ok(content) = fs::read_to_string(&vdf_path) {
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if let Some(rest) = trimmed.strip_prefix("\"path\"") {
+                        let rest = rest.trim().trim_matches('"');
+                        if !rest.is_empty() {
+                            let lib_path =
+                                PathBuf::from(rest.replace('\\', "/"))
+                                    .join("steamapps")
+                                    .join("compatdata");
+                            // Avoid duplicates
+                            if !locations.iter().any(|l| l.path == lib_path) && lib_path.is_dir() {
+                                log::info!(
+                                    "Found additional Steam library: {}",
+                                    lib_path.display()
+                                );
+                                locations.push(SearchLocation {
+                                    source: "Proton",
+                                    path: lib_path,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    locations
 }
 
 // ---------------------------------------------------------------------------
@@ -383,6 +443,16 @@ fn collect_bottles_from(location: &SearchLocation, bottles: &mut Vec<Bottle>) {
         return;
     }
 
+    // Proton/Steam prefixes have a special structure:
+    //   compatdata/{appid}/pfx/drive_c    (the actual Wine prefix)
+    // Other bottle managers use:
+    //   bottles/{name}/drive_c
+    #[cfg(target_os = "linux")]
+    if location.source == "Proton" {
+        collect_proton_bottles(&location.path, bottles);
+        return;
+    }
+
     if !location.path.is_dir() {
         return;
     }
@@ -412,6 +482,83 @@ fn collect_bottles_from(location: &SearchLocation, bottles: &mut Vec<Bottle>) {
             bottles.push(bottle);
         }
     }
+}
+
+/// Collect Proton bottles from a Steam `compatdata` directory.
+///
+/// Proton prefixes live at `compatdata/{appid}/pfx/` — the `pfx/` subdirectory
+/// is the actual Wine prefix containing `drive_c/`.  We cross-reference the app
+/// ID against `appmanifest_{appid}.acf` in the parent `steamapps/` to get a
+/// human-readable game name for the bottle.
+#[cfg(target_os = "linux")]
+fn collect_proton_bottles(compatdata_dir: &Path, bottles: &mut Vec<Bottle>) {
+    if !compatdata_dir.is_dir() {
+        return;
+    }
+
+    // The steamapps directory is one level up from compatdata
+    let steamapps_dir = compatdata_dir.parent();
+
+    let Ok(entries) = fs::read_dir(compatdata_dir) else {
+        return;
+    };
+
+    let mut dirs: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    dirs.sort();
+
+    for dir in dirs {
+        let app_id_str = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        // Skip non-numeric directories (not app IDs)
+        if !app_id_str.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+
+        // The actual Wine prefix is at {appid}/pfx/
+        let pfx_dir = dir.join("pfx");
+        if !pfx_dir.join("drive_c").exists() {
+            continue;
+        }
+
+        // Try to resolve game name from appmanifest
+        let name = steamapps_dir
+            .and_then(|sa| {
+                let manifest = sa.join(format!("appmanifest_{}.acf", app_id_str));
+                parse_appmanifest_name(&manifest)
+            })
+            .unwrap_or_else(|| format!("Proton {}", app_id_str));
+
+        bottles.push(Bottle {
+            name,
+            path: pfx_dir,
+            source: "Proton".to_string(),
+        });
+    }
+}
+
+/// Extract the game name from a Steam appmanifest .acf file.
+#[cfg(target_os = "linux")]
+fn parse_appmanifest_name(path: &Path) -> Option<String> {
+    let content = fs::read_to_string(path).ok()?;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        // Match: "name"		"Game Title"
+        if trimmed.starts_with("\"name\"") {
+            let rest = trimmed.strip_prefix("\"name\"")?;
+            let rest = rest.trim();
+            if rest.starts_with('"') && rest.ends_with('"') && rest.len() >= 2 {
+                return Some(rest[1..rest.len() - 1].to_string());
+            }
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
