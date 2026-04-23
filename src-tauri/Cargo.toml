@@ -95,7 +95,7 @@ tungstenite = { version = "0.29", features = ["native-tls"] }
 libc = "0.2"
 
 # LRU cache (FOMOD parsing)
-lru = "0.16"
+lru = "0.17"
 
 # Regex (instruction parser)
 regex = "1"
