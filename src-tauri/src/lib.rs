@@ -82,6 +82,7 @@ pub mod app_updates;
 pub mod self_update;
 pub mod shader_conversion;
 pub mod texture_optimizer;
+pub mod verified_lists;
 pub mod wine_diagnostic;
 pub mod commands;
 
@@ -393,6 +394,8 @@ pub fn run() {
     plugins::skyrim_se::register();
     plugins::fallout4::register();
     plugins::hogwarts_legacy::register();
+    plugins::hades2::register();
+    plugins::crimson_desert::register();
     game_registry::register_all();
 
     // Initialize database
@@ -1375,6 +1378,12 @@ pub fn run() {
             shader_conversion::execute_shader_conversion_cmd,
             shader_conversion::revert_shader_conversion_cmd,
             shader_conversion::get_shader_conversion_history_cmd,
+            // Verified Lists (Wine compatibility registry)
+            commands::verified_lists_cmds::get_collection_verification,
+            commands::verified_lists_cmds::get_wabbajack_verification,
+            commands::verified_lists_cmds::get_verification_manifest,
+            commands::verified_lists_cmds::refresh_verification_manifest,
+            commands::verified_lists_cmds::get_verification_cache_age_secs,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

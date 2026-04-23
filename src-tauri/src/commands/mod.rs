@@ -13,4 +13,5 @@ pub mod platform;
 pub mod plugins;
 pub mod profiles;
 pub mod tools;
+pub mod verified_lists_cmds;
 pub mod wabbajack;

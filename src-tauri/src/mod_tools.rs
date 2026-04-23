@@ -432,6 +432,8 @@ fn builtin_tools_for_game(game_id: &str) -> Vec<ModTool> {
         "skyrimse" => skyrim_se_tools(),
         "fallout4" => fallout4_tools(),
         "hogwartslegacy" => hogwarts_legacy_tools(),
+        "hades2" => hades2_tools(),
+        "crimsondesert" => crimson_desert_tools(),
         _ => vec![],
     };
 
@@ -491,6 +493,16 @@ fn all_builtin_tools() -> Vec<ModTool> {
         }
     }
     for tool in hogwarts_legacy_tools() {
+        if !tools.iter().any(|t| t.id == tool.id) {
+            tools.push(tool);
+        }
+    }
+    for tool in hades2_tools() {
+        if !tools.iter().any(|t| t.id == tool.id) {
+            tools.push(tool);
+        }
+    }
+    for tool in crimson_desert_tools() {
         if !tools.iter().any(|t| t.id == tool.id) {
             tools.push(tool);
         }
@@ -884,6 +896,133 @@ fn hogwarts_legacy_tools() -> Vec<ModTool> {
             recommended_alternative: None,
             recommended_ini_edits: vec![],
             support_url: None,
+        },
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// Hades II tools
+// ---------------------------------------------------------------------------
+
+fn hades2_tools() -> Vec<ModTool> {
+    vec![
+        ModTool {
+            id: "modimporter".into(),
+            name: "ModImporter".into(),
+            description:
+                "Official Supergiant community mod loader for Hades II. Installs mods from Content/Mods/ into the game's Lua scripting system."
+                    .into(),
+            exe_names: vec![
+                // ModImporter is distributed as a Python script / compiled binary.
+                // Presence of either indicates an install.
+                "modimporter.exe".into(),
+                "modimporter.py".into(),
+            ],
+            detected_path: None,
+            requires_wine: true,
+            category: "Framework".into(),
+            can_auto_install: true,
+            github_repo: Some("SGG-Modding/ModImporter".into()),
+            nexus_mod_id: None,
+            nexus_game_slug: Some("hades2".into()),
+            download_url: None,
+            license: "MIT".into(),
+            wine_notes: Some(
+                "Runs as a Windows binary inside the bottle; no special prefix setup required."
+                    .into(),
+            ),
+            wine_compat: "good".into(),
+            recommended_alternative: None,
+            recommended_ini_edits: vec![],
+            support_url: Some("https://github.com/SGG-Modding/ModImporter".into()),
+        },
+        ModTool {
+            id: "modutil".into(),
+            name: "ModUtil".into(),
+            description:
+                "Runtime Lua merging library for Hades II mods. Required by most script mods."
+                    .into(),
+            exe_names: vec!["ModUtil".into()],
+            detected_path: None,
+            requires_wine: false,
+            category: "Framework".into(),
+            can_auto_install: true,
+            github_repo: Some("SGG-Modding/ModUtil".into()),
+            nexus_mod_id: None,
+            nexus_game_slug: Some("hades2".into()),
+            download_url: None,
+            license: "MIT".into(),
+            wine_notes: Some("Pure Lua — no Wine concerns.".into()),
+            wine_compat: "native".into(),
+            recommended_alternative: None,
+            recommended_ini_edits: vec![],
+            support_url: Some("https://github.com/SGG-Modding/ModUtil".into()),
+        },
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// Crimson Desert tools
+// ---------------------------------------------------------------------------
+
+fn crimson_desert_tools() -> Vec<ModTool> {
+    vec![
+        ModTool {
+            id: "ultimate-asi-loader".into(),
+            name: "Ultimate ASI Loader".into(),
+            description:
+                "Sideloads ASI/DLL mods next to the game exe. Works under Wine/CrossOver with a renamed proxy DLL."
+                    .into(),
+            // Common proxy names the loader ships under. Presence of any
+            // indicates an install.
+            exe_names: vec![
+                "dinput8.dll".into(),
+                "xinput1_3.dll".into(),
+                "version.dll".into(),
+                "winmm.dll".into(),
+            ],
+            detected_path: None,
+            requires_wine: true,
+            category: "Framework".into(),
+            can_auto_install: true,
+            github_repo: Some("ThirteenAG/Ultimate-ASI-Loader".into()),
+            nexus_mod_id: None,
+            nexus_game_slug: Some("crimsondesert".into()),
+            download_url: None,
+            license: "Unlicense".into(),
+            wine_notes: Some(
+                "Loads as a DLL proxy inside the bottle. No special Wine configuration needed."
+                    .into(),
+            ),
+            wine_compat: "good".into(),
+            recommended_alternative: None,
+            recommended_ini_edits: vec![],
+            support_url: Some("https://github.com/ThirteenAG/Ultimate-ASI-Loader".into()),
+        },
+        ModTool {
+            id: "reshade".into(),
+            name: "ReShade".into(),
+            description:
+                "Post-processing shader injector. Works under DXVK/Wine for DX11/DX12 titles."
+                    .into(),
+            exe_names: vec!["ReShade64.dll".into(), "dxgi.dll".into(), "d3d11.dll".into()],
+            detected_path: None,
+            requires_wine: true,
+            category: "Graphics".into(),
+            can_auto_install: false,
+            github_repo: None,
+            nexus_mod_id: None,
+            nexus_game_slug: None,
+            download_url: Some("https://reshade.me/".into()),
+            license: "BSD-3-Clause".into(),
+            wine_notes: Some(
+                "ReShade runs under DXVK; installer is Windows-only — install it through the bottle."
+                    .into(),
+            ),
+            wine_compat: "good".into(),
+            recommended_alternative: None,
+            recommended_ini_edits: vec![],
+            support_url: Some("https://reshade.me/".into()),
         },
     ]
 }

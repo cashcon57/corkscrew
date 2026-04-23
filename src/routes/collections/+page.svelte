@@ -36,6 +36,7 @@
   import CompatibilityPanel from "$lib/components/CompatibilityPanel.svelte";
   import NexusLogo from "$lib/components/NexusLogo.svelte";
   import WabbajackLogo from "$lib/components/WabbajackLogo.svelte";
+  import WineCompatBadge from "$lib/components/WineCompatBadge.svelte";
   import WebViewToggle from "$lib/components/WebViewToggle.svelte";
   import CollectionDeleteDialog from "$lib/components/collections/CollectionDeleteDialog.svelte";
   import InterruptedInstallBanner from "$lib/components/collections/InterruptedInstallBanner.svelte";
@@ -458,6 +459,8 @@
     starfield: "starfield",
     enderal: "enderal",
     enderalse: "enderalspecialedition",
+    hades2: "hades2",
+    crimsondesert: "crimsondesert",
   };
 
   function getGameSlug(): string {
@@ -1030,6 +1033,8 @@
       starfield: "Starfield",
       baldursgate3: "BG3",
       hogwartslegacy: "Hogwarts Legacy",
+      hades2: "Hades II",
+      crimsondesert: "Crimson Desert",
     };
     return map[domain] || domain;
   }
@@ -1556,6 +1561,12 @@
           <div class="detail-title-row">
             <h2 class="detail-name">{selectedCollection.name}</h2>
             <span class="game-badge">{gameDomainDisplay(selectedCollection.game_domain)}</span>
+            <WineCompatBadge
+              kind="collection"
+              gameDomain={selectedCollection.game_domain}
+              key={selectedCollection.slug}
+              compact
+            />
           </div>
           <div class="detail-meta-row">
             <p class="detail-author">by {selectedCollection.author}</p>
@@ -2261,6 +2272,12 @@
               <div class="card-body">
                 <div class="card-top">
                   <span class="game-badge">{gameDomainDisplay(collection.game_domain)}</span>
+                  <WineCompatBadge
+                    kind="collection"
+                    gameDomain={collection.game_domain}
+                    key={collection.slug}
+                    compact
+                  />
                   <span class="revision-badge">Rev {collection.latest_revision}</span>
                   {#if collection.download_size}
                     <span class="size-badge" class:size-small={collection.download_size < 5 * 1024 * 1024 * 1024}
@@ -2280,7 +2297,14 @@
                 </div>
 
                 <h3 class="card-title">{collection.name}</h3>
-                <p class="card-author">by {collection.author}</p>
+                <p class="card-author">
+                  by {collection.author}
+                  {#if collection.updated_at}
+                    <span class="card-updated" title={formatDateFull(collection.updated_at)}>
+                      &middot; Updated {formatDate(collection.updated_at)}
+                    </span>
+                  {/if}
+                </p>
 
                 {#if collection.summary}
                   <p class="card-desc">{collection.summary}</p>
@@ -2693,7 +2717,7 @@
   }
 
   .premium-pill {
-    font-size: 9px;
+    font-size: 11px;
     font-weight: 700;
     color: #ff9f0a;
     background: rgba(255, 159, 10, 0.15);
@@ -2998,6 +3022,11 @@
     font-size: 12px;
     color: var(--text-secondary);
     margin-bottom: var(--space-2);
+  }
+
+  .card-updated {
+    color: var(--text-tertiary);
+    font-size: 11px;
   }
 
   .card-desc {

@@ -1718,3 +1718,23 @@ export interface ProtonVersion {
   variant: string;
   is_recommended: boolean;
 }
+
+// Verified-Lists (Wine compatibility registry)
+
+export type VerifiedStatus = "verified" | "partial" | "broken" | "untested";
+
+export interface VerifiedEntry {
+  status: VerifiedStatus;
+  version_tested: string | null;
+  last_verified: string | null;
+  notes: string | null;
+  reporter: string | null;
+}
+
+export interface VerifiedManifest {
+  schema_version: number;
+  generated_at: string | null;
+  notes: string | null;
+  collections: Record<string, Record<string, VerifiedEntry>>;
+  wabbajack: Record<string, VerifiedEntry>;
+}

@@ -238,6 +238,16 @@
     if (!term) return plugins;
     return plugins.filter((p) => p.filename.toLowerCase().includes(term));
   });
+
+  // Games without a plugin/load-order system (no ESP/ESL/ESM stack).
+  // The Load Order page is not meaningful for these; show a friendly notice.
+  const GAMES_WITHOUT_PLUGINS: ReadonlySet<string> = new Set([
+    "hades2",
+    "crimsondesert",
+  ]);
+  const gameHasNoPluginSystem = $derived(
+    $selectedGame ? GAMES_WITHOUT_PLUGINS.has($selectedGame.game_id) : false,
+  );
 </script>
 
 <svelte:window onkeydown={handlePluginKeydown} />
@@ -248,7 +258,7 @@
     <div class="header-title">
       <h2>Load Order</h2>
     </div>
-    {#if plugins.length > 0}
+    {#if plugins.length > 0 && !gameHasNoPluginSystem}
       <div class="header-meta">
         <span class="meta-chip">
           <span class="meta-value">{enabledCount}</span>
@@ -263,8 +273,23 @@
     {/if}
   </div>
 
+  {#if gameHasNoPluginSystem}
+    <div class="no-plugin-system">
+      <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="10" />
+        <path d="M12 8v4" />
+        <path d="M12 16h.01" />
+      </svg>
+      <h3>{$selectedGame?.display_name ?? "This game"} doesn't use a plugin load order</h3>
+      <p>
+        {$selectedGame?.display_name ?? "This game"} loads mods as self-contained directories — there's no ESP/ESL/ESM stack to reorder.
+        Manage mods from the <strong>Mods</strong> page instead.
+      </p>
+    </div>
+  {/if}
+
   <!-- Toolbar -->
-  {#if $selectedGame && plugins.length > 0}
+  {#if $selectedGame && plugins.length > 0 && !gameHasNoPluginSystem}
     <div class="toolbar">
       <div class="toolbar-left">
         <button
@@ -935,7 +960,7 @@
     justify-content: center;
     width: 16px;
     height: 16px;
-    font-size: 9px;
+    font-size: 11px;
     font-weight: 700;
     border-radius: 50%;
     cursor: help;

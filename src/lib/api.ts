@@ -2405,3 +2405,30 @@ export async function listProtonVersions(): Promise<ProtonVersion[]> {
 export async function getRecommendedProton(): Promise<ProtonVersion | null> {
   return invoke<ProtonVersion | null>("get_recommended_proton");
 }
+
+// --- Verified Lists (Wine compatibility) ---
+
+export async function getCollectionVerification(
+  gameDomain: string,
+  slug: string,
+): Promise<import("$lib/types").VerifiedEntry> {
+  return invoke("get_collection_verification", { gameDomain, slug });
+}
+
+export async function getWabbajackVerification(
+  modlistName: string,
+): Promise<import("$lib/types").VerifiedEntry> {
+  return invoke("get_wabbajack_verification", { modlistName });
+}
+
+export async function getVerificationManifest(): Promise<import("$lib/types").VerifiedManifest> {
+  return invoke("get_verification_manifest");
+}
+
+export async function refreshVerificationManifest(): Promise<void> {
+  return invoke("refresh_verification_manifest");
+}
+
+export async function getVerificationCacheAgeSecs(): Promise<number | null> {
+  return invoke("get_verification_cache_age_secs");
+}

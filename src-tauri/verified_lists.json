@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-04-20",
+  "notes": "Community-maintained registry of Wine/CrossOver compatibility for collections and Wabbajack modlists. Entries PR'd to Corkscrew repo or submitted via in-app report.",
+  "collections": {},
+  "wabbajack": {}
+}

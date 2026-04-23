@@ -5,6 +5,7 @@
   import DOMPurify from "dompurify";
   import { bbcodeToHtml } from "$lib/bbcode";
   import { getNexusModDetail, getModFiles } from "$lib/api";
+  import { relativeTime, absoluteDate } from "$lib/relativeTime";
 
   interface Props {
     mod: NexusModInfo;
@@ -158,8 +159,8 @@
             <span class="detail-stat-label">Version</span>
           </div>
           {#if modDetail.updated_at}
-            <div class="detail-stat">
-              <span class="detail-stat-value">{modDetail.updated_at}</span>
+            <div class="detail-stat" title={absoluteDate(modDetail.updated_at)}>
+              <span class="detail-stat-value">{relativeTime(modDetail.updated_at)}</span>
               <span class="detail-stat-label">Updated</span>
             </div>
           {/if}

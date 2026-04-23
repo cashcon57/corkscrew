@@ -84,6 +84,13 @@
     onComplete();
   }
 
+  async function skipSetup() {
+    await setConfigValue("has_completed_setup", "true").catch((err) =>
+      console.error("FirstRunWizard: persist skip failed:", err),
+    );
+    onComplete();
+  }
+
   function nextStep() {
     if (step < steps.length - 1) step++;
   }
@@ -116,6 +123,9 @@
 
 <div class="wizard-overlay">
   <div class="wizard-card">
+    <button class="wizard-skip" onclick={skipSetup} type="button" aria-label="Skip setup">
+      Skip setup
+    </button>
     <!-- Progress dots -->
     <div class="wizard-progress">
       {#each steps as s, i}
@@ -391,6 +401,27 @@
     border-radius: var(--radius-lg);
     padding: var(--space-8);
     box-shadow: 0 24px 48px rgba(0, 0, 0, 0.4);
+    position: relative;
+  }
+
+  .wizard-skip {
+    position: absolute;
+    top: var(--space-3);
+    right: var(--space-4);
+    background: none;
+    border: none;
+    color: var(--text-tertiary);
+    font-size: 12px;
+    font-weight: 500;
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: color var(--duration-fast) var(--ease), background var(--duration-fast) var(--ease);
+  }
+
+  .wizard-skip:hover {
+    color: var(--text-primary);
+    background: var(--surface-hover);
   }
 
   /* Progress */
