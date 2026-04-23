@@ -244,6 +244,14 @@
   const GAMES_WITHOUT_PLUGINS: ReadonlySet<string> = new Set([
     "hades2",
     "crimsondesert",
+    // Thunderstore / BepInEx games — no ESP load order, mods managed per-DLL.
+    "silksong",
+    "riskofrain2",
+    "lethalcompany",
+    "contentwarning",
+    "repo",
+    "palworld",
+    "valheim",
   ]);
   const gameHasNoPluginSystem = $derived(
     $selectedGame ? GAMES_WITHOUT_PLUGINS.has($selectedGame.game_id) : false,

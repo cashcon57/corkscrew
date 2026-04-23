@@ -12,6 +12,7 @@ pub mod notifications;
 pub mod platform;
 pub mod plugins;
 pub mod profiles;
+pub mod thunderstore_cmds;
 pub mod tools;
 pub mod verified_lists_cmds;
 pub mod wabbajack;

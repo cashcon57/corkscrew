@@ -82,6 +82,7 @@ pub mod app_updates;
 pub mod self_update;
 pub mod shader_conversion;
 pub mod texture_optimizer;
+pub mod thunderstore;
 pub mod verified_lists;
 pub mod wine_diagnostic;
 pub mod commands;
@@ -396,6 +397,7 @@ pub fn run() {
     plugins::hogwarts_legacy::register();
     plugins::hades2::register();
     plugins::crimson_desert::register();
+    plugins::thunderstore_games::register_all();
     game_registry::register_all();
 
     // Initialize database
@@ -1384,6 +1386,9 @@ pub fn run() {
             commands::verified_lists_cmds::get_verification_manifest,
             commands::verified_lists_cmds::refresh_verification_manifest,
             commands::verified_lists_cmds::get_verification_cache_age_secs,
+            // Thunderstore catalog
+            commands::thunderstore_cmds::thunderstore_list_communities,
+            commands::thunderstore_cmds::thunderstore_list_packages,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

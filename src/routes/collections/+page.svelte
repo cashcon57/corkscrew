@@ -461,6 +461,13 @@
     enderalse: "enderalspecialedition",
     hades2: "hades2",
     crimsondesert: "crimsondesert",
+    silksong: "hollowknightsilksong",
+    riskofrain2: "riskofrain2",
+    lethalcompany: "lethalcompany",
+    contentwarning: "contentwarning",
+    repo: "repo",
+    palworld: "palworld",
+    valheim: "valheim",
   };
 
   function getGameSlug(): string {
@@ -1035,6 +1042,13 @@
       hogwartslegacy: "Hogwarts Legacy",
       hades2: "Hades II",
       crimsondesert: "Crimson Desert",
+      hollowknightsilksong: "Hollow Knight: Silksong",
+      riskofrain2: "Risk of Rain 2",
+      lethalcompany: "Lethal Company",
+      contentwarning: "Content Warning",
+      repo: "R.E.P.O.",
+      palworld: "Palworld",
+      valheim: "Valheim",
     };
     return map[domain] || domain;
   }
