@@ -31,11 +31,16 @@
     style="object-fit: contain; filter: drop-shadow(0 1px 3px rgba(0,0,0,0.3));"
   />
 {:else}
-  <!-- Generic game icon fallback -->
-  <svg width={size} height={size} viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-    <rect x="8" y="14" width="48" height="36" rx="6" opacity="0.3" />
-    <circle cx="22" cy="32" r="6" opacity="0.3" />
-    <circle cx="42" cy="32" r="6" opacity="0.3" />
-    <line x1="32" y1="20" x2="32" y2="44" opacity="0.2" />
+  <!-- NES cartridge placeholder -->
+  <svg width={size} height={size} viewBox="0 0 24 28" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.35">
+    <rect x="1.5" y="1.5" width="21" height="20" rx="2" />
+    <rect x="3.5" y="3" width="17" height="13" rx="1" />
+    <line x1="1.5" y1="21.5" x2="22.5" y2="21.5" />
+    <line x1="5" y1="21.5" x2="5" y2="26.5" />
+    <line x1="8" y1="21.5" x2="8" y2="26.5" />
+    <line x1="11" y1="21.5" x2="11" y2="26.5" />
+    <line x1="14" y1="21.5" x2="14" y2="26.5" />
+    <line x1="17" y1="21.5" x2="17" y2="26.5" />
+    <line x1="20" y1="21.5" x2="20" y2="26.5" />
   </svg>
 {/if}

@@ -848,7 +848,7 @@
     gap: var(--space-1);
     font-size: 12px;
     color: var(--text-secondary);
-    font-weight: 450;
+    font-weight: 400;
   }
 
   .meta-item svg {

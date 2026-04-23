@@ -1977,11 +1977,16 @@
     <!-- Game Picker -->
     <div class="picker-container">
       <div class="picker-icon">
-        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="2" y="6" width="20" height="12" rx="2" />
-          <circle cx="8" cy="12" r="2" />
-          <circle cx="16" cy="12" r="2" />
-          <line x1="12" y1="8" x2="12" y2="16" />
+        <svg width="48" height="48" viewBox="0 0 24 28" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="1.5" y="1.5" width="21" height="20" rx="2" />
+          <rect x="3.5" y="3" width="17" height="13" rx="1" />
+          <line x1="1.5" y1="21.5" x2="22.5" y2="21.5" />
+          <line x1="5" y1="21.5" x2="5" y2="26.5" />
+          <line x1="8" y1="21.5" x2="8" y2="26.5" />
+          <line x1="11" y1="21.5" x2="11" y2="26.5" />
+          <line x1="14" y1="21.5" x2="14" y2="26.5" />
+          <line x1="17" y1="21.5" x2="17" y2="26.5" />
+          <line x1="20" y1="21.5" x2="20" y2="26.5" />
         </svg>
       </div>
       <h2 class="picker-title">Select a Game</h2>

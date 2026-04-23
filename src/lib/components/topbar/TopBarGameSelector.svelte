@@ -41,10 +41,16 @@
       <GameIcon gameId={$selectedGame.game_id} size={20} />
       <span class="topbar-selector-label">{$selectedGame.display_name}</span>
     {:else}
-      <svg width="20" height="20" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.4">
-        <rect x="2" y="4" width="12" height="8" rx="2" />
-        <circle cx="6" cy="8" r="1.5" />
-        <circle cx="10" cy="8" r="1.5" />
+      <svg width="20" height="20" viewBox="0 0 24 28" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" opacity="0.4">
+        <rect x="1.5" y="1.5" width="21" height="20" rx="2" />
+        <rect x="3.5" y="3" width="17" height="13" rx="1" />
+        <line x1="1.5" y1="21.5" x2="22.5" y2="21.5" />
+        <line x1="5" y1="21.5" x2="5" y2="26.5" />
+        <line x1="8" y1="21.5" x2="8" y2="26.5" />
+        <line x1="11" y1="21.5" x2="11" y2="26.5" />
+        <line x1="14" y1="21.5" x2="14" y2="26.5" />
+        <line x1="17" y1="21.5" x2="17" y2="26.5" />
+        <line x1="20" y1="21.5" x2="20" y2="26.5" />
       </svg>
       <span class="topbar-selector-label placeholder">Select Game</span>
     {/if}

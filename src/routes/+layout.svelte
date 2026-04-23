@@ -2274,7 +2274,7 @@
   /* --- Status pills --- */
 
   .update-pill {
-    font-size: 9px;
+    font-size: 11px;
     font-weight: 700;
     padding: 2px 7px;
     border-radius: 100px;
@@ -2775,7 +2775,7 @@
     min-width: 14px;
     height: 14px;
     border-radius: 7px;
-    font-size: 9px;
+    font-size: 11px;
     font-weight: 700;
     display: flex;
     align-items: center;
