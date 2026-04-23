@@ -27,6 +27,87 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Semaphore;
 
 // ---------------------------------------------------------------------------
+// Failure categorization
+//
+// WJ downloads fail for many reasons — categorizing them lets users tell
+// "this list is broken" apart from "my network is flaky" apart from "I need
+// premium for this". Pattern-matches against the error strings collected in
+// `download_failures`.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum FailureKind {
+    NotFound,         // 404 / removed from Nexus
+    Unauthorized,     // 401/403 / premium required / auth missing
+    RateLimited,      // 429 / rate limit
+    Network,          // timeout / DNS / connection reset
+    HashMismatch,     // xxHash64 mismatch after download
+    DiskFull,         // no space left
+    ServerError,      // 5xx
+    Unknown,
+}
+
+impl FailureKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::NotFound => "Removed (404)",
+            Self::Unauthorized => "Auth / premium required",
+            Self::RateLimited => "Rate limited",
+            Self::Network => "Network / timeout",
+            Self::HashMismatch => "Hash mismatch",
+            Self::DiskFull => "Disk full",
+            Self::ServerError => "Server error",
+            Self::Unknown => "Other",
+        }
+    }
+}
+
+fn classify_failure(msg: &str) -> FailureKind {
+    let m = msg.to_ascii_lowercase();
+    if m.contains("404") || m.contains("not found") || m.contains("no such file") {
+        FailureKind::NotFound
+    } else if m.contains("401") || m.contains("403") || m.contains("unauthorized")
+        || m.contains("forbidden") || m.contains("premium")
+    {
+        FailureKind::Unauthorized
+    } else if m.contains("429") || m.contains("rate limit") {
+        FailureKind::RateLimited
+    } else if m.contains("hash mismatch") || m.contains("xxhash") {
+        FailureKind::HashMismatch
+    } else if m.contains("no space") || m.contains("disk full") || m.contains("enospc") {
+        FailureKind::DiskFull
+    } else if m.contains("500") || m.contains("502") || m.contains("503")
+        || m.contains("504") || m.contains("bad gateway") || m.contains("service unavailable")
+    {
+        FailureKind::ServerError
+    } else if m.contains("timeout") || m.contains("timed out") || m.contains("dns")
+        || m.contains("connection") || m.contains("reset") || m.contains("network")
+    {
+        FailureKind::Network
+    } else {
+        FailureKind::Unknown
+    }
+}
+
+fn summarize_failures(failures: &[String]) -> String {
+    if failures.is_empty() {
+        return "no error details available".to_string();
+    }
+    let mut counts: HashMap<FailureKind, usize> = HashMap::new();
+    for f in failures {
+        *counts.entry(classify_failure(f)).or_insert(0) += 1;
+    }
+    let mut entries: Vec<(FailureKind, usize)> = counts.into_iter().collect();
+    entries.sort_by(|a, b| b.1.cmp(&a.1));
+    let breakdown: Vec<String> = entries
+        .iter()
+        .map(|(k, n)| format!("{} × {}", n, k.label()))
+        .collect();
+    let first = failures.first().map(|s| s.as_str()).unwrap_or("unknown");
+    format!("{}. First: {}", breakdown.join(", "), first)
+}
+
+// ---------------------------------------------------------------------------
 // Error types
 // ---------------------------------------------------------------------------
 
@@ -1509,15 +1590,11 @@ pub async fn install_wabbajack_modlist(
 
     // If ALL downloads failed, fail the install early
     if download_succeeded == 0 && total_archives > 0 {
-        let reason = if failure_list.is_empty() {
-            "All archives failed to download (no error details available)".to_string()
-        } else {
-            format!(
-                "All {} archives failed to download. First error: {}",
-                total_archives,
-                failure_list.first().unwrap_or(&"unknown".to_string())
-            )
-        };
+        let reason = format!(
+            "All {} archives failed to download. Breakdown: {}",
+            total_archives,
+            summarize_failures(&failure_list),
+        );
         db.update_wj_install_status(install_id, "failed", Some(&reason))
             .map_err(|e| WjInstallError::Database(e.to_string()))?;
         emit_progress(
@@ -1529,12 +1606,15 @@ pub async fn install_wabbajack_modlist(
         return Err(WjInstallError::Download(reason));
     }
 
-    // If a significant portion failed, add a prominent warning
+    // If a significant portion failed, add a prominent warning with categorized breakdown
     if download_failed > 0 {
         let pct = (download_failed as f64 / total_archives as f64 * 100.0) as u32;
         warnings.push(format!(
-            "{} of {} archives failed ({}%) — files from these archives will be missing",
-            download_failed, total_archives, pct
+            "{} of {} archives failed ({}%) — files from these archives will be missing. Breakdown: {}",
+            download_failed,
+            total_archives,
+            pct,
+            summarize_failures(&failure_list),
         ));
         for failure in &failure_list {
             warnings.push(format!("  Failure: {}", failure));
@@ -2188,5 +2268,36 @@ mod tests {
         let event2 = WjInstallProgressEvent::InstallCancelled;
         let json2 = serde_json::to_string(&event2).unwrap();
         assert!(json2.contains("\"type\":\"InstallCancelled\""));
+    }
+
+    #[test]
+    fn classify_failure_buckets() {
+        assert_eq!(classify_failure("HTTP 404 Not Found"), FailureKind::NotFound);
+        assert_eq!(classify_failure("HTTP 403 Forbidden"), FailureKind::Unauthorized);
+        assert_eq!(classify_failure("premium required for this file"), FailureKind::Unauthorized);
+        assert_eq!(classify_failure("HTTP 429 Too Many Requests"), FailureKind::RateLimited);
+        assert_eq!(classify_failure("xxhash mismatch after download"), FailureKind::HashMismatch);
+        assert_eq!(classify_failure("ENOSPC: no space left on device"), FailureKind::DiskFull);
+        assert_eq!(classify_failure("HTTP 502 Bad Gateway"), FailureKind::ServerError);
+        assert_eq!(classify_failure("connection timed out"), FailureKind::Network);
+        assert_eq!(classify_failure("something entirely weird"), FailureKind::Unknown);
+    }
+
+    #[test]
+    fn summarize_failures_breakdown() {
+        let out = summarize_failures(&[
+            "HTTP 404 Not Found".to_string(),
+            "HTTP 404 Not Found".to_string(),
+            "connection timed out".to_string(),
+        ]);
+        assert!(out.contains("2 × Removed (404)"));
+        assert!(out.contains("1 × Network / timeout"));
+        assert!(out.contains("First: HTTP 404"));
+    }
+
+    #[test]
+    fn summarize_failures_empty() {
+        let out = summarize_failures(&[]);
+        assert!(out.contains("no error details"));
     }
 }
