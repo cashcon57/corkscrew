@@ -37,13 +37,13 @@ It works by reading and writing directly to your Wine bottle's filesystem — th
 - [SSE Engine Fixes for Wine](#sse-engine-fixes-for-wine) — Companion SKSE plugin for large modlists under Wine
 - [Architecture](#architecture) — Tech stack, project structure, how mods are installed
 - [Contributing](#contributing) — Setup, help wanted, how to add game support
-- [Acknowledgments](#acknowledgments) — Projects and authors we build on
+- [Acknowledgments](#acknowledgments) — Projects and authors I build on
 
 ---
 
 ## What Works Today
 
-Corkscrew has been **tested extensively with Skyrim Special Edition** on macOS (Apple Silicon, CrossOver). That's the honest baseline. Here's where things stand:
+Corkscrew has been **tested extensively with Skyrim Special Edition** on macOS (Apple Silicon, CrossOver). Here's where things stand:
 
 ### Tested & Working (Skyrim SE)
 - Full mod lifecycle: install from archive, stage, deploy via hardlinks, toggle on/off, uninstall
@@ -57,11 +57,11 @@ Corkscrew has been **tested extensively with Skyrim Special Edition** on macOS (
 - Optional anonymous crash reporting via [Sentry](https://sentry.io/) (opt-in, disabled by default — see [Privacy Policy](PRIVACY.md))
 
 ### Known Issues
-- **Large modlists don't work yet.** Gate to Sovngarde (1700+ plugins) installs and reaches main menu but freezes on New Game due to hash table corruption in Skyrim's engine under Wine. **This is the current bottleneck** — we are actively iterating on [SSE Engine Fixes for Wine](https://github.com/corkscrewmodding/SSEEngineFixesForWine) to solve this. Smaller modlists like [Immersive & Pure](https://next.nexusmods.com/skyrimspecialedition/collections/vaakhi) work end-to-end including New Game and gameplay.
+- **Large modlists don't work yet.** Gate to Sovngarde (1700+ plugins) installs and reaches main menu but freezes on New Game due to hash table corruption in Skyrim's engine under Wine. **This is the current bottleneck** — I am actively iterating on [SSE Engine Fixes for Wine](https://github.com/corkscrewmodding/SSEEngineFixesForWine) to solve this. Smaller modlists like [Immersive & Pure](https://next.nexusmods.com/skyrimspecialedition/collections/vaakhi) work end-to-end including New Game and gameplay.
 - **Wabbajack modlists** — The install pipeline is built (multi-source downloads, BSDiff patching, BSA packing, directive processing), but game file source extraction is incomplete. Complex modlists that depend on vanilla game files as patch sources will partially fail. This is the other main blocker for v1.0.
 
 ### Untested
-- **Every game except Skyrim SE.** 80+ games are auto-detected and support basic mod deployment, but only Skyrim SE and Fallout 4 have full-featured plugins (load order, LOOT, script extender, INI presets, crash logs). We haven't verified the mod workflow end-to-end for other games yet.
+- **Every game except Skyrim SE.** 80+ games are auto-detected and support basic mod deployment, but only Skyrim SE and Fallout 4 have full-featured plugins (load order, LOOT, script extender, INI presets, crash logs). I haven't verified the mod workflow end-to-end for other games yet.
 - **Linux.** The app builds for Linux, handles Linux paths, and supports Proton/Lutris/SteamOS bottles. But primary development and testing happens on macOS. Community testing and feedback on Linux is very welcome.
 
 ---
@@ -70,7 +70,7 @@ Corkscrew has been **tested extensively with Skyrim Special Edition** on macOS (
 
 We're actively expanding support to cover the **top 80 most-modded games on NexusMods**. The architecture is game-agnostic — mod installation, staging, deployment, collections, and profiles work for any game. What varies is the depth of game-specific integration.
 
-> **Note on platform compatibility:** Corkscrew is a cross-platform app. Some games listed below may not run under Wine/CrossOver on macOS or under Proton on Linux (due to anti-cheat, DRM, VR requirements, or engine limitations). We're adding mod management support for all top 80 games regardless, because Corkscrew is designed to eventually support native Windows as well. If a game doesn't run on your platform today, the mod tooling will be ready when it does — or when you use Corkscrew on Windows.
+> **Note on platform compatibility:** Corkscrew is a cross-platform app. Some games listed below may not run under Wine/CrossOver on macOS or under Proton on Linux (due to anti-cheat, DRM, VR requirements, or engine limitations). I'm adding mod management support for all top 80 games regardless, because Corkscrew is designed to eventually support native Windows as well. If a game doesn't run on your platform today, the mod tooling will be ready when it does — or when you use Corkscrew on Windows.
 
 ### Support Tiers
 
@@ -468,7 +468,7 @@ cargo tauri dev    # Dev mode with hot-reload
 
 ### Help Wanted
 
-- **Game testing** — We need players to verify mod workflows for the 80 games listed in [Game Support Status](#game-support-status). If you play any of these games with mods under Wine/CrossOver/Proton, your testing and issue reports are invaluable.
+- **Game testing** — I need players to verify mod workflows for the 80 games listed in [Game Support Status](#game-support-status). If you play any of these games with mods under Wine/CrossOver/Proton, your testing and issue reports are invaluable.
 - **Linux testing** — SteamOS, Steam Deck, Fedora, Ubuntu with Proton/Lutris
 - **New game registry entries** — PRs adding games to `src-tauri/data/vortex_game_registry.json` are welcome. Each entry needs: `game_id`, `name`, `nexus_domain`, `steam_id`, `executable`, `mod_path`, `required_files`.
 - **Dedicated game plugins** — Rust plugins for games needing special handling (load order, custom mod routing, script extender integration). See `src-tauri/src/plugins/` for examples.
