@@ -114,6 +114,18 @@ pub const SPECS: &[ThunderstoreGameSpec] = &[
         executables: &["valheim.exe"],
         mod_dir: &["BepInEx", "plugins"],
     },
+    ThunderstoreGameSpec {
+        game_id: "mewgenics",
+        display_name: "Mewgenics",
+        nexus_slug: "mewgenics",
+        thunderstore_community: "mewgenics",
+        steam_app_id: "686060",
+        steam_dirs: &["Mewgenics"],
+        executables: &["Mewgenics.exe"],
+        // Unverified engine — defaulting to BepInEx/plugins, will correct
+        // if Mewgenics ships with a different loader convention.
+        mod_dir: &["BepInEx", "plugins"],
+    },
 ];
 
 // ---------------------------------------------------------------------------

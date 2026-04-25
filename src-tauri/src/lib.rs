@@ -1386,9 +1386,11 @@ pub fn run() {
             commands::verified_lists_cmds::get_verification_manifest,
             commands::verified_lists_cmds::refresh_verification_manifest,
             commands::verified_lists_cmds::get_verification_cache_age_secs,
-            // Thunderstore catalog
+            // Thunderstore catalog + install
             commands::thunderstore_cmds::thunderstore_list_communities,
             commands::thunderstore_cmds::thunderstore_list_packages,
+            commands::thunderstore_cmds::thunderstore_install_package,
+            commands::thunderstore_cmds::thunderstore_install_with_dependencies,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

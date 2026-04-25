@@ -252,6 +252,7 @@
     "repo",
     "palworld",
     "valheim",
+    "mewgenics",
   ]);
   const gameHasNoPluginSystem = $derived(
     $selectedGame ? GAMES_WITHOUT_PLUGINS.has($selectedGame.game_id) : false,

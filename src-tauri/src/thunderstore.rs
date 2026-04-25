@@ -11,11 +11,12 @@
 //!
 //! Caching: per-community package listings are cached on disk for 1h and
 //! in-memory for the process lifetime. The full community list is cached
-//! for 24h. Cache files live under the platform's data-local dir (same
-//! convention as verified_lists).
+//! for 24h. Downloaded package zips are cached indefinitely (named by
+//! `full_name`, content-addressable by version). All cache files live under
+//! the platform's data-local dir.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -126,6 +127,26 @@ fn cache_dir() -> Option<PathBuf> {
     let dir = base.join("corkscrew").join("thunderstore");
     let _ = std::fs::create_dir_all(&dir);
     Some(dir)
+}
+
+fn packages_cache_dir(community: &str) -> Option<PathBuf> {
+    let dir = cache_dir()?.join("packages").join(sanitize_segment(community));
+    let _ = std::fs::create_dir_all(&dir);
+    Some(dir)
+}
+
+/// Sanitize a path segment: strip traversal attempts, keep alphanumerics,
+/// dashes, underscores, dots.
+fn sanitize_segment(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn ensure_mem() {
@@ -307,6 +328,14 @@ pub fn find_package<'a>(packages: &'a [Package], author_name: &str) -> Option<&'
     packages.iter().find(|p| p.full_name == author_name)
 }
 
+/// Find a specific `author-name-version` across a community's package list.
+pub fn find_version<'a>(packages: &'a [Package], full_name: &str) -> Option<&'a PackageVersion> {
+    // Strip the trailing `-X.Y.Z` to get the package key.
+    let (pkg_key, _) = full_name.rsplit_once('-')?;
+    let pkg = packages.iter().find(|p| p.full_name == pkg_key)?;
+    pkg.versions.iter().find(|v| v.full_name == full_name)
+}
+
 /// Resolve the full dependency closure for a version within a community.
 /// Dependencies are `"author-name-version"`; we match by `"author-name"` prefix
 /// and prefer the explicitly requested version if present, otherwise the
@@ -345,6 +374,94 @@ pub fn resolve_dependencies<'a>(
     }
 
     resolved
+}
+
+// ---------------------------------------------------------------------------
+// Package download + install
+// ---------------------------------------------------------------------------
+
+/// Report from installing one Thunderstore package version.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InstallReport {
+    pub full_name: String,
+    pub mod_subdir: String,
+    pub installed_files: Vec<String>,
+}
+
+/// Download a package version's zip and cache it on disk. Returns the local
+/// path to the zip. Repeat calls for the same version are no-ops.
+pub async fn download_version(
+    community: &str,
+    version: &PackageVersion,
+) -> Result<PathBuf, String> {
+    let dir = packages_cache_dir(community).ok_or("cache dir unavailable")?;
+    let filename = format!("{}.zip", sanitize_segment(&version.full_name));
+    let path = dir.join(&filename);
+    if path.exists() {
+        if let Ok(meta) = std::fs::metadata(&path) {
+            // File_size on Thunderstore can be 0 for pre-v1 packages; treat
+            // any non-empty cache file as a hit.
+            if meta.len() > 0 {
+                return Ok(path);
+            }
+        }
+    }
+
+    let client = http_client()?;
+    let resp = client
+        .get(&version.download_url)
+        .send()
+        .await
+        .map_err(|e| format!("download: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!(
+            "HTTP {} downloading {}",
+            resp.status(),
+            version.full_name
+        ));
+    }
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("read body: {e}"))?;
+
+    let tmp = path.with_extension("zip.tmp");
+    std::fs::write(&tmp, &bytes).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
+/// Extract + deploy a downloaded package zip into `<data_dir>/<full_name>/`.
+/// Each Thunderstore mod gets its own subdirectory under `data_dir` (which
+/// for BepInEx games is `BepInEx/plugins`). Returns the `InstallReport`.
+pub fn install_version(
+    zip_path: &Path,
+    data_dir: &Path,
+    full_name: &str,
+) -> Result<InstallReport, String> {
+    let sub = sanitize_segment(full_name);
+    if sub.is_empty() {
+        return Err("empty full_name".into());
+    }
+    let mod_dir = data_dir.join(&sub);
+
+    // `crate::installer::install_mod` extracts + copies into the given
+    // data_dir, flattening the archive root. We wrap it with the per-mod
+    // subdir so each Thunderstore package stays self-contained.
+    let installed_files = crate::installer::install_mod(
+        zip_path,
+        &mod_dir,
+        full_name,
+        "",    // version string not needed — embedded in full_name
+        None, // no Nexus ID
+    )
+    .map_err(|e| format!("install_mod: {e}"))?;
+
+    Ok(InstallReport {
+        full_name: full_name.to_string(),
+        mod_subdir: sub,
+        installed_files,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -438,5 +555,34 @@ mod tests {
         let root = &pkgs[0].versions[0];
         let closure = resolve_dependencies(&pkgs, root);
         assert!(closure.is_empty());
+    }
+
+    #[test]
+    fn find_version_walks_package_list() {
+        let pkgs = vec![
+            fake_package("author-ModA", "1.0.0", &[]),
+            fake_package("author-ModA", "2.0.0", &[]),
+        ];
+        // Our fake_package only stores one version. Patch the first to hold both.
+        let mut pkgs = pkgs;
+        pkgs[0].versions.push(fake_version("author-ModA-2.0.0", &[]));
+
+        let v = find_version(&pkgs, "author-ModA-2.0.0");
+        assert!(v.is_some());
+        assert_eq!(v.unwrap().version_number, "2.0.0");
+
+        let missing = find_version(&pkgs, "author-ModA-9.9.9");
+        assert!(missing.is_none());
+
+        let malformed = find_version(&pkgs, "no-dashes");
+        assert!(malformed.is_none());
+    }
+
+    #[test]
+    fn sanitize_segment_strips_traversal() {
+        assert_eq!(sanitize_segment("author-Mod-1.0.0"), "author-Mod-1.0.0");
+        assert_eq!(sanitize_segment("../etc/passwd"), ".._etc_passwd");
+        assert_eq!(sanitize_segment("foo/bar\\baz"), "foo_bar_baz");
+        assert_eq!(sanitize_segment("null\0byte"), "null_byte");
     }
 }

@@ -468,6 +468,7 @@
     repo: "repo",
     palworld: "palworld",
     valheim: "valheim",
+    mewgenics: "mewgenics",
   };
 
   function getGameSlug(): string {
@@ -1049,6 +1050,7 @@
       repo: "R.E.P.O.",
       palworld: "Palworld",
       valheim: "Valheim",
+      mewgenics: "Mewgenics",
     };
     return map[domain] || domain;
   }
