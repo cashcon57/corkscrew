@@ -1162,6 +1162,7 @@ dependencies = [
  "dirs",
  "env_logger",
  "esplugin",
+ "filetime",
  "flate2",
  "futures",
  "image 0.25.10",

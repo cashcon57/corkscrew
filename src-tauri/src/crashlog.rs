@@ -270,35 +270,117 @@ pub struct NewCrashInfo {
     pub entries: Vec<CrashLogEntry>,
 }
 
-/// Check for crash logs newer than the last-seen timestamp and update the marker.
+/// Marker for the most recent crash log we've already reported, used to filter
+/// "new" crashes between calls to [`check_new_crashes`].
 ///
-/// The "last seen" timestamp is stored in a small file at
-/// `<data_dir>/crash_check/crash_check_<game_id>.txt`. On first run (no marker file)
-/// all existing crashes are considered "seen" — we write the current marker without
-/// reporting anything, so users don't get a wall of stale crash alerts.
+/// Stored on disk as `"<nanos>:<filename>"`. We use nanosecond-precision mtime
+/// (rather than seconds) plus a filename secondary key so two crashes within
+/// the same second are distinguishable — second-precision missed back-to-back
+/// crashes (e.g. a hard CTD that bounces a few times during the SKSE startup
+/// loop). Comparison is `(nanos, filename)` lexicographic order.
+///
+/// Legacy markers from older versions stored just an integer (seconds); they
+/// are parsed as `(secs * 1_000_000_000, "")`. This treats every crash whose
+/// mtime exceeds the legacy second boundary — including ones with non-zero
+/// nanoseconds in that same second — as new on the first upgraded run, which
+/// is acceptable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CrashSeenMarker {
+    nanos: u128,
+    filename: String,
+}
+
+impl CrashSeenMarker {
+    fn parse(raw: &str) -> Option<Self> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        // New format: "<nanos>:<filename>" — split on the first ':'.
+        if let Some((nanos_str, name)) = trimmed.split_once(':') {
+            if let Ok(nanos) = nanos_str.parse::<u128>() {
+                return Some(CrashSeenMarker {
+                    nanos,
+                    filename: name.to_string(),
+                });
+            }
+        }
+        // Legacy format: bare integer of seconds.
+        if let Ok(secs) = trimmed.parse::<i64>() {
+            if secs >= 0 {
+                return Some(CrashSeenMarker {
+                    nanos: (secs as u128).saturating_mul(1_000_000_000),
+                    filename: String::new(),
+                });
+            }
+        }
+        None
+    }
+
+    fn serialize(&self) -> String {
+        format!("{}:{}", self.nanos, self.filename)
+    }
+
+    /// Strict comparison key: a file is "new" iff its `(nanos, filename)`
+    /// is strictly greater than the stored marker. Filename is the secondary
+    /// key — it disambiguates files that share an mtime second/nanosecond.
+    fn key(&self) -> (u128, &str) {
+        (self.nanos, self.filename.as_str())
+    }
+}
+
+/// Convert a SystemTime to nanoseconds since the Unix epoch.
+///
+/// Both Linux (statx) and macOS (getattrlist) provide nanosecond-precision
+/// mtimes; Rust's SystemTime::duration_since reflects this. On odd
+/// filesystems where nanoseconds are unavailable, the result still has the
+/// correct second-resolution ordering.
+fn mtime_nanos(mtime: std::time::SystemTime) -> Option<u128> {
+    mtime
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_nanos())
+}
+
+/// Check for crash logs newer than the last-seen marker and update the marker.
+///
+/// The marker is stored at `<data_dir>/crash_check/crash_check_<game_id>.txt`
+/// in the format `"<nanos>:<filename>"`. On first run (no marker file) all
+/// existing crashes are considered "seen" — we write the current max marker
+/// without reporting anything, so users don't get a wall of stale crash
+/// alerts.
 pub fn check_new_crashes(
     bottle_path: &Path,
     game_id: &str,
 ) -> NewCrashInfo {
-    // Use crate::config::data_dir() so that CORKSCREW_DATA_DIR env-var
-    // overrides apply, and so the path matches the lowercase "corkscrew"
-    // convention used elsewhere (config.rs:142, loot.rs:101). On Linux ext4
-    // a capital "Corkscrew" diverges from the rest of the codebase.
     let marker_dir = crate::config::data_dir().join("crash_check");
-    let _ = fs::create_dir_all(&marker_dir);
     let marker_path = marker_dir.join(format!("crash_check_{}.txt", game_id));
+    check_new_crashes_with_marker(bottle_path, game_id, &marker_path)
+}
 
-    let last_seen = fs::read_to_string(&marker_path)
+/// Inner function exposed for tests: looks for new crashes against a specific
+/// marker file path. The production wrapper resolves the path via
+/// `crate::config::data_dir()`.
+fn check_new_crashes_with_marker(
+    bottle_path: &Path,
+    game_id: &str,
+    marker_path: &Path,
+) -> NewCrashInfo {
+    if let Some(parent) = marker_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
+    let last_seen: Option<CrashSeenMarker> = fs::read_to_string(marker_path)
         .ok()
-        .and_then(|s| s.trim().parse::<i64>().ok());
+        .and_then(|s| CrashSeenMarker::parse(&s));
 
     let log_dir = script_extender_log_dir(bottle_path, game_id);
     if !log_dir.is_dir() {
         return NewCrashInfo { count: 0, entries: vec![] };
     }
 
-    // Collect crash log files with their modification times (fast: stat only).
-    let mut crash_files: Vec<(PathBuf, std::time::SystemTime, String)> = Vec::new();
+    // Collect crash log files with their nanosecond-precision mtimes.
+    let mut crash_files: Vec<(PathBuf, u128, String)> = Vec::new();
     for entry in WalkDir::new(&log_dir).max_depth(1).into_iter().flatten() {
         let path = entry.path();
         if !path.is_file() {
@@ -310,50 +392,44 @@ pub fn check_new_crashes(
         };
         if let Ok(meta) = fs::metadata(path) {
             if let Ok(mtime) = meta.modified() {
-                crash_files.push((path.to_path_buf(), mtime, filename));
+                if let Some(nanos) = mtime_nanos(mtime) {
+                    crash_files.push((path.to_path_buf(), nanos, filename));
+                }
             }
         }
     }
 
-    // Find the newest mtime across all crash logs to use as the new marker.
-    let now_epoch = crash_files
+    // Compute the new marker = max (nanos, filename) across all files.
+    // (nanos, filename) lexicographic order: ties on nanos broken by name.
+    let new_marker: Option<CrashSeenMarker> = crash_files
         .iter()
-        .filter_map(|(_, mtime, _)| {
-            mtime
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()
-                .map(|d| d.as_secs() as i64)
-        })
-        .max();
+        .max_by(|a, b| (a.1, a.2.as_str()).cmp(&(b.1, b.2.as_str())))
+        .map(|(_, nanos, filename)| CrashSeenMarker {
+            nanos: *nanos,
+            filename: filename.clone(),
+        });
 
     // First run: no marker file — seed it with current max and report nothing.
     if last_seen.is_none() {
-        if let Some(epoch) = now_epoch {
-            let _ = fs::write(&marker_path, epoch.to_string());
+        if let Some(m) = new_marker.as_ref() {
+            let _ = fs::write(marker_path, m.serialize());
         }
         return NewCrashInfo { count: 0, entries: vec![] };
     }
 
     let threshold = last_seen.unwrap();
+    let threshold_key = threshold.key();
 
-    // Filter to only files newer than the threshold.
-    let mut new_files: Vec<(PathBuf, i64, String)> = crash_files
+    // A file is "new" iff its (nanos, filename) is strictly greater than the
+    // stored marker. The filename secondary key catches multiple crashes
+    // sharing an mtime second/nanosecond.
+    let mut new_files: Vec<(PathBuf, u128, String)> = crash_files
         .into_iter()
-        .filter_map(|(path, mtime, filename)| {
-            let epoch = mtime
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()
-                .map(|d| d.as_secs() as i64)?;
-            if epoch > threshold {
-                Some((path, epoch, filename))
-            } else {
-                None
-            }
-        })
+        .filter(|(_, nanos, filename)| (*nanos, filename.as_str()) > threshold_key)
         .collect();
 
-    // Sort newest first.
-    new_files.sort_by(|a, b| b.1.cmp(&a.1));
+    // Sort newest first by (nanos desc, filename desc).
+    new_files.sort_by(|a, b| (b.1, b.2.as_str()).cmp(&(a.1, a.2.as_str())));
 
     let count = new_files.len();
 
@@ -361,7 +437,7 @@ pub fn check_new_crashes(
     let entries: Vec<CrashLogEntry> = new_files
         .iter()
         .take(3)
-        .map(|(path, _epoch, filename)| {
+        .map(|(path, _nanos, filename)| {
             let timestamp = filename
                 .trim_start_matches("crash-")
                 .trim_end_matches(".log")
@@ -379,9 +455,9 @@ pub fn check_new_crashes(
         })
         .collect();
 
-    // Update marker to the newest mtime.
-    if let Some(epoch) = now_epoch {
-        let _ = fs::write(&marker_path, epoch.to_string());
+    // Update marker to the newest (nanos, filename).
+    if let Some(m) = new_marker {
+        let _ = fs::write(marker_path, m.serialize());
     }
 
     NewCrashInfo { count, entries }
@@ -2259,5 +2335,177 @@ Nothing to see here.
         let (summary, severity) = quick_summary(SAMPLE_HDT_CRASH);
         assert!(summary.contains("hdtSMP64.dll"));
         assert_eq!(severity, CrashSeverity::High);
+    }
+
+    // -----------------------------------------------------------------------
+    // CrashSeenMarker — nanosecond + filename de-duplication
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn marker_parse_new_format() {
+        let m = CrashSeenMarker::parse("1700000000000000000:crash-2024-01-01-12-00-00.log").unwrap();
+        assert_eq!(m.nanos, 1_700_000_000_000_000_000u128);
+        assert_eq!(m.filename, "crash-2024-01-01-12-00-00.log");
+    }
+
+    #[test]
+    fn marker_parse_legacy_seconds() {
+        // Legacy markers stored a bare i64 of seconds.
+        let m = CrashSeenMarker::parse("1700000000").unwrap();
+        assert_eq!(m.nanos, 1_700_000_000_000_000_000u128);
+        assert_eq!(m.filename, "");
+    }
+
+    #[test]
+    fn marker_parse_garbage_returns_none() {
+        assert!(CrashSeenMarker::parse("").is_none());
+        assert!(CrashSeenMarker::parse("not-a-number").is_none());
+        assert!(CrashSeenMarker::parse("nope:also-bad").is_none());
+        assert!(CrashSeenMarker::parse("-1").is_none()); // negative legacy
+    }
+
+    #[test]
+    fn marker_roundtrip() {
+        let original = CrashSeenMarker {
+            nanos: 1_700_000_000_123_456_789u128,
+            filename: "crash-2024-03-15-14-23-45.log".to_string(),
+        };
+        let serialized = original.serialize();
+        let parsed = CrashSeenMarker::parse(&serialized).unwrap();
+        assert_eq!(original, parsed);
+    }
+
+    #[test]
+    fn marker_filename_breaks_nano_ties() {
+        // Two markers with identical nanos: filename order is the tiebreaker.
+        let a = CrashSeenMarker {
+            nanos: 1_000_000_000,
+            filename: "crash-a.log".to_string(),
+        };
+        let b = CrashSeenMarker {
+            nanos: 1_000_000_000,
+            filename: "crash-b.log".to_string(),
+        };
+        assert!(a.key() < b.key());
+        assert!(b.key() > a.key());
+    }
+
+    /// Build a fake bottle directory containing the SKSE log dir, return
+    /// (bottle_path, log_dir) so callers can drop crash files in.
+    fn make_fake_bottle(tmp: &tempfile::TempDir) -> (PathBuf, PathBuf) {
+        let bottle = tmp.path().join("bottle");
+        let log_dir = bottle
+            .join("drive_c")
+            .join("users")
+            .join("crossover")
+            .join("Documents")
+            .join("My Games")
+            .join("Skyrim Special Edition")
+            .join("SKSE");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        (bottle, log_dir)
+    }
+
+    /// Force two files to the same exact mtime (sec + nanos) to simulate
+    /// "two crashes within the same nanosecond" — the worst case the
+    /// nanosecond+filename marker has to handle.
+    fn force_equal_mtime(a: &Path, b: &Path) {
+        use filetime::{set_file_mtime, FileTime};
+        let ft = FileTime::from_unix_time(1_700_000_000, 500_000_000);
+        set_file_mtime(a, ft).unwrap();
+        set_file_mtime(b, ft).unwrap();
+    }
+
+    /// Two crashes written in quick succession with identical mtimes — the
+    /// classic second-precision miss. With nanosecond+filename markers, the
+    /// second crash must still be detected as new on a subsequent check.
+    ///
+    /// Scenario: app seeds the marker on an empty dir. Then two crashes
+    /// happen within the same nanosecond (or, more realistically, the same
+    /// second on a coarse filesystem). The second check must report BOTH.
+    #[test]
+    fn check_new_crashes_detects_second_crash_within_same_second() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (bottle, log_dir) = make_fake_bottle(&tmp);
+        let marker = tmp.path().join("crash_check_skyrimse.txt");
+
+        // First call: empty dir, seeds marker with nothing meaningful.
+        // (No crashes yet — marker file simply isn't created in this path.)
+        let result = check_new_crashes_with_marker(&bottle, "skyrimse", &marker);
+        assert_eq!(result.count, 0);
+
+        // To make this test deterministic regardless of whether the marker
+        // file exists yet, write a "long ago" marker so anything above
+        // counts as new.
+        std::fs::write(&marker, "1000000000:").unwrap();
+
+        // Two crashes with identical mtimes (worst case — same nanosecond).
+        let first = log_dir.join("crash-2024-01-01-12-00-00.log");
+        let second = log_dir.join("crash-2024-01-01-12-00-01.log");
+        std::fs::write(&first, SAMPLE_CRASH_LOG).unwrap();
+        std::fs::write(&second, SAMPLE_HDT_CRASH).unwrap();
+        force_equal_mtime(&first, &second);
+
+        let result = check_new_crashes_with_marker(&bottle, "skyrimse", &marker);
+        assert_eq!(
+            result.count, 2,
+            "both crashes (identical mtime) must be detected"
+        );
+    }
+
+    /// After processing N new crashes, a follow-up check with no further
+    /// activity must return 0 — the marker has to advance to the latest
+    /// (nanos, filename) on every successful run.
+    #[test]
+    fn check_new_crashes_idempotent_after_advancing_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (bottle, log_dir) = make_fake_bottle(&tmp);
+        let marker = tmp.path().join("crash_check_skyrimse.txt");
+
+        // Pre-seed marker to a "long ago" value so freshly-written crashes
+        // count as new on the first scoring pass.
+        std::fs::write(&marker, "1000000000:").unwrap();
+
+        // Add two crashes with the same mtime.
+        let a = log_dir.join("crash-2024-01-01-12-00-00.log");
+        let b = log_dir.join("crash-2024-01-01-12-00-01.log");
+        std::fs::write(&a, SAMPLE_CRASH_LOG).unwrap();
+        std::fs::write(&b, SAMPLE_HDT_CRASH).unwrap();
+        force_equal_mtime(&a, &b);
+
+        let r1 = check_new_crashes_with_marker(&bottle, "skyrimse", &marker);
+        assert_eq!(r1.count, 2);
+
+        // Second call with no new files: must report 0.
+        let r2 = check_new_crashes_with_marker(&bottle, "skyrimse", &marker);
+        assert_eq!(r2.count, 0, "no new files between calls — must report 0");
+    }
+
+    /// A legacy marker (bare seconds integer) must be honored: any file with
+    /// mtime > legacy_secs * 1_000_000_000 nanos is "new" on the upgrade run.
+    #[test]
+    fn check_new_crashes_honors_legacy_seconds_marker() {
+        use filetime::{set_file_mtime, FileTime};
+        let tmp = tempfile::tempdir().unwrap();
+        let (bottle, log_dir) = make_fake_bottle(&tmp);
+        let marker = tmp.path().join("crash_check_skyrimse.txt");
+
+        // Write a legacy marker: 2024-01-01 in seconds since epoch.
+        let legacy_secs: i64 = 1_704_067_200;
+        std::fs::write(&marker, legacy_secs.to_string()).unwrap();
+
+        // Crash from BEFORE the legacy marker — should be ignored.
+        let old = log_dir.join("crash-old.log");
+        std::fs::write(&old, SAMPLE_CRASH_LOG).unwrap();
+        set_file_mtime(&old, FileTime::from_unix_time(legacy_secs - 100, 0)).unwrap();
+
+        // Crash from AFTER the legacy marker — must be reported.
+        let fresh = log_dir.join("crash-fresh.log");
+        std::fs::write(&fresh, SAMPLE_HDT_CRASH).unwrap();
+        set_file_mtime(&fresh, FileTime::from_unix_time(legacy_secs + 100, 500_000_000)).unwrap();
+
+        let result = check_new_crashes_with_marker(&bottle, "skyrimse", &marker);
+        assert_eq!(result.count, 1, "only the post-marker crash should be new");
+        assert_eq!(result.entries[0].filename, "crash-fresh.log");
     }
 }
