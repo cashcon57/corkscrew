@@ -284,8 +284,15 @@ impl ModDatabase {
         // Enable foreign key enforcement.
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
 
-        // Wait up to 5 seconds if database is locked by another connection.
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        // Wait if the database is locked by another connection. Linux —
+        // and Steam Deck in particular — can hit longer contention windows
+        // when deploy + scan + LOOT sort overlap under load, so give Linux
+        // a more generous budget. macOS keeps the original 5 s.
+        #[cfg(target_os = "linux")]
+        let busy_timeout = std::time::Duration::from_secs(15);
+        #[cfg(not(target_os = "linux"))]
+        let busy_timeout = std::time::Duration::from_secs(5);
+        conn.busy_timeout(busy_timeout)?;
 
         // Run schema migrations
         crate::migrations::migrate(&conn)

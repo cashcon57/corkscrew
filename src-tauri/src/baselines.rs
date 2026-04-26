@@ -47,8 +47,10 @@ fn is_skyrim_stock_pattern(rel_path: &str) -> bool {
         return true;
     }
 
-    // Video files are stock
-    if lower.starts_with("video/") || lower.starts_with("video\\") {
+    // Video files are stock. Cleaner normalises backslashes to forward
+    // slashes upstream, so the "video\\" variant is unreachable — only
+    // the forward-slash form is needed here.
+    if lower.starts_with("video/") {
         return true;
     }
 
