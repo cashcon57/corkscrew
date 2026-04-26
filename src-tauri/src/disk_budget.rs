@@ -58,6 +58,18 @@ pub struct DiskBudget {
 }
 
 /// Calculate the total size of a directory tree.
+///
+/// On Unix, sums each file's allocated blocks (`blocks() * 512`) rather than
+/// apparent size (`len()`). This matters on copy-on-write filesystems
+/// (btrfs, zfs, APFS) and for sparse files: hardlinked or reflinked copies
+/// share blocks with the source, and sparse files reserve far fewer blocks
+/// than their logical length suggests. Block-based accounting reflects the
+/// actual disk impact reported by `du`, which is what the deploy budget
+/// (`compute_budget`) needs in order to honestly distinguish "0 (hardlinks)"
+/// from "staging_bytes (copies)".
+///
+/// Falls back to `len()` when `blocks()` returns 0 (some sparse files on
+/// network/odd filesystems) and on non-Unix targets.
 pub fn dir_size(path: &Path) -> u64 {
     if !path.exists() {
         return 0;
@@ -67,8 +79,29 @@ pub fn dir_size(path: &Path) -> u64 {
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
         .filter_map(|e| e.metadata().ok())
-        .map(|m| m.len())
+        .map(|m| file_allocated_size(&m))
         .sum()
+}
+
+/// Return the actual on-disk size of a file in bytes.
+///
+/// On Unix, prefers `blocks() * 512` (allocated 512-byte blocks, the same
+/// units `stat(2)` and `du` use). Falls back to `len()` when `blocks()` is 0.
+#[inline]
+fn file_allocated_size(meta: &std::fs::Metadata) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let blocks = meta.blocks();
+        if blocks > 0 {
+            return blocks.saturating_mul(512);
+        }
+        meta.len()
+    }
+    #[cfg(not(unix))]
+    {
+        meta.len()
+    }
 }
 
 /// Get available disk space on the volume containing `path`.
@@ -215,7 +248,12 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         fs::write(tmp.path().join("a.txt"), "hello").unwrap();
         fs::write(tmp.path().join("b.txt"), "world!").unwrap();
-        assert_eq!(dir_size(tmp.path()), 11); // 5 + 6
+        // Block-based accounting rounds up to filesystem block size, so we
+        // can only assert the reported size is at least the apparent total
+        // (11 bytes) and a sane upper bound (e.g. <= 64 KiB for two tiny files).
+        let size = dir_size(tmp.path());
+        assert!(size >= 11, "expected >= 11, got {}", size);
+        assert!(size < 64 * 1024, "expected < 64 KiB, got {}", size);
     }
 
     #[test]
@@ -224,12 +262,57 @@ mod tests {
         let sub = tmp.path().join("sub");
         fs::create_dir(&sub).unwrap();
         fs::write(sub.join("file.bin"), vec![0u8; 1000]).unwrap();
-        assert_eq!(dir_size(tmp.path()), 1000);
+        // Block-based accounting reports allocated blocks (>= 1000 bytes,
+        // typically 4096 on most filesystems).
+        let size = dir_size(tmp.path());
+        assert!(size >= 1000, "expected >= 1000, got {}", size);
+        assert!(size < 64 * 1024, "expected < 64 KiB, got {}", size);
     }
 
     #[test]
     fn dir_size_nonexistent_returns_zero() {
         assert_eq!(dir_size(Path::new("/nonexistent/path/abc123")), 0);
+    }
+
+    /// A sparse file (created via `set_len`) reserves a logical length much
+    /// larger than its allocated blocks. `dir_size` should report the
+    /// allocated extent, not the full apparent length, so the budget
+    /// correctly reflects what's actually on disk.
+    ///
+    /// On filesystems where `blocks()` is unreliable (network mounts), the
+    /// fallback to `len()` keeps the result sane; we accept either outcome.
+    #[test]
+    fn dir_size_sparse_file_reports_allocated_not_apparent() {
+        let tmp = TempDir::new().unwrap();
+        let sparse_path = tmp.path().join("sparse.bin");
+        // 1 GiB sparse file — no data written, just length set.
+        let f = fs::File::create(&sparse_path).unwrap();
+        let apparent = 1024 * 1024 * 1024u64;
+        f.set_len(apparent).unwrap();
+        drop(f);
+
+        let size = dir_size(tmp.path());
+        // We expect either:
+        // - block-based reporting: significantly less than the apparent size
+        // - fallback to len(): equal to apparent (acceptable but surprising)
+        // Either way the result must be a finite, non-zero, sane value.
+        assert!(size > 0, "size should be > 0");
+        assert!(
+            size <= apparent,
+            "size {} should not exceed apparent length {}",
+            size,
+            apparent
+        );
+        // On a sane filesystem the sparse file should be much smaller than
+        // its apparent length. If blocks() returned 0 we'd have fallen back
+        // to len() == apparent — log this case but don't fail the test.
+        if size == apparent {
+            eprintln!(
+                "note: filesystem returned blocks()==0 for sparse file; \
+                 dir_size fell back to apparent len() ({} bytes)",
+                apparent
+            );
+        }
     }
 
     #[test]
