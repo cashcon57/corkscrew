@@ -35,8 +35,12 @@ pub enum NexusError {
     #[error("Missing download links in API response")]
     NoDownloadLinks,
 
-    #[error("Rate limited by NexusMods API (retry after {retry_after}s)")]
-    RateLimited { retry_after: u64 },
+    #[error("Rate limited by NexusMods API (retry after {retry_after}s; hourly remaining: {hourly_remaining}, daily remaining: {daily_remaining})")]
+    RateLimited {
+        retry_after: u64,
+        hourly_remaining: i64,
+        daily_remaining: i64,
+    },
 
     #[error("Authentication error: {0}")]
     Auth(String),
@@ -371,11 +375,11 @@ impl RateLimitState {
     }
 
     /// Get current rate limit info for logging/diagnostics.
-    fn _hourly_remaining(&self) -> i64 {
+    fn hourly_remaining_value(&self) -> i64 {
         self.hourly_remaining.load(Ordering::Relaxed)
     }
 
-    fn _daily_remaining(&self) -> i64 {
+    fn daily_remaining_value(&self) -> i64 {
         self.daily_remaining.load(Ordering::Relaxed)
     }
 }
@@ -498,68 +502,65 @@ impl NexusClient {
     /// `NexusError::Api` on a non-2xx status.
     ///
     /// Includes client-side rate limit throttling (minimum 1s between requests),
-    /// response header tracking, and automatic HTTP 429 retry with backoff.
+    /// response header tracking, and 3-attempt exponential backoff for HTTP 429
+    /// (5s, 15s, 45s — overridden by the `Retry-After` header when present).
     async fn get_json(&self, url: &str) -> Result<serde_json::Value> {
-        // Enforce minimum spacing between requests
-        self.rate_limit.throttle().await;
+        // Backoff schedule: 5s, 15s, 45s (then give up). Honor server
+        // Retry-After when it asks us to wait longer.
+        const BACKOFFS: [u64; 3] = [5, 15, 45];
 
-        let response = self.client.get(url).send().await?;
-        self.rate_limit.update_from_response(&response);
-        let status = response.status();
+        let mut last_retry_after: u64 = 0;
 
-        // Handle HTTP 429 (Too Many Requests) with retry
-        if status.as_u16() == 429 {
+        for (attempt, base_wait) in BACKOFFS.iter().copied().enumerate() {
+            self.rate_limit.throttle().await;
+
+            let response = self.client.get(url).send().await?;
+            self.rate_limit.update_from_response(&response);
+            let status = response.status();
+
+            if status.as_u16() != 429 {
+                if !status.is_success() {
+                    let message = response
+                        .text()
+                        .await
+                        .unwrap_or_else(|_| "no response body".into());
+                    return Err(NexusError::Api {
+                        status: status.as_u16(),
+                        message,
+                    });
+                }
+                return Ok(response.json().await?);
+            }
+
             let retry_after = response
                 .headers()
                 .get("retry-after")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(5);
+                .unwrap_or(base_wait);
+            last_retry_after = retry_after;
 
+            // Last attempt — give up before sleeping again.
+            if attempt + 1 == BACKOFFS.len() {
+                break;
+            }
+
+            let wait = retry_after.max(base_wait);
             log::warn!(
-                "NexusMods API rate limited (429). Retrying after {}s. URL: {}",
-                retry_after,
+                "NexusMods API 429 (attempt {}/{}). Retrying after {}s. URL: {}",
+                attempt + 1,
+                BACKOFFS.len(),
+                wait,
                 url
             );
-
-            tokio::time::sleep(std::time::Duration::from_secs(retry_after)).await;
-
-            // Retry once
-            self.rate_limit.throttle().await;
-            let retry_response = self.client.get(url).send().await?;
-            self.rate_limit.update_from_response(&retry_response);
-            let retry_status = retry_response.status();
-
-            if retry_status.as_u16() == 429 {
-                return Err(NexusError::RateLimited { retry_after });
-            }
-
-            if !retry_status.is_success() {
-                let message = retry_response
-                    .text()
-                    .await
-                    .unwrap_or_else(|_| "no response body".into());
-                return Err(NexusError::Api {
-                    status: retry_status.as_u16(),
-                    message,
-                });
-            }
-
-            return Ok(retry_response.json().await?);
+            tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
         }
 
-        if !status.is_success() {
-            let message = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "no response body".into());
-            return Err(NexusError::Api {
-                status: status.as_u16(),
-                message,
-            });
-        }
-
-        Ok(response.json().await?)
+        Err(NexusError::RateLimited {
+            retry_after: last_retry_after,
+            hourly_remaining: self.rate_limit.hourly_remaining_value(),
+            daily_remaining: self.rate_limit.daily_remaining_value(),
+        })
     }
 
     // -- public API --------------------------------------------------------
@@ -663,73 +664,62 @@ impl NexusClient {
             url.push_str(&query);
         }
 
-        // Enforce minimum spacing between requests
-        self.rate_limit.throttle().await;
+        // 3-attempt exponential backoff for HTTP 429.
+        const BACKOFFS: [u64; 3] = [5, 15, 45];
+        let mut last_retry_after: u64 = 0;
 
-        let response = self.client.get(&url).send().await?;
-        self.rate_limit.update_from_response(&response);
-        let status = response.status();
+        for (attempt, base_wait) in BACKOFFS.iter().copied().enumerate() {
+            self.rate_limit.throttle().await;
 
-        // Handle HTTP 429 with retry
-        if status.as_u16() == 429 {
+            let response = self.client.get(&url).send().await?;
+            self.rate_limit.update_from_response(&response);
+            let status = response.status();
+
+            if status.as_u16() != 429 {
+                if !status.is_success() {
+                    let message = response
+                        .text()
+                        .await
+                        .unwrap_or_else(|_| "no response body".into());
+                    return Err(NexusError::Api {
+                        status: status.as_u16(),
+                        message,
+                    });
+                }
+                let links: Vec<DownloadLink> = response.json().await?;
+                if links.is_empty() {
+                    return Err(NexusError::NoDownloadLinks);
+                }
+                return Ok(links);
+            }
+
             let retry_after = response
                 .headers()
                 .get("retry-after")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(5);
+                .unwrap_or(base_wait);
+            last_retry_after = retry_after;
 
+            if attempt + 1 == BACKOFFS.len() {
+                break;
+            }
+
+            let wait = retry_after.max(base_wait);
             log::warn!(
-                "NexusMods API rate limited (429) on download links. Retrying after {}s.",
-                retry_after
+                "NexusMods 429 on download_link (attempt {}/{}). Retrying after {}s.",
+                attempt + 1,
+                BACKOFFS.len(),
+                wait
             );
-
-            tokio::time::sleep(std::time::Duration::from_secs(retry_after)).await;
-
-            self.rate_limit.throttle().await;
-            let retry_response = self.client.get(&url).send().await?;
-            self.rate_limit.update_from_response(&retry_response);
-            let retry_status = retry_response.status();
-
-            if retry_status.as_u16() == 429 {
-                return Err(NexusError::RateLimited { retry_after });
-            }
-
-            if !retry_status.is_success() {
-                let message = retry_response
-                    .text()
-                    .await
-                    .unwrap_or_else(|_| "no response body".into());
-                return Err(NexusError::Api {
-                    status: retry_status.as_u16(),
-                    message,
-                });
-            }
-
-            let links: Vec<DownloadLink> = retry_response.json().await?;
-            if links.is_empty() {
-                return Err(NexusError::NoDownloadLinks);
-            }
-            return Ok(links);
+            tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
         }
 
-        if !status.is_success() {
-            let message = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "no response body".into());
-            return Err(NexusError::Api {
-                status: status.as_u16(),
-                message,
-            });
-        }
-
-        let links: Vec<DownloadLink> = response.json().await?;
-        if links.is_empty() {
-            return Err(NexusError::NoDownloadLinks);
-        }
-
-        Ok(links)
+        Err(NexusError::RateLimited {
+            retry_after: last_retry_after,
+            hourly_remaining: self.rate_limit.hourly_remaining_value(),
+            daily_remaining: self.rate_limit.daily_remaining_value(),
+        })
     }
 
     /// Download a file from a direct CDN URL to `dest`, optionally reporting
@@ -1053,7 +1043,11 @@ impl NexusClient {
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.parse::<u64>().ok())
                 .unwrap_or(5);
-            return Err(NexusError::RateLimited { retry_after });
+            return Err(NexusError::RateLimited {
+                retry_after,
+                hourly_remaining: self.rate_limit.hourly_remaining_value(),
+                daily_remaining: self.rate_limit.daily_remaining_value(),
+            });
         }
 
         if !status.is_success() {
