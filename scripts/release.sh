@@ -94,8 +94,29 @@ jq --arg v "$VERSION" '.version = $v' "$ROOT/src-tauri/tauri.conf.json" > /tmp/c
 cd "$ROOT"
 npm version "$VERSION" --no-git-tag-version --allow-same-version >/dev/null
 
-# First `version = ` under [package] in Cargo.toml
-sed -i '' '1,/^version = /s/^version = .*/version = "'"$VERSION"'"/' "$ROOT/src-tauri/Cargo.toml"
+# First `version = ` under [package] in Cargo.toml.
+# Use python3 (already a hard dep above for jq+pubkey check) instead of sed so
+# this works on both BSD/macOS (`sed -i ''`) and GNU/Linux (`sed -i`) without
+# branching on $(uname).
+VERSION="$VERSION" python3 - "$ROOT/src-tauri/Cargo.toml" <<'PY'
+import os, re, sys
+path = sys.argv[1]
+version = os.environ["VERSION"]
+with open(path, "r", encoding="utf-8") as f:
+    content = f.read()
+new_content, n = re.subn(
+    r'^version = .*',
+    f'version = "{version}"',
+    content,
+    count=1,
+    flags=re.MULTILINE,
+)
+if n != 1:
+    sys.stderr.write(f"ERROR: failed to find `version = ...` line in {path}\n")
+    sys.exit(1)
+with open(path, "w", encoding="utf-8") as f:
+    f.write(new_content)
+PY
 
 # Refresh Cargo.lock so the package version there matches (no network fetch
 # needed — `cargo check --offline` only updates the local workspace entry).
