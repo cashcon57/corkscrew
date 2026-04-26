@@ -758,8 +758,10 @@ pub fn detect_heroic_games() -> Vec<HeroicGameInfo> {
     for config_dir in find_heroic_config_dirs() {
         let mut gog = parse_heroic_gog_games(&config_dir);
         let mut epic = parse_heroic_epic_games(&config_dir);
+        let mut sideload = parse_heroic_sideloaded_games(&config_dir);
         all_games.append(&mut gog);
         all_games.append(&mut epic);
+        all_games.append(&mut sideload);
     }
 
     // Deduplicate by app_name
@@ -767,13 +769,100 @@ pub fn detect_heroic_games() -> Vec<HeroicGameInfo> {
     all_games.dedup_by(|a, b| a.app_name == b.app_name);
 
     log::info!(
-        "Detected {} Heroic games ({} GOG, {} Epic)",
+        "Detected {} Heroic games ({} GOG, {} Epic, {} sideload)",
         all_games.len(),
         all_games.iter().filter(|g| g.platform == "gog").count(),
         all_games.iter().filter(|g| g.platform == "epic").count(),
+        all_games.iter().filter(|g| g.platform == "sideload").count(),
     );
 
     all_games
+}
+
+/// Parse Heroic's sideloaded (custom Windows exe) library. These games
+/// don't come from GOG or Epic — users add them manually through Heroic's
+/// "Add Game" dialog. Heroic stores them under
+/// `sideload_apps/library.json`. Wine prefix lives in GamesConfig as
+/// usual.
+fn parse_heroic_sideloaded_games(heroic_config_dir: &Path) -> Vec<HeroicGameInfo> {
+    let library_path = heroic_config_dir
+        .join("sideload_apps")
+        .join("library.json");
+    let mut games = Vec::new();
+
+    let content = match fs::read_to_string(&library_path) {
+        Ok(c) => c,
+        Err(_) => return games, // sideload_apps/ may not exist if user has none
+    };
+
+    let parsed: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("Failed to parse Heroic sideload library: {}", e);
+            return games;
+        }
+    };
+
+    // Schema mirrors legendary_library.json: { "library": [ {...}, ... ] }.
+    // Older Heroic versions used a top-level array; handle both.
+    let library_array = parsed
+        .get("library")
+        .and_then(|v| v.as_array())
+        .or_else(|| parsed.as_array());
+
+    let Some(library) = library_array else {
+        return games;
+    };
+
+    for game in library {
+        let app_name = game
+            .get("app_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if app_name.is_empty() {
+            continue;
+        }
+        let title = game
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&app_name)
+            .to_string();
+        let install_path = game
+            .get("install")
+            .and_then(|v| v.get("install_path"))
+            .or_else(|| game.get("install_path"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let version = game
+            .get("install")
+            .and_then(|v| v.get("version"))
+            .or_else(|| game.get("version"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        let is_installed = game
+            .get("is_installed")
+            .or_else(|| game.get("install").and_then(|v| v.get("is_installed")))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true); // sideloaded entries imply install
+        if !is_installed {
+            continue;
+        }
+
+        let wine_prefix = get_heroic_wine_prefix(heroic_config_dir, &app_name);
+
+        games.push(HeroicGameInfo {
+            app_name,
+            title,
+            platform: "sideload".to_string(),
+            install_path,
+            wine_prefix,
+            version,
+        });
+    }
+
+    games
 }
 
 /// Build a lookup from wine prefix path to HeroicGameInfo for enriching bottles.
@@ -969,6 +1058,77 @@ mod tests {
         assert_eq!(games[0].title, "Cyberpunk 2077");
         assert_eq!(games[0].platform, "gog");
         assert_eq!(games[0].version.as_deref(), Some("1.63"));
+    }
+
+    #[test]
+    fn parse_heroic_sideloaded_games_basic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sideload_dir = tmp.path().join("sideload_apps");
+        fs::create_dir_all(&sideload_dir).unwrap();
+        let games_config = tmp.path().join("GamesConfig");
+        fs::create_dir_all(&games_config).unwrap();
+
+        let json = r#"{
+            "library": [
+                {
+                    "app_name": "custom-skyrim",
+                    "title": "Custom Skyrim Install",
+                    "install": {
+                        "install_path": "/home/user/Games/Skyrim",
+                        "is_installed": true,
+                        "version": "1.6.640"
+                    }
+                },
+                {
+                    "app_name": "uninstalled-thing",
+                    "title": "Removed",
+                    "install": { "is_installed": false }
+                }
+            ]
+        }"#;
+        fs::write(sideload_dir.join("library.json"), json).unwrap();
+
+        // Wine prefix entry for the first sideloaded game
+        fs::write(
+            games_config.join("custom-skyrim.json"),
+            r#"{"custom-skyrim":{"winePrefix":"/home/user/Games/Heroic/Prefixes/Skyrim"}}"#,
+        )
+        .unwrap();
+
+        let games = parse_heroic_sideloaded_games(tmp.path());
+        assert_eq!(games.len(), 1);
+        assert_eq!(games[0].app_name, "custom-skyrim");
+        assert_eq!(games[0].title, "Custom Skyrim Install");
+        assert_eq!(games[0].platform, "sideload");
+        assert_eq!(games[0].version.as_deref(), Some("1.6.640"));
+        assert_eq!(
+            games[0].wine_prefix.as_deref(),
+            Some(Path::new("/home/user/Games/Heroic/Prefixes/Skyrim"))
+        );
+    }
+
+    #[test]
+    fn parse_heroic_sideloaded_games_legacy_top_level_array() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sideload_dir = tmp.path().join("sideload_apps");
+        fs::create_dir_all(&sideload_dir).unwrap();
+
+        let json = r#"[
+            { "app_name": "old-format-game", "title": "Old Format" }
+        ]"#;
+        fs::write(sideload_dir.join("library.json"), json).unwrap();
+
+        let games = parse_heroic_sideloaded_games(tmp.path());
+        assert_eq!(games.len(), 1);
+        assert_eq!(games[0].app_name, "old-format-game");
+        assert_eq!(games[0].platform, "sideload");
+    }
+
+    #[test]
+    fn parse_heroic_sideloaded_games_no_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let games = parse_heroic_sideloaded_games(tmp.path());
+        assert!(games.is_empty());
     }
 
     #[test]

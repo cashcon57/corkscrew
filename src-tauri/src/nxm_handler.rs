@@ -28,7 +28,8 @@ const DESKTOP_FILE_NAME: &str = "corkscrew-nxm.desktop";
 
 /// Register Corkscrew as the NXM protocol handler on Linux.
 ///
-/// Creates a .desktop file and registers it via xdg-mime.
+/// Creates a .desktop file and registers it via xdg-mime. Returns a clear,
+/// actionable error if the required `xdg-utils` package isn't installed.
 pub fn register_nxm_handler() -> Result<(), String> {
     #[cfg(not(target_os = "linux"))]
     {
@@ -37,6 +38,13 @@ pub fn register_nxm_handler() -> Result<(), String> {
 
     #[cfg(target_os = "linux")]
     {
+        // Pre-flight: confirm xdg-mime is on PATH. Some minimal distros
+        // (Alpine, container images, busybox-only setups) don't ship it by
+        // default and the bare `Command::new` failure mode is opaque.
+        if !binary_on_path("xdg-mime") {
+            return Err(install_hint_for("xdg-mime", "xdg-utils"));
+        }
+
         let desktop_path = get_desktop_file_path()?;
 
         // Write .desktop file
@@ -65,8 +73,16 @@ pub fn register_nxm_handler() -> Result<(), String> {
             }
         }
 
-        // Update desktop database
-        if let Some(app_dir) = desktop_path.parent() {
+        // Update desktop database — optional. If the binary's missing the
+        // system will pick up the new .desktop file at next session anyway,
+        // so we log a hint but don't fail the registration.
+        if !binary_on_path("update-desktop-database") {
+            log::warn!(
+                "update-desktop-database not on PATH ({}). Handler is registered, \
+                 but the new .desktop file may take a session restart to pick up.",
+                install_hint_for("update-desktop-database", "desktop-file-utils")
+            );
+        } else if let Some(app_dir) = desktop_path.parent() {
             let _ = Command::new("update-desktop-database")
                 .arg(app_dir)
                 .output();
@@ -320,6 +336,35 @@ fn get_desktop_file_path() -> Result<PathBuf, String> {
     Ok(home
         .join(".local/share/applications")
         .join(DESKTOP_FILE_NAME))
+}
+
+/// Check whether a binary is reachable via `$PATH`. Pure-Rust, no `which`
+/// crate dependency.
+#[cfg(target_os = "linux")]
+fn binary_on_path(name: &str) -> bool {
+    let Some(path_var) = std::env::var_os("PATH") else {
+        return false;
+    };
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Build a distro-aware install hint for a missing tool.
+#[cfg(target_os = "linux")]
+fn install_hint_for(binary: &str, package: &str) -> String {
+    format!(
+        "{} not found on PATH. Install the {} package: \
+         `sudo pacman -S {}` (Arch / CachyOS / Manjaro), \
+         `sudo apt install {}` (Debian / Ubuntu / Pop!_OS), \
+         `sudo dnf install {}` (Fedora / Bazzite). \
+         After installing, retry from Settings.",
+        binary, package, package, package, package
+    )
 }
 
 // ---------------------------------------------------------------------------
