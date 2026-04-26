@@ -227,11 +227,88 @@ pub fn install_dependencies(
     results
 }
 
+/// Decide whether to pass `--no-bwrap` to protontricks.
+///
+/// SteamOS (Steam Deck) ships a read-only `/usr` partition, so bubblewrap
+/// fails to set up its sandbox and protontricks must run without it. On
+/// other distros (Fedora, Arch, CachyOS, Ubuntu) the bwrap path is the
+/// upstream-recommended default and produces a more isolated, reproducible
+/// environment — forcing `--no-bwrap` there breaks legitimate setups.
+///
+/// Gate is: Steam Deck DMI signature OR `/etc/os-release` `ID=steamos`.
+fn should_disable_bwrap() -> bool {
+    host_is_steam_deck_or_steamos(
+        std::fs::read_to_string("/sys/devices/virtual/dmi/id/board_vendor")
+            .ok()
+            .as_deref(),
+        std::fs::read_to_string("/etc/os-release").ok().as_deref(),
+    )
+}
+
+/// Pure decision: does this host need `--no-bwrap`?
+///
+/// Inputs are the contents of `/sys/devices/virtual/dmi/id/board_vendor`
+/// and `/etc/os-release` (both `Option<&str>` so callers and tests can
+/// pass `None` when the file is missing).
+///
+/// Returns true iff:
+/// - the DMI board vendor reports `Valve` (Steam Deck), OR
+/// - the os-release file declares `ID=steamos` (case-insensitive, value
+///   may be unquoted, single-quoted, or double-quoted per the spec).
+fn host_is_steam_deck_or_steamos(
+    board_vendor: Option<&str>,
+    os_release: Option<&str>,
+) -> bool {
+    if let Some(vendor) = board_vendor {
+        if vendor.trim() == "Valve" {
+            return true;
+        }
+    }
+    if let Some(content) = os_release {
+        for raw in content.lines() {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let (key, value) = match line.split_once('=') {
+                Some((k, v)) => (k.trim(), v.trim()),
+                None => continue,
+            };
+            if !key.eq_ignore_ascii_case("ID") {
+                continue;
+            }
+            // Strip surrounding quotes per the os-release spec.
+            let bytes = value.as_bytes();
+            let stripped = if bytes.len() >= 2 {
+                let first = bytes[0];
+                let last = bytes[bytes.len() - 1];
+                if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+                    &value[1..value.len() - 1]
+                } else {
+                    value
+                }
+            } else {
+                value
+            };
+            if stripped.eq_ignore_ascii_case("steamos") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn install_via_protontricks(app_id: u32, verb: &str) -> Result<(), String> {
     info!("Running protontricks {} {}", app_id, verb);
 
-    let output = Command::new("protontricks")
-        .arg("--no-bwrap")  // Avoid bubblewrap issues on some distros
+    let mut cmd = Command::new("protontricks");
+    // SteamOS's read-only /usr breaks bubblewrap. Other distros
+    // (Fedora, Arch, CachyOS) prefer the bwrap sandbox path; forcing
+    // --no-bwrap there bypasses isolation users expect.
+    if should_disable_bwrap() {
+        cmd.arg("--no-bwrap");
+    }
+    let output = cmd
         .arg(app_id.to_string())
         .arg(verb)
         .env("STEAM_RUNTIME", "0")
@@ -369,5 +446,88 @@ mod tests {
         let mut deps = get_game_dependencies("skyrimse");
         check_installed_deps(dir.path(), &mut deps);
         assert!(deps.iter().find(|d| d.verb == "vcrun2022").unwrap().installed);
+    }
+
+    // -----------------------------------------------------------------------
+    // --no-bwrap gating: Steam Deck / SteamOS only
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn no_bwrap_steam_deck_via_dmi() {
+        // Steam Deck DMI vendor — must trigger --no-bwrap regardless of
+        // os-release (Holo configurations sometimes report a non-steamos
+        // ID even on the Deck).
+        assert!(host_is_steam_deck_or_steamos(Some("Valve\n"), None));
+        assert!(host_is_steam_deck_or_steamos(
+            Some("Valve\n"),
+            Some("ID=fedora\n")
+        ));
+    }
+
+    #[test]
+    fn no_bwrap_steamos_via_os_release() {
+        // SteamOS ID — read-only /usr, must use --no-bwrap.
+        assert!(host_is_steam_deck_or_steamos(
+            None,
+            Some("NAME=\"SteamOS\"\nID=steamos\nVERSION_ID=3.5\n")
+        ));
+        // Quoted variants per the os-release spec.
+        assert!(host_is_steam_deck_or_steamos(None, Some("ID=\"steamos\"\n")));
+        assert!(host_is_steam_deck_or_steamos(None, Some("ID='steamos'\n")));
+        // Case-insensitive key/value.
+        assert!(host_is_steam_deck_or_steamos(None, Some("id=SteamOS\n")));
+    }
+
+    #[test]
+    fn no_bwrap_skipped_on_fedora() {
+        // Fedora — bwrap works fine, must NOT pass --no-bwrap.
+        let os_release = "NAME=\"Fedora Linux\"\nID=fedora\nID_LIKE=\"\"\nVERSION_ID=39\n";
+        assert!(!host_is_steam_deck_or_steamos(None, Some(os_release)));
+    }
+
+    #[test]
+    fn no_bwrap_skipped_on_arch_and_cachyos() {
+        // Arch and its derivatives — let bwrap run.
+        let arch = "NAME=\"Arch Linux\"\nID=arch\nID_LIKE=\"\"\n";
+        assert!(!host_is_steam_deck_or_steamos(None, Some(arch)));
+
+        let cachyos = "NAME=\"CachyOS Linux\"\nID=cachyos\nID_LIKE=arch\n";
+        assert!(!host_is_steam_deck_or_steamos(None, Some(cachyos)));
+    }
+
+    #[test]
+    fn no_bwrap_skipped_on_ubuntu() {
+        let ubuntu = "NAME=\"Ubuntu\"\nID=ubuntu\nID_LIKE=debian\nVERSION_ID=\"24.04\"\n";
+        assert!(!host_is_steam_deck_or_steamos(None, Some(ubuntu)));
+    }
+
+    #[test]
+    fn no_bwrap_skipped_when_both_inputs_missing() {
+        // No board_vendor file (non-Linux) and no os-release: the safe
+        // default is "let bwrap run". macOS development environments fall
+        // here.
+        assert!(!host_is_steam_deck_or_steamos(None, None));
+    }
+
+    #[test]
+    fn no_bwrap_substring_does_not_match() {
+        // ID=steamos-derivative or NAME containing "steamos" must not
+        // trigger; only an exact ID match is the gate.
+        let near = "NAME=\"SteamOS Holo\"\nID=holo\nID_LIKE=arch\n";
+        assert!(!host_is_steam_deck_or_steamos(None, Some(near)));
+    }
+
+    #[test]
+    fn no_bwrap_dmi_other_vendor_ignored() {
+        // Some non-Valve hardware reporting a vendor that contains "valve"
+        // should NOT match — exact equality only.
+        assert!(!host_is_steam_deck_or_steamos(Some("ValveSoftware\n"), None));
+        assert!(!host_is_steam_deck_or_steamos(Some("Dell Inc.\n"), None));
+    }
+
+    #[test]
+    fn no_bwrap_os_release_handles_comments_and_blanks() {
+        let weird = "# leading comment\n\n   \nID=steamos\n# trailing\n";
+        assert!(host_is_steam_deck_or_steamos(None, Some(weird)));
     }
 }
