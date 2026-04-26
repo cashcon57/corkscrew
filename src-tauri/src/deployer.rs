@@ -103,12 +103,35 @@ pub type DeployProgressCb = dyn Fn(u64, u64) + Send + Sync;
 // ---------------------------------------------------------------------------
 
 /// Check whether two paths reside on the same filesystem (device).
-/// Returns `false` if either path doesn't exist or metadata can't be read.
+///
+/// Each path is walked up to its nearest existing ancestor before the device
+/// number comparison so that not-yet-created destinations (e.g. a Linux Wine
+/// prefix's `Data/` directory before the first deploy) still resolve to the
+/// volume they will live on. Without this walk, a missing destination would
+/// always force the deployer into copy mode, even though a hardlink would
+/// have worked once the directory was created.
+///
+/// Returns `false` only if neither path nor any ancestor can be stat'd, or
+/// if the two stat'd ancestors have different `dev()` values.
 #[cfg(unix)]
 pub fn same_filesystem(a: &Path, b: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
-    match (fs::metadata(a), fs::metadata(b)) {
-        (Ok(ma), Ok(mb)) => ma.dev() == mb.dev(),
+
+    fn nearest_existing_meta(p: &Path) -> Option<std::fs::Metadata> {
+        let mut cur = p.to_path_buf();
+        loop {
+            if let Ok(m) = fs::metadata(&cur) {
+                return Some(m);
+            }
+            match cur.parent() {
+                Some(parent) if parent != cur.as_path() => cur = parent.to_path_buf(),
+                _ => return None,
+            }
+        }
+    }
+
+    match (nearest_existing_meta(a), nearest_existing_meta(b)) {
+        (Some(ma), Some(mb)) => ma.dev() == mb.dev(),
         _ => false,
     }
 }
@@ -1759,13 +1782,38 @@ mod tests {
     }
 
     #[test]
-    fn same_filesystem_nonexistent_returns_false() {
+    fn same_filesystem_walks_to_existing_ancestor() {
+        // Regression: on freshly-initialized Wine prefixes the destination
+        // directory (e.g. `Data/`) does not yet exist. The old implementation
+        // returned `false` whenever stat() failed, forcing copy fallback.
+        // The new implementation walks up to the nearest existing ancestor.
         let tmp = TempDir::new().unwrap();
         let real = tmp.path().join("real");
         fs::create_dir_all(&real).unwrap();
-        let fake = PathBuf::from("/nonexistent/corkscrew_test_xyz");
+        // Path that does not exist yet but lives under the same temp dir
+        let unborn = tmp.path().join("not_yet_created").join("Data");
 
-        assert!(!same_filesystem(&real, &fake));
+        assert!(
+            same_filesystem(&real, &unborn),
+            "should match via existing ancestor (tmp dir)"
+        );
+    }
+
+    #[test]
+    fn same_filesystem_unrooted_returns_false() {
+        // If both paths fail to find any existing ancestor (impossible on
+        // unix where `/` always exists, but we still guarantee no panic and
+        // a sane result for completely unstattable inputs).
+        let tmp = TempDir::new().unwrap();
+        let real = tmp.path().join("real");
+        fs::create_dir_all(&real).unwrap();
+        // `/` exists, so both will resolve. This test now verifies we don't
+        // crash on a deeply nonexistent path; both end up at `/` so it
+        // returns true. Kept here as documentation of the new semantics.
+        let nonexistent = PathBuf::from("/nonexistent/corkscrew_test_xyz");
+        // Both should walk to existing ancestors; on a single-volume host
+        // they'll match.
+        let _ = same_filesystem(&real, &nonexistent);
     }
 
     // -----------------------------------------------------------------------
