@@ -758,10 +758,46 @@ pub fn profile_saves_dir(game_id: &str, bottle_name: &str, profile_id: i64) -> s
         .join(profile_id.to_string())
 }
 
+/// Copy a single file from `src` to `dest`, preserving the source's mtime.
+///
+/// Skyrim sorts the in-game load list by mtime; if we naively `fs::copy`
+/// during backup or restore, every file inherits the copy time and the
+/// load order shows up scrambled. We re-stamp the destination to match
+/// the source after the copy completes.
+///
+/// mtime preservation is best-effort — if `set_file_mtime` fails (read-only
+/// filesystem in tests, exotic FS) we log and keep the copied content
+/// rather than aborting the whole backup.
+fn copy_preserving_mtime(src: &Path, dest: &Path) -> std::io::Result<()> {
+    std::fs::copy(src, dest)?;
+    match src.metadata().and_then(|m| m.modified()) {
+        Ok(src_mtime) => {
+            let ft = filetime::FileTime::from_system_time(src_mtime);
+            if let Err(e) = filetime::set_file_mtime(dest, ft) {
+                log::warn!(
+                    "Failed to preserve mtime on {}: {} (content copied OK)",
+                    dest.display(),
+                    e
+                );
+            }
+        }
+        Err(e) => {
+            log::warn!(
+                "Could not read mtime of {}: {} (content copied OK)",
+                src.display(),
+                e
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Backup saves from the game save directory to the profile's save backup dir.
 ///
 /// This copies all save files from `saves_dir` into the profile-specific backup.
-/// Existing backup files for this profile are replaced.
+/// Existing backup files for this profile are replaced. Each file's mtime is
+/// preserved so the original Skyrim load-order presentation is recovered on
+/// restore.
 pub fn backup_saves(
     profile_id: i64,
     game_id: &str,
@@ -806,7 +842,7 @@ pub fn backup_saves(
             if let Some(parent) = dest.parent() {
                 let _ = fs::create_dir_all(parent);
             }
-            fs::copy(src, &dest).map_err(|e| {
+            copy_preserving_mtime(src, &dest).map_err(|e| {
                 ProfileError::Other(format!("Failed to copy save {}: {}", src.display(), e))
             })?;
             count += 1;
@@ -872,7 +908,7 @@ pub fn restore_saves(
             if let Some(parent) = dest.parent() {
                 let _ = fs::create_dir_all(parent);
             }
-            fs::copy(src, &dest).map_err(|e| {
+            copy_preserving_mtime(src, &dest).map_err(|e| {
                 ProfileError::Other(format!("Failed to restore save {}: {}", src.display(), e))
             })?;
             count += 1;
@@ -1162,5 +1198,108 @@ mod tests {
     fn parse_mo2_modlist_missing_file() {
         let path = Path::new("/nonexistent/modlist.txt");
         assert!(parse_mo2_modlist(path).is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Save backup mtime preservation
+    // -----------------------------------------------------------------------
+
+    /// `backup_saves` and `restore_saves` round-trip: file mtimes must be
+    /// preserved end-to-end. Skyrim's in-game load list is sorted by mtime;
+    /// without this, restored saves appear in copy-order rather than play
+    /// order.
+    ///
+    /// The test sets two source saves to deterministic, distinct mtimes
+    /// (T0 and T0 + 600s), runs backup → wipe → restore, and asserts both
+    /// files come back with the original mtimes intact.
+    ///
+    /// We override `CORKSCREW_DATA_DIR` so `profile_saves_dir` resolves
+    /// inside the test tempdir. The env var is process-global, but tests
+    /// in this module run under cargo's parallel runner — a unique subdir
+    /// per test prevents cross-talk.
+    #[test]
+    fn backup_and_restore_preserves_save_mtime() {
+        use filetime::{set_file_mtime, FileTime};
+        use std::time::SystemTime;
+
+        let tmp = TempDir::new().unwrap();
+        let data_dir_override = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir_override).unwrap();
+        // Per-test isolated CORKSCREW_DATA_DIR. Other tests don't rely on
+        // this path so leaking it is fine in practice — the override gets
+        // overwritten by the next test that needs it.
+        // SAFETY: tests run in parallel, but each writes a unique tempdir
+        // path; the last-writer-wins pattern is acceptable since we use
+        // the override only inside this test's calls.
+        unsafe {
+            std::env::set_var("CORKSCREW_DATA_DIR", &data_dir_override);
+        }
+
+        let saves_dir = tmp.path().join("game_saves");
+        std::fs::create_dir_all(&saves_dir).unwrap();
+
+        // Two saves with distinct, deterministic mtimes.
+        let save_a = saves_dir.join("Save1_PlayerA.ess");
+        let save_b = saves_dir.join("Save2_PlayerA.ess");
+        std::fs::write(&save_a, b"save A contents").unwrap();
+        std::fs::write(&save_b, b"save B contents").unwrap();
+
+        let t_a = FileTime::from_unix_time(1_700_000_000, 123_000_000);
+        let t_b = FileTime::from_unix_time(1_700_000_600, 456_000_000);
+        set_file_mtime(&save_a, t_a).unwrap();
+        set_file_mtime(&save_b, t_b).unwrap();
+
+        // Backup.
+        let count = backup_saves(42, "skyrimse", "TestBottle", &saves_dir).unwrap();
+        assert_eq!(count, 2, "both saves should be backed up");
+
+        // Verify backup preserves mtime.
+        let backup_dir = profile_saves_dir("skyrimse", "TestBottle", 42);
+        let backup_a = backup_dir.join("Save1_PlayerA.ess");
+        let backup_b = backup_dir.join("Save2_PlayerA.ess");
+        assert!(backup_a.exists() && backup_b.exists());
+
+        let backup_mtime_a = FileTime::from_system_time(
+            backup_a.metadata().unwrap().modified().unwrap(),
+        );
+        let backup_mtime_b = FileTime::from_system_time(
+            backup_b.metadata().unwrap().modified().unwrap(),
+        );
+        assert_eq!(backup_mtime_a, t_a, "backup A mtime should match source");
+        assert_eq!(backup_mtime_b, t_b, "backup B mtime should match source");
+
+        // Wipe the live saves dir, simulate "switch profile".
+        std::fs::remove_dir_all(&saves_dir).unwrap();
+        std::fs::create_dir_all(&saves_dir).unwrap();
+        // Touch a sentinel file with the wall clock to demonstrate that
+        // restored mtimes really come from the source, not "now".
+        let sentinel = saves_dir.join("sentinel.tmp");
+        std::fs::write(&sentinel, b"sentinel").unwrap();
+        let now_mtime: SystemTime = sentinel.metadata().unwrap().modified().unwrap();
+        std::fs::remove_file(&sentinel).unwrap();
+
+        // Restore.
+        let count = restore_saves(42, "skyrimse", "TestBottle", &saves_dir).unwrap();
+        assert_eq!(count, 2);
+
+        let restored_a = saves_dir.join("Save1_PlayerA.ess");
+        let restored_b = saves_dir.join("Save2_PlayerA.ess");
+        assert!(restored_a.exists() && restored_b.exists());
+
+        let restored_mtime_a = FileTime::from_system_time(
+            restored_a.metadata().unwrap().modified().unwrap(),
+        );
+        let restored_mtime_b = FileTime::from_system_time(
+            restored_b.metadata().unwrap().modified().unwrap(),
+        );
+        assert_eq!(restored_mtime_a, t_a, "restored A mtime should match original");
+        assert_eq!(restored_mtime_b, t_b, "restored B mtime should match original");
+
+        // Sanity: restored mtime is NOT the wall-clock copy time.
+        let now_ft = FileTime::from_system_time(now_mtime);
+        assert_ne!(
+            restored_mtime_a, now_ft,
+            "restored mtime must come from source, not copy time"
+        );
     }
 }
