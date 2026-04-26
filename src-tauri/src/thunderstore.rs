@@ -136,9 +136,12 @@ fn packages_cache_dir(community: &str) -> Option<PathBuf> {
 }
 
 /// Sanitize a path segment: strip traversal attempts, keep alphanumerics,
-/// dashes, underscores, dots.
+/// dashes, underscores, dots. Rejects `.`/`..`/empty results (which the OS
+/// would treat as path components, not filenames) by falling back to a
+/// content-derived hash.
 fn sanitize_segment(s: &str) -> String {
-    s.chars()
+    let mapped: String = s
+        .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
                 c
@@ -146,7 +149,27 @@ fn sanitize_segment(s: &str) -> String {
                 '_'
             }
         })
-        .collect()
+        .collect();
+    if mapped.is_empty() || mapped == "." || mapped == ".." {
+        return hashed_fallback(s);
+    }
+    mapped
+}
+
+/// 16-hex-char SHA256 prefix of the input, used as a safe filename when the
+/// sanitized form would collide with a path component (`.`, `..`, empty).
+fn hashed_fallback(s: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(s.as_bytes());
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(16 + 4);
+    hex.push_str("pkg_");
+    for b in digest.iter().take(8) {
+        use std::fmt::Write;
+        let _ = write!(hex, "{:02x}", b);
+    }
+    hex
 }
 
 fn ensure_mem() {
@@ -174,7 +197,9 @@ fn write_disk_communities(c: &CommunitiesCache) {
         return;
     };
     if let Ok(bytes) = serde_json::to_vec_pretty(c) {
-        let tmp = path.with_extension("json.tmp");
+        // Unique tmp suffix prevents concurrent refreshes from clobbering
+        // each other's `*.tmp` file before rename.
+        let tmp = path.with_extension(format!("json.tmp.{}", unique_tmp_suffix()));
         if std::fs::write(&tmp, &bytes).is_ok() {
             let _ = std::fs::rename(&tmp, &path);
         }
@@ -192,11 +217,26 @@ fn write_disk_packages(p: &PackagesCache) {
         return;
     };
     if let Ok(bytes) = serde_json::to_vec(p) {
-        let tmp = path.with_extension("json.tmp");
+        // Unique tmp suffix prevents concurrent refreshes (two
+        // `list_packages(community)` calls racing) from clobbering each
+        // other's `*.tmp` file before rename.
+        let tmp = path.with_extension(format!("json.tmp.{}", unique_tmp_suffix()));
         if std::fs::write(&tmp, &bytes).is_ok() {
             let _ = std::fs::rename(&tmp, &path);
         }
     }
+}
+
+/// Process-unique tmp suffix: PID + nanos-since-epoch. Used to keep
+/// concurrent atomic-write callers from overwriting each other's tmp file
+/// before rename.
+fn unique_tmp_suffix() -> String {
+    let pid = std::process::id();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{}-{}", pid, nanos)
 }
 
 // ---------------------------------------------------------------------------
@@ -329,17 +369,54 @@ pub fn find_package<'a>(packages: &'a [Package], author_name: &str) -> Option<&'
 }
 
 /// Find a specific `author-name-version` across a community's package list.
+///
+/// Dep strings are `"author-Name-VERSION"` where VERSION may itself contain
+/// dashes (SemVer pre-release tags like `1.0.0-rc.1`). Naive `rsplit_once('-')`
+/// breaks those. Instead we walk every `package.full_name` (the `author-name`
+/// half) and try to match it as a prefix of `full_name`, then check whether
+/// the suffix-after-`-` corresponds to a known `version_number` on that
+/// package. This handles pre-release versions cleanly without parsing.
 pub fn find_version<'a>(packages: &'a [Package], full_name: &str) -> Option<&'a PackageVersion> {
-    // Strip the trailing `-X.Y.Z` to get the package key.
-    let (pkg_key, _) = full_name.rsplit_once('-')?;
-    let pkg = packages.iter().find(|p| p.full_name == pkg_key)?;
-    pkg.versions.iter().find(|v| v.full_name == full_name)
+    let (pkg, version) = match_pkg_and_version(packages, full_name)?;
+    pkg.versions
+        .iter()
+        .find(|v| v.version_number == version && v.full_name == full_name)
+}
+
+/// Match a `"author-name-version"` string against the package list, returning
+/// the matching package and the parsed version string. Used by both
+/// `find_version` and the dep walker. Tries each `package.full_name` as a
+/// prefix and validates the trailing suffix against that package's known
+/// `version_number`s.
+fn match_pkg_and_version<'a>(
+    packages: &'a [Package],
+    full_name: &str,
+) -> Option<(&'a Package, String)> {
+    for pkg in packages {
+        let prefix = &pkg.full_name;
+        // Need at least one extra `-` and a version after it.
+        if full_name.len() <= prefix.len() + 1 {
+            continue;
+        }
+        if !full_name.starts_with(prefix.as_str()) {
+            continue;
+        }
+        let after = &full_name[prefix.len()..];
+        let Some(version) = after.strip_prefix('-') else {
+            continue;
+        };
+        if pkg.versions.iter().any(|v| v.version_number == version) {
+            return Some((pkg, version.to_string()));
+        }
+    }
+    None
 }
 
 /// Resolve the full dependency closure for a version within a community.
-/// Dependencies are `"author-name-version"`; we match by `"author-name"` prefix
-/// and prefer the explicitly requested version if present, otherwise the
-/// latest version of that package.
+/// Dependencies are `"author-name-version"`; we match by checking every
+/// `package.full_name` as a prefix and validating the trailing version against
+/// that package's known versions. This handles pre-release tags like
+/// `1.0.0-rc.1` that contain extra dashes.
 pub fn resolve_dependencies<'a>(
     packages: &'a [Package],
     root: &PackageVersion,
@@ -350,17 +427,12 @@ pub fn resolve_dependencies<'a>(
 
     while let Some(v) = queue.pop() {
         for dep in &v.dependencies {
-            // Dep format: "author-name-1.2.3". Split off the version suffix.
-            let (pkg_id, version) = match dep.rsplit_once('-') {
-                Some((head, ver)) => (head.to_string(), ver.to_string()),
-                None => continue,
+            let Some((pkg, version)) = match_pkg_and_version(packages, dep) else {
+                continue;
             };
-            if !seen.insert(pkg_id.clone()) {
+            if !seen.insert(pkg.full_name.clone()) {
                 continue;
             }
-            let Some(pkg) = packages.iter().find(|p| p.full_name == pkg_id) else {
-                continue;
-            };
             let picked = pkg
                 .versions
                 .iter()
@@ -579,10 +651,102 @@ mod tests {
     }
 
     #[test]
+    fn find_version_handles_semver_prerelease() {
+        // Pre-release like `1.0.0-rc.1` contains an extra `-`. The naive
+        // `rsplit_once('-')` would split on `rc.1`'s leading dash and break.
+        let mut pkg = Package {
+            name: "".into(),
+            full_name: "author-Mod".into(),
+            owner: "".into(),
+            package_url: "".into(),
+            date_created: "".into(),
+            date_updated: "".into(),
+            rating_score: 0,
+            is_pinned: false,
+            is_deprecated: false,
+            has_nsfw_content: false,
+            categories: vec![],
+            versions: vec![],
+        };
+        let mut v = fake_version("author-Mod-1.0.0-rc.1", &[]);
+        v.version_number = "1.0.0-rc.1".to_string();
+        pkg.versions.push(v);
+        let mut v2 = fake_version("author-Mod-1.0.0", &[]);
+        v2.version_number = "1.0.0".to_string();
+        pkg.versions.push(v2);
+        let pkgs = vec![pkg];
+
+        let pre = find_version(&pkgs, "author-Mod-1.0.0-rc.1");
+        assert!(pre.is_some(), "pre-release version should resolve");
+        assert_eq!(pre.unwrap().version_number, "1.0.0-rc.1");
+
+        let stable = find_version(&pkgs, "author-Mod-1.0.0");
+        assert!(stable.is_some());
+        assert_eq!(stable.unwrap().version_number, "1.0.0");
+    }
+
+    #[test]
+    fn resolve_dependencies_handles_semver_prerelease() {
+        // Build a pkg whose dep string is `BepInEx-BepInExPack-5.4.21-pre.7`.
+        let mut bepinex = Package {
+            name: "".into(),
+            full_name: "BepInEx-BepInExPack".into(),
+            owner: "".into(),
+            package_url: "".into(),
+            date_created: "".into(),
+            date_updated: "".into(),
+            rating_score: 0,
+            is_pinned: false,
+            is_deprecated: false,
+            has_nsfw_content: false,
+            categories: vec![],
+            versions: vec![],
+        };
+        let mut v = fake_version("BepInEx-BepInExPack-5.4.21-pre.7", &[]);
+        v.version_number = "5.4.21-pre.7".to_string();
+        bepinex.versions.push(v);
+
+        let consumer = fake_package(
+            "author-ModA",
+            "1.0.0",
+            &["BepInEx-BepInExPack-5.4.21-pre.7"],
+        );
+
+        let pkgs = vec![bepinex, consumer];
+        let root = &pkgs[1].versions[0];
+        let closure = resolve_dependencies(&pkgs, root);
+        let names: Vec<&str> = closure.iter().map(|v| v.full_name.as_str()).collect();
+        assert!(names.contains(&"BepInEx-BepInExPack-5.4.21-pre.7"));
+    }
+
+    #[test]
     fn sanitize_segment_strips_traversal() {
         assert_eq!(sanitize_segment("author-Mod-1.0.0"), "author-Mod-1.0.0");
         assert_eq!(sanitize_segment("../etc/passwd"), ".._etc_passwd");
         assert_eq!(sanitize_segment("foo/bar\\baz"), "foo_bar_baz");
         assert_eq!(sanitize_segment("null\0byte"), "null_byte");
+    }
+
+    #[test]
+    fn sanitize_segment_rejects_dot_dotdot_empty() {
+        // Empty input → hashed fallback, not ""
+        let empty = sanitize_segment("");
+        assert!(empty.starts_with("pkg_"));
+        assert_eq!(empty.len(), 4 + 16);
+
+        // Bare "." would become "." after mapping (dots are preserved) — must
+        // be rejected because the OS would treat it as the current directory.
+        let dot = sanitize_segment(".");
+        assert!(dot.starts_with("pkg_"));
+        assert_ne!(dot, ".");
+
+        // ".." likewise must not survive — path traversal.
+        let dd = sanitize_segment("..");
+        assert!(dd.starts_with("pkg_"));
+        assert_ne!(dd, "..");
+
+        // All-slashes input maps to underscores → produces a non-empty,
+        // non-traversal segment, no fallback needed.
+        assert_eq!(sanitize_segment("/"), "_");
     }
 }

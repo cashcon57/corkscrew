@@ -37,11 +37,25 @@ const STEAM_GAME_DIRS: &[&str] = &["Crimson Desert"];
 
 const STEAM_APP_ID: &str = "3321460";
 
+/// Whether Crimson Desert support has been end-to-end tested. Pre-release
+/// (March 2026 launch) so we cannot verify mod install + launch yet — set to
+/// `false` so a future frontend filter can hide it from default browse.
+/// Plumbing only; frontend wiring is out of scope.
+pub const VERIFIED: bool = false;
+
 // ---------------------------------------------------------------------------
 // Plugin
 // ---------------------------------------------------------------------------
 
 pub struct CrimsonDesertPlugin;
+
+impl CrimsonDesertPlugin {
+    /// Whether this game has been end-to-end tested. Returns the module-level
+    /// [`VERIFIED`] constant.
+    pub fn verified(&self) -> bool {
+        VERIFIED
+    }
+}
 
 impl GamePlugin for CrimsonDesertPlugin {
     fn game_id(&self) -> &str {
@@ -103,7 +117,8 @@ impl GamePlugin for CrimsonDesertPlugin {
     }
 
     fn categorize_mod_file(&self, rel_path: &str) -> Option<String> {
-        let lower = rel_path.to_lowercase();
+        // Normalize separators: Wine archives may ship with `\` paths.
+        let lower = rel_path.replace('\\', "/").to_lowercase();
         if lower.ends_with(".asi") || lower.ends_with(".dll") {
             return Some("asi".into());
         }
@@ -200,19 +215,19 @@ fn find_executable_in(dir: &Path) -> Option<PathBuf> {
         return None;
     };
     let exe_lower: Vec<String> = EXECUTABLES.iter().map(|e| e.to_lowercase()).collect();
-    let mut found: Option<PathBuf> = None;
+    // Pick the match with the lowest preference index, not first-found.
+    // `read_dir` iteration order is not deterministic across platforms.
+    let mut best: Option<(usize, PathBuf)> = None;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_lowercase();
         if let Some(idx) = exe_lower.iter().position(|e| e == &name) {
-            if idx == 0 {
-                return Some(entry.path());
-            }
-            if found.is_none() {
-                found = Some(entry.path());
+            match &best {
+                Some((cur, _)) if idx >= *cur => {}
+                _ => best = Some((idx, entry.path())),
             }
         }
     }
-    found
+    best.map(|(_, p)| p)
 }
 
 fn find_child_case_insensitive(parent: &Path, target: &str) -> Option<PathBuf> {

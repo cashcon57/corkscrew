@@ -40,6 +40,11 @@ pub struct ThunderstoreGameSpec {
     /// Mod directory relative to game root. For BepInEx games this is
     /// usually `"BepInEx/plugins"`.
     pub mod_dir: &'static [&'static str],
+    /// Whether this entry has been end-to-end tested (game detected, mod
+    /// installed, game launches with mods active). When false the frontend
+    /// can hide the game from default browse so first-run users don't pick
+    /// an untested target. Plumbing only — frontend wiring is a follow-up.
+    pub verified: bool,
 }
 
 pub const SPECS: &[ThunderstoreGameSpec] = &[
@@ -52,6 +57,7 @@ pub const SPECS: &[ThunderstoreGameSpec] = &[
         steam_dirs: &["Hollow Knight Silksong", "Silksong"],
         executables: &["Hollow Knight Silksong.exe", "Silksong.exe"],
         mod_dir: &["BepInEx", "plugins"],
+        verified: true,
     },
     ThunderstoreGameSpec {
         game_id: "riskofrain2",
@@ -62,6 +68,7 @@ pub const SPECS: &[ThunderstoreGameSpec] = &[
         steam_dirs: &["Risk of Rain 2"],
         executables: &["Risk of Rain 2.exe"],
         mod_dir: &["BepInEx", "plugins"],
+        verified: true,
     },
     ThunderstoreGameSpec {
         game_id: "lethalcompany",
@@ -72,6 +79,7 @@ pub const SPECS: &[ThunderstoreGameSpec] = &[
         steam_dirs: &["Lethal Company"],
         executables: &["Lethal Company.exe"],
         mod_dir: &["BepInEx", "plugins"],
+        verified: true,
     },
     ThunderstoreGameSpec {
         game_id: "contentwarning",
@@ -82,6 +90,7 @@ pub const SPECS: &[ThunderstoreGameSpec] = &[
         steam_dirs: &["Content Warning"],
         executables: &["Content Warning.exe"],
         mod_dir: &["BepInEx", "plugins"],
+        verified: true,
     },
     ThunderstoreGameSpec {
         game_id: "repo",
@@ -90,8 +99,12 @@ pub const SPECS: &[ThunderstoreGameSpec] = &[
         thunderstore_community: "repo",
         steam_app_id: "3241660",
         steam_dirs: &["REPO", "R.E.P.O."],
-        executables: &["REPO.exe", "R.E.P.O..exe"],
+        // The earlier `"R.E.P.O..exe"` entry was a literal double-dot typo
+        // (no such file exists); r2modman's `repo` community ships only
+        // `REPO.exe` as the binary.
+        executables: &["REPO.exe"],
         mod_dir: &["BepInEx", "plugins"],
+        verified: true,
     },
     ThunderstoreGameSpec {
         game_id: "palworld",
@@ -103,6 +116,7 @@ pub const SPECS: &[ThunderstoreGameSpec] = &[
         executables: &["Palworld.exe", "Palworld-Win64-Shipping.exe"],
         // Palworld uses UE5, not BepInEx; mods land at game root for UE loaders.
         mod_dir: &[],
+        verified: true,
     },
     ThunderstoreGameSpec {
         game_id: "valheim",
@@ -113,6 +127,7 @@ pub const SPECS: &[ThunderstoreGameSpec] = &[
         steam_dirs: &["Valheim"],
         executables: &["valheim.exe"],
         mod_dir: &["BepInEx", "plugins"],
+        verified: true,
     },
     ThunderstoreGameSpec {
         game_id: "mewgenics",
@@ -123,8 +138,11 @@ pub const SPECS: &[ThunderstoreGameSpec] = &[
         steam_dirs: &["Mewgenics"],
         executables: &["Mewgenics.exe"],
         // Unverified engine — defaulting to BepInEx/plugins, will correct
-        // if Mewgenics ships with a different loader convention.
+        // if Mewgenics ships with a different loader convention. Not
+        // publicly testable yet so we mark it unverified for the frontend
+        // to optionally hide from default browse.
         mod_dir: &["BepInEx", "plugins"],
+        verified: false,
     },
 ];
 
@@ -145,6 +163,13 @@ impl ThunderstorePlugin {
     /// frontend to fetch the catalog without hardcoding a map.
     pub fn thunderstore_community(&self) -> &'static str {
         self.spec.thunderstore_community
+    }
+
+    /// Whether this game has been end-to-end tested (Corkscrew can detect it,
+    /// install mods, launch with mods active). Frontend can use this to gate
+    /// default browse visibility.
+    pub fn verified(&self) -> bool {
+        self.spec.verified
     }
 }
 
@@ -198,7 +223,8 @@ impl GamePlugin for ThunderstorePlugin {
     }
 
     fn categorize_mod_file(&self, rel_path: &str) -> Option<String> {
-        let lower = rel_path.to_lowercase();
+        // Normalize separators: Wine archives may ship with `\` paths.
+        let lower = rel_path.replace('\\', "/").to_lowercase();
         if lower.ends_with(".dll") {
             return Some("plugin".into());
         }
@@ -297,19 +323,19 @@ fn find_executable(game_path: &Path, exes: &[&str]) -> Option<PathBuf> {
         return None;
     };
     let lower: Vec<String> = exes.iter().map(|e| e.to_lowercase()).collect();
-    let mut found: Option<PathBuf> = None;
+    // Pick the match with the lowest preference index, not first-found.
+    // `read_dir` iteration order is not deterministic across platforms.
+    let mut best: Option<(usize, PathBuf)> = None;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_lowercase();
         if let Some(idx) = lower.iter().position(|e| e == &name) {
-            if idx == 0 {
-                return Some(entry.path());
-            }
-            if found.is_none() {
-                found = Some(entry.path());
+            match &best {
+                Some((cur, _)) if idx >= *cur => {}
+                _ => best = Some((idx, entry.path())),
             }
         }
     }
-    found
+    best.map(|(_, p)| p)
 }
 
 fn find_child_ci(parent: &Path, target: &str) -> Option<PathBuf> {

@@ -130,12 +130,25 @@ impl GamePlugin for Hades2Plugin {
 
     fn critical_files(&self) -> Vec<&str> {
         // Never let the cleaner delete these: ModImporter's entry points and
-        // the vanilla RomFileSystem it patches.
-        vec!["RomFileSystem.lua", "Game.lua", "Main.lua"]
+        // the vanilla RomFileSystem it patches. Patterns are relative paths
+        // matched case-insensitively against lowercased rel paths (cleaner
+        // does `lower == pattern.as_str()`), so patterns themselves must be
+        // lowercase. Since `data_dir` for Hades II is `Content/Mods` and the
+        // vanilla files live in `Content/Scripts/`, a cleaner walking the
+        // mod directory will not encounter them — these entries are a
+        // conservative belt-and-braces protection in case a future change
+        // points the cleaner at the game root.
+        vec![
+            "content/scripts/romfilesystem.lua",
+            "content/scripts/game.lua",
+            "content/scripts/main.lua",
+        ]
     }
 
     fn categorize_mod_file(&self, rel_path: &str) -> Option<String> {
-        let lower = rel_path.to_lowercase();
+        // Normalize separators: Wine archives may ship with `\` paths, but our
+        // substring checks assume `/` boundaries.
+        let lower = rel_path.replace('\\', "/").to_lowercase();
         if lower.ends_with(".lua") {
             return Some("script".into());
         }
@@ -235,19 +248,20 @@ fn find_executable(game_path: &Path) -> Option<PathBuf> {
         return None;
     };
     let exe_lower: Vec<String> = EXECUTABLES.iter().map(|e| e.to_lowercase()).collect();
-    let mut found: Option<PathBuf> = None;
+    // Collect every match with its preference index, then return the one with
+    // the lowest index. Iteration order over `read_dir` is not deterministic,
+    // so picking by preference rank rather than first-found is required.
+    let mut best: Option<(usize, PathBuf)> = None;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_lowercase();
         if let Some(idx) = exe_lower.iter().position(|e| e == &name) {
-            if idx == 0 {
-                return Some(entry.path());
-            }
-            if found.is_none() {
-                found = Some(entry.path());
+            match &best {
+                Some((cur, _)) if idx >= *cur => {}
+                _ => best = Some((idx, entry.path())),
             }
         }
     }
-    found
+    best.map(|(_, p)| p)
 }
 
 fn find_child_case_insensitive(parent: &Path, target: &str) -> Option<PathBuf> {
