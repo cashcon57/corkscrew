@@ -73,19 +73,12 @@ pub fn register_nxm_handler() -> Result<(), String> {
             }
         }
 
-        // Update desktop database — optional. If the binary's missing the
-        // system will pick up the new .desktop file at next session anyway,
-        // so we log a hint but don't fail the registration.
-        if !binary_on_path("update-desktop-database") {
-            log::warn!(
-                "update-desktop-database not on PATH ({}). Handler is registered, \
-                 but the new .desktop file may take a session restart to pick up.",
-                install_hint_for("update-desktop-database", "desktop-file-utils")
-            );
-        } else if let Some(app_dir) = desktop_path.parent() {
-            let _ = Command::new("update-desktop-database")
-                .arg(app_dir)
-                .output();
+        // Update desktop database — optional. The helper checks whether
+        // the binary is on PATH and logs a hint if not, but never fails
+        // the registration. If the binary is missing the system will pick
+        // up the .desktop file at next session anyway.
+        if let Some(app_dir) = desktop_path.parent() {
+            try_refresh_desktop_database(app_dir);
         }
 
         info!("Registered Corkscrew as NXM protocol handler");
@@ -108,11 +101,12 @@ pub fn unregister_nxm_handler() -> Result<(), String> {
             std::fs::remove_file(&desktop_path)
                 .map_err(|e| format!("Failed to remove .desktop file: {}", e))?;
 
-            // Update desktop database
+            // Refresh the desktop database. Same gated helper as register —
+            // skips the spawn (and the cryptic ENOENT) if the binary isn't
+            // installed, which mirrors what the register path was already
+            // doing.
             if let Some(app_dir) = desktop_path.parent() {
-                let _ = Command::new("update-desktop-database")
-                    .arg(app_dir)
-                    .output();
+                try_refresh_desktop_database(app_dir);
             }
 
             info!("Unregistered Corkscrew NXM protocol handler");
@@ -120,6 +114,25 @@ pub fn unregister_nxm_handler() -> Result<(), String> {
 
         Ok(())
     }
+}
+
+/// Refresh the freedesktop applications database for `dir`. No-op (with a
+/// warn-level log) when `update-desktop-database` is not on `$PATH`.
+///
+/// Used by both `register_nxm_handler` and `unregister_nxm_handler` so we
+/// don't get the ugly `Failed to run update-desktop-database: ENOENT` on
+/// minimal distros that don't ship desktop-file-utils.
+#[cfg(target_os = "linux")]
+fn try_refresh_desktop_database(dir: &std::path::Path) {
+    if !binary_on_path("update-desktop-database") {
+        log::warn!(
+            "update-desktop-database not on PATH ({}). Skipping cache refresh; \
+             the .desktop change may take a session restart to pick up.",
+            install_hint_for("update-desktop-database", "desktop-file-utils")
+        );
+        return;
+    }
+    let _ = Command::new("update-desktop-database").arg(dir).output();
 }
 
 /// Check if Corkscrew is registered as the NXM handler.
@@ -340,18 +353,34 @@ fn get_desktop_file_path() -> Result<PathBuf, String> {
 
 /// Check whether a binary is reachable via `$PATH`. Pure-Rust, no `which`
 /// crate dependency.
+///
+/// Honors the executable bit on Unix — `is_file()` alone matches data
+/// files and shell-completion stubs that happen to share a name (e.g.
+/// `/usr/share/bash-completion/completions/xdg-mime` on some distros sits
+/// alongside `/usr/bin/xdg-mime`, and the bash-completion file is plain
+/// text). Without the mode check, we'd report a false positive and then
+/// later fail trying to `Command::spawn()` it.
 #[cfg(target_os = "linux")]
 fn binary_on_path(name: &str) -> bool {
     let Some(path_var) = std::env::var_os("PATH") else {
         return false;
     };
-    for dir in std::env::split_paths(&path_var) {
-        let candidate = dir.join(name);
-        if candidate.is_file() {
-            return true;
-        }
-    }
-    false
+    std::env::split_paths(&path_var).any(|dir| is_executable_file(&dir.join(name)))
+}
+
+/// Return true iff `path` exists, is a regular file, and has at least one
+/// of the user/group/other executable bits set. Same semantics as
+/// `access(path, X_OK)` against the inode mode (no setuid/setgid/ACL
+/// awareness, but neither does `access()` from a non-root process for
+/// our purposes).
+#[cfg(target_os = "linux")]
+fn is_executable_file(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let md = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    md.is_file() && md.permissions().mode() & 0o111 != 0
 }
 
 /// Build a distro-aware install hint for a missing tool.
@@ -443,5 +472,46 @@ mod tests {
         assert!(parse_corkscrew_url("https://example.com").is_err());
         assert!(parse_corkscrew_url("corkscrew://").is_err());
         assert!(parse_corkscrew_url("corkscrew://unknown/action").is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_is_executable_file_requires_executable_bit() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+
+        // Non-existent path: false.
+        assert!(!is_executable_file(&temp.path().join("nonexistent")));
+
+        // Plain text file with mode 0644: false. Mirrors the bash-completion
+        // stub case that motivated this check.
+        let non_exec = temp.path().join("nonexec");
+        fs::write(&non_exec, b"# completion data\n").unwrap();
+        let mut perms = fs::metadata(&non_exec).unwrap().permissions();
+        perms.set_mode(0o644);
+        fs::set_permissions(&non_exec, perms).unwrap();
+        assert!(!is_executable_file(&non_exec));
+
+        // Same content with the user-execute bit set: true.
+        let exec = temp.path().join("exec");
+        fs::write(&exec, b"#!/bin/sh\necho hi\n").unwrap();
+        let mut perms = fs::metadata(&exec).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&exec, perms).unwrap();
+        assert!(is_executable_file(&exec));
+
+        // Group-only or other-only execute is sufficient (mirrors access()).
+        let g_only = temp.path().join("g-only");
+        fs::write(&g_only, b"x").unwrap();
+        let mut perms = fs::metadata(&g_only).unwrap().permissions();
+        perms.set_mode(0o010);
+        fs::set_permissions(&g_only, perms).unwrap();
+        assert!(is_executable_file(&g_only));
+
+        // Directories must not register as executable files even though
+        // they often have the +x bit set.
+        assert!(!is_executable_file(temp.path()));
     }
 }
