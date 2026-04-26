@@ -110,7 +110,13 @@ pub fn create_game_snapshot(
     )?;
 
     for entry in WalkDir::new(data_dir).into_iter().filter_map(|e| e.ok()) {
-        if !entry.file_type().is_file() {
+        // WalkDir's default `follow_links=false` yields symlinks but reports
+        // is_file() == false. On Steam Deck microSD setups mod files are
+        // commonly presented via symlinks; we want to hash the link target
+        // so integrity tracking still works for them. fs::metadata follows
+        // symlinks (unlike entry.file_type()), so we can rely on it to
+        // distinguish "symlink to file" from "symlink to directory".
+        if !is_file_or_symlink_to_file(&entry) {
             continue;
         }
 
@@ -182,7 +188,8 @@ pub fn check_game_integrity(
     let mut total_scanned = 0usize;
 
     for entry in WalkDir::new(data_dir).into_iter().filter_map(|e| e.ok()) {
-        if !entry.file_type().is_file() {
+        // Same symlink handling as snapshot creation (see comment above).
+        if !is_file_or_symlink_to_file(&entry) {
             continue;
         }
 
@@ -243,6 +250,23 @@ pub fn has_snapshot(db: &ModDatabase, game_id: &str, bottle_name: &str) -> Resul
 
 fn compute_sha256(path: &Path) -> Result<String> {
     platform::fast_hash(path).map_err(IntegrityError::Io)
+}
+
+/// Return true if a WalkDir entry is a regular file OR a symlink whose target
+/// is a regular file. WalkDir's default `follow_links=false` yields symlinks
+/// but reports them as not-file, which silently dropped symlinked mod files
+/// on Steam Deck microSD setups.
+fn is_file_or_symlink_to_file(entry: &walkdir::DirEntry) -> bool {
+    let ft = entry.file_type();
+    if ft.is_file() {
+        return true;
+    }
+    if ft.is_symlink() {
+        // fs::metadata follows symlinks. If the link is broken or its target
+        // is a directory, treat it as not-a-file.
+        return fs::metadata(entry.path()).map(|m| m.is_file()).unwrap_or(false);
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -336,6 +360,52 @@ mod tests {
         let report = check_game_integrity(&db, "skyrimse", "Gaming", &data_dir).unwrap();
         assert_eq!(report.missing_files.len(), 1);
         assert_eq!(report.missing_files[0], "test.esp");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_includes_symlinked_files() {
+        use std::os::unix::fs::symlink;
+
+        let (db, tmp) = test_db();
+
+        // Real data dir + an external "microSD" dir whose files we'll symlink in.
+        let data_dir = tmp.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+        let external = tmp.path().join("microsd");
+        fs::create_dir_all(&external).unwrap();
+
+        // Plain file
+        fs::write(data_dir.join("plain.esp"), b"plain").unwrap();
+        // External target + symlink in data dir
+        fs::write(external.join("modded.esp"), b"modded").unwrap();
+        symlink(external.join("modded.esp"), data_dir.join("modded.esp")).unwrap();
+
+        let count = create_game_snapshot(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+        // Both files (plain + symlink target hashed) should appear.
+        assert_eq!(count, 2);
+
+        // Integrity check should also see both as known.
+        let report = check_game_integrity(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+        assert_eq!(report.total_scanned, 2);
+        assert!(report.unknown_files.is_empty());
+        assert!(report.missing_files.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_skips_broken_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let (db, tmp) = test_db();
+        let data_dir = tmp.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+        fs::write(data_dir.join("real.esp"), b"x").unwrap();
+        // Broken: target doesn't exist.
+        symlink(tmp.path().join("nope.esp"), data_dir.join("dangling.esp")).unwrap();
+
+        let count = create_game_snapshot(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+        assert_eq!(count, 1, "broken symlink should be skipped");
     }
 
     #[test]

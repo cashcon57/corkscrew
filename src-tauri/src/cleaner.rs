@@ -315,7 +315,30 @@ pub fn scan_game_directory(
     let mut orphaned_count = 0usize;
 
     for entry in WalkDir::new(data_dir).into_iter().filter_map(|e| e.ok()) {
-        if !entry.file_type().is_file() {
+        let file_type = entry.file_type();
+
+        // WalkDir defaults to follow_links=false, which yields symlink entries
+        // but reports file_type().is_file() == false for them. On Steam Deck
+        // microSD setups, mod files presented via symlinks would be silently
+        // skipped. Treat symlinks pointing to files as files for the purposes
+        // of orphan detection — log them so users understand what's scanned.
+        let is_symlink_to_file = if file_type.is_symlink() {
+            match fs::metadata(entry.path()) {
+                Ok(meta) => meta.is_file(),
+                Err(e) => {
+                    warn!(
+                        "cleaner: skipping unreadable symlink {}: {}",
+                        entry.path().display(),
+                        e
+                    );
+                    false
+                }
+            }
+        } else {
+            false
+        };
+
+        if !file_type.is_file() && !is_symlink_to_file {
             continue;
         }
 
@@ -1081,6 +1104,35 @@ mod tests {
         assert!(
             cats.contains(&"config"),
             "INI files should be categorized as config"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_includes_symlinked_files() {
+        use std::os::unix::fs::symlink;
+
+        let (db, tmp) = test_db();
+        let data_dir = tmp.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+
+        // Stock file → snapshot it
+        fs::write(data_dir.join("Skyrim.esm"), b"master").unwrap();
+        integrity::create_game_snapshot(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+
+        // External file presented via symlink (Steam Deck microSD pattern).
+        let external = tmp.path().join("microsd");
+        fs::create_dir_all(&external).unwrap();
+        fs::write(external.join("mod.esp"), b"mod").unwrap();
+        symlink(external.join("mod.esp"), data_dir.join("mod.esp")).unwrap();
+
+        let report = scan_game_directory(&db, "skyrimse", "Gaming", &data_dir).unwrap();
+        // Symlinked mod.esp should be flagged as orphaned/non-stock,
+        // not silently skipped.
+        assert!(
+            report.non_stock_files.iter().any(|f| f.relative_path == "mod.esp"),
+            "symlinked file should be detected as non-stock; got {:?}",
+            report.non_stock_files.iter().map(|f| &f.relative_path).collect::<Vec<_>>()
         );
     }
 
