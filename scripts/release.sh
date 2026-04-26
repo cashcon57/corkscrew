@@ -28,9 +28,10 @@ echo "=== Corkscrew Release $TAG ==="
 echo ""
 
 errors=()
-command -v gh    >/dev/null 2>&1 || errors+=("gh CLI not installed")
-command -v jq    >/dev/null 2>&1 || errors+=("jq not installed")
-command -v cargo >/dev/null 2>&1 || errors+=("cargo not found — check PATH")
+command -v gh      >/dev/null 2>&1 || errors+=("gh CLI not installed")
+command -v jq      >/dev/null 2>&1 || errors+=("jq not installed")
+command -v cargo   >/dev/null 2>&1 || errors+=("cargo not found — check PATH")
+command -v python3 >/dev/null 2>&1 || errors+=("python3 not installed")
 
 if (( ${#errors[@]} )); then
   for e in "${errors[@]}"; do echo "ERROR: $e"; done
