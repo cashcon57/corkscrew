@@ -273,16 +273,18 @@ pub struct NewCrashInfo {
 /// Check for crash logs newer than the last-seen timestamp and update the marker.
 ///
 /// The "last seen" timestamp is stored in a small file at
-/// `<data_dir>/Corkscrew/crash_check_<game_id>.txt`. On first run (no marker file)
+/// `<data_dir>/crash_check/crash_check_<game_id>.txt`. On first run (no marker file)
 /// all existing crashes are considered "seen" — we write the current marker without
 /// reporting anything, so users don't get a wall of stale crash alerts.
 pub fn check_new_crashes(
     bottle_path: &Path,
     game_id: &str,
 ) -> NewCrashInfo {
-    let marker_dir = dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("Corkscrew");
+    // Use crate::config::data_dir() so that CORKSCREW_DATA_DIR env-var
+    // overrides apply, and so the path matches the lowercase "corkscrew"
+    // convention used elsewhere (config.rs:142, loot.rs:101). On Linux ext4
+    // a capital "Corkscrew" diverges from the rest of the codebase.
+    let marker_dir = crate::config::data_dir().join("crash_check");
     let _ = fs::create_dir_all(&marker_dir);
     let marker_path = marker_dir.join(format!("crash_check_{}.txt", game_id));
 
