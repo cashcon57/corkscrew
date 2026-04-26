@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_at": "2026-04-20",
-  "notes": "Community-maintained registry of Wine/CrossOver compatibility for collections and Wabbajack modlists. Entries PR'd to Corkscrew repo or submitted via in-app report.",
+  "notes": "Community-curated registry of Wine/CrossOver compatibility for NexusMods collections and Wabbajack modlists. The bundled fallback ships intentionally empty: status entries are added only when reproducibly confirmed. Submit a status (verified/partial/broken) via PR at https://github.com/cashcon57/Corkscrew, or use the in-app report flow. Anything not listed here returns Untested.",
   "collections": {},
   "wabbajack": {}
 }

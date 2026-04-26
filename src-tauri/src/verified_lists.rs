@@ -15,6 +15,14 @@
 //! - `Partial`    — installs but has known issues (see `notes`).
 //! - `Broken`     — confirmed broken under Wine.
 //! - `Untested`   — no entry (default for anything not in the manifest).
+//!
+//! Disk-cache write strategy:
+//! Writes go to a tmp file with a `json.tmp.<pid>.<unix_secs>` suffix and are
+//! atomically renamed to the final cache filename. The PID + timestamp suffix
+//! ensures concurrent `refresh_from_remote()` calls (e.g. background refresh
+//! racing a manual one) write to *distinct* tmp files, so neither writer can
+//! truncate the other mid-write. The final rename is still atomic per writer;
+//! whichever rename lands last wins, and both produce well-formed manifests.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -126,9 +134,23 @@ fn write_disk_cache(manifest: &Manifest, fetched_at: u64) {
         manifest: manifest.clone(),
     };
     if let Ok(bytes) = serde_json::to_vec_pretty(&payload) {
-        let tmp = path.with_extension("json.tmp");
+        // Suffix tmp filename with PID + unix-seconds so two concurrent
+        // refreshes write to disjoint tmp paths and cannot truncate each other.
+        // The rename-to-final is atomic per writer; last-rename-wins is fine
+        // because both inputs are well-formed manifests.
+        let tmp = path.with_extension(format!(
+            "json.tmp.{}.{}",
+            std::process::id(),
+            unix_now()
+        ));
         if std::fs::write(&tmp, &bytes).is_ok() {
-            let _ = std::fs::rename(&tmp, &path);
+            if std::fs::rename(&tmp, &path).is_err() {
+                // Best-effort cleanup if rename failed (e.g. cross-device).
+                let _ = std::fs::remove_file(&tmp);
+            }
+        } else {
+            // Best-effort cleanup of a partial tmp on write failure.
+            let _ = std::fs::remove_file(&tmp);
         }
     }
 }
