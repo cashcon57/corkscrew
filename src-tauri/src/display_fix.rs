@@ -381,23 +381,60 @@ fn run_command_with_timeout(
         .spawn()
         .map_err(|e| format!("Failed to spawn {}: {}", program, e))?;
 
+    // Drain stdout/stderr concurrently so the OS pipe buffers (~64KB) can't
+    // fill and block the child. Without these threads, processes that produce
+    // a lot of output (e.g. `kscreen-doctor -o` on a busy session, gdbus
+    // dumping a multi-monitor GVariant) can deadlock waiting for someone to
+    // read their stdout, and we'd timeout-kill them every time.
+    use std::io::Read;
+    use std::sync::{Arc, Mutex};
+    let stdout_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let stderr_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+
+    let stdout_handle = child.stdout.take().map(|mut s| {
+        let buf = Arc::clone(&stdout_buf);
+        thread::spawn(move || {
+            let mut local = Vec::new();
+            let _ = s.read_to_end(&mut local);
+            if let Ok(mut g) = buf.lock() {
+                *g = local;
+            }
+        })
+    });
+    let stderr_handle = child.stderr.take().map(|mut s| {
+        let buf = Arc::clone(&stderr_buf);
+        thread::spawn(move || {
+            let mut local = Vec::new();
+            let _ = s.read_to_end(&mut local);
+            if let Ok(mut g) = buf.lock() {
+                *g = local;
+            }
+        })
+    });
+
     let deadline = Instant::now() + timeout;
     let poll = Duration::from_millis(50);
+
+    let take_buf = |buf: &Arc<Mutex<Vec<u8>>>| -> Vec<u8> {
+        buf.lock()
+            .map(|mut g| std::mem::take(&mut *g))
+            .unwrap_or_default()
+    };
 
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let mut stdout = Vec::new();
-                if let Some(mut s) = child.stdout.take() {
-                    use std::io::Read;
-                    let _ = s.read_to_end(&mut stdout);
+                // Child exited. Wait for the drain threads to consume the
+                // remaining buffered output before reading the buffers.
+                if let Some(h) = stdout_handle {
+                    let _ = h.join();
                 }
+                if let Some(h) = stderr_handle {
+                    let _ = h.join();
+                }
+                let stdout = take_buf(&stdout_buf);
                 if !status.success() {
-                    let mut stderr = Vec::new();
-                    if let Some(mut s) = child.stderr.take() {
-                        use std::io::Read;
-                        let _ = s.read_to_end(&mut stderr);
-                    }
+                    let stderr = take_buf(&stderr_buf);
                     return Err(format!(
                         "{} exited with status {}: {}",
                         program,
@@ -412,6 +449,13 @@ fn run_command_with_timeout(
                     // Best-effort kill; ignore errors (process may already be dead).
                     let _ = child.kill();
                     let _ = child.wait();
+                    // Joining drain threads after kill ensures pipe FDs close.
+                    if let Some(h) = stdout_handle {
+                        let _ = h.join();
+                    }
+                    if let Some(h) = stderr_handle {
+                        let _ = h.join();
+                    }
                     return Err(format!(
                         "{} timed out after {}ms",
                         program,
@@ -479,7 +523,7 @@ fn parse_kscreen_doctor_output(text: &str) -> Option<(u32, u32)> {
             if line.contains(" enabled") {
                 b.enabled = true;
             }
-            if line.contains("priority 1") {
+            if has_priority_one_token(line) {
                 b.priority_one = true;
             }
             cur = Some(b);
@@ -495,8 +539,8 @@ fn parse_kscreen_doctor_output(text: &str) -> Option<(u32, u32)> {
         if line.eq_ignore_ascii_case("enabled") || line.eq_ignore_ascii_case("enabled: yes") {
             block.enabled = true;
         }
-        if line.starts_with("priority") && line.contains('1') {
-            // "priority: 1" or "priority 1"
+        if line.starts_with("priority") && has_priority_one_token(line) {
+            // "priority: 1" or "priority 1" — must be exactly 1, not 10/11/etc.
             block.priority_one = true;
         }
 
@@ -607,10 +651,17 @@ fn detect_wayland_resolution_via_mutter() -> Result<(u32, u32), String> {
 /// Pure parser for the GVariant returned by `GetCurrentState`. Extracted
 /// for testability — see `parse_mutter_*` tests below.
 ///
-/// Approach: find the first occurrence of `'is-current': <true>` and walk
-/// **backwards** through the text looking for a tuple opener followed by a
-/// quoted mode-id string and two `int32 N` integers. The two integers in
-/// that tuple are the mode's width and height.
+/// Approach:
+/// 1. **Prefer** the modes block whose owning monitor section is marked
+///    `'is-primary': <true>`. With multiple monitors, every monitor has
+///    its own `'is-current': <true>` mode, but only the primary is the
+///    one users actually launch fullscreen apps on.
+/// 2. If no primary marker is found, fall back to the first
+///    `'is-current': <true>` (legacy single-monitor behavior).
+///
+/// Once we've picked an `is-current` position, walk **backwards** through
+/// the text looking for a tuple containing two `int32 N` integers. Those
+/// are the mode's width and height.
 ///
 /// Mode tuple shape (per Mutter docs):
 /// `(s mode_id, i width, i height, d refresh_rate, d preferred_scale,
@@ -620,20 +671,50 @@ fn detect_wayland_resolution_via_mutter() -> Result<(u32, u32), String> {
 /// `1920` followed by `,` (older bindings drop the type tag).
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn parse_mutter_get_current_state(text: &str) -> Option<(u32, u32)> {
-    // Tokenize on the marker. There can be many monitors; the first one
-    // marked current corresponds to the primary output.
-    let marker = "'is-current': <true>";
-    let alt_marker = "\"is-current\": <true>"; // some gdbus versions
+    let primary_marker_a = "'is-primary': <true>";
+    let primary_marker_b = "\"is-primary\": <true>";
+    let current_marker_a = "'is-current': <true>";
+    let current_marker_b = "\"is-current\": <true>";
 
-    let pos = text
-        .find(marker)
-        .or_else(|| text.find(alt_marker))?;
+    // Find every `is-current` position (one per monitor in multi-monitor setups).
+    let current_positions = find_all_occurrences(text, &[current_marker_a, current_marker_b]);
+    if current_positions.is_empty() {
+        return None;
+    }
+
+    // Prefer an `is-current` whose monitor section also has `is-primary: <true>`.
+    // Mutter's GVariant orders things as: (connector, modes_array, monitor_props).
+    // So for a given monitor, `is-primary` appears AFTER its `is-current` mode.
+    // We pick the `is-current` position whose nearest *following* `is-primary`
+    // appears before the next `is-current` (i.e. they're in the same monitor).
+    let primary_positions = find_all_occurrences(text, &[primary_marker_a, primary_marker_b]);
+
+    let chosen_pos = if !primary_positions.is_empty() {
+        let mut best: Option<usize> = None;
+        for (i, &cur) in current_positions.iter().enumerate() {
+            // The end of "this monitor" in the text is just before the next
+            // is-current, or end of text for the last monitor.
+            let monitor_end = current_positions.get(i + 1).copied().unwrap_or(text.len());
+            // If any is-primary marker falls strictly between cur and monitor_end,
+            // this monitor is the primary.
+            if primary_positions
+                .iter()
+                .any(|&pp| pp > cur && pp < monitor_end)
+            {
+                best = Some(cur);
+                break;
+            }
+        }
+        best.unwrap_or(current_positions[0])
+    } else {
+        current_positions[0]
+    };
 
     // Slice the prefix and look back at most ~2KB to find the mode tuple
     // that owns this property. 2KB is generous: a single mode tuple is
     // typically <300 chars even with many supported scales.
-    let prefix_start = pos.saturating_sub(2048);
-    let window = &text[prefix_start..pos];
+    let prefix_start = chosen_pos.saturating_sub(2048);
+    let window = &text[prefix_start..chosen_pos];
 
     // Find candidate "(int32 W, int32 H," patterns. We grab them all and
     // take the *last* one — the closest preceding pair belongs to the
@@ -672,6 +753,54 @@ fn parse_mutter_get_current_state(text: &str) -> Option<(u32, u32)> {
     }
 
     last.filter(|(w, h)| *w > 0 && *h > 0 && *w < 32_768 && *h < 32_768)
+}
+
+/// Find every occurrence of any of `needles` inside `haystack`, sorted by
+/// ascending position. Used by the Mutter parser to locate `is-current` /
+/// `is-primary` markers regardless of which quoting style gdbus used.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn find_all_occurrences(haystack: &str, needles: &[&str]) -> Vec<usize> {
+    let mut positions = Vec::new();
+    for needle in needles {
+        let mut start = 0;
+        while let Some(p) = haystack[start..].find(needle) {
+            let abs = start + p;
+            positions.push(abs);
+            start = abs + needle.len();
+        }
+    }
+    positions.sort_unstable();
+    positions.dedup();
+    positions
+}
+
+/// Returns true if the line contains a `priority` field with the exact
+/// value `1` (not `10`, `11`, etc.).
+///
+/// kscreen-doctor prints output priority as either:
+/// - `"... priority 1 ..."` (older / inline)
+/// - `"priority: 1"` (newer split-line variant)
+///
+/// We tokenize on whitespace and `:` and look for the token immediately
+/// after a `priority` token to be exactly `"1"`. A naive
+/// `line.contains("priority 1")` match would falsely accept `"priority 10"`
+/// and `"priority 11"`, which broke multi-monitor priority detection.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn has_priority_one_token(line: &str) -> bool {
+    let tokens: Vec<&str> = line
+        .split(|c: char| c.is_whitespace() || c == ':' || c == ',')
+        .filter(|t| !t.is_empty())
+        .collect();
+    for (i, tok) in tokens.iter().enumerate() {
+        if tok.eq_ignore_ascii_case("priority") {
+            if let Some(next) = tokens.get(i + 1) {
+                if *next == "1" {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Parse a resolution string like "2560 x 1440" or "2560 x 1440 @ 60Hz".
@@ -1741,6 +1870,57 @@ Geometry: 0,0 1366x768
         assert_eq!(parse_kscreen_doctor_output("not kscreen output\n"), None);
     }
 
+    #[test]
+    fn parse_kscreen_priority_10_does_not_match_priority_1() {
+        // Prior to the word-boundary fix this returned 3840x2160 because
+        // "priority 10" was greedily matched by `contains("priority 1")`.
+        // The eDP-1 (priority 1) panel is the actual primary; we must
+        // honour it over the high-priority secondary.
+        let sample = "\
+Output: 2 HDMI-A-1 enabled connected priority 10 modes:
+  9:3840x2160@60*
+Geometry: 1920,0 3840x2160
+
+Output: 1 eDP-1 enabled connected priority 1 modes:
+  18:2560x1600@60*
+Geometry: 0,0 2560x1600
+";
+        assert_eq!(parse_kscreen_doctor_output(sample), Some((2560, 1600)));
+    }
+
+    #[test]
+    fn parse_kscreen_priority_11_does_not_match_priority_1_split_form() {
+        // Same fix, exercising the split-line "priority: N" variant some
+        // kscreen-doctor versions emit instead of the inline form.
+        let sample = "\
+Output: 2 HDMI-A-1
+enabled
+priority: 11
+modes:
+  9:3840x2160@60*
+Geometry: 1920,0 3840x2160
+
+Output: 1 eDP-1
+enabled
+priority: 1
+modes:
+  18:2560x1600@60*
+Geometry: 0,0 2560x1600
+";
+        assert_eq!(parse_kscreen_doctor_output(sample), Some((2560, 1600)));
+    }
+
+    #[test]
+    fn has_priority_one_token_basic() {
+        assert!(has_priority_one_token("priority 1"));
+        assert!(has_priority_one_token("priority: 1"));
+        assert!(has_priority_one_token("Output: 1 eDP-1 enabled connected priority 1 modes:"));
+        assert!(!has_priority_one_token("priority 10"));
+        assert!(!has_priority_one_token("priority: 11"));
+        assert!(!has_priority_one_token("priority 100"));
+        assert!(!has_priority_one_token("not a priority line"));
+    }
+
     // --- gdbus / Mutter parser ---
 
     #[test]
@@ -1788,6 +1968,49 @@ Geometry: 0,0 1366x768
         // Pathological input where the int32s are absurd should be rejected.
         let sample = "(int32 999999, int32 999999, {'is-current': <true>})";
         assert_eq!(parse_mutter_get_current_state(sample), None);
+    }
+
+    #[test]
+    fn parse_mutter_prefers_primary_monitor_over_secondary() {
+        // Two monitors, both with their own is-current mode. Only the
+        // *secondary* is listed first in the GVariant; without primary
+        // preference the parser would pick the secondary (4K) panel and
+        // we'd render the game at 3840x2160 instead of the laptop's native
+        // 2560x1600. With the fix, we honour 'is-primary': <true>.
+        let sample = "\
+(uint32 1, [...], [\
+(('HDMI-A-1', 'HDMI-A-1', 'Dell', 'U2723QE', 'DEL0001'), \
+[('hdmi-3840x2160@60', int32 3840, int32 2160, 60.0, 1.0, [1.0, 2.0], \
+{'is-current': <true>, 'is-preferred': <true>})], \
+{'display-name': <'External display'>, 'is-primary': <false>}), \
+(('eDP-1', 'eDP-1', 'AU Optronics', 'B140QAN', 'AUO0000'), \
+[('edp-2560x1600@60', int32 2560, int32 1600, 60.0, 1.0, [1.0, 1.25, 1.5], \
+{'is-current': <true>, 'is-preferred': <true>})], \
+{'display-name': <'Built-in display'>, 'is-primary': <true>})], \
+{})\n";
+        assert_eq!(
+            parse_mutter_get_current_state(sample),
+            Some((2560, 1600))
+        );
+    }
+
+    #[test]
+    fn parse_mutter_falls_back_to_first_current_when_no_primary_marker() {
+        // No 'is-primary' anywhere — older Mutter versions or single
+        // monitor setups. Original behavior (first is-current wins) holds.
+        let sample = "\
+(uint32 1, [\
+(('eDP-1', 'eDP-1', '', '', ''), \
+[('id-1', int32 1920, int32 1080, 60.0, 1.0, [1.0], {'is-current': <true>})], \
+{'display-name': <'eDP-1'>}), \
+(('HDMI-A-1', 'HDMI-A-1', '', '', ''), \
+[('id-2', int32 3840, int32 2160, 60.0, 1.0, [1.0], {'is-current': <true>})], \
+{'display-name': <'HDMI-A-1'>})], \
+{})\n";
+        assert_eq!(
+            parse_mutter_get_current_state(sample),
+            Some((1920, 1080))
+        );
     }
 
     #[test]
