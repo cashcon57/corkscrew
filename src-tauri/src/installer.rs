@@ -436,6 +436,24 @@ fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
             continue;
         }
 
+        // Reject symlink entries — a malicious archive can plant a symlink
+        // and then write through it to an arbitrary host path. The
+        // component-based traversal check below does NOT catch this. The
+        // tar path already does the equivalent check (see below in this
+        // file). Detect symlinks via the POSIX unix mode S_IFLNK bits in
+        // the central-directory external attributes.
+        if !entry.is_dir()
+            && entry
+                .unix_mode()
+                .map_or(false, |m| m & 0o170000 == 0o120000)
+        {
+            warn!(
+                "Skipping symlink entry in ZIP archive: {}",
+                entry.name()
+            );
+            continue;
+        }
+
         // Convert CP437-encoded filenames to UTF-8 (common in old DOS-era archives)
         // Note: CP437 high-byte table (0x80-0xFF) is null-free; check above is defense-in-depth
         let decoded_name = if raw_name.iter().any(|&b| b >= 0x80) {
@@ -565,6 +583,19 @@ fn extract_zip_with_progress(
         let raw_name = entry.name_raw();
         if raw_name.contains(&0u8) {
             warn!("Skipping ZIP entry with null byte in raw filename");
+            continue;
+        }
+
+        // Reject symlink entries — see security note in `extract_zip()`.
+        if !entry.is_dir()
+            && entry
+                .unix_mode()
+                .map_or(false, |m| m & 0o170000 == 0o120000)
+        {
+            warn!(
+                "Skipping symlink entry in ZIP archive: {}",
+                entry.name()
+            );
             continue;
         }
 
@@ -1629,5 +1660,63 @@ mod tests {
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(&[0x42, 0x54, 0x44, 0x58, 0, 0, 0, 0]).unwrap();
         assert_eq!(detect_format_from_magic(&path), Some("ba2"));
+    }
+
+    #[test]
+    fn test_extract_zip_skips_symlink_entries() {
+        // Regression: a malicious ZIP can plant a symlink entry that points
+        // outside the destination dir; subsequent file entries written
+        // through the planted name then escape the sandbox. The
+        // component-based path-traversal check does NOT catch this because
+        // the symlink's stored path itself is benign — the danger is the
+        // symlink target.
+        //
+        // This test crafts a ZIP with one regular file and one symlink
+        // entry (built via the zip crate's `add_symlink` helper, which
+        // ORs in the S_IFLNK high bits), then asserts the symlink entry
+        // is skipped at extraction time and only the regular file is
+        // materialized.
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("attack.zip");
+        {
+            let f = std::fs::File::create(&zip_path).unwrap();
+            let mut w = zip::ZipWriter::new(f);
+
+            // Regular file entry
+            let opts: SimpleFileOptions = SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored)
+                .unix_permissions(0o644);
+            w.start_file("normal.txt", opts).unwrap();
+            w.write_all(b"hello").unwrap();
+
+            // Symlink entry — `add_symlink` sets the S_IFLNK high bits in
+            // the unix mode field; the symlink target is stored as the
+            // entry payload.
+            let link_opts: SimpleFileOptions = SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored)
+                .unix_permissions(0o777);
+            w.add_symlink("evil_link", "/etc/passwd", link_opts).unwrap();
+
+            w.finish().unwrap();
+        }
+
+        let out_dir = dir.path().join("out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let extracted = extract_zip(&zip_path, &out_dir).expect("extract");
+
+        // Only the normal file should have been extracted.
+        assert!(
+            out_dir.join("normal.txt").exists(),
+            "regular file must be extracted"
+        );
+        assert!(
+            !out_dir.join("evil_link").exists(),
+            "symlink entry MUST be skipped (path-traversal hardening)"
+        );
+        // And the returned list should only contain the regular file.
+        assert_eq!(extracted.len(), 1, "only one entry should be extracted");
     }
 }
