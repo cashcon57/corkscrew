@@ -20,6 +20,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(target_os = "linux")]
+use std::time::{Duration, Instant};
 
 use log::{debug, warn};
 use serde::{Deserialize, Serialize};
@@ -189,7 +191,15 @@ fn detect_macos_resolutions() -> Result<((u32, u32), (u32, u32)), String> {
 // ---------------------------------------------------------------------------
 
 /// Detect resolution on Linux, trying SteamOS/Gamescope first, then
-/// Wayland (wlr-randr), then X11 (xrandr).
+/// Wayland-native methods (wlr-randr, kscreen-doctor, gdbus/Mutter), then
+/// X11/XWayland (xrandr).
+///
+/// `wlr-randr` only works on wlroots-based compositors (Sway, Hyprland).
+/// CachyOS ships KDE Plasma 6 by default and GNOME ships Mutter — neither
+/// bundles `wlr-randr`. For those sessions we try `kscreen-doctor -o`
+/// (KDE Plasma) and the `org.gnome.Mutter.DisplayConfig.GetCurrentState`
+/// D-Bus call (GNOME) before falling back to xrandr via XWayland — which
+/// itself fails on pure Wayland sessions where XWayland is not started.
 #[cfg(target_os = "linux")]
 fn detect_linux_resolution() -> Result<(u32, u32), String> {
     // SteamOS / Steam Deck — check Gamescope env vars first
@@ -202,11 +212,26 @@ fn detect_linux_resolution() -> Result<(u32, u32), String> {
         return Ok((1280, 800));
     }
 
-    // Wayland
+    // Wayland-native paths
     if std::env::var("WAYLAND_DISPLAY").is_ok() {
-        if let Ok(res) = detect_wayland_resolution() {
-            return Ok(res);
+        // 1. wlr-randr (Sway / Hyprland / other wlroots compositors)
+        match detect_wayland_resolution() {
+            Ok(res) => return Ok(res),
+            Err(e) => debug!("wlr-randr unavailable: {}", e),
         }
+
+        // 2. kscreen-doctor (KDE Plasma 5/6 — CachyOS default)
+        match detect_wayland_resolution_via_kscreen() {
+            Ok(res) => return Ok(res),
+            Err(e) => debug!("kscreen-doctor unavailable: {}", e),
+        }
+
+        // 3. gdbus + org.gnome.Mutter.DisplayConfig (GNOME)
+        match detect_wayland_resolution_via_mutter() {
+            Ok(res) => return Ok(res),
+            Err(e) => debug!("gdbus/Mutter unavailable: {}", e),
+        }
+
         // Wayland fallback: try xrandr via XWayland
     }
 
@@ -217,7 +242,11 @@ fn detect_linux_resolution() -> Result<(u32, u32), String> {
         }
     }
 
-    Err("Could not detect screen resolution on Linux. Tried wlr-randr, xrandr.".into())
+    Err(
+        "Could not detect screen resolution on Linux. Tried wlr-randr, kscreen-doctor, \
+         gdbus/Mutter, xrandr."
+            .into(),
+    )
 }
 
 /// Detect resolution from Gamescope environment variables.
@@ -326,6 +355,323 @@ fn detect_wayland_resolution() -> Result<(u32, u32), String> {
     }
 
     Err("Could not parse wlr-randr output".into())
+}
+
+/// Run a command with a wall-clock timeout. Returns the captured stdout on
+/// success or an error string on timeout / failure.
+///
+/// We spawn the child, then poll `try_wait()` in a short sleep loop. If the
+/// deadline expires we kill the child (best-effort) so it cannot keep
+/// holding the launch flow. This is intentionally synchronous to match the
+/// rest of this module — `display_fix` is invoked from contexts that may
+/// not have a tokio runtime active.
+#[cfg(target_os = "linux")]
+fn run_command_with_timeout(
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<Vec<u8>, String> {
+    use std::process::Stdio;
+    use std::thread;
+
+    let mut child = Command::new(program)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn {}: {}", program, e))?;
+
+    let deadline = Instant::now() + timeout;
+    let poll = Duration::from_millis(50);
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut stdout = Vec::new();
+                if let Some(mut s) = child.stdout.take() {
+                    use std::io::Read;
+                    let _ = s.read_to_end(&mut stdout);
+                }
+                if !status.success() {
+                    let mut stderr = Vec::new();
+                    if let Some(mut s) = child.stderr.take() {
+                        use std::io::Read;
+                        let _ = s.read_to_end(&mut stderr);
+                    }
+                    return Err(format!(
+                        "{} exited with status {}: {}",
+                        program,
+                        status,
+                        String::from_utf8_lossy(&stderr).trim()
+                    ));
+                }
+                return Ok(stdout);
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    // Best-effort kill; ignore errors (process may already be dead).
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!(
+                        "{} timed out after {}ms",
+                        program,
+                        timeout.as_millis()
+                    ));
+                }
+                thread::sleep(poll);
+            }
+            Err(e) => return Err(format!("Failed to wait on {}: {}", program, e)),
+        }
+    }
+}
+
+/// Detect resolution via `kscreen-doctor -o` (KDE Plasma 5/6).
+///
+/// Plasma is the default desktop on CachyOS and ships `kscreen-doctor` as
+/// part of `libkscreen`. The tool prints one block per output. Each enabled
+/// output ends with a `Geometry: x,y WIDTHxHEIGHT` line and lists its modes
+/// with the active one marked by `*` (current) or `!` (preferred-current).
+///
+/// We honour:
+/// 1. The first enabled+priority-1 output's `Geometry:` line, OR
+/// 2. The first mode flagged with `*` on that output.
+#[cfg(target_os = "linux")]
+fn detect_wayland_resolution_via_kscreen() -> Result<(u32, u32), String> {
+    let stdout = run_command_with_timeout("kscreen-doctor", &["-o"], Duration::from_millis(2500))?;
+    let text = String::from_utf8_lossy(&stdout);
+    parse_kscreen_doctor_output(&text)
+        .ok_or_else(|| "Could not parse kscreen-doctor output".to_string())
+        .inspect(|res| debug!("kscreen-doctor current mode: {}x{}", res.0, res.1))
+}
+
+/// Pure parser for `kscreen-doctor -o` stdout. Extracted as a free function
+/// so it is unit-testable without spawning a real process.
+///
+/// Strategy:
+/// 1. Walk the lines top-to-bottom.
+/// 2. When we hit `Output: ...` start a new block.
+/// 3. Prefer the first `priority 1` enabled block's resolution.
+/// 4. Inside a block, accept the first `Geometry: <x>,<y> WxH` (newer
+///    format) OR `Geometry: WxH` (older format), or the first mode line
+///    matching `<id>:WxH@<rate>*` / `...*!`.
+/// 5. Fall back to the first enabled output if no priority-1 marker found.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_kscreen_doctor_output(text: &str) -> Option<(u32, u32)> {
+    #[derive(Default)]
+    struct Block {
+        enabled: bool,
+        priority_one: bool,
+        resolution: Option<(u32, u32)>,
+    }
+
+    let mut blocks: Vec<Block> = Vec::new();
+    let mut cur: Option<Block> = None;
+
+    for raw in text.lines() {
+        let line = raw.trim();
+
+        if line.starts_with("Output:") {
+            if let Some(b) = cur.take() {
+                blocks.push(b);
+            }
+            let mut b = Block::default();
+            // Header line itself can carry "enabled", "priority N".
+            if line.contains(" enabled") {
+                b.enabled = true;
+            }
+            if line.contains("priority 1") {
+                b.priority_one = true;
+            }
+            cur = Some(b);
+            continue;
+        }
+
+        let block = match cur.as_mut() {
+            Some(b) => b,
+            None => continue,
+        };
+
+        // Some kscreen-doctor versions split fields onto their own lines.
+        if line.eq_ignore_ascii_case("enabled") || line.eq_ignore_ascii_case("enabled: yes") {
+            block.enabled = true;
+        }
+        if line.starts_with("priority") && line.contains('1') {
+            // "priority: 1" or "priority 1"
+            block.priority_one = true;
+        }
+
+        // Geometry line. Handle "Geometry: x,y WxH" and "Geometry: WxH".
+        if let Some(rest) = line.strip_prefix("Geometry:") {
+            let rest = rest.trim();
+            // Try "x,y WIDTHxHEIGHT" — take the last whitespace-separated chunk
+            // that contains 'x'.
+            let candidate = rest
+                .split_whitespace()
+                .rev()
+                .find(|t| t.contains('x'))
+                .unwrap_or(rest);
+            if let Some(res) = parse_resolution_string(candidate) {
+                block.resolution.get_or_insert(res);
+                continue;
+            }
+            // Fallback: "Geometry: 1920,1080" with no 'x' — comma-separated
+            // single point isn't a resolution, skip.
+        }
+
+        // Mode lines look like "  18:1920x1080@60*!" or "1920x1080@60.00*"
+        // — only accept entries marked current (the '*' flag).
+        if line.contains('*') {
+            // Strip leading "<idx>:" if present.
+            let after_colon = line.rsplit(':').next().unwrap_or(line);
+            // Take just the "WxH" portion.
+            let core = after_colon
+                .split(|c: char| c == '@' || c == '*' || c == '!' || c.is_whitespace())
+                .find(|t| t.contains('x') && t.chars().any(|c| c.is_ascii_digit()))
+                .unwrap_or("");
+            if !core.is_empty() {
+                if let Some(res) = parse_resolution_string(core) {
+                    block.resolution.get_or_insert(res);
+                }
+            }
+        }
+    }
+
+    if let Some(b) = cur.take() {
+        blocks.push(b);
+    }
+
+    // Prefer enabled + priority-1 with a resolution; then enabled with one;
+    // then any with one.
+    blocks
+        .iter()
+        .find(|b| b.enabled && b.priority_one && b.resolution.is_some())
+        .and_then(|b| b.resolution)
+        .or_else(|| {
+            blocks
+                .iter()
+                .find(|b| b.enabled && b.resolution.is_some())
+                .and_then(|b| b.resolution)
+        })
+        .or_else(|| {
+            blocks
+                .iter()
+                .find(|b| b.resolution.is_some())
+                .and_then(|b| b.resolution)
+        })
+}
+
+/// Detect resolution via gdbus on the GNOME Mutter D-Bus interface.
+///
+/// Calls `org.gnome.Mutter.DisplayConfig.GetCurrentState` and parses the
+/// returned GVariant. The structure is a 4-tuple
+/// `(uint32 serial, logical_monitors, monitors, properties)`. Each entry
+/// in `monitors` carries a list of mode tuples; the active mode has a
+/// `'is-current': <true>` property. We locate that marker and walk the
+/// preceding tokens to find the `int32 W, int32 H` pair from the same mode
+/// tuple — its dimensions are the current physical resolution.
+///
+/// GVariant parsing is fragile by design: if the format ever changes we
+/// log a warning and return Err so the caller can fall through to xrandr.
+#[cfg(target_os = "linux")]
+fn detect_wayland_resolution_via_mutter() -> Result<(u32, u32), String> {
+    let stdout = run_command_with_timeout(
+        "gdbus",
+        &[
+            "call",
+            "--session",
+            "--dest",
+            "org.gnome.Mutter.DisplayConfig",
+            "--object-path",
+            "/org/gnome/Mutter/DisplayConfig",
+            "--method",
+            "org.gnome.Mutter.DisplayConfig.GetCurrentState",
+        ],
+        Duration::from_millis(3000),
+    )?;
+    let text = String::from_utf8_lossy(&stdout);
+    match parse_mutter_get_current_state(&text) {
+        Some(res) => {
+            debug!("gdbus/Mutter current mode: {}x{}", res.0, res.1);
+            Ok(res)
+        }
+        None => {
+            warn!(
+                "gdbus/Mutter returned a GVariant we could not parse for resolution; \
+                 falling through to xrandr"
+            );
+            Err("Could not parse gdbus/Mutter output".into())
+        }
+    }
+}
+
+/// Pure parser for the GVariant returned by `GetCurrentState`. Extracted
+/// for testability — see `parse_mutter_*` tests below.
+///
+/// Approach: find the first occurrence of `'is-current': <true>` and walk
+/// **backwards** through the text looking for a tuple opener followed by a
+/// quoted mode-id string and two `int32 N` integers. The two integers in
+/// that tuple are the mode's width and height.
+///
+/// Mode tuple shape (per Mutter docs):
+/// `(s mode_id, i width, i height, d refresh_rate, d preferred_scale,
+///   ad supported_scales, a{sv} properties)`
+///
+/// We accept either spelling produced by gdbus: `int32 1920` or just
+/// `1920` followed by `,` (older bindings drop the type tag).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_mutter_get_current_state(text: &str) -> Option<(u32, u32)> {
+    // Tokenize on the marker. There can be many monitors; the first one
+    // marked current corresponds to the primary output.
+    let marker = "'is-current': <true>";
+    let alt_marker = "\"is-current\": <true>"; // some gdbus versions
+
+    let pos = text
+        .find(marker)
+        .or_else(|| text.find(alt_marker))?;
+
+    // Slice the prefix and look back at most ~2KB to find the mode tuple
+    // that owns this property. 2KB is generous: a single mode tuple is
+    // typically <300 chars even with many supported scales.
+    let prefix_start = pos.saturating_sub(2048);
+    let window = &text[prefix_start..pos];
+
+    // Find candidate "(int32 W, int32 H," patterns. We grab them all and
+    // take the *last* one — the closest preceding pair belongs to the
+    // same mode tuple.
+    let mut last: Option<(u32, u32)> = None;
+
+    // Walk char-by-char looking for "int32 " sequences; collect pairs.
+    let mut pending_w: Option<u32> = None;
+    let mut idx = 0;
+    let bytes = window.as_bytes();
+    while idx < bytes.len() {
+        // Match the literal "int32 " then read digits.
+        if window[idx..].starts_with("int32 ") {
+            idx += "int32 ".len();
+            let start = idx;
+            while idx < bytes.len() && (bytes[idx] as char).is_ascii_digit() {
+                idx += 1;
+            }
+            if let Ok(n) = window[start..idx].parse::<u32>() {
+                if let Some(w) = pending_w.take() {
+                    // Got a pair — record it.
+                    last = Some((w, n));
+                } else {
+                    pending_w = Some(n);
+                }
+            }
+            continue;
+        }
+        // A non-int32 separator that resets a half-pair — only reset on
+        // '(' (new tuple) so we don't lose width when "int32 W, int32 H"
+        // is split by simple ", ".
+        if bytes[idx] == b'(' {
+            pending_w = None;
+        }
+        idx += 1;
+    }
+
+    last.filter(|(w, h)| *w > 0 && *h > 0 && *w < 32_768 && *h < 32_768)
 }
 
 /// Parse a resolution string like "2560 x 1440" or "2560 x 1440 @ 60Hz".
@@ -1321,6 +1667,127 @@ fMusicVolume=0.5
         let input = "[Software\\\\Wine\\\\Mac Driver]\n\"RetinaMode\"=\"Y\"\n";
         let result = remove_registry_section(input, r#"[Software\\Wine\\Explorer\\Desktops]"#);
         assert_eq!(result, input);
+    }
+
+    // --- kscreen-doctor parser ---
+
+    #[test]
+    fn parse_kscreen_geometry_with_xy_prefix() {
+        // Newer kscreen-doctor format: "Geometry: 0,0 1920x1080"
+        let sample = "\
+Output: 1 HDMI-A-1 enabled connected priority 1 modes:
+  17:1280x720@60
+  18:1920x1080@60*!
+  19:2560x1440@60
+Geometry: 0,0 1920x1080
+";
+        assert_eq!(parse_kscreen_doctor_output(sample), Some((1920, 1080)));
+    }
+
+    #[test]
+    fn parse_kscreen_geometry_legacy_format() {
+        // Older format documented in the task description.
+        let sample = "\
+Output: 1 HDMI-A-1 enabled connected priority 1 modes:
+  18:1920x1080@60*!
+Geometry: 1920x1080
+";
+        assert_eq!(parse_kscreen_doctor_output(sample), Some((1920, 1080)));
+    }
+
+    #[test]
+    fn parse_kscreen_falls_back_to_starred_mode() {
+        // No Geometry line — must use the "*" marked current mode.
+        let sample = "\
+Output: 1 HDMI-A-1 enabled connected priority 1 modes:
+  17:1280x720@60
+  18:2560x1440@60*
+  19:3840x2160@60
+";
+        assert_eq!(parse_kscreen_doctor_output(sample), Some((2560, 1440)));
+    }
+
+    #[test]
+    fn parse_kscreen_prefers_priority_one_over_other_outputs() {
+        // External monitor enabled but priority 2; built-in is priority 1.
+        let sample = "\
+Output: 2 HDMI-A-1 enabled connected priority 2 modes:
+  9:3840x2160@60*
+Geometry: 1920,0 3840x2160
+
+Output: 1 eDP-1 enabled connected priority 1 modes:
+  18:2560x1600@60*
+Geometry: 0,0 2560x1600
+";
+        assert_eq!(parse_kscreen_doctor_output(sample), Some((2560, 1600)));
+    }
+
+    #[test]
+    fn parse_kscreen_skips_disabled_outputs() {
+        // Disabled output has a Geometry line but should not win unless it
+        // is the only candidate. Here the second block is enabled.
+        let sample = "\
+Output: 2 DP-1 disabled disconnected modes:
+Output: 1 eDP-1 enabled connected priority 1 modes:
+  18:1366x768@60*
+Geometry: 0,0 1366x768
+";
+        assert_eq!(parse_kscreen_doctor_output(sample), Some((1366, 768)));
+    }
+
+    #[test]
+    fn parse_kscreen_returns_none_on_garbage() {
+        assert_eq!(parse_kscreen_doctor_output(""), None);
+        assert_eq!(parse_kscreen_doctor_output("not kscreen output\n"), None);
+    }
+
+    // --- gdbus / Mutter parser ---
+
+    #[test]
+    fn parse_mutter_basic_single_monitor() {
+        // Trimmed gdbus output for a 2560x1600 internal panel. Real output
+        // is a single line; we keep it that way to mirror reality.
+        let sample = "\
+(uint32 1, [(0, 0, 1.0, 0, true, [('eDP-1', 'eDP-1', 'AU Optronics', 'B140QAN', 'AUO0000', \
+[('eDP-1-2560x1600@60.001', int32 2560, int32 1600, 60.000999450683594, 1.0, [1.0, 1.25, 1.5], \
+{'is-current': <true>, 'is-preferred': <true>})], {'display-name': <'Built-in display'>})], \
+{'is-presentation': <false>}, {'layout-mode': <uint32 1>})\n";
+        assert_eq!(
+            parse_mutter_get_current_state(sample),
+            Some((2560, 1600))
+        );
+    }
+
+    #[test]
+    fn parse_mutter_picks_first_current_when_multiple_modes() {
+        // A monitor lists many modes; only one carries is-current.
+        let sample = "\
+[('id-1', int32 1280, int32 720, 60.0, 1.0, [1.0], {'is-preferred': <false>}), \
+('id-2', int32 1920, int32 1080, 60.0, 1.0, [1.0], {'is-current': <true>, 'is-preferred': <true>}), \
+('id-3', int32 2560, int32 1440, 60.0, 1.0, [1.0], {})]\n";
+        assert_eq!(
+            parse_mutter_get_current_state(sample),
+            Some((1920, 1080))
+        );
+    }
+
+    #[test]
+    fn parse_mutter_returns_none_when_no_current_marker() {
+        let sample = "\
+[('id-1', int32 1280, int32 720, 60.0, 1.0, [1.0], {})]\n";
+        assert_eq!(parse_mutter_get_current_state(sample), None);
+    }
+
+    #[test]
+    fn parse_mutter_returns_none_on_empty() {
+        assert_eq!(parse_mutter_get_current_state(""), None);
+    }
+
+    #[test]
+    fn parse_mutter_rejects_implausible_dimensions() {
+        // Pathological input where the int32s are absurd should be rejected.
+        let sample = "(int32 999999, int32 999999, {'is-current': <true>})";
+        assert_eq!(parse_mutter_get_current_state(sample), None);
     }
 
     #[test]
