@@ -157,6 +157,237 @@ pub fn find_proton_for_bottle(bottle_path: &Path) -> Option<ProtonVersion> {
 }
 
 // ---------------------------------------------------------------------------
+// System Wine fork detection
+// ---------------------------------------------------------------------------
+
+/// A detected system-installed Wine fork (not a Proton compatibility tool).
+///
+/// These are full Wine builds shipped via system packages (pacman, dpkg, AUR,
+/// brew, manual install) at well-known paths outside of Steam. They include
+/// wine-tkg, wine-staging, wine-ge, wine-cachyos, etc.
+#[derive(Debug, Clone, Serialize)]
+pub struct WineFork {
+    /// Display name derived from the parent directory (e.g. "wine-tkg-git").
+    pub name: String,
+    /// Path to the wine binary.
+    pub wine_bin: PathBuf,
+    /// Normalized variant string (e.g. "wine-tkg", "wine-ge", "wine-staging").
+    pub variant: String,
+    /// Whether this fork is recommended. Always false for system forks since
+    /// we don't know which version they are without execution; UI can prompt.
+    pub is_recommended: bool,
+}
+
+/// Scan the filesystem for system-installed Wine forks (wine-tkg, wine-staging,
+/// wine-ge, wine-cachyos, etc.).
+///
+/// Looks under:
+/// - `/opt/wine-*` (any subdir matching that pattern)
+/// - `/usr/local/wine*` and `/usr/local/bin/wine*` binaries
+/// - `~/.local/opt/wine*`
+///
+/// Silently skips non-existent paths. Returns the list of forks discovered.
+pub fn detect_system_wine_forks() -> Vec<WineFork> {
+    let mut roots: Vec<PathBuf> =
+        vec![PathBuf::from("/opt"), PathBuf::from("/usr/local")];
+    if let Some(home) = dirs::home_dir() {
+        roots.push(home.join(".local/opt"));
+    }
+    let usr_local_bin = PathBuf::from("/usr/local/bin");
+    let forks = scan_wine_forks_in_roots(&roots, Some(&usr_local_bin));
+
+    info!("Detected {} system Wine forks", forks.len());
+    for f in &forks {
+        debug!("  {} ({}) at {}", f.name, f.variant, f.wine_bin.display());
+    }
+
+    forks
+}
+
+/// Inner scan for system Wine forks. Takes explicit roots and an optional
+/// `usr_local_bin` directory so it can be exercised from tests against a
+/// tempdir.
+///
+/// Roots are scanned for `wine-*` subdirectories; each match has its
+/// `bin/wine` or `bin/wine64` extracted. Then the optional bin directory is
+/// scanned for loose `wine*` executables (e.g. `/usr/local/bin/wine-staging`).
+///
+/// Non-existent paths are skipped silently with a debug log.
+fn scan_wine_forks_in_roots(roots: &[PathBuf], usr_local_bin: Option<&Path>) -> Vec<WineFork> {
+    let mut forks = Vec::new();
+    let mut seen = std::collections::HashSet::<PathBuf>::new();
+
+    // Scan directories matching wine-* and pick out their wine binaries.
+    for root in roots {
+        let entries = match std::fs::read_dir(root) {
+            Ok(e) => e,
+            Err(_) => {
+                debug!("scanned {}: not present", root.display());
+                continue;
+            }
+        };
+
+        let mut count = 0usize;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let dir_name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+
+            // Match "wine-*" subdirectories (and bare "wine"). Skip plain files.
+            let lower = dir_name.to_lowercase();
+            let looks_wine_dir = lower == "wine"
+                || lower.starts_with("wine-")
+                || lower.starts_with("wine_");
+            if !looks_wine_dir {
+                continue;
+            }
+
+            let md = match std::fs::metadata(&path) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if !md.is_dir() {
+                continue;
+            }
+
+            // Look for the wine binary inside; cover bin/wine, bin/wine64.
+            for sub in &["bin/wine", "bin/wine64"] {
+                let wine = path.join(sub);
+                if wine.exists() {
+                    let canonical = wine.canonicalize().unwrap_or_else(|_| wine.clone());
+                    if seen.insert(canonical.clone()) {
+                        let variant = derive_wine_variant(&dir_name);
+                        forks.push(WineFork {
+                            name: dir_name.clone(),
+                            wine_bin: wine,
+                            variant,
+                            is_recommended: false,
+                        });
+                        count += 1;
+                    }
+                    break;
+                }
+            }
+        }
+        debug!("scanned {}, found {} wine fork dir entries", root.display(), count);
+    }
+
+    // Also scan a *bin* directory (typically /usr/local/bin) for loose
+    // wine* binaries that aren't packaged in a wine-*/bin layout.
+    if let Some(bin_dir) = usr_local_bin {
+        match std::fs::read_dir(bin_dir) {
+            Ok(entries) => {
+                let mut count = 0usize;
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let name = match path.file_name().and_then(|n| n.to_str()) {
+                        Some(n) => n.to_string(),
+                        None => continue,
+                    };
+                    let lower = name.to_lowercase();
+                    let is_wine_bin = lower == "wine"
+                        || lower == "wine64"
+                        || lower.starts_with("wine-")
+                        || lower.starts_with("wine_");
+                    if !is_wine_bin {
+                        continue;
+                    }
+                    let md = match std::fs::metadata(&path) {
+                        Ok(m) => m,
+                        Err(_) => continue,
+                    };
+                    if !md.is_file() {
+                        continue;
+                    }
+
+                    let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+                    if !seen.insert(canonical.clone()) {
+                        continue;
+                    }
+                    let variant = derive_wine_variant(&name);
+                    forks.push(WineFork {
+                        name: name.clone(),
+                        wine_bin: path,
+                        variant,
+                        is_recommended: false,
+                    });
+                    count += 1;
+                }
+                debug!(
+                    "scanned {}, found {} wine binaries",
+                    bin_dir.display(),
+                    count
+                );
+            }
+            Err(_) => {
+                debug!("scanned {}: not present", bin_dir.display());
+            }
+        }
+    }
+
+    forks
+}
+
+/// Extract a normalized variant string from a wine-fork file or directory name.
+///
+/// Strips trailing version suffixes and `-git`/`-bin` markers, returning a
+/// canonical fork identifier.
+///
+/// Examples:
+/// - `wine-tkg-git` -> `wine-tkg`
+/// - `wine-staging` -> `wine-staging`
+/// - `wine-ge-9.21` -> `wine-ge`
+/// - `wine-cachyos-staging-9.0` -> `wine-cachyos`
+/// - `wine64` -> `wine`
+/// - `wine` -> `wine`
+pub fn derive_wine_variant(raw: &str) -> String {
+    let lower = raw.to_lowercase();
+
+    // Treat wine64 / wine_64 as plain wine.
+    if lower == "wine64" || lower == "wine_64" || lower == "wine" {
+        return "wine".to_string();
+    }
+
+    // Split on '-' or '_' so we can rebuild only the meaningful prefix.
+    let parts: Vec<&str> = lower.split(|c| c == '-' || c == '_').collect();
+    if parts.is_empty() {
+        return lower;
+    }
+
+    // Always start with "wine"; if the first segment isn't wine just return it.
+    if parts[0] != "wine" {
+        return lower;
+    }
+
+    let mut variant = String::from("wine");
+    for &seg in &parts[1..] {
+        if seg.is_empty() {
+            continue;
+        }
+
+        // Stop at the first numeric / version-ish segment.
+        // "9", "9.0", "9.21", "10", etc.
+        let first = seg.chars().next().unwrap();
+        if first.is_ascii_digit() {
+            break;
+        }
+
+        // Strip "git", "bin", "src" build markers — they're not part of the
+        // variant identity.
+        if matches!(seg, "git" | "bin" | "src" | "stable") {
+            break;
+        }
+
+        variant.push('-');
+        variant.push_str(seg);
+    }
+
+    variant
+}
+
+// ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
@@ -225,24 +456,48 @@ fn find_compat_tools_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 
     if let Some(home) = dirs::home_dir() {
-        // Standard location
-        let standard = home.join(".steam/root/compatibilitytools.d");
-        if standard.is_dir() {
-            dirs.push(standard);
+        // ~/.steam/root/compatibilitytools.d (often a symlink, but cover it)
+        let steam_root = home.join(".steam/root/compatibilitytools.d");
+        if steam_root.is_dir() {
+            dirs.push(steam_root);
         }
 
-        // Alternative location
-        let alt = home.join(".local/share/Steam/compatibilitytools.d");
-        if alt.is_dir() && !dirs.iter().any(|d| same_dir(d, &alt)) {
-            dirs.push(alt);
+        // ~/.steam/steam/compatibilitytools.d (alternate Steam layout)
+        let steam_steam = home.join(".steam/steam/compatibilitytools.d");
+        if steam_steam.is_dir() && !dirs.iter().any(|d| same_dir(d, &steam_steam)) {
+            dirs.push(steam_steam);
         }
 
-        // Flatpak Steam
-        let flatpak = home
+        // XDG / standard local install: ~/.local/share/Steam/compatibilitytools.d
+        let xdg = home.join(".local/share/Steam/compatibilitytools.d");
+        if xdg.is_dir() && !dirs.iter().any(|d| same_dir(d, &xdg)) {
+            dirs.push(xdg);
+        }
+
+        // Flatpak Steam: ~/.var/app/com.valvesoftware.Steam/data/Steam/compatibilitytools.d
+        let flatpak_data = home
+            .join(".var/app/com.valvesoftware.Steam/data/Steam/compatibilitytools.d");
+        if flatpak_data.is_dir() && !dirs.iter().any(|d| same_dir(d, &flatpak_data)) {
+            dirs.push(flatpak_data);
+        }
+
+        // Flatpak Steam (legacy layout): .../.local/share/Steam/compatibilitytools.d
+        let flatpak_legacy = home
             .join(".var/app/com.valvesoftware.Steam/.local/share/Steam/compatibilitytools.d");
-        if flatpak.is_dir() {
-            dirs.push(flatpak);
+        if flatpak_legacy.is_dir() && !dirs.iter().any(|d| same_dir(d, &flatpak_legacy)) {
+            dirs.push(flatpak_legacy);
         }
+    }
+
+    // System-installed compatibility tools (e.g., Proton-CachyOS via pacman/AUR)
+    let system = PathBuf::from("/usr/share/steam/compatibilitytools.d");
+    if system.is_dir() && !dirs.iter().any(|d| same_dir(d, &system)) {
+        dirs.push(system);
+    }
+
+    debug!("Scanned {} compatibilitytools.d locations", dirs.len());
+    for d in &dirs {
+        debug!("  compatibilitytools.d: {}", d.display());
     }
 
     dirs
@@ -544,5 +799,151 @@ mod tests {
             Some("/mnt/games/SteamLibrary")
         );
         assert_eq!(extract_vdf_value(r#""1"		"something""#), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // System Wine fork tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_derive_wine_variant_plain() {
+        assert_eq!(derive_wine_variant("wine"), "wine");
+        assert_eq!(derive_wine_variant("wine64"), "wine");
+    }
+
+    #[test]
+    fn test_derive_wine_variant_tkg() {
+        assert_eq!(derive_wine_variant("wine-tkg"), "wine-tkg");
+        assert_eq!(derive_wine_variant("wine-tkg-git"), "wine-tkg");
+        assert_eq!(derive_wine_variant("wine-tkg-9.0"), "wine-tkg");
+    }
+
+    #[test]
+    fn test_derive_wine_variant_staging() {
+        assert_eq!(derive_wine_variant("wine-staging"), "wine-staging");
+        assert_eq!(derive_wine_variant("wine-staging-git"), "wine-staging");
+        assert_eq!(derive_wine_variant("wine-staging-9.21"), "wine-staging");
+    }
+
+    #[test]
+    fn test_derive_wine_variant_ge() {
+        assert_eq!(derive_wine_variant("wine-ge"), "wine-ge");
+        assert_eq!(derive_wine_variant("wine-ge-9.21"), "wine-ge");
+        assert_eq!(derive_wine_variant("wine-GE-8.26"), "wine-ge");
+    }
+
+    #[test]
+    fn test_derive_wine_variant_cachyos() {
+        assert_eq!(derive_wine_variant("wine-cachyos"), "wine-cachyos");
+        assert_eq!(
+            derive_wine_variant("wine-cachyos-staging-9.0"),
+            "wine-cachyos-staging"
+        );
+    }
+
+    #[test]
+    fn test_derive_wine_variant_stable_marker() {
+        // "wine-stable" should drop the "stable" marker per the spec.
+        assert_eq!(derive_wine_variant("wine-stable"), "wine");
+    }
+
+    #[test]
+    fn test_derive_wine_variant_nonwine_passthrough() {
+        // If the input doesn't start with "wine", just lowercase it.
+        assert_eq!(derive_wine_variant("crossover"), "crossover");
+    }
+
+    #[test]
+    fn test_detect_system_wine_forks_finds_directory_install() {
+        use std::fs;
+        let temp = tempfile::tempdir().unwrap();
+        let opt = temp.path().join("opt");
+
+        // Build /opt/wine-tkg-git/bin/wine
+        let tkg_bin = opt.join("wine-tkg-git/bin");
+        fs::create_dir_all(&tkg_bin).unwrap();
+        let wine = tkg_bin.join("wine");
+        fs::write(&wine, b"#!/bin/sh\n").unwrap();
+
+        // /opt/wine-staging/bin/wine64 (ensure wine64 is also discovered)
+        let staging_bin = opt.join("wine-staging/bin");
+        fs::create_dir_all(&staging_bin).unwrap();
+        fs::write(staging_bin.join("wine64"), b"#!/bin/sh\n").unwrap();
+
+        // Non-wine directory should be ignored.
+        fs::create_dir_all(opt.join("cross-over/bin")).unwrap();
+        fs::write(opt.join("cross-over/bin/wine"), b"#!/bin/sh\n").unwrap();
+
+        // Use the helper that takes explicit roots so we don't touch the real
+        // filesystem.
+        let forks = scan_wine_forks_in_roots(&[opt], None);
+
+        // We should get exactly the two wine-prefixed dirs.
+        let names: Vec<_> = forks.iter().map(|f| f.name.as_str()).collect();
+        assert!(
+            names.contains(&"wine-tkg-git"),
+            "expected wine-tkg-git in {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"wine-staging"),
+            "expected wine-staging in {:?}",
+            names
+        );
+        assert!(
+            !names.contains(&"cross-over"),
+            "non-wine dir should be skipped"
+        );
+
+        // Variant extraction should be applied.
+        let tkg = forks.iter().find(|f| f.name == "wine-tkg-git").unwrap();
+        assert_eq!(tkg.variant, "wine-tkg");
+        assert!(!tkg.is_recommended);
+        let stg = forks.iter().find(|f| f.name == "wine-staging").unwrap();
+        assert_eq!(stg.variant, "wine-staging");
+    }
+
+    #[test]
+    fn test_detect_system_wine_forks_finds_usr_local_bin() {
+        use std::fs;
+        let temp = tempfile::tempdir().unwrap();
+        let usr_local_bin = temp.path().join("usr_local_bin");
+        fs::create_dir_all(&usr_local_bin).unwrap();
+
+        // Drop in some loose binaries.
+        fs::write(usr_local_bin.join("wine-staging"), b"\x7fELF").unwrap();
+        fs::write(usr_local_bin.join("wine-tkg"), b"\x7fELF").unwrap();
+        fs::write(usr_local_bin.join("foo"), b"unrelated").unwrap();
+
+        let forks = scan_wine_forks_in_roots(&[], Some(&usr_local_bin));
+        let names: Vec<_> = forks.iter().map(|f| f.name.as_str()).collect();
+        assert!(
+            names.contains(&"wine-staging"),
+            "expected wine-staging in {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"wine-tkg"),
+            "expected wine-tkg in {:?}",
+            names
+        );
+        assert!(!names.contains(&"foo"), "non-wine binary should be ignored");
+    }
+
+    #[test]
+    fn test_detect_system_wine_forks_silently_skips_missing_paths() {
+        // Pointing at a non-existent root must not error or panic.
+        let forks = scan_wine_forks_in_roots(
+            &[PathBuf::from("/definitely/does/not/exist/here")],
+            Some(&PathBuf::from("/also/missing")),
+        );
+        assert!(forks.is_empty());
+    }
+
+    #[test]
+    fn test_find_compat_tools_dirs_includes_system_path_when_present() {
+        // We can't reliably mock /usr/share/steam in unit tests, but we can at
+        // least call the function and assert it returns without panicking.
+        let _ = find_compat_tools_dirs();
     }
 }

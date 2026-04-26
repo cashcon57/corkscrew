@@ -275,16 +275,21 @@ fn resolve_wine_binary(bottle: &Bottle) -> Result<WineCommand> {
     })
 }
 
-/// Locate `wine` on the system PATH.
+/// Locate `wine` on the system PATH, falling back to common install
+/// locations and finally to the system Wine fork enumerator (which finds
+/// wine-tkg / wine-staging / wine-ge / wine-cachyos under `/opt/wine-*`,
+/// `~/.local/opt/wine*`, and similar custom paths).
 fn find_system_wine() -> Option<PathBuf> {
     // Try `which wine` to find it on PATH.
-    let output = Command::new("which").arg("wine").output().ok()?;
-    if output.status.success() {
-        let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path_str.is_empty() {
-            let path = PathBuf::from(&path_str);
-            if path.exists() {
-                return Some(path);
+    let output = Command::new("which").arg("wine").output().ok();
+    if let Some(out) = output {
+        if out.status.success() {
+            let path_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !path_str.is_empty() {
+                let path = PathBuf::from(&path_str);
+                if path.exists() {
+                    return Some(path);
+                }
             }
         }
     }
@@ -306,6 +311,20 @@ fn find_system_wine() -> Option<PathBuf> {
         if fb.exists() {
             return Some(fb.clone());
         }
+    }
+
+    // Final fallback: scan well-known system Wine fork locations
+    // (`/opt/wine-*`, `/usr/local/bin/wine*`, `~/.local/opt/wine*`).
+    // Picks the first discovered fork; CachyOS users often have wine-tkg or
+    // wine-cachyos here without it being on $PATH.
+    let forks = crate::proton::detect_system_wine_forks();
+    if let Some(fork) = forks.into_iter().next() {
+        debug!(
+            "find_system_wine: falling back to system Wine fork {} at {}",
+            fork.variant,
+            fork.wine_bin.display()
+        );
+        return Some(fork.wine_bin);
     }
 
     None
