@@ -257,6 +257,11 @@ pub fn reset_masterlist_session_flag(session_checked: &AtomicBool) {
 }
 
 /// Download a file from a URL to a local path.
+///
+/// Atomic: writes to a sibling `<dest>.partial` file then renames onto the
+/// final path. An interrupted download (network drop, process kill) cannot
+/// leave behind a half-written file that would then be served from cache
+/// for the next 24 hours.
 async fn download_file(url: &str, dest: &Path) -> Result<()> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
@@ -276,8 +281,29 @@ async fn download_file(url: &str, dest: &Path) -> Result<()> {
         .await
         .context("Failed to read response body")?;
 
-    std::fs::write(dest, &bytes)
-        .with_context(|| format!("Failed to write file: {}", dest.display()))?;
+    // Write to a temp sibling, then atomically rename. fs::rename is
+    // atomic within the same filesystem on POSIX and Windows. If anything
+    // fails before the rename, the destination is untouched.
+    let tmp = {
+        let mut p = dest.to_path_buf();
+        let mut name = p
+            .file_name()
+            .map(|n| n.to_os_string())
+            .unwrap_or_else(|| std::ffi::OsString::from("download"));
+        name.push(".partial");
+        p.set_file_name(name);
+        p
+    };
+
+    std::fs::write(&tmp, &bytes)
+        .with_context(|| format!("Failed to write temp file: {}", tmp.display()))?;
+    std::fs::rename(&tmp, dest).with_context(|| {
+        format!(
+            "Failed to rename {} -> {}",
+            tmp.display(),
+            dest.display()
+        )
+    })?;
 
     log::info!("Downloaded {} -> {}", url, dest.display());
     Ok(())

@@ -293,7 +293,11 @@ pub fn scan_game_directory(
         snapshot_paths
     };
 
-    // Load deployment manifest paths into a HashSet
+    // Load deployment manifest paths into a HashSet, lowercased so the
+    // comparison against on-disk paths is case-insensitive. Linux ext4 is
+    // case-sensitive, but Wine's NTFS/APFS-target case-insensitive mod
+    // sources mean the manifest and the disk can disagree on case and
+    // produce phantom "orphan" files.
     let mut manifest_stmt = conn.prepare(
         "SELECT relative_path FROM deployment_manifest
          WHERE game_id = ?1 AND bottle_name = ?2",
@@ -301,6 +305,7 @@ pub fn scan_game_directory(
     let managed_paths: HashSet<String> = manifest_stmt
         .query_map(params![game_id, bottle_name], |row| row.get::<_, String>(0))?
         .filter_map(|r| r.ok())
+        .map(|p| p.to_lowercase())
         .collect();
 
     // Load game-specific save patterns once before the scan loop.
@@ -375,7 +380,8 @@ pub fn scan_game_directory(
         }
 
         let file_size = fs::metadata(abs_path).map(|m| m.len()).unwrap_or(0);
-        let is_managed = managed_paths.contains(&rel_str);
+        // Case-insensitive match (managed_paths was lowercased on load).
+        let is_managed = managed_paths.contains(&rel_str.to_lowercase());
         let is_enb = is_enb_file(&rel_str);
         let category = if is_save {
             "save".to_string()
