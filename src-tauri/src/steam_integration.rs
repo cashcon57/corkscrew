@@ -5,8 +5,6 @@
 //! creation for standard Linux desktop environments.
 
 use anyhow::{Context, Result};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 /// Information about a detected Steam installation.
@@ -53,12 +51,14 @@ pub fn detect_steam_installation() -> Option<SteamInfo> {
         home.join(".steam/steam"),
         home.join(".local/share/Steam"),
         home.join(".var/app/com.valvesoftware.Steam/.steam/steam"), // Flatpak
+        home.join("snap/steam/current/.steam/steam"),               // Snap
     ];
     // Also check /var/home variant if the normalized home differs from the raw home
     if home != raw_home {
         candidates.push(raw_home.join(".steam/steam"));
         candidates.push(raw_home.join(".local/share/Steam"));
         candidates.push(raw_home.join(".var/app/com.valvesoftware.Steam/.steam/steam"));
+        candidates.push(raw_home.join("snap/steam/current/.steam/steam"));
     }
 
     for candidate in &candidates {
@@ -124,6 +124,39 @@ pub fn is_steam_deck() -> bool {
     false
 }
 
+/// Detect any NVIDIA discrete GPU by walking `/sys/class/drm/card*/device/vendor`
+/// for the PCI vendor ID `0x10de`. Used to gate the WebKit DMA-BUF workaround
+/// in the .desktop entry — only NVIDIA needs it.
+#[cfg(target_os = "linux")]
+fn has_nvidia_gpu() -> bool {
+    let drm_dir = std::path::Path::new("/sys/class/drm");
+    let entries = match std::fs::read_dir(drm_dir) {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        // Only top-level cards (cardN), not connector subdevices (cardN-HDMI-...).
+        if !name_str.starts_with("card") || name_str.contains('-') {
+            continue;
+        }
+        let vendor_path = entry.path().join("device/vendor");
+        if let Ok(contents) = std::fs::read_to_string(&vendor_path) {
+            if contents.trim().eq_ignore_ascii_case("0x10de") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(not(target_os = "linux"))]
+fn has_nvidia_gpu() -> bool {
+    false
+}
+
 /// Return platform warnings relevant to Steam Deck / SteamOS.
 ///
 /// Checks for read-only filesystems and provides guidance on where to store
@@ -156,13 +189,17 @@ pub fn steam_deck_warnings() -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 /// Generate a Steam-compatible app ID from the executable path and app name.
-/// Steam uses CRC32 of ("exe" + "appname") | 0x80000000 for non-Steam games.
+///
+/// The 32-bit `appid` stored in shortcuts.vdf is `CRC32(exe + appname) |
+/// 0x80000000`. The previous implementation hashed via `DefaultHasher`
+/// (SipHash), which produced an ID that did not match the value Steam
+/// recomputes internally — so custom grid art and controller configs
+/// never bound to the shortcut.
 fn generate_app_id(exe: &str, app_name: &str) -> u32 {
-    let input = format!("{}{}", exe, app_name);
-    let mut hasher = DefaultHasher::new();
-    input.hash(&mut hasher);
-    let hash = hasher.finish() as u32;
-    hash | 0x80000000
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(exe.as_bytes());
+    hasher.update(app_name.as_bytes());
+    hasher.finalize() | 0x80000000
 }
 
 /// Binary VDF type markers
@@ -582,11 +619,21 @@ pub fn create_desktop_entry(exe_path: &str) -> Result<PathBuf> {
         "corkscrew".to_string()
     };
 
+    // WEBKIT_DISABLE_DMABUF_RENDERER=1 is a workaround for NVIDIA-only DMA-BUF
+    // rendering bugs in WebKitGTK. Forcing it on AMD/Intel/Steam Deck (RDNA2)
+    // disables hardware accel needlessly. Probe /sys/class/drm for an NVIDIA
+    // device (PCI vendor 0x10de) and only set the env var when one is present.
+    let exec_line = if has_nvidia_gpu() {
+        format!("env WEBKIT_DISABLE_DMABUF_RENDERER=1 {exe_path} %u")
+    } else {
+        format!("{exe_path} %u")
+    };
+
     let content = format!(
         "[Desktop Entry]\n\
          Name=Corkscrew\n\
          Comment=Mod manager for CrossOver/Wine games on macOS and Linux\n\
-         Exec=env WEBKIT_DISABLE_DMABUF_RENDERER=1 {exe_path} %u\n\
+         Exec={exec_line}\n\
          Icon={icon_value}\n\
          Type=Application\n\
          Categories=Game;Utility;\n\
