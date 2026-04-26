@@ -625,6 +625,11 @@ pub fn apply_depot_to_game(
 /// Automate the depot download by opening Steam console and typing the command.
 /// macOS only — uses osascript to send keystrokes to Steam.
 /// Returns Ok(true) if the command was sent successfully, Ok(false) if automation unavailable.
+///
+/// On Linux there is no equivalent (no AppleScript, no portable Steam-window
+/// keystroke automation). Instead of silently returning Ok(false), we surface
+/// a clear error pointing the user at the existing DepotDownloader integration
+/// and giving them the exact Steam console command they can paste manually.
 pub fn send_depot_command_to_steam() -> std::result::Result<bool, String> {
     #[cfg(target_os = "macos")]
     {
@@ -672,7 +677,19 @@ pub fn send_depot_command_to_steam() -> std::result::Result<bool, String> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        Ok(false)
+        let depot_command = format!(
+            "download_depot {} {} {}",
+            SKYRIM_APP_ID, SKYRIM_DEPOT_ID, SKYRIM_SE_MANIFEST
+        );
+        let message = format!(
+            "Steam console automation is not supported on this platform. \
+             Use the DepotDownloader integration (Settings → DepotDownloader) \
+             for offline downgrades, or paste this command into your Steam \
+             console manually: `{}`",
+            depot_command
+        );
+        warn!("{}", message);
+        Err(message)
     }
 }
 
