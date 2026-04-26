@@ -643,7 +643,14 @@
         startDepotPolling();
         return;
       }
-    } catch { /* automation unavailable */ }
+    } catch (err) {
+      // Linux (and other unsupported platforms) returns Err with the depot
+      // command as the message — surface it to the user instead of silently
+      // dropping it, so they see actionable guidance alongside the manual
+      // instructions UI we fall through to.
+      console.error("depot automation unavailable:", err);
+      showError(`Automated depot download unavailable: ${err}`);
+    }
 
     // Fallback to manual instructions
     depotAutoFailed = true;

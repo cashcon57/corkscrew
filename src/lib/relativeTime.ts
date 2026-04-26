@@ -25,7 +25,7 @@ export function relativeTime(input: string | number | Date | null | undefined, n
   const day = Math.floor(hr / 24);
   if (day < 30) return `${day}d ago`;
   const mon = Math.floor(day / 30);
-  if (mon < 12) return `${mon}mo ago`;
+  if (day < 365) return `${mon}mo ago`;
   const yr = Math.floor(day / 365);
   return `${yr}y ago`;
 }

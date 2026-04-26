@@ -262,35 +262,39 @@
 <svelte:window onkeydown={handlePluginKeydown} />
 
 <div class="plugins-page">
-  <!-- Page header -->
-  <div class="page-header">
-    <div class="header-title">
-      <h2>Load Order</h2>
-    </div>
-    {#if plugins.length > 0 && !gameHasNoPluginSystem}
-      <div class="header-meta">
-        <span class="meta-chip">
-          <span class="meta-value">{enabledCount}</span>
-          <span class="meta-label">active</span>
-        </span>
-        <span class="meta-divider"></span>
-        <span class="meta-chip">
-          <span class="meta-value">{plugins.length}</span>
-          <span class="meta-label">total</span>
-        </span>
+  <!-- Page header (hidden when the selected game has no plugin/load-order system) -->
+  {#if !gameHasNoPluginSystem}
+    <div class="page-header">
+      <div class="header-title">
+        <h2>Load Order</h2>
       </div>
-    {/if}
-  </div>
+      {#if plugins.length > 0}
+        <div class="header-meta">
+          <span class="meta-chip">
+            <span class="meta-value">{enabledCount}</span>
+            <span class="meta-label">active</span>
+          </span>
+          <span class="meta-divider"></span>
+          <span class="meta-chip">
+            <span class="meta-value">{plugins.length}</span>
+            <span class="meta-label">total</span>
+          </span>
+        </div>
+      {/if}
+    </div>
+  {/if}
 
   {#if gameHasNoPluginSystem}
-    <div class="no-plugin-system">
-      <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-        <circle cx="12" cy="12" r="10" />
-        <path d="M12 8v4" />
-        <path d="M12 16h.01" />
-      </svg>
-      <h3>{$selectedGame?.display_name ?? "This game"} doesn't use a plugin load order</h3>
-      <p>
+    <div class="empty-state">
+      <div class="empty-icon">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10" />
+          <path d="M12 8v4" />
+          <path d="M12 16h.01" />
+        </svg>
+      </div>
+      <p class="empty-title">{$selectedGame?.display_name ?? "This game"} doesn't use a plugin load order</p>
+      <p class="empty-description">
         {$selectedGame?.display_name ?? "This game"} loads mods as self-contained directories — there's no ESP/ESL/ESM stack to reorder.
         Manage mods from the <strong>Mods</strong> page instead.
       </p>

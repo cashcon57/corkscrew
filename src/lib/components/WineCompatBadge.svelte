@@ -27,6 +27,7 @@
       loading = false;
       return;
     }
+    let cancelled = false;
     loading = true;
     const promise =
       kd === "collection"
@@ -34,15 +35,20 @@
         : getWabbajackVerification(k);
     promise
       .then((e) => {
-        entry = e;
+        if (!cancelled) entry = e;
       })
       .catch((err) => {
-        console.error("WineCompatBadge: fetch failed:", err);
-        entry = null;
+        if (!cancelled) {
+          console.error("WineCompatBadge: fetch failed:", err);
+          entry = null;
+        }
       })
       .finally(() => {
-        loading = false;
+        if (!cancelled) loading = false;
       });
+    return () => {
+      cancelled = true;
+    };
   });
 
   const label = $derived.by(() => {
