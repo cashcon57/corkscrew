@@ -1503,6 +1503,12 @@ async fn install_tool_from_nexus(
 }
 
 /// Extract a ZIP archive from bytes into the target directory.
+///
+/// On Unix, preserves the file mode bits stored in the ZIP's external attributes
+/// so executables (LOOT, Pandora, ASI Loader, etc. distributed via GitHub) launch
+/// without manual `chmod`. Falls back to `0o755` for files when no Unix mode is
+/// stored in the entry — most modding tools' archives lack metadata when packed
+/// on Windows but still need to be executable under Wine/native.
 fn extract_zip(data: &[u8], target: &Path) -> Result<()> {
     let cursor = io::Cursor::new(data);
     let mut archive = zip::ZipArchive::new(cursor)?;
@@ -1522,6 +1528,22 @@ fn extract_zip(data: &[u8], target: &Path) -> Result<()> {
             }
             let mut outfile = fs::File::create(&out_path)?;
             io::copy(&mut file, &mut outfile)?;
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                // Default to 0o755 so files pulled from Windows-packed zips
+                // (which often have no Unix mode) are still executable.
+                let mode = file.unix_mode().unwrap_or(0o755);
+                if let Err(e) = fs::set_permissions(&out_path, fs::Permissions::from_mode(mode)) {
+                    log::warn!(
+                        "Failed to set mode {:o} on {}: {}",
+                        mode,
+                        out_path.display(),
+                        e
+                    );
+                }
+            }
         }
     }
 
@@ -1529,6 +1551,10 @@ fn extract_zip(data: &[u8], target: &Path) -> Result<()> {
 }
 
 /// Extract a 7z archive from bytes into the target directory.
+///
+/// `sevenz_rust2::decompress_file` does not preserve mode bits, so on Unix we
+/// walk the extracted tree and `chmod 0o755` any file that looks executable:
+/// `*.exe`, files without an extension, or files with the ELF magic header.
 fn extract_7z(data: &[u8], target: &Path) -> Result<()> {
     // Write to temp file since sevenz-rust needs a path
     let tmp_path = target.join("__download.7z");
@@ -1559,7 +1585,59 @@ fn extract_7z(data: &[u8], target: &Path) -> Result<()> {
         }
     }
 
+    // On Unix, mark plausible executables 0o755 since 7z extraction lost mode bits.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for entry in WalkDir::new(target).into_iter().filter_map(|e| e.ok()) {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry.path();
+            if looks_executable(path) {
+                if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(0o755)) {
+                    log::warn!(
+                        "Failed to chmod 0o755 {}: {}",
+                        path.display(),
+                        e
+                    );
+                }
+            }
+        }
+    }
+
     Ok(())
+}
+
+/// Heuristic check for files that should be executable after extraction.
+///
+/// Used by the 7z extractor on Unix because `sevenz_rust2` doesn't preserve mode
+/// bits. Matches Windows binaries (`.exe`), extensionless tools, and ELF binaries
+/// (detected via the magic header `7f 45 4c 46`).
+#[cfg(unix)]
+fn looks_executable(path: &Path) -> bool {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+    // Windows binaries — needed for Wine launches.
+    if name.to_ascii_lowercase().ends_with(".exe") {
+        return true;
+    }
+
+    // Extensionless files are typically Unix tools.
+    if !name.contains('.') {
+        return true;
+    }
+
+    // ELF magic header (0x7F 'E' 'L' 'F').
+    if let Ok(mut file) = fs::File::open(path) {
+        use std::io::Read;
+        let mut buf = [0u8; 4];
+        if file.read_exact(&mut buf).is_ok() && buf == [0x7f, 0x45, 0x4c, 0x46] {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// If the extracted directory contains a single subdirectory, move its contents up.
