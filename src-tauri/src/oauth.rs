@@ -327,6 +327,19 @@ pub(crate) fn open_browser(url: &str) -> Result<(), OAuthError> {
         )));
     }
 
+    // Steam Deck Game Mode (gamescope-session) doesn't honor xdg-open the way
+    // a real desktop does — the URL gets swallowed by Big Picture and the user
+    // is left staring at a stalled OAuth prompt. Detect that combination and
+    // bail with a clear actionable error instead.
+    #[cfg(target_os = "linux")]
+    if is_steam_deck_game_mode() {
+        return Err(OAuthError::TokenExchange(
+            "OAuth sign-in requires Desktop Mode on Steam Deck. \
+             Switch to Desktop and retry."
+                .to_string(),
+        ));
+    }
+
     #[cfg(target_os = "macos")]
     let cmd = "open";
 
@@ -342,6 +355,43 @@ pub(crate) fn open_browser(url: &str) -> Result<(), OAuthError> {
         .map_err(OAuthError::Io)?;
 
     Ok(())
+}
+
+/// Detect Steam Deck Game Mode (gamescope-session) where browser launches
+/// silently fail because xdg-open routes through Big Picture instead of a
+/// real desktop browser.
+#[cfg(target_os = "linux")]
+fn is_steam_deck_game_mode() -> bool {
+    // SteamDeck=1 is set inside the Deck's Steam runtime. Treat it as a
+    // necessary precondition, then confirm we're under gamescope.
+    if std::env::var("SteamDeck").as_deref() != Ok("1") {
+        return false;
+    }
+
+    if let Ok(desktop) = std::env::var("XDG_CURRENT_DESKTOP") {
+        if desktop.to_lowercase().contains("gamescope") {
+            return true;
+        }
+    }
+
+    // Fallback: parent process is gamescope-session. Read ppid from
+    // /proc/self/status so we don't pull in an unsafe libc::getppid call.
+    if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+        for line in status.lines() {
+            if let Some(rest) = line.strip_prefix("PPid:") {
+                let ppid = rest.trim();
+                if let Ok(comm) = std::fs::read_to_string(format!("/proc/{}/comm", ppid)) {
+                    let trimmed = comm.trim();
+                    if trimmed == "gamescope-session" || trimmed == "gamescope" {
+                        return true;
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -565,8 +615,11 @@ pub(crate) fn wait_for_callback(
                 return Ok(CallbackResult { code, state });
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // No connection yet; sleep briefly and retry.
-                std::thread::sleep(std::time::Duration::from_millis(100));
+                // No connection yet; sleep briefly and retry. 500ms halves
+                // the wakeup rate vs the old 100ms loop without making the
+                // post-callback latency user-perceptible (it's bounded by
+                // browser → loopback round-trip, not this poll).
+                std::thread::sleep(std::time::Duration::from_millis(500));
                 continue;
             }
             Err(e) => return Err(OAuthError::Io(e)),
