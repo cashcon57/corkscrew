@@ -2,7 +2,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::{Path, PathBuf};
-use xxhash_rust::xxh64;
+use xxhash_rust::xxh64::{self, Xxh64};
 
 // ---------------------------------------------------------------------------
 // xxHash64 wrapper (base64-encoded, matching Wabbajack format)
@@ -51,19 +51,23 @@ pub fn xxhash64_bytes(data: &[u8]) -> WjHash {
 }
 
 /// Compute xxHash64 of a file and return as base64 WjHash.
+///
+/// Streams the file through an `Xxh64` hasher in 1 MiB chunks so that hashing
+/// a 10–40 GB Wabbajack archive does not require buffering the entire file in
+/// memory — the previous implementation would OOM on 16 GB Steam Decks.
 pub fn xxhash64_file(path: &Path) -> Result<WjHash, std::io::Error> {
     use std::io::Read;
     let mut file = std::fs::File::open(path)?;
-    let mut buf = vec![0u8; 1024 * 1024]; // 1MB buffer
-    let mut all_data = Vec::new();
+    let mut buf = vec![0u8; 1024 * 1024]; // 1 MiB streaming buffer
+    let mut hasher = Xxh64::new(0);
     loop {
         let n = file.read(&mut buf)?;
         if n == 0 {
             break;
         }
-        all_data.extend_from_slice(&buf[..n]);
+        hasher.update(&buf[..n]);
     }
-    let hash_val = xxh64::xxh64(&all_data, 0);
+    let hash_val = hasher.digest();
     Ok(WjHash::from_u64(hash_val))
 }
 
@@ -1007,6 +1011,45 @@ mod tests {
         // Verify from_u64 produces the same base64
         let reconstructed = WjHash::from_u64(0x45ab6734b21e6968);
         assert_eq!(reconstructed.0, "aGkesjRnq0U=");
+    }
+
+    #[test]
+    fn test_xxhash64_file_streaming_matches_bytes() {
+        // Regression: `xxhash64_file` used to slurp the whole file into a
+        // `Vec<u8>` before hashing, OOMing on 10-40 GB modlist archives on
+        // 16 GB Steam Decks. Verify the streaming implementation produces
+        // the exact same base64 hash as the in-memory `xxhash64_bytes`
+        // helper for the existing Wabbajack-compat fixture.
+        let tmp = tempfile::NamedTempFile::new().expect("temp file");
+        std::fs::write(tmp.path(), b"hello world").expect("write");
+        let from_file = xxhash64_file(tmp.path()).expect("hash file");
+        assert_eq!(
+            from_file.0, "aGkesjRnq0U=",
+            "streaming xxhash64_file must match the Wabbajack LE base64 fixture"
+        );
+        // And it must equal the in-memory variant for the same bytes.
+        let from_bytes = xxhash64_bytes(b"hello world");
+        assert_eq!(from_file, from_bytes);
+    }
+
+    #[test]
+    fn test_xxhash64_file_streams_multi_chunk() {
+        // Use enough data to force more than one read() call through the
+        // 1 MiB internal buffer, ensuring `Xxh64::update()` is being fed
+        // chunks rather than a single slice.
+        let tmp = tempfile::NamedTempFile::new().expect("temp file");
+        // ~3 MiB of pseudo-random-looking but deterministic bytes
+        let mut data = Vec::with_capacity(3 * 1024 * 1024);
+        for i in 0..(3 * 1024 * 1024_u32) {
+            data.push((i.wrapping_mul(2654435761) >> 24) as u8);
+        }
+        std::fs::write(tmp.path(), &data).expect("write");
+        let from_file = xxhash64_file(tmp.path()).expect("hash file");
+        let from_bytes = xxhash64_bytes(&data);
+        assert_eq!(
+            from_file, from_bytes,
+            "streaming hash of multi-chunk file must equal in-memory hash"
+        );
     }
 
     #[test]
