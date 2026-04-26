@@ -136,6 +136,65 @@ pub fn is_installed() -> bool {
     path.exists() && path.is_file()
 }
 
+/// Verify the .NET 8+ runtime is available on Linux.
+///
+/// The Linux DepotDownloader asset is framework-dependent and silently fails
+/// with a non-zero exit code if `dotnet` is missing or the installed runtime
+/// is too old. macOS bundles ship with the runtime baked in, so we skip the
+/// probe there. Windows is not a build target.
+#[cfg(target_os = "linux")]
+async fn check_dotnet_runtime() -> Result<()> {
+    let output = Command::new("dotnet")
+        .arg("--list-runtimes")
+        .output()
+        .await;
+
+    let install_hint = "DepotDownloader requires .NET 8+. Install: \
+        `sudo pacman -S dotnet-runtime` (Arch/CachyOS), \
+        `sudo apt install dotnet-runtime-8.0` (Debian/Ubuntu), \
+        `sudo dnf install dotnet-runtime-8.0` (Fedora). \
+        On Steam Deck, install via Distrobox.";
+
+    let output = match output {
+        Ok(o) => o,
+        Err(_) => return Err(DDError::Other(install_hint.into())),
+    };
+
+    if !output.status.success() {
+        return Err(DDError::Other(install_hint.into()));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Lines look like: "Microsoft.NETCore.App 8.0.10 [/usr/share/dotnet/...]"
+    let mut has_supported = false;
+    for line in stdout.lines() {
+        if !line.starts_with("Microsoft.NETCore.App ") {
+            continue;
+        }
+        if let Some(version) = line.split_whitespace().nth(1) {
+            if let Some(major) = version.split('.').next() {
+                if let Ok(n) = major.parse::<u32>() {
+                    if n >= 8 {
+                        has_supported = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if !has_supported {
+        return Err(DDError::Other(install_hint.into()));
+    }
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn check_dotnet_runtime() -> Result<()> {
+    Ok(())
+}
+
 /// Get the installed DD version (from .version file).
 pub fn installed_version() -> Option<String> {
     let version_file = dd_install_dir().join(".version");
@@ -296,6 +355,11 @@ pub async fn check_auth_state_live(username: &str) -> AuthState {
     if !is_installed() {
         return AuthState::NeedCredentials;
     }
+    // If .NET is missing the binary will exit with a runtime-loader error
+    // that we'd misinterpret as "needs credentials". Bail early instead.
+    if check_dotnet_runtime().await.is_err() {
+        return AuthState::NeedCredentials;
+    }
 
     let binary = dd_binary_path();
     let mut cmd = Command::new(&binary);
@@ -345,6 +409,7 @@ pub async fn list_manifests(
     if !is_installed() {
         return Err(DDError::NotInstalled);
     }
+    check_dotnet_runtime().await?;
 
     let binary = dd_binary_path();
     let mut cmd = Command::new(&binary);
@@ -416,6 +481,7 @@ pub async fn download_depot(
     if !is_installed() {
         return Err(DDError::NotInstalled);
     }
+    check_dotnet_runtime().await?;
 
     let binary = dd_binary_path();
     let mut cmd = Command::new(&binary);
@@ -548,6 +614,7 @@ pub async fn authenticate(
     if !is_installed() {
         return Err(DDError::NotInstalled);
     }
+    check_dotnet_runtime().await?;
 
     let binary = dd_binary_path();
     let mut cmd = Command::new(&binary);
