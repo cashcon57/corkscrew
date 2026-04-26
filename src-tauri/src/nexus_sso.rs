@@ -123,8 +123,9 @@ fn set_read_timeout(
     timeout: Duration,
 ) -> Result<(), SsoError> {
     match socket.get_ref() {
-        MaybeTlsStream::NativeTls(tls_stream) => {
-            tls_stream.get_ref().set_read_timeout(Some(timeout))?;
+        MaybeTlsStream::Rustls(tls_stream) => {
+            // StreamOwned exposes its inner socket via the public `sock` field.
+            tls_stream.sock.set_read_timeout(Some(timeout))?;
         }
         MaybeTlsStream::Plain(tcp_stream) => {
             tcp_stream.set_read_timeout(Some(timeout))?;

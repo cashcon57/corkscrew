@@ -89,7 +89,9 @@ libloot = "0.29"
 esplugin = "6"
 
 # WebSocket (Nexus Mods SSO)
-tungstenite = { version = "0.29", features = ["native-tls"] }
+# Uses rustls + Mozilla webpki-roots (no system OpenSSL dep) to align with the rest
+# of the TLS stack (reqwest also uses rustls). Drops OpenSSL from the SSO path.
+tungstenite = { version = "0.29", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 
 # System info (disk space)
 libc = "0.2"
