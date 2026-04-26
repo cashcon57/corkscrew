@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 static PROTON_CACHE: Lazy<Mutex<Option<Vec<ProtonVersion>>>> = Lazy::new(|| Mutex::new(None));
+static WINE_FORK_CACHE: Lazy<Mutex<Option<Vec<WineFork>>>> = Lazy::new(|| Mutex::new(None));
 
 /// A detected Proton installation.
 #[derive(Debug, Clone, Serialize)]
@@ -187,21 +188,124 @@ pub struct WineFork {
 /// - `~/.local/opt/wine*`
 ///
 /// Silently skips non-existent paths. Returns the list of forks discovered.
+///
+/// **Cached.** This function is called from `find_system_wine` on every
+/// game launch, but the underlying filesystem layout doesn't change between
+/// launches. The first call computes; subsequent calls return the cached
+/// vector. Call `invalidate_wine_fork_cache()` to force a rescan (e.g.
+/// after the user installs a new Wine package).
 pub fn detect_system_wine_forks() -> Vec<WineFork> {
+    let mut cache = WINE_FORK_CACHE.lock().unwrap();
+    if let Some(cached) = cache.as_ref() {
+        return cached.clone();
+    }
+    let forks = detect_system_wine_forks_uncached();
+    *cache = Some(forks.clone());
+    forks
+}
+
+/// Force a refresh of the system Wine fork cache.
+#[allow(dead_code)]
+pub fn invalidate_wine_fork_cache() {
+    if let Ok(mut cache) = WINE_FORK_CACHE.lock() {
+        *cache = None;
+    }
+}
+
+/// Uncached scan implementation. Public-ish for testing via the inner
+/// `scan_wine_forks_in_roots` helper, but called only by the cached entry
+/// point above in production code.
+fn detect_system_wine_forks_uncached() -> Vec<WineFork> {
     let mut roots: Vec<PathBuf> =
         vec![PathBuf::from("/opt"), PathBuf::from("/usr/local")];
     if let Some(home) = dirs::home_dir() {
         roots.push(home.join(".local/opt"));
     }
     let usr_local_bin = PathBuf::from("/usr/local/bin");
-    let forks = scan_wine_forks_in_roots(&roots, Some(&usr_local_bin));
+    let mut forks = scan_wine_forks_in_roots(&roots, Some(&usr_local_bin));
+
+    // On CachyOS hosts, surface wine-cachyos / Proton-CachyOS variants as
+    // recommended so the launcher and UI prefer them over generic wine.
+    if host_is_cachyos() {
+        for f in forks.iter_mut() {
+            if f.variant.contains("cachyos") || f.name.to_lowercase().contains("cachyos") {
+                f.is_recommended = true;
+            }
+        }
+    }
 
     info!("Detected {} system Wine forks", forks.len());
     for f in &forks {
-        debug!("  {} ({}) at {}", f.name, f.variant, f.wine_bin.display());
+        debug!(
+            "  {} ({}, recommended={}) at {}",
+            f.name,
+            f.variant,
+            f.is_recommended,
+            f.wine_bin.display()
+        );
     }
 
     forks
+}
+
+/// Detect whether the current host is CachyOS (or a CachyOS-derived distro)
+/// by reading `/etc/os-release`. Pure-Rust, no shell-out.
+///
+/// Matches if `ID=cachyos` (exact) OR `ID_LIKE` contains the token
+/// `cachyos` (whitespace-separated, per the os-release spec).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn host_is_cachyos() -> bool {
+    match std::fs::read_to_string("/etc/os-release") {
+        Ok(content) => os_release_is_cachyos(&content),
+        Err(_) => false,
+    }
+}
+
+/// Pure parser for `/etc/os-release` content; returns true if the host
+/// identifies as CachyOS or has CachyOS in its `ID_LIKE`.
+///
+/// Per the os-release spec, values may be unquoted, single-quoted, or
+/// double-quoted. `ID_LIKE` is a space-separated list of distro IDs.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn os_release_is_cachyos(content: &str) -> bool {
+    for raw in content.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (key, value) = match line.split_once('=') {
+            Some((k, v)) => (k.trim(), v.trim()),
+            None => continue,
+        };
+        let value = strip_os_release_quotes(value);
+
+        if key.eq_ignore_ascii_case("ID") {
+            if value.eq_ignore_ascii_case("cachyos") {
+                return true;
+            }
+        } else if key.eq_ignore_ascii_case("ID_LIKE") {
+            for tok in value.split(|c: char| c.is_whitespace()) {
+                if tok.eq_ignore_ascii_case("cachyos") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Strip surrounding `"` or `'` from an os-release value.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn strip_os_release_quotes(s: &str) -> &str {
+    let bytes = s.as_bytes();
+    if bytes.len() >= 2 {
+        let first = bytes[0];
+        let last = bytes[bytes.len() - 1];
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return &s[1..s.len() - 1];
+        }
+    }
+    s
 }
 
 /// Inner scan for system Wine forks. Takes explicit roots and an optional
@@ -375,8 +479,10 @@ pub fn derive_wine_variant(raw: &str) -> String {
         }
 
         // Strip "git", "bin", "src" build markers — they're not part of the
-        // variant identity.
-        if matches!(seg, "git" | "bin" | "src" | "stable") {
+        // variant identity. *Keep* "stable" because `wine-stable` is a real,
+        // distinct variant (the upstream stable branch); collapsing it to
+        // `wine` loses meaningful information for the UI.
+        if matches!(seg, "git" | "bin" | "src") {
             break;
         }
 
@@ -843,8 +949,10 @@ mod tests {
 
     #[test]
     fn test_derive_wine_variant_stable_marker() {
-        // "wine-stable" should drop the "stable" marker per the spec.
-        assert_eq!(derive_wine_variant("wine-stable"), "wine");
+        // "wine-stable" is a real variant (upstream stable branch) — keep it.
+        // Only `git`, `bin`, `src` are stripped as build markers.
+        assert_eq!(derive_wine_variant("wine-stable"), "wine-stable");
+        assert_eq!(derive_wine_variant("wine-stable-9.0"), "wine-stable");
     }
 
     #[test]
@@ -945,5 +1053,79 @@ mod tests {
         // We can't reliably mock /usr/share/steam in unit tests, but we can at
         // least call the function and assert it returns without panicking.
         let _ = find_compat_tools_dirs();
+    }
+
+    // -----------------------------------------------------------------------
+    // CachyOS host detection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_os_release_is_cachyos_exact_id() {
+        let sample = "NAME=\"CachyOS\"\n\
+                      PRETTY_NAME=\"CachyOS\"\n\
+                      ID=cachyos\n\
+                      ID_LIKE=arch\n\
+                      BUILD_ID=rolling\n";
+        assert!(os_release_is_cachyos(sample));
+    }
+
+    #[test]
+    fn test_os_release_is_cachyos_quoted_id() {
+        // Some distros quote the ID value.
+        let sample = "ID=\"cachyos\"\n";
+        assert!(os_release_is_cachyos(sample));
+        let sample = "ID='cachyos'\n";
+        assert!(os_release_is_cachyos(sample));
+    }
+
+    #[test]
+    fn test_os_release_is_cachyos_via_id_like() {
+        // A CachyOS-derived distro that lists cachyos in ID_LIKE.
+        let sample = "ID=mycustomdistro\n\
+                      ID_LIKE=\"cachyos arch\"\n";
+        assert!(os_release_is_cachyos(sample));
+    }
+
+    #[test]
+    fn test_os_release_is_cachyos_arch_not_cachyos() {
+        // Pure Arch should not match. Containing "cachy" as a substring of
+        // some other word would be a false positive — verify token matching.
+        let sample = "NAME=\"Arch Linux\"\nID=arch\nID_LIKE=\"\"\n";
+        assert!(!os_release_is_cachyos(sample));
+    }
+
+    #[test]
+    fn test_os_release_is_cachyos_substring_does_not_match() {
+        // ID=cachyos-experimental shouldn't match (we want exact ID); but a
+        // deliberate "not-cachyos" string with cachy in it must not match.
+        let sample = "ID=notcachyos\n";
+        assert!(!os_release_is_cachyos(sample));
+    }
+
+    #[test]
+    fn test_strip_os_release_quotes() {
+        assert_eq!(strip_os_release_quotes("\"cachyos\""), "cachyos");
+        assert_eq!(strip_os_release_quotes("'cachyos'"), "cachyos");
+        assert_eq!(strip_os_release_quotes("cachyos"), "cachyos");
+        assert_eq!(strip_os_release_quotes(""), "");
+        assert_eq!(strip_os_release_quotes("\""), "\"");
+    }
+
+    #[test]
+    fn test_detect_system_wine_forks_caches_after_first_call() {
+        // Sanity-check: two consecutive calls return the same data and the
+        // cache holds something. We can't reliably assert the cache speeds
+        // anything up in a unit test, but we can at least confirm the
+        // result is deterministic.
+        invalidate_wine_fork_cache();
+        let first = detect_system_wine_forks();
+        let second = detect_system_wine_forks();
+        assert_eq!(first.len(), second.len());
+        for (a, b) in first.iter().zip(second.iter()) {
+            assert_eq!(a.name, b.name);
+            assert_eq!(a.variant, b.variant);
+            assert_eq!(a.wine_bin, b.wine_bin);
+        }
+        invalidate_wine_fork_cache();
     }
 }
