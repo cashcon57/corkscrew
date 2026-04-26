@@ -1171,14 +1171,37 @@ fn pick_asset<'a>(tool_id: &str, assets: &'a [GitHubAsset]) -> Option<&'a GitHub
                 .filter(|(_, n)| n.contains("pandora") && !n.contains("src"))
                 .collect()
         }
-        "wryebash" => archives
-            .iter()
-            .filter(|(_, n)| {
-                (n.contains("standalone") || n.contains("wrye"))
-                    && !n.contains("src")
-                    && !n.contains("source")
-            })
-            .collect(),
+        "wryebash" => {
+            // Wrye Bash 312+ ships native Linux releases. Prefer those when
+            // running on Linux so we don't install Windows-only Python builds
+            // that need Wine to run a Python interpreter inside Wine.
+            #[cfg(target_os = "linux")]
+            {
+                let linux_assets: Vec<&(usize, &String)> = archives
+                    .iter()
+                    .filter(|(_, n)| {
+                        n.contains("linux")
+                            && !n.contains("src")
+                            && !n.contains("source")
+                    })
+                    .collect();
+                if !linux_assets.is_empty() {
+                    return linux_assets
+                        .iter()
+                        .max_by_key(|(i, _)| assets[*i].size)
+                        .map(|(i, _)| &assets[*i]);
+                }
+            }
+            archives
+                .iter()
+                .filter(|(_, n)| {
+                    (n.contains("standalone") || n.contains("wrye"))
+                        && !n.contains("src")
+                        && !n.contains("source")
+                        && !n.contains("linux") // Windows fallback shouldn't grab Linux build
+                })
+                .collect()
+        }
         _ => archives
             .iter()
             .filter(|(_, n)| !n.contains("src") && !n.contains("source") && !n.contains("linux"))
