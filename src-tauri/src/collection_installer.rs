@@ -175,6 +175,44 @@ fn is_retryable_extraction_error(error: &str) -> bool {
 /// Maximum number of re-download + re-extract attempts per mod.
 const MAX_EXTRACTION_RETRIES: u32 = 2;
 
+/// Pick a base directory for per-mod extraction temp folders.
+///
+/// On most Linux distros `/tmp` is `tmpfs` (RAM-backed, ~50% of physical
+/// RAM); extracting a 12 GB texture pak there OOMs a 16 GB Steam Deck.
+/// We instead extract under the install destination first, falling back
+/// to `download_dir` if that path is read-only / not writable, and only
+/// to the platform temp dir as a last resort. This mirrors the
+/// `wabbajack_installer.rs::extraction_temp_base` pattern.
+///
+/// The chosen directory is created if missing. The `.collection_extraction_temp`
+/// hidden subfolder isolates extraction scratch from real install
+/// content and is cleaned up by the call sites once extraction succeeds.
+fn pick_extraction_temp_base(data_dir: &Path, download_dir: &Path) -> PathBuf {
+    let preferred = data_dir.join(".collection_extraction_temp");
+    if std::fs::create_dir_all(&preferred).is_ok() {
+        let probe = preferred.join(".write_probe");
+        if std::fs::write(&probe, b"ok").is_ok() {
+            let _ = std::fs::remove_file(&probe);
+            return preferred;
+        }
+        log::warn!(
+            "Extraction temp at data_dir is not writable, falling back to download_dir"
+        );
+    } else {
+        log::warn!(
+            "Cannot create extraction temp at data_dir, falling back to download_dir"
+        );
+    }
+    let fallback = download_dir.join(".collection_extraction_temp");
+    if std::fs::create_dir_all(&fallback).is_ok() {
+        return fallback;
+    }
+    log::warn!(
+        "Cannot create extraction temp at download_dir either, falling back to system temp_dir"
+    );
+    std::env::temp_dir().join("corkscrew_collection_extract")
+}
+
 /// Quick-check that an archive file has valid headers before extraction.
 fn validate_archive(path: &Path) -> Result<(), String> {
     // Quick size check — files under 100 bytes are likely error pages, not archives
@@ -1150,6 +1188,11 @@ pub async fn install_collection(
     let download_sem = Arc::new(Semaphore::new(max_concurrent));
     let mut handles = Vec::with_capacity(total_downloads);
 
+    // Pick an on-disk extraction scratch base. Avoid the platform temp dir,
+    // which on most Linux distros is `tmpfs` and OOMs when extracting
+    // multi-GB texture paks on 16 GB Steam Decks.
+    let extraction_temp_base = Arc::new(pick_extraction_temp_base(&data_dir, &download_dir));
+
     for &(order_pos, mod_idx) in &downloadable {
         // Check cancellation before spawning each download task
         if is_cancelled() {
@@ -1185,6 +1228,7 @@ pub async fn install_collection(
         let done_c = Arc::clone(&extraction_done);
         let notify_c = Arc::clone(&extraction_notify);
         let manifest_mods_c = Arc::clone(&manifest_mods);
+        let extract_base_c = Arc::clone(&extraction_temp_base);
 
         let handle = tokio::spawn(async move {
             // ---- Download Phase ----
@@ -1319,8 +1363,11 @@ pub async fn install_collection(
                     if !is_cancelled() {
                         let extract_start = std::time::Instant::now();
                         let estimated_total = arc_size.saturating_mul(3);
-                        let temp_dir =
-                            std::env::temp_dir().join(format!("corkscrew_extract_{}", order_pos));
+                        // Extract under install destination (or download dir
+                        // fallback) — `/tmp` on Linux is tmpfs and OOMs on
+                        // multi-GB pak extracts. Cleaned up on success.
+                        let temp_dir = extract_base_c
+                            .join(format!("corkscrew_extract_{}", order_pos));
 
                         // Spawn dir-size poller for progress tracking
                         let poller_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1492,7 +1539,7 @@ pub async fn install_collection(
                                             let retry_archive = dl2.archive_path.clone();
                                             // Update archive path for next retry iteration
                                             archive = dl2.archive_path;
-                                            let retry_temp = std::env::temp_dir().join(format!(
+                                            let retry_temp = extract_base_c.join(format!(
                                                 "corkscrew_extract_{}_retry{}",
                                                 order_pos, attempt
                                             ));
@@ -1743,8 +1790,9 @@ pub async fn install_collection(
                         );
 
                         let estimated_total = arc_size.saturating_mul(3);
-                        let temp_dir =
-                            std::env::temp_dir().join(format!("corkscrew_extract_{}", order_pos));
+                        // Avoid /tmp on Linux (tmpfs OOM on multi-GB paks).
+                        let temp_dir = extraction_temp_base
+                            .join(format!("corkscrew_extract_{}", order_pos));
 
                         let poller_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
                         let poller_stop_c = poller_stop.clone();
@@ -2566,6 +2614,11 @@ pub async fn install_collection(
             let _ = std::fs::remove_dir_all(dir);
         }
     }
+
+    // Tear down the extraction scratch parent itself (best-effort). Only
+    // removes if empty, so any per-mod directories still in use by the
+    // active install (already cleaned above) are preserved against races.
+    let _ = std::fs::remove_dir(extraction_temp_base.as_path());
 
     // Apply plugin load order from manifest (works for any game with plugin support)
     if !manifest.plugins.is_empty() {
