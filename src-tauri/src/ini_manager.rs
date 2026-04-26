@@ -13,6 +13,143 @@ use thiserror::Error;
 
 use crate::bottles::Bottle;
 
+// ---------------------------------------------------------------------------
+// Encoding detection (BOM-aware)
+// ---------------------------------------------------------------------------
+
+/// Encoding of an INI file, detected via byte-order-mark.
+///
+/// Bethesda's launcher occasionally writes Skyrim INI files as UTF-16 LE
+/// with a BOM. Plain UTF-8 (with or without BOM) is the common case.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IniEncoding {
+    Utf8,
+    Utf8Bom,
+    Utf16Le,
+    Utf16Be,
+}
+
+/// Line-ending style detected in the source file. Preserved on write so
+/// third-party tools that hash the INI don't see spurious modifications.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LineEnding {
+    Lf,
+    Crlf,
+}
+
+impl LineEnding {
+    fn as_str(self) -> &'static str {
+        match self {
+            LineEnding::Lf => "\n",
+            LineEnding::Crlf => "\r\n",
+        }
+    }
+}
+
+/// Read an INI file, detecting any BOM and decoding to a UTF-8 String.
+/// Returns the decoded text, the source encoding, and the dominant line
+/// ending so they can be preserved on round-trip writes.
+fn read_ini_decoded(path: &Path) -> Result<(String, IniEncoding, LineEnding)> {
+    let bytes = fs::read(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            IniError::NotFound(path.to_string_lossy().to_string())
+        } else {
+            IniError::Io(e)
+        }
+    })?;
+
+    let (text, encoding) = decode_ini_bytes(&bytes).map_err(IniError::Other)?;
+    let line_ending = detect_line_ending(&text);
+    Ok((text, encoding, line_ending))
+}
+
+/// Decode INI bytes based on a leading BOM (if any). Falls back to UTF-8
+/// (lossy) so even a malformed file still parses to something.
+fn decode_ini_bytes(bytes: &[u8]) -> std::result::Result<(String, IniEncoding), String> {
+    // UTF-8 BOM: EF BB BF
+    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        let s = String::from_utf8_lossy(&bytes[3..]).into_owned();
+        return Ok((s, IniEncoding::Utf8Bom));
+    }
+    // UTF-16 LE BOM: FF FE
+    if bytes.starts_with(&[0xFF, 0xFE]) {
+        let payload = &bytes[2..];
+        let mut units: Vec<u16> = Vec::with_capacity(payload.len() / 2);
+        for chunk in payload.chunks_exact(2) {
+            units.push(u16::from_le_bytes([chunk[0], chunk[1]]));
+        }
+        let s = String::from_utf16(&units)
+            .map_err(|e| format!("UTF-16 LE decode failed: {}", e))?;
+        return Ok((s, IniEncoding::Utf16Le));
+    }
+    // UTF-16 BE BOM: FE FF
+    if bytes.starts_with(&[0xFE, 0xFF]) {
+        let payload = &bytes[2..];
+        let mut units: Vec<u16> = Vec::with_capacity(payload.len() / 2);
+        for chunk in payload.chunks_exact(2) {
+            units.push(u16::from_be_bytes([chunk[0], chunk[1]]));
+        }
+        let s = String::from_utf16(&units)
+            .map_err(|e| format!("UTF-16 BE decode failed: {}", e))?;
+        return Ok((s, IniEncoding::Utf16Be));
+    }
+
+    // No BOM — assume UTF-8 (lossy for safety; Bethesda INIs are ASCII in
+    // practice and we don't want a stray invalid byte to fail the whole read).
+    let s = String::from_utf8_lossy(bytes).into_owned();
+    Ok((s, IniEncoding::Utf8))
+}
+
+/// Decide whether the source uses CRLF or bare LF. Defaults to LF when
+/// neither is present.
+fn detect_line_ending(text: &str) -> LineEnding {
+    if text.contains("\r\n") {
+        LineEnding::Crlf
+    } else {
+        LineEnding::Lf
+    }
+}
+
+/// Encode a UTF-8 string back to the original byte representation,
+/// re-prepending any BOM that was stripped on read.
+fn encode_ini_bytes(text: &str, encoding: IniEncoding) -> Vec<u8> {
+    match encoding {
+        IniEncoding::Utf8 => text.as_bytes().to_vec(),
+        IniEncoding::Utf8Bom => {
+            let mut out = Vec::with_capacity(text.len() + 3);
+            out.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+            out.extend_from_slice(text.as_bytes());
+            out
+        }
+        IniEncoding::Utf16Le => {
+            let mut out = Vec::with_capacity(2 + text.len() * 2);
+            out.extend_from_slice(&[0xFF, 0xFE]);
+            for unit in text.encode_utf16() {
+                out.extend_from_slice(&unit.to_le_bytes());
+            }
+            out
+        }
+        IniEncoding::Utf16Be => {
+            let mut out = Vec::with_capacity(2 + text.len() * 2);
+            out.extend_from_slice(&[0xFE, 0xFF]);
+            for unit in text.encode_utf16() {
+                out.extend_from_slice(&unit.to_be_bytes());
+            }
+            out
+        }
+    }
+}
+
+/// Atomic write: write to `<path>.ini.tmp`, then rename onto the target.
+/// Wine bottles share INIs with Steam Proton and INI corruption from a
+/// half-written file ruins the user's settings.
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    let tmp = path.with_extension("ini.tmp");
+    fs::write(&tmp, bytes)?;
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 #[derive(Debug, Error)]
 pub enum IniError {
     #[error("I/O error: {0}")]
@@ -81,12 +218,16 @@ pub fn find_ini_files(bottle: &Bottle, game_id: &str) -> Vec<PathBuf> {
 }
 
 /// Parse an INI file into sections and key-value pairs.
+///
+/// Detects UTF-8 / UTF-8 BOM / UTF-16 LE / UTF-16 BE encodings via leading
+/// BOM. `fs::read_to_string` would either fail or return mojibake on the
+/// UTF-16 INI files Skyrim's launcher occasionally produces.
 pub fn parse_ini(path: &Path) -> Result<IniFile> {
     if !path.exists() {
         return Err(IniError::NotFound(path.to_string_lossy().to_string()));
     }
 
-    let content = fs::read_to_string(path)?;
+    let (content, _enc, _le) = read_ini_decoded(path)?;
     let file_name = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -144,19 +285,25 @@ pub fn get_setting(ini: &IniFile, section: &str, key: &str) -> Option<String> {
 }
 
 /// Set a specific value in an INI file on disk.
+///
+/// Preserves the original encoding (UTF-8 / UTF-8 BOM / UTF-16 LE/BE) and
+/// line-ending style (LF vs CRLF) so third-party tools comparing hashes
+/// don't flag the file as gratuitously modified. Writes are atomic via
+/// `<path>.ini.tmp` + rename; an interrupted call cannot leave the user's
+/// shared Wine/Proton INI truncated.
 pub fn set_setting(path: &Path, section: &str, key: &str, value: &str) -> Result<()> {
-    let content = fs::read_to_string(path).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            IniError::NotFound(path.to_string_lossy().to_string())
-        } else {
-            IniError::Io(e)
-        }
-    })?;
+    let (content, encoding, line_ending) = read_ini_decoded(path)?;
+
+    // Note whether the source ends with a trailing newline so we can preserve
+    // it. `str::lines` strips the final newline, so we'd otherwise lose it.
+    let ends_with_newline = content.ends_with('\n');
+
     let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
 
     let mut in_section = false;
     let mut found = false;
     let section_header = format!("[{}]", section);
+    let le = line_ending.as_str();
 
     for line in &mut lines {
         let trimmed = line.trim();
@@ -168,8 +315,9 @@ pub fn set_setting(path: &Path, section: &str, key: &str, value: &str) -> Result
 
         if trimmed.starts_with('[') && trimmed.ends_with(']') {
             if in_section && !found {
-                // Insert before the next section
-                *line = format!("{}={}\n{}", key, value, line);
+                // Insert before the next section, preserving the source's
+                // line-ending style.
+                *line = format!("{}={}{}{}", key, value, le, line);
                 found = true;
             }
             in_section = false;
@@ -197,8 +345,13 @@ pub fn set_setting(path: &Path, section: &str, key: &str, value: &str) -> Result
         lines.push(format!("{}={}", key, value));
     }
 
-    let output = lines.join("\n");
-    fs::write(path, output)?;
+    let mut output = lines.join(le);
+    if ends_with_newline {
+        output.push_str(le);
+    }
+
+    let bytes = encode_ini_bytes(&output, encoding);
+    write_atomic(path, &bytes)?;
     Ok(())
 }
 
@@ -1037,5 +1190,149 @@ mod tests {
         let sections = parse_ini_string(content);
         assert_eq!(sections.len(), 1);
         assert!(sections.get("Section").unwrap().contains_key("key"));
+    }
+
+    // ── BOM / encoding round-trip tests ──────────────────────────────────
+
+    #[test]
+    fn parse_ini_handles_utf8_bom() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("bom.ini");
+        // EF BB BF + "[Display]\nkey=val\n"
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(b"[Display]\nkey=val\n");
+        fs::write(&path, &bytes).unwrap();
+
+        let ini = parse_ini(&path).unwrap();
+        assert_eq!(
+            ini.sections.get("Display").unwrap().get("key").unwrap(),
+            "val"
+        );
+    }
+
+    #[test]
+    fn parse_ini_handles_utf16_le_bom() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("u16.ini");
+        let text = "[Display]\nkey=val\n";
+        let mut bytes = vec![0xFF, 0xFE];
+        for u in text.encode_utf16() {
+            bytes.extend_from_slice(&u.to_le_bytes());
+        }
+        fs::write(&path, &bytes).unwrap();
+
+        let ini = parse_ini(&path).unwrap();
+        assert_eq!(
+            ini.sections.get("Display").unwrap().get("key").unwrap(),
+            "val"
+        );
+    }
+
+    #[test]
+    fn parse_ini_handles_utf16_be_bom() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("u16be.ini");
+        let text = "[Display]\nkey=val\n";
+        let mut bytes = vec![0xFE, 0xFF];
+        for u in text.encode_utf16() {
+            bytes.extend_from_slice(&u.to_be_bytes());
+        }
+        fs::write(&path, &bytes).unwrap();
+
+        let ini = parse_ini(&path).unwrap();
+        assert_eq!(
+            ini.sections.get("Display").unwrap().get("key").unwrap(),
+            "val"
+        );
+    }
+
+    #[test]
+    fn set_setting_preserves_utf16_le_encoding() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("u16.ini");
+        let text = "[Display]\r\nkey=val\r\n";
+        let mut bytes = vec![0xFF, 0xFE];
+        for u in text.encode_utf16() {
+            bytes.extend_from_slice(&u.to_le_bytes());
+        }
+        fs::write(&path, &bytes).unwrap();
+
+        set_setting(&path, "Display", "key", "newval").unwrap();
+
+        let after = fs::read(&path).unwrap();
+        assert!(
+            after.starts_with(&[0xFF, 0xFE]),
+            "UTF-16 LE BOM should be preserved on write"
+        );
+        let parsed = parse_ini(&path).unwrap();
+        assert_eq!(
+            parsed.sections.get("Display").unwrap().get("key").unwrap(),
+            "newval"
+        );
+    }
+
+    #[test]
+    fn set_setting_preserves_crlf_line_endings() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("crlf.ini");
+        fs::write(&path, "[Display]\r\nkey=val\r\nother=keep\r\n").unwrap();
+
+        set_setting(&path, "Display", "key", "newval").unwrap();
+
+        let after = fs::read_to_string(&path).unwrap();
+        assert!(
+            after.contains("\r\n"),
+            "CRLF should be preserved (got {:?})",
+            after
+        );
+        assert!(
+            !after.contains("\n\n") && !after.replace("\r\n", "").contains('\n'),
+            "no bare LFs should be introduced (got {:?})",
+            after
+        );
+        assert!(after.contains("key=newval"));
+    }
+
+    #[test]
+    fn set_setting_preserves_lf_line_endings() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("lf.ini");
+        fs::write(&path, "[Display]\nkey=val\n").unwrap();
+
+        set_setting(&path, "Display", "key", "newval").unwrap();
+
+        let after = fs::read_to_string(&path).unwrap();
+        assert!(!after.contains("\r\n"), "no CRLFs should be introduced");
+        assert!(after.contains("key=newval"));
+    }
+
+    #[test]
+    fn set_setting_atomic_no_tmp_left_behind_on_success() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("atomic.ini");
+        fs::write(&path, "[A]\nkey=val\n").unwrap();
+
+        set_setting(&path, "A", "key", "v2").unwrap();
+
+        // .ini.tmp sibling should not remain after successful rename.
+        let tmp_sibling = path.with_extension("ini.tmp");
+        assert!(
+            !tmp_sibling.exists(),
+            ".ini.tmp should be renamed away on success"
+        );
+    }
+
+    #[test]
+    fn detect_line_ending_lf_vs_crlf() {
+        assert_eq!(detect_line_ending("a\nb\n"), LineEnding::Lf);
+        assert_eq!(detect_line_ending("a\r\nb\r\n"), LineEnding::Crlf);
+        assert_eq!(detect_line_ending(""), LineEnding::Lf);
+    }
+
+    #[test]
+    fn decode_ini_bytes_no_bom_is_utf8() {
+        let (s, enc) = decode_ini_bytes(b"[A]\nk=v\n").unwrap();
+        assert_eq!(enc, IniEncoding::Utf8);
+        assert_eq!(s, "[A]\nk=v\n");
     }
 }
