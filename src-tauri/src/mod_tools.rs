@@ -112,6 +112,13 @@ pub struct ModTool {
     pub recommended_ini_edits: Vec<IniEdit>,
     /// Ko-fi, Patreon, or other support/donation URL for the tool author.
     pub support_url: Option<String>,
+    /// If true, this tool requires an additional explicit user opt-in
+    /// (beyond the experimental-tool warning) before it appears or is
+    /// installable. Used for sources that host adult / NSFW content
+    /// (e.g. LoversLab), which are gated behind a per-game config flag
+    /// such as `enable_adult_content_for_sims4`.
+    #[serde(default)]
+    pub requires_explicit_opt_in: bool,
 }
 
 /// A recommended INI edit for a tool.
@@ -434,6 +441,7 @@ fn builtin_tools_for_game(game_id: &str) -> Vec<ModTool> {
         "hogwartslegacy" => hogwarts_legacy_tools(),
         "hades2" => hades2_tools(),
         "crimsondesert" => crimson_desert_tools(),
+        "sims4" => sims4_tools_filtered(),
         _ => vec![],
     };
 
@@ -476,6 +484,7 @@ fn vortex_tool_to_mod_tool(vt: &crate::vortex_types::VortexTool) -> ModTool {
         recommended_alternative: None,
         recommended_ini_edits: vec![],
         support_url: None,
+        requires_explicit_opt_in: false,
     }
 }
 
@@ -507,7 +516,28 @@ fn all_builtin_tools() -> Vec<ModTool> {
             tools.push(tool);
         }
     }
+    for tool in sims4_tools() {
+        if !tools.iter().any(|t| t.id == tool.id) {
+            tools.push(tool);
+        }
+    }
     tools
+}
+
+/// The Sims 4 tools, filtered by the user's adult-content opt-in.
+///
+/// Tools with `requires_explicit_opt_in == true` (e.g. the LoversLab
+/// link entry) are only included when the user has flipped the
+/// `enable_adult_content_for_sims4` flag in their config. The base
+/// tools (MC Command Center, Sims 4 Studio) always appear.
+fn sims4_tools_filtered() -> Vec<ModTool> {
+    let opted_in = crate::config::get_config()
+        .map(|c| c.enable_adult_content_for_sims4)
+        .unwrap_or(false);
+    sims4_tools()
+        .into_iter()
+        .filter(|t| !t.requires_explicit_opt_in || opted_in)
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -535,6 +565,7 @@ fn shared_tools() -> Vec<ModTool> {
             recommended_alternative: None,
             recommended_ini_edits: vec![],
             support_url: None,
+            requires_explicit_opt_in: false,
         },
         ModTool {
             id: "bethini".into(),
@@ -555,6 +586,7 @@ fn shared_tools() -> Vec<ModTool> {
             recommended_alternative: None,
             recommended_ini_edits: vec![],
             support_url: None,
+            requires_explicit_opt_in: false,
         },
     ]
 }
@@ -585,6 +617,7 @@ fn skyrim_se_tools() -> Vec<ModTool> {
             recommended_alternative: None,
             recommended_ini_edits: vec![],
             support_url: Some("https://skse.silverlock.org/".into()),
+            requires_explicit_opt_in: false,
         },
         // ---- Recommended tools (good Wine compatibility) ----
         ModTool {
@@ -612,6 +645,7 @@ fn skyrim_se_tools() -> Vec<ModTool> {
             recommended_alternative: None,
             recommended_ini_edits: vec![],
             support_url: Some("https://ko-fi.com/elminsterau".into()),
+            requires_explicit_opt_in: false,
         },
         ModTool {
             id: "pandora".into(),
@@ -637,6 +671,7 @@ fn skyrim_se_tools() -> Vec<ModTool> {
             recommended_alternative: None,
             recommended_ini_edits: vec![],
             support_url: Some("https://www.patreon.com/monitorhz".into()),
+            requires_explicit_opt_in: false,
         },
         ModTool {
             id: "bodyslide".into(),
@@ -657,6 +692,7 @@ fn skyrim_se_tools() -> Vec<ModTool> {
             recommended_alternative: None,
             recommended_ini_edits: vec![],
             support_url: None,
+            requires_explicit_opt_in: false,
         },
         ModTool {
             id: "cao".into(),
@@ -680,6 +716,7 @@ fn skyrim_se_tools() -> Vec<ModTool> {
             recommended_alternative: None,
             recommended_ini_edits: vec![],
             support_url: Some("https://github.com/sponsors/Guekka".into()),
+            requires_explicit_opt_in: false,
         },
         ModTool {
             id: "nifoptimizer".into(),
@@ -700,6 +737,7 @@ fn skyrim_se_tools() -> Vec<ModTool> {
             recommended_alternative: None,
             recommended_ini_edits: vec![],
             support_url: None,
+            requires_explicit_opt_in: false,
         },
         // ---- Tools with limited Wine compatibility ----
         ModTool {
@@ -721,6 +759,7 @@ fn skyrim_se_tools() -> Vec<ModTool> {
             recommended_alternative: None,
             recommended_ini_edits: vec![],
             support_url: Some("https://ko-fi.com/sheson".into()),
+            requires_explicit_opt_in: false,
         },
         // ---- Not recommended via Wine — use Pandora instead ----
         ModTool {
@@ -742,6 +781,7 @@ fn skyrim_se_tools() -> Vec<ModTool> {
             recommended_alternative: Some("pandora".into()),
             recommended_ini_edits: vec![],
             support_url: Some("https://www.patreon.com/shikyokira".into()),
+            requires_explicit_opt_in: false,
         },
         ModTool {
             id: "fnis".into(),
@@ -764,6 +804,7 @@ fn skyrim_se_tools() -> Vec<ModTool> {
             recommended_alternative: Some("pandora".into()),
             recommended_ini_edits: vec![],
             support_url: None,
+            requires_explicit_opt_in: false,
         },
     ];
     tools.extend(shared_tools());
@@ -796,6 +837,7 @@ fn fallout4_tools() -> Vec<ModTool> {
             recommended_alternative: None,
             recommended_ini_edits: vec![],
             support_url: Some("https://f4se.silverlock.org/".into()),
+            requires_explicit_opt_in: false,
         },
         // ---- Recommended tools ----
         ModTool {
@@ -823,6 +865,7 @@ fn fallout4_tools() -> Vec<ModTool> {
             recommended_alternative: None,
             recommended_ini_edits: vec![],
             support_url: Some("https://ko-fi.com/elminsterau".into()),
+            requires_explicit_opt_in: false,
         },
         ModTool {
             id: "bodyslide_fo4".into(),
@@ -843,6 +886,7 @@ fn fallout4_tools() -> Vec<ModTool> {
             recommended_alternative: None,
             recommended_ini_edits: vec![],
             support_url: None,
+            requires_explicit_opt_in: false,
         },
     ];
     tools.extend(shared_tools());
@@ -874,6 +918,7 @@ fn hogwarts_legacy_tools() -> Vec<ModTool> {
             recommended_alternative: None,
             recommended_ini_edits: vec![],
             support_url: Some("https://github.com/UE4SS-RE/RE-UE4SS".into()),
+            requires_explicit_opt_in: false,
         },
         // NOTE: HLModMerger removed — Corkscrew has native PAK database merging
         // via hl_merger.rs. The external Windows tool is not needed.
@@ -896,6 +941,7 @@ fn hogwarts_legacy_tools() -> Vec<ModTool> {
             recommended_alternative: None,
             recommended_ini_edits: vec![],
             support_url: None,
+            requires_explicit_opt_in: false,
         },
     ]
 }
@@ -935,6 +981,7 @@ fn hades2_tools() -> Vec<ModTool> {
             recommended_alternative: None,
             recommended_ini_edits: vec![],
             support_url: Some("https://github.com/SGG-Modding/ModImporter".into()),
+            requires_explicit_opt_in: false,
         },
         ModTool {
             id: "modutil".into(),
@@ -957,6 +1004,7 @@ fn hades2_tools() -> Vec<ModTool> {
             recommended_alternative: None,
             recommended_ini_edits: vec![],
             support_url: Some("https://github.com/SGG-Modding/ModUtil".into()),
+            requires_explicit_opt_in: false,
         },
     ]
 }
@@ -998,6 +1046,7 @@ fn crimson_desert_tools() -> Vec<ModTool> {
             recommended_alternative: None,
             recommended_ini_edits: vec![],
             support_url: Some("https://github.com/ThirteenAG/Ultimate-ASI-Loader".into()),
+            requires_explicit_opt_in: false,
         },
         ModTool {
             id: "reshade".into(),
@@ -1023,6 +1072,107 @@ fn crimson_desert_tools() -> Vec<ModTool> {
             recommended_alternative: None,
             recommended_ini_edits: vec![],
             support_url: Some("https://reshade.me/".into()),
+            requires_explicit_opt_in: false,
+        },
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// The Sims 4 tools
+// ---------------------------------------------------------------------------
+
+/// Tool registry for The Sims 4.
+///
+/// Includes the community-essential script-mod framework (MC Command
+/// Center), the de-facto custom-content authoring tool (Sims 4 Studio),
+/// and a link-only entry for LoversLab — gated behind both the
+/// experimental-warning dialog and the
+/// `enable_adult_content_for_sims4` config flag.
+fn sims4_tools() -> Vec<ModTool> {
+    vec![
+        // MC Command Center — by Deaderpool. Community essential. Hosted
+        // on Patreon (free tier OK, no NM mirror).
+        ModTool {
+            id: "mccc".into(),
+            name: "MC Command Center".into(),
+            description:
+                "Community-essential script mod by Deaderpool. Adds gameplay control, story progression tuning, and a long tail of quality-of-life fixes."
+                    .into(),
+            // Loaded by exact filename from Mods/. The pack ships a
+            // `.ts4script` archive plus several `.package` files.
+            exe_names: vec!["mc_cmd_center.ts4script".into(), "mc_settings.ts4script".into()],
+            detected_path: None,
+            requires_wine: false,
+            category: "Framework".into(),
+            can_auto_install: false,
+            github_repo: None,
+            nexus_mod_id: None,
+            nexus_game_slug: None,
+            download_url: Some("https://www.patreon.com/MCCC".into()),
+            license: "Shareware".into(),
+            wine_notes: Some(
+                "Pure Python script mod — runs inside the game, no Wine interaction needed."
+                    .into(),
+            ),
+            wine_compat: "good".into(),
+            recommended_alternative: None,
+            recommended_ini_edits: vec![],
+            support_url: Some("https://www.patreon.com/MCCC".into()),
+            requires_explicit_opt_in: false,
+        },
+        // Sims 4 Studio — CC creation tool (Windows GUI app).
+        ModTool {
+            id: "sims4-studio".into(),
+            name: "Sims 4 Studio".into(),
+            description:
+                "Custom-content creation and editing tool for The Sims 4. Free download from sims4studio.com."
+                    .into(),
+            exe_names: vec!["Sims4Studio.exe".into()],
+            detected_path: None,
+            requires_wine: true,
+            category: "Tool".into(),
+            can_auto_install: false,
+            github_repo: None,
+            nexus_mod_id: None,
+            nexus_game_slug: None,
+            download_url: Some("https://sims4studio.com/".into()),
+            license: "Freeware".into(),
+            wine_notes: Some(
+                "Windows GUI app; runs under Wine/CrossOver. Requires .NET runtime in the bottle."
+                    .into(),
+            ),
+            wine_compat: "limited".into(),
+            recommended_alternative: None,
+            recommended_ini_edits: vec![],
+            support_url: Some("https://sims4studio.com/".into()),
+            requires_explicit_opt_in: false,
+        },
+        // LoversLab — adult content (NSFW). Link-only; gated behind
+        // explicit user opt-in via `enable_adult_content_for_sims4`.
+        ModTool {
+            id: "loverslab-sims4".into(),
+            name: "LoversLab — The Sims 4".into(),
+            description:
+                "Community hub for adult / NSFW Sims 4 mods. External link only — Corkscrew does not download from LoversLab automatically."
+                    .into(),
+            exe_names: vec![],
+            detected_path: None,
+            requires_wine: false,
+            category: "Adult Content".into(),
+            can_auto_install: false,
+            github_repo: None,
+            nexus_mod_id: None,
+            nexus_game_slug: None,
+            download_url: Some(
+                "https://www.loverslab.com/files/category/150-the-sims-4/".into(),
+            ),
+            license: "Varies".into(),
+            wine_notes: None,
+            wine_compat: "unknown".into(),
+            recommended_alternative: None,
+            recommended_ini_edits: vec![],
+            support_url: None,
+            requires_explicit_opt_in: true,
         },
     ]
 }

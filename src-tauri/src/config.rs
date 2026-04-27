@@ -103,6 +103,12 @@ pub struct AppConfig {
     #[serde(default)]
     pub use_wine_engine_fixes: bool,
 
+    /// If true, surface The Sims 4 adult-content sources (e.g. LoversLab)
+    /// in tool listings. Off by default — explicit opt-in required since
+    /// these sources host NSFW mods.
+    #[serde(default)]
+    pub enable_adult_content_for_sims4: bool,
+
     /// Catch-all for any additional settings that may be added in the future.
     /// Flattened so extra keys sit at the top level of the JSON object.
     #[serde(flatten)]
@@ -378,6 +384,7 @@ mod tests {
             verification_level: VerificationLevel::default(),
             use_original_engine_fixes: false,
             use_wine_engine_fixes: false,
+            enable_adult_content_for_sims4: false,
             extra: HashMap::new(),
         };
         config
