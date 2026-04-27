@@ -67,6 +67,7 @@ pub mod staging;
 pub mod steam_integration;
 pub mod umu;
 pub mod vortex_fetcher;
+pub mod vortex_index;
 pub mod vortex_plugin;
 pub mod vortex_registry;
 pub mod vortex_runtime;

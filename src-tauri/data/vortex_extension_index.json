@@ -1,0 +1,582 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-04-20",
+  "source": "github.com/Nexus-Mods/vortex-games (master)",
+  "notes": "Curated mapping from Steam app ID to Vortex extension directory. Steam IDs were extracted from each extension's index.js (STEAM_ID/STEAMAPP_ID/SteamId/SteamAPPId/findByAppId patterns) and from canonical Steam app store IDs for stub extensions. Extensions without a discoverable Steam app ID (e.g. registry-only detection like Neverwinter Nights 2, World of Tanks, X Rebirth registry-detected variants) are intentionally omitted.",
+  "extensions": [
+    {
+      "id": "game-7daystodie",
+      "name": "7 Days to Die",
+      "steam_app_id": "251570",
+      "nexus_slug": "7daystodie",
+      "vortex_dir_name": "game-7daystodie"
+    },
+    {
+      "id": "game-ahatintime",
+      "name": "A Hat in Time",
+      "steam_app_id": "253230",
+      "nexus_slug": "ahatintime",
+      "vortex_dir_name": "game-ahatintime"
+    },
+    {
+      "id": "game-baldursgate3",
+      "name": "Baldur's Gate 3",
+      "steam_app_id": "1086940",
+      "nexus_slug": "baldursgate3",
+      "vortex_dir_name": "game-baldursgate3"
+    },
+    {
+      "id": "game-battletech",
+      "name": "BattleTech",
+      "steam_app_id": "637090",
+      "nexus_slug": "battletech",
+      "vortex_dir_name": "game-battletech"
+    },
+    {
+      "id": "game-bladeandsorcery",
+      "name": "Blade & Sorcery",
+      "steam_app_id": "629730",
+      "nexus_slug": "bladeandsorcery",
+      "vortex_dir_name": "game-bladeandsorcery"
+    },
+    {
+      "id": "game-bloodstainedritualofthenight",
+      "name": "Bloodstained: Ritual of the Night",
+      "steam_app_id": "692850",
+      "nexus_slug": "bloodstainedritualofthenight",
+      "vortex_dir_name": "game-bloodstainedritualofthenight"
+    },
+    {
+      "id": "game-breakingwheel",
+      "name": "Breaking Wheel",
+      "steam_app_id": "545890",
+      "nexus_slug": "breakingwheel",
+      "vortex_dir_name": "game-breakingwheel"
+    },
+    {
+      "id": "game-codevein",
+      "name": "Code Vein",
+      "steam_app_id": "678960",
+      "nexus_slug": "codevein",
+      "vortex_dir_name": "game-codevein"
+    },
+    {
+      "id": "game-conanexiles",
+      "name": "Conan Exiles",
+      "steam_app_id": "440900",
+      "nexus_slug": "conanexiles",
+      "vortex_dir_name": "game-conanexiles"
+    },
+    {
+      "id": "game-cyberpunk2077",
+      "name": "Cyberpunk 2077",
+      "steam_app_id": "1091500",
+      "nexus_slug": "cyberpunk2077",
+      "vortex_dir_name": "game-cyberpunk2077"
+    },
+    {
+      "id": "game-darkestdungeon",
+      "name": "Darkest Dungeon",
+      "steam_app_id": "262060",
+      "nexus_slug": "darkestdungeon",
+      "vortex_dir_name": "game-darkestdungeon"
+    },
+    {
+      "id": "game-darksouls",
+      "name": "Dark Souls: Prepare to Die Edition",
+      "steam_app_id": "211420",
+      "nexus_slug": "darksouls",
+      "vortex_dir_name": "game-darksouls"
+    },
+    {
+      "id": "game-darksouls2",
+      "name": "Dark Souls II",
+      "steam_app_id": "236430",
+      "nexus_slug": "darksouls2",
+      "vortex_dir_name": "game-darksouls2"
+    },
+    {
+      "id": "game-dawnofman",
+      "name": "Dawn of Man",
+      "steam_app_id": "858810",
+      "nexus_slug": "dawnofman",
+      "vortex_dir_name": "game-dawnofman"
+    },
+    {
+      "id": "game-divinityoriginalsin2",
+      "name": "Divinity: Original Sin 2",
+      "steam_app_id": "435150",
+      "nexus_slug": "divinityoriginalsin2",
+      "vortex_dir_name": "game-divinityoriginalsin2"
+    },
+    {
+      "id": "game-dmc5",
+      "name": "Devil May Cry 5",
+      "steam_app_id": "601150",
+      "nexus_slug": "devilmaycry5",
+      "vortex_dir_name": "game-dmc5"
+    },
+    {
+      "id": "game-dragonage",
+      "name": "Dragon Age: Origins",
+      "steam_app_id": "17450",
+      "nexus_slug": "dragonage",
+      "vortex_dir_name": "game-dragonage"
+    },
+    {
+      "id": "game-dragonage2",
+      "name": "Dragon Age 2",
+      "steam_app_id": "1238040",
+      "nexus_slug": "dragonage2",
+      "vortex_dir_name": "game-dragonage2"
+    },
+    {
+      "id": "game-dragons-dogma",
+      "name": "Dragon's Dogma: Dark Arisen",
+      "steam_app_id": "367500",
+      "nexus_slug": "dragonsdogma",
+      "vortex_dir_name": "game-dragons-dogma"
+    },
+    {
+      "id": "game-elex",
+      "name": "ELEX",
+      "steam_app_id": "411300",
+      "nexus_slug": "elex",
+      "vortex_dir_name": "game-elex"
+    },
+    {
+      "id": "game-enderal",
+      "name": "Enderal: Forgotten Stories (Special Edition)",
+      "steam_app_id": "933480",
+      "nexus_slug": "enderalspecialedition",
+      "vortex_dir_name": "game-enderal"
+    },
+    {
+      "id": "game-factorio",
+      "name": "Factorio",
+      "steam_app_id": "427520",
+      "nexus_slug": "factorio",
+      "vortex_dir_name": "game-factorio"
+    },
+    {
+      "id": "game-fallout3",
+      "name": "Fallout 3",
+      "steam_app_id": "22300",
+      "nexus_slug": "fallout3",
+      "vortex_dir_name": "game-fallout3"
+    },
+    {
+      "id": "game-fallout4vr",
+      "name": "Fallout 4 VR",
+      "steam_app_id": "611660",
+      "nexus_slug": "fallout4",
+      "vortex_dir_name": "game-fallout4vr"
+    },
+    {
+      "id": "game-falloutnv",
+      "name": "Fallout: New Vegas",
+      "steam_app_id": "22380",
+      "nexus_slug": "newvegas",
+      "vortex_dir_name": "game-falloutnv"
+    },
+    {
+      "id": "game-galciv3",
+      "name": "Galactic Civilizations III",
+      "steam_app_id": "976210",
+      "nexus_slug": "galacticcivilizations3",
+      "vortex_dir_name": "game-galciv3"
+    },
+    {
+      "id": "game-gardenpaws",
+      "name": "Garden Paws",
+      "steam_app_id": "840010",
+      "nexus_slug": "gardenpaws",
+      "vortex_dir_name": "game-gardenpaws"
+    },
+    {
+      "id": "game-greedfall",
+      "name": "GreedFall",
+      "steam_app_id": "606880",
+      "nexus_slug": "greedfall",
+      "vortex_dir_name": "game-greedfall"
+    },
+    {
+      "id": "game-grimdawn",
+      "name": "Grim Dawn",
+      "steam_app_id": "219990",
+      "nexus_slug": "grimdawn",
+      "vortex_dir_name": "game-grimdawn"
+    },
+    {
+      "id": "game-grimrock",
+      "name": "Legend of Grimrock",
+      "steam_app_id": "207170",
+      "nexus_slug": "legendofgrimrock",
+      "vortex_dir_name": "game-grimrock"
+    },
+    {
+      "id": "game-kenshi",
+      "name": "Kenshi",
+      "steam_app_id": "233860",
+      "nexus_slug": "kenshi",
+      "vortex_dir_name": "game-kenshi"
+    },
+    {
+      "id": "game-kerbalspaceprogram",
+      "name": "Kerbal Space Program",
+      "steam_app_id": "220200",
+      "nexus_slug": "kerbalspaceprogram",
+      "vortex_dir_name": "game-kerbalspaceprogram"
+    },
+    {
+      "id": "game-kingdomcome-deliverance",
+      "name": "Kingdom Come: Deliverance",
+      "steam_app_id": "379430",
+      "nexus_slug": "kingdomcomedeliverance",
+      "vortex_dir_name": "game-kingdomcome-deliverance"
+    },
+    {
+      "id": "game-masterchiefcollection",
+      "name": "Halo: The Master Chief Collection",
+      "steam_app_id": "976730",
+      "nexus_slug": "halothemasterchiefcollection",
+      "vortex_dir_name": "game-masterchiefcollection"
+    },
+    {
+      "id": "game-microsoftflightsimulator",
+      "name": "Microsoft Flight Simulator",
+      "steam_app_id": "1250410",
+      "nexus_slug": "microsoftflightsimulator",
+      "vortex_dir_name": "game-microsoftflightsimulator"
+    },
+    {
+      "id": "game-monster-hunter-world",
+      "name": "Monster Hunter: World",
+      "steam_app_id": "582010",
+      "nexus_slug": "monsterhunterworld",
+      "vortex_dir_name": "game-monster-hunter-world"
+    },
+    {
+      "id": "game-morrowind",
+      "name": "The Elder Scrolls III: Morrowind",
+      "steam_app_id": "22320",
+      "nexus_slug": "morrowind",
+      "vortex_dir_name": "game-morrowind"
+    },
+    {
+      "id": "game-mount-and-blade",
+      "name": "Mount & Blade",
+      "steam_app_id": "22100",
+      "nexus_slug": "mountandblade",
+      "vortex_dir_name": "game-mount-and-blade"
+    },
+    {
+      "id": "game-mount-and-blade2",
+      "name": "Mount & Blade II: Bannerlord",
+      "steam_app_id": "261550",
+      "nexus_slug": "mountandblade2bannerlord",
+      "vortex_dir_name": "game-mount-and-blade2"
+    },
+    {
+      "id": "game-nehrim",
+      "name": "Nehrim: At Fate's Edge",
+      "steam_app_id": "1014940",
+      "nexus_slug": "nehrim",
+      "vortex_dir_name": "game-nehrim"
+    },
+    {
+      "id": "game-neverwinter-nights",
+      "name": "Neverwinter Nights: Enhanced Edition",
+      "steam_app_id": "704450",
+      "nexus_slug": "neverwinter",
+      "vortex_dir_name": "game-neverwinter-nights"
+    },
+    {
+      "id": "game-nomanssky",
+      "name": "No Man's Sky",
+      "steam_app_id": "275850",
+      "nexus_slug": "nomanssky",
+      "vortex_dir_name": "game-nomanssky"
+    },
+    {
+      "id": "game-oblivion",
+      "name": "The Elder Scrolls IV: Oblivion",
+      "steam_app_id": "22330",
+      "nexus_slug": "oblivion",
+      "vortex_dir_name": "game-oblivion"
+    },
+    {
+      "id": "game-oni",
+      "name": "Oxygen Not Included",
+      "steam_app_id": "457140",
+      "nexus_slug": "oxygennotincluded",
+      "vortex_dir_name": "game-oni"
+    },
+    {
+      "id": "game-palworld",
+      "name": "Palworld",
+      "steam_app_id": "1623730",
+      "nexus_slug": "palworld",
+      "vortex_dir_name": "game-palworld"
+    },
+    {
+      "id": "game-pathfinderkingmaker",
+      "name": "Pathfinder: Kingmaker",
+      "steam_app_id": "640820",
+      "nexus_slug": "pathfinderkingmaker",
+      "vortex_dir_name": "game-pathfinderkingmaker"
+    },
+    {
+      "id": "game-pathfinderwrathoftherighteous",
+      "name": "Pathfinder: Wrath of the Righteous",
+      "steam_app_id": "1184370",
+      "nexus_slug": "pathfinderwrathoftherighteous",
+      "vortex_dir_name": "game-pathfinderwrathoftherighteous"
+    },
+    {
+      "id": "game-prisonarchitect",
+      "name": "Prison Architect",
+      "steam_app_id": "233450",
+      "nexus_slug": "prisonarchitect",
+      "vortex_dir_name": "game-prisonarchitect"
+    },
+    {
+      "id": "game-re2remake",
+      "name": "Resident Evil 2 (2019)",
+      "steam_app_id": "883710",
+      "nexus_slug": "residentevil22019",
+      "vortex_dir_name": "game-re2remake"
+    },
+    {
+      "id": "game-re3remake",
+      "name": "Resident Evil 3 (2020)",
+      "steam_app_id": "952060",
+      "nexus_slug": "residentevil32020",
+      "vortex_dir_name": "game-re3remake"
+    },
+    {
+      "id": "game-rimworld",
+      "name": "RimWorld",
+      "steam_app_id": "294100",
+      "nexus_slug": "rimworld",
+      "vortex_dir_name": "game-rimworld"
+    },
+    {
+      "id": "game-sekiro",
+      "name": "Sekiro: Shadows Die Twice",
+      "steam_app_id": "814380",
+      "nexus_slug": "sekiro",
+      "vortex_dir_name": "game-sekiro"
+    },
+    {
+      "id": "game-shadowrunreturns",
+      "name": "Shadowrun Returns",
+      "steam_app_id": "234650",
+      "nexus_slug": "shadowrunreturns",
+      "vortex_dir_name": "game-shadowrunreturns"
+    },
+    {
+      "id": "game-sims3",
+      "name": "The Sims 3",
+      "steam_app_id": "47890",
+      "nexus_slug": "thesims3",
+      "vortex_dir_name": "game-sims3"
+    },
+    {
+      "id": "game-sims4",
+      "name": "The Sims 4",
+      "steam_app_id": "1222670",
+      "nexus_slug": "thesims4",
+      "vortex_dir_name": "game-sims4"
+    },
+    {
+      "id": "game-skyrim",
+      "name": "The Elder Scrolls V: Skyrim",
+      "steam_app_id": "72850",
+      "nexus_slug": "skyrim",
+      "vortex_dir_name": "game-skyrim"
+    },
+    {
+      "id": "game-skyrimvr",
+      "name": "The Elder Scrolls V: Skyrim VR",
+      "steam_app_id": "611670",
+      "nexus_slug": "skyrimspecialedition",
+      "vortex_dir_name": "game-skyrimvr"
+    },
+    {
+      "id": "game-spyroreignitedtrilogy",
+      "name": "Spyro Reignited Trilogy",
+      "steam_app_id": "996580",
+      "nexus_slug": "spyroreignitedtrilogy",
+      "vortex_dir_name": "game-spyroreignitedtrilogy"
+    },
+    {
+      "id": "game-starbound",
+      "name": "Starbound",
+      "steam_app_id": "211820",
+      "nexus_slug": "starbound",
+      "vortex_dir_name": "game-starbound"
+    },
+    {
+      "id": "game-stardewvalley",
+      "name": "Stardew Valley",
+      "steam_app_id": "413150",
+      "nexus_slug": "stardewvalley",
+      "vortex_dir_name": "game-stardewvalley"
+    },
+    {
+      "id": "game-starfield",
+      "name": "Starfield",
+      "steam_app_id": "1716740",
+      "nexus_slug": "starfield",
+      "vortex_dir_name": "game-starfield"
+    },
+    {
+      "id": "game-stateofdecay",
+      "name": "State of Decay",
+      "steam_app_id": "241540",
+      "nexus_slug": "stateofdecay",
+      "vortex_dir_name": "game-stateofdecay"
+    },
+    {
+      "id": "game-subnautica",
+      "name": "Subnautica",
+      "steam_app_id": "264710",
+      "nexus_slug": "subnautica",
+      "vortex_dir_name": "game-subnautica"
+    },
+    {
+      "id": "game-subnauticabelowzero",
+      "name": "Subnautica: Below Zero",
+      "steam_app_id": "848450",
+      "nexus_slug": "subnauticabelowzero",
+      "vortex_dir_name": "game-subnauticabelowzero"
+    },
+    {
+      "id": "game-survivingmars",
+      "name": "Surviving Mars",
+      "steam_app_id": "464920",
+      "nexus_slug": "survivingmars",
+      "vortex_dir_name": "game-survivingmars"
+    },
+    {
+      "id": "game-sw-kotor",
+      "name": "Star Wars: Knights of the Old Republic",
+      "steam_app_id": "32370",
+      "nexus_slug": "kotor",
+      "vortex_dir_name": "game-sw-kotor"
+    },
+    {
+      "id": "game-sw-kotor2",
+      "name": "Star Wars: Knights of the Old Republic II - The Sith Lords",
+      "steam_app_id": "208580",
+      "nexus_slug": "kotor2",
+      "vortex_dir_name": "game-sw-kotor"
+    },
+    {
+      "id": "game-teamfortress2",
+      "name": "Team Fortress 2",
+      "steam_app_id": "440",
+      "nexus_slug": "teamfortress2",
+      "vortex_dir_name": "game-teamfortress2"
+    },
+    {
+      "id": "game-teso",
+      "name": "The Elder Scrolls Online",
+      "steam_app_id": "306130",
+      "nexus_slug": "elderscrollsonline",
+      "vortex_dir_name": "game-teso"
+    },
+    {
+      "id": "game-torchlight2",
+      "name": "Torchlight II",
+      "steam_app_id": "200710",
+      "nexus_slug": "torchlight2",
+      "vortex_dir_name": "game-torchlight2"
+    },
+    {
+      "id": "game-totalwarthreekingdoms",
+      "name": "Total War: Three Kingdoms",
+      "steam_app_id": "779340",
+      "nexus_slug": "totalwarthreekingdoms",
+      "vortex_dir_name": "game-totalwarthreekingdoms"
+    },
+    {
+      "id": "game-vtmbloodlines",
+      "name": "Vampire: The Masquerade - Bloodlines",
+      "steam_app_id": "2600",
+      "nexus_slug": "vampirebloodlines",
+      "vortex_dir_name": "game-vtmbloodlines"
+    },
+    {
+      "id": "game-warthunder",
+      "name": "War Thunder",
+      "steam_app_id": "236390",
+      "nexus_slug": "warthunder",
+      "vortex_dir_name": "game-warthunder"
+    },
+    {
+      "id": "game-witcher",
+      "name": "The Witcher: Enhanced Edition",
+      "steam_app_id": "20900",
+      "nexus_slug": "witcher",
+      "vortex_dir_name": "game-witcher"
+    },
+    {
+      "id": "game-witcher2",
+      "name": "The Witcher 2: Assassins of Kings",
+      "steam_app_id": "20920",
+      "nexus_slug": "witcher2",
+      "vortex_dir_name": "game-witcher2"
+    },
+    {
+      "id": "game-witcher3",
+      "name": "The Witcher 3: Wild Hunt",
+      "steam_app_id": "292030",
+      "nexus_slug": "witcher3",
+      "vortex_dir_name": "game-witcher3"
+    },
+    {
+      "id": "game-witcher3-goty",
+      "name": "The Witcher 3: Wild Hunt — Game of the Year Edition",
+      "steam_app_id": "499450",
+      "nexus_slug": "witcher3",
+      "vortex_dir_name": "game-witcher3"
+    },
+    {
+      "id": "game-wolcen",
+      "name": "Wolcen: Lords of Mayhem",
+      "steam_app_id": "424370",
+      "nexus_slug": "wolcenlordsofmayhem",
+      "vortex_dir_name": "game-wolcen"
+    },
+    {
+      "id": "game-x4foundations",
+      "name": "X4: Foundations",
+      "steam_app_id": "392160",
+      "nexus_slug": "x4foundations",
+      "vortex_dir_name": "game-x4foundations"
+    },
+    {
+      "id": "game-xcom2",
+      "name": "XCOM 2",
+      "steam_app_id": "268500",
+      "nexus_slug": "xcom2",
+      "vortex_dir_name": "game-xcom2"
+    },
+    {
+      "id": "game-xcom2-wotc",
+      "name": "XCOM 2: War of the Chosen",
+      "steam_app_id": "593380",
+      "nexus_slug": "xcom2",
+      "vortex_dir_name": "game-xcom2"
+    },
+    {
+      "id": "game-xrebirth",
+      "name": "X Rebirth",
+      "steam_app_id": "2870",
+      "nexus_slug": "xrebirth",
+      "vortex_dir_name": "game-xrebirth"
+    }
+  ]
+}
