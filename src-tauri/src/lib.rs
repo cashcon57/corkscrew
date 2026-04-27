@@ -46,6 +46,7 @@ pub mod migrations;
 pub mod mod_dependencies;
 pub mod mod_recommendations;
 pub mod mod_tools;
+pub mod mod_types;
 pub mod modlist_io;
 pub mod nexus;
 pub mod nexus_sso;

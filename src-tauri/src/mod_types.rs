@@ -1,0 +1,699 @@
+//! Mod-type registry — heuristics for routing mods to the correct install
+//! directory based on archive contents.
+//!
+//! ## Why
+//!
+//! Bethesda games (Skyrim, Fallout) have a single, well-known data directory
+//! (`<game>/Data`) into which every mod merges. Their [`GamePlugin`]
+//! implementations return that directory from `get_data_dir()`, and the
+//! installer copies extracted files in directly.
+//!
+//! Other games are more varied:
+//!
+//! - **BepInEx-based** games (Valheim, RoR2, Subnautica, etc.) want plugins
+//!   in `BepInEx/plugins/<modname>/`.
+//! - **Stardew Valley / SMAPI** wants `<game>/Mods/<modname>/`.
+//! - **Unreal Engine** games want `.pak` files in
+//!   `<game>/<project>/Content/Paks/~mods/`.
+//! - **UE4SS** Lua mods want `<inferred>/Binaries/Win64/Mods/<modname>/`.
+//! - **RimWorld** wants `<game>/Mods/<modname>/`.
+//!
+//! For unknown games (where no [`GamePlugin`] matches), we previously fell
+//! back to `data_dir = game_path` and dumped everything in the game root.
+//! That works for Bethesda-shaped archives by coincidence but routes
+//! BepInEx / SMAPI / Unreal mods to the wrong place.
+//!
+//! ## Design — Vortex parity
+//!
+//! Vortex registers mod types via
+//! `registerModType(id, priority, isSupported, getPath)`. Each type
+//! self-declares which archives it claims and the install path. The highest
+//! priority `isSupported` match wins.
+//!
+//! [`detect_mod_type`] walks the registered types in priority order and
+//! returns the first match. [`resolve_install_target`] additionally computes
+//! the absolute install path, including a per-mod subfolder when appropriate
+//! (BepInEx plugins want their own dir; UE pak files merge into `~mods/`).
+
+use std::path::{Path, PathBuf};
+
+// ---------------------------------------------------------------------------
+// ModType
+// ---------------------------------------------------------------------------
+
+/// A mod-type heuristic. See module docs.
+pub struct ModType {
+    /// Stable identifier used in DB / logs. e.g. `"BepInEx"`, `"SMAPI"`.
+    pub id: &'static str,
+    /// Human-readable name shown in UI / logs.
+    pub display_name: &'static str,
+    /// Higher priority wins when multiple types match. Range [0, 100].
+    pub priority: u8,
+    /// Predicate run against the archive's relative entry list. Return true
+    /// if this mod type claims the archive.
+    pub detect: fn(&[String]) -> bool,
+    /// Compute the install path relative to (or rooted at) `game_path` for
+    /// the given `mod_name`. The function may ignore `mod_name` if files
+    /// merge into a shared parent (UE paks, BepInExPack bootstrap).
+    pub install_path: fn(game_path: &Path, mod_name: &str) -> PathBuf,
+    /// If true, the install path includes a per-mod subfolder (e.g.
+    /// `BepInEx/plugins/MyMod/`); each mod gets its own directory.
+    /// If false, files merge into a shared parent (e.g. UE pak `~mods/`).
+    pub per_mod_subfolder: bool,
+}
+
+/// Result of [`resolve_install_target`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallTarget {
+    /// Absolute deploy directory. When `per_mod_subfolder` is true, this
+    /// already includes the per-mod subfolder.
+    pub target_dir: PathBuf,
+    /// Whether `target_dir` is a per-mod subfolder. Callers may use this to
+    /// decide if existing files at `target_dir` represent a stale install
+    /// of *this* mod (and can be wiped) or a shared deploy directory (and
+    /// must not be touched).
+    pub per_mod_subfolder: bool,
+    /// Identifier of the matched [`ModType`] (or `"Generic_Subfolder"` for
+    /// the fallback).
+    pub type_id: &'static str,
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Sanitize a string for use as a directory name. Removes characters that
+/// are invalid on Windows (the most restrictive of the supported targets)
+/// and trims surrounding whitespace and dots. Empty results fall back to
+/// `"mod"` so we never create a `""` directory.
+fn sanitize_dir_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for ch in name.chars() {
+        match ch {
+            // Forbidden on NTFS / common archive consumers.
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0' => out.push('_'),
+            c if (c as u32) < 0x20 => out.push('_'),
+            c => out.push(c),
+        }
+    }
+    let trimmed = out.trim_matches(|c: char| c.is_whitespace() || c == '.');
+    if trimmed.is_empty() {
+        "mod".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Lower-case helper: returns true iff any entry path's component (split on
+/// `/` or `\`) equals one of `targets` (case-insensitive). Cheap for the
+/// detect-fn use cases; we don't bother with `Path` parsing to avoid the
+/// cross-platform dance for `\` separators in archive paths.
+fn any_entry_starts_with(entries: &[String], prefix: &str) -> bool {
+    let prefix_lower = prefix.to_lowercase();
+    entries
+        .iter()
+        .any(|e| e.replace('\\', "/").to_lowercase().starts_with(&prefix_lower))
+}
+
+fn any_entry_ext_eq(entries: &[String], ext: &str) -> bool {
+    let ext_lower = ext.to_lowercase();
+    entries.iter().any(|e| {
+        Path::new(e)
+            .extension()
+            .and_then(|x| x.to_str())
+            .map(|x| x.eq_ignore_ascii_case(&ext_lower))
+            .unwrap_or(false)
+    })
+}
+
+fn any_entry_filename_eq(entries: &[String], filename: &str) -> bool {
+    let filename_lower = filename.to_lowercase();
+    entries.iter().any(|e| {
+        Path::new(e)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.eq_ignore_ascii_case(&filename_lower))
+            .unwrap_or(false)
+    })
+}
+
+/// Returns true if any `entries[i]` ends (case-insensitive) in `suffix`.
+fn any_entry_ends_with(entries: &[String], suffix: &str) -> bool {
+    let suffix_lower = suffix.to_lowercase();
+    entries
+        .iter()
+        .any(|e| e.replace('\\', "/").to_lowercase().ends_with(&suffix_lower))
+}
+
+/// Depth of an entry path = number of `/`-separated components, *not*
+/// counting the final filename. `"manifest.json"` has depth 0;
+/// `"sub/manifest.json"` has depth 1.
+fn entry_depth(path: &str) -> usize {
+    path.replace('\\', "/").trim_matches('/').split('/').count().saturating_sub(1)
+}
+
+// ---------------------------------------------------------------------------
+// Detect functions
+// ---------------------------------------------------------------------------
+
+/// BepInExPack bootstrap — the pack ships `BepInExPack/winhttp.dll` /
+/// `BepInExPack/BepInEx/`. Distinct from a regular BepInEx plugin.
+fn detect_bepinex_pack(entries: &[String]) -> bool {
+    any_entry_starts_with(entries, "BepInExPack/winhttp.dll")
+        || any_entry_starts_with(entries, "BepInExPack/BepInEx/")
+}
+
+/// Regular BepInEx plugin — payload is a DLL under `BepInEx/plugins/` or
+/// just `plugins/` (some authors strip the BepInEx prefix).
+fn detect_bepinex_plugin(entries: &[String]) -> bool {
+    let has_dll = any_entry_ext_eq(entries, "dll");
+    let in_bepinex_plugins = any_entry_starts_with(entries, "BepInEx/plugins/");
+    let in_loose_plugins = any_entry_starts_with(entries, "plugins/");
+    has_dll && (in_bepinex_plugins || in_loose_plugins)
+}
+
+/// SMAPI (Stardew Modding API) — every SMAPI mod ships a `manifest.json`
+/// alongside an assembly DLL. The manifest is at depth 0 (loose) or 1
+/// (one wrapper dir).
+fn detect_smapi(entries: &[String]) -> bool {
+    let manifest = entries.iter().any(|e| {
+        let p = e.replace('\\', "/");
+        Path::new(&p)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.eq_ignore_ascii_case("manifest.json"))
+            .unwrap_or(false)
+            && entry_depth(&p) <= 2
+    });
+    manifest && any_entry_ext_eq(entries, "dll")
+}
+
+/// Unreal Engine pak files at top level or under a `Paks/` directory.
+fn detect_ue_paks(entries: &[String]) -> bool {
+    if !any_entry_ext_eq(entries, "pak") {
+        return false;
+    }
+    // Either top-level paks or under a Paks/ subdir; we don't insist on
+    // either, just that paks exist somewhere — the install path falls back
+    // to `<game>/Paks/~mods/` for the latter and the project-relative
+    // path for the former.
+    true
+}
+
+/// UE4SS Lua mods or the UE4SS bootstrap itself.
+///
+/// UE4SS Lua mods place files at `Mods/<name>/Scripts/main.lua` or
+/// `Mods/<name>/main.lua`. The UE4SS bootstrap itself ships `dwmapi.dll`
+/// alongside `UE4SS-settings.ini`.
+fn detect_ue4ss(entries: &[String]) -> bool {
+    let lua_mod = entries.iter().any(|e| {
+        let p = e.replace('\\', "/").to_lowercase();
+        (p.contains("/scripts/main.lua") && p.starts_with("mods/"))
+            || (p.starts_with("mods/") && p.ends_with("/main.lua"))
+    });
+    let bootstrap = any_entry_filename_eq(entries, "dwmapi.dll")
+        && any_entry_filename_eq(entries, "UE4SS-settings.ini");
+    lua_mod || bootstrap
+}
+
+/// RimWorld mod — every RimWorld mod has `About/About.xml`.
+fn detect_rimworld(entries: &[String]) -> bool {
+    any_entry_ends_with(entries, "/About/About.xml")
+        || entries.iter().any(|e| {
+            e.replace('\\', "/").eq_ignore_ascii_case("About/About.xml")
+        })
+}
+
+/// Generic fallback — always matches. Lowest priority.
+fn detect_generic(_entries: &[String]) -> bool {
+    true
+}
+
+// ---------------------------------------------------------------------------
+// Install-path functions
+// ---------------------------------------------------------------------------
+
+/// BepInExPack bootstrap extracts directly to the game root — the pack
+/// ships its own folder structure (`BepInExPack/...`) which lays out
+/// alongside the game exe.
+fn path_bepinex_pack(game_path: &Path, _mod_name: &str) -> PathBuf {
+    game_path.to_path_buf()
+}
+
+fn path_bepinex_plugin(game_path: &Path, mod_name: &str) -> PathBuf {
+    game_path
+        .join("BepInEx")
+        .join("plugins")
+        .join(sanitize_dir_name(mod_name))
+}
+
+fn path_smapi(game_path: &Path, mod_name: &str) -> PathBuf {
+    game_path.join("Mods").join(sanitize_dir_name(mod_name))
+}
+
+/// UE pak install path — try to derive the project directory by scanning
+/// for `*/Content/Paks/`; otherwise fall back to `<game>/Paks/~mods/`.
+///
+/// Note: per-mod subfolder is FALSE — pak files merge into `~mods/`.
+fn path_ue_paks(game_path: &Path, _mod_name: &str) -> PathBuf {
+    if let Some(project_paks) = find_unreal_paks_dir(game_path) {
+        return project_paks.join("~mods");
+    }
+    game_path.join("Paks").join("~mods")
+}
+
+fn path_ue4ss(game_path: &Path, mod_name: &str) -> PathBuf {
+    // UE4SS lives at `<project>/Binaries/Win64/Mods/`. Try to derive the
+    // project from a discovered `Binaries/Win64` directory; else fall back
+    // to a per-mod folder under the game root.
+    if let Some(win64) = find_unreal_win64_dir(game_path) {
+        return win64.join("Mods").join(sanitize_dir_name(mod_name));
+    }
+    game_path.join(sanitize_dir_name(mod_name))
+}
+
+fn path_rimworld(game_path: &Path, mod_name: &str) -> PathBuf {
+    game_path.join("Mods").join(sanitize_dir_name(mod_name))
+}
+
+fn path_generic(game_path: &Path, mod_name: &str) -> PathBuf {
+    game_path.join(sanitize_dir_name(mod_name))
+}
+
+/// Walk `game_path` (max depth 4) looking for any directory shaped like
+/// `<X>/Content/Paks`, returning that absolute path. Many UE titles bury
+/// the project under `<game>/<ProjectName>/Content/Paks/` and the project
+/// name is otherwise opaque.
+fn find_unreal_paks_dir(game_path: &Path) -> Option<PathBuf> {
+    find_dir_path_suffix(game_path, &["Content", "Paks"], 4)
+}
+
+/// Same search, for `<X>/Binaries/Win64`. Used by UE4SS Lua mods.
+fn find_unreal_win64_dir(game_path: &Path) -> Option<PathBuf> {
+    find_dir_path_suffix(game_path, &["Binaries", "Win64"], 4)
+}
+
+/// Walk `root` (max `max_depth` levels) and return the first directory
+/// whose final path segments equal `suffix` (case-insensitive).
+fn find_dir_path_suffix(root: &Path, suffix: &[&str], max_depth: usize) -> Option<PathBuf> {
+    fn walk(dir: &Path, suffix: &[&str], depth: usize, max_depth: usize) -> Option<PathBuf> {
+        if depth > max_depth {
+            return None;
+        }
+        let entries = std::fs::read_dir(dir).ok()?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            // Check whether `path` ends with `suffix` (case-insensitive).
+            if path_ends_with_ci(&path, suffix) {
+                return Some(path);
+            }
+            if let Some(found) = walk(&path, suffix, depth + 1, max_depth) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    walk(root, suffix, 0, max_depth)
+}
+
+fn path_ends_with_ci(path: &Path, suffix: &[&str]) -> bool {
+    let comps: Vec<String> = path
+        .components()
+        .filter_map(|c| c.as_os_str().to_str().map(|s| s.to_lowercase()))
+        .collect();
+    if comps.len() < suffix.len() {
+        return false;
+    }
+    let start = comps.len() - suffix.len();
+    comps[start..]
+        .iter()
+        .zip(suffix.iter())
+        .all(|(a, b)| a == &b.to_lowercase())
+}
+
+// ---------------------------------------------------------------------------
+// Registry
+// ---------------------------------------------------------------------------
+
+/// Built-in mod types. Higher priority wins. Iteration order is stable;
+/// we sort by priority once at lookup time.
+const BUILTIN_MOD_TYPES: &[ModType] = &[
+    ModType {
+        id: "Generic_BepInExPack_Bootstrap",
+        display_name: "BepInExPack (bootstrap)",
+        priority: 95,
+        detect: detect_bepinex_pack,
+        install_path: path_bepinex_pack,
+        per_mod_subfolder: false,
+    },
+    ModType {
+        id: "BepInEx",
+        display_name: "BepInEx plugin",
+        priority: 90,
+        detect: detect_bepinex_plugin,
+        install_path: path_bepinex_plugin,
+        per_mod_subfolder: true,
+    },
+    ModType {
+        id: "SMAPI",
+        display_name: "SMAPI (Stardew Valley)",
+        priority: 80,
+        detect: detect_smapi,
+        install_path: path_smapi,
+        per_mod_subfolder: true,
+    },
+    ModType {
+        id: "UE_Paks",
+        display_name: "Unreal Engine pak",
+        priority: 70,
+        detect: detect_ue_paks,
+        install_path: path_ue_paks,
+        per_mod_subfolder: false,
+    },
+    ModType {
+        id: "UE4SS",
+        display_name: "UE4SS Lua mod",
+        priority: 60,
+        detect: detect_ue4ss,
+        install_path: path_ue4ss,
+        per_mod_subfolder: true,
+    },
+    ModType {
+        id: "RimWorld",
+        display_name: "RimWorld mod",
+        priority: 60,
+        detect: detect_rimworld,
+        install_path: path_rimworld,
+        per_mod_subfolder: true,
+    },
+    ModType {
+        id: "Generic_Subfolder",
+        display_name: "Generic per-mod subfolder",
+        priority: 10,
+        detect: detect_generic,
+        install_path: path_generic,
+        per_mod_subfolder: true,
+    },
+];
+
+/// Detect the matching mod type for the given archive entry list. Returns
+/// the highest-priority type whose `detect` predicate matches. Always
+/// succeeds — the `Generic_Subfolder` fallback (priority 10) matches
+/// unconditionally.
+pub fn detect_mod_type(entries: &[String]) -> Option<&'static ModType> {
+    // Sort indices by descending priority and walk in order. Static slice
+    // means we can't sort in place; collect references then sort.
+    let mut sorted: Vec<&'static ModType> = BUILTIN_MOD_TYPES.iter().collect();
+    sorted.sort_by(|a, b| b.priority.cmp(&a.priority));
+    sorted.into_iter().find(|mt| (mt.detect)(entries))
+}
+
+/// Resolve the absolute deploy target for a mod. Wraps [`detect_mod_type`]
+/// to also compute the install path. Always returns a target — the
+/// `Generic_Subfolder` fallback ensures we never deploy to the game root
+/// for unknown shapes.
+pub fn resolve_install_target(
+    game_path: &Path,
+    mod_name: &str,
+    entries: &[String],
+) -> InstallTarget {
+    let mt = detect_mod_type(entries).expect("Generic_Subfolder always matches");
+    let target_dir = (mt.install_path)(game_path, mod_name);
+    InstallTarget {
+        target_dir,
+        per_mod_subfolder: mt.per_mod_subfolder,
+        type_id: mt.id,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entries(paths: &[&str]) -> Vec<String> {
+        paths.iter().map(|s| s.to_string()).collect()
+    }
+
+    // --- detect functions ---------------------------------------------------
+
+    #[test]
+    fn detect_bepinex_plugin_positive() {
+        let e = entries(&["BepInEx/plugins/MyPlugin.dll"]);
+        assert!(detect_bepinex_plugin(&e));
+    }
+
+    #[test]
+    fn detect_bepinex_plugin_loose_plugins() {
+        // Some authors strip the BepInEx prefix and ship `plugins/foo.dll`.
+        let e = entries(&["plugins/MyPlugin.dll"]);
+        assert!(detect_bepinex_plugin(&e));
+    }
+
+    #[test]
+    fn detect_bepinex_plugin_negative_no_dll() {
+        let e = entries(&["BepInEx/plugins/readme.txt"]);
+        assert!(!detect_bepinex_plugin(&e));
+    }
+
+    #[test]
+    fn detect_bepinex_plugin_negative_unrelated() {
+        let e = entries(&["meshes/armor/foo.nif", "mymod.esp"]);
+        assert!(!detect_bepinex_plugin(&e));
+    }
+
+    #[test]
+    fn detect_bepinex_pack_positive() {
+        let e = entries(&[
+            "BepInExPack/winhttp.dll",
+            "BepInExPack/BepInEx/core/BepInEx.Core.dll",
+        ]);
+        assert!(detect_bepinex_pack(&e));
+    }
+
+    #[test]
+    fn detect_bepinex_pack_negative() {
+        let e = entries(&["BepInEx/plugins/foo.dll"]);
+        assert!(!detect_bepinex_pack(&e));
+    }
+
+    #[test]
+    fn detect_smapi_positive() {
+        let e = entries(&["MyMod/manifest.json", "MyMod/MyMod.dll"]);
+        assert!(detect_smapi(&e));
+    }
+
+    #[test]
+    fn detect_smapi_loose_manifest() {
+        let e = entries(&["manifest.json", "MyMod.dll"]);
+        assert!(detect_smapi(&e));
+    }
+
+    #[test]
+    fn detect_smapi_negative_no_dll() {
+        let e = entries(&["MyMod/manifest.json"]);
+        assert!(!detect_smapi(&e));
+    }
+
+    #[test]
+    fn detect_smapi_negative_too_deep() {
+        // manifest.json buried at depth 3 — not a SMAPI mod root.
+        let e = entries(&["a/b/c/manifest.json", "a/b/c/x.dll"]);
+        assert!(!detect_smapi(&e));
+    }
+
+    #[test]
+    fn detect_ue_paks_positive_top_level() {
+        let e = entries(&["MyMod_P.pak"]);
+        assert!(detect_ue_paks(&e));
+    }
+
+    #[test]
+    fn detect_ue_paks_positive_subdir() {
+        let e = entries(&["Paks/MyMod_P.pak"]);
+        assert!(detect_ue_paks(&e));
+    }
+
+    #[test]
+    fn detect_ue_paks_negative() {
+        let e = entries(&["meshes/foo.nif"]);
+        assert!(!detect_ue_paks(&e));
+    }
+
+    #[test]
+    fn detect_ue4ss_positive_lua() {
+        let e = entries(&["Mods/MyMod/Scripts/main.lua"]);
+        assert!(detect_ue4ss(&e));
+    }
+
+    #[test]
+    fn detect_ue4ss_positive_bootstrap() {
+        let e = entries(&["dwmapi.dll", "UE4SS-settings.ini", "Mods/shared/enabled.txt"]);
+        assert!(detect_ue4ss(&e));
+    }
+
+    #[test]
+    fn detect_ue4ss_negative() {
+        let e = entries(&["BepInEx/plugins/foo.dll"]);
+        assert!(!detect_ue4ss(&e));
+    }
+
+    #[test]
+    fn detect_rimworld_positive_loose() {
+        let e = entries(&["About/About.xml", "Assemblies/MyMod.dll"]);
+        assert!(detect_rimworld(&e));
+    }
+
+    #[test]
+    fn detect_rimworld_positive_wrapped() {
+        let e = entries(&["MyMod/About/About.xml"]);
+        assert!(detect_rimworld(&e));
+    }
+
+    #[test]
+    fn detect_rimworld_negative() {
+        let e = entries(&["mymod.esp"]);
+        assert!(!detect_rimworld(&e));
+    }
+
+    #[test]
+    fn detect_generic_always_matches() {
+        assert!(detect_generic(&entries(&[])));
+        assert!(detect_generic(&entries(&["random.txt"])));
+    }
+
+    // --- detect_mod_type priority ordering ---------------------------------
+
+    #[test]
+    fn priority_bepinex_pack_beats_plugin() {
+        // The pack ships `BepInExPack/...` AND `BepInEx/plugins/...` — the
+        // pack should win because of higher priority.
+        let e = entries(&[
+            "BepInExPack/winhttp.dll",
+            "BepInExPack/BepInEx/plugins/Core.dll",
+            "BepInEx/plugins/Helper.dll",
+        ]);
+        let mt = detect_mod_type(&e).unwrap();
+        assert_eq!(mt.id, "Generic_BepInExPack_Bootstrap");
+    }
+
+    #[test]
+    fn priority_bepinex_beats_generic() {
+        let e = entries(&["BepInEx/plugins/Foo.dll", "readme.txt"]);
+        let mt = detect_mod_type(&e).unwrap();
+        assert_eq!(mt.id, "BepInEx");
+    }
+
+    #[test]
+    fn priority_unknown_falls_back_to_generic() {
+        let e = entries(&["random.txt", "subdir/another.txt"]);
+        let mt = detect_mod_type(&e).unwrap();
+        assert_eq!(mt.id, "Generic_Subfolder");
+    }
+
+    // --- resolve_install_target --------------------------------------------
+
+    #[test]
+    fn resolve_bepinex_plugin_target() {
+        let game = Path::new("/game/MyGame");
+        let e = entries(&["BepInEx/plugins/Foo.dll"]);
+        let target = resolve_install_target(game, "Cool Plugin / v1.0", &e);
+        assert_eq!(target.type_id, "BepInEx");
+        assert!(target.per_mod_subfolder);
+        // Sanitized: `/` -> `_`
+        assert_eq!(
+            target.target_dir,
+            Path::new("/game/MyGame/BepInEx/plugins/Cool Plugin _ v1.0")
+        );
+    }
+
+    #[test]
+    fn resolve_smapi_target() {
+        let game = Path::new("/game/Stardew");
+        let e = entries(&["manifest.json", "MyMod.dll"]);
+        let target = resolve_install_target(game, "MyMod", &e);
+        assert_eq!(target.type_id, "SMAPI");
+        assert!(target.per_mod_subfolder);
+        assert_eq!(target.target_dir, Path::new("/game/Stardew/Mods/MyMod"));
+    }
+
+    #[test]
+    fn resolve_ue_paks_fallback_when_no_project() {
+        // No `<X>/Content/Paks/` discoverable — fall back to <game>/Paks/~mods/.
+        let game = Path::new("/nonexistent/game");
+        let e = entries(&["MyMod_P.pak"]);
+        let target = resolve_install_target(game, "MyMod", &e);
+        assert_eq!(target.type_id, "UE_Paks");
+        assert!(!target.per_mod_subfolder);
+        assert_eq!(target.target_dir, Path::new("/nonexistent/game/Paks/~mods"));
+    }
+
+    #[test]
+    fn resolve_ue_paks_uses_project_dir_when_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let game = tmp.path().to_path_buf();
+        let project_paks = game.join("MyProject").join("Content").join("Paks");
+        std::fs::create_dir_all(&project_paks).unwrap();
+
+        let e = entries(&["MyMod_P.pak"]);
+        let target = resolve_install_target(&game, "MyMod", &e);
+        assert_eq!(target.type_id, "UE_Paks");
+        assert_eq!(target.target_dir, project_paks.join("~mods"));
+    }
+
+    #[test]
+    fn resolve_rimworld_target() {
+        let game = Path::new("/game/RimWorld");
+        let e = entries(&["About/About.xml", "Assemblies/Mod.dll"]);
+        let target = resolve_install_target(game, "MyRimMod", &e);
+        assert_eq!(target.type_id, "RimWorld");
+        assert!(target.per_mod_subfolder);
+        assert_eq!(target.target_dir, Path::new("/game/RimWorld/Mods/MyRimMod"));
+    }
+
+    #[test]
+    fn resolve_generic_fallback_target() {
+        let game = Path::new("/game/Mystery");
+        let e = entries(&["readme.txt", "data/whatever.bin"]);
+        let target = resolve_install_target(game, "Some Mod", &e);
+        assert_eq!(target.type_id, "Generic_Subfolder");
+        assert!(target.per_mod_subfolder);
+        assert_eq!(target.target_dir, Path::new("/game/Mystery/Some Mod"));
+    }
+
+    #[test]
+    fn resolve_bepinex_pack_extracts_to_game_root() {
+        let game = Path::new("/game/Valheim");
+        let e = entries(&["BepInExPack/winhttp.dll", "BepInExPack/BepInEx/core/x.dll"]);
+        let target = resolve_install_target(game, "BepInExPack", &e);
+        assert_eq!(target.type_id, "Generic_BepInExPack_Bootstrap");
+        assert!(!target.per_mod_subfolder);
+        assert_eq!(target.target_dir, game);
+    }
+
+    // --- sanitize_dir_name -------------------------------------------------
+
+    #[test]
+    fn sanitize_strips_invalid_chars() {
+        assert_eq!(sanitize_dir_name("foo/bar:baz"), "foo_bar_baz");
+        assert_eq!(sanitize_dir_name("a*b?c|d"), "a_b_c_d");
+    }
+
+    #[test]
+    fn sanitize_trims_dots_and_whitespace() {
+        assert_eq!(sanitize_dir_name(" .MyMod. "), "MyMod");
+    }
+
+    #[test]
+    fn sanitize_empty_falls_back() {
+        assert_eq!(sanitize_dir_name(""), "mod");
+        assert_eq!(sanitize_dir_name("..."), "mod");
+        assert_eq!(sanitize_dir_name("   "), "mod");
+    }
+}
