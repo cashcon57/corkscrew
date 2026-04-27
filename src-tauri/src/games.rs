@@ -148,6 +148,25 @@ pub trait GamePlugin: Send + Sync {
     fn categorize_mod_file(&self, _rel_path: &str) -> Option<String> {
         None
     }
+
+    /// If `true`, the install pipeline uses [`get_data_dir`] directly and
+    /// assumes mods MERGE into it. Bethesda games (Skyrim, Fallout) return
+    /// `true` because every mod's contents pour into `<game>/Data`.
+    ///
+    /// If `false`, the install pipeline delegates to [`crate::mod_types`]
+    /// for archive-shape-based path detection (BepInEx plugins to
+    /// `BepInEx/plugins/<modname>/`, UE paks to `~mods/`, etc.).
+    ///
+    /// Default: `true` to preserve existing behavior. Per-game plugins
+    /// that want to opt into mod-type detection should override and
+    /// return `false`. Unknown games (no plugin matched) fall through
+    /// to mod-type detection automatically — see
+    /// [`crate::installer`] for the integration point.
+    ///
+    /// [`get_data_dir`]: GamePlugin::get_data_dir
+    fn use_legacy_data_dir(&self) -> bool {
+        true
+    }
 }
 
 // ---------------------------------------------------------------------------
