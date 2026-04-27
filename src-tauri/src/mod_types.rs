@@ -242,6 +242,72 @@ fn detect_sims4_script(entries: &[String]) -> bool {
     any_entry_ext_eq(entries, "ts4script")
 }
 
+// --- GTA V detect functions ---
+//
+// NOTE on namespace overlap: the GTA V mod types fire purely on file shape
+// (`.asi`, `dlcpacks/`, `scripts/*.dll`). They are NOT gated by `game_id` —
+// the registry has no notion of game context. This is intentional and
+// matches the existing Sims4_Package / SMAPI / BepInEx pattern.
+//
+// In practice the overlap is not a problem because:
+// - Bethesda titles set `use_legacy_data_dir() == true` and bypass the
+//   mod-types registry entirely (every mod merges into `<game>/Data`).
+// - The remaining games whose archives could shadow GTA V shapes (e.g.
+//   a Crimson Desert mod that ships a `dinput8.dll`) match higher-priority
+//   types like `Generic_BepInExPack_Bootstrap` (95) before reaching these.
+// - GTA V's own archives (.asi, dlcpacks/) have no other mainstream consumer.
+
+/// Detect a GTA V dlcpack add-on. Two shapes:
+///   1. Archive root contains a `dlcpacks/<pack>/dlc.rpf` tree.
+///   2. Archive root IS a single dlcpack folder containing `dlc.rpf`
+///      (e.g. `MyDLC/dlc.rpf` with no leading `dlcpacks/`).
+fn detect_gtav_dlcpack(entries: &[String]) -> bool {
+    let normalised: Vec<String> = entries
+        .iter()
+        .map(|e| e.replace('\\', "/").to_lowercase())
+        .collect();
+    let has_dlcpacks_tree = normalised
+        .iter()
+        .any(|e| e.starts_with("dlcpacks/") && e.ends_with("/dlc.rpf"));
+    if has_dlcpacks_tree {
+        return true;
+    }
+    // Bare `<pack>/dlc.rpf` shape — exactly one dir level then `dlc.rpf`.
+    normalised.iter().any(|e| {
+        let parts: Vec<&str> = e.split('/').collect();
+        parts.len() == 2 && parts[1] == "dlc.rpf" && !parts[0].is_empty()
+    })
+}
+
+/// Detect a GTA V ASI / Lua-script mod (Alexander Blade ASI loader plus
+/// Headscript LUA Plugin payloads).
+fn detect_gtav_asi_script(entries: &[String]) -> bool {
+    if any_entry_ext_eq(entries, "asi") {
+        return true;
+    }
+    // Lua Plugin scripts live under `scripts/addins/`.
+    entries.iter().any(|e| {
+        let p = e.replace('\\', "/").to_lowercase();
+        p.starts_with("scripts/addins/") && p.ends_with(".lua")
+    })
+}
+
+/// Detect a GTA V .NET (SHVDN) script mod — `.dll` files referencing the
+/// SHVDN runtime, OR DLLs nested under a top-level `scripts/` dir.
+fn detect_gtav_net_script(entries: &[String]) -> bool {
+    let normalised: Vec<String> = entries
+        .iter()
+        .map(|e| e.replace('\\', "/").to_lowercase())
+        .collect();
+    let has_shvdn_ref = normalised
+        .iter()
+        .any(|e| e.contains("scripthookvdotnet") && e.ends_with(".dll"));
+    let in_scripts = normalised
+        .iter()
+        .any(|e| e.starts_with("scripts/") && e.ends_with(".dll"));
+    has_shvdn_ref || in_scripts
+}
+
 /// Generic fallback — always matches. Lowest priority.
 fn detect_generic(_entries: &[String]) -> bool {
     true
@@ -308,6 +374,38 @@ fn path_sims4_package(mods_dir: &Path, mod_name: &str) -> PathBuf {
 /// lives flat with no per-mod wrapping folder.
 fn path_sims4_script(mods_dir: &Path, _mod_name: &str) -> PathBuf {
     mods_dir.to_path_buf()
+}
+
+// --- GTA V install-path functions ---
+
+/// GTA V dlcpack install path.
+///
+/// - Archive shape `dlcpacks/<pack>/dlc.rpf` extracts to the game root and
+///   the `dlcpacks/` segment in the archive lays itself out under
+///   `<game>/dlcpacks/`. We return the game root for that case.
+/// - Archive shape `<pack>/dlc.rpf` (no leading `dlcpacks/`) extracts under
+///   `<game>/dlcpacks/` so the pack lands at `<game>/dlcpacks/<pack>/`.
+///
+/// We can't tell which shape we have here — the install pipeline merges
+/// the archive into the returned dir. Defaulting to `<game>/dlcpacks/` is
+/// safe for the bare shape and only misroutes the prefixed shape into
+/// `<game>/dlcpacks/dlcpacks/<pack>/`. Inspect the archive entries first
+/// to disambiguate.
+fn path_gtav_dlcpack(game_path: &Path, _mod_name: &str) -> PathBuf {
+    game_path.join("dlcpacks")
+}
+
+/// ASI / Lua scripts deploy directly to the game root. The archive's own
+/// `scripts/` subdir (if present) is preserved automatically by the
+/// extraction pass.
+fn path_gtav_asi_script(game_path: &Path, _mod_name: &str) -> PathBuf {
+    game_path.to_path_buf()
+}
+
+/// .NET scripts deploy to the game root; `scripts/` subdir is preserved
+/// from the archive layout.
+fn path_gtav_net_script(game_path: &Path, _mod_name: &str) -> PathBuf {
+    game_path.to_path_buf()
 }
 
 fn path_generic(game_path: &Path, mod_name: &str) -> PathBuf {
@@ -398,6 +496,36 @@ const BUILTIN_MOD_TYPES: &[ModType] = &[
         detect: detect_smapi,
         install_path: path_smapi,
         per_mod_subfolder: true,
+    },
+    // -- GTA V mod types --
+    //
+    // Priorities chosen to slot below BepInExPack (95) and above the
+    // generic Unreal Engine catch-alls (UE_Paks 70 / UE4SS 60). They fire
+    // on file shape only — see the design note above the GTA V detect
+    // functions for why namespace overlap with non-GTA games is benign.
+    ModType {
+        id: "GTAV_DlcPack",
+        display_name: "GTA V dlcpack",
+        priority: 78,
+        detect: detect_gtav_dlcpack,
+        install_path: path_gtav_dlcpack,
+        per_mod_subfolder: false,
+    },
+    ModType {
+        id: "GTAV_ASIScript",
+        display_name: "GTA V ASI / Lua script",
+        priority: 72,
+        detect: detect_gtav_asi_script,
+        install_path: path_gtav_asi_script,
+        per_mod_subfolder: false,
+    },
+    ModType {
+        id: "GTAV_NetScript",
+        display_name: "GTA V .NET (SHVDN) script",
+        priority: 70,
+        detect: detect_gtav_net_script,
+        install_path: path_gtav_net_script,
+        per_mod_subfolder: false,
     },
     ModType {
         id: "Sims4_Package",
@@ -827,5 +955,116 @@ mod tests {
         assert_eq!(sanitize_dir_name(""), "mod");
         assert_eq!(sanitize_dir_name("..."), "mod");
         assert_eq!(sanitize_dir_name("   "), "mod");
+    }
+
+    // --- GTA V detect tests -------------------------------------------------
+
+    #[test]
+    fn detect_gtav_dlcpack_with_prefix() {
+        let e = entries(&["dlcpacks/myDLC/dlc.rpf"]);
+        assert!(detect_gtav_dlcpack(&e));
+    }
+
+    #[test]
+    fn detect_gtav_dlcpack_bare_shape() {
+        let e = entries(&["myDLC/dlc.rpf"]);
+        assert!(detect_gtav_dlcpack(&e));
+    }
+
+    #[test]
+    fn detect_gtav_dlcpack_negative() {
+        let e = entries(&["foo.asi", "scripts/main.lua"]);
+        assert!(!detect_gtav_dlcpack(&e));
+        // Just a top-level dlc.rpf with no folder is not a valid pack.
+        let e = entries(&["dlc.rpf"]);
+        assert!(!detect_gtav_dlcpack(&e));
+    }
+
+    #[test]
+    fn detect_gtav_asi_positive() {
+        let e = entries(&["MyMod.asi"]);
+        assert!(detect_gtav_asi_script(&e));
+    }
+
+    #[test]
+    fn detect_gtav_asi_lua_addins() {
+        let e = entries(&["scripts/addins/menyoo.lua"]);
+        assert!(detect_gtav_asi_script(&e));
+    }
+
+    #[test]
+    fn detect_gtav_asi_negative() {
+        let e = entries(&["BepInEx/plugins/foo.dll"]);
+        assert!(!detect_gtav_asi_script(&e));
+    }
+
+    #[test]
+    fn detect_gtav_net_via_shvdn_reference() {
+        let e = entries(&["ScriptHookVDotNet.asi", "ScriptHookVDotNet3.dll"]);
+        assert!(detect_gtav_net_script(&e));
+    }
+
+    #[test]
+    fn detect_gtav_net_via_scripts_dir() {
+        let e = entries(&["scripts/MyModScript.dll"]);
+        assert!(detect_gtav_net_script(&e));
+    }
+
+    #[test]
+    fn detect_gtav_net_negative_loose_dll() {
+        // Plain `foo.dll` at root is NOT a SHVDN script — could be anything.
+        let e = entries(&["foo.dll", "readme.txt"]);
+        assert!(!detect_gtav_net_script(&e));
+    }
+
+    #[test]
+    fn priority_dlcpack_beats_asi_when_both_present() {
+        // Hybrid release — some packs ship both dlcpacks/ and an ASI
+        // helper. dlcpack (78) should win over ASIScript (72).
+        let e = entries(&[
+            "dlcpacks/myPack/dlc.rpf",
+            "MyHelper.asi",
+        ]);
+        let mt = detect_mod_type(&e).unwrap();
+        assert_eq!(mt.id, "GTAV_DlcPack");
+    }
+
+    #[test]
+    fn priority_asi_beats_net_when_both_present() {
+        // ASIScript (72) > NetScript (70). A pack with both .asi and a
+        // SHVDN .dll lands as ASIScript.
+        let e = entries(&["Something.asi", "scripts/Helper.dll"]);
+        let mt = detect_mod_type(&e).unwrap();
+        assert_eq!(mt.id, "GTAV_ASIScript");
+    }
+
+    #[test]
+    fn resolve_gtav_dlcpack_target() {
+        let game = Path::new("/game/GTAV");
+        let e = entries(&["dlcpacks/myPack/dlc.rpf"]);
+        let target = resolve_install_target(game, "MyPack", &e);
+        assert_eq!(target.type_id, "GTAV_DlcPack");
+        assert!(!target.per_mod_subfolder);
+        assert_eq!(target.target_dir, Path::new("/game/GTAV/dlcpacks"));
+    }
+
+    #[test]
+    fn resolve_gtav_asi_to_root() {
+        let game = Path::new("/game/GTAV");
+        let e = entries(&["NativeTrainer.asi"]);
+        let target = resolve_install_target(game, "Native Trainer", &e);
+        assert_eq!(target.type_id, "GTAV_ASIScript");
+        assert!(!target.per_mod_subfolder);
+        assert_eq!(target.target_dir, Path::new("/game/GTAV"));
+    }
+
+    #[test]
+    fn resolve_gtav_net_to_root() {
+        let game = Path::new("/game/GTAV");
+        let e = entries(&["scripts/MyMod.dll"]);
+        let target = resolve_install_target(game, "MyMod", &e);
+        assert_eq!(target.type_id, "GTAV_NetScript");
+        assert!(!target.per_mod_subfolder);
+        assert_eq!(target.target_dir, Path::new("/game/GTAV"));
     }
 }
