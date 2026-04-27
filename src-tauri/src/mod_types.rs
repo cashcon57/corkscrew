@@ -308,6 +308,17 @@ fn detect_gtav_net_script(entries: &[String]) -> bool {
     has_shvdn_ref || in_scripts
 }
 
+/// 3DMigoto-family mod (GIMI / SRMI / ZZMI / Honkai-3rd HIMI). The shared
+/// signature is a 3DMigoto `.ini` config file alongside binary buffer / index
+/// files (`.buf`, `.ib`) — the latter are unique to 3DMigoto-style asset
+/// swaps and not produced by any other modding tool, so their presence is
+/// the cleanest disambiguator from generic INI archives.
+fn detect_gimi(entries: &[String]) -> bool {
+    let has_ini = any_entry_ext_eq(entries, "ini");
+    let has_buffer = any_entry_ext_eq(entries, "buf") || any_entry_ext_eq(entries, "ib");
+    has_ini && has_buffer
+}
+
 /// Generic fallback — always matches. Lowest priority.
 fn detect_generic(_entries: &[String]) -> bool {
     true
@@ -360,6 +371,7 @@ fn path_rimworld(game_path: &Path, mod_name: &str) -> PathBuf {
     game_path.join("Mods").join(sanitize_dir_name(mod_name))
 }
 
+<<<<<<< HEAD
 /// Sims 4 `.package` install path — `<mods_dir>/<modname>/`.
 ///
 /// Note: the installer passes `data_dir` as `game_path` for plugins where
@@ -406,6 +418,14 @@ fn path_gtav_asi_script(game_path: &Path, _mod_name: &str) -> PathBuf {
 /// from the archive layout.
 fn path_gtav_net_script(game_path: &Path, _mod_name: &str) -> PathBuf {
     game_path.to_path_buf()
+}
+
+/// 3DMigoto/GIMI mods install per-mod under `<game>/Mods/<modname>/`. GIMI
+/// (and the sibling SRMI / ZZMI / HIMI loaders) scans `Mods/` recursively
+/// and loads each subdirectory's `.ini` + buffer files independently, so
+/// each mod gets its own folder.
+fn path_gimi(game_path: &Path, mod_name: &str) -> PathBuf {
+    game_path.join("Mods").join(sanitize_dir_name(mod_name))
 }
 
 fn path_generic(game_path: &Path, mod_name: &str) -> PathBuf {
@@ -542,6 +562,19 @@ const BUILTIN_MOD_TYPES: &[ModType] = &[
         detect: detect_sims4_script,
         install_path: path_sims4_script,
         per_mod_subfolder: false,
+    },
+    ModType {
+        id: "GIMI_Mod",
+        display_name: "3DMigoto / GIMI mod",
+        // Higher than UE_Paks (70) — both could match an archive that ships
+        // a `.pak` alongside a `.buf`, but the buffer file is the stronger
+        // signal that we're looking at an asset-swap mod. Lower than SMAPI
+        // (80) so SMAPI archives that happen to ship a `.buf` payload still
+        // route correctly.
+        priority: 75,
+        detect: detect_gimi,
+        install_path: path_gimi,
+        per_mod_subfolder: true,
     },
     ModType {
         id: "UE_Paks",
@@ -740,6 +773,48 @@ mod tests {
         assert!(!detect_rimworld(&e));
     }
 
+    // --- GIMI / 3DMigoto -------------------------------------------------
+
+    #[test]
+    fn detect_gimi_typical_character_mod() {
+        // Representative GIMI character swap: per-mod ini + buffer files.
+        let e = entries(&[
+            "Yelan/Yelan.ini",
+            "Yelan/YelanBody.buf",
+            "Yelan/YelanBody.ib",
+            "Yelan/Body.dds",
+        ]);
+        assert!(detect_gimi(&e));
+    }
+
+    #[test]
+    fn detect_gimi_buffer_only_with_ini_at_root() {
+        // Some authors flatten the archive with a top-level merged.ini.
+        let e = entries(&["merged.ini", "vb1.buf"]);
+        assert!(detect_gimi(&e));
+    }
+
+    #[test]
+    fn detect_gimi_negative_ini_only_no_buffers() {
+        // Plain INI archive (e.g. a config patch) — must NOT match GIMI.
+        let e = entries(&["Skyrim.ini", "SkyrimPrefs.ini"]);
+        assert!(!detect_gimi(&e));
+    }
+
+    #[test]
+    fn detect_gimi_negative_buffers_only_no_ini() {
+        // Buffer files without an INI shouldn't match — GIMI requires the
+        // INI to define the hash/draw rules.
+        let e = entries(&["raw.buf", "data.ib"]);
+        assert!(!detect_gimi(&e));
+    }
+
+    #[test]
+    fn detect_gimi_case_insensitive_extensions() {
+        let e = entries(&["Char/Char.INI", "Char/MeshA.BUF"]);
+        assert!(detect_gimi(&e));
+    }
+
     #[test]
     fn detect_generic_always_matches() {
         assert!(detect_generic(&entries(&[])));
@@ -859,6 +934,33 @@ mod tests {
         let target = resolve_install_target(&game, "MyMod", &e);
         assert_eq!(target.type_id, "UE_Paks");
         assert_eq!(target.target_dir, project_paks.join("~mods"));
+    }
+
+    #[test]
+    fn resolve_gimi_target() {
+        let game = Path::new("/game/Genshin Impact game");
+        let e = entries(&[
+            "YelanRework/YelanRework.ini",
+            "YelanRework/Body.buf",
+            "YelanRework/Body.ib",
+        ]);
+        let target = resolve_install_target(game, "Yelan Rework", &e);
+        assert_eq!(target.type_id, "GIMI_Mod");
+        assert!(target.per_mod_subfolder);
+        assert_eq!(
+            target.target_dir,
+            Path::new("/game/Genshin Impact game/Mods/Yelan Rework")
+        );
+    }
+
+    #[test]
+    fn priority_gimi_beats_ue_paks_when_both_match() {
+        // Hypothetical archive shipping both a pak and a buffer/ini — GIMI
+        // should win because of higher priority (and because authors
+        // shipping buffers really mean a 3DMigoto mod, not a UE pak mod).
+        let e = entries(&["MyMod/MyMod.ini", "MyMod/MyMod.buf", "Bundle.pak"]);
+        let mt = detect_mod_type(&e).unwrap();
+        assert_eq!(mt.id, "GIMI_Mod");
     }
 
     #[test]
