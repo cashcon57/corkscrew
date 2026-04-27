@@ -471,6 +471,7 @@
     valheim: "valheim",
     mewgenics: "mewgenics",
     sims4: "thesims4",
+    genshin: "genshinimpact",
   };
 
   function getGameSlug(): string {
@@ -1055,6 +1056,7 @@
       valheim: "Valheim",
       mewgenics: "Mewgenics",
       thesims4: "The Sims 4",
+      genshinimpact: "Genshin Impact",
     };
     return map[domain] || domain;
   }

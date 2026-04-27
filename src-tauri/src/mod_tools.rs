@@ -1256,6 +1256,7 @@ fn gtav_tools() -> Vec<ModTool> {
             recommended_alternative: None,
             recommended_ini_edits: vec![],
             support_url: Some("http://www.dev-c.com/gtav/scripthookv/".into()),
+            requires_explicit_opt_in: false,
         },
         ModTool {
             id: "scripthookv".into(),
@@ -1281,6 +1282,7 @@ fn gtav_tools() -> Vec<ModTool> {
             recommended_alternative: None,
             recommended_ini_edits: vec![],
             support_url: Some("http://www.dev-c.com/gtav/scripthookv/".into()),
+            requires_explicit_opt_in: false,
         },
         ModTool {
             id: "shvdn".into(),
@@ -1310,6 +1312,7 @@ fn gtav_tools() -> Vec<ModTool> {
             recommended_alternative: None,
             recommended_ini_edits: vec![],
             support_url: Some("https://github.com/scripthookvdotnet/scripthookvdotnet".into()),
+            requires_explicit_opt_in: false,
         },
         ModTool {
             id: "gtav-lua-plugin".into(),
@@ -1339,6 +1342,7 @@ fn gtav_tools() -> Vec<ModTool> {
             support_url: Some(
                 "https://www.gta5-mods.com/tools/lua-plugin-for-script-hook-v".into(),
             ),
+            requires_explicit_opt_in: false,
         },
         // ---- External tool: OpenIV (link-only) ----
         ModTool {
@@ -1365,6 +1369,7 @@ fn gtav_tools() -> Vec<ModTool> {
             recommended_alternative: None,
             recommended_ini_edits: vec![],
             support_url: Some("https://openiv.com/".into()),
+            requires_explicit_opt_in: false,
         },
     ]
 }
@@ -1415,6 +1420,7 @@ fn genshin_tools() -> Vec<ModTool> {
             recommended_alternative: None,
             recommended_ini_edits: vec![],
             support_url: Some("https://github.com/SilentNightSound/GIMI-Package".into()),
+            requires_explicit_opt_in: false,
         },
         ModTool {
             id: "3dmigoto".into(),
@@ -1442,6 +1448,7 @@ fn genshin_tools() -> Vec<ModTool> {
             recommended_alternative: Some("gimi".into()),
             recommended_ini_edits: vec![],
             support_url: Some("https://github.com/bo3b/3Dmigoto".into()),
+            requires_explicit_opt_in: false,
         },
     ]
 }

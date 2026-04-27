@@ -294,6 +294,8 @@
     "palworld",
     "valheim",
     "mewgenics",
+    // HoYoverse — no Bethesda-style plugin load order; mods loaded by GIMI/3DMigoto.
+    "genshin",
   ]);
 
   const gameHasNoPluginSystem = $derived(loadOrderKind === "none");

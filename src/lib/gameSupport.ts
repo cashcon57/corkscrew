@@ -113,3 +113,29 @@ export function getTierForGame(
 export function experimentalWarningDismissedKey(gameId: string): string {
   return `experimental_warning_dismissed_${gameId}`;
 }
+
+// ---------------------------------------------------------------------------
+// Anti-cheat acknowledgment — distinct from the experimental warning. Required
+// for games whose modding stack injects a graphics/runtime hook into a process
+// that ships anti-cheat (e.g. HoyoProtect for Genshin). Per-game, persistent
+// via the same `set_config_value` plumbing.
+// ---------------------------------------------------------------------------
+
+/**
+ * Game IDs that require a one-time anti-cheat acknowledgment before the user
+ * can install mods. Phase 1 ships Genshin only; Star Rail / ZZZ / Honkai 3rd
+ * are tracked separately and will extend this set.
+ *
+ * Frozen so callers cannot mutate it accidentally.
+ */
+export const ANTI_CHEAT_GATED_GAMES: ReadonlySet<string> = new Set(["genshin"]);
+
+/** Convenience predicate. */
+export function gameRequiresAntiCheatAck(gameId: string): boolean {
+  return ANTI_CHEAT_GATED_GAMES.has(gameId);
+}
+
+/** Config key holding the acknowledgment flag for a given game. */
+export function antiCheatAckKey(gameId: string): string {
+  return `anti_cheat_warning_accepted_${gameId}`;
+}

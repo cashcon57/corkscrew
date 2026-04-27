@@ -85,7 +85,10 @@
     getTier as getGameTier,
     tierRequiresWarning,
     experimentalWarningDismissedKey,
+    gameRequiresAntiCheatAck,
+    antiCheatAckKey,
   } from "$lib/gameSupport";
+  import AntiCheatWarningDialog from "$lib/components/AntiCheatWarningDialog.svelte";
   import type { GameSupportTier } from "$lib/types";
   import ModDetailPanel from "$lib/components/mods/ModDetailPanel.svelte";
   import DeploymentPanel from "$lib/components/mods/DeploymentPanel.svelte";
@@ -131,6 +134,16 @@
   let pendingDropFilePath = $state<string | null>(null);
   // Resume callback set by gates other than drag-drop (e.g. ModInstallFlow).
   let pendingExperimentalResume: (() => void) | null = null;
+
+  // Anti-cheat acknowledgment dialog — distinct from the experimental
+  // warning. Surfaces for games whose modding stack injects a graphics
+  // hook into an anti-cheat process (e.g. Genshin / HoyoProtect). One-time
+  // per game; persisted via `set_config_value`.
+  let antiCheatWarning = $state<{
+    gameId: string;
+    displayName: string;
+  } | null>(null);
+  let pendingAntiCheatResume: (() => void) | null = null;
 
   /**
    * Returns true when the install should proceed immediately. When the game
@@ -197,13 +210,92 @@
   }
 
   /**
+   * Returns true when the install should proceed immediately. When the active
+   * game is in `ANTI_CHEAT_GATED_GAMES` (Genshin in Phase 1) and the user has
+   * not previously acknowledged the risk, captures `resume` for replay and
+   * shows the anti-cheat dialog instead.
+   *
+   * Independent from `gateExperimentalInstall` — both can fire for the same
+   * install (e.g. Genshin is currently Experimental AND anti-cheat-gated);
+   * callers are expected to chain them.
+   */
+  async function gateAntiCheatInstall(
+    game: DetectedGame,
+    resume: () => void
+  ): Promise<boolean> {
+    if (!gameRequiresAntiCheatAck(game.game_id)) return true;
+
+    const ackKey = antiCheatAckKey(game.game_id);
+    try {
+      const cfg = await getConfig();
+      const accepted = (cfg as Record<string, unknown>)[ackKey];
+      if (accepted === "true" || accepted === true) return true;
+    } catch (err) {
+      console.error("gateAntiCheatInstall: getConfig failed:", err);
+      // Fail open — show the dialog rather than silently proceeding.
+    }
+
+    pendingAntiCheatResume = resume;
+    antiCheatWarning = {
+      gameId: game.game_id,
+      displayName: game.display_name,
+    };
+    return false;
+  }
+
+  async function confirmAntiCheatInstall() {
+    const warn = antiCheatWarning;
+    if (!warn) return;
+    try {
+      await setConfigValue(antiCheatAckKey(warn.gameId), "true");
+    } catch (err) {
+      console.error("confirmAntiCheatInstall: setConfigValue failed:", err);
+      // Continue anyway — user's intent is clear.
+    }
+    antiCheatWarning = null;
+    const resume = pendingAntiCheatResume;
+    pendingAntiCheatResume = null;
+    if (resume) resume();
+  }
+
+  function cancelAntiCheatInstall() {
+    antiCheatWarning = null;
+    pendingAntiCheatResume = null;
+    pendingDropFilePath = null;
+  }
+
+  /**
+   * Run the experimental + anti-cheat gates in sequence for a given game.
+   * Returns true only when both gates pass; otherwise schedules `resume` for
+   * the appropriate dialog and returns false.
+   */
+  async function runInstallGates(
+    game: DetectedGame,
+    resume: () => void
+  ): Promise<boolean> {
+    const expProceed = await gateExperimentalInstall(game, () => {
+      // After the experimental dialog is dismissed, re-enter to pick up the
+      // anti-cheat gate. `runInstallGates` is async; firing it without await
+      // is fine because `resume` is captured by the inner gate if needed.
+      void runInstallGates(game, resume);
+    });
+    if (!expProceed) return false;
+
+    const acProceed = await gateAntiCheatInstall(game, resume);
+    if (!acProceed) return false;
+
+    return true;
+  }
+
+  /**
    * Wrap the file-picker install flow so experimental/unknown games surface
-   * the warning dialog before the OS file dialog opens.
+   * the warning dialog, and anti-cheat-gated games surface the acknowledgment
+   * dialog, before the OS file dialog opens.
    */
   async function gatedInstallFlow() {
     const game = pickedGame ?? $selectedGame;
     if (!game) return;
-    const proceed = await gateExperimentalInstall(game, () => {
+    const proceed = await runInstallGates(game, () => {
       if (installFlowRef) void installFlowRef.handleInstall();
     });
     if (!proceed) return;
@@ -1529,7 +1621,7 @@
     }
 
     pendingDropFilePath = filePath;
-    const proceed = await gateExperimentalInstall(game, () => {
+    const proceed = await runInstallGates(game, () => {
       const path = pendingDropFilePath;
       pendingDropFilePath = null;
       if (path) void runDropInstall(game, path);
@@ -3627,6 +3719,14 @@
   onConfirm={() => { void confirmExperimentalInstall(); }}
   onCancel={cancelExperimentalInstall}
 />
+
+{#if antiCheatWarning !== null}
+  <AntiCheatWarningDialog
+    gameName={antiCheatWarning.displayName}
+    onAccept={() => { void confirmAntiCheatInstall(); }}
+    onCancel={cancelAntiCheatInstall}
+  />
+{/if}
 
 {#if showImportWizard}
   <ModlistImportWizard
