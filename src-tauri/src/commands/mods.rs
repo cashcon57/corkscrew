@@ -101,7 +101,7 @@ const VERIFIED_PLUGIN_IDS: &[&str] = &["skyrimse", "fallout4", "hogwartslegacy"]
 /// Game IDs whose dedicated Rust plugin is known to be experimental.
 /// We hard-code these rather than thread a `verified()` accessor through the
 /// `GamePlugin` trait — the set is small and stable.
-const EXPERIMENTAL_PLUGIN_IDS: &[&str] = &["hades2", "crimsondesert"];
+const EXPERIMENTAL_PLUGIN_IDS: &[&str] = &["hades2", "crimsondesert", "genshin"];
 
 #[tauri::command]
 pub fn get_game_support_tier(

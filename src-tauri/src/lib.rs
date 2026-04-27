@@ -401,6 +401,7 @@ pub fn run() {
     plugins::crimson_desert::register();
     plugins::sims4::register();
     plugins::gtav::register();
+    plugins::genshin::register();
     plugins::thunderstore_games::register_all();
     game_registry::register_all();
 

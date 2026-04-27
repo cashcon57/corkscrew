@@ -6,6 +6,7 @@
 
 pub mod crimson_desert;
 pub mod fallout4;
+pub mod genshin;
 pub mod gtav;
 pub mod hades2;
 pub mod hl_merger;
