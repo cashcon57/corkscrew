@@ -1574,6 +1574,21 @@ export interface VortexExtensionSummary {
   mod_type_count: number;
 }
 
+/**
+ * A Vortex extension upstream of `Nexus-Mods/vortex-games` that matches an
+ * installed Steam game Corkscrew detected without a native handler. Pass
+ * {@link vortex_dir_name} to `vortexFetchExtension` to install.
+ */
+export interface VortexExtensionSuggestion {
+  extension_id: string;
+  vortex_dir_name: string;
+  display_name: string;
+  nexus_slug: string;
+  steam_app_id: string;
+  detected_game_id: string;
+  bottle_name: string;
+}
+
 export interface VortexGameRegistration {
   id: string;
   name: string;

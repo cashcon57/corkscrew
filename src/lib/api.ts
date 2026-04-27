@@ -2287,6 +2287,16 @@ export async function vortexGetExtensionDetail(gameId: string): Promise<import("
   return invoke("vortex_get_extension_detail", { gameId });
 }
 
+/**
+ * Returns Vortex extension suggestions for installed Steam games that have no
+ * native Corkscrew plugin and no bundled registry entry but DO have a matching
+ * upstream Vortex extension. Each suggestion's `vortex_dir_name` is the argument
+ * to {@link vortexFetchExtension} for one-click install.
+ */
+export async function getVortexExtensionSuggestions(): Promise<import("./types").VortexExtensionSuggestion[]> {
+  return invoke("get_vortex_extension_suggestions");
+}
+
 // ---- FOMOD in Collection Install ----
 
 export async function submitFomodChoices(

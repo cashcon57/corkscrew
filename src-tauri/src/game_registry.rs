@@ -431,6 +431,157 @@ pub fn detect_unregistered_steam_games(
     found
 }
 
+// ---------------------------------------------------------------------------
+// Vortex extension suggestions
+// ---------------------------------------------------------------------------
+
+/// Pairing of a detected (but unregistered) Steam game with the upstream
+/// Vortex extension that mods it.
+///
+/// Returned by [`collect_extension_suggestions`] when an installed Steam game
+/// has no native Corkscrew plugin and no entry in `vortex_game_registry.json`,
+/// but the curated [`crate::vortex_index`] has a matching extension.
+///
+/// The frontend uses `vortex_dir_name` as the argument to the existing
+/// `vortex_fetch_extension` Tauri command — once fetched and registered,
+/// the game is no longer "unknown".
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VortexExtensionSuggestion {
+    /// Stable extension entry id (e.g. `"game-cyberpunk2077"`).
+    pub extension_id: String,
+    /// Directory name in `Nexus-Mods/vortex-games`. Pass to
+    /// `vortex_fetch_extension` to install.
+    pub vortex_dir_name: String,
+    /// Human-readable game name (e.g. `"Cyberpunk 2077"`).
+    pub display_name: String,
+    /// Nexus Mods slug, useful for surfacing a "view on Nexus" link.
+    pub nexus_slug: String,
+    /// Steam app ID this suggestion was matched against.
+    pub steam_app_id: String,
+    /// Slugified game ID Corkscrew assigned to the unregistered game.
+    /// Lets the frontend correlate the suggestion with the entry already in
+    /// the detected-games list.
+    pub detected_game_id: String,
+    /// Bottle the game was found in. A single Vortex extension may apply to
+    /// multiple bottles when the same game is installed in more than one.
+    pub bottle_name: String,
+}
+
+/// Walk every bottle, find Steam games that aren't covered by a registered
+/// plugin or the bundled `vortex_game_registry.json`, and pair each with the
+/// matching upstream Vortex extension (if one exists in the static index).
+///
+/// `already_registered_ids` is the set of game IDs the caller has already
+/// covered through native plugins, the bundled registry, and any
+/// already-fetched Vortex extensions — those don't need a suggestion.
+pub fn collect_extension_suggestions(
+    already_registered_ids: &[String],
+) -> Vec<VortexExtensionSuggestion> {
+    use crate::bottles::detect_bottles;
+    use std::collections::HashSet;
+
+    let registered: HashSet<&str> = already_registered_ids
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
+
+    let mut out: Vec<VortexExtensionSuggestion> = Vec::new();
+    let mut seen_pairs: HashSet<(String, String)> = HashSet::new();
+
+    for bottle in detect_bottles() {
+        for unregistered in scan_steam_games_with_appid(&bottle) {
+            // Skip if a registered plugin already covers this game ID.
+            if registered.contains(unregistered.game.game_id.as_str()) {
+                continue;
+            }
+            // Skip if the bundled registry already maps this game ID
+            // (e.g. via a steam_id entry in vortex_game_registry.json).
+            if get_game_entry(&unregistered.game.game_id).is_some() {
+                continue;
+            }
+            let Some(entry) =
+                crate::vortex_index::lookup_extension_for_steam_appid(&unregistered.app_id)
+            else {
+                continue;
+            };
+            let key = (entry.id.clone(), bottle.name.clone());
+            if !seen_pairs.insert(key) {
+                continue;
+            }
+            out.push(VortexExtensionSuggestion {
+                extension_id: entry.id.clone(),
+                vortex_dir_name: entry.vortex_dir_name.clone(),
+                display_name: entry.name.clone(),
+                nexus_slug: entry.nexus_slug.clone(),
+                steam_app_id: entry.steam_app_id.clone(),
+                detected_game_id: unregistered.game.game_id.clone(),
+                bottle_name: bottle.name.clone(),
+            });
+        }
+    }
+
+    out
+}
+
+/// Pair an unregistered Steam game with the Steam app ID that produced it.
+///
+/// Used internally by [`collect_extension_suggestions`] — the public
+/// [`detect_unregistered_steam_games`] discards the app ID after slugifying.
+struct UnregisteredSteamGame {
+    game: DetectedGame,
+    app_id: String,
+}
+
+/// Variant of [`detect_unregistered_steam_games`] that retains each game's
+/// Steam app ID for downstream lookups.
+///
+/// We don't want to change the public signature of
+/// [`detect_unregistered_steam_games`] (callers all over the codebase use it),
+/// so we accept a small amount of duplication here.
+fn scan_steam_games_with_appid(bottle: &Bottle) -> Vec<UnregisteredSteamGame> {
+    let steamapps = match bottle.find_path(&["Program Files (x86)", "Steam", "steamapps"]) {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+
+    let mut out = Vec::new();
+    let Ok(entries) = fs::read_dir(&steamapps) else {
+        return out;
+    };
+
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with("appmanifest_") || !name.ends_with(".acf") {
+            continue;
+        }
+        let manifest = match parse_appmanifest(&entry.path()) {
+            Some(m) => m,
+            None => continue,
+        };
+        let common = steamapps.join("common");
+        let game_path = match find_child_case_insensitive(&common, &manifest.install_dir) {
+            Some(p) if p.is_dir() => p,
+            _ => continue,
+        };
+        let exe_path = find_main_executable(&game_path);
+        let game_id = slugify_game_name(&manifest.name);
+        out.push(UnregisteredSteamGame {
+            game: DetectedGame {
+                game_id: game_id.clone(),
+                display_name: manifest.name.clone(),
+                nexus_slug: game_id,
+                game_path: game_path.clone(),
+                exe_path,
+                data_dir: game_path,
+                bottle_name: bottle.name.clone(),
+                bottle_path: bottle.path.clone(),
+            },
+            app_id: manifest.app_id,
+        });
+    }
+    out
+}
+
 /// Parse a Steam appmanifest ACF file to extract app ID, name, and install dir.
 fn parse_appmanifest(path: &Path) -> Option<SteamAppManifest> {
     let content = fs::read_to_string(path).ok()?;
@@ -944,5 +1095,33 @@ mod tests {
         // Skyrim SE should have tools
         let sse = supported.iter().find(|g| g.game_id == "skyrimse").unwrap();
         assert!(sse.has_tools);
+    }
+
+    #[test]
+    fn vortex_extension_suggestion_serializes_snake_case() {
+        // Surface for the frontend — snake_case to match the rest of the
+        // Vortex API surface in types.ts.
+        let s = VortexExtensionSuggestion {
+            extension_id: "game-cyberpunk2077".into(),
+            vortex_dir_name: "game-cyberpunk2077".into(),
+            display_name: "Cyberpunk 2077".into(),
+            nexus_slug: "cyberpunk2077".into(),
+            steam_app_id: "1091500".into(),
+            detected_game_id: "cyberpunk-2077".into(),
+            bottle_name: "Steam".into(),
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"vortex_dir_name\""));
+        assert!(json.contains("\"steam_app_id\""));
+        assert!(json.contains("\"detected_game_id\""));
+    }
+
+    #[test]
+    fn collect_extension_suggestions_does_not_panic_on_empty() {
+        // Smoke test: function is safe to call when there are no bottles or
+        // when every detected game is already registered.
+        let _ = collect_extension_suggestions(&[]);
+        let many: Vec<String> = vec!["skyrimse".into(), "fallout4".into()];
+        let _ = collect_extension_suggestions(&many);
     }
 }

@@ -1347,6 +1347,7 @@ pub fn run() {
             commands::config_commands::vortex_list_available_extensions,
             commands::config_commands::vortex_delete_cached_extension,
             commands::config_commands::vortex_get_extension_detail,
+            commands::config_commands::get_vortex_extension_suggestions,
             // Download Queue
             commands::notifications::get_download_queue,
             commands::notifications::get_download_queue_counts,

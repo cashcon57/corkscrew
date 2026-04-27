@@ -647,4 +647,31 @@ pub async fn vortex_get_extension_detail(
         .map_err(crate::format_join_error)?
 }
 
+/// Return Vortex extension suggestions for installed Steam games that lack a
+/// native Corkscrew plugin and a bundled registry entry.
+///
+/// The frontend calls this after the initial game scan completes; each entry
+/// can be installed via `vortex_fetch_extension(vortex_dir_name)`.
+#[tauri::command]
+pub async fn get_vortex_extension_suggestions(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::game_registry::VortexExtensionSuggestion>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        // Build the set of game IDs that already have *some* form of mod
+        // management — these don't need a suggestion.
+        let mut covered: Vec<String> = crate::games::detect_all_games_with_custom(&db)
+            .iter()
+            .map(|g| g.game_id.clone())
+            .collect();
+        // Also include any Vortex extensions the user has already fetched.
+        for ext in crate::vortex_registry::list_cached(&db) {
+            covered.push(ext.game_id);
+        }
+        Ok(crate::game_registry::collect_extension_suggestions(&covered))
+    })
+    .await
+    .map_err(crate::format_join_error)?
+}
+
 
