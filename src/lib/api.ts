@@ -5,6 +5,7 @@ import type {
   BottleSettings,
   BottleSettingDef,
   DetectedGame,
+  GameSupportTier,
   InstalledMod,
   PluginEntry,
   AppConfig,
@@ -347,6 +348,12 @@ export async function setConfigValue(
 
 export async function getGameLogo(gameId: string): Promise<string | null> {
   return invoke("get_game_logo", { gameId });
+}
+
+export async function getGameSupportTier(
+  gameId: string
+): Promise<GameSupportTier> {
+  return invoke("get_game_support_tier", { gameId });
 }
 
 // Game Launching

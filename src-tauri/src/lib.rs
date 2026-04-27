@@ -997,6 +997,7 @@ pub fn run() {
             commands::mods::get_depot_history_cmd,
             commands::mods::sync_lua_mods,
             commands::mods::list_supported_games,
+            commands::mods::get_game_support_tier,
             commands::mods::get_bottle_settings,
             commands::mods::get_bottle_setting_defs,
             commands::mods::set_bottle_setting,

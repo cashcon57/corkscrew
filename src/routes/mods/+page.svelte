@@ -81,6 +81,12 @@
   import ModBisect from "$lib/components/ModBisect.svelte";
   import SkeletonRows from "$lib/components/SkeletonRows.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
+  import {
+    getTier as getGameTier,
+    tierRequiresWarning,
+    experimentalWarningDismissedKey,
+  } from "$lib/gameSupport";
+  import type { GameSupportTier } from "$lib/types";
   import ModDetailPanel from "$lib/components/mods/ModDetailPanel.svelte";
   import DeploymentPanel from "$lib/components/mods/DeploymentPanel.svelte";
   import ActionQueue from "$lib/components/mods/ActionQueue.svelte";
@@ -113,6 +119,96 @@
   let draggingOver = $state(false);
   let fixingDisplay = $state(false);
   let installUnlisten: (() => void) | null = null;
+
+  // Experimental / unknown game first-install warning. Shown once per game
+  // unless the user re-enables it via Settings. Pending* holds the input that
+  // triggered the warning so we can resume on confirm.
+  let experimentalWarning = $state<{
+    tier: GameSupportTier;
+    gameId: string;
+    displayName: string;
+  } | null>(null);
+  let pendingDropFilePath = $state<string | null>(null);
+  // Resume callback set by gates other than drag-drop (e.g. ModInstallFlow).
+  let pendingExperimentalResume: (() => void) | null = null;
+
+  /**
+   * Returns true when the install should proceed immediately. When the game
+   * is experimental/unknown and the user hasn't dismissed the warning, this
+   * captures `resume` for later replay and shows the dialog instead.
+   */
+  async function gateExperimentalInstall(
+    game: DetectedGame,
+    resume: () => void
+  ): Promise<boolean> {
+    let tier: GameSupportTier;
+    try {
+      tier = await getGameTier(game.game_id);
+    } catch (err) {
+      console.error("gateExperimentalInstall: tier lookup failed:", err);
+      return true; // Don't block installs on a backend hiccup.
+    }
+    if (!tierRequiresWarning(tier)) return true;
+
+    const dismissedKey = experimentalWarningDismissedKey(game.game_id);
+    try {
+      // `extra` is serde-flattened on the backend, so dismissal flags appear
+      // at the root of AppConfig — not under a nested `extra` field.
+      const cfg = await getConfig();
+      const dismissed = (cfg as Record<string, unknown>)[dismissedKey];
+      if (dismissed === "true" || dismissed === true) return true;
+    } catch (err) {
+      console.error("gateExperimentalInstall: getConfig failed:", err);
+      // If we can't read config, fail open — show the dialog rather than
+      // silently swallowing the prompt.
+    }
+
+    pendingExperimentalResume = resume;
+    experimentalWarning = {
+      tier,
+      gameId: game.game_id,
+      displayName: game.display_name,
+    };
+    return false;
+  }
+
+  async function confirmExperimentalInstall() {
+    const warn = experimentalWarning;
+    if (!warn) return;
+    try {
+      await setConfigValue(
+        experimentalWarningDismissedKey(warn.gameId),
+        "true"
+      );
+    } catch (err) {
+      console.error("confirmExperimentalInstall: setConfigValue failed:", err);
+      // Continue anyway — user's intent is clearly "proceed".
+    }
+    experimentalWarning = null;
+    const resume = pendingExperimentalResume;
+    pendingExperimentalResume = null;
+    if (resume) resume();
+  }
+
+  function cancelExperimentalInstall() {
+    experimentalWarning = null;
+    pendingExperimentalResume = null;
+    pendingDropFilePath = null;
+  }
+
+  /**
+   * Wrap the file-picker install flow so experimental/unknown games surface
+   * the warning dialog before the OS file dialog opens.
+   */
+  async function gatedInstallFlow() {
+    const game = pickedGame ?? $selectedGame;
+    if (!game) return;
+    const proceed = await gateExperimentalInstall(game, () => {
+      if (installFlowRef) void installFlowRef.handleInstall();
+    });
+    if (!proceed) return;
+    if (installFlowRef) await installFlowRef.handleInstall();
+  }
 
   // Drag reorder state
   let dragRowIndex = $state<number | null>(null);
@@ -1432,6 +1528,19 @@
       return;
     }
 
+    pendingDropFilePath = filePath;
+    const proceed = await gateExperimentalInstall(game, () => {
+      const path = pendingDropFilePath;
+      pendingDropFilePath = null;
+      if (path) void runDropInstall(game, path);
+    });
+    if (!proceed) return;
+    pendingDropFilePath = null;
+    await runDropInstall(game, filePath);
+  }
+
+  async function runDropInstall(game: DetectedGame, filePath: string) {
+    if (installing) return;
     installing = true;
     installStep = "preparing";
     installDetail = "";
@@ -1771,7 +1880,7 @@
   async function handleInstallOverMod(mod: InstalledMod) {
     // Re-install: open file picker and install over the same mod
     showSuccess(`Select a new archive to reinstall "${mod.name}"`);
-    if (installFlowRef) await installFlowRef.handleInstall();
+    await gatedInstallFlow();
   }
 
   async function handleCheckSingleUpdate(mod: InstalledMod) {
@@ -2738,7 +2847,7 @@
           Install mods from .zip, .7z, or .rar archives, or use NXM links via Settings.
         </p>
         <div class="empty-actions">
-          <button class="btn empty-action-btn" onclick={() => { if (installFlowRef) installFlowRef.handleInstall(); }}>
+          <button class="btn empty-action-btn" onclick={() => { void gatedInstallFlow(); }}>
             <svg width="16" height="16" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
               <line x1="7" y1="2" x2="7" y2="12" />
               <line x1="2" y1="7" x2="12" y2="7" />
@@ -3497,6 +3606,27 @@
 />
 
 <!-- Modlist name prompt is now rendered by ModInstallFlow component -->
+
+<ConfirmDialog
+  open={experimentalWarning !== null}
+  title={experimentalWarning?.tier === "unknown"
+    ? "Untested game"
+    : "Experimental game support"}
+  message={experimentalWarning
+    ? `${experimentalWarning.displayName} is ${
+        experimentalWarning.tier === "unknown" ? "not" : "only experimentally"
+      } supported. Modding may not work as expected — installs may fail, mods may not load, or the game may crash.`
+    : ""}
+  details={experimentalWarning
+    ? [
+        "Corkscrew has not verified that mods install and load correctly here.",
+        "You won't see this warning again for this game.",
+      ]
+    : []}
+  confirmLabel="Continue anyway"
+  onConfirm={() => { void confirmExperimentalInstall(); }}
+  onCancel={cancelExperimentalInstall}
+/>
 
 {#if showImportWizard}
   <ModlistImportWizard

@@ -15,6 +15,23 @@ export interface DetectedGame {
   bottle_path: string;
 }
 
+/**
+ * How well-supported a given game is in Corkscrew. Mirrors the backend
+ * `GameSupportTier` enum (snake_case Serde representation).
+ *
+ * - `verified` — Dedicated Rust plugin AND end-to-end tested.
+ * - `experimental` — Dedicated Rust plugin but unverified for modding.
+ * - `vortex_extension` — Supported via a Vortex extension fetched at runtime.
+ * - `vortex_registry` — Listed in the bundled Vortex registry JSON only.
+ * - `unknown` — Found via Steam appmanifest scan or added as a custom game.
+ */
+export type GameSupportTier =
+  | "verified"
+  | "experimental"
+  | "vortex_extension"
+  | "vortex_registry"
+  | "unknown";
+
 export type ModSourceType = "nexus" | "direct" | "loverslab" | "moddb" | "curseforge" | "github" | "mega" | "google_drive" | "mediafire" | "manual";
 
 export interface InstalledMod {

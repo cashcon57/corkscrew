@@ -1,0 +1,115 @@
+/**
+ * Helpers for working with game support tiers in the UI.
+ *
+ * The authoritative tier comes from the backend `get_game_support_tier`
+ * command (registries + plugins live there). This module is purely about
+ * presentation and minor synchronous heuristics — never duplicate the
+ * registry checks here.
+ */
+
+import { getGameSupportTier as fetchTier } from "$lib/api";
+import type { DetectedGame, GameSupportTier } from "$lib/types";
+
+/** Per-game cache so badge components don't re-invoke for every render. */
+const tierCache = new Map<string, GameSupportTier>();
+const inflight = new Map<string, Promise<GameSupportTier>>();
+
+/**
+ * Fetch the support tier for a game, caching the result. Safe to call
+ * frequently from Svelte components — concurrent calls coalesce.
+ */
+export async function getTier(gameId: string): Promise<GameSupportTier> {
+  const cached = tierCache.get(gameId);
+  if (cached) return cached;
+
+  const existing = inflight.get(gameId);
+  if (existing) return existing;
+
+  const promise = fetchTier(gameId)
+    .then((tier) => {
+      tierCache.set(gameId, tier);
+      inflight.delete(gameId);
+      return tier;
+    })
+    .catch((err) => {
+      inflight.delete(gameId);
+      console.error(`gameSupport.getTier(${gameId}) failed:`, err);
+      // Fall back to "unknown" so the UI degrades gracefully rather than
+      // crashing or showing nothing.
+      return "unknown" as GameSupportTier;
+    });
+  inflight.set(gameId, promise);
+  return promise;
+}
+
+/**
+ * Synchronously read a previously-cached tier. Returns `undefined` if no
+ * fetch has resolved yet — callers should treat that as "not yet known"
+ * and avoid blocking UI on it.
+ */
+export function getCachedTier(gameId: string): GameSupportTier | undefined {
+  return tierCache.get(gameId);
+}
+
+/** Reset the cache. Tests + fresh-detection flows only. */
+export function _clearTierCache(): void {
+  tierCache.clear();
+  inflight.clear();
+}
+
+/**
+ * Tiers for which the user should see a first-install confirmation dialog.
+ * "experimental" and "unknown" surface modding risk; the other tiers do not.
+ */
+export function tierRequiresWarning(tier: GameSupportTier): boolean {
+  return tier === "experimental" || tier === "unknown";
+}
+
+/** Short, capitalised label for the badge component. */
+export function tierLabel(tier: GameSupportTier): string {
+  switch (tier) {
+    case "verified":
+      return "Verified";
+    case "experimental":
+      return "Experimental";
+    case "vortex_extension":
+      return "Community";
+    case "vortex_registry":
+      return "Generic";
+    case "unknown":
+      return "Untested";
+  }
+}
+
+/** Longer tooltip explaining what the tier actually means. */
+export function tierTooltip(tier: GameSupportTier): string {
+  switch (tier) {
+    case "verified":
+      return "End-to-end tested: Corkscrew detects this game, installs mods, and launches with mods active.";
+    case "experimental":
+      return "A dedicated plugin exists but mod install + launch has not been verified. Expect rough edges.";
+    case "vortex_extension":
+      return "Supported via a Vortex extension fetched at runtime. Coverage depends on the upstream extension.";
+    case "vortex_registry":
+      return "Listed in the bundled Vortex registry but no Corkscrew-specific plugin matched. Treat as untested.";
+    case "unknown":
+      return "Discovered via Steam scan or added manually. Modding behaviour for this game has not been verified.";
+  }
+}
+
+/** Convenience for cases where you have a `DetectedGame` already. */
+export function getTierForGame(
+  game: DetectedGame
+): Promise<GameSupportTier> {
+  return getTier(game.game_id);
+}
+
+// ---------------------------------------------------------------------------
+// First-install dialog dismissal — keyed off the AppConfig `extra` map via
+// the existing `set_config_value` plumbing. The key is per-game so dismissing
+// the warning for, say, Mewgenics doesn't suppress it for Crimson Desert.
+// ---------------------------------------------------------------------------
+
+export function experimentalWarningDismissedKey(gameId: string): string {
+  return `experimental_warning_dismissed_${gameId}`;
+}

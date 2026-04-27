@@ -9,6 +9,7 @@
     showError,
   } from "$lib/stores";
   import type { Bottle, DetectedGame, BottleSettingDef } from "$lib/types";
+  import GameSupportBadge from "$lib/components/GameSupportBadge.svelte";
   import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 
   let loadingState = $state<"idle" | "loading" | "done">("idle");
@@ -368,7 +369,10 @@
                 onclick={() => selectGame(game)}
               >
                 <div class="card-top-row">
-                  <span class="game-tag">{game.game_id}</span>
+                  <div class="card-top-left">
+                    <span class="game-tag">{game.game_id}</span>
+                    <GameSupportBadge gameId={game.game_id} hideWhenVerified />
+                  </div>
                   <svg class="card-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <polyline points="9 18 15 12 9 6" />
                   </svg>
@@ -791,6 +795,13 @@
     align-items: center;
     justify-content: space-between;
     margin-bottom: var(--space-3);
+  }
+
+  .card-top-left {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-width: 0;
   }
 
   .source-badge {

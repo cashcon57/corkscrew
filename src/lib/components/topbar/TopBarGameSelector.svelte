@@ -1,6 +1,7 @@
 <script lang="ts">
   import { selectedGame } from "$lib/stores";
   import GameIcon from "$lib/components/GameIcon.svelte";
+  import GameSupportBadge from "$lib/components/GameSupportBadge.svelte";
   import type { DetectedGame } from "$lib/types";
 
   interface Props {
@@ -40,6 +41,7 @@
     {#if $selectedGame}
       <GameIcon gameId={$selectedGame.game_id} size={20} />
       <span class="topbar-selector-label">{$selectedGame.display_name}</span>
+      <GameSupportBadge gameId={$selectedGame.game_id} compact hideWhenVerified />
     {:else}
       <svg width="20" height="20" viewBox="0 0 24 28" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" opacity="0.4">
         <rect x="1.5" y="1.5" width="21" height="20" rx="2" />
@@ -90,6 +92,7 @@
               <span class="dropdown-item-name">{game.display_name}</span>
               <span class="dropdown-item-sub">{game.bottle_name}</span>
             </div>
+            <GameSupportBadge gameId={game.game_id} compact hideWhenVerified />
           </button>
         {/each}
       {:else}
@@ -235,6 +238,7 @@
     display: flex;
     flex-direction: column;
     min-width: 0;
+    flex: 1;
   }
 
   .dropdown-item-name {

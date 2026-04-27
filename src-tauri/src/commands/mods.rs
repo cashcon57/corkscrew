@@ -71,6 +71,84 @@ pub fn list_supported_games() -> Result<Vec<game_registry::SupportedGame>, Strin
     Ok(game_registry::list_supported_games())
 }
 
+/// Categorisation of how well-supported a given game is.
+///
+/// The frontend uses this to badge games and gate first-install warnings for
+/// experimental / unknown targets. Strings are stable identifiers consumed by
+/// the TS-side `GameSupportTier` type.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GameSupportTier {
+    /// Has a dedicated Rust plugin AND has been end-to-end tested.
+    Verified,
+    /// Has a dedicated Rust plugin but the game itself is unverified
+    /// (e.g. pre-release titles, mods not yet validated).
+    Experimental,
+    /// Supported via a Vortex extension fetched at runtime from
+    /// `Nexus-Mods/vortex-games`.
+    VortexExtension,
+    /// Listed in the bundled Vortex registry JSON but no dedicated plugin
+    /// nor an upstream extension matched.
+    VortexRegistry,
+    /// Discovered via Steam appmanifest scan or a custom user entry.
+    /// Modding behaviour is untested for this game.
+    Unknown,
+}
+
+/// Game IDs that have a dedicated, end-to-end-tested Rust plugin.
+const VERIFIED_PLUGIN_IDS: &[&str] = &["skyrimse", "fallout4", "hogwartslegacy"];
+
+/// Game IDs whose dedicated Rust plugin is known to be experimental.
+/// We hard-code these rather than thread a `verified()` accessor through the
+/// `GamePlugin` trait — the set is small and stable.
+const EXPERIMENTAL_PLUGIN_IDS: &[&str] = &["hades2", "crimsondesert"];
+
+#[tauri::command]
+pub fn get_game_support_tier(
+    game_id: String,
+    state: State<'_, AppState>,
+) -> Result<GameSupportTier, String> {
+    let id = game_id.as_str();
+
+    // 1. Verified — explicit allow-list of dedicated, tested plugins.
+    if VERIFIED_PLUGIN_IDS.contains(&id) {
+        return Ok(GameSupportTier::Verified);
+    }
+
+    // 2. Thunderstore plugin? Use its `verified` flag from the spec table.
+    if let Some(spec) = crate::plugins::thunderstore_games::SPECS
+        .iter()
+        .find(|s| s.game_id == id)
+    {
+        return Ok(if spec.verified {
+            GameSupportTier::Verified
+        } else {
+            GameSupportTier::Experimental
+        });
+    }
+
+    // 3. Other dedicated plugin marked experimental.
+    if EXPERIMENTAL_PLUGIN_IDS.contains(&id) {
+        return Ok(GameSupportTier::Experimental);
+    }
+
+    // 4. Vortex extension — only if a cached registration is present in DB.
+    //    (The plugin registry can also contain RegistryGamePlugin entries
+    //    sourced from `vortex_game_registry.json`; those are checked separately
+    //    below so we don't conflate the two paths.)
+    if crate::vortex_registry::load_cached(&state.db, id).is_some() {
+        return Ok(GameSupportTier::VortexExtension);
+    }
+
+    // 5. Bundled Vortex registry JSON entry.
+    if game_registry::get_game_entry(id).is_some() {
+        return Ok(GameSupportTier::VortexRegistry);
+    }
+
+    // 6. Default — custom games and Steam-appmanifest-only discoveries.
+    Ok(GameSupportTier::Unknown)
+}
+
 #[tauri::command]
 pub async fn get_game_version(
     game_id: String,
