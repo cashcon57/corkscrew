@@ -400,6 +400,7 @@ pub fn run() {
     plugins::hades2::register();
     plugins::crimson_desert::register();
     plugins::sims4::register();
+    plugins::gtav::register();
     plugins::thunderstore_games::register_all();
     game_registry::register_all();
 
