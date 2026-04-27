@@ -9,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::bottles::Bottle;
-use crate::games::{DetectedGame, GamePlugin};
+use crate::games::{DetectedGame, GamePlugin, LoadOrderKind};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -130,6 +130,10 @@ impl GamePlugin for SkyrimSEPlugin {
 
     fn save_file_patterns(&self) -> Vec<&str> {
         vec![".ess", ".skse", "saves/"]
+    }
+
+    fn load_order_kind(&self, _game_path: &Path) -> LoadOrderKind {
+        LoadOrderKind::Plugins
     }
 
     fn categorize_mod_file(&self, rel_path: &str) -> Option<String> {

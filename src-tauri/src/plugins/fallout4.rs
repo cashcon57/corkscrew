@@ -9,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::bottles::Bottle;
-use crate::games::{DetectedGame, GamePlugin};
+use crate::games::{DetectedGame, GamePlugin, LoadOrderKind};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -120,6 +120,10 @@ impl GamePlugin for Fallout4Plugin {
 
     fn save_file_patterns(&self) -> Vec<&str> {
         vec![".fos", ".f4se", "saves/"]
+    }
+
+    fn load_order_kind(&self, _game_path: &Path) -> LoadOrderKind {
+        LoadOrderKind::Plugins
     }
 
     fn categorize_mod_file(&self, rel_path: &str) -> Option<String> {

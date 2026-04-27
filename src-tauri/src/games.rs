@@ -167,6 +167,73 @@ pub trait GamePlugin: Send + Sync {
     fn use_legacy_data_dir(&self) -> bool {
         true
     }
+
+    // -- Load order --
+
+    /// Describe how this game's load order should be presented in the UI.
+    ///
+    /// Default is [`LoadOrderKind::None`] — the game has no concept of an
+    /// ordered list of mods. Bethesda titles return [`LoadOrderKind::Plugins`]
+    /// to drive the existing rich plugins.txt/loadorder.txt UI. Games whose
+    /// load order is a plain list of mod identifiers serialised to a config
+    /// file (UE4 `~mods`, Unity `Mods.txt`, RimWorld `ModsConfig.xml`, etc.)
+    /// return [`LoadOrderKind::FileBased`] to drive the generic re-orderable
+    /// list panel.
+    fn load_order_kind(&self, _game_path: &Path) -> LoadOrderKind {
+        LoadOrderKind::None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Load order
+// ---------------------------------------------------------------------------
+
+/// How a game's load order should be presented to the user.
+///
+/// The frontend reads this via the `get_load_order_kind` Tauri command and
+/// dispatches to one of three UIs.
+#[derive(Clone, Debug)]
+pub enum LoadOrderKind {
+    /// No load order applies. The Load Order page renders a friendly notice
+    /// directing the user to the Mods page. Default for most games.
+    None,
+    /// Bethesda-style plugins.txt + loadorder.txt — the existing rich UI is
+    /// used (drag/drop ESP/ESL/ESM, LOOT integration, plugin warnings).
+    Plugins,
+    /// File-based load order: an ordered list of mod identifiers persisted to
+    /// a config file. The generic `FileBasedLoadOrderPanel` renders this.
+    FileBased(FileBasedLoadOrder),
+}
+
+/// Configuration for a [`LoadOrderKind::FileBased`] game.
+#[derive(Clone, Debug)]
+pub struct FileBasedLoadOrder {
+    /// Where to read/write the order file. May be relative to `game_path`
+    /// (the resolver joins it under `game_path` if not absolute) or absolute.
+    pub config_path: PathBuf,
+    /// How the list of mod IDs is serialised on disk.
+    pub format: LoadOrderFormat,
+    /// Optional friendly-name lookup. When `Some`, the function maps a mod ID
+    /// to a human-readable label shown in the UI; when `None`, the ID is used
+    /// verbatim.
+    pub describe: Option<fn(mod_id: &str) -> String>,
+}
+
+/// Supported on-disk encodings for a file-based load order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoadOrderFormat {
+    /// One mod ID per line. Lines starting with `#` and blank lines are
+    /// ignored on read; `# id` marks a disabled entry, plain `id` enabled.
+    Lines,
+    /// JSON array. Two shapes accepted on read:
+    ///   - `["modA", "modB", ...]` (all enabled)
+    ///   - `[{"id": "modA", "enabled": true}, ...]`
+    /// Always written in the object form to preserve the `enabled` flag.
+    JsonArray,
+    /// Minimal RimWorld `ModsConfig.xml` handling: parses `<activeMods>`
+    /// children. Disabled entries are not representable in the upstream
+    /// format, so writes drop them; toggle UX still works in-session.
+    RimWorldXml,
 }
 
 // ---------------------------------------------------------------------------
@@ -367,6 +434,15 @@ mod tests {
         }
         fn get_plugins_file(&self, _game_path: &Path, _bottle: &Bottle) -> Option<PathBuf> {
             None
+        }
+    }
+
+    #[test]
+    fn default_load_order_kind_is_none() {
+        let plugin = TestPlugin;
+        match plugin.load_order_kind(Path::new("/tmp")) {
+            LoadOrderKind::None => {}
+            other => panic!("expected None, got {:?}", other),
         }
     }
 
