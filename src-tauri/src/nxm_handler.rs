@@ -271,6 +271,78 @@ fn urlencoding_decode(s: &str) -> String {
     result
 }
 
+/// Outcome of [`route_nxm_game`] — describes how an NXM URL's `game_domain`
+/// was matched against currently-known games.
+///
+/// Mirrors Vortex's `InstallManager.ts` ~L1418-1450 fallback: when the
+/// declared game isn't installed, route to the user's active selection
+/// rather than failing outright. The user sees a clear warning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NxmRoute {
+    /// The NXM `game_domain` matched a registered game directly. Use the
+    /// returned `game_id`.
+    Recognized { game_id: String },
+    /// The NXM `game_domain` did NOT match any registered game. Fall back
+    /// to `active_game_id`. UI should show `warning` to the user.
+    Fallback { active_game_id: String, warning: String },
+    /// No active game profile is set, and the declared `game_domain` is
+    /// unknown. Cannot proceed. UI should show `error` to the user.
+    NoActiveGame { error: String },
+}
+
+/// Pure helper: given an NXM URL `game_domain`, the list of known
+/// `(game_id, nexus_slug)` pairs from the registry, and the currently
+/// active `game_id` (if any), decide where to route the install.
+///
+/// - If `game_domain` matches one of `known_games[i].nexus_slug` (case
+///   insensitive) — return `Recognized(game_id)`.
+/// - Else, if `active_game_id` is `Some` — return `Fallback` with a
+///   warning string callers can surface to the UI.
+/// - Else — `NoActiveGame`.
+///
+/// Pure, no I/O. Callers wire the inputs from the database / app state.
+pub fn route_nxm_game(
+    game_domain: &str,
+    known_games: &[(String, String)],
+    active_game_id: Option<&str>,
+) -> NxmRoute {
+    let domain_lower = game_domain.to_lowercase();
+
+    // 1. Match by nexus_slug.
+    for (gid, slug) in known_games {
+        if slug.eq_ignore_ascii_case(&domain_lower) {
+            return NxmRoute::Recognized { game_id: gid.clone() };
+        }
+    }
+    // 2. Match by game_id (some custom games use the slug as the id).
+    for (gid, _slug) in known_games {
+        if gid.eq_ignore_ascii_case(&domain_lower) {
+            return NxmRoute::Recognized { game_id: gid.clone() };
+        }
+    }
+
+    // 3. Fall back to active game.
+    match active_game_id {
+        Some(active) if !active.is_empty() => NxmRoute::Fallback {
+            active_game_id: active.to_string(),
+            warning: format!(
+                "Routing this NXM mod to '{}' — no installed game matched \
+                 the link's domain '{}'. Confirm this is the right game \
+                 before installing.",
+                active, game_domain
+            ),
+        },
+        _ => NxmRoute::NoActiveGame {
+            error: format!(
+                "Cannot install: NXM link declares game '{}', which is not \
+                 installed, and no active game is selected. Open Corkscrew, \
+                 select a game, then re-click the download link.",
+                game_domain
+            ),
+        },
+    }
+}
+
 #[allow(dead_code)]
 pub fn parse_nxm_url(url: &str) -> Result<NxmUrl, String> {
     let url = url.strip_prefix("nxm://").ok_or("Not an NXM URL")?;
@@ -472,6 +544,82 @@ mod tests {
         assert!(parse_corkscrew_url("https://example.com").is_err());
         assert!(parse_corkscrew_url("corkscrew://").is_err());
         assert!(parse_corkscrew_url("corkscrew://unknown/action").is_err());
+    }
+
+    // --- route_nxm_game ---------------------------------------------------
+
+    fn known(games: &[(&str, &str)]) -> Vec<(String, String)> {
+        games
+            .iter()
+            .map(|(g, s)| (g.to_string(), s.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn route_nxm_recognized_by_slug() {
+        let games = known(&[
+            ("skyrimse", "skyrimspecialedition"),
+            ("fallout4", "fallout4"),
+        ]);
+        let r = route_nxm_game("skyrimspecialedition", &games, Some("fallout4"));
+        match r {
+            NxmRoute::Recognized { game_id } => assert_eq!(game_id, "skyrimse"),
+            other => panic!("expected Recognized, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn route_nxm_recognized_by_game_id() {
+        // Some custom games use the slug as the game_id.
+        let games = known(&[("rerequiem", "rerequiem")]);
+        let r = route_nxm_game("rerequiem", &games, None);
+        match r {
+            NxmRoute::Recognized { game_id } => assert_eq!(game_id, "rerequiem"),
+            other => panic!("expected Recognized, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn route_nxm_recognition_is_case_insensitive() {
+        let games = known(&[("skyrimse", "SkyrimSpecialEdition")]);
+        let r = route_nxm_game("skyrimspecialedition", &games, None);
+        assert!(matches!(r, NxmRoute::Recognized { .. }));
+    }
+
+    #[test]
+    fn route_nxm_fallback_when_unknown_with_active() {
+        let games = known(&[("skyrimse", "skyrimspecialedition")]);
+        let r = route_nxm_game("oblivionremastered", &games, Some("skyrimse"));
+        match r {
+            NxmRoute::Fallback {
+                active_game_id,
+                warning,
+            } => {
+                assert_eq!(active_game_id, "skyrimse");
+                assert!(warning.contains("oblivionremastered"));
+                assert!(warning.contains("skyrimse"));
+            }
+            other => panic!("expected Fallback, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn route_nxm_no_active_game_returns_error() {
+        let games = known(&[("skyrimse", "skyrimspecialedition")]);
+        let r = route_nxm_game("oblivionremastered", &games, None);
+        match r {
+            NxmRoute::NoActiveGame { error } => {
+                assert!(error.contains("oblivionremastered"));
+            }
+            other => panic!("expected NoActiveGame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn route_nxm_empty_active_treated_as_none() {
+        let games = known(&[("skyrimse", "skyrimspecialedition")]);
+        let r = route_nxm_game("oblivionremastered", &games, Some(""));
+        assert!(matches!(r, NxmRoute::NoActiveGame { .. }));
     }
 
     #[cfg(target_os = "linux")]

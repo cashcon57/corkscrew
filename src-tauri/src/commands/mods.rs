@@ -23,6 +23,7 @@ use crate::installer;
 use crate::launcher::{LaunchResult};
 use crate::mod_types;
 use crate::nexus;
+use crate::nxm_handler;
 use crate::oauth;
 use crate::plugins::skyrim_plugins::{PluginEntry};
 use crate::progress;
@@ -881,6 +882,49 @@ pub async fn download_from_nexus(
     let client = nexus_client().await?;
 
     let nxm = nexus::NXMLink::parse(&nxm_url).map_err(|e| e.to_string())?;
+
+    // Cross-check: route the NXM link's game_domain against the games we
+    // can detect. If it doesn't match any known game, fall back to the
+    // user-supplied `game_id` (which the UI sourced from the active
+    // profile) and log a warning. Mirrors Vortex InstallManager.ts
+    // L1418-1450 — we don't fail the download just because we don't know
+    // the game; we route to active and let the user confirm.
+    {
+        let known: Vec<(String, String)> = {
+            let db = state.db.clone();
+            // Avoid blocking the async runtime on the bottle scan; the
+            // caller is awaiting so spawn_blocking is fine. We do this
+            // inside a block so the result drops before the await below.
+            tokio::task::spawn_blocking(move || {
+                games::detect_all_games_with_custom(&db)
+                    .into_iter()
+                    .map(|g| (g.game_id.clone(), g.nexus_slug.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .await
+            .unwrap_or_default()
+        };
+        let active = if game_id.is_empty() { None } else { Some(game_id.as_str()) };
+        match nxm_handler::route_nxm_game(&nxm.game_slug, &known, active) {
+            nxm_handler::NxmRoute::Recognized { game_id: matched } => {
+                if !matched.eq_ignore_ascii_case(&game_id) {
+                    log::warn!(
+                        "NXM link declares game '{}' (matches '{}') but caller \
+                         requested install into '{}'. Proceeding with caller's \
+                         game per active selection.",
+                        nxm.game_slug, matched, game_id
+                    );
+                }
+            }
+            nxm_handler::NxmRoute::Fallback { active_game_id, warning } => {
+                log::warn!("{}", warning);
+                debug_assert_eq!(active_game_id, game_id);
+            }
+            nxm_handler::NxmRoute::NoActiveGame { error } => {
+                return Err(error);
+            }
+        }
+    }
 
     // Get mod info
     let mod_info = client
