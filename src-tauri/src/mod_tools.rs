@@ -479,6 +479,7 @@ fn builtin_tools_for_game(game_id: &str) -> Vec<ModTool> {
         "crimsondesert" => crimson_desert_tools(),
         "sims4" => sims4_tools_filtered(),
         "gtav" => gtav_tools(),
+        "genshin" => genshin_tools(),
         _ => vec![],
     };
 
@@ -559,6 +560,11 @@ fn all_builtin_tools() -> Vec<ModTool> {
         }
     }
     for tool in gtav_tools() {
+        if !tools.iter().any(|t| t.id == tool.id) {
+            tools.push(tool);
+        }
+    }
+    for tool in genshin_tools() {
         if !tools.iter().any(|t| t.id == tool.id) {
             tools.push(tool);
         }
@@ -1359,6 +1365,83 @@ fn gtav_tools() -> Vec<ModTool> {
             recommended_alternative: None,
             recommended_ini_edits: vec![],
             support_url: Some("https://openiv.com/".into()),
+        },
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// Genshin Impact tools
+// ---------------------------------------------------------------------------
+//
+// Genshin uses 3DMigoto (a generic DX11 hook) plus the GIMI fork (Genshin
+// Impact Model Importer) for character/weapon swaps. GIMI is the
+// recommended loader for users; raw 3DMigoto is listed for transparency
+// but not auto-installed because it requires manual `d3dx.ini` editing
+// for each game.
+
+fn genshin_tools() -> Vec<ModTool> {
+    vec![
+        ModTool {
+            id: "gimi".into(),
+            name: "GIMI (Genshin Impact Model Importer)".into(),
+            description:
+                "3DMigoto fork preconfigured for Genshin Impact. Loads character, weapon, and texture mods from `<game>/Mods/`."
+                    .into(),
+            // GIMI ships the 3DMigoto loader as `d3d11.dll` plus the
+            // 3DMigoto launcher executable. Presence of either indicates
+            // an install.
+            exe_names: vec![
+                "d3d11.dll".into(),
+                "3DMigoto Loader.exe".into(),
+                "GIMI.exe".into(),
+            ],
+            detected_path: None,
+            requires_wine: true,
+            category: "Framework".into(),
+            can_auto_install: true,
+            // SilentNightSound's GIMI-Package is the canonical distribution
+            // most modlists target. Forks exist; if the canonical repo
+            // moves, swap this entry.
+            github_repo: Some("SilentNightSound/GIMI-Package".into()),
+            nexus_mod_id: None,
+            nexus_game_slug: Some("genshinimpact".into()),
+            download_url: None,
+            license: "GPL-3.0".into(),
+            wine_notes: Some(
+                "DLL injection works under Wine/CrossOver; 3DMigoto's DX11 hook is well-supported by DXVK."
+                    .into(),
+            ),
+            wine_compat: "good".into(),
+            recommended_alternative: None,
+            recommended_ini_edits: vec![],
+            support_url: Some("https://github.com/SilentNightSound/GIMI-Package".into()),
+        },
+        ModTool {
+            id: "3dmigoto".into(),
+            name: "3DMigoto".into(),
+            description:
+                "Upstream DX11 hook that GIMI is built on. Listed for reference — most users want GIMI, not raw 3DMigoto."
+                    .into(),
+            exe_names: vec!["3DMigoto Loader.exe".into(), "d3d11.dll".into()],
+            detected_path: None,
+            requires_wine: true,
+            category: "Framework".into(),
+            // Info-only: 3DMigoto requires per-game `d3dx.ini` configuration
+            // that GIMI already supplies. Users almost always want GIMI.
+            can_auto_install: false,
+            github_repo: Some("bo3b/3Dmigoto".into()),
+            nexus_mod_id: None,
+            nexus_game_slug: None,
+            download_url: Some("https://github.com/bo3b/3Dmigoto".into()),
+            license: "BSD-3-Clause".into(),
+            wine_notes: Some(
+                "Generic 3DMigoto build is not preconfigured for Genshin. Use GIMI instead unless you know why you want the raw loader."
+                    .into(),
+            ),
+            wine_compat: "good".into(),
+            recommended_alternative: Some("gimi".into()),
+            recommended_ini_edits: vec![],
+            support_url: Some("https://github.com/bo3b/3Dmigoto".into()),
         },
     ]
 }
