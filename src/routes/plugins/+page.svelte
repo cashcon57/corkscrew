@@ -8,11 +8,26 @@
     togglePlugin,
     movePlugin,
     reorderPlugins,
+    getLoadOrderKind,
   } from "$lib/api";
   import { selectedGame, showError } from "$lib/stores";
-  import type { PluginEntry, DetectedGame, PluginWarning, MasterlistStatus } from "$lib/types";
+  import type {
+    PluginEntry,
+    DetectedGame,
+    PluginWarning,
+    MasterlistStatus,
+    LoadOrderKindResponse,
+  } from "$lib/types";
   import PluginRulesPanel from "$lib/components/PluginRulesPanel.svelte";
   import HelpTooltip from "$lib/components/HelpTooltip.svelte";
+  import FileBasedLoadOrderPanel from "$lib/components/FileBasedLoadOrderPanel.svelte";
+
+  // Backend-supplied UI mode for the current game. We default to a
+  // conservative value while the kind is being fetched so neither the
+  // Bethesda nor the file-based UI flickers in.
+  let loadOrderKind = $state<LoadOrderKindResponse["kind"] | "loading">(
+    "loading",
+  );
 
   let plugins = $state<PluginEntry[]>([]);
   let warnings = $state<PluginWarning[]>([]);
@@ -72,9 +87,30 @@
   }
 
   $effect(() => {
-    if ($selectedGame) {
-      loadPlugins($selectedGame);
+    if (!$selectedGame) {
+      loadOrderKind = "loading";
+      return;
     }
+    // Fetch the kind first; only load plugins.txt if the backend says this
+    // game uses Bethesda-style plugin order.
+    const game = $selectedGame;
+    loadOrderKind = "loading";
+    getLoadOrderKind(game.game_id, game.bottle_name)
+      .then((resp: LoadOrderKindResponse) => {
+        loadOrderKind = resp.kind;
+        if (resp.kind === "plugins") {
+          loadPlugins(game);
+        }
+      })
+      .catch((err: unknown) => {
+        console.error("getLoadOrderKind:", err);
+        // Fall back to the existing hardcoded list — preserves prior behaviour
+        // for users hitting a transient backend error.
+        loadOrderKind = GAMES_WITHOUT_PLUGINS.has(game.game_id)
+          ? "none"
+          : "plugins";
+        if (loadOrderKind === "plugins") loadPlugins(game);
+      });
   });
 
   async function loadPlugins(game: DetectedGame) {
@@ -239,8 +275,10 @@
     return plugins.filter((p) => p.filename.toLowerCase().includes(term));
   });
 
-  // Games without a plugin/load-order system (no ESP/ESL/ESM stack).
-  // The Load Order page is not meaningful for these; show a friendly notice.
+  // Fallback list of games known not to have a plugin/load-order system.
+  // Used only if `getLoadOrderKind` fails (e.g. backend transient error);
+  // the authoritative answer comes from the GamePlugin trait's
+  // `load_order_kind` method.
   const GAMES_WITHOUT_PLUGINS: ReadonlySet<string> = new Set([
     "hades2",
     "crimsondesert",
@@ -254,14 +292,41 @@
     "valheim",
     "mewgenics",
   ]);
-  const gameHasNoPluginSystem = $derived(
-    $selectedGame ? GAMES_WITHOUT_PLUGINS.has($selectedGame.game_id) : false,
-  );
+
+  const gameHasNoPluginSystem = $derived(loadOrderKind === "none");
+  const gameUsesFileBased = $derived(loadOrderKind === "file_based");
 </script>
 
 <svelte:window onkeydown={handlePluginKeydown} />
 
 <div class="plugins-page">
+  {#if !$selectedGame}
+    <!-- No game selected — same friendly notice as before -->
+    <div class="empty-state">
+      <div class="empty-icon">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+          <polyline points="14 2 14 8 20 8" />
+          <line x1="16" y1="13" x2="8" y2="13" />
+          <line x1="16" y1="17" x2="8" y2="17" />
+          <polyline points="10 9 9 9 8 9" />
+        </svg>
+      </div>
+      <p class="empty-title">No game selected</p>
+      <p class="empty-description">
+        Select a game from the Dashboard or Mods page to view its plugin load order.
+      </p>
+    </div>
+  {:else if loadOrderKind === "loading"}
+    <!-- Determining which UI to show; brief loading shimmer keeps the page from flickering -->
+    <div class="loading-state">
+      <div class="spinner"></div>
+      <p class="loading-text">Loading load order...</p>
+    </div>
+  {:else if gameUsesFileBased}
+    <FileBasedLoadOrderPanel />
+  {:else}
+  <!-- Bethesda-style plugin load order (existing UI, unchanged below) -->
   <!-- Page header (hidden when the selected game has no plugin/load-order system) -->
   {#if !gameHasNoPluginSystem}
     <div class="page-header">
@@ -381,26 +446,8 @@
     </div>
   {/if}
 
-  <!-- No game selected -->
-  {#if !$selectedGame}
-    <div class="empty-state">
-      <div class="empty-icon">
-        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-          <polyline points="14 2 14 8 20 8" />
-          <line x1="16" y1="13" x2="8" y2="13" />
-          <line x1="16" y1="17" x2="8" y2="17" />
-          <polyline points="10 9 9 9 8 9" />
-        </svg>
-      </div>
-      <p class="empty-title">No game selected</p>
-      <p class="empty-description">
-        Select a game from the Dashboard or Mods page to view its plugin load order.
-      </p>
-    </div>
-
   <!-- Loading -->
-  {:else if loading}
+  {#if loading}
     <div class="loading-state">
       <div class="spinner"></div>
       <p class="loading-text">Loading plugins...</p>
@@ -549,6 +596,7 @@
         <PluginRulesPanel />
       </div>
     {/if}
+  {/if}
   {/if}
 </div>
 

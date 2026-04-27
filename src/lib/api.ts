@@ -90,6 +90,8 @@ import type {
   GameLock,
   ProtonVersion,
   LaunchOptionsStatus,
+  LoadOrderEntry,
+  LoadOrderKindResponse,
 } from "./types";
 
 // Bottles
@@ -720,6 +722,29 @@ export async function movePlugin(
   newIndex: number
 ): Promise<PluginEntry[]> {
   return invoke("move_plugin_cmd", { gameId, bottleName, pluginName, newIndex });
+}
+
+// File-Based Load Order (generic, non-Bethesda games)
+export async function getLoadOrderKind(
+  gameId: string,
+  bottleName: string,
+): Promise<LoadOrderKindResponse> {
+  return invoke("get_load_order_kind_cmd", { gameId, bottleName });
+}
+
+export async function getFileBasedLoadOrder(
+  gameId: string,
+  bottleName: string,
+): Promise<LoadOrderEntry[]> {
+  return invoke("get_file_based_load_order", { gameId, bottleName });
+}
+
+export async function setFileBasedLoadOrder(
+  gameId: string,
+  bottleName: string,
+  order: LoadOrderEntry[],
+): Promise<void> {
+  return invoke("set_file_based_load_order", { gameId, bottleName, order });
 }
 
 export async function getPluginMessages(

@@ -88,6 +88,25 @@ export interface PluginEntry {
   enabled: boolean;
 }
 
+// File-Based Load Order (generic, non-Bethesda games)
+export interface LoadOrderEntry {
+  /** Stable identifier on disk (mod folder name, package ID, etc.). */
+  id: string;
+  /** Human-readable label shown in the UI. */
+  display_name: string;
+  /** Whether the entry is currently active. */
+  enabled: boolean;
+}
+
+/**
+ * Server-side enum returned by `get_load_order_kind_cmd`. The frontend
+ * switches on `kind` to choose which UI to render on the Load Order page.
+ */
+export type LoadOrderKindResponse =
+  | { kind: "none" }
+  | { kind: "plugins" }
+  | { kind: "file_based" };
+
 export interface AppConfig {
   nexus_api_key: string | null;
   download_dir: string | null;
