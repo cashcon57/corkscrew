@@ -6,6 +6,7 @@ pub mod deployment;
 pub mod depot;
 pub mod diagnostics;
 pub mod game_state;
+pub mod load_order;
 pub mod mods;
 pub mod nexus;
 pub mod notifications;

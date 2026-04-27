@@ -1126,6 +1126,10 @@ pub fn run() {
             commands::plugins::toggle_plugin_cmd,
             commands::plugins::move_plugin_cmd,
             commands::plugins::get_plugin_messages,
+            // File-Based Load Order (generic)
+            commands::load_order::get_load_order_kind_cmd,
+            commands::load_order::get_file_based_load_order,
+            commands::load_order::set_file_based_load_order,
             // Plugin Load Order Rules
             commands::plugins::add_plugin_rule,
             commands::plugins::remove_plugin_rule,
