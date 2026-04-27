@@ -262,6 +262,42 @@ pub const TOOL_SIGNATURES: &[ToolSignature] = &[
     // NOTE: HLModMerger (Nexus mod 178) is NOT listed here — Corkscrew has a
     // native PAK database merger (hl_merger.rs) that replaces it entirely.
     // No external tool needed.
+    // -- GTA V tools --
+    ToolSignature {
+        tool_id: "gtav-asi-loader",
+        tool_name: "ASI Loader",
+        nexus_mod_ids: &[],
+        name_patterns: &["asi loader", "asiloader", "alexander blade", "dinput8"],
+        game_ids: &["gtav"],
+    },
+    ToolSignature {
+        tool_id: "scripthookv",
+        tool_name: "ScriptHookV",
+        nexus_mod_ids: &[],
+        name_patterns: &["scripthookv", "script hook v"],
+        game_ids: &["gtav"],
+    },
+    ToolSignature {
+        tool_id: "shvdn",
+        tool_name: "ScriptHookVDotNet",
+        nexus_mod_ids: &[],
+        name_patterns: &["scripthookvdotnet", "shvdn", "script hook v dot net"],
+        game_ids: &["gtav"],
+    },
+    ToolSignature {
+        tool_id: "gtav-lua-plugin",
+        tool_name: "LUA Plugin for Script Hook V",
+        nexus_mod_ids: &[],
+        name_patterns: &["lua plugin", "lua-plugin"],
+        game_ids: &["gtav"],
+    },
+    ToolSignature {
+        tool_id: "openiv",
+        tool_name: "OpenIV",
+        nexus_mod_ids: &[],
+        name_patterns: &["openiv", "open iv"],
+        game_ids: &["gtav"],
+    },
 ];
 
 /// A tool detected as required by a collection or wabbajack modlist.
@@ -442,6 +478,7 @@ fn builtin_tools_for_game(game_id: &str) -> Vec<ModTool> {
         "hades2" => hades2_tools(),
         "crimsondesert" => crimson_desert_tools(),
         "sims4" => sims4_tools_filtered(),
+        "gtav" => gtav_tools(),
         _ => vec![],
     };
 
@@ -517,6 +554,11 @@ fn all_builtin_tools() -> Vec<ModTool> {
         }
     }
     for tool in sims4_tools() {
+        if !tools.iter().any(|t| t.id == tool.id) {
+            tools.push(tool);
+        }
+    }
+    for tool in gtav_tools() {
         if !tools.iter().any(|t| t.id == tool.id) {
             tools.push(tool);
         }
@@ -1173,6 +1215,150 @@ fn sims4_tools() -> Vec<ModTool> {
             recommended_ini_edits: vec![],
             support_url: None,
             requires_explicit_opt_in: true,
+        },
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// GTA V tools
+// ---------------------------------------------------------------------------
+
+fn gtav_tools() -> Vec<ModTool> {
+    vec![
+        // ---- Frameworks ----
+        ModTool {
+            id: "gtav-asi-loader".into(),
+            name: "ASI Loader".into(),
+            description:
+                "Alexander Blade's ASI Loader. Drops in as `dinput8.dll` next to GTA5.exe and auto-loads any `.asi` plugins from the game directory."
+                    .into(),
+            exe_names: vec!["dinput8.dll".into()],
+            detected_path: None,
+            requires_wine: true,
+            category: "Framework".into(),
+            can_auto_install: true,
+            github_repo: None,
+            nexus_mod_id: None,
+            nexus_game_slug: None,
+            download_url: Some("http://www.dev-c.com/gtav/scripthookv/".into()),
+            license: "Freeware".into(),
+            wine_notes: Some(
+                "DLL proxy load works under Wine/CrossOver. Bundled with the ScriptHookV release archive."
+                    .into(),
+            ),
+            wine_compat: "good".into(),
+            recommended_alternative: None,
+            recommended_ini_edits: vec![],
+            support_url: Some("http://www.dev-c.com/gtav/scripthookv/".into()),
+        },
+        ModTool {
+            id: "scripthookv".into(),
+            name: "ScriptHookV".into(),
+            description:
+                "Alexander Blade's native scripting library — required by virtually every C++ GTA V mod. Loads via the ASI Loader."
+                    .into(),
+            exe_names: vec!["ScriptHookV.dll".into()],
+            detected_path: None,
+            requires_wine: true,
+            category: "Framework".into(),
+            can_auto_install: true,
+            github_repo: None,
+            nexus_mod_id: None,
+            nexus_game_slug: None,
+            download_url: Some("http://www.dev-c.com/gtav/scripthookv/".into()),
+            license: "Freeware".into(),
+            wine_notes: Some(
+                "Story mode only — never use online. Works under Wine when paired with the ASI Loader."
+                    .into(),
+            ),
+            wine_compat: "good".into(),
+            recommended_alternative: None,
+            recommended_ini_edits: vec![],
+            support_url: Some("http://www.dev-c.com/gtav/scripthookv/".into()),
+        },
+        ModTool {
+            id: "shvdn".into(),
+            name: "ScriptHookVDotNet".into(),
+            description:
+                ".NET (C#/VB) scripting layer for GTA V. Requires ScriptHookV; ships ScriptHookVDotNet.asi plus a per-runtime DLL set."
+                    .into(),
+            exe_names: vec![
+                "ScriptHookVDotNet.asi".into(),
+                "ScriptHookVDotNet2.dll".into(),
+                "ScriptHookVDotNet3.dll".into(),
+            ],
+            detected_path: None,
+            requires_wine: true,
+            category: "Framework".into(),
+            can_auto_install: true,
+            github_repo: Some("scripthookvdotnet/scripthookvdotnet".into()),
+            nexus_mod_id: None,
+            nexus_game_slug: None,
+            download_url: None,
+            license: "zlib".into(),
+            wine_notes: Some(
+                "Needs the in-bottle .NET runtime that the C# scripts target (typically .NET Framework 4.8). Install via winetricks if missing."
+                    .into(),
+            ),
+            wine_compat: "good".into(),
+            recommended_alternative: None,
+            recommended_ini_edits: vec![],
+            support_url: Some("https://github.com/scripthookvdotnet/scripthookvdotnet".into()),
+        },
+        ModTool {
+            id: "gtav-lua-plugin".into(),
+            name: "LUA Plugin for Script Hook V".into(),
+            description:
+                "Headscript's Lua scripting plugin for GTA V. Drops `LUA Plugin.asi` into the game root and reads scripts from `scripts/addins/`."
+                    .into(),
+            exe_names: vec!["LUA Plugin.asi".into()],
+            detected_path: None,
+            requires_wine: true,
+            category: "Framework".into(),
+            can_auto_install: false,
+            github_repo: None,
+            nexus_mod_id: None,
+            nexus_game_slug: None,
+            download_url: Some(
+                "https://www.gta5-mods.com/tools/lua-plugin-for-script-hook-v".into(),
+            ),
+            license: "Freeware".into(),
+            wine_notes: Some(
+                "Loads as an ASI plugin — no separate Wine setup needed beyond the ASI Loader."
+                    .into(),
+            ),
+            wine_compat: "good".into(),
+            recommended_alternative: None,
+            recommended_ini_edits: vec![],
+            support_url: Some(
+                "https://www.gta5-mods.com/tools/lua-plugin-for-script-hook-v".into(),
+            ),
+        },
+        // ---- External tool: OpenIV (link-only) ----
+        ModTool {
+            id: "openiv".into(),
+            name: "OpenIV".into(),
+            description:
+                "external tool, install separately for .rpf editing. Closed-source archive editor used for vehicle / ped / map replacements. Phase 1 of Corkscrew does not parse .rpf or .oiv archives."
+                    .into(),
+            exe_names: vec!["OpenIV.exe".into()],
+            detected_path: None,
+            requires_wine: true,
+            category: "Tool".into(),
+            can_auto_install: false,
+            github_repo: None,
+            nexus_mod_id: None,
+            nexus_game_slug: None,
+            download_url: Some("https://openiv.com/".into()),
+            license: "Proprietary".into(),
+            wine_notes: Some(
+                "Native installer is Windows-only. Run inside the bottle if needed; Corkscrew will not auto-install it."
+                    .into(),
+            ),
+            wine_compat: "limited".into(),
+            recommended_alternative: None,
+            recommended_ini_edits: vec![],
+            support_url: Some("https://openiv.com/".into()),
         },
     ]
 }
