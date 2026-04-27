@@ -165,6 +165,15 @@ const MOD_FOLDER_NAMES: &[&str] = &[
     "content",
     "mods",
     "logicmods",
+    // Unity / BepInEx
+    "bepinex",
+    "bepinexpack",
+    "plugins",
+    "patchers",
+    "monomod",
+    // SMAPI / RimWorld
+    "about",
+    "assemblies",
 ];
 
 // ---------------------------------------------------------------------------
@@ -1074,8 +1083,18 @@ fn extract_tar<R: io::Read>(
 // Mod content detection
 // ---------------------------------------------------------------------------
 
-/// Heuristic: does `directory` look like it already contains Bethesda mod
-/// content (plugin files, BSAs, or well-known sub-folders)?
+/// Heuristic: does `directory` look like it already contains mod content
+/// for any supported game family?
+///
+/// Recognized signals:
+/// - Bethesda subdirs (meshes, textures, scripts, skse, etc.)
+/// - Unreal Engine subdirs (paks, content, logicmods)
+/// - Unity / BepInEx subdirs (bepinex, bepinexpack, plugins, patchers)
+/// - SMAPI / RimWorld subdirs (about, assemblies, mods)
+/// - Mod file extensions (esp/esm/bsa/pak/dll/lua)
+/// - Loose `manifest.json` (SMAPI / Thunderstore convention)
+/// - Loose `.pak` files (UE)
+/// - Loose `About.xml` is covered via the `about` directory check
 fn looks_like_mod_content(directory: &Path) -> bool {
     let entries = match fs::read_dir(directory) {
         Ok(rd) => rd,
@@ -1099,6 +1118,16 @@ fn looks_like_mod_content(directory: &Path) -> bool {
                 return true;
             }
         }
+
+        // SMAPI / Thunderstore signal: a loose `manifest.json` is a strong
+        // indicator that this directory IS the mod root and should not be
+        // recursed into. (Inside SMAPI mods the manifest sits next to the
+        // assembly DLL, so the .dll extension would also catch it — this is
+        // belt-and-suspenders for Thunderstore-style packages where the
+        // payload is just config + manifest.)
+        if name_str == "manifest.json" {
+            return true;
+        }
     }
 
     false
@@ -1109,6 +1138,9 @@ fn looks_like_mod_content(directory: &Path) -> bool {
 /// Many archives nest content in a single wrapper directory or include an
 /// explicit `Data` folder.  This function walks down into that structure so
 /// the caller can copy only the relevant files.
+///
+/// Recognized shapes (Bethesda, Unreal Engine, Unity/BepInEx, SMAPI,
+/// RimWorld) — see [`looks_like_mod_content`] for the full signal list.
 ///
 /// Rules (evaluated in order):
 /// 1. If the extracted root has a single top-level directory:
@@ -1183,18 +1215,14 @@ fn _find_data_root_inner(dir: &Path, depth: u32) -> PathBuf {
                 return entry_path;
             }
 
-            // 1b – looks like mod content
-            if looks_like_mod_content(&entry_path) {
-                debug!(
-                    "find_data_root: single dir looks like mod content -> {}",
-                    entry_path.display()
-                );
-                return entry_path;
-            }
-
-            // 1c – if the single directory IS a recognized mod folder name
-            // (e.g. "skse", "meshes", "textures"), the current directory is the
-            // data root — do NOT recurse into it or we'll strip the folder prefix.
+            // 1b – if the single directory IS a recognized mod folder name
+            // (e.g. "skse", "meshes", "textures", "bepinex"), the CURRENT
+            // directory is the data root — do NOT recurse into it or we'll
+            // strip the folder prefix. This MUST run before the
+            // looks_like_mod_content check below: a wrapper directory like
+            // `BepInEx/` contains `plugins/` (also a mod-folder name), so
+            // looks_like_mod_content would otherwise return the wrapper
+            // and the deploy would lose the `BepInEx/` prefix.
             if MOD_FOLDER_NAMES.contains(&name.as_str()) {
                 debug!(
                     "find_data_root: single dir '{}' is a known mod folder -> {}",
@@ -1202,6 +1230,15 @@ fn _find_data_root_inner(dir: &Path, depth: u32) -> PathBuf {
                     dir.display()
                 );
                 return dir.to_path_buf();
+            }
+
+            // 1c – looks like mod content
+            if looks_like_mod_content(&entry_path) {
+                debug!(
+                    "find_data_root: single dir looks like mod content -> {}",
+                    entry_path.display()
+                );
+                return entry_path;
             }
 
             // Otherwise recurse into the wrapper directory
@@ -1534,6 +1571,63 @@ mod tests {
         assert_eq!(root, tmp);
 
         fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_find_data_root_bepinex_archive() {
+        // Regression: BepInEx-shaped archive starts with `BepInEx/plugins/foo.dll`.
+        // Before the Unity/BepInEx folder additions, find_data_root would
+        // recurse INTO the single `BepInEx` directory and return
+        // `BepInEx/plugins`, stripping the prefix. After the fix, the
+        // single top-level `bepinex/` is recognized as a mod folder and the
+        // PARENT (extracted_dir) is returned as the data root.
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("BepInEx").join("plugins");
+        fs::create_dir_all(&plugins).unwrap();
+        fs::write(plugins.join("MyPlugin.dll"), b"dll").unwrap();
+
+        let root = find_data_root(tmp.path());
+        assert_eq!(root, tmp.path());
+    }
+
+    #[test]
+    fn test_find_data_root_smapi_archive_with_manifest() {
+        // SMAPI mod ships a `manifest.json` alongside an assembly DLL.
+        // The directory holding the manifest is the data root.
+        let tmp = tempfile::tempdir().unwrap();
+        let mod_dir = tmp.path().join("MyMod");
+        fs::create_dir_all(&mod_dir).unwrap();
+        fs::write(mod_dir.join("manifest.json"), b"{}").unwrap();
+        fs::write(mod_dir.join("MyMod.dll"), b"dll").unwrap();
+
+        // With a single wrapper dir containing manifest.json, that wrapper
+        // looks like mod content (manifest signal) -> return it.
+        let root = find_data_root(tmp.path());
+        assert_eq!(root, mod_dir);
+    }
+
+    #[test]
+    fn test_find_data_root_ue_paks_at_root() {
+        // UE archive with .pak files at the top level. The .pak extension
+        // is in MOD_FILE_EXTENSIONS so the root looks like mod content.
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("MyMod_P.pak"), b"pak").unwrap();
+
+        let root = find_data_root(tmp.path());
+        assert_eq!(root, tmp.path());
+    }
+
+    #[test]
+    fn test_find_data_root_rimworld_about() {
+        // RimWorld mod has `About/About.xml`. The `about` directory name
+        // should be recognized.
+        let tmp = tempfile::tempdir().unwrap();
+        let about = tmp.path().join("About");
+        fs::create_dir_all(&about).unwrap();
+        fs::write(about.join("About.xml"), b"<xml/>").unwrap();
+
+        let root = find_data_root(tmp.path());
+        assert_eq!(root, tmp.path());
     }
 
     #[test]

@@ -21,6 +21,7 @@ use crate::game_registry;
 use crate::games::{DetectedGame};
 use crate::installer;
 use crate::launcher::{LaunchResult};
+use crate::mod_types;
 use crate::nexus;
 use crate::oauth;
 use crate::plugins::skyrim_plugins::{PluginEntry};
@@ -353,11 +354,31 @@ pub async fn install_mod_cmd(
         db.store_file_hashes(mod_id, &staging_result.hashes)
             .map_err(|e| e.to_string())?;
 
-        // Step 3b: Auto-detect mod type and resolve deploy directory
+        // Step 3b: Auto-detect mod type and resolve deploy directory.
+        //
+        // Two layers, in order:
+        //
+        // 1. **Vortex mod types** — per-plugin `detect_mod_type_from_files`
+        //    + `vortex_mod_types()`. Used by games whose plugin came from a
+        //    Vortex extension (Witcher 3, etc.).
+        //
+        // 2. **mod_types registry** — archive-shape heuristics for games
+        //    whose plugin returns `use_legacy_data_dir() == false` OR has
+        //    no plugin at all (unknown / appmanifest-detected games).
+        //    Routes BepInEx plugins to `BepInEx/plugins/<modname>/`, UE
+        //    paks to `~mods/`, etc. See `crate::mod_types`.
+        //
+        // The Bethesda fast-path (plugin exists AND `use_legacy_data_dir`
+        // is true, the default) skips both — mods MERGE into `Data`.
         let detected_mod_type = games::with_plugin(&game_id, |plugin| {
             plugin.detect_mod_type_from_files(&staging_result.files)
         })
         .flatten();
+
+        // Layer 2: only consult the mod_types registry if the plugin
+        // explicitly opts out OR there is no plugin for this game.
+        let use_legacy = games::with_plugin(&game_id, |p| p.use_legacy_data_dir())
+            .unwrap_or(false);
 
         let effective_dir = if let Some(ref mod_type_id) = detected_mod_type {
             // Look up the target path from registered vortex mod types
@@ -380,6 +401,21 @@ pub async fn install_mod_cmd(
             } else {
                 data_dir.clone()
             }
+        } else if !use_legacy {
+            // No Vortex hit, plugin opts out (or is missing). Use the
+            // archive-shape registry.
+            let target = mod_types::resolve_install_target(
+                &game.game_path,
+                &name,
+                &staging_result.files,
+            );
+            log::info!(
+                "Mod-type registry: '{}' → {} (per_mod_subfolder={})",
+                target.type_id,
+                target.target_dir.display(),
+                target.per_mod_subfolder
+            );
+            target.target_dir
         } else {
             data_dir.clone()
         };
