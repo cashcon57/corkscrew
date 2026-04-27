@@ -224,6 +224,24 @@ fn detect_rimworld(entries: &[String]) -> bool {
         })
 }
 
+/// The Sims 4 `.package` archive (custom content / gameplay tuning).
+///
+/// Detection is generic by file extension — `.package` is essentially
+/// Sims-4-specific (the only other widespread `.package` consumer is
+/// The Sims 3, which Corkscrew doesn't support). Per-mod subfolder is
+/// enabled so file conflicts between authors stay localized.
+fn detect_sims4_package(entries: &[String]) -> bool {
+    any_entry_ext_eq(entries, "package")
+}
+
+/// The Sims 4 `.ts4script` Python mod. Loaded by exact filename from
+/// the `Mods/` root, so per-mod subfolder is **disabled** — the script
+/// must live directly under `Mods/` (or one level deep, but flat keeps
+/// load behaviour predictable).
+fn detect_sims4_script(entries: &[String]) -> bool {
+    any_entry_ext_eq(entries, "ts4script")
+}
+
 /// Generic fallback — always matches. Lowest priority.
 fn detect_generic(_entries: &[String]) -> bool {
     true
@@ -274,6 +292,22 @@ fn path_ue4ss(game_path: &Path, mod_name: &str) -> PathBuf {
 
 fn path_rimworld(game_path: &Path, mod_name: &str) -> PathBuf {
     game_path.join("Mods").join(sanitize_dir_name(mod_name))
+}
+
+/// Sims 4 `.package` install path — `<mods_dir>/<modname>/`.
+///
+/// Note: the installer passes `data_dir` as `game_path` for plugins where
+/// `use_legacy_data_dir() == false`, so `game_path` here is already the
+/// resolved `Documents/.../The Sims 4/Mods/` directory.
+fn path_sims4_package(mods_dir: &Path, mod_name: &str) -> PathBuf {
+    mods_dir.join(sanitize_dir_name(mod_name))
+}
+
+/// Sims 4 `.ts4script` install path — directly into `<mods_dir>/`. The
+/// game loads scripts by exact filename from the Mods root, so the file
+/// lives flat with no per-mod wrapping folder.
+fn path_sims4_script(mods_dir: &Path, _mod_name: &str) -> PathBuf {
+    mods_dir.to_path_buf()
 }
 
 fn path_generic(game_path: &Path, mod_name: &str) -> PathBuf {
@@ -364,6 +398,22 @@ const BUILTIN_MOD_TYPES: &[ModType] = &[
         detect: detect_smapi,
         install_path: path_smapi,
         per_mod_subfolder: true,
+    },
+    ModType {
+        id: "Sims4_Package",
+        display_name: "The Sims 4 .package",
+        priority: 75,
+        detect: detect_sims4_package,
+        install_path: path_sims4_package,
+        per_mod_subfolder: true,
+    },
+    ModType {
+        id: "Sims4_Script",
+        display_name: "The Sims 4 .ts4script",
+        priority: 70,
+        detect: detect_sims4_script,
+        install_path: path_sims4_script,
+        per_mod_subfolder: false,
     },
     ModType {
         id: "UE_Paks",
@@ -568,6 +618,42 @@ mod tests {
         assert!(detect_generic(&entries(&["random.txt"])));
     }
 
+    #[test]
+    fn detect_sims4_package_positive() {
+        let e = entries(&["MyHair.package"]);
+        assert!(detect_sims4_package(&e));
+    }
+
+    #[test]
+    fn detect_sims4_package_nested() {
+        let e = entries(&["Author/CoolMod/awesome.package", "Author/CoolMod/readme.txt"]);
+        assert!(detect_sims4_package(&e));
+    }
+
+    #[test]
+    fn detect_sims4_package_negative() {
+        let e = entries(&["MyMod_P.pak"]);
+        assert!(!detect_sims4_package(&e));
+    }
+
+    #[test]
+    fn detect_sims4_script_positive() {
+        let e = entries(&["mc_command_center.ts4script"]);
+        assert!(detect_sims4_script(&e));
+    }
+
+    #[test]
+    fn detect_sims4_script_nested() {
+        let e = entries(&["MCCC/mc_woohoo.ts4script"]);
+        assert!(detect_sims4_script(&e));
+    }
+
+    #[test]
+    fn detect_sims4_script_negative() {
+        let e = entries(&["plugin.dll"]);
+        assert!(!detect_sims4_script(&e));
+    }
+
     // --- detect_mod_type priority ordering ---------------------------------
 
     #[test]
@@ -655,6 +741,52 @@ mod tests {
         assert_eq!(target.type_id, "RimWorld");
         assert!(target.per_mod_subfolder);
         assert_eq!(target.target_dir, Path::new("/game/RimWorld/Mods/MyRimMod"));
+    }
+
+    #[test]
+    fn resolve_sims4_package_target() {
+        // For Sims 4, the install pipeline passes the resolved Mods directory
+        // as `game_path` (because the plugin returns `use_legacy_data_dir =
+        // false` and its data_dir lives outside the game install).
+        let mods_dir = Path::new("/Documents/Electronic Arts/The Sims 4/Mods");
+        let e = entries(&["Hair_Pack/curly.package", "Hair_Pack/wavy.package"]);
+        let target = resolve_install_target(mods_dir, "Hair Pack", &e);
+        assert_eq!(target.type_id, "Sims4_Package");
+        assert!(target.per_mod_subfolder);
+        assert_eq!(
+            target.target_dir,
+            Path::new("/Documents/Electronic Arts/The Sims 4/Mods/Hair Pack")
+        );
+    }
+
+    #[test]
+    fn resolve_sims4_script_target_no_subfolder() {
+        let mods_dir = Path::new("/Documents/Electronic Arts/The Sims 4/Mods");
+        let e = entries(&["mc_command_center.ts4script"]);
+        let target = resolve_install_target(mods_dir, "MCCC", &e);
+        assert_eq!(target.type_id, "Sims4_Script");
+        assert!(!target.per_mod_subfolder);
+        // Script files install flat under the Mods root.
+        assert_eq!(target.target_dir, mods_dir);
+    }
+
+    #[test]
+    fn resolve_sims4_package_beats_generic() {
+        // `.package` files must route to Sims4_Package, not Generic_Subfolder.
+        let mods_dir = Path::new("/Mods");
+        let e = entries(&["readme.txt", "skin.package"]);
+        let target = resolve_install_target(mods_dir, "Skin Mod", &e);
+        assert_eq!(target.type_id, "Sims4_Package");
+    }
+
+    #[test]
+    fn resolve_sims4_package_does_not_fire_on_pak() {
+        // UE pak files have extension "pak" — distinct from "package".
+        // A `.pak` archive must NOT route to Sims4_Package.
+        let mods_dir = Path::new("/Mods");
+        let e = entries(&["MyTextures_P.pak"]);
+        let target = resolve_install_target(mods_dir, "Textures", &e);
+        assert_eq!(target.type_id, "UE_Paks");
     }
 
     #[test]
