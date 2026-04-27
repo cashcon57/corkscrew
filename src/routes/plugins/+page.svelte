@@ -282,6 +282,8 @@
   const GAMES_WITHOUT_PLUGINS: ReadonlySet<string> = new Set([
     "hades2",
     "crimsondesert",
+    // The Sims 4 — `.package` / `.ts4script` mods, no ESP load order.
+    "sims4",
     // Thunderstore / BepInEx games — no ESP load order, mods managed per-DLL.
     "silksong",
     "riskofrain2",

@@ -469,6 +469,7 @@
     palworld: "palworld",
     valheim: "valheim",
     mewgenics: "mewgenics",
+    sims4: "thesims4",
   };
 
   function getGameSlug(): string {
@@ -1051,6 +1052,7 @@
       palworld: "Palworld",
       valheim: "Valheim",
       mewgenics: "Mewgenics",
+      thesims4: "The Sims 4",
     };
     return map[domain] || domain;
   }
