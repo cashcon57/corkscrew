@@ -10,6 +10,14 @@
 
 <p align="center">
   <a href="https://corkscrewmodmanager.com">🌐 Website</a>
+  &nbsp;•&nbsp;
+  <a href="https://discord.gg/nufkm2b7pB"><strong>💬 Join the Discord</strong></a>
+</p>
+
+<p align="center">
+  <a href="https://discord.gg/nufkm2b7pB">
+    <img src="https://invidget.switchblade.xyz/nufkm2b7pB" alt="Join the Corkscrew Discord">
+  </a>
 </p>
 
 <p align="center">
@@ -30,6 +38,7 @@ It works by reading and writing directly to your Wine bottle's filesystem — th
 
 ## Quick Links
 
+- **[Join the Discord](https://discord.gg/nufkm2b7pB)** — Live support, modding help, release announcements
 - [What Works Today](#what-works-today) — Current status, tested features, known issues
 - [Game Support Status](#game-support-status) — Full breakdown of 80 games: support tiers, planned additions, upcoming enhancements
 - [Install](#install) — Download links and build-from-source instructions
