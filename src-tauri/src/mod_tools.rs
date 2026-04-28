@@ -480,6 +480,9 @@ fn builtin_tools_for_game(game_id: &str) -> Vec<ModTool> {
         "sims4" => sims4_tools_filtered(),
         "gtav" => gtav_tools(),
         "genshin" => genshin_tools(),
+        "sekiro" | "eldenring" | "darksouls3" | "darksouls_remastered" | "armoredcore6" => {
+            fromsoft_tools()
+        }
         _ => vec![],
     };
 
@@ -565,6 +568,11 @@ fn all_builtin_tools() -> Vec<ModTool> {
         }
     }
     for tool in genshin_tools() {
+        if !tools.iter().any(|t| t.id == tool.id) {
+            tools.push(tool);
+        }
+    }
+    for tool in fromsoft_tools() {
         if !tools.iter().any(|t| t.id == tool.id) {
             tools.push(tool);
         }
@@ -1372,6 +1380,49 @@ fn gtav_tools() -> Vec<ModTool> {
             requires_explicit_opt_in: false,
         },
     ]
+}
+
+// ---------------------------------------------------------------------------
+// FromSoft tools (Sekiro / Elden Ring / DS3 / DS:R / AC6)
+// ---------------------------------------------------------------------------
+//
+// Mod Engine 2 is the canonical FromSoft mod loader — a `dinput8.dll`
+// proxy + injection framework. Mods install as `<game>/mod/<modname>/`
+// subdirectories which the loader merges into the game's virtual file
+// system at runtime. The launcher `modengine2_launcher.exe` patches
+// `start_protected_game.exe` to disable EAC for offline modding.
+//
+// Works under Wine/CrossOver because it's a pure DLL proxy — no
+// kernel-mode anti-cheat shenanigans involved.
+
+fn fromsoft_tools() -> Vec<ModTool> {
+    vec![ModTool {
+        id: "modengine2".into(),
+        name: "Mod Engine 2".into(),
+        description: "FromSoft mod loader for Sekiro, Elden Ring, Dark Souls 3, Dark Souls: Remastered, and Armored Core VI. Disables EAC for offline modding.".into(),
+        exe_names: vec![
+            "modengine2_launcher.exe".into(),
+            "launchmod_eldenring.bat".into(),
+            "launchmod_sekiro.bat".into(),
+            "launchmod_darksouls3.bat".into(),
+            "launchmod_armoredcore6.bat".into(),
+        ],
+        detected_path: None,
+        requires_wine: true,
+        category: "Framework".into(),
+        can_auto_install: true,
+        github_repo: Some("soulsmods/ModEngine2".into()),
+        nexus_mod_id: None,
+        nexus_game_slug: None,
+        download_url: None,
+        license: "BSD-3-Clause".into(),
+        wine_notes: Some("Loads as a dinput8.dll proxy. Patches start_protected_game.exe to disable EAC for offline play. Works under Wine/CrossOver.".into()),
+        wine_compat: "good".into(),
+        recommended_alternative: None,
+        recommended_ini_edits: vec![],
+        support_url: Some("https://github.com/soulsmods/ModEngine2".into()),
+        requires_explicit_opt_in: false,
+    }]
 }
 
 // ---------------------------------------------------------------------------
