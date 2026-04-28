@@ -319,6 +319,40 @@ fn detect_gimi(entries: &[String]) -> bool {
     has_ini && has_buffer
 }
 
+/// Mod Engine 2 (FromSoft games — Sekiro, Elden Ring, DS3, DS:R, AC6).
+/// Detects archives shipping FromSoft asset directories OR a regulation.bin.
+///
+/// Mod Engine 2 mods install per-mod under `<game>/mod/<modname>/`. Most
+/// mods ship just `regulation.bin` (single-file) or one of the FromSoft
+/// asset dirs (`parts/`, `event/`, `chr/`, `msg/`, `param/`, etc.). Some
+/// also include a `modengine2.toml` config the loader reads.
+fn detect_modengine2(entries: &[String]) -> bool {
+    let normalised: Vec<String> = entries
+        .iter()
+        .map(|e| e.replace('\\', "/").to_lowercase())
+        .collect();
+    // regulation.bin at any depth (often shipped solo)
+    let has_regulation = normalised.iter().any(|e| e.ends_with("regulation.bin"));
+    // FromSoft asset dirs at depth ≤ 2 (top-level or one wrapper folder)
+    let has_fs_asset_dir = normalised.iter().any(|e| {
+        let parts: Vec<&str> = e.split('/').collect();
+        if parts.len() < 2 || parts.len() > 4 {
+            return false;
+        }
+        let segment = if parts.len() <= 2 {
+            parts[0]
+        } else {
+            parts[parts.len() - 2]
+        };
+        matches!(
+            segment,
+            "parts" | "event" | "chr" | "msg" | "param" | "menu" | "facegen" | "sfx"
+        )
+    });
+    let has_me2_toml = normalised.iter().any(|e| e.ends_with("modengine2.toml"));
+    has_regulation || has_fs_asset_dir || has_me2_toml
+}
+
 /// Generic fallback — always matches. Lowest priority.
 fn detect_generic(_entries: &[String]) -> bool {
     true
@@ -371,7 +405,6 @@ fn path_rimworld(game_path: &Path, mod_name: &str) -> PathBuf {
     game_path.join("Mods").join(sanitize_dir_name(mod_name))
 }
 
-<<<<<<< HEAD
 /// Sims 4 `.package` install path — `<mods_dir>/<modname>/`.
 ///
 /// Note: the installer passes `data_dir` as `game_path` for plugins where
@@ -426,6 +459,14 @@ fn path_gtav_net_script(game_path: &Path, _mod_name: &str) -> PathBuf {
 /// each mod gets its own folder.
 fn path_gimi(game_path: &Path, mod_name: &str) -> PathBuf {
     game_path.join("Mods").join(sanitize_dir_name(mod_name))
+}
+
+/// Mod Engine 2 mods install per-mod under `<game>/mod/<modname>/`.
+/// The FromSoft plugin family sets `data_dir` to `<game>/mod`, so when
+/// `use_legacy_data_dir() == false` the installer passes that as `game_path`
+/// here — meaning we just append the per-mod folder.
+fn path_modengine2(mod_dir: &Path, mod_name: &str) -> PathBuf {
+    mod_dir.join(sanitize_dir_name(mod_name))
 }
 
 fn path_generic(game_path: &Path, mod_name: &str) -> PathBuf {
@@ -546,6 +587,19 @@ const BUILTIN_MOD_TYPES: &[ModType] = &[
         detect: detect_gtav_net_script,
         install_path: path_gtav_net_script,
         per_mod_subfolder: false,
+    },
+    ModType {
+        id: "ModEngine2",
+        display_name: "Mod Engine 2 (FromSoft)",
+        // Priority 76 sits between BepInEx (90) / SMAPI (80) — neither would
+        // false-positive on a regulation.bin — and the UE / RimWorld /
+        // generic types below. Above Sims4_Package (75) and GIMI_Mod (75)
+        // since the regulation.bin / FromSoft asset-dir signals are unique
+        // to FromSoft titles.
+        priority: 76,
+        detect: detect_modengine2,
+        install_path: path_modengine2,
+        per_mod_subfolder: true,
     },
     ModType {
         id: "Sims4_Package",
@@ -1168,5 +1222,65 @@ mod tests {
         assert_eq!(target.type_id, "GTAV_NetScript");
         assert!(!target.per_mod_subfolder);
         assert_eq!(target.target_dir, Path::new("/game/GTAV"));
+    }
+
+    // --- Mod Engine 2 (FromSoft) ------------------------------------------
+
+    #[test]
+    fn detect_modengine2_regulation_only() {
+        // Single-file regulation.bin shipped under a wrapper folder is the
+        // most common Elden Ring / DS3 mod shape.
+        let e = entries(&["MyMod/regulation.bin"]);
+        assert!(detect_modengine2(&e));
+    }
+
+    #[test]
+    fn detect_modengine2_parts_dir() {
+        // Weapon/armor model swap — parts/ asset dir under a wrapper folder.
+        let e = entries(&["MyMod/parts/wp_a_0001.bnd"]);
+        assert!(detect_modengine2(&e));
+    }
+
+    #[test]
+    fn detect_modengine2_param_dir() {
+        // Top-level param/ — gameplay table override.
+        let e = entries(&["param/equipparamweapon.param"]);
+        assert!(detect_modengine2(&e));
+    }
+
+    #[test]
+    fn detect_modengine2_toml() {
+        // Some mods bundle a modengine2.toml config alongside payloads.
+        let e = entries(&["MyMod/modengine2.toml"]);
+        assert!(detect_modengine2(&e));
+    }
+
+    #[test]
+    fn detect_modengine2_no_match_for_bepinex() {
+        // BepInEx archive must NOT match Mod Engine 2 — keeps priority
+        // ordering safe even on shape overlap.
+        let e = entries(&["BepInEx/plugins/MyPlugin.dll"]);
+        assert!(!detect_modengine2(&e));
+    }
+
+    #[test]
+    fn detect_modengine2_path_resolution() {
+        // path_modengine2 is just `<mod_dir>/<sanitized name>` — the
+        // FromSoft plugin family will pass `<game>/mod` as the first arg.
+        let mod_dir = Path::new("/game/EldenRing/mod");
+        let result = path_modengine2(mod_dir, "MyMod");
+        assert_eq!(result, Path::new("/game/EldenRing/mod/MyMod"));
+    }
+
+    #[test]
+    fn resolve_modengine2_picks_over_generic() {
+        // A bare `regulation.bin` archive must route to ModEngine2, not
+        // Generic_Subfolder.
+        let mod_dir = Path::new("/game/EldenRing/mod");
+        let e = entries(&["regulation.bin"]);
+        let target = resolve_install_target(mod_dir, "Reforged", &e);
+        assert_eq!(target.type_id, "ModEngine2");
+        assert!(target.per_mod_subfolder);
+        assert_eq!(target.target_dir, Path::new("/game/EldenRing/mod/Reforged"));
     }
 }
