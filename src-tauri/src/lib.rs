@@ -1404,6 +1404,9 @@ pub fn run() {
             commands::thunderstore_cmds::thunderstore_list_packages,
             commands::thunderstore_cmds::thunderstore_install_package,
             commands::thunderstore_cmds::thunderstore_install_with_dependencies,
+            // CrossOver shortcut auto-discovery (unregistered games)
+            commands::crossover_cmds::list_unregistered_crossover_games,
+            commands::crossover_cmds::register_unregistered_game,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

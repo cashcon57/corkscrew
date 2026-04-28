@@ -2,6 +2,7 @@ pub mod chat;
 pub mod cli;
 pub mod collections;
 pub mod config_commands;
+pub mod crossover_cmds;
 pub mod deployment;
 pub mod depot;
 pub mod diagnostics;
