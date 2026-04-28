@@ -296,6 +296,12 @@
     "mewgenics",
     // HoYoverse — no Bethesda-style plugin load order; mods loaded by GIMI/3DMigoto.
     "genshin",
+    // FromSoftware (Mod Engine 2) — no ESP load order; mods are per-folder overlays.
+    "sekiro",
+    "eldenring",
+    "darksouls3",
+    "darksouls_remastered",
+    "armoredcore6",
   ]);
 
   const gameHasNoPluginSystem = $derived(loadOrderKind === "none");

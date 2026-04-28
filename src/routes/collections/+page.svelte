@@ -472,6 +472,11 @@
     mewgenics: "mewgenics",
     sims4: "thesims4",
     genshin: "genshinimpact",
+    sekiro: "sekiro",
+    eldenring: "eldenring",
+    darksouls3: "darksouls3",
+    darksouls_remastered: "darksoulsremastered",
+    armoredcore6: "armoredcore6firesofrubicon",
   };
 
   function getGameSlug(): string {
@@ -1057,6 +1062,11 @@
       mewgenics: "Mewgenics",
       thesims4: "The Sims 4",
       genshinimpact: "Genshin Impact",
+      sekiro: "Sekiro: Shadows Die Twice",
+      eldenring: "Elden Ring",
+      darksouls3: "Dark Souls III",
+      darksoulsremastered: "Dark Souls: Remastered",
+      armoredcore6firesofrubicon: "Armored Core VI",
     };
     return map[domain] || domain;
   }
