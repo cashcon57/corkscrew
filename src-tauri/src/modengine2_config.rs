@@ -120,12 +120,11 @@ pub fn find_config_path(game_path: &Path, game_id: &str) -> Option<PathBuf> {
     }
 
     // Map our internal game_ids to the ME2 config slug. The ME2 distribution
-    // uses lowercased no-underscore slugs.
+    // uses lowercased no-underscore slugs. Only games officially supported by
+    // ME2 v2.x are mapped — Sekiro and DS:R are not.
     let me2_slug = match game_id {
         "eldenring" => Some("eldenring"),
-        "sekiro" => Some("sekiro"),
         "darksouls3" => Some("darksouls3"),
-        "darksouls_remastered" => Some("darksoulsremastered"),
         "armoredcore6" => Some("armoredcore6"),
         _ => None,
     };
@@ -179,20 +178,40 @@ pub fn save_config(
     game_id: &str,
     cfg: &ModEngine2Config,
 ) -> Result<(), String> {
+    // Pin the bottle scope: any caller-supplied source_path must canonicalize
+    // to within the game's modengine2 directory. Prevents a malicious or
+    // stale `source_path` from redirecting writes outside the bottle.
+    let me2_dir = game_path.join("modengine2");
     let target = if let Some(p) = cfg.source_path.as_deref() {
-        PathBuf::from(p)
+        let candidate = PathBuf::from(p);
+        let me2_canon = me2_dir
+            .canonicalize()
+            .map_err(|e| format!("Failed to canonicalize {}: {}", me2_dir.display(), e))?;
+        // Canonicalize the candidate's parent — file may not exist yet for
+        // first-time writes, so we resolve the directory it lives in.
+        let parent = candidate.parent().ok_or_else(|| {
+            format!("source_path {} has no parent directory", candidate.display())
+        })?;
+        let parent_canon = parent
+            .canonicalize()
+            .map_err(|e| format!("Failed to canonicalize {}: {}", parent.display(), e))?;
+        if !parent_canon.starts_with(&me2_canon) {
+            return Err(format!(
+                "source_path {} escapes bottle scope {}",
+                candidate.display(),
+                me2_canon.display()
+            ));
+        }
+        candidate
     } else if let Some(p) = find_config_path(game_path, game_id) {
         p
     } else {
         // First-time materialization: derive the canonical path.
-        let me2_dir = game_path.join("modengine2");
         fs::create_dir_all(&me2_dir)
             .map_err(|e| format!("Failed to create {}: {}", me2_dir.display(), e))?;
         let slug = match game_id {
             "eldenring" => "eldenring",
-            "sekiro" => "sekiro",
             "darksouls3" => "darksouls3",
-            "darksouls_remastered" => "darksoulsremastered",
             "armoredcore6" => "armoredcore6",
             _ => "fromsoft",
         };
@@ -328,34 +347,35 @@ fn serialize_toml(cfg: &ModEngine2Config) -> Result<String, String> {
 
     // Round-trip extras. Sort for determinism.
     for (k, v) in &cfg.extra_extensions {
-        // Each value we round-trip should be a sub-table; render it as
-        // `[extension.<key>]`.
         if let Value::Table(t) = v {
-            out.push_str(&format!("[extension.{}]\n", k));
-            for (kk, vv) in t {
-                // Avoid clobbering nested tables if any. For non-table values we
-                // emit a key = value line; for nested tables we serialize
-                // a child header.
-                if let Value::Table(_) = vv {
-                    let nested = toml::to_string(&{
-                        let mut wrap = toml::value::Table::new();
-                        wrap.insert(kk.clone(), vv.clone());
-                        wrap
-                    })
-                    .map_err(|e| e.to_string())?;
-                    out.push_str(&nested);
-                    if !out.ends_with('\n') {
-                        out.push('\n');
-                    }
-                } else {
-                    out.push_str(&format!("{} = {}\n", kk, vv));
-                }
-            }
-            out.push('\n');
+            emit_table(&mut out, &format!("extension.{}", k), t);
         }
     }
 
     Ok(out)
+}
+
+/// Recursively emit a TOML table at the given dotted header path.
+///
+/// Scalars/arrays are rendered first under `[header]`, then each child table
+/// is emitted as `[header.child]` with the same rule applied. This preserves
+/// the canonical TOML layout where nested tables live under properly-namespaced
+/// headers rather than being flattened at the top level.
+fn emit_table(out: &mut String, header: &str, table: &toml::value::Table) {
+    out.push_str(&format!("[{}]\n", header));
+    // Emit non-table values first (TOML grammar requires they appear before
+    // any sub-table headers under the same parent).
+    for (k, v) in table {
+        if !matches!(v, Value::Table(_)) {
+            out.push_str(&format!("{} = {}\n", k, v));
+        }
+    }
+    out.push('\n');
+    for (k, v) in table {
+        if let Value::Table(child) = v {
+            emit_table(out, &format!("{}.{}", header, k), child);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -403,6 +423,60 @@ enabled = true
         assert_eq!(cfg.mod_loader.mods[1].name, "Reshade");
         assert!(!cfg.mod_loader.mods[1].enabled);
         assert!(cfg.extra_extensions.contains_key("scylla_hide"));
+    }
+
+    #[test]
+    fn round_trip_preserves_nested_extra_tables() {
+        let nested = r#"
+[modengine]
+debug = false
+external_dlls = []
+
+[extension.mod_loader]
+enabled = true
+loose_params = false
+
+[extension.scylla_hide]
+enabled = true
+
+[extension.scylla_hide.advanced]
+hide_kernel_modules = true
+log_level = "info"
+"#;
+        let cfg = parse_toml(nested).expect("parse");
+        let serialized = serialize_toml(&cfg).expect("serialize");
+        let cfg2 = parse_toml(&serialized).expect("reparse");
+        // The nested [extension.scylla_hide.advanced] table must survive.
+        let scylla = cfg2.extra_extensions.get("scylla_hide").expect("scylla_hide");
+        let scylla_table = scylla.as_table().expect("table");
+        let advanced = scylla_table
+            .get("advanced")
+            .and_then(|v| v.as_table())
+            .expect("nested advanced table preserved");
+        assert_eq!(
+            advanced.get("hide_kernel_modules").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            advanced.get("log_level").and_then(|v| v.as_str()),
+            Some("info")
+        );
+    }
+
+    #[test]
+    fn save_rejects_source_path_outside_bottle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let game = tmp.path().join("Elden Ring");
+        let me2 = game.join("modengine2");
+        fs::create_dir_all(&me2).unwrap();
+
+        // Attacker-controlled source_path pointing outside the bottle.
+        let escape = tmp.path().join("escape.toml");
+        let mut cfg = ModEngine2Config::default();
+        cfg.source_path = Some(escape.to_string_lossy().to_string());
+        let err = save_config(&game, "eldenring", &cfg).unwrap_err();
+        assert!(err.contains("escapes bottle scope"), "got: {}", err);
+        assert!(!escape.exists(), "must not have written outside bottle");
     }
 
     #[test]

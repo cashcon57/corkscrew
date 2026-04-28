@@ -58,11 +58,13 @@ pub struct SaveFile {
 /// Map a game_id to the AppData\Roaming\<dirname> the game uses on Windows.
 /// Returns None for non-FromSoft ids.
 fn appdata_dirname_for(game_id: &str) -> Option<&'static str> {
+    // DS:R saves live under Documents/NBGI/DARK SOULS REMASTERED, not
+    // AppData/Roaming — needs a separate code path. Dropped here until
+    // that's wired so we don't return a path the game never writes to.
     Some(match game_id {
         "sekiro" => "Sekiro",
         "eldenring" => "EldenRing",
         "darksouls3" => "DarkSoulsIII",
-        "darksouls_remastered" => "DarkSoulsRemastered",
         "armoredcore6" => "ArmoredCore6",
         _ => return None,
     })
@@ -294,16 +296,13 @@ mod tests {
     }
 
     #[test]
-    fn appdata_mapping_covers_all_five() {
-        for id in [
-            "sekiro",
-            "eldenring",
-            "darksouls3",
-            "darksouls_remastered",
-            "armoredcore6",
-        ] {
+    fn appdata_mapping_covers_supported_games() {
+        for id in ["sekiro", "eldenring", "darksouls3", "armoredcore6"] {
             assert!(appdata_dirname_for(id).is_some(), "missing mapping for {}", id);
         }
+        // DS:R saves under Documents/NBGI, not AppData/Roaming — until that
+        // separate path is wired, we deliberately return None.
+        assert!(appdata_dirname_for("darksouls_remastered").is_none());
         assert!(appdata_dirname_for("skyrimse").is_none());
     }
 
@@ -320,7 +319,6 @@ mod tests {
             ("sekiro", "Sekiro"),
             ("eldenring", "EldenRing"),
             ("darksouls3", "DarkSoulsIII"),
-            ("darksouls_remastered", "DarkSoulsRemastered"),
             ("armoredcore6", "ArmoredCore6"),
         ] {
             let (bottle, expected, _t) = setup_bottle_with_saves(game);

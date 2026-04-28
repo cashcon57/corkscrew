@@ -331,26 +331,35 @@ fn detect_modengine2(entries: &[String]) -> bool {
         .iter()
         .map(|e| e.replace('\\', "/").to_lowercase())
         .collect();
-    // regulation.bin at any depth (often shipped solo)
+    // Strong signals — any one of these alone is enough.
     let has_regulation = normalised.iter().any(|e| e.ends_with("regulation.bin"));
-    // FromSoft asset dirs at depth ≤ 2 (top-level or one wrapper folder)
-    let has_fs_asset_dir = normalised.iter().any(|e| {
+    let has_me2_toml = normalised.iter().any(|e| e.ends_with("modengine2.toml"));
+    if has_regulation || has_me2_toml {
+        return true;
+    }
+    // Weak signal — FromSoft asset dirs. A single asset dir name can collide
+    // with unrelated archives (e.g. UE pak mods that happen to contain a
+    // `chr/` or `sfx/` folder). Require ≥2 distinct FromSoft asset dirs at
+    // depth ≤ 2 before we claim this is an ME2 mod.
+    let mut distinct_dirs = std::collections::HashSet::new();
+    for e in &normalised {
         let parts: Vec<&str> = e.split('/').collect();
         if parts.len() < 2 || parts.len() > 4 {
-            return false;
+            continue;
         }
         let segment = if parts.len() <= 2 {
             parts[0]
         } else {
             parts[parts.len() - 2]
         };
-        matches!(
+        if matches!(
             segment,
             "parts" | "event" | "chr" | "msg" | "param" | "menu" | "facegen" | "sfx"
-        )
-    });
-    let has_me2_toml = normalised.iter().any(|e| e.ends_with("modengine2.toml"));
-    has_regulation || has_fs_asset_dir || has_me2_toml
+        ) {
+            distinct_dirs.insert(segment.to_string());
+        }
+    }
+    distinct_dirs.len() >= 2
 }
 
 /// Generic fallback — always matches. Lowest priority.
@@ -1235,17 +1244,25 @@ mod tests {
     }
 
     #[test]
-    fn detect_modengine2_parts_dir() {
-        // Weapon/armor model swap — parts/ asset dir under a wrapper folder.
-        let e = entries(&["MyMod/parts/wp_a_0001.bnd"]);
+    fn detect_modengine2_two_asset_dirs() {
+        // Weapon/armor model swap shipping multiple FromSoft asset dirs is
+        // a confident ME2 signature even without regulation.bin.
+        let e = entries(&[
+            "MyMod/parts/wp_a_0001.bnd",
+            "MyMod/chr/c0001.bnd",
+        ]);
         assert!(detect_modengine2(&e));
     }
 
     #[test]
-    fn detect_modengine2_param_dir() {
-        // Top-level param/ — gameplay table override.
+    fn detect_modengine2_single_asset_dir_is_not_enough() {
+        // A lone `param/` or `chr/` collides with unrelated archives (e.g. UE
+        // pak mods that happen to contain a folder by that name). Single
+        // asset dir alone must NOT route to ME2.
         let e = entries(&["param/equipparamweapon.param"]);
-        assert!(detect_modengine2(&e));
+        assert!(!detect_modengine2(&e));
+        let e = entries(&["MyMod/parts/wp_a_0001.bnd"]);
+        assert!(!detect_modengine2(&e));
     }
 
     #[test]

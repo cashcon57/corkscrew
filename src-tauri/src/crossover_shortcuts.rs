@@ -475,7 +475,9 @@ fn match_against_vortex(exe_name: &str) -> Option<MatchHint> {
     // Walk the registry → for each entry whose `executable` filename matches,
     // check if vortex_index has a corresponding entry.
     for entry in crate::game_registry::all_game_entries() {
-        let exe = entry.executable.as_deref()?;
+        let Some(exe) = entry.executable.as_deref() else {
+            continue;
+        };
         let entry_exe_name = std::path::Path::new(exe)
             .file_name()
             .map(|n| n.to_string_lossy().to_lowercase())

@@ -159,10 +159,11 @@ export function isFromSoftGame(gameId: string): boolean {
 }
 
 /**
- * Per-game config key for the Mod Engine 2 first-launch wizard
- * dismissal flag. Once set, the wizard never appears again for that
- * game.
+ * Per-(game, bottle) config key for the Mod Engine 2 first-launch wizard
+ * dismissal flag. Composed with the bottle name so dismissing the wizard
+ * in one bottle doesn't suppress it in a sibling bottle that hasn't been
+ * set up yet.
  */
-export function me2SetupDismissedKey(gameId: string): string {
-  return `me2_setup_dismissed_${gameId}`;
+export function me2SetupDismissedKey(gameId: string, bottleName: string): string {
+  return `me2_setup_dismissed_${gameId}:${bottleName}`;
 }

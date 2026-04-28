@@ -156,6 +156,7 @@
   // `mod/` directory isn't there yet. Per-game dismissal flag persisted
   // via `set_config_value`.
   let me2WizardGameId = $state<string | null>(null);
+  let me2WizardBottleName = $state<string | null>(null);
   let me2WizardInstalling = $state(false);
 
   /**
@@ -269,48 +270,63 @@
   async function maybeShowMe2Wizard(game: DetectedGame): Promise<void> {
     if (!isFromSoftGame(game.game_id)) {
       me2WizardGameId = null;
+      me2WizardBottleName = null;
       return;
     }
     try {
       const cfg = await getConfig();
-      const dismissed = (cfg as Record<string, unknown>)[me2SetupDismissedKey(game.game_id)];
+      const dismissed = (cfg as Record<string, unknown>)[
+        me2SetupDismissedKey(game.game_id, game.bottle_name)
+      ];
       if (dismissed === "true" || dismissed === true) {
         me2WizardGameId = null;
+        me2WizardBottleName = null;
         return;
       }
       const tools = await detectModTools(game.game_id, game.bottle_name);
       const me2 = tools.find((t) => t.id === "modengine2");
       if (me2?.detected_path) {
         me2WizardGameId = null;
+        me2WizardBottleName = null;
         return;
       }
       me2WizardGameId = game.game_id;
+      me2WizardBottleName = game.bottle_name;
     } catch (err) {
       console.error("maybeShowMe2Wizard:", err);
       me2WizardGameId = null;
+      me2WizardBottleName = null;
     }
   }
 
   async function dismissMe2Wizard(): Promise<void> {
     const gid = me2WizardGameId;
-    if (!gid) return;
+    const bot = me2WizardBottleName;
+    if (!gid || !bot) return;
     try {
-      await setConfigValue(me2SetupDismissedKey(gid), "true");
+      await setConfigValue(me2SetupDismissedKey(gid, bot), "true");
     } catch (err) {
       console.error("dismissMe2Wizard: setConfigValue failed:", err);
     }
     me2WizardGameId = null;
+    me2WizardBottleName = null;
   }
 
   async function installMe2FromWizard(): Promise<void> {
     const game = pickedGame ?? $selectedGame;
-    if (!game || !me2WizardGameId) return;
+    if (!game || !me2WizardGameId || !me2WizardBottleName) return;
     me2WizardInstalling = true;
     try {
       await installModTool("modengine2", game.game_id, game.bottle_name);
       // Dismiss permanently once installed so the wizard doesn't reappear.
-      await setConfigValue(me2SetupDismissedKey(me2WizardGameId), "true");
+      await setConfigValue(
+        me2SetupDismissedKey(me2WizardGameId, me2WizardBottleName),
+        "true",
+      );
       me2WizardGameId = null;
+      me2WizardBottleName = null;
+      await loadMods(game);
+      await refreshHealth(game);
       showSuccess("Mod Engine 2 installed.");
     } catch (err) {
       console.error("installMe2FromWizard:", err);
@@ -1057,6 +1073,7 @@
       void maybeShowMe2Wizard(game);
     } else {
       me2WizardGameId = null;
+      me2WizardBottleName = null;
     }
   });
 
