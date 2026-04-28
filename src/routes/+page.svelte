@@ -10,6 +10,7 @@
   } from "$lib/stores";
   import type { Bottle, DetectedGame, BottleSettingDef } from "$lib/types";
   import GameSupportBadge from "$lib/components/GameSupportBadge.svelte";
+  import UnregisteredGamesBanner from "$lib/components/UnregisteredGamesBanner.svelte";
   import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 
   let loadingState = $state<"idle" | "loading" | "done">("idle");
@@ -141,6 +142,9 @@
         </div>
       </div>
     {:else}
+      <!-- Unregistered games banner (CrossOver shortcut auto-discovery) -->
+      <UnregisteredGamesBanner />
+
       <!-- Bottles Section -->
       <section class="section">
         <div class="section-header">

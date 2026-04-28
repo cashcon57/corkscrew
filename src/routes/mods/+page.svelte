@@ -6,6 +6,7 @@
   import ModlistImportWizard from "$lib/components/ModlistImportWizard.svelte";
   import FomodWizard from "$lib/components/FomodWizard.svelte";
   import ShaderConversionWizard from "$lib/components/ShaderConversionWizard.svelte";
+  import UnregisteredGamesBanner from "$lib/components/UnregisteredGamesBanner.svelte";
   import {
     getInstalledMods,
     getInstalledModsSummary,
@@ -2175,6 +2176,8 @@
     </div>
   {/if}
   {#if !activeGame}
+    <!-- Unregistered games banner — same auto-discovery the dashboard surfaces -->
+    <UnregisteredGamesBanner />
     <!-- Game Picker -->
     <div class="picker-container">
       <div class="picker-icon">

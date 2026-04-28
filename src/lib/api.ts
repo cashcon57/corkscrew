@@ -2474,3 +2474,31 @@ export async function refreshVerificationManifest(): Promise<void> {
 export async function getVerificationCacheAgeSecs(): Promise<number | null> {
   return invoke("get_verification_cache_age_secs");
 }
+
+// --- CrossOver shortcut auto-discovery ---
+
+export async function listUnregisteredCrossoverGames(): Promise<
+  import("$lib/types").UnregisteredGame[]
+> {
+  return invoke("list_unregistered_crossover_games");
+}
+
+export async function registerUnregisteredGame(args: {
+  bottleName: string;
+  gameId: string;
+  displayName: string;
+  nexusSlug: string;
+  steamAppId: string | null;
+  gamePath: string;
+  exePath: string;
+}): Promise<void> {
+  return invoke("register_unregistered_game", {
+    bottleName: args.bottleName,
+    gameId: args.gameId,
+    displayName: args.displayName,
+    nexusSlug: args.nexusSlug,
+    steamAppId: args.steamAppId,
+    gamePath: args.gamePath,
+    exePath: args.exePath,
+  });
+}

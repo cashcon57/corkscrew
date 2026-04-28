@@ -1789,3 +1789,35 @@ export interface VerifiedManifest {
   collections: Record<string, Record<string, VerifiedEntry>>;
   wabbajack: Record<string, VerifiedEntry>;
 }
+
+// CrossOver shortcut auto-discovery
+//
+// `.lnk` files in `<bottle>/drive_c/users/*/Start Menu/Programs/` and
+// `Desktop/` get parsed by the Rust crossover_shortcuts module. Shortcuts
+// surviving the game-vs-tool filter (and not already registered) come
+// back as UnregisteredGame[] for the dashboard banner.
+
+export interface CrossoverShortcut {
+  bottle_name: string;
+  display_name: string;
+  source_lnk_path: string;
+  windows_target: string;
+  host_target: string;
+  working_directory: string | null;
+  icon_path: string | null;
+}
+
+export type CrossoverMatchSource = "Plugin" | "VortexIndex";
+
+export interface CrossoverMatchHint {
+  game_id: string;
+  display_name: string;
+  nexus_slug: string;
+  steam_app_id: string | null;
+  source: CrossoverMatchSource;
+}
+
+export interface UnregisteredGame {
+  shortcut: CrossoverShortcut;
+  match_hint: CrossoverMatchHint | null;
+}
