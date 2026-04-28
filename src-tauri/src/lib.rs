@@ -403,6 +403,7 @@ pub fn run() {
     plugins::gtav::register();
     plugins::genshin::register();
     plugins::thunderstore_games::register_all();
+    plugins::fromsoft::register_all();
     game_registry::register_all();
 
     // Initialize database
