@@ -62,6 +62,7 @@ pub mod profile_sharing;
 pub mod profiles;
 pub mod progress;
 pub mod proton;
+pub mod regulation_conflicts;
 pub mod rollback;
 pub mod session_tracker;
 pub mod skse;
@@ -1174,6 +1175,8 @@ pub fn run() {
             commands::modengine2_cmds::save_modengine2_config,
             commands::modengine2_cmds::add_mod_to_modengine2,
             commands::modengine2_cmds::remove_mod_from_modengine2,
+            // FromSoft: regulation.bin conflict detection
+            commands::modengine2_cmds::get_regulation_conflicts,
             // Platform Detection
             commands::platform::get_platform_detail,
             commands::platform::get_optimal_download_threads,

@@ -4,8 +4,11 @@
 //! and resolves to `(Bottle, DetectedGame, game_data_dir)` via [`resolve_game`].
 //! ME2 config lives at `<game_path>/modengine2/`, so we use `game.game_path`.
 
+use tauri::State;
+
 use crate::modengine2_config::{self as me2, ModEngine2Config};
-use crate::resolve_game;
+use crate::regulation_conflicts::{self, RegulationConflict};
+use crate::{resolve_game, AppState};
 
 // ---------------------------------------------------------------------------
 // modengine2.toml editor
@@ -69,6 +72,24 @@ pub async fn remove_mod_from_modengine2(
             me2::save_config(&game.game_path, &game_id, &cfg)?;
         }
         Ok::<bool, String>(removed)
+    })
+    .await
+    .map_err(crate::format_join_error)?
+}
+
+// ---------------------------------------------------------------------------
+// regulation.bin conflict detection
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn get_regulation_conflicts(
+    game_id: String,
+    bottle_name: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<RegulationConflict>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        regulation_conflicts::detect_regulation_conflicts(&db, &game_id, &bottle_name)
     })
     .await
     .map_err(crate::format_join_error)?
