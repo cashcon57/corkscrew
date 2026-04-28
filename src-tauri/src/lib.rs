@@ -629,6 +629,21 @@ pub fn run() {
             return;
         }
 
+        // --scan-bottle <bottle_name>  (diagnostic: dump everything Corkscrew
+        // can detect in a bottle — Steam appmanifest games, CrossOver
+        // shortcuts, FromSoft Mod Engine 2 install, plugin-detected games.
+        // Pure read-only; safe to run anywhere. Designed for paste-into-Discord
+        // troubleshooting.)
+        if let Some(pos) = args.iter().position(|a| a == "--scan-bottle") {
+            let bottle_name = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("");
+            if bottle_name.is_empty() {
+                eprintln!("Usage: corkscrew --scan-bottle <bottle_name>");
+                std::process::exit(1);
+            }
+            commands::cli::cli_scan_bottle(bottle_name);
+            return;
+        }
+
         // --list-games  (JSON array of detected games across all bottles)
         if args.iter().any(|a| a == "--list-games") {
             commands::cli::cli_list_games(&db);
@@ -861,6 +876,7 @@ pub fn run() {
             println!("  corkscrew --mod-files <id> <game> <bottle>   Show mod's files");
             println!("  corkscrew --list-bottles                     List detected bottles (JSON)");
             println!("  corkscrew --list-games                       List detected games (JSON)");
+            println!("  corkscrew --scan-bottle <bottle>             Diagnostic: dump everything detected in a bottle");
             println!("  corkscrew --db-stats <game> <bottle>         Database statistics (JSON)");
             println!("  corkscrew --db-integrity                     SQLite integrity check");
             println!("  corkscrew --vortex-list                      List cached Vortex extensions (JSON)");

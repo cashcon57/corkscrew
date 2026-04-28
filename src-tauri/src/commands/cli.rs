@@ -493,6 +493,98 @@ pub fn cli_list_bottles() {
     );
 }
 
+/// Diagnostic: dump everything Corkscrew detects in one bottle as plain text.
+///
+/// Read-only. Designed to be piped into a Discord paste so users can show
+/// what Corkscrew sees without screenshots. Surfaces:
+/// - bottle path + engine
+/// - detected games via plugin registry (Steam appmanifest + plugins)
+/// - CrossOver `.lnk` shortcuts found in the bottle
+/// - per-game tool detection (ME2, SKSE, etc.)
+pub fn cli_scan_bottle(bottle_name: &str) {
+    let bottle = match crate::bottles::find_bottle_by_name(bottle_name) {
+        Some(b) => b,
+        None => {
+            eprintln!("Error: Bottle '{}' not found", bottle_name);
+            eprintln!("Run `corkscrew --list-bottles` to see available bottles.");
+            std::process::exit(1);
+        }
+    };
+
+    println!("=== Bottle: {} ===", bottle.name);
+    println!("Path:   {}", bottle.path.display());
+    println!("Engine: {:?}", bottle.source);
+    println!("Exists: {}", bottle.exists());
+    println!();
+
+    // --- Detected games (Steam appmanifest + plugin-registered) ---
+    let games = crate::games::detect_games(&bottle);
+    println!("=== Detected games ({}) ===", games.len());
+    if games.is_empty() {
+        println!("(none)");
+    }
+    for g in &games {
+        println!("- {} [{}]", g.display_name, g.game_id);
+        println!("    path: {}", g.game_path.display());
+        if let Some(exe) = &g.exe_path {
+            println!("    exe:  {}", exe.display());
+        }
+        println!("    data: {}", g.data_dir.display());
+
+        // Per-game tool detection — useful for confirming ME2 / SKSE etc.
+        let tools = crate::mod_tools::detect_tools_for_game(&g.data_dir, &g.game_id);
+        let installed: Vec<&crate::mod_tools::ModTool> =
+            tools.iter().filter(|t| t.detected_path.is_some()).collect();
+        if !installed.is_empty() {
+            println!("    tools detected:");
+            for t in &installed {
+                println!(
+                    "      - {} ({}): {}",
+                    t.name,
+                    t.id,
+                    t.detected_path.as_ref().unwrap()
+                );
+            }
+        }
+    }
+    println!();
+
+    // --- CrossOver shortcuts (the v0.13.x auto-discovery path) ---
+    let shortcuts = crate::crossover_shortcuts::scan_bottle_shortcuts(&bottle);
+    println!("=== CrossOver shortcuts ({}) ===", shortcuts.len());
+    if shortcuts.is_empty() {
+        println!("(none — bottle has no .lnk files in any standard Wine location)");
+    }
+    for s in &shortcuts {
+        println!("- {}", s.display_name);
+        println!("    lnk:    {}", s.source_lnk_path.display());
+        println!("    target: {}", s.windows_target);
+        println!("    host:   {}", s.host_target.display());
+    }
+    println!();
+
+    // --- Unregistered games (shortcut found but no registered game) ---
+    let unreg =
+        crate::crossover_shortcuts::list_unregistered_games(std::slice::from_ref(&bottle), &games);
+    println!("=== Unregistered games (would surface a registration banner) ({}) ===", unreg.len());
+    if unreg.is_empty() {
+        println!("(none)");
+    }
+    for u in &unreg {
+        let hint = u
+            .match_hint
+            .as_ref()
+            .map(|h| format!("{} via {:?}", h.game_id, h.source))
+            .unwrap_or_else(|| "no match".into());
+        println!(
+            "- {} → {} [{}]",
+            u.shortcut.display_name,
+            u.shortcut.host_target.display(),
+            hint
+        );
+    }
+}
+
 /// List detected games as JSON (includes auto-detected Steam games and custom games).
 pub fn cli_list_games(db: &Arc<ModDatabase>) {
     let bottles = crate::bottles::detect_bottles();
