@@ -11,6 +11,8 @@
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "tauri": "tauri",
     "release": "./scripts/release.sh",
+    "discord:bootstrap": "node scripts/discord-bootstrap.mjs",
+    "discord:bootstrap:dry": "node scripts/discord-bootstrap.mjs --dry-run",
     "test:e2e": "npx playwright test",
     "test:e2e:ui": "npx playwright test --ui",
     "test:e2e:wdio": "cd e2e-wdio && npm test",

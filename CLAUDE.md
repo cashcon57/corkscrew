@@ -27,6 +27,24 @@ ALWAYS run `cargo test` and `npx svelte-check` after making changes. Fix failure
 - Always version-bump fixes (user preference)
 - NEVER commit signing keys, tokens, or credentials — check MEMORY.md for what's sensitive
 
+## Secrets storage (macOS Keychain)
+
+Sensitive credentials live in the macOS Keychain on cashconway's machine, NEVER in the repo.
+
+| Service name | Holds | Retrieve |
+|---|---|---|
+| `corkscrew-discord-bot` | Discord bot token (Corkscrew-Bot, App ID 1498475927167045642) | `security find-generic-password -s "corkscrew-discord-bot" -w` |
+| `corkscrew-discord-guild` | Discord guild ID (1498470295470739547) | `security find-generic-password -s "corkscrew-discord-guild" -w` |
+
+Discord bootstrap ([scripts/discord-bootstrap.mjs](scripts/discord-bootstrap.mjs)) reads `BOT_TOKEN` and `GUILD_ID` from env:
+```bash
+BOT_TOKEN="$(security find-generic-password -s 'corkscrew-discord-bot' -w)" \
+GUILD_ID="$(security find-generic-password -s 'corkscrew-discord-guild' -w)" \
+npm run discord:bootstrap
+```
+
+See `discord-server.md` in auto-memory for server structure + token recovery.
+
 ## Critical Invariants
 
 These rules exist because violating them caused real bugs. Follow them exactly.

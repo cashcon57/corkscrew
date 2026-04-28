@@ -1359,6 +1359,7 @@
         <span class="row-label">Links</span>
         <div class="row-value about-links">
           <button class="btn-link" onclick={() => openUrl("https://github.com/cashcon57/corkscrew")}>GitHub</button>
+          <button class="btn-link" onclick={() => openUrl("https://discord.gg/nufkm2b7pB")}>Discord</button>
           <button class="btn-link" onclick={() => openUrl("https://github.com/cashcon57/corkscrew/blob/main/PRIVACY.md")}>Privacy Policy</button>
           <button class="btn-link" onclick={() => openUrl("https://ko-fi.com/cash508287")}>Support</button>
         </div>

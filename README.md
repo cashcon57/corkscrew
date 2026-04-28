@@ -16,6 +16,7 @@
   <img src="https://img.shields.io/badge/macOS-10.15+-000000?logo=apple&logoColor=white" alt="macOS">
   <img src="https://img.shields.io/badge/Linux-SteamOS%20%7C%20Ubuntu%20%7C%20Fedora-FCC624?logo=linux&logoColor=black" alt="Linux">
   <img src="https://img.shields.io/badge/License-GPL--3.0-blue" alt="License">
+  <a href="https://discord.gg/nufkm2b7pB"><img src="https://img.shields.io/discord/1498470295470739547?logo=discord&logoColor=white&label=Discord&color=5865F2" alt="Discord"></a>
   <a href="https://ko-fi.com/cash508287"><img src="https://img.shields.io/badge/Ko--fi-Support%20Corkscrew-FF5E5B?logo=ko-fi&logoColor=white" alt="Ko-fi"></a>
 </p>
 
