@@ -136,6 +136,11 @@ tempfile = "3"
 # deterministic mtime control in crash-log dedup tests).
 filetime = "0.2"
 
+# Windows .lnk shortcut parsing (CrossOver bottle game auto-discovery).
+# Parses the Start Menu / Desktop shortcuts CrossOver creates per app to
+# surface unregistered games in the UI without requiring CLI use.
+parselnk = { version = "0.1", default-features = false }
+
 # WebDriver E2E testing — debug builds only, compiled out of release
 [target.'cfg(debug_assertions)'.dependencies]
 tauri-plugin-webdriver = "0.2"

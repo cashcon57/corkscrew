@@ -9,6 +9,7 @@ pub mod collections;
 pub mod config;
 pub mod conflict_resolver;
 pub mod crashlog;
+pub mod crossover_shortcuts;
 pub mod cursor_clamp;
 pub mod database;
 pub mod deck;

@@ -74,6 +74,14 @@ fn entries() -> &'static Vec<GameEntry> {
     })
 }
 
+/// Public read-only view of the embedded game-registry entries.
+///
+/// Exposed for cross-module lookups (e.g. CrossOver shortcut auto-match)
+/// that need to walk the catalog by `game_id` / `executable` / `steam_id`.
+pub fn all_game_entries() -> &'static [GameEntry] {
+    entries().as_slice()
+}
+
 // ---------------------------------------------------------------------------
 // Generic GamePlugin implementation
 // ---------------------------------------------------------------------------
