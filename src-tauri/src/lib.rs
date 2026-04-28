@@ -48,6 +48,7 @@ pub mod mod_dependencies;
 pub mod mod_recommendations;
 pub mod mod_tools;
 pub mod mod_types;
+pub mod modengine2_config;
 pub mod modlist_io;
 pub mod nexus;
 pub mod nexus_sso;
@@ -1168,6 +1169,11 @@ pub fn run() {
             // Wine Prefix Dependencies
             commands::tools::get_prefix_dependencies,
             commands::tools::install_prefix_dependencies,
+            // FromSoft: Mod Engine 2 modengine2.toml editor
+            commands::modengine2_cmds::get_modengine2_config,
+            commands::modengine2_cmds::save_modengine2_config,
+            commands::modengine2_cmds::add_mod_to_modengine2,
+            commands::modengine2_cmds::remove_mod_from_modengine2,
             // Platform Detection
             commands::platform::get_platform_detail,
             commands::platform::get_optimal_download_threads,
