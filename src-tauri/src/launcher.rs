@@ -15,6 +15,16 @@ use thiserror::Error;
 
 use crate::bottles::Bottle;
 
+/// Whether the given game_id refers to one of the FromSoft titles where we
+/// run a pre-launch save backup. Centralized here so launcher.rs and the
+/// frontend agree on the canonical set.
+fn is_fromsoft_game(game_id: &str) -> bool {
+    matches!(
+        game_id,
+        "sekiro" | "eldenring" | "darksouls3" | "darksouls_remastered" | "armoredcore6"
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
@@ -452,6 +462,24 @@ pub fn launch_game(
         bottle.path.display(),
         work_dir.display(),
     );
+
+    // Pre-launch FromSoft save backup. Best-effort: never block the launch
+    // on backup failure. FromSoft saves get corrupted under Wine when the
+    // game is interrupted ungracefully — this guards against losing tens
+    // of hours of progress.
+    if let Some(gid) = game_id {
+        if is_fromsoft_game(gid) {
+            match crate::fromsoft_saves::backup_saves_before_launch(
+                bottle,
+                gid,
+                crate::fromsoft_saves::DEFAULT_MAX_BACKUPS,
+            ) {
+                Ok(0) => {} // No saves yet — nothing to back up.
+                Ok(n) => info!("FromSoft save backup: {} file(s) saved before launch", n),
+                Err(e) => warn!("FromSoft save backup failed (non-fatal): {}", e),
+            }
+        }
+    }
 
     // Build and spawn the command.
     let mut cmd = Command::new(&wine_cmd.binary);

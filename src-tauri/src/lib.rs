@@ -25,6 +25,7 @@ pub mod esp_analyzer;
 pub mod executables;
 pub mod fomod;
 pub mod fomod_recipes;
+pub mod fromsoft_saves;
 pub mod game_lock;
 pub mod game_registry;
 pub mod games;
@@ -1177,6 +1178,10 @@ pub fn run() {
             commands::modengine2_cmds::remove_mod_from_modengine2,
             // FromSoft: regulation.bin conflict detection
             commands::modengine2_cmds::get_regulation_conflicts,
+            // FromSoft: pre-launch save backup
+            commands::modengine2_cmds::list_fromsoft_saves,
+            commands::modengine2_cmds::get_fromsoft_saves_dir,
+            commands::modengine2_cmds::backup_fromsoft_saves,
             // Platform Detection
             commands::platform::get_platform_detail,
             commands::platform::get_optimal_download_threads,
