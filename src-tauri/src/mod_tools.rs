@@ -1396,33 +1396,126 @@ fn gtav_tools() -> Vec<ModTool> {
 // kernel-mode anti-cheat shenanigans involved.
 
 fn fromsoft_tools() -> Vec<ModTool> {
-    vec![ModTool {
-        id: "modengine2".into(),
-        name: "Mod Engine 2".into(),
-        description: "FromSoft mod loader for Sekiro, Elden Ring, Dark Souls 3, Dark Souls: Remastered, and Armored Core VI. Disables EAC for offline modding.".into(),
-        exe_names: vec![
-            "modengine2_launcher.exe".into(),
-            "launchmod_eldenring.bat".into(),
-            "launchmod_sekiro.bat".into(),
-            "launchmod_darksouls3.bat".into(),
-            "launchmod_armoredcore6.bat".into(),
-        ],
-        detected_path: None,
-        requires_wine: true,
-        category: "Framework".into(),
-        can_auto_install: true,
-        github_repo: Some("soulsmods/ModEngine2".into()),
-        nexus_mod_id: None,
-        nexus_game_slug: None,
-        download_url: None,
-        license: "BSD-3-Clause".into(),
-        wine_notes: Some("Loads as a dinput8.dll proxy. Patches start_protected_game.exe to disable EAC for offline play. Works under Wine/CrossOver.".into()),
-        wine_compat: "good".into(),
-        recommended_alternative: None,
-        recommended_ini_edits: vec![],
-        support_url: Some("https://github.com/soulsmods/ModEngine2".into()),
-        requires_explicit_opt_in: false,
-    }]
+    vec![
+        ModTool {
+            id: "modengine2".into(),
+            name: "Mod Engine 2".into(),
+            description: "FromSoft mod loader for Sekiro, Elden Ring, Dark Souls 3, Dark Souls: Remastered, and Armored Core VI. Disables EAC for offline modding.".into(),
+            exe_names: vec![
+                "modengine2_launcher.exe".into(),
+                "launchmod_eldenring.bat".into(),
+                "launchmod_sekiro.bat".into(),
+                "launchmod_darksouls3.bat".into(),
+                "launchmod_armoredcore6.bat".into(),
+            ],
+            detected_path: None,
+            requires_wine: true,
+            category: "Framework".into(),
+            can_auto_install: true,
+            github_repo: Some("soulsmods/ModEngine2".into()),
+            nexus_mod_id: None,
+            nexus_game_slug: None,
+            download_url: None,
+            license: "BSD-3-Clause".into(),
+            wine_notes: Some("Loads as a dinput8.dll proxy. Patches start_protected_game.exe to disable EAC for offline play. Works under Wine/CrossOver.".into()),
+            wine_compat: "good".into(),
+            recommended_alternative: None,
+            recommended_ini_edits: vec![],
+            support_url: Some("https://github.com/soulsmods/ModEngine2".into()),
+            requires_explicit_opt_in: false,
+        },
+        ModTool {
+            // Repacker for FromSoft archive formats (BND/BHD/BDT/DCX/PARAM/etc).
+            // Essential for any FromSoft mod author; users tend to want it
+            // alongside Mod Engine 2 for inspecting/repacking shipped mods.
+            id: "witchybnd".into(),
+            name: "WitchyBND".into(),
+            description: "FromSoft archive repacker (BND/DCX/PARAM/MSB/etc). Essential for inspecting and repacking FromSoft mods.".into(),
+            exe_names: vec!["WitchyBND.exe".into()],
+            detected_path: None,
+            requires_wine: true,
+            category: "Tool".into(),
+            can_auto_install: true,
+            github_repo: Some("ividyon/WitchyBND".into()),
+            nexus_mod_id: None,
+            nexus_game_slug: None,
+            download_url: None,
+            license: "BSD-3-Clause".into(),
+            wine_notes: Some("Pure .NET CLI/GUI tool — runs cleanly under Wine. No native deps.".into()),
+            wine_compat: "good".into(),
+            recommended_alternative: None,
+            recommended_ini_edits: vec![],
+            support_url: Some("https://github.com/ividyon/WitchyBND".into()),
+            requires_explicit_opt_in: false,
+        },
+        ModTool {
+            // Successor to DSMapStudio. Param/map/event editor across all five
+            // FromSoft titles we support.
+            id: "smithbox".into(),
+            name: "Smithbox".into(),
+            description: "Param, map, and event editor for FromSoft games. Successor to DSMapStudio.".into(),
+            exe_names: vec!["Smithbox.exe".into()],
+            detected_path: None,
+            requires_wine: true,
+            category: "Editor".into(),
+            can_auto_install: true,
+            github_repo: Some("vawser/Smithbox".into()),
+            nexus_mod_id: None,
+            nexus_game_slug: None,
+            download_url: None,
+            license: "MIT".into(),
+            wine_notes: Some("Veldrid renderer; works under DXVK. May need d3dcompiler_47 in the bottle.".into()),
+            wine_compat: "good".into(),
+            recommended_alternative: None,
+            recommended_ini_edits: vec![],
+            support_url: Some("https://github.com/vawser/Smithbox".into()),
+            requires_explicit_opt_in: false,
+        },
+        ModTool {
+            // Param editor specifically tuned for Elden Ring's param schema.
+            id: "yapped_rune_bear".into(),
+            name: "Yapped Rune Bear".into(),
+            description: "Param editor specifically tuned for Elden Ring. Read/write regulation.bin params with named field metadata.".into(),
+            exe_names: vec!["Yapped.exe".into(), "Yapped Rune Bear.exe".into()],
+            detected_path: None,
+            requires_wine: true,
+            category: "Editor".into(),
+            can_auto_install: true,
+            github_repo: Some("vawser/Yapped-Rune-Bear".into()),
+            nexus_mod_id: None,
+            nexus_game_slug: None,
+            download_url: None,
+            license: "MIT".into(),
+            wine_notes: Some("WinForms .NET app — runs cleanly under Wine.".into()),
+            wine_compat: "good".into(),
+            recommended_alternative: None,
+            recommended_ini_edits: vec![],
+            support_url: Some("https://github.com/vawser/Yapped-Rune-Bear".into()),
+            requires_explicit_opt_in: false,
+        },
+        ModTool {
+            // Animation viewer/editor for FromSoft games (HKX animations).
+            id: "dsanimstudio".into(),
+            name: "DSAnimStudio".into(),
+            description: "Animation viewer and editor for FromSoft games (HKX/TAE). Used for animation mod authoring.".into(),
+            exe_names: vec!["DSAnimStudio.exe".into()],
+            detected_path: None,
+            requires_wine: true,
+            category: "Editor".into(),
+            can_auto_install: true,
+            github_repo: Some("Meowmaritus/DSAnimStudio".into()),
+            nexus_mod_id: None,
+            nexus_game_slug: None,
+            download_url: None,
+            license: "MIT".into(),
+            wine_notes: Some("MonoGame DX11 renderer; works under DXVK with d3dcompiler_47 in the bottle.".into()),
+            wine_compat: "good".into(),
+            recommended_alternative: None,
+            recommended_ini_edits: vec![],
+            support_url: Some("https://github.com/Meowmaritus/DSAnimStudio".into()),
+            requires_explicit_opt_in: false,
+        },
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -2953,6 +3046,47 @@ mod tests {
         assert_eq!(tools[0].tool_id, "skse");
         assert!(tools[0].can_auto_install);
         assert_eq!(tools[0].tool_name, "SKSE64");
+    }
+
+    #[test]
+    fn test_fromsoft_tools_registry_complete() {
+        // All five S-class FromSoft tools must be wired with the canonical IDs
+        // the frontend / install pipeline references.
+        let tools = fromsoft_tools();
+        let ids: Vec<&str> = tools.iter().map(|t| t.id.as_str()).collect();
+        for needed in [
+            "modengine2",
+            "witchybnd",
+            "smithbox",
+            "yapped_rune_bear",
+            "dsanimstudio",
+        ] {
+            assert!(ids.contains(&needed), "FromSoft tool {} missing", needed);
+        }
+        // Each must declare a GitHub repo for auto-install + a license string.
+        for t in &tools {
+            assert!(
+                t.github_repo.is_some(),
+                "FromSoft tool {} missing github_repo",
+                t.id
+            );
+            assert!(!t.license.is_empty(), "FromSoft tool {} missing license", t.id);
+            assert!(t.requires_wine, "FromSoft tool {} should require wine", t.id);
+        }
+    }
+
+    #[test]
+    fn test_fromsoft_tools_categorized() {
+        let tools = fromsoft_tools();
+        // ME2 is the loader framework; the other four are tooling.
+        let me2 = tools.iter().find(|t| t.id == "modengine2").unwrap();
+        assert_eq!(me2.category, "Framework");
+        let witchy = tools.iter().find(|t| t.id == "witchybnd").unwrap();
+        assert_eq!(witchy.category, "Tool");
+        for editor_id in ["smithbox", "yapped_rune_bear", "dsanimstudio"] {
+            let t = tools.iter().find(|t| t.id == editor_id).unwrap();
+            assert_eq!(t.category, "Editor", "{} should be Editor", editor_id);
+        }
     }
 
     #[test]

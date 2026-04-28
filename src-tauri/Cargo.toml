@@ -141,6 +141,10 @@ filetime = "0.2"
 # surface unregistered games in the UI without requiring CLI use.
 parselnk = { version = "0.1", default-features = false }
 
+# TOML parsing/serialization (FromSoft Mod Engine 2 config files).
+# Preserves table-of-arrays layout for `[[extension.mod_loader.mods]]`.
+toml = { version = "0.8", features = ["preserve_order"] }
+
 # WebDriver E2E testing — debug builds only, compiled out of release
 [target.'cfg(debug_assertions)'.dependencies]
 tauri-plugin-webdriver = "0.2"
