@@ -1044,6 +1044,46 @@ export interface ModTool {
   support_url: string | null;
 }
 
+// FromSoft Mod Engine 2 / regulation.bin / save backup --------------------
+
+export interface ModEngine2ModEntry {
+  enabled: boolean;
+  name: string;
+  path: string;
+}
+
+export interface ModEngine2Section {
+  debug: boolean;
+  external_dlls: string[];
+}
+
+export interface ModLoaderSection {
+  enabled: boolean;
+  loose_params: boolean;
+  mods: ModEngine2ModEntry[];
+}
+
+export interface ModEngine2Config {
+  modengine: ModEngine2Section;
+  mod_loader: ModLoaderSection;
+  /** Round-tripped pass-through tables (e.g. scylla_hide). */
+  extra_extensions: Record<string, unknown>;
+  source_path?: string;
+}
+
+export interface RegulationConflict {
+  game_id: string;
+  mod_ids_modifying_regulation: number[];
+  mod_names: string[];
+}
+
+export interface FromSoftSaveFile {
+  path: string;
+  backup_path: string;
+  size_bytes: number;
+  modified_unix: number;
+}
+
 export interface DownloadRecord {
   id: number;
   archive_path: string;

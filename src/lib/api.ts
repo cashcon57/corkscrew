@@ -1527,6 +1527,75 @@ export async function applyToolIniEdits(
   return invoke("apply_tool_ini_edits_cmd", { toolId, gameId, bottleName });
 }
 
+// ---------------------------------------------------------------------------
+// FromSoft: Mod Engine 2 + regulation.bin + save backup
+// ---------------------------------------------------------------------------
+
+export async function getModEngine2Config(
+  gameId: string,
+  bottleName: string,
+): Promise<import("./types").ModEngine2Config> {
+  return invoke("get_modengine2_config", { gameId, bottleName });
+}
+
+export async function saveModEngine2Config(
+  gameId: string,
+  bottleName: string,
+  config: import("./types").ModEngine2Config,
+): Promise<void> {
+  return invoke("save_modengine2_config", { gameId, bottleName, config });
+}
+
+export async function addModToModEngine2(
+  gameId: string,
+  bottleName: string,
+  name: string,
+  path: string,
+): Promise<void> {
+  return invoke("add_mod_to_modengine2", { gameId, bottleName, name, path });
+}
+
+export async function removeModFromModEngine2(
+  gameId: string,
+  bottleName: string,
+  name: string,
+): Promise<boolean> {
+  return invoke("remove_mod_from_modengine2", { gameId, bottleName, name });
+}
+
+export async function getRegulationConflicts(
+  gameId: string,
+  bottleName: string,
+): Promise<import("./types").RegulationConflict[]> {
+  return invoke("get_regulation_conflicts", { gameId, bottleName });
+}
+
+export async function listFromSoftSaves(
+  gameId: string,
+  bottleName: string,
+): Promise<import("./types").FromSoftSaveFile[]> {
+  return invoke("list_fromsoft_saves", { gameId, bottleName });
+}
+
+export async function getFromSoftSavesDir(
+  gameId: string,
+  bottleName: string,
+): Promise<string | null> {
+  return invoke("get_fromsoft_saves_dir", { gameId, bottleName });
+}
+
+export async function backupFromSoftSaves(
+  gameId: string,
+  bottleName: string,
+  maxBackups?: number,
+): Promise<number> {
+  return invoke("backup_fromsoft_saves", {
+    gameId,
+    bottleName,
+    maxBackups: maxBackups ?? null,
+  });
+}
+
 // Notes & Tags
 export async function setModNotes(
   modId: number,

@@ -139,3 +139,30 @@ export function gameRequiresAntiCheatAck(gameId: string): boolean {
 export function antiCheatAckKey(gameId: string): string {
   return `anti_cheat_warning_accepted_${gameId}`;
 }
+
+// ---------------------------------------------------------------------------
+// FromSoftware support — Sekiro / Elden Ring / DS3 / DS:R / AC6.
+// All five share the Mod Engine 2 architecture, so we treat them uniformly.
+// ---------------------------------------------------------------------------
+
+/** Game IDs handled by the FromSoft / Mod Engine 2 plugin family. */
+export const FROMSOFT_GAMES: ReadonlySet<string> = new Set([
+  "sekiro",
+  "eldenring",
+  "darksouls3",
+  "darksouls_remastered",
+  "armoredcore6",
+]);
+
+export function isFromSoftGame(gameId: string): boolean {
+  return FROMSOFT_GAMES.has(gameId);
+}
+
+/**
+ * Per-game config key for the Mod Engine 2 first-launch wizard
+ * dismissal flag. Once set, the wizard never appears again for that
+ * game.
+ */
+export function me2SetupDismissedKey(gameId: string): string {
+  return `me2_setup_dismissed_${gameId}`;
+}

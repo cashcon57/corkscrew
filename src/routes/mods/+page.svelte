@@ -88,8 +88,13 @@
     experimentalWarningDismissedKey,
     gameRequiresAntiCheatAck,
     antiCheatAckKey,
+    isFromSoftGame,
+    me2SetupDismissedKey,
   } from "$lib/gameSupport";
   import AntiCheatWarningDialog from "$lib/components/AntiCheatWarningDialog.svelte";
+  import ModEngine2ConfigPanel from "$lib/components/fromsoft/ModEngine2ConfigPanel.svelte";
+  import RegulationConflictBanner from "$lib/components/fromsoft/RegulationConflictBanner.svelte";
+  import { installModTool } from "$lib/api";
   import type { GameSupportTier } from "$lib/types";
   import ModDetailPanel from "$lib/components/mods/ModDetailPanel.svelte";
   import DeploymentPanel from "$lib/components/mods/DeploymentPanel.svelte";
@@ -145,6 +150,13 @@
     displayName: string;
   } | null>(null);
   let pendingAntiCheatResume: (() => void) | null = null;
+
+  // FromSoft Mod Engine 2 first-launch wizard. Surfaces when a user opens
+  // the mods page for a FromSoft game and ME2 isn't installed AND the
+  // `mod/` directory isn't there yet. Per-game dismissal flag persisted
+  // via `set_config_value`.
+  let me2WizardGameId = $state<string | null>(null);
+  let me2WizardInstalling = $state(false);
 
   /**
    * Returns true when the install should proceed immediately. When the game
@@ -242,6 +254,70 @@
       displayName: game.display_name,
     };
     return false;
+  }
+
+  /**
+   * Decide whether to surface the Mod Engine 2 first-launch wizard for a
+   * FromSoft game. Triggers only when:
+   *  - the game is in FROMSOFT_GAMES
+   *  - ME2 isn't already detected as a tool
+   *  - the user hasn't previously dismissed the wizard for this game
+   *
+   * Errors fail closed (no wizard) — the user can always trigger the
+   * install manually from the Tools menu.
+   */
+  async function maybeShowMe2Wizard(game: DetectedGame): Promise<void> {
+    if (!isFromSoftGame(game.game_id)) {
+      me2WizardGameId = null;
+      return;
+    }
+    try {
+      const cfg = await getConfig();
+      const dismissed = (cfg as Record<string, unknown>)[me2SetupDismissedKey(game.game_id)];
+      if (dismissed === "true" || dismissed === true) {
+        me2WizardGameId = null;
+        return;
+      }
+      const tools = await detectModTools(game.game_id, game.bottle_name);
+      const me2 = tools.find((t) => t.id === "modengine2");
+      if (me2?.detected_path) {
+        me2WizardGameId = null;
+        return;
+      }
+      me2WizardGameId = game.game_id;
+    } catch (err) {
+      console.error("maybeShowMe2Wizard:", err);
+      me2WizardGameId = null;
+    }
+  }
+
+  async function dismissMe2Wizard(): Promise<void> {
+    const gid = me2WizardGameId;
+    if (!gid) return;
+    try {
+      await setConfigValue(me2SetupDismissedKey(gid), "true");
+    } catch (err) {
+      console.error("dismissMe2Wizard: setConfigValue failed:", err);
+    }
+    me2WizardGameId = null;
+  }
+
+  async function installMe2FromWizard(): Promise<void> {
+    const game = pickedGame ?? $selectedGame;
+    if (!game || !me2WizardGameId) return;
+    me2WizardInstalling = true;
+    try {
+      await installModTool("modengine2", game.game_id, game.bottle_name);
+      // Dismiss permanently once installed so the wizard doesn't reappear.
+      await setConfigValue(me2SetupDismissedKey(me2WizardGameId), "true");
+      me2WizardGameId = null;
+      showSuccess("Mod Engine 2 installed.");
+    } catch (err) {
+      console.error("installMe2FromWizard:", err);
+      showError(`Mod Engine 2 install failed: ${err}`);
+    } finally {
+      me2WizardInstalling = false;
+    }
   }
 
   async function confirmAntiCheatInstall() {
@@ -971,6 +1047,18 @@
   }
 
   const activeGame = $derived(pickedGame ?? $selectedGame);
+
+  // FromSoft Mod Engine 2 first-launch wizard. Checks each time the
+  // active game changes; resets to null when the user picks a non-FromSoft
+  // game.
+  $effect(() => {
+    const game = activeGame;
+    if (game) {
+      void maybeShowMe2Wizard(game);
+    } else {
+      me2WizardGameId = null;
+    }
+  });
 
   // Re-check game lock when the active game changes
   $effect(() => {
@@ -2560,6 +2648,46 @@
     </div>
 
     <!-- Banners (full-width, above the main content grid) -->
+    {#if isFromSoftGame(activeGame.game_id)}
+      <RegulationConflictBanner
+        gameId={activeGame.game_id}
+        bottleName={activeGame.bottle_name}
+        refreshKey={$modStateVersion}
+      />
+      {#if me2WizardGameId === activeGame.game_id}
+        <div class="me2-wizard-banner" role="dialog" aria-label="Install Mod Engine 2">
+          <div class="skse-banner-icon me2-wizard-icon">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M10 2v4M10 14v4M2 10h4M14 10h4" />
+              <circle cx="10" cy="10" r="3" />
+            </svg>
+          </div>
+          <div class="skse-banner-content">
+            <p class="skse-banner-title">Install Mod Engine 2 to start modding?</p>
+            <p class="skse-banner-text">
+              Mod Engine 2 is the standard mod loader for {activeGame.display_name}.
+              We'll auto-install it from GitHub and create the <code>mod/</code> directory if missing.
+            </p>
+          </div>
+          <div class="skse-banner-actions">
+            <button
+              class="btn btn-ghost btn-sm"
+              onclick={() => { void dismissMe2Wizard(); }}
+              disabled={me2WizardInstalling}
+            >
+              I'll do it manually
+            </button>
+            <button
+              class="btn btn-primary btn-sm"
+              onclick={() => { void installMe2FromWizard(); }}
+              disabled={me2WizardInstalling}
+            >
+              {me2WizardInstalling ? "Installing…" : "Install"}
+            </button>
+          </div>
+        </div>
+      {/if}
+    {/if}
     {#if $gameLock && !$gameLockOverridden}
       <div class="game-lock-banner">
         <div class="skse-banner-icon game-lock-icon">
@@ -3542,6 +3670,14 @@
               </button>
             {/if}
           </div>
+        {/if}
+
+        <!-- FromSoft Mod Engine 2 config editor -->
+        {#if activeGame && isFromSoftGame(activeGame.game_id)}
+          <ModEngine2ConfigPanel
+            gameId={activeGame.game_id}
+            bottleName={activeGame.bottle_name}
+          />
         {/if}
 
         <!-- Disk Budget -->
@@ -5168,6 +5304,22 @@
 
   .cs-warning-icon {
     color: var(--yellow, #f59e0b);
+  }
+
+  /* FromSoft Mod Engine 2 first-launch wizard banner. Reuses skse-banner-*
+     classes for layout; adds a teal accent so it visually distinguishes
+     itself from the yellow warning banners. */
+  .me2-wizard-banner {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+    padding: var(--space-3) var(--space-4);
+    background: color-mix(in srgb, var(--accent, #4dabf7) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent, #4dabf7) 25%, transparent);
+    border-radius: var(--radius);
+  }
+  .me2-wizard-icon {
+    color: var(--accent, #4dabf7);
   }
 
   .btn-warning {
