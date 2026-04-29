@@ -96,6 +96,216 @@ pub(crate) fn scan_dir(dir: &Path) -> Vec<NativeAppCandidate> {
     results
 }
 
+// ---------------------------------------------------------------------
+// Steam mac integration
+// ---------------------------------------------------------------------
+
+/// Walk Steam's macOS install for native games.
+///
+/// Reads `~/Library/Application Support/Steam/steamapps/libraryfolders.vdf`
+/// to discover all library roots, then scans each library's
+/// `steamapps/appmanifest_*.acf` files to find installed games. For each
+/// game, resolves the install directory under
+/// `<library>/steamapps/common/<installdir>` and descends up to 2 levels
+/// looking for `.app` bundles. Each found bundle becomes a
+/// [`NativeAppCandidate`] with `source = NativeSource::Steam`.
+///
+/// Symlinks are skipped unconditionally (consistent with `scan_dir`).
+/// Missing or unreadable files are silently skipped — callers should not
+/// assume Steam is installed.
+pub fn scan_steam_mac() -> Vec<NativeAppCandidate> {
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    scan_steam_mac_at(
+        &home
+            .join("Library")
+            .join("Application Support")
+            .join("Steam"),
+    )
+}
+
+/// Testable inner: takes the Steam root explicitly.
+///
+/// The default Steam root on macOS is
+/// `~/Library/Application Support/Steam`. Tests pass a temporary
+/// directory here so that the scanner can be exercised without a real
+/// Steam installation.
+pub(crate) fn scan_steam_mac_at(steam_root: &Path) -> Vec<NativeAppCandidate> {
+    // Always include steam_root itself as the first library (it is its own
+    // primary library). Additional libraries are discovered via libraryfolders.vdf.
+    // Deduplicate by canonical path so that libraryfolders.vdf entries pointing
+    // at the same directory as steam_root don't cause double-scanning.
+    let extra_libraries =
+        parse_libraryfolders(&steam_root.join("steamapps").join("libraryfolders.vdf"));
+    let mut seen = std::collections::HashSet::new();
+    let mut all_libs: Vec<PathBuf> = Vec::new();
+    for lib in std::iter::once(steam_root.to_path_buf()).chain(extra_libraries) {
+        // Use the canonicalized path for dedup; fall back to the raw path if
+        // canonicalization fails (e.g. library path doesn't exist yet).
+        let key = lib.canonicalize().unwrap_or_else(|_| lib.clone());
+        if seen.insert(key) {
+            all_libs.push(lib);
+        }
+    }
+
+    let mut results = Vec::new();
+    for lib in all_libs {
+        let steamapps = lib.join("steamapps");
+        if !steamapps.is_dir() {
+            continue;
+        }
+        let read = match fs::read_dir(&steamapps) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        for entry in read.flatten() {
+            let p = entry.path();
+            let Some(file_name) = p.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if !file_name.starts_with("appmanifest_") || !file_name.ends_with(".acf") {
+                continue;
+            }
+            let Some(manifest) = parse_appmanifest(&p) else {
+                continue;
+            };
+            let install_root = steamapps.join("common").join(&manifest.installdir);
+            for bundle in find_app_bundles(&install_root, 2) {
+                let info_path = bundle.join("Contents").join("Info.plist");
+                let Ok(info) = read_info_plist(&info_path) else {
+                    continue;
+                };
+                results.push(NativeAppCandidate {
+                    bundle_path: bundle,
+                    info,
+                    architecture: Architecture::Unknown,
+                    source: NativeSource::Steam,
+                    sandboxed: false,
+                });
+            }
+        }
+    }
+    results
+}
+
+// ---------------------------------------------------------------------------
+// VDF / ACF parsers — minimal line-based; Steam's key/value files on macOS
+// use ASCII with no quote escaping in the path or name fields we care about.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+struct SteamAppManifest {
+    #[allow(dead_code)]
+    appid: String,
+    #[allow(dead_code)]
+    name: String,
+    installdir: String,
+}
+
+/// Extract the list of additional Steam library paths from `libraryfolders.vdf`.
+///
+/// The VDF format used here is the legacy key-value text format (not JSON).
+/// We only need lines of the form `"path"    "/some/path"` — a simple line
+/// scan is sufficient and avoids pulling in a full VDF parser.
+fn parse_libraryfolders(path: &Path) -> Vec<PathBuf> {
+    let Ok(contents) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for line in contents.lines() {
+        let line = line.trim();
+        // Match lines like: "path"    "/Users/foo/Library/Application Support/Steam"
+        if let Some(rest) = line.strip_prefix(r#""path""#) {
+            let trimmed = rest.trim();
+            if let Some(value) = trimmed.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+                if !value.is_empty() {
+                    out.push(PathBuf::from(value));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Parse a single `appmanifest_<appid>.acf` file.
+///
+/// Returns `None` if the file is unreadable or any of the three required
+/// fields (`appid`, `name`, `installdir`) are missing.
+fn parse_appmanifest(path: &Path) -> Option<SteamAppManifest> {
+    let contents = fs::read_to_string(path).ok()?;
+    let mut appid = None;
+    let mut name = None;
+    let mut installdir = None;
+    for line in contents.lines() {
+        let line = line.trim();
+        if let Some(v) = parse_kv(line, "appid") {
+            appid = Some(v);
+        } else if let Some(v) = parse_kv(line, "name") {
+            name = Some(v);
+        } else if let Some(v) = parse_kv(line, "installdir") {
+            installdir = Some(v);
+        }
+    }
+    Some(SteamAppManifest {
+        appid: appid?,
+        name: name?,
+        installdir: installdir?,
+    })
+}
+
+/// Extract the value from a VDF/ACF key-value line of the form:
+/// `"<key>"    "<value>"`.
+///
+/// Returns `None` if the line does not match the expected pattern for
+/// `key`, or if the value is not properly quoted.
+fn parse_kv(line: &str, key: &str) -> Option<String> {
+    let prefix = format!(r#""{key}""#);
+    let rest = line.strip_prefix(&prefix)?;
+    let trimmed = rest.trim();
+    let value = trimmed.strip_prefix('"')?.strip_suffix('"')?;
+    Some(value.to_string())
+}
+
+/// Recursively find `.app` bundles inside `root`, up to `max_depth` levels
+/// deep.
+///
+/// Symlinks are skipped (consistent with `scan_dir`). Descends into
+/// subdirectories but stops recursing once a `.app` is found — there should
+/// never be a game inside a `.app` inside this context, and descending into
+/// bundle internals would be wasteful.
+fn find_app_bundles(root: &Path, max_depth: usize) -> Vec<PathBuf> {
+    fn recurse(p: &Path, depth: usize, max_depth: usize, out: &mut Vec<PathBuf>) {
+        if depth > max_depth {
+            return;
+        }
+        let Ok(read) = fs::read_dir(p) else {
+            return;
+        };
+        for entry in read.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            // Symlinks skipped unconditionally — consistent with scan_dir.
+            if file_type.is_symlink() {
+                continue;
+            }
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "app") {
+                out.push(path);
+                // Don't descend into a .app bundle's internals.
+                continue;
+            }
+            if file_type.is_dir() {
+                recurse(&path, depth + 1, max_depth, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    recurse(root, 0, max_depth, &mut out);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,5 +391,114 @@ mod tests {
     fn scan_dir_returns_empty_for_missing_dir() {
         let result = scan_dir(Path::new("/nonexistent/very/unlikely/to/exist"));
         assert!(result.is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // Steam mac integration tests
+    // -----------------------------------------------------------------
+
+    /// Happy path: scan_steam_mac_at finds a game whose install dir
+    /// contains a properly-structured .app bundle.
+    #[test]
+    fn scan_steam_mac_finds_native_app_in_library() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let steam_root = dir.path();
+        let steamapps = steam_root.join("steamapps");
+        fs::create_dir_all(&steamapps).unwrap();
+
+        // libraryfolders.vdf — references steam_root itself (the scanner
+        // always prepends steam_root, so this exercises duplicate-path
+        // tolerance, but the path entry being steam_root is fine too).
+        fs::write(
+            steamapps.join("libraryfolders.vdf"),
+            format!(
+                r#""libraryfolders"
+{{
+    "0"
+    {{
+        "path"      "{}"
+    }}
+}}
+"#,
+                steam_root.display()
+            ),
+        )
+        .unwrap();
+
+        // appmanifest for Stardew Valley (appid 413150).
+        fs::write(
+            steamapps.join("appmanifest_413150.acf"),
+            r#""AppState"
+{
+    "appid"        "413150"
+    "name"         "Stardew Valley"
+    "installdir"   "Stardew Valley"
+}
+"#,
+        )
+        .unwrap();
+
+        // Create the .app bundle with a valid Info.plist.
+        let install = steamapps.join("common").join("Stardew Valley");
+        let bundle = install.join("Stardew Valley.app").join("Contents");
+        fs::create_dir_all(&bundle).unwrap();
+        write_valid_info_plist(
+            &bundle.join("Info.plist"),
+            "com.chucklefish.stardewvalley",
+            "StardewValley",
+        );
+
+        let candidates = scan_steam_mac_at(steam_root);
+        assert_eq!(candidates.len(), 1, "expected exactly one candidate");
+        assert_eq!(candidates[0].source, NativeSource::Steam);
+        assert_eq!(
+            candidates[0].info.bundle_identifier,
+            "com.chucklefish.stardewvalley"
+        );
+        assert_eq!(candidates[0].architecture, Architecture::Unknown);
+        assert!(!candidates[0].sandboxed);
+    }
+
+    /// A library with an appmanifest but no .app bundle inside the install
+    /// dir should yield no candidates.
+    #[test]
+    fn scan_steam_mac_skips_library_with_no_apps() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let steam_root = dir.path();
+        let steamapps = steam_root.join("steamapps");
+
+        // Create the install dir without any .app inside it.
+        fs::create_dir_all(steamapps.join("common").join("SomeGame")).unwrap();
+
+        fs::write(
+            steamapps.join("libraryfolders.vdf"),
+            r#""libraryfolders" { "0" { "path" "" } }"#,
+        )
+        .unwrap();
+
+        fs::write(
+            steamapps.join("appmanifest_123.acf"),
+            r#""AppState" { "appid" "123" "name" "X" "installdir" "SomeGame" }"#,
+        )
+        .unwrap();
+
+        let candidates = scan_steam_mac_at(steam_root);
+        assert!(
+            candidates.is_empty(),
+            "no .app bundles → should return empty Vec"
+        );
+    }
+
+    /// When libraryfolders.vdf is absent (Steam not installed) the scanner
+    /// returns an empty Vec without panicking.
+    #[test]
+    fn scan_steam_mac_handles_missing_libraryfolders_gracefully() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // The temp dir exists but has no steamapps/ subdirectory at all.
+        let candidates = scan_steam_mac_at(dir.path());
+        assert!(
+            candidates.is_empty(),
+            "missing libraryfolders.vdf → should return empty Vec"
+        );
     }
 }
