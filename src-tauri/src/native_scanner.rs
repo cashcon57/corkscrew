@@ -12,6 +12,7 @@
 //! logic that DOES mutate bundles lives in per-game plugins (Task 3.7+).
 
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::plist::{read_info_plist, InfoPlist};
@@ -35,6 +36,133 @@ pub struct NativeAppCandidate {
     /// Whether the app runs inside the App Sandbox.
     /// `false` until Task 2.4 fills this in via entitlement inspection.
     pub sandboxed: bool,
+}
+
+/// Detect the CPU architecture of a Mach-O binary.
+///
+/// Reads the first ~36 bytes of the file. Recognizes single-arch 64-bit
+/// (`FEEDFACF`), fat universal (`CAFEBABE`), and CPU type discriminators
+/// for arm64 (`0x0100000C`) and x86_64 (`0x01000007`).
+///
+/// Returns [`Architecture::Unknown`] for unreadable files, unrecognized
+/// magic, or CPU types we don't classify.
+fn detect_architecture(executable_path: &Path) -> Architecture {
+    const MH_MAGIC_64: u32 = 0xFEED_FACF;
+    const MH_CIGAM_64: u32 = 0xCFFA_EDFE; // byte-swapped (LE → BE encoded)
+    const FAT_MAGIC: u32 = 0xCAFE_BABE;
+    const FAT_CIGAM: u32 = 0xBEBA_FECA;
+    const CPU_TYPE_ARM64: u32 = 0x0100_000C;
+    const CPU_TYPE_X86_64: u32 = 0x0100_0007;
+
+    let mut file = match fs::File::open(executable_path) {
+        Ok(f) => f,
+        Err(_) => return Architecture::Unknown,
+    };
+    // 4 magic + 4 nfat_arch + 2 × 20-byte fat_arch entries = 48 bytes covers
+    // both single-arch and typical Universal-2 fat binaries inline.
+    let mut buf = [0u8; 48];
+    let n = match file.read(&mut buf) {
+        Ok(n) => n,
+        Err(_) => return Architecture::Unknown,
+    };
+    if n < 8 {
+        return Architecture::Unknown;
+    }
+
+    let magic_le = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+    let magic_be = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+
+    // Single-arch 64-bit (most common case for native modern macOS apps).
+    if magic_le == MH_MAGIC_64 || magic_le == MH_CIGAM_64 {
+        let cputype = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
+        return match cputype {
+            CPU_TYPE_ARM64 => Architecture::AppleSilicon,
+            CPU_TYPE_X86_64 => Architecture::IntelOnly,
+            _ => Architecture::Unknown,
+        };
+    }
+
+    // Fat / universal binary (BE header).
+    if magic_be == FAT_MAGIC || magic_be == FAT_CIGAM {
+        let nfat_arch = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
+        if nfat_arch == 0 || nfat_arch > 16 {
+            return Architecture::Unknown; // bogus entry count
+        }
+        let mut has_arm64 = false;
+        let mut has_x86_64 = false;
+
+        // Each fat_arch entry is 20 bytes; first 4 bytes are cputype (BE).
+        // With a 48-byte buffer: 8 bytes header + 2 × 20-byte entries = 48,
+        // so we can parse up to 2 slices inline without re-reading.
+        let max_in_buf = ((n.saturating_sub(8)) / 20).min(nfat_arch as usize);
+        for i in 0..max_in_buf {
+            let offset = 8 + i * 20;
+            if offset + 4 > n {
+                break;
+            }
+            let cputype = u32::from_be_bytes([
+                buf[offset],
+                buf[offset + 1],
+                buf[offset + 2],
+                buf[offset + 3],
+            ]);
+            match cputype {
+                CPU_TYPE_ARM64 => has_arm64 = true,
+                CPU_TYPE_X86_64 => has_x86_64 = true,
+                _ => {}
+            }
+        }
+
+        // For nfat_arch > what we buffered, read the rest of the table.
+        let remaining_slices = nfat_arch as usize - max_in_buf;
+        if remaining_slices > 0 {
+            let mut more = vec![0u8; remaining_slices * 20];
+            if file.read_exact(&mut more).is_ok() {
+                for i in 0..remaining_slices {
+                    let off = i * 20;
+                    if off + 4 > more.len() {
+                        break;
+                    }
+                    let cputype = u32::from_be_bytes([
+                        more[off],
+                        more[off + 1],
+                        more[off + 2],
+                        more[off + 3],
+                    ]);
+                    match cputype {
+                        CPU_TYPE_ARM64 => has_arm64 = true,
+                        CPU_TYPE_X86_64 => has_x86_64 = true,
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        return match (has_arm64, has_x86_64) {
+            (true, true) => Architecture::Universal,
+            (true, false) => Architecture::AppleSilicon,
+            (false, true) => Architecture::IntelOnly,
+            (false, false) => Architecture::Unknown,
+        };
+    }
+
+    Architecture::Unknown
+}
+
+/// Resolve a bundle's main executable from `Info.plist`'s
+/// `CFBundleExecutable`, then call [`detect_architecture`] on it.
+///
+/// Returns [`Architecture::Unknown`] if the executable path does not exist
+/// or cannot be read.
+fn detect_bundle_architecture(bundle: &Path, info: &InfoPlist) -> Architecture {
+    let exe = bundle
+        .join("Contents")
+        .join("MacOS")
+        .join(&info.bundle_executable);
+    if !exe.exists() {
+        return Architecture::Unknown;
+    }
+    detect_architecture(&exe)
 }
 
 /// Detect whether a bundle is Mac App Store sandboxed.
@@ -102,12 +230,13 @@ pub(crate) fn scan_dir(dir: &Path) -> Vec<NativeAppCandidate> {
         let Ok(info) = read_info_plist(&info_path) else {
             continue;
         };
+        let architecture = detect_bundle_architecture(&p, &info);
         results.push(NativeAppCandidate {
             bundle_path: p.clone(),
-            info,
-            architecture: Architecture::Unknown,
-            source: NativeSource::SystemApplications,
+            architecture,
             sandboxed: is_sandboxed(&p),
+            info,
+            source: NativeSource::SystemApplications,
         });
     }
     results
@@ -193,12 +322,13 @@ pub(crate) fn scan_steam_mac_at(steam_root: &Path) -> Vec<NativeAppCandidate> {
                 let Ok(info) = read_info_plist(&info_path) else {
                     continue;
                 };
+                let architecture = detect_bundle_architecture(&bundle, &info);
                 results.push(NativeAppCandidate {
                     bundle_path: bundle.clone(),
-                    info,
-                    architecture: Architecture::Unknown,
-                    source: NativeSource::Steam,
+                    architecture,
                     sandboxed: is_sandboxed(&bundle),
+                    info,
+                    source: NativeSource::Steam,
                 });
             }
         }
@@ -561,5 +691,70 @@ mod tests {
         let mas_c = candidates.iter().find(|c| c.bundle_path == mas).unwrap();
         assert!(!plain_c.sandboxed);
         assert!(mas_c.sandboxed);
+    }
+
+    // -----------------------------------------------------------------
+    // Mach-O architecture detection tests
+    // -----------------------------------------------------------------
+
+    fn write_macho_header(path: &Path, bytes: &[u8]) {
+        fs::write(path, bytes).expect("write header");
+    }
+
+    #[test]
+    fn arch_detects_arm64_single() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("test_arm64");
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0xFEED_FACFu32.to_le_bytes()); // MH_MAGIC_64
+        bytes.extend_from_slice(&0x0100_000Cu32.to_le_bytes()); // cputype = arm64
+        bytes.extend(std::iter::repeat(0u8).take(28));
+        write_macho_header(&exe, &bytes);
+        assert_eq!(detect_architecture(&exe), Architecture::AppleSilicon);
+    }
+
+    #[test]
+    fn arch_detects_x86_64_single() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("test_x86");
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0xFEED_FACFu32.to_le_bytes()); // MH_MAGIC_64
+        bytes.extend_from_slice(&0x0100_0007u32.to_le_bytes()); // cputype = x86_64
+        bytes.extend(std::iter::repeat(0u8).take(28));
+        write_macho_header(&exe, &bytes);
+        assert_eq!(detect_architecture(&exe), Architecture::IntelOnly);
+    }
+
+    #[test]
+    fn arch_detects_universal_arm64_x86_64() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("test_fat");
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0xCAFE_BABEu32.to_be_bytes()); // FAT_MAGIC (BE)
+        bytes.extend_from_slice(&2u32.to_be_bytes()); // nfat_arch = 2
+        // First fat_arch entry (20 bytes): cputype = arm64 (BE)
+        bytes.extend_from_slice(&0x0100_000Cu32.to_be_bytes());
+        bytes.extend(std::iter::repeat(0u8).take(16));
+        // Second fat_arch entry (20 bytes): cputype = x86_64 (BE)
+        bytes.extend_from_slice(&0x0100_0007u32.to_be_bytes());
+        bytes.extend(std::iter::repeat(0u8).take(16));
+        write_macho_header(&exe, &bytes);
+        assert_eq!(detect_architecture(&exe), Architecture::Universal);
+    }
+
+    #[test]
+    fn arch_detects_unknown_for_random_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("not_macho");
+        write_macho_header(&exe, b"hello world this is not a macho header\x00\x00");
+        assert_eq!(detect_architecture(&exe), Architecture::Unknown);
+    }
+
+    #[test]
+    fn arch_returns_unknown_for_missing_file() {
+        assert_eq!(
+            detect_architecture(Path::new("/nonexistent/binary")),
+            Architecture::Unknown
+        );
     }
 }
