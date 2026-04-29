@@ -71,6 +71,7 @@ pub mod rollback;
 pub mod runtime;
 pub mod session_tracker;
 pub mod skse;
+pub mod smapi;
 pub mod staging;
 pub mod steam_integration;
 pub mod umu;
