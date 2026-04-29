@@ -1000,3 +1000,80 @@ button:focus-visible,
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ==============================
+   M5 Native-Mode Utility Classes
+   Opt-in glass aesthetic for components. Apply these class names to
+   elements inside components to get the M5 Liquid Glass look.
+   All selectors are scoped under [data-theme="native"] so they are
+   a complete no-op in dark/light/wine mode — no conditional rendering
+   needed in components. Components adopt these in Tasks 5.5 and 5.6+.
+   ============================== */
+
+/* Glass card — frosted surface with gradient border via ::before mask trick.
+   The card itself carries box-shadow which renders outside the box, so
+   overflow: hidden does NOT clip it. The ::before pseudo-element fakes a
+   gradient border using mask-composite exclusion on 1px padding. */
+[data-theme="native"] .native-glass-card {
+  background: var(--surface-glass);
+  -webkit-backdrop-filter: blur(24px) saturate(1.6);
+  backdrop-filter: blur(24px) saturate(1.6);
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background-clip: padding-box;
+  position: relative;
+  box-shadow: var(--shadow-glass);
+  overflow: hidden;
+}
+
+[data-theme="native"] .native-glass-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: var(--m5-gradient);
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+[data-theme="native"] .native-glass-card:hover::before {
+  opacity: 0.75;
+  transition: opacity 240ms ease;
+}
+
+/* Glass panel — heavier blur for full-bleed semi-transparent panels
+   (sidebars, bottom sheets, drawers). Uses the vibrancy background
+   token with a hard-border separator. */
+[data-theme="native"] .native-glass-panel {
+  background: var(--bg-primary-vibrancy, var(--bg-primary));
+  -webkit-backdrop-filter: blur(40px) saturate(1.8);
+  backdrop-filter: blur(40px) saturate(1.8);
+  border: 1px solid var(--separator);
+  box-shadow: var(--shadow-glass);
+}
+
+/* Gradient text — clips the M5 cyan→blue→purple gradient to the text
+   glyph shapes. text-shadow: none prevents the fallback from doubling
+   up when background-clip:text is supported. */
+[data-theme="native"] .m5-gradient-text {
+  background: var(--m5-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  /* Fallback for browsers without background-clip:text */
+  text-shadow: none;
+}
+
+/* Outside [data-theme="native"], these classes have no effect — they
+   render as the host element's normal styles. The selectors above
+   only apply when the body's data-theme attribute is "native". */
