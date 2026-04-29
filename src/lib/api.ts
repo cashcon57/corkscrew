@@ -2618,3 +2618,4 @@ export async function registerUnregisteredGame(args: {
     exePath: args.exePath,
   });
 }
+

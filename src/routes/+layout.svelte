@@ -2,7 +2,8 @@
   import { onMount, onDestroy } from "svelte";
   import "../app.css";
   import { goto } from "$app/navigation";
-  import { currentPage, errorMessage, successMessage, selectedGame, selectedBottle, showError, showSuccess, appVersion, collectionInstallStatus, collectionUninstallStatus, wjInstallStatus, updateReady as updateReadyStore, updateVersion as updateVersionStore, updateNotes as updateNotesStore, updateChecking as updateCheckingStore, updateError as updateErrorStore, setUpdateCheckFn, notificationCount, showNotificationLog, activeProfile, profileList, activeCollection, collectionList, sidebarCollapsed, controllerMode, pendingNxmInstall, nxmInstallComplete, showUninstalledGames, uninstalledGames } from "$lib/stores";
+  import { page } from "$app/state";
+  import { currentPage, errorMessage, successMessage, selectedGame, selectedBottle, showError, showSuccess, appVersion, collectionInstallStatus, collectionUninstallStatus, wjInstallStatus, updateReady as updateReadyStore, updateVersion as updateVersionStore, updateNotes as updateNotesStore, updateChecking as updateCheckingStore, updateError as updateErrorStore, setUpdateCheckFn, notificationCount, showNotificationLog, activeProfile, profileList, activeCollection, collectionList, sidebarCollapsed, controllerMode, pendingNxmInstall, nxmInstallComplete, showUninstalledGames, uninstalledGames, nativeMode } from "$lib/stores";
   import { initTheme } from "$lib/theme";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
@@ -1021,6 +1022,9 @@
 
     <ul class="nav-list" style="--active-idx: {navItems.findIndex(i => i.id === $currentPage)}">
       {#each navItems as item}
+        {#if (item.id === "discover" || item.id === "plugins") && $nativeMode}
+          <!-- Wine-only nav item hidden in native mode -->
+        {:else}
         <li>
           <button
             class="nav-item"
@@ -1080,7 +1084,64 @@
             {#if !$sidebarCollapsed}<span class="nav-label">{item.label}</span>{/if}
           </button>
         </li>
+        {/if}
       {/each}
+
+      <!-- Native-only nav items — shown only when nativeMode is active -->
+      {#if $nativeMode}
+        <li>
+          <button
+            class="nav-item"
+            class:active={(page.url.pathname as string) === "/native/mods"}
+            onclick={() => goto("/native/mods").catch((err) => console.error("navigation to /native/mods failed:", err))}
+            title="Mods"
+          >
+            <span class="nav-icon">
+              <!-- Cube/package — mod archives -->
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M8 1.5L2.5 4.5v7l5.5 3 5.5-3v-7L8 1.5z" />
+                <path d="M2.5 4.5L8 7.5l5.5-3" />
+                <line x1="8" y1="7.5" x2="8" y2="14.5" />
+              </svg>
+            </span>
+            {#if !$sidebarCollapsed}<span class="nav-label">Mods</span>{/if}
+          </button>
+        </li>
+        <li>
+          <button
+            class="nav-item"
+            class:active={(page.url.pathname as string) === "/native/discover"}
+            onclick={() => goto("/native/discover").catch((err) => console.error("navigation to /native/discover failed:", err))}
+            title="Discover"
+          >
+            <span class="nav-icon">
+              <!-- Compass — exploration/discovery -->
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="8" cy="8" r="6.5" />
+                <path d="M5.5 5.5l2 4.5 4.5 2-2-4.5z" />
+              </svg>
+            </span>
+            {#if !$sidebarCollapsed}<span class="nav-label">Discover</span>{/if}
+          </button>
+        </li>
+        <li>
+          <button
+            class="nav-item"
+            class:active={(page.url.pathname as string) === "/native/settings"}
+            onclick={() => goto("/native/settings").catch((err) => console.error("navigation to /native/settings failed:", err))}
+            title="Settings"
+          >
+            <span class="nav-icon">
+              <!-- Gear — settings -->
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+                <circle cx="12" cy="12" r="3" />
+              </svg>
+            </span>
+            {#if !$sidebarCollapsed}<span class="nav-label">Settings</span>{/if}
+          </button>
+        </li>
+      {/if}
     </ul>
 
     <!-- Download progress mini-bar -->
