@@ -30,7 +30,7 @@ use crate::bg3_pak;
 use crate::bottles::Bottle;
 use crate::database::ModDatabase;
 use crate::deployer::{DeployResult, DeployerError};
-use crate::games::{DetectedGame, GamePlugin};
+use crate::games::{DetectedGame, FileBasedLoadOrder, GamePlugin, LoadOrderFormat, LoadOrderKind};
 use crate::staging::is_safe_relative_path;
 
 // ---------------------------------------------------------------------------
@@ -408,10 +408,24 @@ impl GamePlugin for BaldursGate3NativePlugin {
     /// BG3 has no `plugins.txt` load-order file.
     ///
     /// Load order is stored as XML in `modsettings.lsx`
-    /// (`<region id="ModuleSettings">`). Access to that file requires a
-    /// different abstraction; see Task 4.5.
+    /// (`<region id="ModuleSettings">`). The `LoadOrderKind::FileBased` path
+    /// with `LoadOrderFormat::Bg3ModSettings` drives the generic
+    /// re-orderable-list panel for community mods.
     fn get_plugins_file(&self, _game_path: &Path, _bottle: &Bottle) -> Option<PathBuf> {
         None
+    }
+
+    /// BG3 exposes its mod load order via the generic `FileBasedLoadOrderPanel`.
+    ///
+    /// The config path points at the canonical `modsettings.lsx` for the
+    /// `"Public"` profile. The `Bg3ModSettings` format variant handles
+    /// master-entry filtering on read and master-preserving merge on write.
+    fn load_order_kind(&self, _game_path: &Path) -> LoadOrderKind {
+        LoadOrderKind::FileBased(FileBasedLoadOrder {
+            config_path: resolve_modsettings_path("Public"),
+            format: LoadOrderFormat::Bg3ModSettings,
+            describe: None,
+        })
     }
 
     /// Deploy all staged BG3 mods into the mods directory and update
@@ -448,7 +462,7 @@ mod tests {
     use super::*;
     use crate::bg3_lsx::{read_modsettings, MASTER_GUSTAV_DEV_UUID};
     use crate::bg3_pak::{make_minimal_lspk, TEST_META_LSX_XML};
-    use crate::games::with_plugin;
+    use crate::games::{with_plugin, GamePlugin};
     use crate::runtime::{Architecture, GameRuntime, NativeContext, NativeSource};
     use std::io::Write;
     use std::sync::Arc;
@@ -510,6 +524,35 @@ mod tests {
             .unwrap();
 
         staging_dir
+    }
+
+    // ── Task 4.5: load_order_kind ───────────────────────────────────────────
+
+    #[test]
+    fn bg3_load_order_kind_returns_file_based_with_bg3_modsettings_format() {
+        let plugin = BaldursGate3NativePlugin;
+        let kind = plugin.load_order_kind(Path::new("/Applications/Baldurs Gate 3.app"));
+        match kind {
+            crate::games::LoadOrderKind::FileBased(fb) => {
+                assert!(
+                    matches!(fb.format, crate::games::LoadOrderFormat::Bg3ModSettings),
+                    "expected Bg3ModSettings format, got {:?}",
+                    fb.format
+                );
+                // config_path must end in modsettings.lsx
+                assert!(
+                    fb.config_path
+                        .file_name()
+                        .map(|n| n == "modsettings.lsx")
+                        .unwrap_or(false),
+                    "config_path must point at modsettings.lsx, got {:?}",
+                    fb.config_path
+                );
+                // describe is None (UUID + folder name is enough for the UI)
+                assert!(fb.describe.is_none(), "describe should be None for BG3");
+            }
+            other => panic!("expected LoadOrderKind::FileBased, got {:?}", other),
+        }
     }
 
     // ── Existing scaffold tests ─────────────────────────────────────────────

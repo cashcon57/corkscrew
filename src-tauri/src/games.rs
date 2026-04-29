@@ -275,6 +275,16 @@ pub enum LoadOrderFormat {
     /// children. Disabled entries are not representable in the upstream
     /// format, so writes drop them; toggle UX still works in-session.
     RimWorldXml,
+    /// Baldur's Gate 3 `modsettings.lsx` — Larian XML encoding. Read returns
+    /// only the community mods (the three master entries GustavDev, Gustav,
+    /// SharedDev are filtered out; they are always present and are not
+    /// user-controllable). Write preserves masters at the head of the list
+    /// and reorders only the community entries, carrying full `ModEntry`
+    /// data (Folder, Name, Version64) forward from the existing file by
+    /// UUID lookup. Dispatch is handled directly in the load-order commands
+    /// (not via the generic `encode_load_order` / `decode_load_order` path)
+    /// because the write phase requires read-then-merge semantics.
+    Bg3ModSettings,
 }
 
 // ---------------------------------------------------------------------------
