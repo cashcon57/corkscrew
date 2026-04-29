@@ -100,7 +100,7 @@ impl GamePlugin for Sims4Plugin {
         EXECUTABLES
     }
 
-    fn detect(&self, bottle: &Bottle) -> Option<DetectedGame> {
+    fn detect_wine(&self, bottle: &Bottle) -> Option<DetectedGame> {
         let game_path = find_game_path(bottle)?;
         if !has_real_executable(&game_path) {
             return None;
@@ -505,7 +505,7 @@ mod tests {
         create_user_documents(&bottle_path);
 
         let bottle = make_bottle(bottle_path);
-        let detected = Sims4Plugin.detect(&bottle).expect("should detect");
+        let detected = Sims4Plugin.detect_wine(&bottle).expect("should detect");
         assert_eq!(detected.game_id, "sims4");
         assert_eq!(detected.game_path, game_dir);
         // data_dir lives outside the game install — under Documents.
@@ -528,7 +528,7 @@ mod tests {
         create_user_documents(&bottle_path);
 
         let bottle = make_bottle(bottle_path);
-        let detected = Sims4Plugin.detect(&bottle).expect("should detect");
+        let detected = Sims4Plugin.detect_wine(&bottle).expect("should detect");
         assert_eq!(detected.game_id, "sims4");
         assert_eq!(detected.game_path, game_dir);
     }
@@ -540,7 +540,7 @@ mod tests {
         fs::create_dir_all(bottle_path.join("drive_c")).unwrap();
 
         let bottle = make_bottle(bottle_path);
-        assert!(Sims4Plugin.detect(&bottle).is_none());
+        assert!(Sims4Plugin.detect_wine(&bottle).is_none());
     }
 
     #[test]
@@ -559,7 +559,7 @@ mod tests {
         fs::create_dir_all(bottle_path.join("drive_c")).unwrap();
 
         let bottle = make_bottle(bottle_path);
-        assert!(Sims4Plugin.detect(&bottle).is_none());
+        assert!(Sims4Plugin.detect_wine(&bottle).is_none());
     }
 
     #[test]

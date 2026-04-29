@@ -72,7 +72,7 @@ impl GamePlugin for VortexGamePlugin {
         &[]
     }
 
-    fn detect(&self, bottle: &Bottle) -> Option<DetectedGame> {
+    fn detect_wine(&self, bottle: &Bottle) -> Option<DetectedGame> {
         let exe = &self.reg.executable;
         if exe.is_empty() {
             return None;

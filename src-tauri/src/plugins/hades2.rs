@@ -66,7 +66,7 @@ impl GamePlugin for Hades2Plugin {
         EXECUTABLES
     }
 
-    fn detect(&self, bottle: &Bottle) -> Option<DetectedGame> {
+    fn detect_wine(&self, bottle: &Bottle) -> Option<DetectedGame> {
         let game_path = find_game_path(bottle)?;
         if find_executable(&game_path).is_none() {
             return None;
@@ -371,7 +371,7 @@ mod tests {
             path: bottle_path,
             source: "Test".into(),
         };
-        assert!(Hades2Plugin.detect(&bottle).is_none());
+        assert!(Hades2Plugin.detect_wine(&bottle).is_none());
     }
 
     #[test]
@@ -393,7 +393,7 @@ mod tests {
             path: bottle_path,
             source: "Test".into(),
         };
-        let detected = Hades2Plugin.detect(&bottle).expect("detection");
+        let detected = Hades2Plugin.detect_wine(&bottle).expect("detection");
         assert_eq!(detected.game_id, "hades2");
         assert_eq!(detected.data_dir, game_dir.join("Content").join("Mods"));
     }

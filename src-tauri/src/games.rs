@@ -21,6 +21,13 @@ use crate::runtime::GameRuntime;
 /// global plugin registry via [`register_plugin`]. The trait is object-safe
 /// and requires `Send + Sync` so trait objects can be shared across Tauri's
 /// async runtime threads.
+///
+/// Game detection is split into two methods:
+/// - [`detect_wine`](GamePlugin::detect_wine): locates the game inside a Wine
+///   bottle. Wine plugins override this; native-only plugins leave it as `None`.
+/// - [`detect_native`](GamePlugin::detect_native): locates native macOS
+///   installations. Native plugins override this; Wine-only plugins leave it as
+///   an empty `Vec`.
 pub trait GamePlugin: Send + Sync {
     /// Unique identifier for this game (e.g. `"skyrimse"`).
     fn game_id(&self) -> &str;
@@ -34,9 +41,20 @@ pub trait GamePlugin: Send + Sync {
     /// Executable filenames used to verify a game installation.
     fn executables(&self) -> &[&str];
 
-    /// Attempt to locate this game inside `bottle`. Returns `Some(DetectedGame)`
-    /// if the game is found, or `None` otherwise.
-    fn detect(&self, bottle: &Bottle) -> Option<DetectedGame>;
+    /// Attempt to locate this game inside a Wine `bottle`. Returns
+    /// `Some(DetectedGame)` if the game is found, or `None` otherwise.
+    /// Default: `None` (not a Wine game). Wine plugins override this method.
+    fn detect_wine(&self, _bottle: &Bottle) -> Option<DetectedGame> {
+        None
+    }
+
+    /// Attempt to locate this game as a native macOS install. Returns one
+    /// entry per discovered installation (the same game can exist in multiple
+    /// Steam libraries or both `/Applications` and `~/Applications`). Default:
+    /// empty `Vec` (not a native game). Native plugins override this method.
+    fn detect_native(&self) -> Vec<DetectedGame> {
+        vec![]
+    }
 
     /// Return the directory where mods should be deployed for a given
     /// `game_path` (e.g. `<game_path>/Data` for Bethesda titles).
@@ -305,7 +323,7 @@ pub fn detect_games(bottle: &Bottle) -> Vec<DetectedGame> {
     let plugins = registry().lock().unwrap_or_else(|e| e.into_inner());
     let mut found = Vec::new();
     for plugin in plugins.iter() {
-        if let Some(detected) = plugin.detect(bottle) {
+        if let Some(detected) = plugin.detect_wine(bottle) {
             found.push(detected);
         }
     }
@@ -318,7 +336,19 @@ pub fn detect_games(bottle: &Bottle) -> Vec<DetectedGame> {
     found
 }
 
-/// Scan **all** discoverable bottles for all recognized games.
+/// Scan native macOS installs for all registered native plugins. Each plugin
+/// returns 0+ DetectedGame entries (one per discovered installation). Returns
+/// an aggregated, ungrouped list — caller is responsible for any dedup logic.
+pub fn detect_native_games() -> Vec<DetectedGame> {
+    let plugins = registry().lock().unwrap_or_else(|e| e.into_inner());
+    let mut found = Vec::new();
+    for plugin in plugins.iter() {
+        found.extend(plugin.detect_native());
+    }
+    found
+}
+
+/// Scan **all** discoverable bottles and native installs for all recognized games.
 pub fn detect_all_games() -> Vec<DetectedGame> {
     use crate::bottles::detect_bottles;
 
@@ -326,6 +356,7 @@ pub fn detect_all_games() -> Vec<DetectedGame> {
     for bottle in detect_bottles() {
         found.extend(detect_games(&bottle));
     }
+    found.extend(detect_native_games());
     found
 }
 
@@ -438,7 +469,7 @@ mod tests {
         fn executables(&self) -> &[&str] {
             &["test.exe"]
         }
-        fn detect(&self, _bottle: &Bottle) -> Option<DetectedGame> {
+        fn detect_wine(&self, _bottle: &Bottle) -> Option<DetectedGame> {
             None
         }
         fn get_data_dir(&self, game_path: &Path) -> PathBuf {

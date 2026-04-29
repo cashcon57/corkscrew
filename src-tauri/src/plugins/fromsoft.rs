@@ -147,7 +147,7 @@ impl GamePlugin for FromSoftPlugin {
         self.spec.executables
     }
 
-    fn detect(&self, bottle: &Bottle) -> Option<DetectedGame> {
+    fn detect_wine(&self, bottle: &Bottle) -> Option<DetectedGame> {
         let game_path = find_game_path(bottle, self.spec)?;
         let exe_path = find_executable(&game_path, self.spec.executables)?;
 
@@ -611,7 +611,7 @@ mod tests {
 
         let b = make_bottle(bottle_path);
         let p = FromSoftPlugin::new(spec_for("sekiro"));
-        let d = p.detect(&b).expect("detection");
+        let d = p.detect_wine(&b).expect("detection");
         assert_eq!(d.game_id, "sekiro");
         assert_eq!(d.game_path, game_dir);
         assert_eq!(d.data_dir, game_dir.join("mod"));
@@ -630,7 +630,7 @@ mod tests {
 
         let b = make_bottle(bottle_path);
         let p = FromSoftPlugin::new(spec_for("eldenring"));
-        let d = p.detect(&b).expect("detection");
+        let d = p.detect_wine(&b).expect("detection");
         assert_eq!(d.game_id, "eldenring");
         assert_eq!(
             d.exe_path.as_deref(),
@@ -646,7 +646,7 @@ mod tests {
 
         let b = make_bottle(bottle_path);
         let p = FromSoftPlugin::new(spec_for("darksouls3"));
-        assert!(p.detect(&b).is_some());
+        assert!(p.detect_wine(&b).is_some());
     }
 
     #[test]
@@ -661,7 +661,7 @@ mod tests {
 
         let b = make_bottle(bottle_path);
         let p = FromSoftPlugin::new(spec_for("darksouls_remastered"));
-        assert!(p.detect(&b).is_some());
+        assert!(p.detect_wine(&b).is_some());
     }
 
     #[test]
@@ -676,7 +676,7 @@ mod tests {
 
         let b = make_bottle(bottle_path);
         let p = FromSoftPlugin::new(spec_for("armoredcore6"));
-        let d = p.detect(&b).expect("detection");
+        let d = p.detect_wine(&b).expect("detection");
         assert_eq!(d.nexus_slug, "armoredcore6firesofrubicon");
     }
 
@@ -696,7 +696,7 @@ mod tests {
 
         let b = make_bottle(bottle_path);
         let p = FromSoftPlugin::new(spec_for("eldenring"));
-        assert!(p.detect(&b).is_none());
+        assert!(p.detect_wine(&b).is_none());
     }
 
     #[test]

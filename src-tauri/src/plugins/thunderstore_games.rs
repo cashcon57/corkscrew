@@ -188,7 +188,7 @@ impl GamePlugin for ThunderstorePlugin {
         self.spec.executables
     }
 
-    fn detect(&self, bottle: &Bottle) -> Option<DetectedGame> {
+    fn detect_wine(&self, bottle: &Bottle) -> Option<DetectedGame> {
         let game_path = find_game_path(bottle, self.spec)?;
         if find_executable(&game_path, self.spec.executables).is_none() {
             return None;
@@ -505,7 +505,7 @@ mod tests {
             source: "T".into(),
         };
         let p = ThunderstorePlugin::new(silksong_spec());
-        let d = p.detect(&b).expect("detection");
+        let d = p.detect_wine(&b).expect("detection");
         assert_eq!(d.game_id, "silksong");
         assert_eq!(
             d.data_dir,

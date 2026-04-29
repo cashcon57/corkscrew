@@ -96,7 +96,7 @@ impl GamePlugin for GtaVPlugin {
         EXECUTABLES
     }
 
-    fn detect(&self, bottle: &Bottle) -> Option<DetectedGame> {
+    fn detect_wine(&self, bottle: &Bottle) -> Option<DetectedGame> {
         let game_path = find_game_path(bottle)?;
 
         // Verify at least one of the known executables actually exists.
@@ -492,7 +492,7 @@ mod tests {
             source: "Test".into(),
         };
         let plugin = GtaVPlugin;
-        assert!(plugin.detect(&bottle).is_none());
+        assert!(plugin.detect_wine(&bottle).is_none());
     }
 
     #[test]
@@ -514,7 +514,7 @@ mod tests {
             source: "Test".into(),
         };
         let plugin = GtaVPlugin;
-        let detected = plugin.detect(&bottle).expect("Steam install should detect");
+        let detected = plugin.detect_wine(&bottle).expect("Steam install should detect");
         assert_eq!(detected.game_id, "gtav");
         assert_eq!(detected.display_name, "Grand Theft Auto V");
         assert_eq!(detected.nexus_slug, "grandtheftautov");
@@ -538,7 +538,7 @@ mod tests {
             source: "Test".into(),
         };
         let plugin = GtaVPlugin;
-        let detected = plugin.detect(&bottle).expect("Rockstar install should detect");
+        let detected = plugin.detect_wine(&bottle).expect("Rockstar install should detect");
         assert_eq!(detected.game_id, "gtav");
     }
 
@@ -559,7 +559,7 @@ mod tests {
             source: "Test".into(),
         };
         let plugin = GtaVPlugin;
-        let detected = plugin.detect(&bottle).expect("Epic install should detect");
+        let detected = plugin.detect_wine(&bottle).expect("Epic install should detect");
         assert_eq!(detected.game_id, "gtav");
     }
 
@@ -613,7 +613,7 @@ mod tests {
             source: "Test".into(),
         };
         let plugin = GtaVPlugin;
-        let detected = plugin.detect(&bottle).unwrap();
+        let detected = plugin.detect_wine(&bottle).unwrap();
         let exe = detected.exe_path.unwrap();
         // exe_path (detection) should be GTA5.exe — the real binary.
         assert_eq!(

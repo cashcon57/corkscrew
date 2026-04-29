@@ -70,7 +70,7 @@ impl GamePlugin for SkyrimSEPlugin {
         EXECUTABLES
     }
 
-    fn detect(&self, bottle: &Bottle) -> Option<DetectedGame> {
+    fn detect_wine(&self, bottle: &Bottle) -> Option<DetectedGame> {
         let game_path = find_game_path(bottle)?;
 
         // Verify at least one known executable exists (case-insensitive).
@@ -470,7 +470,7 @@ mod tests {
         };
 
         let plugin = SkyrimSEPlugin;
-        assert!(plugin.detect(&bottle).is_none());
+        assert!(plugin.detect_wine(&bottle).is_none());
     }
 
     #[test]
@@ -496,7 +496,7 @@ mod tests {
         };
 
         let plugin = SkyrimSEPlugin;
-        let detected = plugin.detect(&bottle);
+        let detected = plugin.detect_wine(&bottle);
         assert!(detected.is_some());
 
         let detected = detected.unwrap();

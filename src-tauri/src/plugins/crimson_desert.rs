@@ -75,7 +75,7 @@ impl GamePlugin for CrimsonDesertPlugin {
         EXECUTABLES
     }
 
-    fn detect(&self, bottle: &Bottle) -> Option<DetectedGame> {
+    fn detect_wine(&self, bottle: &Bottle) -> Option<DetectedGame> {
         let game_path = find_game_path(bottle)?;
         if find_executable(&game_path).is_none() {
             return None;
@@ -349,7 +349,7 @@ mod tests {
             path: bottle_path,
             source: "T".into(),
         };
-        assert!(CrimsonDesertPlugin.detect(&b).is_none());
+        assert!(CrimsonDesertPlugin.detect_wine(&b).is_none());
     }
 
     #[test]
@@ -371,7 +371,7 @@ mod tests {
             path: bottle_path,
             source: "T".into(),
         };
-        let d = CrimsonDesertPlugin.detect(&b).expect("detection");
+        let d = CrimsonDesertPlugin.detect_wine(&b).expect("detection");
         assert_eq!(d.game_id, "crimsondesert");
         assert_eq!(d.data_dir, game_dir);
     }
@@ -395,7 +395,7 @@ mod tests {
             path: bottle_path,
             source: "T".into(),
         };
-        let d = CrimsonDesertPlugin.detect(&b).expect("detection");
+        let d = CrimsonDesertPlugin.detect_wine(&b).expect("detection");
         assert_eq!(d.game_id, "crimsondesert");
     }
 }

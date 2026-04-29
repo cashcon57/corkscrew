@@ -69,7 +69,7 @@ impl GamePlugin for HogwartsLegacyPlugin {
         EXECUTABLES
     }
 
-    fn detect(&self, bottle: &Bottle) -> Option<DetectedGame> {
+    fn detect_wine(&self, bottle: &Bottle) -> Option<DetectedGame> {
         let game_path = find_game_path(bottle)?;
 
         // Verify the real executable exists in Phoenix/Binaries/Win64/
@@ -950,7 +950,7 @@ mod tests {
         };
 
         let plugin = HogwartsLegacyPlugin;
-        assert!(plugin.detect(&bottle).is_none());
+        assert!(plugin.detect_wine(&bottle).is_none());
     }
 
     /// Helper to create the full Hogwarts Legacy directory structure in a
@@ -984,7 +984,7 @@ mod tests {
         };
 
         let plugin = HogwartsLegacyPlugin;
-        let detected = plugin.detect(&bottle);
+        let detected = plugin.detect_wine(&bottle);
         assert!(detected.is_some());
 
         let detected = detected.unwrap();
@@ -1011,7 +1011,7 @@ mod tests {
         };
 
         let plugin = HogwartsLegacyPlugin;
-        let detected = plugin.detect(&bottle);
+        let detected = plugin.detect_wine(&bottle);
         assert!(detected.is_some());
         assert_eq!(detected.unwrap().game_id, "hogwartslegacy");
     }
@@ -1041,7 +1041,7 @@ mod tests {
 
         let plugin = HogwartsLegacyPlugin;
         // Should NOT detect — root launcher alone is insufficient.
-        assert!(plugin.detect(&bottle).is_none());
+        assert!(plugin.detect_wine(&bottle).is_none());
     }
 
     #[test]
@@ -1067,7 +1067,7 @@ mod tests {
         };
 
         let plugin = HogwartsLegacyPlugin;
-        let detected = plugin.detect(&bottle).unwrap();
+        let detected = plugin.detect_wine(&bottle).unwrap();
 
         // exe_path should point to the real exe in Phoenix/Binaries/Win64/.
         let exe_path = detected.exe_path.unwrap();

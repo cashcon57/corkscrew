@@ -116,7 +116,7 @@ impl GamePlugin for RegistryGamePlugin {
         &[]
     }
 
-    fn detect(&self, bottle: &Bottle) -> Option<DetectedGame> {
+    fn detect_wine(&self, bottle: &Bottle) -> Option<DetectedGame> {
         let exe = self.entry.executable.as_deref()?;
         let game_path = find_game_path(bottle, self.entry)?;
 
