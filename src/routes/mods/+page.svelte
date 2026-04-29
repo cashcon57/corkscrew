@@ -71,6 +71,7 @@
     gameLockOverridden,
     wjInstallGeneration,
     modStateVersion,
+    nativeMode,
   } from "$lib/stores";
   import type { InstalledMod, DetectedGame, SkseStatus, DowngradeStatus, FileConflict, ModUpdateInfo, FomodInstaller } from "$lib/types";
   import { createModFilters } from "$lib/stores/modFilters.svelte";
@@ -2348,7 +2349,7 @@
             <span class="meta-separator">&middot;</span>
             <span class="meta-mods">{enabledCount}/{modCount} mods active</span>
           {/if}
-          {#if skse?.installed}
+          {#if !$nativeMode && skse?.installed}
             <span class="meta-separator">&middot;</span>
             <span class="meta-skse">SKSE {skse.version ?? ""}</span>
           {/if}
@@ -2598,6 +2599,7 @@
             Play{#if skse?.use_skse && activeGame?.game_id === "skyrimse"} (SKSE){/if}
           {/if}
         </button>
+        {#if !$nativeMode}
         {#if activeGame?.game_id === "skyrimse"}
           <button
             class="btn btn-play-dropdown"
@@ -2662,6 +2664,7 @@
             </button>
           </div>
         {/if}
+        {/if}<!-- end !nativeMode: SKSE dropdowns -->
       </div>
     </div>
 
