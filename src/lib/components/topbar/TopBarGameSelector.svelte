@@ -2,8 +2,8 @@
   import { selectedGame, showUninstalledGames, uninstalledGames } from "$lib/stores";
   import GameIcon from "$lib/components/GameIcon.svelte";
   import GameSupportBadge from "$lib/components/GameSupportBadge.svelte";
-  import type { DetectedGame, KnownUninstalledGame } from "$lib/types";
-  import { setConfigValue, listKnownUninstalledGames } from "$lib/api";
+  import type { DetectedGame, KnownUninstalledGame, UnregisteredGame } from "$lib/types";
+  import { setConfigValue, listKnownUninstalledGames, listUnregisteredCrossoverGames } from "$lib/api";
   import { openUrl } from "@tauri-apps/plugin-opener";
 
   interface Props {
@@ -28,8 +28,27 @@
     onClose,
   }: Props = $props();
 
+  // Unregistered CrossOver shortcuts — loaded lazily on first dropdown open.
+  let unregisteredGames = $state<UnregisteredGame[]>([]);
+  let unregisteredLoaded = $state(false);
+
+  $effect(() => {
+    if (isOpen && !unregisteredLoaded) {
+      unregisteredLoaded = true;
+      listUnregisteredCrossoverGames()
+        .then((games) => { unregisteredGames = games; })
+        .catch((err) => console.error('TopBarGameSelector: listUnregisteredCrossoverGames failed:', err));
+    }
+  });
+
   function selectGame(game: DetectedGame) {
     onPickGame(game);
+    onClose();
+  }
+
+  /** Navigate to the collections/discover page where the registration banner lives. */
+  function goToRegister() {
+    onNavigate("collections");
     onClose();
   }
 

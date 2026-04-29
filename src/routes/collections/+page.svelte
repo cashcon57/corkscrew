@@ -44,6 +44,7 @@
   import NexusBrowsePanel from "$lib/components/collections/NexusBrowsePanel.svelte";
   import SearchFilterBar from "$lib/components/SearchFilterBar.svelte";
   import CollectionInstallWizard from "$lib/components/collections/CollectionInstallWizard.svelte";
+  import UnregisteredGamesBanner from "$lib/components/UnregisteredGamesBanner.svelte";
   import type { DetectedGame } from "$lib/types";
 
   const NEXUS_API_KEY_URL = "https://www.nexusmods.com/users/myaccount?tab=api+access";
@@ -1096,6 +1097,10 @@
       Browse Nexus
     </button>
   </div>
+
+  <!-- Unregistered games banner — surfaces CrossOver shortcuts not yet registered,
+       visible on every tab so users see it regardless of their current context. -->
+  <UnregisteredGamesBanner />
 
   {#if $selectedGame}
     <InterruptedInstallBanner

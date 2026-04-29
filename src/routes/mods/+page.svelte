@@ -2268,6 +2268,9 @@
   ondrop={handleDrop}
   role="application"
 >
+  <!-- Unregistered games banner — visible regardless of selected game state so
+       newly-detected shortcuts are always surfaced even when a game is active. -->
+  <UnregisteredGamesBanner />
   {#if draggingOver}
     <div class="drop-overlay">
       <div class="drop-overlay-content">
@@ -2281,8 +2284,6 @@
     </div>
   {/if}
   {#if !activeGame}
-    <!-- Unregistered games banner — same auto-discovery the dashboard surfaces -->
-    <UnregisteredGamesBanner />
     <!-- Game Picker -->
     <div class="picker-container">
       <div class="picker-icon">

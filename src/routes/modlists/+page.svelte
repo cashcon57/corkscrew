@@ -27,6 +27,7 @@
   import WabbajackLogo from "$lib/components/WabbajackLogo.svelte";
   import SearchFilterBar from "$lib/components/SearchFilterBar.svelte";
   import WebViewToggle from "$lib/components/WebViewToggle.svelte";
+  import UnregisteredGamesBanner from "$lib/components/UnregisteredGamesBanner.svelte";
 
   let modlists = $state<ModlistSummary[]>([]);
   let filtered = $state<ModlistSummary[]>([]);
@@ -544,6 +545,9 @@
       Small lists are more likely to succeed. Large modlists (500+ archives) are known to have issues.
     </div>
   </div>
+
+  <!-- Unregistered games banner — surfaces CrossOver shortcuts not yet registered. -->
+  <UnregisteredGamesBanner />
 
   {#if pendingWjInstall}
     <div class="resume-banner">
