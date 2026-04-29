@@ -1,8 +1,12 @@
 <script lang="ts">
+  import { goto } from "$app/navigation";
   import TopBarGameSelector from "./TopBarGameSelector.svelte";
   import TopBarModlistSelector from "./TopBarModlistSelector.svelte";
   import TopBarProfileSelector from "./TopBarProfileSelector.svelte";
   import type { DetectedGame } from "$lib/types";
+  import { nativeMode } from "$lib/stores";
+  import { setNativeMode } from "$lib/api";
+  import { applyNativeTheme } from "$lib/native/theme";
 
   interface Props {
     detectedGames: DetectedGame[];
@@ -30,6 +34,23 @@
 
   function closeAll() {
     openDropdown = null;
+  }
+
+  async function toggleNativeMode() {
+    const newValue = !$nativeMode;
+    try {
+      await setNativeMode(newValue);
+    } catch (err) {
+      console.error("setNativeMode failed:", err);
+      return;
+    }
+    nativeMode.set(newValue);
+    await applyNativeTheme(newValue);
+    if (newValue) {
+      goto("/native").catch((err) => console.error("navigation to /native failed:", err));
+    } else {
+      goto("/").catch((err) => console.error("navigation to / failed:", err));
+    }
   }
 </script>
 
@@ -75,6 +96,30 @@
       onToggle={() => handleOpenDropdown("profile")}
       onClose={closeAll}
     />
+
+    <span class="topbar-separator topbar-separator-spacer"></span>
+
+    <button
+      class="topbar-mode-toggle"
+      class:native-active={$nativeMode}
+      onclick={toggleNativeMode}
+      aria-label={$nativeMode ? "Switch to Wine Mode" : "Switch to Native Mode"}
+      title={$nativeMode ? "Switch to Wine Mode" : "Switch to Native Mode"}
+    >
+      {#if $nativeMode}
+        <!-- Apple logo mark — native mode active -->
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <path d="M17.05 20.28c-.98.95-2.05.8-3.08.35-1.09-.46-2.09-.48-3.24 0-1.44.62-2.2.44-3.06-.35C2.79 15.25 3.51 7.59 9.05 7.31c1.35.07 2.29.74 3.08.8 1.18-.24 2.31-.93 3.57-.84 1.51.12 2.65.72 3.4 1.8-3.12 1.87-2.38 5.98.48 7.13-.57 1.5-1.31 2.99-2.54 4.09zM12.03 7.25c-.15-2.23 1.66-4.07 3.74-4.25.29 2.58-2.34 4.5-3.74 4.25z"/>
+        </svg>
+        <span>Wine</span>
+      {:else}
+        <!-- Apple logo mark — click to enter native mode -->
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <path d="M17.05 20.28c-.98.95-2.05.8-3.08.35-1.09-.46-2.09-.48-3.24 0-1.44.62-2.2.44-3.06-.35C2.79 15.25 3.51 7.59 9.05 7.31c1.35.07 2.29.74 3.08.8 1.18-.24 2.31-.93 3.57-.84 1.51.12 2.65.72 3.4 1.8-3.12 1.87-2.38 5.98.48 7.13-.57 1.5-1.31 2.99-2.54 4.09zM12.03 7.25c-.15-2.23 1.66-4.07 3.74-4.25.29 2.58-2.34 4.5-3.74 4.25z"/>
+        </svg>
+        <span>Native</span>
+      {/if}
+    </button>
   </div>
 </div>
 
@@ -177,5 +222,52 @@
     user-select: none;
     padding: 0 2px;
     opacity: 0.5;
+  }
+
+  /* Push the mode toggle to the far right of the pill */
+  .topbar-separator-spacer {
+    flex: 1;
+    min-width: 8px;
+    padding: 0;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .topbar-mode-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 10px;
+    background: transparent;
+    border: 1px solid var(--separator);
+    border-radius: 100px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    white-space: nowrap;
+    transition:
+      background var(--duration-fast, 120ms) var(--ease, ease),
+      color var(--duration-fast, 120ms) var(--ease, ease),
+      border-color var(--duration-fast, 120ms) var(--ease, ease);
+    -webkit-app-region: no-drag;
+  }
+
+  .topbar-mode-toggle:hover {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+    border-color: var(--separator);
+  }
+
+  .topbar-mode-toggle.native-active {
+    background: var(--accent-subtle);
+    color: var(--accent);
+    border-color: var(--accent-muted);
+  }
+
+  .topbar-mode-toggle.native-active:hover {
+    background: var(--accent-muted);
+    color: var(--accent-hover, var(--accent));
   }
 </style>
