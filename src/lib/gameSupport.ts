@@ -167,3 +167,40 @@ export function isFromSoftGame(gameId: string): boolean {
 export function me2SetupDismissedKey(gameId: string, bottleName: string): string {
   return `me2_setup_dismissed_${gameId}:${bottleName}`;
 }
+
+/**
+ * Legacy game_id → Nexus slug overrides. Most slugs come from the backend
+ * `DetectedGame.nexus_slug` field — this map only covers cases where the
+ * backend ships the wrong value or where the call site has nothing but
+ * a game_id (no full DetectedGame). Keep this map small.
+ */
+const NEXUS_SLUG_OVERRIDES: Record<string, string> = {
+  skyrimse: "skyrimspecialedition",
+  skyrim: "skyrim",
+  fallout4: "fallout4",
+  fallout3: "fallout3",
+  falloutnv: "newvegas",
+  oblivion: "oblivion",
+  morrowind: "morrowind",
+  starfield: "starfield",
+  enderal: "enderal",
+  enderalse: "enderalspecialedition",
+};
+
+/**
+ * Resolve the Nexus Mods slug for a detected game.
+ *
+ * Priority:
+ *   1. The backend-supplied `nexus_slug` field (canonical — comes from
+ *      registered plugins, vortex_index lookup, or a dash-stripped fallback
+ *      derived from the Steam display name).
+ *   2. Hardcoded legacy overrides (`skyrimse` → `skyrimspecialedition`).
+ *   3. The `game_id` with dashes stripped (Nexus's slug convention is
+ *      no-dashes-no-spaces, so this is a reasonable last resort for
+ *      auto-detected Steam games not covered by the index).
+ */
+export function gameToNexusSlug(g: { game_id: string; nexus_slug?: string }): string {
+  if (g.nexus_slug && g.nexus_slug.length > 0) return g.nexus_slug;
+  if (NEXUS_SLUG_OVERRIDES[g.game_id]) return NEXUS_SLUG_OVERRIDES[g.game_id];
+  return g.game_id.replace(/-/g, "");
+}

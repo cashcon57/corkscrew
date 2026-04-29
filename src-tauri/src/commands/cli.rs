@@ -595,6 +595,7 @@ pub fn cli_list_games(db: &Arc<ModDatabase>) {
             all_games.push(serde_json::json!({
                 "id": game.game_id,
                 "name": game.display_name,
+                "nexus_slug": game.nexus_slug,
                 "bottle": bottle.name,
                 "path": game.game_path.display().to_string(),
                 "executable": game.exe_path.as_ref().map(|p| p.display().to_string()),

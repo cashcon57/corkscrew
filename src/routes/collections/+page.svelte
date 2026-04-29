@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy, untrack } from "svelte";
   import { goto } from "$app/navigation";
+  import { gameToNexusSlug } from "$lib/gameSupport";
   import InstructionParser from "$lib/components/InstructionParser.svelte";
   import { selectedGame, showError, showSuccess, collectionInstallStatus, collectionUninstallStatus, modStateVersion, installedMods, collectionList, activeCollection } from "$lib/stores";
   import type { CollectionInfo, CollectionMod, CollectionSearchResult, InstalledMod, NexusModInfo, CollectionRevision } from "$lib/types";
@@ -323,7 +324,7 @@
     const tab = activeTab;
     const connected = untrack(() => account?.connected);
     if (tab === "nexus" && game && connected) {
-      const slug = gameSlugMap[game.game_id] ?? game.game_id;
+      const slug = gameToNexusSlug(game);
       if (untrack(() => collectionsInitializedForGame) !== slug) {
         collectionsInitializedForGame = slug;
         gameFilter = slug;
@@ -448,41 +449,10 @@
   // NexusBrowsePanel ref for LLM events
   let nexusBrowsePanel: NexusBrowsePanel | null = $state(null);
 
-  const gameSlugMap: Record<string, string> = {
-    skyrimse: "skyrimspecialedition",
-    skyrim: "skyrim",
-    fallout4: "fallout4",
-    fallout3: "fallout3",
-    falloutnv: "newvegas",
-    oblivion: "oblivion",
-    morrowind: "morrowind",
-    starfield: "starfield",
-    enderal: "enderal",
-    enderalse: "enderalspecialedition",
-    hades2: "hades2",
-    crimsondesert: "crimsondesert",
-    gtav: "grandtheftautov",
-    silksong: "hollowknightsilksong",
-    riskofrain2: "riskofrain2",
-    lethalcompany: "lethalcompany",
-    contentwarning: "contentwarning",
-    repo: "repo",
-    palworld: "palworld",
-    valheim: "valheim",
-    mewgenics: "mewgenics",
-    sims4: "thesims4",
-    genshin: "genshinimpact",
-    sekiro: "sekiro",
-    eldenring: "eldenring",
-    darksouls3: "darksouls3",
-    darksouls_remastered: "darksoulsremastered",
-    armoredcore6: "armoredcore6firesofrubicon",
-  };
-
   function getGameSlug(): string {
     const game = $selectedGame;
     if (!game) return "";
-    return gameSlugMap[game.game_id] ?? game.game_id;
+    return gameToNexusSlug(game);
   }
 
   /** Intercept clicks on links inside rendered markdown/HTML and open them externally. */
@@ -519,8 +489,7 @@
     // Combine games from loaded collections with all detected games
     const gamesSet = new Set(collections.map(c => c.game_domain));
     for (const g of allDetectedGames) {
-      const slug = gameSlugMap[g.game_id] ?? g.game_id;
-      gamesSet.add(slug);
+      gamesSet.add(gameToNexusSlug(g));
     }
     return Array.from(gamesSet).sort();
   });
@@ -636,7 +605,7 @@
       account = status;
       if (status.connected && activeTab === "nexus") {
         const game = $selectedGame;
-        const slug = game ? (gameSlugMap[game.game_id] ?? game.game_id) : "skyrimspecialedition";
+        const slug = game ? gameToNexusSlug(game) : "skyrimspecialedition";
         collectionsInitializedForGame = slug;
         gameFilter = slug;
         await loadCollections(slug);
@@ -659,7 +628,7 @@
     account = status;
     showSuccess(`Signed in as ${status.name}`);
     const game = $selectedGame;
-    const slug = game ? (gameSlugMap[game.game_id] ?? game.game_id) : "skyrimspecialedition";
+    const slug = game ? gameToNexusSlug(game) : "skyrimspecialedition";
     collectionsInitializedForGame = slug;
     gameFilter = slug;
     await loadCollections(slug);

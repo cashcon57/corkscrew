@@ -15,6 +15,7 @@
   import SearchFilterBar from "$lib/components/SearchFilterBar.svelte";
   import BrowseModDetail from "$lib/components/collections/BrowseModDetail.svelte";
   import BrowseFilePicker from "$lib/components/collections/BrowseFilePicker.svelte";
+  import { gameToNexusSlug } from "$lib/gameSupport";
 
   interface Props {
     game: DetectedGame;
@@ -25,30 +26,17 @@
 
   let { game, account, allDetectedGames = [], onModInstalled }: Props = $props();
 
-  const gameSlugMap: Record<string, string> = {
-    skyrimse: "skyrimspecialedition",
-    skyrim: "skyrim",
-    fallout4: "fallout4",
-    fallout3: "fallout3",
-    falloutnv: "newvegas",
-    oblivion: "oblivion",
-    morrowind: "morrowind",
-    starfield: "starfield",
-    enderal: "enderal",
-    enderalse: "enderalspecialedition",
-  };
-
   // ---- Browse game override ----
   let browseGameOverride = $state<string | null>(null);
 
   function getGameSlug(): string {
     if (browseGameOverride) return browseGameOverride;
-    return gameSlugMap[game.game_id] ?? game.game_id;
+    return gameToNexusSlug(game);
   }
 
   function getBrowseGameName(): string {
     if (browseGameOverride) {
-      const g = allDetectedGames.find(g => (gameSlugMap[g.game_id] ?? g.game_id) === browseGameOverride);
+      const g = allDetectedGames.find(g => gameToNexusSlug(g) === browseGameOverride);
       return g?.display_name ?? gameDomainDisplay(browseGameOverride);
     }
     return game.display_name ?? "your game";
@@ -450,7 +438,7 @@
         <select bind:value={browseGameOverride} onchange={() => { browseInitializedForGame = ""; loadBrowseMods(); loadBrowseCategories(); }}>
           <option value={null}>{game.display_name ?? "Current Game"}</option>
           {#each allDetectedGames as g}
-            {@const slug = gameSlugMap[g.game_id] ?? g.game_id}
+            {@const slug = gameToNexusSlug(g)}
             {#if slug !== getGameSlug() || browseGameOverride}
               <option value={slug}>{g.display_name}</option>
             {/if}

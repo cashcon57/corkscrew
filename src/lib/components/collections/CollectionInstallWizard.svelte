@@ -2,6 +2,7 @@
   import { onDestroy } from "svelte";
   import { goto } from "$app/navigation";
   import { selectedGame, showError, showSuccess, collectionInstallStatus, modStateVersion } from "$lib/stores";
+  import { gameToNexusSlug } from "$lib/gameSupport";
   import type { CollectionInfo, CollectionManifest, CollectionMod, CollectionModEntry } from "$lib/types";
   import type { RequiredTool, CleanReport, DlcStatus, CachedVersion } from "$lib/types";
   import type { DetectedGame } from "$lib/types";
@@ -40,18 +41,6 @@
     details: { name: string; status: string; error: string | null; url: string | null; instructions: string | null }[];
   };
 
-  const gameSlugMap: Record<string, string> = {
-    skyrimse: "skyrimspecialedition",
-    skyrim: "skyrim",
-    fallout4: "fallout4",
-    fallout3: "fallout3",
-    falloutnv: "newvegas",
-    oblivion: "oblivion",
-    morrowind: "morrowind",
-    starfield: "starfield",
-    enderal: "enderal",
-    enderalse: "enderalspecialedition",
-  };
 
   // ---- Install workflow state ----
   let installing = $state(false);
@@ -107,14 +96,13 @@
     const collectionDomain = collection.game_domain;
     const currentGame = $selectedGame;
     if (currentGame) {
-      const currentSlug = gameSlugMap[currentGame.game_id] ?? currentGame.game_id;
-      if (collectionDomain && currentSlug !== collectionDomain && currentGame.nexus_slug !== collectionDomain) {
+      const currentSlug = gameToNexusSlug(currentGame);
+      if (collectionDomain && currentSlug !== collectionDomain) {
         try {
           const allGames = await getAllGames();
           const targetGame = allGames.find(
             (g: { nexus_slug: string; game_id: string }) =>
-              g.nexus_slug === collectionDomain ||
-              (gameSlugMap[g.game_id] ?? g.game_id) === collectionDomain
+              gameToNexusSlug(g) === collectionDomain
           );
           if (targetGame) {
             selectedGame.set(targetGame);
