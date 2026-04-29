@@ -486,7 +486,7 @@ button:focus-visible,
 
 .btn-accent {
   background: var(--system-accent);
-  color: #fff;
+  color: var(--system-accent-on);
 }
 
 .btn-accent:hover:not(:disabled) {
@@ -496,7 +496,7 @@ button:focus-visible,
 
 .btn-view-details {
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-on);
   flex: 1;
   justify-content: center;
 }

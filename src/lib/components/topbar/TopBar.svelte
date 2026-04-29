@@ -119,7 +119,7 @@
     -webkit-app-region: no-drag;
     border-radius: 100px;
     /* Glass material: minimal tint so content shows through with distortion */
-    background: rgba(255, 255, 255, 0.04);
+    background: var(--surface-glass);
     /* Light blur + brightness/contrast shift = refractive look, not smeared */
     backdrop-filter: blur(4px) saturate(1.8) brightness(1.1) contrast(1.05);
     -webkit-backdrop-filter: blur(4px) saturate(1.8) brightness(1.1) contrast(1.05);

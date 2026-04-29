@@ -228,7 +228,7 @@
   }
 
   .topbar-selector:hover {
-    background: rgba(255, 255, 255, 0.06);
+    background: var(--surface);
   }
 
   .topbar-selector-label {
@@ -262,7 +262,7 @@
     background: color-mix(in srgb, var(--bg-elevated) 92%, transparent);
     backdrop-filter: var(--glass-blur-heavy);
     -webkit-backdrop-filter: var(--glass-blur-heavy);
-    border: 1px solid rgba(255, 255, 255, 0.10);
+    border: 1px solid var(--separator);
     border-radius: var(--radius-lg);
     padding: 4px;
     z-index: 100;
@@ -348,7 +348,7 @@
   }
 
   .dropdown-delete-btn:hover {
-    background: rgba(255, 59, 48, 0.15);
+    background: var(--red-subtle);
     color: var(--red);
   }
 

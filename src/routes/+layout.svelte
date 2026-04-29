@@ -1143,7 +1143,7 @@
               <polyline points="3 7 6 10 11 4" />
             </svg>
           {:else if $wjInstallStatus.phase === "failed"}
-            <svg class="status-check" width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="#ef4444" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <svg class="status-check" width="12" height="12" viewBox="0 0 14 14" fill="none" style="stroke: var(--red)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
               <line x1="3" y1="3" x2="11" y2="11" />
               <line x1="11" y1="3" x2="3" y2="11" />
             </svg>
@@ -1792,7 +1792,7 @@
     overflow: hidden;
     position: relative;
     transition: width var(--duration-slow) var(--ease-spring), min-width var(--duration-slow) var(--ease-spring);
-    border: 0.5px solid rgba(255, 255, 255, 0.06);
+    border: 0.5px solid var(--surface);
   }
 
   .sidebar.resizing {
@@ -1967,7 +1967,7 @@
     -webkit-backdrop-filter: blur(12px) saturate(1.3);
     border-radius: var(--radius);
     transition: top var(--duration) var(--ease-spring);
-    box-shadow: inset 0 0.5px 0 0 rgba(255,255,255,0.1), inset 0 -0.5px 0 0 rgba(255,255,255,0.04);
+    box-shadow: inset 0 0.5px 0 0 var(--separator), inset 0 -0.5px 0 0 var(--surface-glass);
     z-index: 0;
     pointer-events: none;
   }
@@ -2152,7 +2152,7 @@
     width: 7px;
     height: 7px;
     border-radius: 50%;
-    background: #ef4444;
+    background: var(--red);
     animation: crash-pulse 1.5s ease-in-out infinite;
   }
   @keyframes crash-pulse {
@@ -2197,7 +2197,7 @@
   }
 
   .update-check-btn.up-to-date {
-    color: #34c759;
+    color: var(--green);
   }
 
   .update-check-btn.update-avail {
@@ -2206,7 +2206,7 @@
   }
 
   .update-check-btn.ready {
-    color: #34c759;
+    color: var(--green);
     animation: pulse-glow-green 1.5s ease-in-out infinite;
   }
 
@@ -2320,13 +2320,13 @@
   }
 
   .update-pill.ready {
-    background: rgba(52, 199, 89, 0.15);
-    color: #34c759;
+    background: var(--green-subtle);
+    color: var(--green);
     animation: glass-glow-pulse 2s ease-in-out infinite;
   }
 
   .update-pill.downloading {
-    background: rgba(255, 255, 255, 0.06);
+    background: var(--surface);
     color: var(--text-tertiary);
     cursor: default;
   }
@@ -2446,7 +2446,7 @@
 
   .changelog-entry {
     padding: var(--space-2, 8px);
-    background: rgba(255, 255, 255, 0.03);
+    background: var(--surface-subtle);
     border-radius: var(--radius-sm, 4px);
     border: 1px solid var(--separator);
   }
@@ -2811,12 +2811,12 @@
 
   .queue-badge-active {
     background: var(--accent);
-    color: #fff;
+    color: var(--accent-on);
   }
 
   .queue-badge-error {
     background: var(--red);
-    color: #fff;
+    color: var(--system-accent-on);
   }
 
   .queue-popover {
@@ -2824,7 +2824,7 @@
     width: 300px;
     max-height: 400px;
     background: color-mix(in srgb, var(--bg-elevated) 72%, transparent);
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    border: 1px solid var(--separator);
     border-radius: var(--radius);
     box-shadow: var(--glass-refraction),
                 var(--glass-edge-shadow),
@@ -3081,11 +3081,11 @@
   }
 
   .status-spinner-red {
-    border-top-color: #ef4444;
+    border-top-color: var(--red);
   }
 
   .status-progress-fill-red {
-    background: #ef4444;
+    background: var(--red);
   }
 
   .sidebar.collapsed .sidebar-status-bar {
@@ -3151,7 +3151,7 @@
     background: color-mix(in srgb, var(--bg-secondary) 75%, transparent);
     backdrop-filter: var(--glass-blur-heavy);
     -webkit-backdrop-filter: var(--glass-blur-heavy);
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    border: 1px solid var(--separator);
     border-radius: var(--radius);
     padding: var(--space-6);
     max-width: 380px;
@@ -3251,7 +3251,7 @@
     padding: 10px 16px 8px;
   }
   .hashing-banner-icon {
-    color: #34c759;
+    color: var(--green);
     flex-shrink: 0;
   }
   .hashing-spinner {
@@ -3287,11 +3287,11 @@
   }
   .hashing-progress-track {
     height: 3px;
-    background: rgba(52, 199, 89, 0.12);
+    background: var(--green-subtle);
   }
   .hashing-progress-fill {
     height: 100%;
-    background: #34c759;
+    background: var(--green);
     transition: width 0.4s ease-out;
     border-radius: 0 2px 2px 0;
   }
