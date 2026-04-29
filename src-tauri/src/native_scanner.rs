@@ -204,7 +204,27 @@ pub fn scan_applications_dirs() -> Vec<NativeAppCandidate> {
     results
 }
 
+/// Returns `true` if the parsed `Info.plist` category indicates a game.
+///
+/// Games use `LSApplicationCategoryType` values that start with
+/// `"public.app-category.games"` (e.g. `"public.app-category.games"`,
+/// `"public.app-category.action-games"`, etc.). Bundles with no category
+/// or a non-game category (utilities, developer tools, productivity, etc.)
+/// return `false` and are skipped by [`scan_dir`].
+fn is_game_category(info: &InfoPlist) -> bool {
+    info.category
+        .as_deref()
+        .map(|cat| cat.starts_with("public.app-category.games"))
+        .unwrap_or(false)
+}
+
 /// Walk `dir` (non-recursively) for `.app` bundles.
+///
+/// Only includes bundles whose `Info.plist` `LSApplicationCategoryType`
+/// starts with `"public.app-category.games"`. Bundles with no category
+/// (VS Code, Claude, etc.) or non-game categories (utilities, developer
+/// tools, productivity) are silently skipped — this filter keeps the
+/// discovery list limited to actual games.
 ///
 /// Skips symlinks and any bundle whose `Contents/Info.plist` is missing
 /// or malformed. A missing `dir` itself returns an empty `Vec` without
@@ -230,6 +250,12 @@ pub(crate) fn scan_dir(dir: &Path) -> Vec<NativeAppCandidate> {
         let Ok(info) = read_info_plist(&info_path) else {
             continue;
         };
+        // Only include bundles with a game-category LSApplicationCategoryType.
+        // VS Code, Chrome, Slack, Claude.app, etc. all lack the games category
+        // and would otherwise pollute the discovery list.
+        if !is_game_category(&info) {
+            continue;
+        }
         let architecture = detect_bundle_architecture(&p, &info);
         results.push(NativeAppCandidate {
             bundle_path: p.clone(),
@@ -579,9 +605,28 @@ mod tests {
     use super::*;
     use std::fs;
 
-    /// Write a valid XML Info.plist with the given bundle identifier and
-    /// executable name at `path`.
+    /// Write a valid XML Info.plist with the given bundle identifier,
+    /// executable name, and optional `LSApplicationCategoryType` at `path`.
     fn write_valid_info_plist(path: &Path, identifier: &str, exe: &str) {
+        write_info_plist_with_category(path, identifier, exe, Some("public.app-category.games"));
+    }
+
+    /// Write a valid XML Info.plist with full control over the category key.
+    ///
+    /// Pass `Some("public.app-category.games")` for a game bundle, or `None`
+    /// to omit the key entirely (simulating a non-game app like VS Code).
+    fn write_info_plist_with_category(
+        path: &Path,
+        identifier: &str,
+        exe: &str,
+        category: Option<&str>,
+    ) {
+        let category_xml = match category {
+            Some(cat) => format!(
+                "    <key>LSApplicationCategoryType</key>\n    <string>{cat}</string>\n"
+            ),
+            None => String::new(),
+        };
         let xml = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -591,19 +636,30 @@ mod tests {
     <string>{identifier}</string>
     <key>CFBundleExecutable</key>
     <string>{exe}</string>
-</dict>
+{category_xml}</dict>
 </plist>
 "#
         );
         fs::write(path, xml).expect("write plist");
     }
 
-    /// Create a minimal `.app` bundle under `dir` with a valid Info.plist.
+    /// Create a minimal `.app` bundle under `dir` with a valid Info.plist
+    /// that includes `LSApplicationCategoryType = "public.app-category.games"`.
     fn make_app(dir: &Path, name: &str, identifier: &str) -> PathBuf {
         let bundle = dir.join(format!("{}.app", name));
         let contents = bundle.join("Contents");
         fs::create_dir_all(&contents).expect("mkdir Contents");
         write_valid_info_plist(&contents.join("Info.plist"), identifier, name);
+        bundle
+    }
+
+    /// Create a `.app` bundle under `dir` whose Info.plist has NO
+    /// `LSApplicationCategoryType` key (simulates a non-game app like VS Code).
+    fn make_non_game_app(dir: &Path, name: &str, identifier: &str) -> PathBuf {
+        let bundle = dir.join(format!("{}.app", name));
+        let contents = bundle.join("Contents");
+        fs::create_dir_all(&contents).expect("mkdir Contents");
+        write_info_plist_with_category(&contents.join("Info.plist"), identifier, name, None);
         bundle
     }
 
@@ -659,6 +715,44 @@ mod tests {
     fn scan_dir_returns_empty_for_missing_dir() {
         let result = scan_dir(Path::new("/nonexistent/very/unlikely/to/exist"));
         assert!(result.is_empty());
+    }
+
+    /// scan_dir must filter out bundles that lack LSApplicationCategoryType
+    /// (e.g. VS Code, Claude.app, CrossOver, developer tools). Only the
+    /// bundle with a games category should survive.
+    #[test]
+    fn scan_dir_filters_non_game_apps() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A proper game — has the games category.
+        make_app(dir.path(), "RimWorld", "ludeon.rimworld");
+        // A non-game app — no LSApplicationCategoryType key at all.
+        make_non_game_app(dir.path(), "VSCode", "com.microsoft.vscode");
+        // Another non-game app — utility category, not games.
+        let bundle = dir.path().join("Terminal.app");
+        let contents = bundle.join("Contents");
+        fs::create_dir_all(&contents).expect("mkdir");
+        write_info_plist_with_category(
+            &contents.join("Info.plist"),
+            "com.apple.terminal",
+            "Terminal",
+            Some("public.app-category.utilities"),
+        );
+
+        let candidates = scan_dir(dir.path());
+        assert_eq!(candidates.len(), 1, "only the game-category bundle should survive");
+        assert_eq!(candidates[0].info.bundle_identifier, "ludeon.rimworld");
+    }
+
+    /// Positive case: a bundle with an exact game category is returned.
+    #[test]
+    fn scan_dir_includes_game_category_bundles() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        make_app(dir.path(), "Balatro", "com.localthunk.balatro");
+
+        let candidates = scan_dir(dir.path());
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].info.bundle_identifier, "com.localthunk.balatro");
+        assert_eq!(candidates[0].source, NativeSource::SystemApplications);
     }
 
     // -----------------------------------------------------------------
