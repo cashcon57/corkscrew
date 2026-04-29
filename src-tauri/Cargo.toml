@@ -106,6 +106,7 @@ regex = "1"
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 base64 = "0.22"
 zstd = "0.13"
+lz4_flex = "0.11"  # LZ4 decompression for LSPK (BG3 .pak) file tables and entries
 mega = "0.8"
 scraper = "0.26"
 qbsdiff = "1"
