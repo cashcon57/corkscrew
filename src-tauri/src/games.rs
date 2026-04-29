@@ -259,6 +259,11 @@ pub struct DetectedGame {
     pub bottle_name: String,
     /// Absolute path to the bottle root.
     pub bottle_path: PathBuf,
+    /// Steam App ID, populated when known. Drives icon/logo fetching for
+    /// games discovered through the Steam appmanifest scanner that don't
+    /// have a hardcoded entry in the bundled Vortex game registry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steam_app_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

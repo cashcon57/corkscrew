@@ -147,6 +147,7 @@ impl GamePlugin for RegistryGamePlugin {
             data_dir,
             bottle_name: bottle.name.clone(),
             bottle_path: bottle.path.clone(),
+            steam_app_id: None,
         })
     }
 
@@ -421,18 +422,30 @@ pub fn detect_unregistered_steam_games(
         // Find the first .exe in the game directory (heuristic)
         let exe_path = find_main_executable(&game_path);
 
-        // Derive a game_id from the app name
+        // Derive a game_id from the app name. The internal id is just for
+        // local identification — slugify is fine.
         let game_id = slugify_game_name(&manifest.name);
+
+        // Resolve the *Nexus* slug separately. Nexus uses its own slugs that
+        // don't match our slugify output (Nexus drops dashes:
+        // "Tainted Grail: The Fall of Avalon" → "taintedgrailthefallofavalon",
+        // not "tainted-grail-the-fall-of-avalon"). The curated vortex_index
+        // ships the correct Nexus slug per Steam appid; consult it first and
+        // fall back to a dash-stripped slugify if the appid isn't indexed.
+        let nexus_slug = crate::vortex_index::lookup_extension_for_steam_appid(&manifest.app_id)
+            .map(|e| e.nexus_slug.clone())
+            .unwrap_or_else(|| game_id.replace('-', ""));
 
         found.push(DetectedGame {
             game_id: game_id.clone(),
             display_name: manifest.name.clone(),
-            nexus_slug: game_id,
+            nexus_slug,
             game_path: game_path.clone(),
             exe_path,
             data_dir: game_path,
             bottle_name: bottle.name.clone(),
             bottle_path: bottle.path.clone(),
+            steam_app_id: Some(manifest.app_id.clone()),
         });
     }
 
@@ -583,6 +596,7 @@ fn scan_steam_games_with_appid(bottle: &Bottle) -> Vec<UnregisteredSteamGame> {
                 data_dir: game_path,
                 bottle_name: bottle.name.clone(),
                 bottle_path: bottle.path.clone(),
+            steam_app_id: None,
             },
             app_id: manifest.app_id,
         });
@@ -987,6 +1001,7 @@ pub fn load_custom_games(db: &crate::database::ModDatabase) -> Vec<DetectedGame>
                 data_dir: PathBuf::from(row.get::<_, String>(5)?),
                 bottle_name: row.get(6)?,
                 bottle_path: PathBuf::from(row.get::<_, String>(7)?),
+                steam_app_id: None,
             })
         })
         .ok();

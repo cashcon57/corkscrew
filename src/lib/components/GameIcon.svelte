@@ -3,18 +3,27 @@
 
   interface Props {
     gameId: string;
+    /**
+     * Optional Steam App ID. When provided, the backend uses it directly
+     * instead of looking it up in the bundled Vortex registry — this
+     * matters for games discovered via the Steam appmanifest scanner that
+     * have no registry entry (e.g. Tainted Grail, The Midnight Walk,
+     * Mewgenics, anything indie/recent).
+     */
+    steamAppId?: string;
     size?: number;
   }
 
-  let { gameId, size = 48 }: Props = $props();
+  let { gameId, steamAppId, size = 48 }: Props = $props();
 
   let logoUrl = $state<string | null>(null);
 
-  // Use $effect so the icon updates when gameId prop changes
+  // Use $effect so the icon updates when either prop changes.
   $effect(() => {
-    const id = gameId; // capture for async closure
-    logoUrl = null; // reset while loading
-    getGameLogo(id)
+    const id = gameId;
+    const sid = steamAppId;
+    logoUrl = null;
+    getGameLogo(id, sid)
       .then((dataUrl) => {
         if (dataUrl) logoUrl = dataUrl;
       })

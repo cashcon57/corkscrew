@@ -93,6 +93,7 @@ import type {
   LaunchOptionsStatus,
   LoadOrderEntry,
   LoadOrderKindResponse,
+  KnownUninstalledGame,
 } from "./types";
 
 // Bottles
@@ -346,8 +347,11 @@ export async function setConfigValue(
   return invoke("set_config_value", { key, value });
 }
 
-export async function getGameLogo(gameId: string): Promise<string | null> {
-  return invoke("get_game_logo", { gameId });
+export async function getGameLogo(
+  gameId: string,
+  steamAppId?: string,
+): Promise<string | null> {
+  return invoke("get_game_logo", { gameId, steamAppId });
 }
 
 export async function getGameSupportTier(
@@ -893,6 +897,11 @@ export async function hasGameSnapshot(
   bottleName: string
 ): Promise<boolean> {
   return invoke("has_game_snapshot", { gameId, bottleName });
+}
+
+// Known but uninstalled games
+export async function listKnownUninstalledGames(): Promise<KnownUninstalledGame[]> {
+  return invoke("list_known_uninstalled_games_cmd");
 }
 
 // Game Directory Cleaner

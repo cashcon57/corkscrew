@@ -13,6 +13,21 @@ export interface DetectedGame {
   data_dir: string;
   bottle_name: string;
   bottle_path: string;
+  steam_app_id?: string;
+}
+
+/**
+ * A game Corkscrew knows about (via the bundled Vortex registry or the
+ * curated Vortex extension index) but that is NOT installed in any
+ * detected bottle. Surfaced in the game-selector dropdown when the user
+ * has opted in to "show uninstalled games" so they can preview which
+ * titles Corkscrew supports without installing first.
+ */
+export interface KnownUninstalledGame {
+  game_id: string;
+  name: string;
+  nexus_slug: string;
+  source: "vortex_registry" | "vortex_extension_index";
 }
 
 /**

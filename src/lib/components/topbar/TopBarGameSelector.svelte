@@ -1,8 +1,10 @@
 <script lang="ts">
-  import { selectedGame } from "$lib/stores";
+  import { selectedGame, showUninstalledGames, uninstalledGames } from "$lib/stores";
   import GameIcon from "$lib/components/GameIcon.svelte";
   import GameSupportBadge from "$lib/components/GameSupportBadge.svelte";
-  import type { DetectedGame } from "$lib/types";
+  import type { DetectedGame, KnownUninstalledGame } from "$lib/types";
+  import { setConfigValue, listKnownUninstalledGames } from "$lib/api";
+  import { openUrl } from "@tauri-apps/plugin-opener";
 
   interface Props {
     detectedGames: DetectedGame[];
@@ -30,6 +32,31 @@
     onPickGame(game);
     onClose();
   }
+
+  function browseUninstalled(g: KnownUninstalledGame) {
+    openUrl(`https://www.nexusmods.com/${g.nexus_slug}/mods`).catch((err) =>
+      console.error('browseUninstalled: openUrl failed:', err)
+    );
+    onClose();
+  }
+
+  async function toggleShowUninstalled() {
+    const next = !$showUninstalledGames;
+    showUninstalledGames.set(next);
+    try {
+      await setConfigValue("show_uninstalled_games", next ? "true" : "false");
+    } catch (err) {
+      console.error('toggleShowUninstalled: persist failed:', err);
+    }
+    if (next && $uninstalledGames.length === 0) {
+      try {
+        const games = await listKnownUninstalledGames();
+        uninstalledGames.set(games);
+      } catch (err) {
+        console.error('toggleShowUninstalled: fetch failed:', err);
+      }
+    }
+  }
 </script>
 
 <div class="topbar-selector-wrap">
@@ -39,7 +66,7 @@
     title={$selectedGame?.display_name ?? "Select a game"}
   >
     {#if $selectedGame}
-      <GameIcon gameId={$selectedGame.game_id} size={20} />
+      <GameIcon gameId={$selectedGame.game_id} steamAppId={$selectedGame.steam_app_id} size={20} />
       <span class="topbar-selector-label">{$selectedGame.display_name}</span>
       <GameSupportBadge gameId={$selectedGame.game_id} compact hideWhenVerified />
     {:else}
@@ -81,13 +108,14 @@
   {#if isOpen}
     <div class="topbar-dropdown" onclick={(e) => e.stopPropagation()}>
       {#if detectedGames.length > 0}
+        <div class="dropdown-section-label">Installed</div>
         {#each detectedGames as game}
           <button
             class="dropdown-item"
             class:active={$selectedGame?.game_id === game.game_id && $selectedGame?.bottle_name === game.bottle_name}
             onclick={() => selectGame(game)}
           >
-            <GameIcon gameId={game.game_id} size={16} />
+            <GameIcon gameId={game.game_id} steamAppId={game.steam_app_id} size={16} />
             <div class="dropdown-item-text">
               <span class="dropdown-item-name">{game.display_name}</span>
               <span class="dropdown-item-sub">{game.bottle_name}</span>
@@ -98,7 +126,36 @@
       {:else}
         <div class="dropdown-empty">No games detected</div>
       {/if}
+
+      {#if $showUninstalledGames && $uninstalledGames.length > 0}
+        <div class="dropdown-section-label">Not Installed</div>
+        {#each $uninstalledGames as game}
+          <button
+            class="dropdown-item dropdown-item-uninstalled"
+            onclick={() => browseUninstalled(game)}
+            title="Browse {game.name} mods on Nexus"
+          >
+            <GameIcon gameId={game.game_id} size={16} />
+            <div class="dropdown-item-text">
+              <span class="dropdown-item-name">{game.name}</span>
+              <span class="dropdown-item-sub">Browse on Nexus</span>
+            </div>
+            <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.6">
+              <path d="M3 13l10-10" /><path d="M6 3h7v7" />
+            </svg>
+          </button>
+        {/each}
+      {/if}
+
       <div class="dropdown-footer">
+        <label class="dropdown-toggle">
+          <input
+            type="checkbox"
+            checked={$showUninstalledGames}
+            onchange={toggleShowUninstalled}
+          />
+          <span>Show uninstalled games</span>
+        </label>
         <button class="dropdown-action" onclick={() => { onNavigate("dashboard"); onClose(); }}>
           <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <line x1="8" y1="3" x2="8" y2="13" /><line x1="3" y1="8" x2="13" y2="8" />
@@ -260,10 +317,52 @@
     text-align: center;
   }
 
+  .dropdown-section-label {
+    padding: 6px 10px 4px;
+    font-size: 10.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-tertiary);
+  }
+
+  .dropdown-item-uninstalled {
+    opacity: 0.75;
+  }
+
+  .dropdown-item-uninstalled:hover {
+    opacity: 1;
+  }
+
   .dropdown-footer {
     border-top: 1px solid var(--separator);
     margin-top: 4px;
     padding-top: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .dropdown-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 10px;
+    border-radius: calc(var(--radius) - 2px);
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 12px;
+    transition: background 0.1s ease, color 0.1s ease;
+  }
+
+  .dropdown-toggle:hover {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+  }
+
+  .dropdown-toggle input[type="checkbox"] {
+    accent-color: var(--accent);
+    cursor: pointer;
   }
 
   .dropdown-action {

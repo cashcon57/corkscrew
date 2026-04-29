@@ -887,6 +887,7 @@ mod tests {
             data_dir: game_path.clone(),
             bottle_name: bottle.name.clone(),
             bottle_path: bottle.path.clone(),
+            steam_app_id: None,
         }];
 
         // No shortcuts present — list should be empty regardless of

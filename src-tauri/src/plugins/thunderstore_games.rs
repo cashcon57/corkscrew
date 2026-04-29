@@ -203,6 +203,7 @@ impl GamePlugin for ThunderstorePlugin {
             data_dir,
             bottle_name: bottle.name.clone(),
             bottle_path: bottle.path.clone(),
+            steam_app_id: None,
         })
     }
 

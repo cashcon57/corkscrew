@@ -2337,7 +2337,7 @@
     <!-- Game Banner Header -->
     <div class="game-banner">
       <div class="game-banner-icon">
-        <GameIcon gameId={activeGame.game_id} size={36} />
+        <GameIcon gameId={activeGame.game_id} steamAppId={activeGame.steam_app_id} size={36} />
       </div>
       <div class="game-banner-info">
         <h2 class="game-banner-title">{activeGame.display_name}</h2>

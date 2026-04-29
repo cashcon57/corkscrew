@@ -1471,7 +1471,10 @@ pub async fn delete_orphaned_downloads(
 ///
 /// Works for ANY game with a Steam App ID in the registry (84+ games).
 #[tauri::command]
-pub async fn get_game_logo(game_id: String) -> Result<Option<String>, String> {
+pub async fn get_game_logo(
+    game_id: String,
+    steam_app_id: Option<String>,
+) -> Result<Option<String>, String> {
     let icon_dir = config::cache_dir().join("game-icons");
     let cached_path = icon_dir.join(format!("{game_id}.png"));
 
@@ -1489,10 +1492,25 @@ pub async fn get_game_logo(game_id: String) -> Result<Option<String>, String> {
         }
     }
 
-    // Look up Steam App ID from the game registry (covers all 84+ games)
-    let steam_app_id = game_registry::get_game_entry(&game_id)
-        .and_then(|e| e.steam_id.as_deref())
-        .and_then(|s| s.parse::<u32>().ok());
+    // Steam App ID resolution priority:
+    //   1. Frontend-supplied (DetectedGame.steam_app_id from the appmanifest
+    //      scanner — covers Steam-installed games not in the bundled registry).
+    //   2. Bundled Vortex game registry entry.
+    //   3. Curated Vortex extension index by id or nexus_slug.
+    let steam_app_id = steam_app_id
+        .as_deref()
+        .and_then(|s| s.parse::<u32>().ok())
+        .or_else(|| {
+            game_registry::get_game_entry(&game_id)
+                .and_then(|e| e.steam_id.as_deref())
+                .and_then(|s| s.parse::<u32>().ok())
+        })
+        .or_else(|| {
+            crate::vortex_index::all_entries()
+                .iter()
+                .find(|e| e.id == game_id || e.nexus_slug == game_id)
+                .and_then(|e| e.steam_app_id.parse::<u32>().ok())
+        });
 
     let client = reqwest::Client::builder()
         .user_agent(format!("Corkscrew/{}", env!("CARGO_PKG_VERSION")))
