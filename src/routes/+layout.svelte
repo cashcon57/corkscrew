@@ -13,6 +13,7 @@
   import { hashingProgress } from "$lib/stores";
   import { cancelBackgroundHashing } from "$lib/api";
   import type { CollectionInstallCheckpoint, WabbajackInstallStatus } from "$lib/types";
+  import { wineCtx } from "$lib/types";
   import { get } from "svelte/store";
   import type { DetectedGame, QueueItem, KnownUninstalledGame } from "$lib/types";
   import NotificationLog from "$lib/components/mods/NotificationLog.svelte";
@@ -605,7 +606,7 @@
           const lastBottle = (cfg as Record<string, unknown>).last_selected_bottle as string | undefined;
           if (lastGameId && lastBottle) {
             const match = detectedGames.find(
-              (g) => g.game_id === lastGameId && g.bottle_name === lastBottle
+              (g) => g.game_id === lastGameId && (wineCtx(g)?.bottle_name ?? "") === lastBottle
             );
             if (match) {
               pickGame(match);
@@ -631,10 +632,10 @@
 
   function pickGame(game: DetectedGame) {
     selectedGame.set(game);
-    selectedBottle.set(game.bottle_name);
+    selectedBottle.set((wineCtx(game)?.bottle_name ?? ""));
     // Remember the selected game so it persists across restarts
     setConfigValue("last_selected_game", game.game_id)
-      .then(() => setConfigValue("last_selected_bottle", game.bottle_name))
+      .then(() => setConfigValue("last_selected_bottle", (wineCtx(game)?.bottle_name ?? "")))
       .catch((err) => console.warn('Failed to persist selected game to config:', err));
     loadProfilesForGame(game);
     loadCollectionsForGame(game);
@@ -644,12 +645,12 @@
   async function checkGameVersion(game: DetectedGame) {
     if (game.game_id !== "skyrimse") return;
     try {
-      const status = await checkSkyrimVersion(game.game_id, game.bottle_name);
+      const status = await checkSkyrimVersion(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       const currentVersion = status.current_version;
-      const pinned = await getPinnedGameVersion(game.game_id, game.bottle_name);
+      const pinned = await getPinnedGameVersion(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       if (!pinned) {
         // First time seeing this game — pin without warning
-        await pinGameVersion(game.game_id, game.bottle_name, currentVersion);
+        await pinGameVersion(game.game_id, (wineCtx(game)?.bottle_name ?? ""), currentVersion);
       } else if (pinned !== currentVersion) {
         versionWarning = { oldVersion: pinned, newVersion: currentVersion };
       }
@@ -659,7 +660,7 @@
   function handleAcknowledgeVersion() {
     const game = $selectedGame;
     if (!game || !versionWarning) return;
-    pinGameVersion(game.game_id, game.bottle_name, versionWarning.newVersion);
+    pinGameVersion(game.game_id, (wineCtx(game)?.bottle_name ?? ""), versionWarning.newVersion);
     versionWarning = null;
   }
 
@@ -669,7 +670,7 @@
 
   async function loadProfilesForGame(game: DetectedGame) {
     try {
-      const profiles = await listProfiles(game.game_id, game.bottle_name);
+      const profiles = await listProfiles(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       profileList.set(profiles);
       const active = profiles.find(p => p.is_active) ?? null;
       activeProfile.set(active);
@@ -684,7 +685,7 @@
 
   async function loadCollectionsForGame(game: DetectedGame) {
     try {
-      const collections = await listInstalledCollections(game.game_id, game.bottle_name);
+      const collections = await listInstalledCollections(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       collectionList.set(collections);
       // Keep current active collection if it still exists in the new list,
       // otherwise clear it (no persistent is_active flag for collections)
@@ -715,7 +716,7 @@
     if (!$selectedGame || launching) return;
     launching = true;
     try {
-      const result = await launchGame($selectedGame.game_id, $selectedGame.bottle_name, useSkse);
+      const result = await launchGame($selectedGame.game_id, (wineCtx($selectedGame)?.bottle_name ?? ""), useSkse);
       if (result.success) {
         showSuccess(result.warning
           ? `Launched ${$selectedGame.display_name}. ${result.warning}`
@@ -757,9 +758,9 @@
         const match = allGames.find((g) => g.nexus_slug === nxmSlug);
         if (match) {
           game = match;
-          bottle = match.bottle_name;
+          bottle = (wineCtx(match)?.bottle_name ?? "");
           selectedGame.set(match);
-          selectedBottle.set(match.bottle_name);
+          selectedBottle.set((wineCtx(match)?.bottle_name ?? ""));
         } else {
           showError(`No installed game found for NexusMods domain "${nxmSlug}". Make sure the game is detected on the Dashboard.`);
           return;

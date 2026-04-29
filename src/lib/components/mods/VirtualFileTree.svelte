@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { wineCtx } from "$lib/types";
   import { getMergedFileTree } from "$lib/api";
   import { selectedGame, showError } from "$lib/stores";
 
@@ -23,7 +24,7 @@
     if (!game) return;
     loading = true;
     try {
-      tree = await getMergedFileTree(game.game_id, game.bottle_name);
+      tree = await getMergedFileTree(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
     } catch (e) {
       showError(`Failed to load file tree: ${e}`);
       tree = [];

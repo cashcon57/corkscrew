@@ -4,6 +4,7 @@
   import { selectedGame, showError, showSuccess, collectionInstallStatus, modStateVersion } from "$lib/stores";
   import { gameToNexusSlug } from "$lib/gameSupport";
   import type { CollectionInfo, CollectionManifest, CollectionMod, CollectionModEntry } from "$lib/types";
+  import { wineCtx } from "$lib/types";
   import type { RequiredTool, CleanReport, DlcStatus, CachedVersion } from "$lib/types";
   import type { DetectedGame } from "$lib/types";
   import {
@@ -167,7 +168,7 @@
 
     try {
       const manifestJson = JSON.stringify(manifest);
-      const tools = await detectCollectionTools(manifestJson, $selectedGame.game_id, $selectedGame.bottle_name);
+      const tools = await detectCollectionTools(manifestJson, $selectedGame.game_id, (wineCtx($selectedGame)?.bottle_name ?? ""));
       const uninstalled = tools.filter((t) => !t.is_detected);
       if (uninstalled.length > 0) {
         pendingTools = tools;
@@ -195,10 +196,10 @@
       let detected: string | null = null;
 
       if ($selectedGame.game_id === "skyrimse") {
-        const status = await checkSkyrimVersion($selectedGame.game_id, $selectedGame.bottle_name);
+        const status = await checkSkyrimVersion($selectedGame.game_id, (wineCtx($selectedGame)?.bottle_name ?? ""));
         detected = status.current_version;
       } else {
-        const ver = await getGameVersion($selectedGame.game_id, $selectedGame.bottle_name);
+        const ver = await getGameVersion($selectedGame.game_id, (wineCtx($selectedGame)?.bottle_name ?? ""));
         detected = ver ?? null;
       }
 
@@ -261,7 +262,7 @@
     if (!$selectedGame) return;
 
     try {
-      const dlc = await checkDlcStatus($selectedGame.game_id, $selectedGame.bottle_name);
+      const dlc = await checkDlcStatus($selectedGame.game_id, (wineCtx($selectedGame)?.bottle_name ?? ""));
       if (!dlc.all_present && dlc.dlcs.length > 0) {
         dlcStatus = dlc;
         pendingManifest = manifest;
@@ -269,7 +270,7 @@
         return;
       }
 
-      const hasSnap = await hasGameSnapshot($selectedGame.game_id, $selectedGame.bottle_name);
+      const hasSnap = await hasGameSnapshot($selectedGame.game_id, (wineCtx($selectedGame)?.bottle_name ?? ""));
       if (!hasSnap) {
         await proceedWithInstall(manifest);
         return;
@@ -278,7 +279,7 @@
       cleanScanning = true;
       pendingManifest = manifest;
 
-      const report = await scanGameDirectory($selectedGame.game_id, $selectedGame.bottle_name);
+      const report = await scanGameDirectory($selectedGame.game_id, (wineCtx($selectedGame)?.bottle_name ?? ""));
       cleanScanning = false;
 
       const orphanedFiles = report.non_stock_files.filter((f: { is_managed: boolean }) => !f.is_managed);
@@ -321,13 +322,13 @@
       const manifest = pendingManifest;
       if (!$selectedGame) return;
       try {
-        const hasSnap = await hasGameSnapshot($selectedGame.game_id, $selectedGame.bottle_name);
+        const hasSnap = await hasGameSnapshot($selectedGame.game_id, (wineCtx($selectedGame)?.bottle_name ?? ""));
         if (!hasSnap) {
           await proceedWithInstall(manifest);
           return;
         }
         cleanScanning = true;
-        const report = await scanGameDirectory($selectedGame.game_id, $selectedGame.bottle_name);
+        const report = await scanGameDirectory($selectedGame.game_id, (wineCtx($selectedGame)?.bottle_name ?? ""));
         cleanScanning = false;
         const orphanedFiles = report.non_stock_files.filter((f: { is_managed: boolean }) => !f.is_managed);
         if (orphanedFiles.length === 0) {
@@ -347,7 +348,7 @@
     if (!$selectedGame) return;
     dlcLaunching = true;
     try {
-      await launchGame($selectedGame.game_id, $selectedGame.bottle_name, false);
+      await launchGame($selectedGame.game_id, (wineCtx($selectedGame)?.bottle_name ?? ""), false);
       showSuccess("Game launched. Close it after reaching the main menu, then try installing again.");
     } catch (e) {
       showError(`Failed to launch game: ${e}`);
@@ -375,7 +376,7 @@
 
     const collectionName = activeCollection.name;
     const gameId = $selectedGame.game_id;
-    const bottleName = $selectedGame.bottle_name;
+    const bottleName = (wineCtx($selectedGame)?.bottle_name ?? "");
 
     installCollection(manifest, gameId, bottleName)
       .then((result) => {
@@ -402,7 +403,7 @@
   <RequiredToolsPrompt
     tools={pendingTools}
     gameId={$selectedGame.game_id}
-    bottleName={$selectedGame.bottle_name}
+    bottleName={(wineCtx($selectedGame)?.bottle_name ?? "")}
     oncontinue={() => {
       showToolsPrompt = false;
       if (pendingManifest) checkGameVersionAndProceed(pendingManifest);

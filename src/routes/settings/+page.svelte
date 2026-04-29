@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, uninstallSkse, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, findOrphanedDownloads, deleteOrphanedDownloads, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, checkModToolUpdate, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads, checkSteamStatus, addToSteam, removeFromSteam, scanGameDirectory, cleanGameDirectory, checkSkyrimVersion, downgradeSkyrim, checkDeploymentHealth, redeployAllMods, getVerificationLevel, setVerificationLevel, setUseWineEngineFixes, getDepotDownloadCommand, startDepotDownload, checkDepotReady, applyDowngrade, listGameVersions, swapGameVersion, listDisabledWinePlugins, reenableWinePlugin, vortexListCachedExtensions, vortexFetchExtension, vortexRefreshExtension, vortexDeleteCachedExtension, vortexListAvailableExtensions, vortexGetExtensionDetail, ddStatus, ddEnsureUpdated, ddAuthenticate, ddDownloadDepot, ddApplyDepot, ddGetDepotVersions, getLaunchOptionsStatus, patchSteamLaunchOptions, unpatchSteamLaunchOptions } from "$lib/api";
   import type { CleanReport, CleanResult, DowngradeStatus, DeploymentHealth, VerificationLevel, CachedVersion, DepotDownloadInfo, LaunchOptionsStatus } from "$lib/types";
+  import { wineCtx } from "$lib/types";
   import type { SteamStatus } from "$lib/types";
   import { config, showError, showSuccess, selectedGame, skseStatus, currentPage, appVersion, updateReady, updateVersion, updateNotes, updateChecking, updateError, triggerUpdateCheck, controllerMode } from "$lib/stores";
   import type { AppConfig, ModTool, PlatformInfo, ToolInstallProgress, ToolUpdateInfo, VortexExtensionSummary, VortexGameRegistration } from "$lib/types";
@@ -202,7 +203,7 @@
   async function loadDisabledWinePlugins() {
     if (!game) return;
     try {
-      disabledWinePlugins = await listDisabledWinePlugins(game.game_id, game.bottle_name);
+      disabledWinePlugins = await listDisabledWinePlugins(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
     } catch {
       disabledWinePlugins = [];
     }
@@ -213,7 +214,7 @@
     togglingWinePlugin = dllName;
     try {
       if (currentlyDisabled) {
-        await reenableWinePlugin(game.game_id, game.bottle_name, dllName);
+        await reenableWinePlugin(game.game_id, (wineCtx(game)?.bottle_name ?? ""), dllName);
         showSuccess(`Re-enabled ${dllName}. This may cause crashes under Wine.`);
       }
       await loadDisabledWinePlugins();
@@ -243,7 +244,7 @@
     shaderScanning = true;
     shaderScanResult = null;
     try {
-      shaderScanResult = await scanShaderCompatibility(game.game_id, game.bottle_name);
+      shaderScanResult = await scanShaderCompatibility(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
     } catch (e: unknown) {
       showError(`Shader scan failed: ${e}`);
     } finally {
@@ -441,7 +442,7 @@
 
     if (game && isSkyrim) {
       try {
-        const status = await checkSkse(game.game_id, game.bottle_name);
+        const status = await checkSkse(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
         skseStatus.set(status);
       } catch { /* ignore */ }
     }
@@ -460,7 +461,7 @@
     if (game) {
       try {
         loadingTools = true;
-        modTools = await detectModTools(game.game_id, game.bottle_name);
+        modTools = await detectModTools(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       } catch { /* ignore */ } finally {
         loadingTools = false;
       }
@@ -475,7 +476,7 @@
     // Check Skyrim version / downgrade status + cached versions
     if (game && isSkyrim) {
       try {
-        downgradeStatus = await checkSkyrimVersion(game.game_id, game.bottle_name);
+        downgradeStatus = await checkSkyrimVersion(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
         cachedVersions = await listGameVersions(game.game_id);
       } catch { /* ignore */ }
     }
@@ -496,7 +497,7 @@
     // Check deployment health
     if (game) {
       try {
-        deployHealth = await checkDeploymentHealth(game.game_id, game.bottle_name);
+        deployHealth = await checkDeploymentHealth(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       } catch { /* ignore */ }
     }
 
@@ -509,7 +510,7 @@
     if (!game) return;
     checkingDowngrade = true;
     try {
-      downgradeStatus = await checkSkyrimVersion(game.game_id, game.bottle_name);
+      downgradeStatus = await checkSkyrimVersion(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       cachedVersions = await listGameVersions(game.game_id);
     } catch (e: unknown) {
       showError(`Failed to check version: ${e}`);
@@ -526,7 +527,7 @@
     ddSelectedVersion = null;
 
     try {
-      downgradeStatus = await checkSkyrimVersion(game.game_id, game.bottle_name);
+      downgradeStatus = await checkSkyrimVersion(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       cachedVersions = await listGameVersions(game.game_id);
     } catch { /* ignore */ }
 
@@ -609,8 +610,8 @@
       );
 
       // Apply the downloaded depot
-      const filesApplied = await ddApplyDepot(game.game_id, game.bottle_name, depotDir);
-      downgradeStatus = await checkSkyrimVersion(game.game_id, game.bottle_name);
+      const filesApplied = await ddApplyDepot(game.game_id, (wineCtx(game)?.bottle_name ?? ""), depotDir);
+      downgradeStatus = await checkSkyrimVersion(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       cachedVersions = await listGameVersions(game.game_id);
       wizardStep = "done";
       showSuccess(`Downgrade complete — ${filesApplied} files applied (v${ddSelectedVersion.game_version})`);
@@ -628,7 +629,7 @@
 
     // Get depot info for polling path
     try {
-      depotInfo = await getDepotDownloadCommand(game.game_id, game.bottle_name);
+      depotInfo = await getDepotDownloadCommand(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
     } catch (e: unknown) {
       showError(`Failed to get depot info: ${e}`);
       return;
@@ -664,7 +665,7 @@
     depotPollTimer = setInterval(async () => {
       if (!game) return;
       try {
-        const result = await checkDepotReady(game.game_id, game.bottle_name);
+        const result = await checkDepotReady(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
         if (result) {
           depotExePath = result;
           depotPolling = false;
@@ -680,7 +681,7 @@
     if (!game) return;
     downgrading = true;
     try {
-      const status = await applyDowngrade(game.game_id, game.bottle_name);
+      const status = await applyDowngrade(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       downgradeStatus = status;
       cachedVersions = await listGameVersions(game.game_id);
       wizardStep = "done";
@@ -705,7 +706,7 @@
     if (!game) return;
     swapping = true;
     try {
-      const status = await swapGameVersion(game.game_id, game.bottle_name, version);
+      const status = await swapGameVersion(game.game_id, (wineCtx(game)?.bottle_name ?? ""), version);
       downgradeStatus = status;
       showSuccess(`Switched game to v${version}`);
     } catch (e: unknown) {
@@ -741,7 +742,7 @@
     if (!game) return;
     checkingHealth = true;
     try {
-      deployHealth = await checkDeploymentHealth(game.game_id, game.bottle_name);
+      deployHealth = await checkDeploymentHealth(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
     } catch (e: unknown) {
       showError(`Health check failed: ${e}`);
     } finally {
@@ -758,9 +759,9 @@
     confirmRedeploy = false;
     redeploying = true;
     try {
-      const result = await redeployAllMods(game.game_id, game.bottle_name);
+      const result = await redeployAllMods(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       showSuccess(`Redeployed ${result.deployed_count} files`);
-      deployHealth = await checkDeploymentHealth(game.game_id, game.bottle_name);
+      deployHealth = await checkDeploymentHealth(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
     } catch (e: unknown) {
       showError(`Redeploy failed: ${e}`);
     } finally {
@@ -783,7 +784,7 @@
     cleanResult = null;
     cleanReport = null;
     try {
-      cleanReport = await scanGameDirectory(game.game_id, game.bottle_name);
+      cleanReport = await scanGameDirectory(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
     } catch (e: unknown) {
       showError(`Scan failed: ${e}`);
     } finally {
@@ -798,7 +799,7 @@
       // "Remove All" = nuclear option: include SKSE, ENB, saves
       // "Remove Orphaned Only" = safer: exclude SKSE/ENB since they may be from tools
       const removeAll = !orphansOnly;
-      cleanResult = await cleanGameDirectory(game.game_id, game.bottle_name, {
+      cleanResult = await cleanGameDirectory(game.game_id, (wineCtx(game)?.bottle_name ?? ""), {
         remove_loose_files: true,
         remove_archives: true,
         remove_enb: removeAll,
@@ -836,7 +837,7 @@
 
       const archivePath = selected as string;
       installingSkse = true;
-      const status = await installSkseFromArchive(game.game_id, game.bottle_name, archivePath);
+      const status = await installSkseFromArchive(game.game_id, (wineCtx(game)?.bottle_name ?? ""), archivePath);
       skseStatus.set(status);
       showSuccess("SKSE installed successfully");
     } catch (e: unknown) {
@@ -850,7 +851,7 @@
     if (!game) return;
     try {
       uninstallingSkse = true;
-      const status = await uninstallSkse(game.game_id, game.bottle_name);
+      const status = await uninstallSkse(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       skseStatus.set(status);
       showSuccess("SKSE uninstalled");
     } catch (e: unknown) {
@@ -864,8 +865,8 @@
     if (!game) return;
     installingTool = toolId;
     try {
-      await installModTool(toolId, game.game_id, game.bottle_name);
-      modTools = await detectModTools(game.game_id, game.bottle_name);
+      await installModTool(toolId, game.game_id, (wineCtx(game)?.bottle_name ?? ""));
+      modTools = await detectModTools(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       showSuccess("Tool installed successfully");
     } catch (e: unknown) {
       showError(`Failed to install tool: ${e}`);
@@ -882,8 +883,8 @@
     try {
       // Find the tool's detected_path so the backend can locate exes outside Tools/
       const tool = modTools.find((t) => t.id === toolId);
-      await uninstallModTool(toolId, game.game_id, game.bottle_name, tool?.detected_path);
-      modTools = await detectModTools(game.game_id, game.bottle_name);
+      await uninstallModTool(toolId, game.game_id, (wineCtx(game)?.bottle_name ?? ""), tool?.detected_path);
+      modTools = await detectModTools(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       showSuccess("Tool removed");
     } catch (e: unknown) {
       showError(`Failed to uninstall tool: ${e}`);
@@ -896,7 +897,7 @@
     if (!game) return;
     launchingTool = toolId;
     try {
-      await launchModTool(toolId, game.game_id, game.bottle_name);
+      await launchModTool(toolId, game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       showSuccess("Tool launched");
     } catch (e: unknown) {
       showError(`Failed to launch tool: ${e}`);
@@ -909,8 +910,8 @@
     if (!game) return;
     reinstallingTool = toolId;
     try {
-      await reinstallModTool(toolId, game.game_id, game.bottle_name);
-      modTools = await detectModTools(game.game_id, game.bottle_name);
+      await reinstallModTool(toolId, game.game_id, (wineCtx(game)?.bottle_name ?? ""));
+      modTools = await detectModTools(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       showSuccess("Tool reinstalled successfully");
     } catch (e: unknown) {
       showError(`Failed to reinstall tool: ${e}`);
@@ -925,7 +926,7 @@
     if (!game) return;
     checkingUpdate = toolId;
     try {
-      const info = await checkModToolUpdate(toolId, game.game_id, game.bottle_name);
+      const info = await checkModToolUpdate(toolId, game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       toolUpdateResults[toolId] = info;
       toolUpdateResults = toolUpdateResults;
       if (info.update_available) {
@@ -943,7 +944,7 @@
   async function handleApplyIniEdits(toolId: string) {
     if (!game) return;
     try {
-      const count = await applyToolIniEdits(toolId, game.game_id, game.bottle_name);
+      const count = await applyToolIniEdits(toolId, game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       if (count > 0) {
         showSuccess(`Applied ${count} recommended INI edit${count === 1 ? "" : "s"}`);
       } else {
@@ -2185,7 +2186,7 @@
   {#if showShaderWizard && game}
     <ShaderConversionWizard
       gameId={game.game_id}
-      bottleName={game.bottle_name}
+      bottleName={(wineCtx(game)?.bottle_name ?? "")}
       onComplete={() => { showShaderWizard = false; shaderScanResult = null; }}
       onCancel={() => { showShaderWizard = false; }}
     />
@@ -2469,7 +2470,7 @@
         INI Settings
       </button>
       {#if !collapsedSections.has('iniSettings')}
-      <IniManagerPanel gameId={game.game_id} bottleName={game.bottle_name} />
+      <IniManagerPanel gameId={game.game_id} bottleName={(wineCtx(game)?.bottle_name ?? "")} />
       {/if}
     </div>
   {/if}
@@ -2482,7 +2483,7 @@
         Wine Diagnostics
       </button>
       {#if !collapsedSections.has('wineDiagnostics')}
-      <WineDiagnosticsPanel gameId={game.game_id} bottleName={game.bottle_name} gamePath={game.game_path} />
+      <WineDiagnosticsPanel gameId={game.game_id} bottleName={(wineCtx(game)?.bottle_name ?? "")} gamePath={game.game_path} />
       {/if}
     </div>
   {/if}

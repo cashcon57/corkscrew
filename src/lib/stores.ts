@@ -1,5 +1,6 @@
 import { writable, derived } from "svelte/store";
 import type { Bottle, DetectedGame, InstalledMod, AppConfig, SkseStatus, Profile, CollectionSummary, FomodInstaller, GameLock, WjArchiveStatus, KnownUninstalledGame } from "./types";
+import { wineCtx } from "./types";
 
 // App state
 export const bottles = writable<Bottle[]>([]);
@@ -27,7 +28,7 @@ export const activeGames = derived(
   [games, selectedBottle],
   ([$games, $selectedBottle]) => {
     if (!$selectedBottle) return $games;
-    return $games.filter((g) => g.bottle_name === $selectedBottle);
+    return $games.filter((g) => wineCtx(g)?.bottle_name === $selectedBottle);
   }
 );
 
@@ -38,7 +39,7 @@ export const activeMods = derived(
     return $installedMods.filter(
       (m) =>
         m.game_id === $selectedGame.game_id &&
-        m.bottle_name === $selectedGame.bottle_name
+        m.bottle_name === (wineCtx($selectedGame)?.bottle_name ?? '')
     );
   }
 );

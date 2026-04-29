@@ -5,6 +5,7 @@
   import type { DetectedGame, KnownUninstalledGame } from "$lib/types";
   import { setConfigValue, listKnownUninstalledGames } from "$lib/api";
   import { openUrl } from "@tauri-apps/plugin-opener";
+  import { wineCtx } from "$lib/types";
 
   interface Props {
     detectedGames: DetectedGame[];
@@ -112,13 +113,13 @@
         {#each detectedGames as game}
           <button
             class="dropdown-item"
-            class:active={$selectedGame?.game_id === game.game_id && $selectedGame?.bottle_name === game.bottle_name}
+            class:active={$selectedGame?.game_id === game.game_id && ($selectedGame ? wineCtx($selectedGame)?.bottle_name : null) === wineCtx(game)?.bottle_name}
             onclick={() => selectGame(game)}
           >
             <GameIcon gameId={game.game_id} steamAppId={game.steam_app_id} size={16} />
             <div class="dropdown-item-text">
               <span class="dropdown-item-name">{game.display_name}</span>
-              <span class="dropdown-item-sub">{game.bottle_name}</span>
+              <span class="dropdown-item-sub">{(wineCtx(game)?.bottle_name ?? "")}</span>
             </div>
             <GameSupportBadge gameId={game.game_id} compact hideWhenVerified />
           </button>

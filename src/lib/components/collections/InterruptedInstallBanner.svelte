@@ -3,6 +3,7 @@
   import { goto } from "$app/navigation";
   import { selectedGame, showError } from "$lib/stores";
   import type { CollectionInstallCheckpoint, DetectedGame } from "$lib/types";
+  import { wineCtx } from "$lib/types";
   import {
     getIncompleteCollectionInstalls,
     resumeCollectionInstall,
@@ -28,7 +29,7 @@
   // Check for incomplete installs on mount
   $effect(() => {
     const g = game;
-    getIncompleteCollectionInstalls(g.game_id, g.bottle_name)
+    getIncompleteCollectionInstalls(g.game_id, (wineCtx(g)?.bottle_name ?? ""))
       .then((incomplete) => {
         if (incomplete.length > 0) {
           interruptedInstall = incomplete[0];
@@ -75,7 +76,7 @@
         try {
           await deleteCollection(
             game.game_id,
-            game.bottle_name,
+            (wineCtx(game)?.bottle_name ?? ""),
             checkpoint.collection_name,
             true, // delete unique downloads
           );

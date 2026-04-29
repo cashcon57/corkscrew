@@ -6,6 +6,7 @@
   import { dismissInstall } from "$lib/installService";
   import { cancelCollectionInstall, submitFomodChoices, deleteCollection, scanSksePlugins } from "$lib/api";
   import type { SksePluginScanResult } from "$lib/types";
+  import { wineCtx } from "$lib/types";
   import { get } from "svelte/store";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { marked } from "marked";
@@ -50,7 +51,7 @@
       skseScanDone = true;
       const game = $selectedGame;
       if (game && game.game_id === "skyrimse") {
-        scanSksePlugins(game.game_id, game.bottle_name)
+        scanSksePlugins(game.game_id, (wineCtx(game)?.bottle_name ?? ""))
           .then(r => { skseScanResult = r; })
           .catch((err) => console.warn('Failed to scan SKSE plugins:', err));
       }
@@ -307,7 +308,7 @@
         try {
           const result = await deleteCollection(
             game.game_id,
-            game.bottle_name,
+            (wineCtx(game)?.bottle_name ?? ""),
             colName,
             deleteDownloads,
             false,

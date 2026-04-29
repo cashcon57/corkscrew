@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { wineCtx } from "$lib/types";
   import { selectedGame, activeCollection, collectionList, showError, showSuccess } from "$lib/stores";
   import { switchCollection, deleteCollection, listInstalledCollections } from "$lib/api";
   import { get } from "svelte/store";
@@ -40,7 +41,7 @@
     if (!game || switching) return;
     switching = name;
     try {
-      const result = await switchCollection(game.game_id, game.bottle_name, name);
+      const result = await switchCollection(game.game_id, (wineCtx(game)?.bottle_name ?? ""), name);
       const col = get(collectionList).find(c => c.name === name) ?? null;
       activeCollection.set(col);
       showSuccess(`Switched to "${name}" — ${result.deployed_count} files deployed`);
@@ -59,9 +60,9 @@
     if (!game) return;
     deleting = true;
     try {
-      await deleteCollection(game.game_id, game.bottle_name, name, false);
+      await deleteCollection(game.game_id, (wineCtx(game)?.bottle_name ?? ""), name, false);
       // Reload collection list
-      const collections = await listInstalledCollections(game.game_id, game.bottle_name);
+      const collections = await listInstalledCollections(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       collectionList.set(collections);
       // Clear active if deleted
       if (get(activeCollection)?.name === name) {

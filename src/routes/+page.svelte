@@ -9,6 +9,7 @@
     showError,
   } from "$lib/stores";
   import type { Bottle, DetectedGame, BottleSettingDef } from "$lib/types";
+  import { wineCtx } from "$lib/types";
   import GameSupportBadge from "$lib/components/GameSupportBadge.svelte";
   import UnregisteredGamesBanner from "$lib/components/UnregisteredGamesBanner.svelte";
   import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -388,7 +389,7 @@
                       <path d="M8 2h8l1.5 6H6.5L8 2z" />
                       <path d="M6.5 8v12a2 2 0 0 0 2 2h7a2 2 0 0 0 2-2V8" />
                     </svg>
-                    {game.bottle_name}
+                    {(wineCtx(game)?.bottle_name ?? "")}
                   </span>
                 </div>
                 <div class="card-path-row">

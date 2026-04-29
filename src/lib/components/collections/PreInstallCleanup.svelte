@@ -1,6 +1,7 @@
 <script lang="ts">
   import { showError, showSuccess } from "$lib/stores";
   import type { CleanReport, CleanOptions, DetectedGame } from "$lib/types";
+  import { wineCtx } from "$lib/types";
   import { cleanGameDirectory } from "$lib/api";
 
   interface Props {
@@ -48,7 +49,7 @@
 
       const result = await cleanGameDirectory(
         game.game_id,
-        game.bottle_name,
+        (wineCtx(game)?.bottle_name ?? ""),
         options
       );
 

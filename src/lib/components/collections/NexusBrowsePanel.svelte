@@ -1,6 +1,7 @@
 <script lang="ts">
   import { showError, showSuccess } from "$lib/stores";
   import type { DetectedGame, NexusModInfo, NexusCategory, NexusModFile } from "$lib/types";
+  import { wineCtx } from "$lib/types";
   import {
     browseNexusMods,
     searchNexusMods,
@@ -151,7 +152,7 @@
     const g = game;
     const connected = account?.connected;
     if (g && connected) {
-      const gameKey = `${g.game_id}:${g.bottle_name}`;
+      const gameKey = `${g.game_id}:${(wineCtx(g)?.bottle_name ?? "")}`;
       if (browseInitializedForGame !== gameKey) {
         browseInitializedForGame = gameKey;
         loadBrowseMods();
@@ -270,7 +271,7 @@
 
   async function loadBrowseInstalledIds() {
     try {
-      const mods = await getInstalledMods(game.game_id, game.bottle_name);
+      const mods = await getInstalledMods(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       browseInstalledNexusIds = new Set(
         mods.filter(m => m.nexus_mod_id != null).map(m => m.nexus_mod_id as number)
       );
@@ -354,7 +355,7 @@
     });
 
     try {
-      await downloadAndInstallNexusMod(slug, filePickerMod.mod_id, file.file_id, game.game_id, game.bottle_name);
+      await downloadAndInstallNexusMod(slug, filePickerMod.mod_id, file.file_id, game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       showSuccess(`Installed "${filePickerMod.name}" successfully`);
       browseInstalledNexusIds = new Set([...browseInstalledNexusIds, filePickerMod.mod_id]);
       closeFilePicker();

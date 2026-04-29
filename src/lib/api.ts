@@ -94,6 +94,7 @@ import type {
   LoadOrderEntry,
   LoadOrderKindResponse,
   KnownUninstalledGame,
+  NativeAppCandidate,
 } from "./types";
 
 // Bottles
@@ -353,6 +354,19 @@ export async function getNativeMode(): Promise<boolean> {
 
 export async function setNativeMode(enabled: boolean): Promise<void> {
   return invoke<void>("set_native_mode", { enabled });
+}
+
+/** Trigger a full rescan of native macOS app locations and return all discovered candidates. */
+export async function rescanNativeGames(): Promise<NativeAppCandidate[]> {
+  return invoke<NativeAppCandidate[]>("rescan_native_games");
+}
+
+/**
+ * Validate a user-supplied `.app` path and return it as a `NativeAppCandidate`.
+ * Throws a string error if the path is not a valid `.app` bundle.
+ */
+export async function addNativeGameManually(appPath: string): Promise<NativeAppCandidate> {
+  return invoke<NativeAppCandidate>("add_native_game_manually", { appPath });
 }
 
 export async function getGameLogo(

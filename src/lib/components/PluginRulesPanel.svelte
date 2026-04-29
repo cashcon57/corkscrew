@@ -2,6 +2,7 @@
   import { getPluginOrder, addPluginRule, removePluginRule, listPluginRules } from "$lib/api";
   import { selectedGame, showError, showSuccess } from "$lib/stores";
   import type { PluginEntry, PluginRule, PluginRuleType } from "$lib/types";
+  import { wineCtx } from "$lib/types";
 
   // ---- State ----
 
@@ -39,8 +40,8 @@
     if (!game) return;
     loading = true;
     try {
-      plugins = await getPluginOrder(game.game_id, game.bottle_name);
-      rules = await listPluginRules(game.game_id, game.bottle_name);
+      plugins = await getPluginOrder(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
+      rules = await listPluginRules(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
     } catch (e: unknown) {
       showError(`Failed to load plugins: ${e}`);
     } finally {
@@ -143,9 +144,9 @@
     savingRule = true;
     cycleWarning = null;
     try {
-      await addPluginRule(game.game_id, game.bottle_name, formPlugin, formRuleType, formReference);
+      await addPluginRule(game.game_id, (wineCtx(game)?.bottle_name ?? ""), formPlugin, formRuleType, formReference);
       // Reload rules from backend to get the real IDs
-      rules = await listPluginRules(game.game_id, game.bottle_name);
+      rules = await listPluginRules(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       showSuccess("Rule added");
       cancelAddForm();
     } catch (e: unknown) {
