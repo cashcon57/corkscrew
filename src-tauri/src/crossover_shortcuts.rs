@@ -124,37 +124,46 @@ fn extract_lnk_target(lnk: &parselnk::Lnk) -> Option<String> {
 }
 
 /// Resolve a Windows-style absolute path (e.g. `C:\Games\Foo\bar.exe`) to a
-/// host filesystem path under the bottle's `drive_c`.
+/// host filesystem path under the bottle's drive root for that letter.
 ///
-/// Returns `None` for paths outside `C:\` (e.g. `D:\`, UNC paths) or paths
-/// that fail safety checks (traversal, null bytes).
+/// Supports any drive letter A-Z, mapping `X:` → `<bottle>/drive_x` when that
+/// directory exists. Returns `None` for UNC paths, paths whose drive directory
+/// doesn't exist in the bottle, or paths that fail safety checks (traversal,
+/// null bytes).
 fn resolve_windows_path(bottle: &Bottle, win_path: &str) -> Option<PathBuf> {
     let trimmed = win_path.trim();
     if trimmed.is_empty() || trimmed.contains('\0') {
         return None;
     }
 
-    // Strip leading drive letter; only `C:` is mapped (the bottle's drive_c).
-    // Treat `\??\C:\foo`, `\\?\C:\foo`, and `C:\foo` uniformly.
+    // Strip NT object-manager / extended-length prefixes before inspecting
+    // the drive letter. Treat `\??\C:\foo`, `\\?\C:\foo`, and `C:\foo` uniformly.
     let no_prefix = trimmed
         .strip_prefix("\\??\\")
         .or_else(|| trimmed.strip_prefix("\\\\?\\"))
         .unwrap_or(trimmed);
 
-    // We require an absolute Windows path with a drive letter.
-    let after_drive = if no_prefix.len() >= 2 && no_prefix.as_bytes()[1] == b':' {
-        let drive = no_prefix.as_bytes()[0].to_ascii_lowercase();
-        if drive != b'c' {
+    // We require an absolute Windows path with a drive letter (A-Z / a-z).
+    let (drive_root, after_drive) =
+        if no_prefix.len() >= 2 && no_prefix.as_bytes()[1] == b':' {
+            let letter = no_prefix.as_bytes()[0].to_ascii_lowercase();
+            if !letter.is_ascii_alphabetic() {
+                return None;
+            }
+            // Map the drive letter to the host directory: drive_c, drive_d, …
+            let drive_dir_name = format!("drive_{}", letter as char);
+            let drive_root = bottle.path.join(&drive_dir_name);
+            if !drive_root.is_dir() {
+                return None;
+            }
+            // Strip "X:" — keep the rest, which may start with `\` or `/`.
+            (drive_root, &no_prefix[2..])
+        } else {
             return None;
-        }
-        // Strip "C:" — keep the rest, which may start with `\` or `/`.
-        &no_prefix[2..]
-    } else {
-        return None;
-    };
+        };
 
     // Split into components, normalize to forward slashes, reject traversal.
-    let mut walk = bottle.drive_c();
+    let mut walk = drive_root;
     let mut had_any = false;
     for raw in after_drive.split(|c| c == '\\' || c == '/') {
         if raw.is_empty() {
@@ -164,7 +173,7 @@ fn resolve_windows_path(bottle: &Bottle, win_path: &str) -> Option<PathBuf> {
             continue;
         }
         if raw == ".." {
-            // Refuse to climb out of drive_c.
+            // Refuse to climb out of the drive root.
             return None;
         }
         had_any = true;
@@ -510,6 +519,14 @@ pub fn match_shortcut(shortcut: &CrossoverShortcut) -> Option<MatchHint> {
 fn match_against_plugins(exe_name: &str) -> Option<MatchHint> {
     use crate::games::with_plugin;
 
+    // Special case: Mod Engine 2 (v2.x) registers CrossOver shortcuts as
+    // `launchmod_<slug>.bat` rather than a plain `.exe`. Check for this
+    // pattern before the generic exe-name scan so that ME2-managed games are
+    // auto-matched even though their shortcut doesn't end in `.exe`.
+    if let Some(hint) = match_against_modengine2_bat(exe_name) {
+        return Some(hint);
+    }
+
     // We need to scan the plugin registry. There is no public iterator over
     // the registry, so we walk the embedded game registry for known IDs and
     // probe each one. This is O(n_games) but only runs on demand.
@@ -531,6 +548,42 @@ fn match_against_plugins(exe_name: &str) -> Option<MatchHint> {
         }
     }
     None
+}
+
+/// Match a Mod Engine 2 `launchmod_<slug>.bat` shortcut against the FromSoft
+/// plugin specs.
+///
+/// ME2 v2.x supports Elden Ring, Dark Souls III, and Armored Core VI. Sekiro
+/// and Dark Souls: Remastered were dropped in ME2 v2.x and are excluded to
+/// avoid mismatching a user's manually-created `.bat` file.
+fn match_against_modengine2_bat(exe_name: &str) -> Option<MatchHint> {
+    // Supported slugs for Mod Engine 2 v2.x (case-insensitive filename match).
+    // Sekiro (sekiro) and Dark Souls: Remastered (darksouls_remastered) are
+    // intentionally excluded — ME2 v2 dropped support for both.
+    const ME2_SLUGS: &[&str] = &["eldenring", "darksouls3", "armoredcore6"];
+
+    let lower = exe_name.to_lowercase();
+    let stem = lower.strip_prefix("launchmod_")?.strip_suffix(".bat")?;
+
+    // Reject slugs that ME2 v2.x doesn't support.
+    if !ME2_SLUGS.contains(&stem) {
+        return None;
+    }
+
+    // Look up the matching FromSoft spec so we return accurate metadata.
+    let spec = crate::plugins::fromsoft::SPECS
+        .iter()
+        .find(|s| s.game_id == stem)?;
+
+    Some(MatchHint {
+        game_id: spec.game_id.to_string(),
+        display_name: spec.display_name.to_string(),
+        nexus_slug: spec.nexus_slug.to_string(),
+        // Steam app ID is unknown from the .bat alone — the user may have
+        // installed the game outside of Steam.
+        steam_app_id: None,
+        source: MatchSource::Plugin,
+    })
 }
 
 fn match_against_vortex(exe_name: &str) -> Option<MatchHint> {
@@ -895,5 +948,135 @@ mod tests {
         // without scanning the actual filesystem.
         let result = list_unregistered_games(&[bottle], &already);
         assert!(result.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Fix 4: Mod Engine 2 .bat shortcut matching
+    // -----------------------------------------------------------------------
+
+    /// Build a minimal CrossoverShortcut whose `host_target` filename is the
+    /// supplied string — enough for `match_shortcut` to extract the name.
+    fn bat_shortcut(filename: &str) -> CrossoverShortcut {
+        CrossoverShortcut {
+            bottle_name: "b".into(),
+            display_name: filename.to_string(),
+            source_lnk_path: PathBuf::from("/dev/null"),
+            windows_target: format!("C:\\Games\\ModEngine2\\{}", filename),
+            host_target: PathBuf::from("/fake/bottle/drive_c/Games/ModEngine2").join(filename),
+            working_directory: None,
+            icon_path: None,
+        }
+    }
+
+    #[test]
+    fn me2_bat_matches_eldenring() {
+        let sc = bat_shortcut("launchmod_eldenring.bat");
+        let hint = match_shortcut(&sc).expect("should match eldenring ME2 bat");
+        assert_eq!(hint.game_id, "eldenring");
+        assert_eq!(hint.display_name, "Elden Ring");
+        assert_eq!(hint.nexus_slug, "eldenring");
+        assert_eq!(hint.steam_app_id, None);
+        assert_eq!(hint.source, MatchSource::Plugin);
+    }
+
+    #[test]
+    fn me2_bat_matches_darksouls3() {
+        let sc = bat_shortcut("launchmod_darksouls3.bat");
+        let hint = match_shortcut(&sc).expect("should match darksouls3 ME2 bat");
+        assert_eq!(hint.game_id, "darksouls3");
+        assert_eq!(hint.source, MatchSource::Plugin);
+    }
+
+    #[test]
+    fn me2_bat_matches_armoredcore6() {
+        let sc = bat_shortcut("launchmod_armoredcore6.bat");
+        let hint = match_shortcut(&sc).expect("should match armoredcore6 ME2 bat");
+        assert_eq!(hint.game_id, "armoredcore6");
+        assert_eq!(hint.source, MatchSource::Plugin);
+    }
+
+    #[test]
+    fn me2_bat_rejects_sekiro() {
+        // Sekiro was dropped from ME2 v2.x — must not produce a hint.
+        let sc = bat_shortcut("launchmod_sekiro.bat");
+        assert!(match_shortcut(&sc).is_none(), "sekiro should not be matched by ME2 bat logic");
+    }
+
+    #[test]
+    fn me2_bat_rejects_random_bat() {
+        let sc = bat_shortcut("random.bat");
+        assert!(match_shortcut(&sc).is_none());
+    }
+
+    #[test]
+    fn me2_bat_is_case_insensitive() {
+        // CrossOver may preserve the original filename capitalisation from
+        // Windows, e.g. `LaunchMod_EldenRing.BAT`.
+        let sc = bat_shortcut("LaunchMod_EldenRing.BAT");
+        let hint = match_shortcut(&sc).expect("case-insensitive ME2 bat should match");
+        assert_eq!(hint.game_id, "eldenring");
+    }
+
+    // -----------------------------------------------------------------------
+    // Fix 5: Multi-drive resolution
+    // -----------------------------------------------------------------------
+
+    fn make_bottle_with_drive(parent: &Path, name: &str, extra_drives: &[char]) -> Bottle {
+        let path = parent.join(name);
+        fs::create_dir_all(path.join("drive_c")).unwrap();
+        for &letter in extra_drives {
+            fs::create_dir_all(path.join(format!("drive_{}", letter))).unwrap();
+        }
+        Bottle {
+            name: name.to_string(),
+            path,
+            source: "CrossOver".to_string(),
+        }
+    }
+
+    #[test]
+    fn resolve_d_drive_when_drive_d_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle = make_bottle_with_drive(tmp.path(), "b", &['d']);
+        let games_dir = bottle.path.join("drive_d").join("Games").join("Foo");
+        fs::create_dir_all(&games_dir).unwrap();
+
+        let resolved = resolve_windows_path(&bottle, "D:\\Games\\Foo\\foo.exe")
+            .expect("should resolve D: path when drive_d exists");
+        assert_eq!(resolved, games_dir.join("foo.exe"));
+    }
+
+    #[test]
+    fn reject_d_drive_when_drive_d_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No drive_d directory created.
+        let bottle = make_fake_bottle(tmp.path(), "b");
+        assert!(
+            resolve_windows_path(&bottle, "D:\\Games\\Foo\\foo.exe").is_none(),
+            "should reject D: when drive_d does not exist"
+        );
+    }
+
+    #[test]
+    fn reject_traversal_on_non_c_drive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle = make_bottle_with_drive(tmp.path(), "b", &['z']);
+        // Path traversal attempt via Z: drive.
+        assert!(
+            resolve_windows_path(&bottle, "Z:\\..\\..\\etc\\passwd").is_none(),
+            "traversal via non-C drive must be rejected"
+        );
+    }
+
+    #[test]
+    fn c_drive_still_works_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle = make_fake_bottle(tmp.path(), "b");
+        fs::create_dir_all(bottle.drive_c().join("Games").join("Foo")).unwrap();
+        let resolved = resolve_windows_path(&bottle, "C:\\Games\\Foo\\bar.exe").unwrap();
+        assert_eq!(
+            resolved,
+            bottle.drive_c().join("Games").join("Foo").join("bar.exe")
+        );
     }
 }
