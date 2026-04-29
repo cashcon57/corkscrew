@@ -1397,6 +1397,7 @@ pub fn run() {
             commands::config_commands::get_native_mode,
             commands::config_commands::set_native_mode,
             commands::native_cmds::rescan_native_games,
+            commands::stardew_cmds::get_stardew_mod_status,
             // Download Queue
             commands::notifications::get_download_queue,
             commands::notifications::get_download_queue_counts,

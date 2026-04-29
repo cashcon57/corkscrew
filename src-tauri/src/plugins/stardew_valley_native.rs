@@ -6,10 +6,11 @@
 //! those matching the Stardew bundle identifier (or the executable name
 //! as a fallback for GOG variants).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::bottles::Bottle;
@@ -82,6 +83,116 @@ pub fn parse_manifest(path: &Path) -> Result<SdvModManifest, ManifestError> {
         .map_err(|e| ManifestError::Malformed(format!("read failed: {}", e)))?;
     serde_json::from_str(&contents)
         .map_err(|e| ManifestError::Malformed(format!("json parse failed: {}", e)))
+}
+
+// ---------------------------------------------------------------------------
+// Mod status analysis
+// ---------------------------------------------------------------------------
+
+/// Pre-parsed information about an installed SMAPI mod. Callers are responsible
+/// for reading `manifest.json` and populating this structure before calling
+/// [`analyze_mod_status`].
+#[derive(Clone, Debug)]
+pub struct InstalledModInfo {
+    /// The mod's globally-unique identifier (from `UniqueID`).
+    pub unique_id: String,
+    /// The human-readable mod name.
+    pub name: String,
+    /// The mod version string.
+    pub version: String,
+    /// The mod's declared dependencies.
+    pub dependencies: Vec<SdvDependency>,
+    /// The minimum SMAPI API version required, if declared.
+    pub minimum_api_version: Option<String>,
+}
+
+/// Per-mod status produced by [`analyze_mod_status`].
+#[derive(Clone, Debug, Serialize)]
+pub struct StardewModStatus {
+    /// The mod's globally-unique identifier.
+    pub unique_id: String,
+    /// The human-readable mod name.
+    pub name: String,
+    /// Required dependencies whose `UniqueID` is not present in the installed
+    /// mod list. Mods in this list will fail to load in SMAPI.
+    pub missing_required_deps: Vec<String>,
+    /// Optional dependencies whose `UniqueID` is not present in the installed
+    /// mod list. The mod still loads but may lack optional features.
+    pub missing_optional_deps: Vec<String>,
+    /// Other mods that share this mod's `UniqueID` (duplicate install). Each
+    /// entry is the *name* of the conflicting mod. SMAPI typically refuses to
+    /// load both copies when this occurs.
+    pub conflicts_with: Vec<String>,
+    /// Whether the mod's `MinimumApiVersion` is satisfied.
+    ///
+    /// Phase 1 always returns `true` — enforcing this constraint requires
+    /// SemVer comparison against the installed SMAPI version, which is deferred
+    /// to a later polish task.
+    pub api_version_ok: bool,
+}
+
+/// Analyze a list of installed mods and produce per-mod status.
+///
+/// Detects:
+/// - Missing required/optional dependencies (UniqueID not present in
+///   the installed list).
+/// - UniqueID duplicates (two mod folders shipping the same UniqueID).
+///
+/// Does NOT yet enforce dependency version constraints (`MinimumVersion` on a
+/// dependency entry) — that requires SemVer comparison and is deferred to a
+/// polish task. See [`StardewModStatus::api_version_ok`] for the analogous
+/// deferral on the SMAPI API version.
+pub fn analyze_mod_status(mods: &[InstalledModInfo]) -> Vec<StardewModStatus> {
+    // Build an index of UniqueID -> Vec<mod_name> for quick lookup and
+    // duplicate detection. Multiple names under the same key indicate a
+    // UniqueID conflict.
+    let mut id_to_names: HashMap<String, Vec<String>> = HashMap::new();
+    for m in mods {
+        id_to_names
+            .entry(m.unique_id.clone())
+            .or_default()
+            .push(m.name.clone());
+    }
+
+    mods.iter()
+        .map(|m| {
+            let mut missing_required = Vec::new();
+            let mut missing_optional = Vec::new();
+
+            for dep in &m.dependencies {
+                if !id_to_names.contains_key(&dep.unique_id) {
+                    if dep.is_required {
+                        missing_required.push(dep.unique_id.clone());
+                    } else {
+                        missing_optional.push(dep.unique_id.clone());
+                    }
+                }
+                // NOTE: dep.minimum_version is intentionally not enforced here.
+                // Enforcing it requires SemVer comparison; deferred to a polish task.
+            }
+
+            // conflicts_with lists the names of OTHER mods that share this UniqueID.
+            let conflicts_with = id_to_names
+                .get(&m.unique_id)
+                .map(|names| {
+                    names
+                        .iter()
+                        .filter(|n| n.as_str() != m.name.as_str())
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            StardewModStatus {
+                unique_id: m.unique_id.clone(),
+                name: m.name.clone(),
+                missing_required_deps: missing_required,
+                missing_optional_deps: missing_optional,
+                conflicts_with,
+                api_version_ok: true, // version comparison deferred — see doc comment
+            }
+        })
+        .collect()
 }
 
 /// Return the canonical SMAPI mods directory for a detected Stardew Valley game.
@@ -860,6 +971,113 @@ mod tests {
             msg.contains("manifest.json"),
             "error should mention manifest.json: {msg}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // analyze_mod_status tests (Task 3.8)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn analyze_detects_missing_required_dep() {
+        let mods = vec![InstalledModInfo {
+            unique_id: "tester.A".into(),
+            name: "Mod A".into(),
+            version: "1.0".into(),
+            dependencies: vec![SdvDependency {
+                unique_id: "Pathoschild.ContentPatcher".into(),
+                is_required: true,
+                minimum_version: None,
+            }],
+            minimum_api_version: None,
+        }];
+        let result = analyze_mod_status(&mods);
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].missing_required_deps,
+            vec!["Pathoschild.ContentPatcher"]
+        );
+        assert!(result[0].missing_optional_deps.is_empty());
+    }
+
+    #[test]
+    fn analyze_detects_missing_optional_dep() {
+        let mods = vec![InstalledModInfo {
+            unique_id: "tester.A".into(),
+            name: "Mod A".into(),
+            version: "1.0".into(),
+            dependencies: vec![SdvDependency {
+                unique_id: "tester.OptDep".into(),
+                is_required: false,
+                minimum_version: None,
+            }],
+            minimum_api_version: None,
+        }];
+        let result = analyze_mod_status(&mods);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].missing_optional_deps, vec!["tester.OptDep"]);
+        assert!(result[0].missing_required_deps.is_empty());
+    }
+
+    #[test]
+    fn analyze_detects_unique_id_conflicts() {
+        let mods = vec![
+            InstalledModInfo {
+                unique_id: "tester.X".into(),
+                name: "Mod X v1".into(),
+                version: "1.0".into(),
+                dependencies: vec![],
+                minimum_api_version: None,
+            },
+            InstalledModInfo {
+                unique_id: "tester.X".into(),
+                name: "Mod X v2".into(),
+                version: "2.0".into(),
+                dependencies: vec![],
+                minimum_api_version: None,
+            },
+        ];
+        let result = analyze_mod_status(&mods);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].conflicts_with, vec!["Mod X v2"]);
+        assert_eq!(result[1].conflicts_with, vec!["Mod X v1"]);
+    }
+
+    #[test]
+    fn analyze_returns_empty_problems_when_all_deps_satisfied() {
+        let mods = vec![
+            InstalledModInfo {
+                unique_id: "tester.A".into(),
+                name: "A".into(),
+                version: "1.0".into(),
+                dependencies: vec![SdvDependency {
+                    unique_id: "tester.B".into(),
+                    is_required: true,
+                    minimum_version: None,
+                }],
+                minimum_api_version: None,
+            },
+            InstalledModInfo {
+                unique_id: "tester.B".into(),
+                name: "B".into(),
+                version: "1.0".into(),
+                dependencies: vec![],
+                minimum_api_version: None,
+            },
+        ];
+        let result = analyze_mod_status(&mods);
+        assert_eq!(result.len(), 2);
+        assert!(result[0].missing_required_deps.is_empty());
+        assert!(result[0].missing_optional_deps.is_empty());
+        assert!(result[0].conflicts_with.is_empty());
+        assert!(result[1].missing_required_deps.is_empty());
+        assert!(result[1].missing_optional_deps.is_empty());
+        assert!(result[1].conflicts_with.is_empty());
+    }
+
+    #[test]
+    fn analyze_handles_no_mods() {
+        let result = analyze_mod_status(&[]);
+        assert!(result.is_empty());
     }
 
     // -----------------------------------------------------------------------
