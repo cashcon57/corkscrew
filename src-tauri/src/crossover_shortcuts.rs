@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
 use crate::bottles::Bottle;
+use crate::crossover_cxmenu;
 use crate::games::DetectedGame;
 
 // ---------------------------------------------------------------------------
@@ -278,11 +279,136 @@ pub fn scan_bottle_shortcuts(bottle: &Bottle) -> Vec<CrossoverShortcut> {
         }
     }
 
+    // --- cxmenu.conf augmentation -------------------------------------------
+    // CrossOver registers many shortcuts only in `cxmenu.conf` (a Mac-side INI
+    // at the bottle root) without writing a `.lnk` into drive_c. We parse it
+    // now and synthesize CrossoverShortcut entries for any exe we can locate.
+    merge_cxmenu_shortcuts(bottle, &mut out);
+
     // De-dup by resolved exe path: the same exe is often linked from
     // multiple Start Menu / Desktop locations.
     let mut seen: HashSet<PathBuf> = HashSet::new();
     out.retain(|s| seen.insert(s.host_target.clone()));
     out
+}
+
+// ---------------------------------------------------------------------------
+// cxmenu.conf augmentation
+// ---------------------------------------------------------------------------
+
+/// Parse the bottle's `cxmenu.conf` (or `cxmenu`) and append synthetic
+/// [`CrossoverShortcut`] entries for any entries not already captured by the
+/// `.lnk` walk.
+///
+/// For each [`crossover_cxmenu::CxmenuEntry`]:
+/// 1. If the decoded `windows_path` ends in `.lnk` and resolves to a file on
+///    disk, we skip it — the `.lnk` walk will have already handled it (or the
+///    `.lnk` itself is missing, meaning the shortcut is broken and we should
+///    not emit it).
+/// 2. Otherwise, if the entry carries a `startup_wm_class` (typically an
+///    `.exe` filename), we walk `drive_c` up to depth 6 looking for a file
+///    whose name matches (case-insensitively). The first match is used as
+///    `host_target`. If none is found, we skip the entry rather than emitting
+///    a broken shortcut.
+fn merge_cxmenu_shortcuts(bottle: &Bottle, out: &mut Vec<CrossoverShortcut>) {
+    let Some(cxmenu_path) = crossover_cxmenu::find_cxmenu_file(&bottle.path) else {
+        return;
+    };
+
+    let entries = crossover_cxmenu::parse_cxmenu(&cxmenu_path);
+    if entries.is_empty() {
+        return;
+    }
+
+    // Build a set of host targets already discovered by the .lnk walk so we
+    // can skip duplicates cheaply (the final dedup pass also catches these, but
+    // avoiding unnecessary filesystem walks is better).
+    let existing: HashSet<PathBuf> = out.iter().map(|s| s.host_target.clone()).collect();
+
+    let drive_c = bottle.drive_c();
+
+    for entry in &entries {
+        let win_path = &entry.windows_path;
+
+        // Case 1: path ends in .lnk — check if it already resolved; if so,
+        // skip. We don't re-parse lnk files here; the walk already handled it.
+        if win_path.to_lowercase().ends_with(".lnk") {
+            if let Some(host) = resolve_windows_path(bottle, win_path) {
+                if host.is_file() && existing.contains(&host) {
+                    continue;
+                }
+            }
+            // .lnk not on disk — skip entirely; broken shortcut.
+            continue;
+        }
+
+        // Case 2: non-.lnk entry — requires startup_wm_class to find the exe.
+        let Some(ref wm_class) = entry.startup_wm_class else {
+            continue;
+        };
+
+        // Reject startup_wm_class values that don't look like plain exe names
+        // (no path separators, must end in .exe).
+        if wm_class.contains('\\')
+            || wm_class.contains('/')
+            || !wm_class.to_lowercase().ends_with(".exe")
+        {
+            continue;
+        }
+
+        // Search drive_c for the exe (case-insensitive, depth-limited).
+        let Some(host_target) = find_exe_in_drive_c(&drive_c, wm_class, 6) else {
+            continue;
+        };
+
+        if existing.contains(&host_target) {
+            continue;
+        }
+
+        // Derive a display name from the windows_path filename (strip extension).
+        let display_name = std::path::Path::new(win_path)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| {
+                host_target
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            });
+
+        out.push(CrossoverShortcut {
+            bottle_name: bottle.name.clone(),
+            display_name,
+            // Use the bottle root as source_lnk_path to signal cxmenu origin.
+            source_lnk_path: cxmenu_path.clone(),
+            windows_target: win_path.clone(),
+            host_target,
+            working_directory: None,
+            icon_path: None,
+        });
+    }
+}
+
+/// Walk `drive_c` recursively up to `max_depth` looking for a file whose name
+/// matches `exe_name` case-insensitively. Stops after the first match.
+///
+/// Returns the absolute host path on success, `None` if not found.
+fn find_exe_in_drive_c(drive_c: &Path, exe_name: &str, max_depth: usize) -> Option<PathBuf> {
+    let exe_lower = exe_name.to_lowercase();
+    for entry in WalkDir::new(drive_c)
+        .max_depth(max_depth)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_lowercase();
+        if name == exe_lower {
+            return Some(entry.into_path());
+        }
+    }
+    None
 }
 
 fn scan_recursive(bottle: &Bottle, root: &Path, out: &mut Vec<CrossoverShortcut>) {
@@ -1078,5 +1204,109 @@ mod tests {
             resolved,
             bottle.drive_c().join("Games").join("Foo").join("bar.exe")
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // cxmenu.conf integration tests
+    // -----------------------------------------------------------------------
+
+    /// A bottle with both a real `.lnk` (via parse_shortcut_file) AND a
+    /// `cxmenu.conf` entry for a different game should return both entries,
+    /// deduplicated so the Steam.lnk entry is not doubled.
+    ///
+    /// We can't easily synthesize a valid parselnk binary, so this test only
+    /// places a `cxmenu.conf` entry (no real .lnk) and verifies the cxmenu
+    /// path surfaces the exe correctly.
+    #[test]
+    fn scan_bottle_merges_cxmenu_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle = make_fake_bottle(tmp.path(), "cx");
+
+        // Create a fake game exe in drive_c that cxmenu.conf references.
+        let game_dir = bottle.drive_c().join("Games").join("EldenRing");
+        fs::create_dir_all(&game_dir).unwrap();
+        // Use a large file so is_likely_game() passes (≥5 MB).
+        let exe = game_dir.join("eldenring.exe");
+        fs::write(&exe, vec![0u8; 6 * 1024 * 1024]).unwrap();
+
+        // Write a cxmenu.conf pointing to eldenring.exe.
+        let cxmenu = r#"
+[Desktop.C^3A_users_Public_Desktop/Elden+Ring.url]
+"Type" = "Windows"
+"Mode" = "install"
+"StartupWMClass" = "eldenring.exe"
+"#;
+        fs::write(bottle.path.join("cxmenu.conf"), cxmenu).unwrap();
+
+        let shortcuts = scan_bottle_shortcuts(&bottle);
+
+        // Exactly one shortcut — the cxmenu-synthesized one.
+        assert_eq!(shortcuts.len(), 1, "expected 1 shortcut, got {:?}", shortcuts);
+        assert_eq!(shortcuts[0].host_target, exe);
+        assert_eq!(shortcuts[0].bottle_name, "cx");
+    }
+
+    /// A cxmenu.conf entry that references an exe not present in drive_c must
+    /// be silently dropped rather than producing a broken shortcut.
+    #[test]
+    fn scan_bottle_cxmenu_skips_missing_exe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle = make_fake_bottle(tmp.path(), "cx2");
+
+        let cxmenu = r#"
+[Desktop.C^3A_users_Public_Desktop/Missing+Game.url]
+"Type" = "Windows"
+"Mode" = "install"
+"StartupWMClass" = "totally_missing.exe"
+"#;
+        fs::write(bottle.path.join("cxmenu.conf"), cxmenu).unwrap();
+
+        let shortcuts = scan_bottle_shortcuts(&bottle);
+        assert!(shortcuts.is_empty(), "expected empty, got {:?}", shortcuts);
+    }
+
+    /// An entry without StartupWMClass must be skipped gracefully.
+    #[test]
+    fn scan_bottle_cxmenu_skips_entry_without_wm_class() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle = make_fake_bottle(tmp.path(), "cx3");
+
+        let cxmenu = r#"
+[Desktop.C^3A_users_Public_Desktop/SomeURL.url]
+"Type" = "Windows"
+"Mode" = "install"
+"#;
+        fs::write(bottle.path.join("cxmenu.conf"), cxmenu).unwrap();
+
+        let shortcuts = scan_bottle_shortcuts(&bottle);
+        assert!(shortcuts.is_empty());
+    }
+
+    /// Two cxmenu.conf entries pointing to the same exe must be deduplicated
+    /// so only one shortcut is returned.
+    #[test]
+    fn scan_bottle_cxmenu_deduplicates_same_exe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle = make_fake_bottle(tmp.path(), "cx4");
+
+        let game_dir = bottle.drive_c().join("Games").join("SomeGame");
+        fs::create_dir_all(&game_dir).unwrap();
+        let exe = game_dir.join("somegame.exe");
+        fs::write(&exe, vec![0u8; 6 * 1024 * 1024]).unwrap();
+
+        // Two entries for the same game (Desktop + StartMenu).
+        let cxmenu = r#"
+[Desktop.C^3A_users_Public_Desktop/SomeGame.url]
+"Mode" = "install"
+"StartupWMClass" = "somegame.exe"
+
+[StartMenu.C^3A_users_crossover_AppData/SomeGame.url]
+"Mode" = "install"
+"StartupWMClass" = "somegame.exe"
+"#;
+        fs::write(bottle.path.join("cxmenu.conf"), cxmenu).unwrap();
+
+        let shortcuts = scan_bottle_shortcuts(&bottle);
+        assert_eq!(shortcuts.len(), 1, "expected dedup to 1, got {:?}", shortcuts);
     }
 }
