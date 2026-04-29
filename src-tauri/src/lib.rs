@@ -54,6 +54,7 @@ pub mod modlist_io;
 pub mod nexus;
 pub mod nexus_games_index;
 pub mod nexus_sso;
+pub mod bg3se;
 pub mod native_scanner;
 pub mod nxm_handler;
 pub mod oauth;
@@ -1398,6 +1399,7 @@ pub fn run() {
             commands::config_commands::get_native_mode,
             commands::config_commands::set_native_mode,
             commands::native_cmds::rescan_native_games,
+            commands::native_cmds::get_bg3se_status,
             commands::stardew_cmds::get_stardew_mod_status,
             // Download Queue
             commands::notifications::get_download_queue,

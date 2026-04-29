@@ -49,3 +49,18 @@ pub async fn rescan_native_games(
 
     Ok(candidates)
 }
+
+/// Return the BG3 Script Extender detection status for the given `.app` bundle.
+///
+/// Pass the absolute path to the `.app` bundle directory (e.g.
+/// `/Applications/Baldurs Gate 3.app`). The command is read-only and
+/// performs no installation or modification.
+///
+/// Returns [`crate::bg3se::Bg3seStatus`] — see that struct for field semantics,
+/// especially `mac_supported` which distinguishes a correctly-installed macOS
+/// dylib from a mis-dropped Windows `DWrite.dll`.
+#[tauri::command]
+pub async fn get_bg3se_status(app_bundle: String) -> Result<crate::bg3se::Bg3seStatus, String> {
+    let path = std::path::PathBuf::from(app_bundle);
+    Ok(crate::bg3se::detect(&path))
+}
