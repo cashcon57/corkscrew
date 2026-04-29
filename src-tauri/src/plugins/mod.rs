@@ -4,6 +4,7 @@
 //! game and provides a `register()` function to insert it into the global
 //! plugin registry.
 
+pub mod baldurs_gate_3_native;
 pub mod crimson_desert;
 pub mod fallout4;
 pub mod fromsoft;

@@ -412,6 +412,7 @@ pub fn run() {
     plugins::gtav::register();
     plugins::genshin::register();
     plugins::stardew_valley_native::register();
+    plugins::baldurs_gate_3_native::register();
     plugins::thunderstore_games::register_all();
     plugins::fromsoft::register_all();
     game_registry::register_all();
