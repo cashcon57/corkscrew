@@ -4,7 +4,7 @@
   import type { CleanReport, CleanResult, DowngradeStatus, DeploymentHealth, VerificationLevel, CachedVersion, DepotDownloadInfo, LaunchOptionsStatus } from "$lib/types";
   import { wineCtx } from "$lib/types";
   import type { SteamStatus } from "$lib/types";
-  import { config, showError, showSuccess, selectedGame, skseStatus, currentPage, appVersion, updateReady, updateVersion, updateNotes, updateChecking, updateError, triggerUpdateCheck, controllerMode } from "$lib/stores";
+  import { config, showError, showSuccess, selectedGame, skseStatus, currentPage, appVersion, updateReady, updateVersion, updateNotes, updateChecking, updateError, triggerUpdateCheck, controllerMode, nativeMode } from "$lib/stores";
   import type { AppConfig, ModTool, PlatformInfo, ToolInstallProgress, ToolUpdateInfo, VortexExtensionSummary, VortexGameRegistration } from "$lib/types";
   import { listen } from "@tauri-apps/api/event";
   import ThemeToggle from "$lib/components/ThemeToggle.svelte";
@@ -1401,6 +1401,7 @@
   {#if settingsTab === "game"}
   <div class="tab-content" class:tab-visible={tabVisible}>
 
+  {#if !$nativeMode}
   {#if isSkyrim}
     <!-- Game Tools -->
     <div class="section">
@@ -1848,6 +1849,7 @@
       {/if}
     </div>
   {/if}
+  {/if}<!-- end !nativeMode: SKSE/Engine Fixes section -->
 
   <!-- Deployment Health -->
   {#if game}
@@ -1974,6 +1976,7 @@
       </button>
       {#if !collapsedSections.has('gameMaintenance')}
       <div class="section-card">
+        {#if !$nativeMode}
         <div class="card-row appearance-row">
           <div class="toggle-info">
             <span class="row-label">Disable Launch Fixes</span>
@@ -1993,6 +1996,7 @@
             <span class="toggle-thumb"></span>
           </button>
         </div>
+        {/if}<!-- end !nativeMode: display/cursor fix toggle -->
         <div class="card-row" style="flex-direction: column; align-items: stretch; gap: 12px;">
           <div style="display: flex; align-items: center; justify-content: space-between;">
             <div>
@@ -2476,6 +2480,7 @@
   {/if}
 
   <!-- Wine Diagnostics -->
+  {#if !$nativeMode}
   {#if game}
     <div class="section">
       <button class="section-title section-title-collapsible" onclick={() => toggleSection('wineDiagnostics')}>
@@ -2487,6 +2492,7 @@
       {/if}
     </div>
   {/if}
+  {/if}<!-- end !nativeMode: Wine Diagnostics -->
 
   <!-- Vortex Game Extensions -->
   <div class="section">
