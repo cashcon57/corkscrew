@@ -347,6 +347,14 @@ export async function setConfigValue(
   return invoke("set_config_value", { key, value });
 }
 
+export async function getNativeMode(): Promise<boolean> {
+  return invoke<boolean>("get_native_mode");
+}
+
+export async function setNativeMode(enabled: boolean): Promise<void> {
+  return invoke<void>("set_native_mode", { enabled });
+}
+
 export async function getGameLogo(
   gameId: string,
   steamAppId?: string,

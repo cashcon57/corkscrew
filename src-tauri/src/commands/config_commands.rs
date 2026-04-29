@@ -675,3 +675,28 @@ pub async fn get_vortex_extension_suggestions(
 }
 
 
+// --- Native Mode (Experimental) ---
+
+/// Returns the current value of the `experimental.native_mode` config flag.
+#[tauri::command]
+pub async fn get_native_mode() -> Result<bool, String> {
+    tokio::task::spawn_blocking(|| {
+        config::get_config()
+            .map(|cfg| cfg.experimental.native_mode)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(crate::format_join_error)?
+}
+
+/// Persists `experimental.native_mode` to the JSON config file.
+#[tauri::command]
+pub async fn set_native_mode(enabled: bool) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let mut cfg = config::get_config().map_err(|e| e.to_string())?;
+        cfg.experimental.native_mode = enabled;
+        config::save_config(&cfg).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(crate::format_join_error)?
+}

@@ -1387,6 +1387,9 @@ pub fn run() {
             commands::config_commands::vortex_delete_cached_extension,
             commands::config_commands::vortex_get_extension_detail,
             commands::config_commands::get_vortex_extension_suggestions,
+            // Native Mode (experimental)
+            commands::config_commands::get_native_mode,
+            commands::config_commands::set_native_mode,
             // Download Queue
             commands::notifications::get_download_queue,
             commands::notifications::get_download_queue_counts,

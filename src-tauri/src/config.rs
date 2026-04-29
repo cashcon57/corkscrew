@@ -57,6 +57,20 @@ pub enum VerificationLevel {
 }
 
 // ---------------------------------------------------------------------------
+// ExperimentalConfig
+// ---------------------------------------------------------------------------
+
+/// Opt-in experimental features that may graduate to permanent settings later.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ExperimentalConfig {
+    /// When true, surface Native Mode UI for games that support macOS-native
+    /// modding (e.g. Stardew Valley, Baldur's Gate 3). Off by default — opt-in
+    /// only, as native-mode modding is not yet the primary supported workflow.
+    #[serde(default)]
+    pub native_mode: bool,
+}
+
+// ---------------------------------------------------------------------------
 // AppConfig
 // ---------------------------------------------------------------------------
 
@@ -108,6 +122,11 @@ pub struct AppConfig {
     /// these sources host NSFW mods.
     #[serde(default)]
     pub enable_adult_content_for_sims4: bool,
+
+    /// Experimental / opt-in features (native mode, etc.).
+    /// Deserializes gracefully from old configs that lack this block.
+    #[serde(default)]
+    pub experimental: ExperimentalConfig,
 
     /// Catch-all for any additional settings that may be added in the future.
     /// Flattened so extra keys sit at the top level of the JSON object.
@@ -385,6 +404,7 @@ mod tests {
             use_original_engine_fixes: false,
             use_wine_engine_fixes: false,
             enable_adult_content_for_sims4: false,
+            experimental: ExperimentalConfig::default(),
             extra: HashMap::new(),
         };
         config
@@ -456,5 +476,42 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         let restored: AppConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.verification_level, VerificationLevel::Paranoid);
+    }
+
+    // Task 1.6: ExperimentalConfig / native_mode tests
+
+    #[test]
+    fn native_mode_default_is_false() {
+        // Fresh AppConfig (Default) must have experimental.native_mode = false.
+        let cfg = AppConfig::default();
+        assert!(
+            !cfg.experimental.native_mode,
+            "experimental.native_mode should default to false"
+        );
+    }
+
+    #[test]
+    fn native_mode_round_trip() {
+        // Set native_mode = true, serialize, deserialize, assert it survived.
+        let mut cfg = AppConfig::default();
+        cfg.experimental.native_mode = true;
+        let json = serde_json::to_string(&cfg).unwrap();
+        let restored: AppConfig = serde_json::from_str(&json).unwrap();
+        assert!(
+            restored.experimental.native_mode,
+            "native_mode should survive a JSON round-trip as true"
+        );
+    }
+
+    #[test]
+    fn loading_old_config_without_experimental_block_defaults_native_mode_false() {
+        // Simulate a pre-Task-1.6 config file that has no "experimental" key.
+        // The #[serde(default)] annotation should fill it in with false.
+        let old_json = r#"{}"#;
+        let cfg: AppConfig = serde_json::from_str(old_json).unwrap();
+        assert!(
+            !cfg.experimental.native_mode,
+            "old config without experimental block should default native_mode to false"
+        );
     }
 }

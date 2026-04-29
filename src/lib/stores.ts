@@ -335,3 +335,7 @@ export const modStateVersion = writable(0);
 export const gameLock = writable<GameLock | null>(null);
 // Whether the user has force-unlocked (overridden the lock for this session)
 export const gameLockOverridden = writable<boolean>(false);
+
+// Experimental: Native Mode (macOS-native modding for supported games).
+// Hydrated from the backend config in Task 5.5 (Mode-scoped routing).
+export const nativeMode = writable<boolean>(false);
