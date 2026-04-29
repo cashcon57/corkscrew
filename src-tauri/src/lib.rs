@@ -1219,6 +1219,8 @@ pub fn run() {
             commands::game_state::list_known_uninstalled_games_cmd,
             commands::game_state::scan_game_directory,
             commands::game_state::clean_game_directory,
+            // Native Game Manual Add
+            commands::game_state::add_native_game_manually,
             // Wabbajack Modlists
             commands::wabbajack::get_wabbajack_modlists,
             commands::wabbajack::parse_wabbajack_file,

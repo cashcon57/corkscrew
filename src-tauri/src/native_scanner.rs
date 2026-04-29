@@ -22,7 +22,7 @@ use crate::runtime::{Architecture, NativeSource};
 /// locations. Fields that require deeper per-bundle inspection
 /// (`architecture`, `sandboxed`) are filled in by later tasks; for now
 /// they carry safe zero-value defaults.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct NativeAppCandidate {
     /// Absolute path to the `.app` bundle directory.
     pub bundle_path: PathBuf,
@@ -453,6 +453,88 @@ fn find_app_bundles(root: &Path, max_depth: usize) -> Vec<PathBuf> {
     out
 }
 
+// ---------------------------------------------------------------------
+// GOG mac integration
+// ---------------------------------------------------------------------
+
+/// Walk `~/Games` for GOG-style `.app` installs.
+///
+/// GOG installs on macOS typically follow the convention
+/// `~/Games/<Game Name>/<Game Name>.app`. This function discovers all
+/// `.app` bundles up to depth 2 inside `~/Games` and returns one
+/// [`NativeAppCandidate`] per bundle with `source = NativeSource::Gog`.
+///
+/// Symlinks are skipped (consistent with `scan_dir`). A missing
+/// `~/Games` directory returns an empty `Vec` without panicking.
+pub fn scan_gog_mac() -> Vec<NativeAppCandidate> {
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    scan_gog_mac_at(&home.join("Games"))
+}
+
+/// Testable inner: takes the GOG games directory explicitly.
+///
+/// The default GOG games directory on macOS is `~/Games`. Tests pass a
+/// temporary directory here so that the scanner can be exercised without
+/// a real GOG installation.
+pub(crate) fn scan_gog_mac_at(games_dir: &Path) -> Vec<NativeAppCandidate> {
+    let mut results = Vec::new();
+    for bundle in find_app_bundles(games_dir, 2) {
+        let info_path = bundle.join("Contents").join("Info.plist");
+        let Ok(info) = read_info_plist(&info_path) else {
+            continue;
+        };
+        let architecture = detect_bundle_architecture(&bundle, &info);
+        let sandboxed = is_sandboxed(&bundle);
+        results.push(NativeAppCandidate {
+            bundle_path: bundle,
+            info,
+            architecture,
+            source: NativeSource::Gog,
+            sandboxed,
+        });
+    }
+    results
+}
+
+// ---------------------------------------------------------------------
+// Manual native game add
+// ---------------------------------------------------------------------
+
+/// Validate a user-supplied `.app` path and produce a `NativeAppCandidate`.
+///
+/// Used by the `add_native_game_manually` Tauri command as the testable
+/// validation layer. Returns user-readable error strings on failure.
+///
+/// Checks performed (in order):
+/// 1. Path ends with `.app` extension.
+/// 2. Path exists and is a directory.
+/// 3. `Contents/Info.plist` is present and parseable.
+pub fn validate_manual_native_app(app_path: &Path) -> Result<NativeAppCandidate, String> {
+    if app_path.extension().map(|e| e != "app").unwrap_or(true) {
+        return Err(format!("not a .app bundle: {}", app_path.display()));
+    }
+    if !app_path.is_dir() {
+        return Err(format!(
+            "path does not exist or is not a directory: {}",
+            app_path.display()
+        ));
+    }
+    let info_path = app_path.join("Contents").join("Info.plist");
+    let info = read_info_plist(&info_path)
+        .map_err(|e| format!("could not read Info.plist: {}", e))?;
+    let architecture = detect_bundle_architecture(app_path, &info);
+    let sandboxed = is_sandboxed(app_path);
+    Ok(NativeAppCandidate {
+        bundle_path: app_path.to_path_buf(),
+        info,
+        architecture,
+        source: NativeSource::Manual,
+        sandboxed,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -756,5 +838,60 @@ mod tests {
             detect_architecture(Path::new("/nonexistent/binary")),
             Architecture::Unknown
         );
+    }
+
+    // -----------------------------------------------------------------
+    // GOG mac integration tests
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn scan_gog_mac_finds_apps_in_games_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        // GOG convention: ~/Games/<Game Name>/<Game Name>.app
+        let game1_contents = dir.path().join("Awesome Game/Awesome Game.app/Contents");
+        let game2_contents = dir.path().join("Other Game/Other Game.app/Contents");
+        fs::create_dir_all(&game1_contents).unwrap();
+        fs::create_dir_all(&game2_contents).unwrap();
+        write_valid_info_plist(&game1_contents.join("Info.plist"), "com.gog.awesome", "Awesome");
+        write_valid_info_plist(&game2_contents.join("Info.plist"), "com.gog.other", "Other");
+
+        let candidates = scan_gog_mac_at(dir.path());
+        assert_eq!(candidates.len(), 2, "expected 2 GOG candidates");
+        for c in &candidates {
+            assert_eq!(c.source, NativeSource::Gog);
+        }
+    }
+
+    #[test]
+    fn scan_gog_mac_returns_empty_for_missing_dir() {
+        let candidates = scan_gog_mac_at(Path::new("/nonexistent/very/unlikely"));
+        assert!(candidates.is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // Manual native game add tests
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn validate_manual_native_app_rejects_non_app_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let txt = dir.path().join("readme.txt");
+        fs::write(&txt, "hello").unwrap();
+        assert!(validate_manual_native_app(&txt).is_err());
+    }
+
+    #[test]
+    fn validate_manual_native_app_rejects_missing_path() {
+        let result = validate_manual_native_app(Path::new("/nonexistent.app"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_manual_native_app_returns_candidate_for_valid_app() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = make_app(dir.path(), "Manual", "com.user.manual");
+        let result = validate_manual_native_app(&bundle).expect("should succeed");
+        assert_eq!(result.source, NativeSource::Manual);
+        assert_eq!(result.info.bundle_identifier, "com.user.manual");
     }
 }
