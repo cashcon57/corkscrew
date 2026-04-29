@@ -17,9 +17,6 @@
 //!
 //! ## Deferred items
 //!
-//! - **Quarantine xattr clearing** (`xattr -d com.apple.quarantine`): deferred
-//!   to Task 3.9. The install succeeds without it; users may see a Gatekeeper
-//!   dialog on first launch which they can dismiss.
 //! - **Pre-install snapshot**: `rollback::create_snapshot` requires a
 //!   `&ModDatabase` which `install` does not have at this call site.
 //!   Integration deferred to Task 6.1.
@@ -259,6 +256,48 @@ pub fn uninstall(app_bundle: &Path) -> Result<(), SmapiError> {
     // 7. Preserve Mods/ (intentional — per official SMAPI uninstall behavior).
 
     Ok(())
+}
+
+/// Clear macOS Gatekeeper's `com.apple.quarantine` extended attribute
+/// from a Stardew Valley `.app` bundle.
+///
+/// Steam game updates re-quarantine the bundle. SMAPI's launcher script
+/// is then blocked by Gatekeeper until the user approves it manually.
+/// To avoid that friction, we clear the quarantine attribute before each
+/// launch when SMAPI is detected.
+///
+/// On non-macOS platforms this is a no-op.
+///
+/// Tolerates the case where no quarantine attribute is present (xattr
+/// returns a non-zero exit silently — that's expected and harmless).
+pub fn clear_quarantine(app_bundle: &Path) -> Result<(), SmapiError> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        // -d delete the named attribute, -r recursive (whole bundle).
+        // We don't propagate non-zero exits — the most common cause is
+        // "no such xattr" which is fine.
+        let output = Command::new("xattr")
+            .arg("-dr")
+            .arg("com.apple.quarantine")
+            .arg(app_bundle)
+            .output()
+            .map_err(|e| SmapiError::Other(format!("xattr command failed: {}", e)))?;
+
+        // Log non-zero exits but don't fail. The attribute may not exist.
+        if !output.status.success() {
+            log::debug!(
+                "xattr -dr returned non-zero (likely no quarantine to clear): {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app_bundle;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -804,5 +843,39 @@ mod tests {
     fn uninstall_returns_error_for_nonexistent_bundle() {
         let result = uninstall(Path::new("/nonexistent/Foo.app"));
         assert!(result.is_err(), "uninstall should return Err for a nonexistent bundle");
+    }
+
+    // -----------------------------------------------------------------------
+    // clear_quarantine() tests
+    // -----------------------------------------------------------------------
+
+    /// clear_quarantine succeeds on a bundle without a quarantine attribute.
+    /// xattr -dr returns non-zero (no such xattr), but we tolerate that silently.
+    #[test]
+    fn clear_quarantine_succeeds_on_bundle_without_quarantine() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = vanilla_bundle(dir.path());
+        // No quarantine attribute set; xattr -dr should silently no-op.
+        assert!(clear_quarantine(&bundle).is_ok());
+    }
+
+    /// On non-macOS platforms, clear_quarantine is a no-op that always returns Ok.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn clear_quarantine_returns_ok_on_non_macos_platforms() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(clear_quarantine(dir.path()).is_ok());
+    }
+
+    /// On real macOS, clear_quarantine does not panic when invoking xattr.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn clear_quarantine_does_not_panic_on_real_macos_invocation() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = vanilla_bundle(dir.path());
+        // xattr should exist on macOS; calling clear_quarantine should not panic.
+        // It will return Ok even though there's no quarantine attribute present.
+        let result = clear_quarantine(&bundle);
+        assert!(result.is_ok(), "clear_quarantine should not panic on real macOS");
     }
 }
