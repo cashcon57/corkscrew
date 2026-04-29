@@ -1682,19 +1682,34 @@ pub fn deploy_wine_game(
     )
 }
 
-/// Native macOS deployment stub. For Phase 1 this returns an error —
-/// per-game native plugins (Stardew in Task 3.7, BG3 in Task 4.4) provide
-/// the real implementation via this entry point. Returning an error here
-/// ensures unsupported native games fail loudly rather than silently
-/// corrupting state.
+/// Native macOS deployment dispatcher. Routes to the registered per-game
+/// plugin's [`crate::games::GamePlugin::deploy_native`] implementation.
+///
+/// If a plugin is registered for `detected.game_id`, its `deploy_native`
+/// method is called and the result propagated. If no plugin matches (e.g. a
+/// native game discovered via appmanifest scanning with no dedicated plugin),
+/// a clear "not implemented" error is returned so callers fail loudly rather
+/// than silently corrupting state.
+///
+/// Wine games are not routed here — see [`deploy_wine_game`].
 pub fn deploy_native_game(
     detected: &crate::games::DetectedGame,
-    _db: &std::sync::Arc<ModDatabase>,
+    db: &std::sync::Arc<ModDatabase>,
 ) -> Result<DeployResult> {
-    Err(DeployerError::Other(format!(
-        "native deployment not implemented for {}; per-game plugin must provide it",
-        detected.game_id
-    )))
+    // Dispatch to the registered plugin. `with_plugin` holds the registry
+    // lock only for the duration of the closure, so `deploy_native` is called
+    // inside the lock. This is intentional: native deploy implementations
+    // must be synchronous (no async, no blocking network), matching the
+    // sync guarantees of `with_plugin`.
+    match crate::games::with_plugin(&detected.game_id, |plugin| {
+        plugin.deploy_native(detected, db)
+    }) {
+        Some(result) => result,
+        None => Err(DeployerError::Other(format!(
+            "native deployment not implemented for {}; per-game plugin must provide it",
+            detected.game_id
+        ))),
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -201,6 +201,28 @@ pub trait GamePlugin: Send + Sync {
     fn load_order_kind(&self, _game_path: &Path) -> LoadOrderKind {
         LoadOrderKind::None
     }
+
+    // -- Native deployment --
+
+    /// Deploy all staged mods for a native macOS game installation.
+    ///
+    /// The default implementation returns an error — only native game plugins
+    /// override this. Wine plugins leave it as the default and are never
+    /// dispatched here (see [`crate::deployer::deploy_native_game`]).
+    ///
+    /// Native plugins (Stardew Valley in Task 3.7, BG3 in Task 4.4) override
+    /// this to implement their per-game mod layout (SMAPI `<mods_dir>/<UniqueID>/`
+    /// for Stardew, etc.).
+    fn deploy_native(
+        &self,
+        _detected: &DetectedGame,
+        _db: &std::sync::Arc<crate::database::ModDatabase>,
+    ) -> std::result::Result<crate::deployer::DeployResult, crate::deployer::DeployerError> {
+        Err(crate::deployer::DeployerError::Other(format!(
+            "native deployment not implemented for {}; per-game plugin must provide it",
+            self.game_id()
+        )))
+    }
 }
 
 // ---------------------------------------------------------------------------

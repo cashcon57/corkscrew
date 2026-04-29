@@ -7,11 +7,14 @@
 //! as a fallback for GOG variants).
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::Deserialize;
 use thiserror::Error;
 
 use crate::bottles::Bottle;
+use crate::database::ModDatabase;
+use crate::deployer::{DeployResult, DeployerError};
 use crate::games::{DetectedGame, GamePlugin};
 
 // ---------------------------------------------------------------------------
@@ -180,6 +183,167 @@ impl GamePlugin for StardewValleyNativePlugin {
         // mod folders alphabetically.
         None
     }
+
+    /// Deploy all staged Stardew Valley mods into SMAPI's per-mod folder layout.
+    ///
+    /// SMAPI expects each mod in its own directory under `<game>/Mods/<UniqueID>/`.
+    /// This method:
+    /// 1. Lists all enabled mods registered in the DB for this game.
+    /// 2. For each mod with a staging directory, reads `manifest.json` to
+    ///    extract the mod's `UniqueID`.
+    /// 3. Validates the `UniqueID` is safe (no path traversal, no embedded
+    ///    separators) and resolves to a path inside `<mods_dir>`.
+    /// 4. Creates `<mods_dir>/<UniqueID>/` and copies (or hardlinks if same
+    ///    volume) staged files into it.
+    fn deploy_native(
+        &self,
+        detected: &DetectedGame,
+        db: &Arc<ModDatabase>,
+    ) -> std::result::Result<DeployResult, DeployerError> {
+        use crate::staging::is_safe_relative_path;
+        use std::fs;
+
+        let mods_dir = resolve_mods_dir(detected);
+        fs::create_dir_all(&mods_dir)?;
+
+        // Native games have no bottle; use "" as the bottle_name sentinel.
+        let enabled_mods = db
+            .list_mods(&detected.game_id, "")
+            .map_err(|e| DeployerError::Database(e.to_string()))?;
+
+        let mut deployed_count = 0usize;
+        let mut fallback_used = false;
+
+        for m in enabled_mods.iter().filter(|m| m.enabled) {
+            let staging_path = match &m.staging_path {
+                Some(p) => PathBuf::from(p),
+                None => {
+                    log::warn!(
+                        "stardew deploy_native: mod {} has no staging path, skipping",
+                        m.name
+                    );
+                    continue;
+                }
+            };
+
+            if !staging_path.exists() {
+                log::warn!(
+                    "stardew deploy_native: staging dir missing for mod {}: {}",
+                    m.name,
+                    staging_path.display()
+                );
+                continue;
+            }
+
+            // Read manifest.json from the staging root.
+            let manifest_path = staging_path.join("manifest.json");
+            let manifest = parse_manifest(&manifest_path).map_err(|e| {
+                DeployerError::Other(format!(
+                    "mod '{}': manifest.json error: {}",
+                    m.name, e
+                ))
+            })?;
+
+            let unique_id = &manifest.unique_id;
+
+            // Safety: reject UniqueIDs that would escape <mods_dir>.
+            // SMAPI UniqueIDs are dotted identifiers like "AuthorName.ModName"
+            // and must never contain path separators or traversal sequences.
+            if !is_safe_relative_path(unique_id) || unique_id.contains('/') || unique_id.contains('\\') {
+                return Err(DeployerError::Other(format!(
+                    "mod '{}': UniqueID '{}' contains unsafe path characters",
+                    m.name, unique_id
+                )));
+            }
+
+            let target_dir = mods_dir.join(unique_id);
+
+            // Post-join safety: ensure target_dir is inside mods_dir.
+            // We can't use canonicalize on a path that may not exist yet,
+            // so we normalise via components instead.
+            let normalised_target = normalise_path(&target_dir);
+            let normalised_mods = normalise_path(&mods_dir);
+            if !normalised_target.starts_with(&normalised_mods) {
+                return Err(DeployerError::Other(format!(
+                    "mod '{}': resolved target '{}' escapes mods dir '{}'",
+                    m.name,
+                    target_dir.display(),
+                    mods_dir.display()
+                )));
+            }
+
+            fs::create_dir_all(&target_dir)?;
+
+            // Copy every file from the staging root into the target dir.
+            // Hardlink when on the same filesystem (zero extra disk space).
+            let can_hardlink = crate::deployer::same_filesystem(&staging_path, &target_dir);
+
+            for entry in walkdir::WalkDir::new(&staging_path)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_file())
+            {
+                let rel = entry
+                    .path()
+                    .strip_prefix(&staging_path)
+                    .expect("walkdir entry must be inside staging root");
+
+                let dst = target_dir.join(rel);
+                if let Some(parent) = dst.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+
+                if can_hardlink {
+                    match fs::hard_link(entry.path(), &dst) {
+                        Ok(()) => {}
+                        Err(_) => {
+                            // Hardlink failed (e.g. destination already exists from a
+                            // previous deploy pass). Remove and retry, then copy.
+                            let _ = fs::remove_file(&dst);
+                            match fs::hard_link(entry.path(), &dst) {
+                                Ok(()) => {}
+                                Err(_) => {
+                                    fs::copy(entry.path(), &dst)?;
+                                    fallback_used = true;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // Different filesystem — copy directly.
+                    let _ = fs::remove_file(&dst); // overwrite if present
+                    fs::copy(entry.path(), &dst)?;
+                    fallback_used = true;
+                }
+
+                deployed_count += 1;
+            }
+        }
+
+        Ok(DeployResult {
+            deployed_count,
+            skipped_count: 0,
+            fallback_used,
+        })
+    }
+}
+
+/// Collapse `.` and `..` components from a `Path` without touching the
+/// filesystem. Used for pre-existence path safety checks where
+/// [`std::fs::canonicalize`] cannot be used (target may not exist yet).
+fn normalise_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -510,6 +674,192 @@ mod tests {
             steam_app_id: Some("413150".into()),
         };
         assert_eq!(resolve_mods_dir(&detected), game_path.join("Mods"));
+    }
+
+    // -----------------------------------------------------------------------
+    // deploy_native tests (Task 3.7)
+    // -----------------------------------------------------------------------
+
+    /// Build a synthetic `DetectedGame` with a native runtime rooted at `game_path`.
+    fn fake_detected_game(game_path: &std::path::Path) -> DetectedGame {
+        DetectedGame {
+            game_id: "stardew_valley_native".into(),
+            display_name: "Stardew Valley".into(),
+            nexus_slug: "stardewvalley".into(),
+            game_path: game_path.to_path_buf(),
+            exe_path: Some(game_path.join("StardewValley")),
+            data_dir: game_path.join("Mods"),
+            runtime: crate::runtime::GameRuntime::Native(crate::runtime::NativeContext {
+                app_bundle_path: game_path
+                    .parent()
+                    .and_then(|p| p.parent())
+                    .unwrap_or(game_path)
+                    .to_path_buf(),
+                game_data_root: game_path.to_path_buf(),
+                architecture: Architecture::Universal,
+                sandboxed: false,
+                source: NativeSource::Steam,
+            }),
+            steam_app_id: Some("413150".into()),
+        }
+    }
+
+    /// Happy-path: staged mod with a valid manifest.json is deployed into
+    /// `<mods_dir>/<UniqueID>/` and all staged files appear there.
+    #[test]
+    fn stardew_deploy_native_creates_mod_folder_with_unique_id() {
+        use std::sync::Arc;
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Set up a fake "game" directory and staging directory.
+        let game_path = tmp.path().join("MacOS");
+        let staging_dir = tmp.path().join("staging").join("my_mod");
+        std::fs::create_dir_all(&game_path).unwrap();
+        std::fs::create_dir_all(&staging_dir).unwrap();
+
+        // Write a valid SMAPI manifest.json in the staging root.
+        std::fs::write(
+            staging_dir.join("manifest.json"),
+            r#"{"Name":"My Mod","Version":"1.0.0","UniqueID":"tester.MyMod"}"#,
+        )
+        .unwrap();
+        // Write an additional staged file.
+        std::fs::write(staging_dir.join("MyMod.dll"), b"fake dll").unwrap();
+
+        // Set up an in-memory DB and add the mod with the staging path.
+        let db_path = tmp.path().join("test.db");
+        let db = Arc::new(crate::database::ModDatabase::new(&db_path).unwrap());
+        let mod_id = db
+            .add_mod(
+                "stardew_valley_native",
+                "",
+                None,
+                "My Mod",
+                "1.0.0",
+                "MyMod.zip",
+                &[],
+            )
+            .unwrap();
+        db.set_staging_path(mod_id, &staging_dir.to_string_lossy())
+            .unwrap();
+
+        let detected = fake_detected_game(&game_path);
+        let plugin = StardewValleyNativePlugin;
+        let result = plugin.deploy_native(&detected, &db).unwrap();
+
+        // Both files should have been deployed.
+        assert_eq!(result.deployed_count, 2, "manifest.json + MyMod.dll");
+
+        // Verify the per-mod folder was created with the correct UniqueID.
+        let expected_dir = game_path.join("Mods").join("tester.MyMod");
+        assert!(
+            expected_dir.exists(),
+            "per-mod folder <mods_dir>/tester.MyMod/ must exist"
+        );
+        assert!(
+            expected_dir.join("manifest.json").exists(),
+            "manifest.json must be present in target dir"
+        );
+        assert!(
+            expected_dir.join("MyMod.dll").exists(),
+            "MyMod.dll must be present in target dir"
+        );
+    }
+
+    /// A UniqueID that contains a path traversal sequence (`..`) must be
+    /// rejected with an error; no files should be written outside `<mods_dir>`.
+    #[test]
+    fn stardew_deploy_native_refuses_path_outside_mods_dir() {
+        use std::sync::Arc;
+        let tmp = tempfile::tempdir().unwrap();
+
+        let game_path = tmp.path().join("MacOS");
+        let staging_dir = tmp.path().join("staging").join("evil_mod");
+        std::fs::create_dir_all(&game_path).unwrap();
+        std::fs::create_dir_all(&staging_dir).unwrap();
+
+        // A manifest whose UniqueID contains path-traversal characters.
+        std::fs::write(
+            staging_dir.join("manifest.json"),
+            r#"{"Name":"Evil","Version":"1.0.0","UniqueID":"../../../etc/evil"}"#,
+        )
+        .unwrap();
+
+        let db_path = tmp.path().join("test.db");
+        let db = Arc::new(crate::database::ModDatabase::new(&db_path).unwrap());
+        let mod_id = db
+            .add_mod(
+                "stardew_valley_native",
+                "",
+                None,
+                "Evil Mod",
+                "1.0.0",
+                "evil.zip",
+                &[],
+            )
+            .unwrap();
+        db.set_staging_path(mod_id, &staging_dir.to_string_lossy())
+            .unwrap();
+
+        let detected = fake_detected_game(&game_path);
+        let plugin = StardewValleyNativePlugin;
+        let result = plugin.deploy_native(&detected, &db);
+
+        assert!(
+            result.is_err(),
+            "path-traversal UniqueID must be rejected"
+        );
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("unsafe path characters") || msg.contains("escapes mods dir"),
+            "error should mention unsafe path or escape: {msg}"
+        );
+    }
+
+    /// A staged mod directory that has no `manifest.json` must cause an error
+    /// rather than being silently skipped, so missing manifests are caught early.
+    #[test]
+    fn stardew_deploy_native_returns_err_for_missing_manifest() {
+        use std::sync::Arc;
+        let tmp = tempfile::tempdir().unwrap();
+
+        let game_path = tmp.path().join("MacOS");
+        let staging_dir = tmp.path().join("staging").join("no_manifest");
+        std::fs::create_dir_all(&game_path).unwrap();
+        std::fs::create_dir_all(&staging_dir).unwrap();
+
+        // Write a file but NOT a manifest.json.
+        std::fs::write(staging_dir.join("SomeMod.dll"), b"bytes").unwrap();
+
+        let db_path = tmp.path().join("test.db");
+        let db = Arc::new(crate::database::ModDatabase::new(&db_path).unwrap());
+        let mod_id = db
+            .add_mod(
+                "stardew_valley_native",
+                "",
+                None,
+                "No Manifest Mod",
+                "1.0.0",
+                "nomanifest.zip",
+                &[],
+            )
+            .unwrap();
+        db.set_staging_path(mod_id, &staging_dir.to_string_lossy())
+            .unwrap();
+
+        let detected = fake_detected_game(&game_path);
+        let plugin = StardewValleyNativePlugin;
+        let result = plugin.deploy_native(&detected, &db);
+
+        assert!(
+            result.is_err(),
+            "missing manifest.json must return an error"
+        );
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("manifest.json"),
+            "error should mention manifest.json: {msg}"
+        );
     }
 
     // -----------------------------------------------------------------------
