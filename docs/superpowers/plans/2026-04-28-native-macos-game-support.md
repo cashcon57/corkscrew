@@ -8,6 +8,11 @@
 
 **Tech Stack:** Tauri v2 + Svelte 5 + Rust. Reuses existing deps — `quick-xml` for BG3 LSX, `tauri-plugin-liquid-glass = "0.1"` already wired (no new deps), `window-vibrancy = "0.7"` for native vibrancy ratchet, `dirs` for HOME paths, `walkdir`, `serde`. New module surface: `native_scanner.rs`, `plugins/stardew_valley_native.rs`, `plugins/baldurs_gate_3_native.rs`, `bg3_lsx.rs`, `smapi.rs`, frontend `/src/routes/native/*` + `/src/lib/native/*`.
 
+**Execution status (live):**
+- ✅ Task 1.1 (GameRuntime types) landed at `bc5a62d`.
+- ✅ Task 1.2 (DB migration v23) landed at `3c3e2c8`.
+- 🔍 **Discovery during Task 1.2:** the `games` table did NOT exist in any prior migration (only `custom_games` for user-added games). `DetectedGame` is a transient runtime struct, never persisted. Migration v23 *creates* the table for the first time. Plan amended below: **Task 1.3 is now mechanical struct-rename only** (no DB persistence layer to refactor); the `database.rs` games-table API moves into **revised Task 2.7**.
+
 **Versioning rollout:**
 - **v0.14.0** — Phases 1–2 (runtime split + native scanner) behind config feature flag `experimental.native_mode = false`. No native plugins shipped yet; existing Wine functionality unchanged.
 - **v0.14.x** — Patches as needed.
@@ -47,7 +52,7 @@ These are the only items that **require external verification** before their tas
 |---|---|
 | `src-tauri/src/games.rs` | `DetectedGame.runtime: GameRuntime`; trait split `detect_wine` + `detect_native`. |
 | `src-tauri/src/migrations.rs` | New migration `v22 → v23` adds runtime column, nullable bottle, native paths. |
-| `src-tauri/src/database.rs` | Read/write helpers updated for runtime column. |
+| `src-tauri/src/database.rs` | NEW: games-table read/write API (introduced in revised Task 2.7, not Task 1.3 — there is no pre-existing API to refactor). |
 | `src-tauri/src/deployer.rs` | Split into `deploy_wine_game` / `deploy_native_game`. |
 | `src-tauri/src/lib.rs` | Register new plugins, init native scanner, expose new commands. |
 | `src-tauri/src/config.rs` | New field `native_mode: bool` (default false), `experimental_native: bool`. |
@@ -386,46 +391,72 @@ git commit -m "v0.14.0-wip: db migration v23 — runtime column + native fields"
 
 ---
 
-### Task 1.3: Refactor `DetectedGame` to carry `GameRuntime`
+### Task 1.3 (REVISED): Mechanical struct rename — `DetectedGame.bottle_*` → `runtime: GameRuntime`
 
-**Goal:** `DetectedGame` no longer has bottle fields directly; they move into `GameRuntime::Wine(...)`.
+> **Scope correction:** The original Task 1.3 also called for `database.rs` read/write helper updates. Discovery during Task 1.2 confirmed there are no existing `games`-table read/write helpers — the table itself was first created in v23. The `database.rs` games-table API now lives in **revised Task 2.7**. Task 1.3 is purely an in-memory struct rename + compile-driven call-site fixes.
+
+**Goal:** `DetectedGame` no longer carries bottle fields directly; they move into `GameRuntime::Wine(WineContext { ... })`. Pure mechanical refactor; existing 1353 tests must still pass.
 
 **Files:**
-- Modify: `src-tauri/src/games.rs` (struct + impl)
-- Modify: `src-tauri/src/database.rs` (read/write helpers)
-- Modify: any direct field accessors in callers — search and fix
+- Modify: `src-tauri/src/games.rs` (struct definition + any internal constructor)
+- Modify: every other file that reads `.bottle_name` or `.bottle_path` on a `DetectedGame` value (use `cargo build` errors as the worklist)
+- Likely call sites (verify with grep): `src-tauri/src/game_registry.rs`, `src-tauri/src/commands/*.rs`, `src-tauri/src/launcher.rs`, possibly `src-tauri/src/games.rs::detect_all_games_with_custom`
+
+**Out of scope (do NOT touch):**
+- `src-tauri/src/database.rs` — no games-table API exists yet; do not invent one. That's Task 2.7.
+- `custom_games` table or its read/write functions in `game_registry.rs` — different table, different struct shape, unaffected by this refactor.
 
 **Acceptance Criteria:**
-- [ ] `DetectedGame.bottle_name` / `.bottle_path` removed
-- [ ] `DetectedGame.runtime: GameRuntime` added
-- [ ] All call sites compile (use `runtime.wine()?.bottle_name` etc.)
-- [ ] DB serialization writes/reads runtime column correctly
-- [ ] `cargo build` succeeds
+- [ ] `DetectedGame.bottle_name` / `.bottle_path` fields are removed from the struct
+- [ ] `DetectedGame.runtime: GameRuntime` field is added
+- [ ] Every callsite that previously read `.bottle_name` / `.bottle_path` now reads through `runtime.wine()?.bottle_name` (or the `Wine`-required pattern below)
+- [ ] All constructors of `DetectedGame` (including `detect_unregistered_steam_games` in `game_registry.rs` and `load_custom_games` if it builds DetectedGames) build the `runtime: GameRuntime::Wine(WineContext { ... })` field correctly
+- [ ] `cargo build` succeeds with zero errors
+- [ ] `cargo test` runs all 1353 existing tests with zero failures
+- [ ] No new tests required — this is a refactor with full coverage from existing tests
 
-**Verify:** `cd src-tauri && cargo build && cargo test --lib games::` → 0 failures
+**Verify (run all):**
+
+```bash
+cd /Users/cashconway/Corkscrew-native-mode/src-tauri
+cargo build 2>&1 | tail -20
+# Expected: clean build
+
+cargo test 2>&1 | grep "test result" | tail -5
+# Expected: every line shows "0 failed"
+
+cargo clippy -- --allow clippy::too_many_arguments --allow clippy::type_complexity 2>&1 | grep -i 'warning\|error' | grep -v "previously emitted" | head -10
+# Expected: no NEW warnings/errors from the changed files
+```
 
 **Steps:**
 
-- [ ] **Step 1: Find every reader of `bottle_name` / `bottle_path` on `DetectedGame`**
+- [ ] **Step 1: Inventory call sites**
 
-Run: `cd src-tauri && grep -rn '\.bottle_name\|\.bottle_path' src/ | grep -v '/runtime.rs' | wc -l`
-Note count for the migration audit.
+```bash
+cd /Users/cashconway/Corkscrew-native-mode/src-tauri
+grep -rn '\.bottle_name\|\.bottle_path' src/ | grep -v '/runtime.rs'
+```
 
-- [ ] **Step 2: Replace struct definition**
+Note the count and the file list. Constructors will need updating too — find them:
 
-In `src-tauri/src/games.rs`:
+```bash
+grep -rn 'DetectedGame {' src/ | head -20
+```
+
+- [ ] **Step 2: Replace `DetectedGame` struct definition**
+
+In `src-tauri/src/games.rs` (currently lines ~244–267):
 
 ```rust
-/// A game found by Corkscrew. Runtime determines whether it lives inside
-/// a Wine bottle or as a native macOS app.
+/// A game found by Corkscrew. The `runtime` field discriminates between
+/// Wine/CrossOver games (carry a `WineContext`) and native macOS games
+/// (carry a `NativeContext`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DetectedGame {
     pub game_id: String,
     pub display_name: String,
     pub nexus_slug: String,
-    /// Absolute path to the game installation root.
-    /// For Wine: inside the bottle. For native: the .app bundle path or its
-    /// resources subdir, per per-game plugin convention.
     pub game_path: PathBuf,
     pub exe_path: Option<PathBuf>,
     pub data_dir: PathBuf,
@@ -435,56 +466,78 @@ pub struct DetectedGame {
 }
 ```
 
-- [ ] **Step 3: Update every call site (compile-error-driven)**
+- [ ] **Step 3: Fix constructors first (where DetectedGame is built)**
+
+Every place that builds a `DetectedGame { ... }` literal needs to swap `bottle_name`/`bottle_path` for `runtime: GameRuntime::Wine(WineContext { bottle_name, bottle_path, source })`. The `source` value is whatever `Bottle::source` is in the local context (or `bottle.source.clone()`).
+
+Common pattern:
+
+```rust
+// Before:
+DetectedGame {
+    game_id: ...,
+    bottle_name: bottle.name.clone(),
+    bottle_path: bottle.path.clone(),
+    ...
+}
+
+// After:
+DetectedGame {
+    game_id: ...,
+    runtime: GameRuntime::Wine(WineContext {
+        bottle_name: bottle.name.clone(),
+        bottle_path: bottle.path.clone(),
+        source: bottle.source.clone(),
+    }),
+    ...
+}
+```
+
+Add `use crate::runtime::{GameRuntime, WineContext};` to each file that builds the variant.
+
+- [ ] **Step 4: Fix readers (compile-error-driven)**
 
 Run `cargo build` and fix each error in turn. Common patterns:
 
 ```rust
-// Before:
-let bottle_name = detected.bottle_name.clone();
-
-// After:
+// Read with default fallback (rare — most readers should be Wine-context-aware):
 let bottle_name = detected.runtime.wine()
-    .map(|w| w.bottle_name.clone())
-    .unwrap_or_default();
-```
+    .map(|w| w.bottle_name.as_str())
+    .unwrap_or("");
 
-For sites that ASSUME a bottle context (Wine-only commands), use:
-
-```rust
+// Wine-required (most callsites — Wine commands that should error on native):
 let wine = detected.runtime.wine()
     .ok_or_else(|| "this command requires a Wine game".to_string())?;
 let bottle_path = &wine.bottle_path;
 ```
 
-- [ ] **Step 4: Update DB write/read in `database.rs`**
+Use the second pattern by default. Use the first only when there is genuinely a fallback story (which there usually isn't — failing loudly is correct behavior for "you tried a Wine action on a native game").
 
-When inserting `DetectedGame` rows, emit `runtime` + appropriate native/wine columns. When reading, reconstruct `GameRuntime` from `runtime` discriminator + applicable columns. Add a helper:
-
-```rust
-fn row_to_runtime(
-    runtime: &str,
-    bottle_name: Option<String>,
-    bottle_path: Option<String>,
-    source: Option<String>,
-    native_app_path: Option<String>,
-    native_data_root: Option<String>,
-    native_architecture: Option<String>,
-    native_sandboxed: i64,
-    native_source: Option<String>,
-) -> Result<GameRuntime, DbError> { /* ... */ }
-```
-
-- [ ] **Step 5: Run all backend tests**
-
-Run: `cd src-tauri && cargo test`
-Expected: 0 failures. Existing 787+ tests should all still pass — runtime split is mechanical.
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Re-run full suite, ensure zero regressions**
 
 ```bash
-git add src-tauri/src/games.rs src-tauri/src/database.rs src-tauri/src/
-git commit -m "v0.14.0-wip: DetectedGame.runtime replaces bottle_* fields"
+cd /Users/cashconway/Corkscrew-native-mode/src-tauri && cargo test 2>&1 | grep "test result" | tail -5
+```
+
+Expected: every line `0 failed`.
+
+- [ ] **Step 6: Commit + push**
+
+```bash
+cd /Users/cashconway/Corkscrew-native-mode
+git add src-tauri/src/
+git commit -m "$(cat <<'EOF'
+v0.14.0-wip: DetectedGame.runtime replaces bottle_* fields (mechanical)
+
+Pure struct rename: bottle_name + bottle_path move into
+GameRuntime::Wine(WineContext { ... }). All existing call sites updated
+to read through runtime.wine(). No DB persistence layer added — that's
+revised Task 2.7. All 1353 existing tests still pass.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+EOF
+)"
+git push origin feature/native-mode
 ```
 
 ---
@@ -1112,23 +1165,74 @@ git commit -m "v0.14.0-wip: GOG mac scanner + manual native add command"
 
 ---
 
-### Task 2.7: Aggregate scanner + DB persistence
+### Task 2.7 (REVISED): Aggregate scanner + games-table API in `database.rs` + persistence
 
-**Goal:** One entry point `scan_all_native()` that returns deduped candidates and persists them to DB on demand.
+> **Scope expansion:** Originally this task only added `scan_all_native()` and a Tauri command that wrote rows. The discovery during Task 1.2 (no pre-existing games-table API) means this task now also designs and implements the read/write surface in `database.rs` for the games table created by migration v23.
+
+**Goal:** One entry point `scan_all_native()` that returns deduped candidates, plus the canonical games-table API in `database.rs`, plus a Tauri command that persists scan results.
 
 **Files:**
-- Modify: `src-tauri/src/native_scanner.rs`
+- Modify: `src-tauri/src/native_scanner.rs` (add `scan_all_native`)
+- Modify: `src-tauri/src/database.rs` (NEW: games-table API — see below)
 - Modify: `src-tauri/src/lib.rs` (register `rescan_native_games` command)
+
+**Games-table API to add to `database.rs`:**
+
+```rust
+// Persistence shape — mirrors the v23 schema. NOT the same as DetectedGame
+// (which is the in-memory struct passed to the frontend).
+#[derive(Clone, Debug)]
+pub struct PersistedGame {
+    pub game_id: String,
+    pub runtime: crate::runtime::GameRuntime,
+}
+
+impl ModDatabase {
+    /// Insert or update a row in the `games` table. Used by the native
+    /// scanner to record discovered native games. Wine games are typically
+    /// NOT persisted (they're runtime-detected per-launch), but this fn
+    /// supports both runtimes for completeness.
+    pub fn upsert_game(&self, game: &PersistedGame) -> Result<(), DbError> { /* ... */ }
+
+    /// Read all persisted games. Native scanner calls this on startup to
+    /// surface previously-discovered native installs without rescanning.
+    pub fn list_persisted_games(&self) -> Result<Vec<PersistedGame>, DbError> { /* ... */ }
+
+    /// Read a single persisted game by id, or None if not present.
+    pub fn get_persisted_game(&self, game_id: &str) -> Result<Option<PersistedGame>, DbError> { /* ... */ }
+
+    /// Remove a persisted game (e.g. user uninstalled it).
+    pub fn delete_persisted_game(&self, game_id: &str) -> Result<(), DbError> { /* ... */ }
+}
+```
+
+The implementor designs the row→`GameRuntime` reconstruction. Use a private helper `row_to_runtime(...)` that takes the relevant column values (runtime discriminator, all wine + native columns) and builds the appropriate `GameRuntime` variant.
 
 **Acceptance Criteria:**
 - [ ] `scan_all_native()` calls `scan_applications_dirs`, `scan_steam_mac`, `scan_gog_mac`; dedupes by canonical `bundle_path`
-- [ ] Tauri command `rescan_native_games(state)` calls it, writes results to DB via existing `games` table inserts
-- [ ] Test: dedup logic with synthetic overlapping candidates
+- [ ] `database.rs` has the 4 new methods above (`upsert_game`, `list_persisted_games`, `get_persisted_game`, `delete_persisted_game`)
+- [ ] `PersistedGame` round-trips correctly through `upsert_game` → `list_persisted_games` for both Wine and Native variants
+- [ ] Tauri command `rescan_native_games(state)` calls `scan_all_native`, then for each candidate constructs a `PersistedGame` and calls `upsert_game`
+- [ ] Tests:
+  - Dedup logic with synthetic overlapping candidates
+  - `upsert_game` / `list_persisted_games` round-trip for Wine variant
+  - `upsert_game` / `list_persisted_games` round-trip for Native variant
+  - `get_persisted_game` returns `Some` after upsert, `None` after delete
+  - `upsert_game` is idempotent (calling twice replaces, doesn't insert duplicate)
 
-**Verify:** `cd src-tauri && cargo test --lib native_scanner::aggregate` → pass
+**Verify:**
 
 ```bash
-git commit -m "v0.14.0-wip: aggregate native scanner + rescan_native_games command"
+cd /Users/cashconway/Corkscrew-native-mode/src-tauri
+cargo test --lib native_scanner::aggregate 2>&1 | tail -10
+cargo test --lib database::persisted_game 2>&1 | tail -15
+cargo test 2>&1 | grep "test result" | tail -5
+```
+
+Expected: every line `0 failed`.
+
+```bash
+git commit -m "v0.14.0-wip: games-table API in database.rs + native scanner persistence"
 ```
 
 ---
