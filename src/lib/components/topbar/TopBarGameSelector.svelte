@@ -1,9 +1,9 @@
 <script lang="ts">
-  import { selectedGame, showUninstalledGames, uninstalledGames } from "$lib/stores";
+  import { selectedGame, showUninstalledGames, uninstalledGames, nativeMode } from "$lib/stores";
   import GameIcon from "$lib/components/GameIcon.svelte";
   import GameSupportBadge from "$lib/components/GameSupportBadge.svelte";
-  import type { DetectedGame, KnownUninstalledGame } from "$lib/types";
-  import { setConfigValue, listKnownUninstalledGames } from "$lib/api";
+  import type { DetectedGame, KnownUninstalledGame, NativeAppCandidate } from "$lib/types";
+  import { setConfigValue, listKnownUninstalledGames, rescanNativeGames } from "$lib/api";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { wineCtx } from "$lib/types";
 
@@ -28,6 +28,47 @@
     onToggle,
     onClose,
   }: Props = $props();
+
+  // ── Native mode state ────────────────────────────────────────────────────
+  let nativeCandidates: NativeAppCandidate[] = $state([]);
+  let nativeLoading = $state(false);
+
+  async function loadNativeCandidates() {
+    nativeLoading = true;
+    try {
+      nativeCandidates = await rescanNativeGames();
+    } catch (err) {
+      console.error('loadNativeCandidates: rescanNativeGames failed:', err);
+    } finally {
+      nativeLoading = false;
+    }
+  }
+
+  $effect(() => {
+    if ($nativeMode) {
+      loadNativeCandidates();
+    }
+  });
+
+  function archBadge(a: string): string {
+    return ({
+      apple_silicon: "Apple Silicon",
+      intel_only: "Intel",
+      universal: "Universal",
+      unknown: "Unknown",
+    } as Record<string, string>)[a] ?? a;
+  }
+
+  function sourceBadge(s: string): string {
+    return ({
+      system_applications: "/Applications",
+      steam: "Steam",
+      gog: "GOG",
+      manual: "Manual",
+      app_store: "App Store",
+    } as Record<string, string>)[s] ?? s;
+  }
+  // ─────────────────────────────────────────────────────────────────────────
 
   function selectGame(game: DetectedGame) {
     onPickGame(game);
@@ -108,62 +149,94 @@
 
   {#if isOpen}
     <div class="topbar-dropdown" onclick={(e) => e.stopPropagation()}>
-      {#if detectedGames.length > 0}
-        <div class="dropdown-section-label">Installed</div>
-        {#each detectedGames as game}
-          <button
-            class="dropdown-item"
-            class:active={$selectedGame?.game_id === game.game_id && ($selectedGame ? wineCtx($selectedGame)?.bottle_name : null) === wineCtx(game)?.bottle_name}
-            onclick={() => selectGame(game)}
-          >
-            <GameIcon gameId={game.game_id} steamAppId={game.steam_app_id} size={16} />
-            <div class="dropdown-item-text">
-              <span class="dropdown-item-name">{game.display_name}</span>
-              <span class="dropdown-item-sub">{(wineCtx(game)?.bottle_name ?? "")}</span>
-            </div>
-            <GameSupportBadge gameId={game.game_id} compact hideWhenVerified />
-          </button>
-        {/each}
+      {#if $nativeMode}
+        <!-- Native macOS game list -->
+        {#if nativeLoading}
+          <div class="dropdown-empty">Scanning native games…</div>
+        {:else if nativeCandidates.length === 0}
+          <div class="dropdown-empty">No native games found.</div>
+        {:else}
+          <div class="dropdown-section-label">Native installs</div>
+          {#each nativeCandidates as candidate}
+            <button
+              class="dropdown-item"
+              class:disabled={candidate.sandboxed}
+              disabled={candidate.sandboxed}
+              title={candidate.sandboxed ? "Sandboxed (cannot be modded)" : candidate.bundle_path}
+              onclick={() => { onClose(); }}
+            >
+              <div class="dropdown-item-text">
+                <span class="dropdown-item-name">{candidate.info.bundle_executable}</span>
+                <div class="badges">
+                  <span class="badge">{archBadge(candidate.architecture)}</span>
+                  <span class="badge">{sourceBadge(candidate.source)}</span>
+                  {#if candidate.sandboxed}
+                    <span class="badge warn">Sandboxed</span>
+                  {/if}
+                </div>
+              </div>
+            </button>
+          {/each}
+        {/if}
       {:else}
-        <div class="dropdown-empty">No games detected</div>
-      {/if}
+        <!-- Wine / bottle-scoped game list -->
+        {#if detectedGames.length > 0}
+          <div class="dropdown-section-label">Installed</div>
+          {#each detectedGames as game}
+            <button
+              class="dropdown-item"
+              class:active={$selectedGame?.game_id === game.game_id && ($selectedGame ? wineCtx($selectedGame)?.bottle_name : null) === wineCtx(game)?.bottle_name}
+              onclick={() => selectGame(game)}
+            >
+              <GameIcon gameId={game.game_id} steamAppId={game.steam_app_id} size={16} />
+              <div class="dropdown-item-text">
+                <span class="dropdown-item-name">{game.display_name}</span>
+                <span class="dropdown-item-sub">{(wineCtx(game)?.bottle_name ?? "")}</span>
+              </div>
+              <GameSupportBadge gameId={game.game_id} compact hideWhenVerified />
+            </button>
+          {/each}
+        {:else}
+          <div class="dropdown-empty">No games detected</div>
+        {/if}
 
-      {#if $showUninstalledGames && $uninstalledGames.length > 0}
-        <div class="dropdown-section-label">Not Installed</div>
-        {#each $uninstalledGames as game}
-          <button
-            class="dropdown-item dropdown-item-uninstalled"
-            onclick={() => browseUninstalled(game)}
-            title="Browse {game.name} mods on Nexus"
-          >
-            <GameIcon gameId={game.game_id} size={16} />
-            <div class="dropdown-item-text">
-              <span class="dropdown-item-name">{game.name}</span>
-              <span class="dropdown-item-sub">Browse on Nexus</span>
-            </div>
-            <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.6">
-              <path d="M3 13l10-10" /><path d="M6 3h7v7" />
+        {#if $showUninstalledGames && $uninstalledGames.length > 0}
+          <div class="dropdown-section-label">Not Installed</div>
+          {#each $uninstalledGames as game}
+            <button
+              class="dropdown-item dropdown-item-uninstalled"
+              onclick={() => browseUninstalled(game)}
+              title="Browse {game.name} mods on Nexus"
+            >
+              <GameIcon gameId={game.game_id} size={16} />
+              <div class="dropdown-item-text">
+                <span class="dropdown-item-name">{game.name}</span>
+                <span class="dropdown-item-sub">Browse on Nexus</span>
+              </div>
+              <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.6">
+                <path d="M3 13l10-10" /><path d="M6 3h7v7" />
+              </svg>
+            </button>
+          {/each}
+        {/if}
+
+        <div class="dropdown-footer">
+          <label class="dropdown-toggle">
+            <input
+              type="checkbox"
+              checked={$showUninstalledGames}
+              onchange={toggleShowUninstalled}
+            />
+            <span>Show uninstalled games</span>
+          </label>
+          <button class="dropdown-action" onclick={() => { onNavigate("dashboard"); onClose(); }}>
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="8" y1="3" x2="8" y2="13" /><line x1="3" y1="8" x2="13" y2="8" />
             </svg>
+            Add Game
           </button>
-        {/each}
+        </div>
       {/if}
-
-      <div class="dropdown-footer">
-        <label class="dropdown-toggle">
-          <input
-            type="checkbox"
-            checked={$showUninstalledGames}
-            onchange={toggleShowUninstalled}
-          />
-          <span>Show uninstalled games</span>
-        </label>
-        <button class="dropdown-action" onclick={() => { onNavigate("dashboard"); onClose(); }}>
-          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <line x1="8" y1="3" x2="8" y2="13" /><line x1="3" y1="8" x2="13" y2="8" />
-          </svg>
-          Add Game
-        </button>
-      </div>
     </div>
   {/if}
 </div>
@@ -394,4 +467,29 @@
     border-color: var(--separator);
   }
 
+  /* ── Native mode badge styles ─────────────────────────────────────────── */
+  .badges {
+    display: flex;
+    gap: 6px;
+    margin-top: 4px;
+    flex-wrap: wrap;
+  }
+
+  .badge {
+    background: var(--surface);
+    color: var(--text-secondary);
+    padding: 2px 6px;
+    border-radius: 10px;
+    font-size: 10px;
+  }
+
+  .badge.warn {
+    background: var(--yellow-subtle, rgba(255, 200, 0, 0.15));
+    color: var(--yellow, #f5a623);
+  }
+
+  .dropdown-item.disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
 </style>
