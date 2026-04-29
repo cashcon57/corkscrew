@@ -293,16 +293,11 @@ fn find_entry<'a>(entries: &'a [PakEntry], want: &str) -> Option<&'a PakEntry> {
         })
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
+// ─── Test helpers (pub(crate) so BG3 plugin tests can build synthetic paks) ───
 
+/// Fixture meta.lsx XML reused by both bg3_pak and bg3 plugin tests.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-
-    // ── Fixture meta.lsx (same XML used in bg3_lsx tests) ─────────────────────
-    const META_LSX_XML: &[u8] = br#"<?xml version="1.0" encoding="UTF-8"?>
+pub(crate) const TEST_META_LSX_XML: &[u8] = br#"<?xml version="1.0" encoding="UTF-8"?>
 <save>
     <version major="4" minor="0" revision="0" build="0" />
     <region id="Config">
@@ -322,16 +317,18 @@ mod tests {
 </save>
 "#;
 
-    // ── Synthetic LSPK builder ─────────────────────────────────────────────────
-
-    /// Build a minimal, valid V18 LSPK byte buffer containing a single
-    /// uncompressed file at `entry_name` with `payload` as its content.
-    ///
-    /// Layout:
-    ///   [header][payload bytes][file table block]
-    ///
-    /// The file table block is LZ4-compressed (as required by the format).
-    fn make_minimal_lspk(entry_name: &str, payload: &[u8]) -> Vec<u8> {
+/// Build a minimal, valid V18 LSPK byte buffer containing a single
+/// uncompressed file at `entry_name` with `payload` as its content.
+///
+/// Layout:
+///   [header][payload bytes][file table block]
+///
+/// The file table block is LZ4-compressed (as required by the format).
+///
+/// Exposed as `pub(crate)` so other test modules (e.g. the BG3 plugin tests)
+/// can build synthetic `.pak` fixtures without duplicating this infrastructure.
+#[cfg(test)]
+pub(crate) fn make_minimal_lspk(entry_name: &str, payload: &[u8]) -> Vec<u8> {
         // --- 1. Build the file entry (288 bytes) --------------------------------
         let mut file_entry = [0u8; FILE_ENTRY_SIZE];
 
@@ -406,6 +403,18 @@ mod tests {
 
         buf
     }
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    // META_LSX_XML is available via crate::bg3_pak::TEST_META_LSX_XML at
+    // module level; re-alias it here for convenience.
+    use crate::bg3_pak::TEST_META_LSX_XML as META_LSX_XML;
 
     /// Write bytes to a temp file and return the NamedTempFile.
     fn write_temp(data: &[u8]) -> NamedTempFile {
