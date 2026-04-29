@@ -404,7 +404,8 @@ fn merge_cxmenu_shortcuts(bottle: &Bottle, out: &mut Vec<CrossoverShortcut>) {
         out.push(CrossoverShortcut {
             bottle_name: bottle.name.clone(),
             display_name,
-            // Use the bottle root as source_lnk_path to signal cxmenu origin.
+            // Use the cxmenu file path as source_lnk_path to signal cxmenu
+            // origin (distinguishable from .lnk-derived shortcuts by extension).
             source_lnk_path: cxmenu_path.clone(),
             windows_target: win_path.clone(),
             host_target,
@@ -1304,7 +1305,9 @@ mod tests {
         // Create a fake game exe in drive_c that cxmenu.conf references.
         let game_dir = bottle.drive_c().join("Games").join("EldenRing");
         fs::create_dir_all(&game_dir).unwrap();
-        // Use a large file so is_likely_game() passes (≥5 MB).
+        // Use a large file so the size-based filter in is_likely_game() would
+        // pass if called — scan_bottle_shortcuts itself does not filter, but
+        // this keeps the fixture realistic for downstream callers.
         let exe = game_dir.join("eldenring.exe");
         fs::write(&exe, vec![0u8; 6 * 1024 * 1024]).unwrap();
 

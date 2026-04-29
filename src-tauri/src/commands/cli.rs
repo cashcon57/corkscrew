@@ -565,10 +565,10 @@ pub fn cli_scan_bottle(bottle_name: &str) {
     // -----------------------------------------------------------------------
     // cxmenu.conf: presence, entry count, and a sample of section headers
     // -----------------------------------------------------------------------
-    let cxmenu_path = bottle.path.join("cxmenu.conf");
+    let cxmenu_path = crate::crossover_cxmenu::find_cxmenu_file(&bottle.path);
     println!("=== cxmenu.conf ===");
-    if cxmenu_path.is_file() {
-        match std::fs::read_to_string(&cxmenu_path) {
+    if let Some(ref cxmenu_path) = cxmenu_path {
+        match std::fs::read_to_string(cxmenu_path) {
             Ok(content) => {
                 let total_lines = content.lines().count();
                 let section_headers: Vec<&str> = content
@@ -578,13 +578,16 @@ pub fn cli_scan_bottle(bottle_name: &str) {
                         t.starts_with('[') && t.ends_with(']')
                     })
                     .collect();
-                println!("Present    : yes");
+                println!("Present    : yes ({})", cxmenu_path.display());
                 println!("Total lines: {}", total_lines);
                 println!("Sections   : {}", section_headers.len());
                 println!("First 5 sections:");
                 for header in section_headers.iter().take(5) {
-                    let truncated = if header.len() > 80 {
-                        format!("{}...", &header[..77])
+                    // Truncate at a char boundary to avoid panics on multi-byte
+                    // UTF-8 (section headers can contain non-ASCII game names).
+                    let truncated = if header.chars().count() > 80 {
+                        let cut: String = header.chars().take(77).collect();
+                        format!("{}...", cut)
                     } else {
                         header.to_string()
                     };

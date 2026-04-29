@@ -372,9 +372,10 @@ pub struct SteamAppManifest {
     pub install_dir: String,
 }
 
-/// Drive letters that Wine exposes inside a bottle as `drive_X` directories.
-/// We check these when scanning for additional Steam library folders.
-const WINE_DRIVE_LETTERS: &[&str] = &["c", "d", "e", "f", "z"];
+/// Drive letters that Wine may expose inside a bottle as `drive_X` directories,
+/// excluding `c` which is always the primary drive and is already checked by
+/// the primary Steam path lookup (via `bottle.find_path`).
+const WINE_DRIVE_LETTERS: &[&str] = &["d", "e", "f", "z"];
 
 /// Resolve a Windows absolute path (e.g. `D:\SteamLibrary`) to the
 /// corresponding host path inside a Wine bottle.

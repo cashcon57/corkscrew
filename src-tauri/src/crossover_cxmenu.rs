@@ -174,10 +174,14 @@ fn strip_location_prefix(raw: &str) -> &str {
 ///
 /// Encoding rules (applied left-to-right):
 /// 1. `^XX` (caret + two uppercase or lowercase hex digits) → the character
-///    with that code point.
+///    with that code point (as UTF-8 if the value is a valid UTF-8 scalar,
+///    otherwise the Unicode replacement character U+FFFD).
 /// 2. `+` → ` ` (space).
 /// 3. `_` → `\` (path separator / backslash).
 /// 4. `/` → `\` (also used as a path separator in section keys).
+/// 5. Any other byte is emitted verbatim as part of a valid UTF-8 sequence.
+///    Multi-byte UTF-8 sequences in game names (e.g. Japanese or Chinese
+///    game titles) pass through unchanged.
 fn decode_cxmenu_path(encoded: &str) -> String {
     let mut out = String::with_capacity(encoded.len());
     let bytes = encoded.as_bytes();
@@ -191,13 +195,15 @@ fn decode_cxmenu_path(encoded: &str) -> String {
             let hi = hex_digit(bytes[i + 1]);
             let lo = hex_digit(bytes[i + 2]);
             if let (Some(h), Some(l)) = (hi, lo) {
-                let code = (h << 4) | l;
-                // Only emit printable / reasonable ASCII. For non-ASCII code
-                // points (unlikely in path context) fall back to '?'.
-                if code < 128 {
-                    out.push(code as char);
+                let code_point = ((h << 4) | l) as u32;
+                // Convert the decoded value to a char. Values above 0x7F are
+                // valid Latin-1 / Unicode scalar values — emit them correctly.
+                if let Some(c) = char::from_u32(code_point) {
+                    out.push(c);
                 } else {
-                    out.push('?');
+                    // Not a valid Unicode scalar (e.g. a lone surrogate) — use
+                    // the replacement character rather than corrupting the string.
+                    out.push(char::REPLACEMENT_CHARACTER);
                 }
                 i += 3;
                 continue;
@@ -212,8 +218,12 @@ fn decode_cxmenu_path(encoded: &str) -> String {
             out.push('\\');
             i += 1;
         } else {
-            out.push(b as char);
-            i += 1;
+            // Emit the byte(s) that form the next valid UTF-8 character. Since
+            // `encoded` is a `&str` (guaranteed valid UTF-8), walking by bytes
+            // is safe here — we just need to advance past the full code unit.
+            let ch = encoded[i..].chars().next().unwrap_or('\u{FFFD}');
+            out.push(ch);
+            i += ch.len_utf8();
         }
     }
 
@@ -312,6 +322,27 @@ mod tests {
         // `^ZZ` is not a valid hex escape → `^` emitted literally.
         let result = decode_cxmenu_path("^ZZ");
         assert!(result.starts_with('^'));
+    }
+
+    /// Multi-byte UTF-8 game names (Japanese, Chinese, etc.) must pass through
+    /// decode_cxmenu_path without corruption. CrossOver encodes the path
+    /// separators as `^3A`, `_`, etc., but game directory names with non-ASCII
+    /// characters appear verbatim in the section header.
+    #[test]
+    fn decode_preserves_multi_byte_utf8_in_game_names() {
+        // "原神" (Genshin Impact) with a path: C:\Games\原神\GenshinImpact.exe
+        let encoded = "C^3A_Games_\u{539f}\u{795e}_GenshinImpact.exe";
+        let result = decode_cxmenu_path(encoded);
+        assert_eq!(result, r"C:\Games\原神\GenshinImpact.exe");
+    }
+
+    /// A `^XX` escape with a value > 0x7F should decode to the correct Unicode
+    /// scalar (e.g. `^E9` → U+00E9 é, a common character in French game names).
+    #[test]
+    fn decode_latin1_hex_escape() {
+        // `^E9` → é (U+00E9)
+        let result = decode_cxmenu_path("G^E9n^E9ration");
+        assert_eq!(result, "Génération");
     }
 
     // ----- strip_location_prefix --------------------------------------------
