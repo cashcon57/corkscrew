@@ -2,8 +2,8 @@
   import { selectedGame, showUninstalledGames, uninstalledGames, nativeMode } from "$lib/stores";
   import GameIcon from "$lib/components/GameIcon.svelte";
   import GameSupportBadge from "$lib/components/GameSupportBadge.svelte";
-  import type { DetectedGame, KnownUninstalledGame, NativeAppCandidate } from "$lib/types";
-  import { setConfigValue, listKnownUninstalledGames, rescanNativeGames } from "$lib/api";
+  import type { DetectedGame, KnownUninstalledGame } from "$lib/types";
+  import { setConfigValue, listKnownUninstalledGames, getAllGames } from "$lib/api";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { wineCtx } from "$lib/types";
 
@@ -30,15 +30,21 @@
   }: Props = $props();
 
   // ── Native mode state ────────────────────────────────────────────────────
-  let nativeCandidates: NativeAppCandidate[] = $state([]);
+  // Native games are full DetectedGame objects (runtime.runtime === 'native')
+  // sourced from the same getAllGames pipeline as Wine games. This means
+  // selecting a native game uses the same onPickGame callback, populates
+  // $selectedGame, and persists exactly as Wine games do — no separate
+  // selection-state machinery required.
+  let nativeGames: DetectedGame[] = $state([]);
   let nativeLoading = $state(false);
 
-  async function loadNativeCandidates() {
+  async function loadNativeGames() {
     nativeLoading = true;
     try {
-      nativeCandidates = await rescanNativeGames();
+      const all = await getAllGames();
+      nativeGames = all.filter((g) => g.runtime.runtime === 'native');
     } catch (err) {
-      console.error('loadNativeCandidates: rescanNativeGames failed:', err);
+      console.error('loadNativeGames: getAllGames failed:', err);
     } finally {
       nativeLoading = false;
     }
@@ -46,27 +52,29 @@
 
   $effect(() => {
     if ($nativeMode) {
-      loadNativeCandidates();
+      loadNativeGames();
     }
   });
 
-  function archBadge(a: string): string {
+  function archBadgeFromGame(game: DetectedGame): string {
+    if (game.runtime.runtime !== 'native') return '';
     return ({
       apple_silicon: "Apple Silicon",
       intel_only: "Intel",
       universal: "Universal",
       unknown: "Unknown",
-    } as Record<string, string>)[a] ?? a;
+    } as Record<string, string>)[game.runtime.architecture] ?? game.runtime.architecture;
   }
 
-  function sourceBadge(s: string): string {
+  function sourceBadgeFromGame(game: DetectedGame): string {
+    if (game.runtime.runtime !== 'native') return '';
     return ({
       system_applications: "/Applications",
       steam: "Steam",
       gog: "GOG",
       manual: "Manual",
       app_store: "App Store",
-    } as Record<string, string>)[s] ?? s;
+    } as Record<string, string>)[game.runtime.source] ?? game.runtime.source;
   }
   // ─────────────────────────────────────────────────────────────────────────
 
@@ -153,29 +161,33 @@
         <!-- Native macOS game list -->
         {#if nativeLoading}
           <div class="dropdown-empty">Scanning native games…</div>
-        {:else if nativeCandidates.length === 0}
+        {:else if nativeGames.length === 0}
           <div class="dropdown-empty">No native games found.</div>
         {:else}
           <div class="dropdown-section-label">Native installs</div>
-          {#each nativeCandidates as candidate}
-            <button
-              class="dropdown-item"
-              class:disabled={candidate.sandboxed}
-              disabled={candidate.sandboxed}
-              title={candidate.sandboxed ? "Sandboxed (cannot be modded)" : candidate.bundle_path}
-              onclick={() => { onClose(); }}
-            >
-              <div class="dropdown-item-text">
-                <span class="dropdown-item-name">{candidate.info.bundle_executable}</span>
-                <div class="badges">
-                  <span class="badge">{archBadge(candidate.architecture)}</span>
-                  <span class="badge">{sourceBadge(candidate.source)}</span>
-                  {#if candidate.sandboxed}
-                    <span class="badge warn">Sandboxed</span>
-                  {/if}
+          {#each nativeGames as game}
+            {#if game.runtime.runtime === 'native'}
+              {@const sandboxed = game.runtime.sandboxed}
+              <button
+                class="dropdown-item"
+                class:disabled={sandboxed}
+                class:active={$selectedGame?.game_id === game.game_id}
+                disabled={sandboxed}
+                title={sandboxed ? "Sandboxed (cannot be modded)" : game.game_path}
+                onclick={() => { onPickGame(game); onClose(); }}
+              >
+                <div class="dropdown-item-text">
+                  <span class="dropdown-item-name">{game.display_name}</span>
+                  <div class="badges">
+                    <span class="badge">{archBadgeFromGame(game)}</span>
+                    <span class="badge">{sourceBadgeFromGame(game)}</span>
+                    {#if sandboxed}
+                      <span class="badge warn">Sandboxed</span>
+                    {/if}
+                  </div>
                 </div>
-              </div>
-            </button>
+              </button>
+            {/if}
           {/each}
         {/if}
       {:else}
