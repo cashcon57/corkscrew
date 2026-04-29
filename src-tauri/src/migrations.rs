@@ -1099,7 +1099,7 @@ fn migrate_v21_to_v22(conn: &Connection) -> Result<()> {
 
 /// Returns `true` if `column` exists in `table`.
 fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
-    let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table))?;
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info(`{}`)", table))?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
         let name: String = row.get(1)?;
@@ -1110,10 +1110,16 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
     Ok(false)
 }
 
-/// Executes `ALTER TABLE {table} ADD COLUMN {ddl}` only if the column is absent.
+/// Add `column` to `table` if it does not already exist.
+///
+/// **SAFETY:** `ddl` is interpolated verbatim into the SQL string. Callers
+/// MUST pass a literal column definition (`"runtime TEXT NOT NULL DEFAULT 'wine'"`),
+/// never a value derived from user input or external config. `table` is
+/// quoted with backticks but `ddl` is not — the column-definition grammar
+/// is too rich to safely escape.
 fn add_column_if_missing(conn: &Connection, table: &str, column: &str, ddl: &str) -> Result<()> {
     if !column_exists(conn, table, column)? {
-        conn.execute(&format!("ALTER TABLE {} ADD COLUMN {}", table, ddl), [])?;
+        conn.execute(&format!("ALTER TABLE `{}` ADD COLUMN {}", table, ddl), [])?;
     }
     Ok(())
 }
@@ -1423,5 +1429,19 @@ mod tests {
             data_root.is_none(),
             "native_data_root should be NULL when not provided"
         );
+    }
+
+    #[test]
+    fn v23_migration_is_idempotent() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        // Calling the v23 migration directly a second time must not error.
+        migrate_v22_to_v23(&conn).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 23);
+        // And a row insertable under v23's column set still works.
+        conn.execute(
+            "INSERT INTO games (game_id, runtime) VALUES ('idemp', 'wine')",
+            [],
+        ).unwrap();
     }
 }
