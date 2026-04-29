@@ -66,6 +66,7 @@ pub mod progress;
 pub mod proton;
 pub mod regulation_conflicts;
 pub mod rollback;
+pub mod runtime;
 pub mod session_tracker;
 pub mod skse;
 pub mod staging;
