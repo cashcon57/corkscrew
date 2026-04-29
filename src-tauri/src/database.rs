@@ -3616,31 +3616,21 @@ impl ModDatabase {
              FROM games WHERE game_id = ?1",
         )?;
 
-        let result: Option<(
-            String, String,
-            Option<String>, Option<String>,
-            Option<String>, Option<String>, Option<String>,
-            i64, Option<String>,
-        )> = stmt
-            .query_row(params![game_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                    row.get::<_, Option<i64>>(7)?.unwrap_or(0),
-                    row.get::<_, Option<String>>(8)?,
-                ))
-            })
-            .ok();
-
-        match result {
-            None => Ok(None),
-            Some((game_id, runtime_str, bottle_name, bottle_path, native_app_path,
-                  native_data_root, native_architecture, native_sandboxed, native_source)) => {
+        match stmt.query_row(params![game_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<i64>>(7)?.unwrap_or(0),
+                row.get::<_, Option<String>>(8)?,
+            ))
+        }) {
+            Ok((game_id, runtime_str, bottle_name, bottle_path, native_app_path,
+                native_data_root, native_architecture, native_sandboxed, native_source)) => {
                 let runtime = row_to_runtime(
                     &runtime_str,
                     bottle_name,
@@ -3653,6 +3643,8 @@ impl ModDatabase {
                 )?;
                 Ok(Some(PersistedGame { game_id, runtime }))
             }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -4179,6 +4171,24 @@ mod tests {
         let (db, _tmp) = test_db();
         let result = db.get_persisted_game("does_not_exist").unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn get_persisted_game_propagates_unknown_runtime_discriminator() {
+        let (db, _tmp) = test_db();
+        // Insert a row with a bogus runtime discriminator that row_to_runtime rejects.
+        let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "INSERT INTO games (game_id, runtime) VALUES ('weird', 'martian')",
+            [],
+        ).unwrap();
+        drop(conn);
+
+        let result = db.get_persisted_game("weird");
+        assert!(
+            result.is_err(),
+            "should propagate unknown discriminator error, not silently return None"
+        );
     }
 
     #[test]
