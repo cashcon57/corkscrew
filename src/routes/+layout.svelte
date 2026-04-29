@@ -1028,11 +1028,14 @@
       </button>
     </div>
 
-    <ul class="nav-list" style="--active-idx: {navItems.findIndex(i => i.id === $currentPage)}">
+    <ul class="nav-list" style="--active-idx: {$nativeMode
+      ? ((page.url.pathname as string) === '/native/mods' ? 0
+         : (page.url.pathname as string) === '/native/discover' ? 1
+         : (page.url.pathname as string) === '/native/settings' ? 2
+         : -1)
+      : navItems.findIndex(i => i.id === $currentPage)}">
+      {#if !$nativeMode}
       {#each navItems as item}
-        {#if (item.id === "discover" || item.id === "plugins") && $nativeMode}
-          <!-- Wine-only nav item hidden in native mode -->
-        {:else}
         <li>
           <button
             class="nav-item"
@@ -1092,8 +1095,8 @@
             {#if !$sidebarCollapsed}<span class="nav-label">{item.label}</span>{/if}
           </button>
         </li>
-        {/if}
       {/each}
+      {/if}
 
       <!-- Native-only nav items — shown only when nativeMode is active -->
       {#if $nativeMode}
