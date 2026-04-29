@@ -13,6 +13,7 @@
     DiskBudget,
     PreflightResult,
   } from "$lib/types";
+  import { wineCtx } from "$lib/types";
   import { selectedGame } from "$lib/stores";
 
   // ---- State ----
@@ -34,11 +35,11 @@
     loading = true;
     try {
       const [h, c, d, db, pf] = await Promise.allSettled([
-        getDeploymentHealth(game.game_id, game.bottle_name),
-        getConflicts(game.game_id, game.bottle_name),
-        checkDependencyIssues(game.game_id, game.bottle_name),
-        getDiskBudget(game.game_id, game.bottle_name),
-        runPreflightCheck(game.game_id, game.bottle_name),
+        getDeploymentHealth(game.game_id, (wineCtx(game)?.bottle_name ?? "")),
+        getConflicts(game.game_id, (wineCtx(game)?.bottle_name ?? "")),
+        checkDependencyIssues(game.game_id, (wineCtx(game)?.bottle_name ?? "")),
+        getDiskBudget(game.game_id, (wineCtx(game)?.bottle_name ?? "")),
+        runPreflightCheck(game.game_id, (wineCtx(game)?.bottle_name ?? "")),
       ]);
       health = h.status === "fulfilled" ? h.value : null;
       conflicts = c.status === "fulfilled" ? c.value : [];

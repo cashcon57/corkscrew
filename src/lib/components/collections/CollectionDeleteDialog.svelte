@@ -3,6 +3,7 @@
   import { selectedGame, showError, collectionUninstallStatus, collectionList, activeCollection, installedMods } from "$lib/stores";
   import type { CollectionUninstallStatus } from "$lib/stores";
   import type { UninstallProgressEvent, DetectedGame } from "$lib/types";
+  import { wineCtx } from "$lib/types";
   import {
     deleteCollection,
     getCollectionDownloadSize,
@@ -42,8 +43,8 @@
     deleteDownloadSizeLoading = true;
 
     Promise.all([
-      getCollectionDownloadSize(g.game_id, g.bottle_name, name).catch(() => null),
-      hasGameSnapshot(g.game_id, g.bottle_name).catch(() => false),
+      getCollectionDownloadSize(g.game_id, (wineCtx(g)?.bottle_name ?? ""), name).catch(() => null),
+      hasGameSnapshot(g.game_id, (wineCtx(g)?.bottle_name ?? "")).catch(() => false),
     ]).then(([size, snap]) => {
       deleteDownloadSize = size;
       deleteHasSnapshot = snap;
@@ -124,7 +125,7 @@
     });
 
     try {
-      await deleteCollection(game.game_id, game.bottle_name, collectionName, deleteDownloads, deleteRemoveAllMods);
+      await deleteCollection(game.game_id, (wineCtx(game)?.bottle_name ?? ""), collectionName, deleteDownloads, deleteRemoveAllMods);
 
       // After successful uninstall, optionally clean non-stock files (preserving SKSE)
       if (shouldCleanGameDir) {
@@ -133,7 +134,7 @@
           return { ...s, currentStep: "Cleaning non-stock files from game directory...", phase: "redeploying" };
         });
         try {
-          const cleanResult = await cleanGameDirectory(game.game_id, game.bottle_name, {
+          const cleanResult = await cleanGameDirectory(game.game_id, (wineCtx(game)?.bottle_name ?? ""), {
             remove_loose_files: true,
             remove_archives: true,
             remove_enb: false,
@@ -162,7 +163,7 @@
       deletingCollection = false;
 
       // Refresh global state so Mods page and top bar reflect the uninstall
-      listInstalledCollections(game.game_id, game.bottle_name)
+      listInstalledCollections(game.game_id, (wineCtx(game)?.bottle_name ?? ""))
         .then(cols => {
           collectionList.set(cols);
           // Clear active collection if the deleted one was active
@@ -174,7 +175,7 @@
         .catch((err) => console.error('Failed to refresh collections after uninstall:', err));
 
       // Refresh the installed mods store so Mods page updates immediately
-      getInstalledMods(game.game_id, game.bottle_name)
+      getInstalledMods(game.game_id, (wineCtx(game)?.bottle_name ?? ""))
         .then(mods => installedMods.set(mods))
         .catch((err) => console.error('Failed to refresh mods after uninstall:', err));
 

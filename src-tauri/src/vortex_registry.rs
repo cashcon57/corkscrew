@@ -273,5 +273,5 @@ pub async fn refresh_extension(
 
 fn register_vortex_plugin(reg: VortexGameRegistration) {
     let plugin = VortexGamePlugin::new(reg);
-    register_plugin(Box::new(plugin));
+    register_plugin(std::sync::Arc::new(plugin));
 }

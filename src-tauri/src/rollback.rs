@@ -426,6 +426,24 @@ pub fn create_snapshot(
     Ok(snapshot_id)
 }
 
+/// Convenience wrapper for native-game snapshots.
+///
+/// Native games have no Wine bottle; this wrapper supplies the empty-string
+/// `bottle_name` sentinel that all native deploy paths use, so callers do not
+/// have to repeat the convention at every site.
+///
+/// Snapshot failures are non-fatal at the call sites — a failed snapshot must
+/// NOT abort the deploy operation. Callers should use `let _ = …` or log the
+/// error with `log::warn!`, not propagate it.
+pub fn create_native_snapshot(
+    db: &ModDatabase,
+    game_id: &str,
+    name: &str,
+    description: &str,
+) -> Result<i64, String> {
+    create_snapshot(db, game_id, "", name, Some(description))
+}
+
 /// List all snapshots for a game/bottle.
 ///
 /// Returns snapshots without their mod_states populated (use

@@ -133,6 +133,24 @@ pub async fn list_known_uninstalled_games_cmd(
     .map_err(crate::format_join_error)?
 }
 
+// --- Native Game Commands ---
+
+/// Accept a user-supplied `.app` path (from a file picker) and return a
+/// fully-populated [`NativeAppCandidate`].
+///
+/// Validation is delegated to `native_scanner::validate_manual_native_app`,
+/// which checks the extension, existence, and `Info.plist` readability.
+/// This command is stateless — it does not mutate the database or game
+/// registry; callers should follow up with a registry registration if
+/// they intend to track the game.
+#[tauri::command]
+pub async fn add_native_game_manually(
+    app_path: String,
+) -> Result<crate::native_scanner::NativeAppCandidate, String> {
+    let path = std::path::PathBuf::from(&app_path);
+    crate::native_scanner::validate_manual_native_app(&path)
+}
+
 // --- Game Lock Commands ---
 
 #[tauri::command]

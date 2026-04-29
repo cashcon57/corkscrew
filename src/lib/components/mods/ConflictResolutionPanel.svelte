@@ -14,6 +14,7 @@
     ResolutionResult,
     IdenticalContentStats,
   } from "$lib/types";
+  import { wineCtx } from "$lib/types";
   import {
     showError,
     showSuccess,
@@ -58,8 +59,8 @@
       const loserIds = conflict.mods
         .filter(m => m.mod_id !== modId)
         .map(m => m.mod_id);
-      await recordConflictWinner(game.game_id, game.bottle_name, modId, loserIds);
-      await redeployAllMods(game.game_id, game.bottle_name);
+      await recordConflictWinner(game.game_id, (wineCtx(game)?.bottle_name ?? ""), modId, loserIds);
+      await redeployAllMods(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       await onResolved();
     } catch (e: unknown) {
       showError(`Failed to set winner: ${e}`);
@@ -74,7 +75,7 @@
     resolutionResult = null;
     identicalStats = null;
     try {
-      const response = await analyzeConflicts(game.game_id, game.bottle_name);
+      const response = await analyzeConflicts(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       suggestions = response.suggestions;
       identicalStats = response.identical_stats;
     } catch (e: unknown) {
@@ -89,10 +90,10 @@
     resolutionResult = null;
     identicalStats = null;
     try {
-      resolutionResult = await resolveAllConflicts(game.game_id, game.bottle_name);
+      resolutionResult = await resolveAllConflicts(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       await onResolved();
       // Re-analyze to show updated state
-      const response = await analyzeConflicts(game.game_id, game.bottle_name);
+      const response = await analyzeConflicts(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       suggestions = response.suggestions;
       identicalStats = response.identical_stats;
       const autoCount = resolutionResult.author_resolved + resolutionResult.auto_suggested + resolutionResult.identical_content;

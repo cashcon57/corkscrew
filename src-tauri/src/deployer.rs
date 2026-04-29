@@ -10,6 +10,8 @@
 //! resolution breaks with symlinks. See `should_avoid_symlink()`.
 //!
 //! Key operations:
+//! - `deploy_game` — runtime-dispatched dispatcher (Wine or Native); prefer this for new code
+//! - `deploy_wine_game` / `deploy_native_game` — per-runtime legs (native is Phase 1 stub)
 //! - `deploy_mod` — deploy a single mod's files from staging to game dir
 //! - `undeploy_mod` — remove deployed files, restore lower-priority files
 //! - `redeploy_all` — purge + redeploy all enabled mods (after priority changes)
@@ -1630,6 +1632,87 @@ pub fn verify_deployment(
 }
 
 // ---------------------------------------------------------------------------
+// Runtime-dispatched deployment API
+//
+// These three functions form the high-level deployment abstraction that sits
+// above the fine-grained `deploy_mod` / `redeploy_all` / etc. primitives.
+// Callers that hold a `DetectedGame` should use `deploy_game`; the lower-level
+// functions remain available for places that operate on individual mods.
+// ---------------------------------------------------------------------------
+
+/// Public dispatcher for full-game deployment. Routes by `detected.runtime`
+/// to the appropriate per-runtime implementation.
+///
+/// Wine games are delegated to `deploy_wine_game`, which runs a full
+/// `redeploy_all` using bottle context extracted from `detected`.
+/// Native games are delegated to `deploy_native_game`, which is a stub in
+/// Phase 1 — per-game native plugins (Stardew in Task 3.7, BG3 in Task 4.4)
+/// replace that stub with real logic.
+pub fn deploy_game(
+    detected: &crate::games::DetectedGame,
+    db: &std::sync::Arc<ModDatabase>,
+) -> Result<DeployResult> {
+    match &detected.runtime {
+        crate::runtime::GameRuntime::Wine(_) => deploy_wine_game(detected, db),
+        crate::runtime::GameRuntime::Native(_) => deploy_native_game(detected, db),
+    }
+}
+
+/// Full redeploy for a Wine/CrossOver-hosted game. Extracts bottle context
+/// from `detected.runtime` and delegates to [`redeploy_all`].
+///
+/// This is the Wine leg of the runtime split introduced in Task 1.5.
+/// Behavior is identical to calling `redeploy_all` directly — the wrapper
+/// exists so callers that hold a `DetectedGame` don't need to unpack
+/// runtime fields manually.
+pub fn deploy_wine_game(
+    detected: &crate::games::DetectedGame,
+    db: &std::sync::Arc<ModDatabase>,
+) -> Result<DeployResult> {
+    let wine_ctx = detected
+        .runtime
+        .wine()
+        .ok_or_else(|| DeployerError::Other("deploy_wine_game called on non-Wine game".into()))?;
+    redeploy_all(
+        db,
+        &detected.game_id,
+        &wine_ctx.bottle_name,
+        &detected.data_dir,
+        &detected.game_path,
+    )
+}
+
+/// Native macOS deployment dispatcher. Routes to the registered per-game
+/// plugin's [`crate::games::GamePlugin::deploy_native`] implementation.
+///
+/// If a plugin is registered for `detected.game_id`, its `deploy_native`
+/// method is called and the result propagated. If no plugin matches (e.g. a
+/// native game discovered via appmanifest scanning with no dedicated plugin),
+/// a clear "not implemented" error is returned so callers fail loudly rather
+/// than silently corrupting state.
+///
+/// Wine games are not routed here — see [`deploy_wine_game`].
+pub fn deploy_native_game(
+    detected: &crate::games::DetectedGame,
+    db: &std::sync::Arc<ModDatabase>,
+) -> Result<DeployResult> {
+    // Clone the Arc out of the registry so the registry lock is dropped
+    // before we call deploy_native. Deploying walks every staged file and
+    // performs hardlink / copy operations, which can take hundreds of
+    // milliseconds — holding the registry mutex that entire time would block
+    // detect_all_games, detect_native_games, and any other thread that calls
+    // with_plugin or register_plugin.
+    let plugin = crate::games::clone_plugin_for_dispatch(&detected.game_id)
+        .ok_or_else(|| DeployerError::Other(format!(
+            "native deployment not implemented for {}; per-game plugin must provide it",
+            detected.game_id
+        )))?;
+
+    // Registry lock is released here. deploy_native may take arbitrarily long.
+    plugin.deploy_native(detected, db)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -2203,5 +2286,36 @@ mod tests {
             "Balanced should check at least 1 file"
         );
         assert_eq!(result.hash_mismatches, 0);
+    }
+
+    #[test]
+    fn deploy_native_game_without_plugin_returns_error() {
+        use crate::runtime::{Architecture, GameRuntime, NativeContext, NativeSource};
+        use std::sync::Arc;
+
+        let detected = crate::games::DetectedGame {
+            game_id: "fakegame".into(),
+            display_name: "Fake".into(),
+            nexus_slug: "fake".into(),
+            game_path: PathBuf::from("/Applications/Fake.app/Contents/MacOS"),
+            exe_path: None,
+            data_dir: PathBuf::from("/Applications/Fake.app/Contents/MacOS"),
+            runtime: GameRuntime::Native(NativeContext {
+                app_bundle_path: PathBuf::from("/Applications/Fake.app"),
+                game_data_root: PathBuf::from("/Applications/Fake.app/Contents/MacOS"),
+                architecture: Architecture::AppleSilicon,
+                sandboxed: false,
+                source: NativeSource::Manual,
+            }),
+            steam_app_id: None,
+        };
+
+        let (db, _tmp, _, _) = setup();
+        let db = Arc::new(db);
+
+        let result = deploy_native_game(&detected, &db);
+        assert!(result.is_err(), "expected stub error for unimplemented native deploy");
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(err_msg.contains("fakegame"), "error should mention game_id");
     }
 }

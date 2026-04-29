@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 
 use crate::bottles::Bottle;
 use crate::games::{DetectedGame, GamePlugin};
+use crate::runtime::{GameRuntime, WineContext};
 
 const STEAM_COMMON: &[&str] = &["Program Files (x86)", "Steam", "steamapps", "common"];
 
@@ -187,7 +188,7 @@ impl GamePlugin for ThunderstorePlugin {
         self.spec.executables
     }
 
-    fn detect(&self, bottle: &Bottle) -> Option<DetectedGame> {
+    fn detect_wine(&self, bottle: &Bottle) -> Option<DetectedGame> {
         let game_path = find_game_path(bottle, self.spec)?;
         if find_executable(&game_path, self.spec.executables).is_none() {
             return None;
@@ -201,8 +202,11 @@ impl GamePlugin for ThunderstorePlugin {
             game_path,
             exe_path,
             data_dir,
-            bottle_name: bottle.name.clone(),
-            bottle_path: bottle.path.clone(),
+            runtime: GameRuntime::Wine(WineContext {
+                bottle_name: bottle.name.clone(),
+                bottle_path: bottle.path.clone(),
+                source: bottle.source.clone(),
+            }),
             steam_app_id: None,
         })
     }
@@ -252,7 +256,7 @@ impl GamePlugin for ThunderstorePlugin {
 
 pub fn register_all() {
     for spec in SPECS {
-        crate::games::register_plugin(Box::new(ThunderstorePlugin::new(spec)));
+        crate::games::register_plugin(std::sync::Arc::new(ThunderstorePlugin::new(spec)));
     }
 }
 
@@ -501,7 +505,7 @@ mod tests {
             source: "T".into(),
         };
         let p = ThunderstorePlugin::new(silksong_spec());
-        let d = p.detect(&b).expect("detection");
+        let d = p.detect_wine(&b).expect("detection");
         assert_eq!(d.game_id, "silksong");
         assert_eq!(
             d.data_dir,

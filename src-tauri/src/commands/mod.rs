@@ -10,6 +10,8 @@ pub mod game_state;
 pub mod load_order;
 pub mod modengine2_cmds;
 pub mod mods;
+pub mod native_cmds;
+pub mod stardew_cmds;
 pub mod nexus;
 pub mod notifications;
 pub mod platform;

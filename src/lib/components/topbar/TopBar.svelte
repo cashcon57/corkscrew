@@ -1,8 +1,12 @@
 <script lang="ts">
+  import { goto } from "$app/navigation";
   import TopBarGameSelector from "./TopBarGameSelector.svelte";
   import TopBarModlistSelector from "./TopBarModlistSelector.svelte";
   import TopBarProfileSelector from "./TopBarProfileSelector.svelte";
   import type { DetectedGame } from "$lib/types";
+  import { nativeMode, nativeModeVisible } from "$lib/stores";
+  import { setNativeMode } from "$lib/api";
+  import { applyNativeTheme } from "$lib/native/theme";
 
   interface Props {
     detectedGames: DetectedGame[];
@@ -30,6 +34,23 @@
 
   function closeAll() {
     openDropdown = null;
+  }
+
+  async function toggleNativeMode() {
+    const newValue = !$nativeMode;
+    try {
+      await setNativeMode(newValue);
+    } catch (err) {
+      console.error("setNativeMode failed:", err);
+      return;
+    }
+    nativeMode.set(newValue);
+    await applyNativeTheme(newValue);
+    if (newValue) {
+      goto("/native").catch((err) => console.error("navigation to /native failed:", err));
+    } else {
+      goto("/").catch((err) => console.error("navigation to / failed:", err));
+    }
   }
 </script>
 
@@ -75,6 +96,32 @@
       onToggle={() => handleOpenDropdown("profile")}
       onClose={closeAll}
     />
+
+    {#if $nativeModeVisible}
+      <span class="topbar-separator topbar-separator-spacer"></span>
+
+      <button
+        class="topbar-mode-toggle"
+        class:native-active={$nativeMode}
+        onclick={toggleNativeMode}
+        aria-label={$nativeMode ? "Switch to Wine Mode" : "Switch to Native Mode"}
+        title={$nativeMode ? "Switch to Wine Mode" : "Switch to Native Mode"}
+      >
+        {#if $nativeMode}
+          <!-- Sparkle — native mode active -->
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M8 1.5v3M8 11.5v3M1.5 8h3M11.5 8h3M3.5 3.5l2 2M10.5 10.5l2 2M3.5 12.5l2-2M10.5 5.5l2-2"/>
+          </svg>
+          <span>Wine</span>
+        {:else}
+          <!-- Sparkle — click to enter native mode -->
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M8 1.5v3M8 11.5v3M1.5 8h3M11.5 8h3M3.5 3.5l2 2M10.5 10.5l2 2M3.5 12.5l2-2M10.5 5.5l2-2"/>
+          </svg>
+          <span>Native</span>
+        {/if}
+      </button>
+    {/if}
   </div>
 </div>
 
@@ -119,7 +166,7 @@
     -webkit-app-region: no-drag;
     border-radius: 100px;
     /* Glass material: minimal tint so content shows through with distortion */
-    background: rgba(255, 255, 255, 0.04);
+    background: var(--surface-glass);
     /* Light blur + brightness/contrast shift = refractive look, not smeared */
     backdrop-filter: blur(4px) saturate(1.8) brightness(1.1) contrast(1.05);
     -webkit-backdrop-filter: blur(4px) saturate(1.8) brightness(1.1) contrast(1.05);
@@ -177,5 +224,52 @@
     user-select: none;
     padding: 0 2px;
     opacity: 0.5;
+  }
+
+  /* Push the mode toggle to the far right of the pill */
+  .topbar-separator-spacer {
+    flex: 1;
+    min-width: 8px;
+    padding: 0;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .topbar-mode-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 10px;
+    background: transparent;
+    border: 1px solid var(--separator);
+    border-radius: 100px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    white-space: nowrap;
+    transition:
+      background var(--duration-fast, 120ms) var(--ease, ease),
+      color var(--duration-fast, 120ms) var(--ease, ease),
+      border-color var(--duration-fast, 120ms) var(--ease, ease);
+    -webkit-app-region: no-drag;
+  }
+
+  .topbar-mode-toggle:hover {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+    border-color: var(--separator);
+  }
+
+  .topbar-mode-toggle.native-active {
+    background: var(--accent-subtle);
+    color: var(--accent);
+    border-color: var(--accent-muted);
+  }
+
+  .topbar-mode-toggle.native-active:hover {
+    background: var(--accent-muted);
+    color: var(--accent-hover, var(--accent));
   }
 </style>

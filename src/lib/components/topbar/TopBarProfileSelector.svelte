@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { wineCtx } from "$lib/types";
   import { selectedGame, activeProfile, profileList, showError, showSuccess } from "$lib/stores";
   import { activateProfile, deleteProfile, createProfile, saveProfileSnapshot, listProfiles } from "$lib/api";
   import { get } from "svelte/store";
@@ -26,7 +27,7 @@
   async function reloadProfiles() {
     const game = get(selectedGame);
     if (!game) return;
-    const profiles = await listProfiles(game.game_id, game.bottle_name);
+    const profiles = await listProfiles(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
     profileList.set(profiles);
     const active = profiles.find(p => p.is_active) ?? null;
     activeProfile.set(active);
@@ -37,7 +38,7 @@
     if (!game || switching) return;
     switching = profileId;
     try {
-      await activateProfile(profileId, game.game_id, game.bottle_name);
+      await activateProfile(profileId, game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       await reloadProfiles();
       showSuccess(`Switched to profile "${profileName}"`);
       onClose();
@@ -70,7 +71,7 @@
     const game = get(selectedGame);
     if (!game) return;
     try {
-      await createProfile(game.game_id, game.bottle_name, name);
+      await createProfile(game.game_id, (wineCtx(game)?.bottle_name ?? ""), name);
       await reloadProfiles();
       showSuccess(`Created profile "${name}"`);
       newProfileName = "";
@@ -86,7 +87,7 @@
     if (!profile || !game) return;
     saving = true;
     try {
-      await saveProfileSnapshot(profile.id, game.game_id, game.bottle_name);
+      await saveProfileSnapshot(profile.id, game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       showSuccess(`Saved current state to "${profile.name}"`);
     } catch (e: unknown) {
       showError(`Failed to save profile: ${e}`);
@@ -227,7 +228,7 @@
   }
 
   .topbar-selector:hover {
-    background: rgba(255, 255, 255, 0.06);
+    background: var(--surface);
   }
 
   .topbar-selector-label {
@@ -261,7 +262,7 @@
     background: color-mix(in srgb, var(--bg-elevated) 92%, transparent);
     backdrop-filter: var(--glass-blur-heavy);
     -webkit-backdrop-filter: var(--glass-blur-heavy);
-    border: 1px solid rgba(255, 255, 255, 0.10);
+    border: 1px solid var(--separator);
     border-radius: var(--radius-lg);
     padding: 4px;
     z-index: 100;
@@ -347,7 +348,7 @@
   }
 
   .dropdown-delete-btn:hover {
-    background: rgba(255, 59, 48, 0.15);
+    background: var(--red-subtle);
     color: var(--red);
   }
 

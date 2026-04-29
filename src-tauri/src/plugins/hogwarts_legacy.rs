@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 use crate::bottles::Bottle;
 use crate::games::{DetectedGame, GamePlugin};
+use crate::runtime::{GameRuntime, WineContext};
 use crate::vortex_types::VortexModType;
 
 // ---------------------------------------------------------------------------
@@ -86,7 +87,7 @@ impl GamePlugin for HogwartsLegacyPlugin {
         EXECUTABLES
     }
 
-    fn detect(&self, bottle: &Bottle) -> Option<DetectedGame> {
+    fn detect_wine(&self, bottle: &Bottle) -> Option<DetectedGame> {
         let game_path = find_game_path(bottle)?;
 
         // Verify the real executable exists in Phoenix/Binaries/Win64/
@@ -105,8 +106,11 @@ impl GamePlugin for HogwartsLegacyPlugin {
             game_path,
             exe_path,
             data_dir,
-            bottle_name: bottle.name.clone(),
-            bottle_path: bottle.path.clone(),
+            runtime: GameRuntime::Wine(WineContext {
+                bottle_name: bottle.name.clone(),
+                bottle_path: bottle.path.clone(),
+                source: bottle.source.clone(),
+            }),
             steam_app_id: None,
         })
     }
@@ -593,7 +597,7 @@ fn resolve_case_insensitive_path(base: &Path, components: &[&str]) -> Option<Pat
 
 /// Register the Hogwarts Legacy plugin with the global game plugin registry.
 pub fn register() {
-    crate::games::register_plugin(Box::new(HogwartsLegacyPlugin));
+    crate::games::register_plugin(std::sync::Arc::new(HogwartsLegacyPlugin));
 }
 
 // ---------------------------------------------------------------------------
@@ -942,7 +946,7 @@ mod tests {
         };
 
         let plugin = HogwartsLegacyPlugin;
-        assert!(plugin.detect(&bottle).is_none());
+        assert!(plugin.detect_wine(&bottle).is_none());
     }
 
     /// Helper to create the full Hogwarts Legacy directory structure in a
@@ -976,7 +980,7 @@ mod tests {
         };
 
         let plugin = HogwartsLegacyPlugin;
-        let detected = plugin.detect(&bottle);
+        let detected = plugin.detect_wine(&bottle);
         assert!(detected.is_some());
 
         let detected = detected.unwrap();
@@ -1003,7 +1007,7 @@ mod tests {
         };
 
         let plugin = HogwartsLegacyPlugin;
-        let detected = plugin.detect(&bottle);
+        let detected = plugin.detect_wine(&bottle);
         assert!(detected.is_some());
         assert_eq!(detected.unwrap().game_id, "hogwartslegacy");
     }
@@ -1033,7 +1037,7 @@ mod tests {
 
         let plugin = HogwartsLegacyPlugin;
         // Should NOT detect — root launcher alone is insufficient.
-        assert!(plugin.detect(&bottle).is_none());
+        assert!(plugin.detect_wine(&bottle).is_none());
     }
 
     #[test]
@@ -1059,7 +1063,7 @@ mod tests {
         };
 
         let plugin = HogwartsLegacyPlugin;
-        let detected = plugin.detect(&bottle).unwrap();
+        let detected = plugin.detect_wine(&bottle).unwrap();
 
         // exe_path should point to the real exe in Phoenix/Binaries/Win64/.
         let exe_path = detected.exe_path.unwrap();
@@ -1086,7 +1090,7 @@ mod tests {
             source: "Test".into(),
         };
         let plugin = HogwartsLegacyPlugin;
-        let detected = plugin.detect(&bottle).expect("Program Files detect");
+        let detected = plugin.detect_wine(&bottle).expect("Program Files detect");
         assert_eq!(detected.game_id, "hogwartslegacy");
         assert_eq!(detected.game_path, game_dir);
     }
@@ -1107,7 +1111,7 @@ mod tests {
             source: "Test".into(),
         };
         let plugin = HogwartsLegacyPlugin;
-        assert!(plugin.detect(&bottle).is_some());
+        assert!(plugin.detect_wine(&bottle).is_some());
     }
 
     #[test]
@@ -1123,7 +1127,7 @@ mod tests {
             source: "Test".into(),
         };
         let plugin = HogwartsLegacyPlugin;
-        assert!(plugin.detect(&bottle).is_some(), "top-level drag-drop");
+        assert!(plugin.detect_wine(&bottle).is_some(), "top-level drag-drop");
     }
 
     #[test]
@@ -1143,7 +1147,7 @@ mod tests {
             source: "Test".into(),
         };
         let plugin = HogwartsLegacyPlugin;
-        let detected = plugin.detect(&bottle).expect("Xbox Game Pass detect");
+        let detected = plugin.detect_wine(&bottle).expect("Xbox Game Pass detect");
         assert_eq!(detected.game_id, "hogwartslegacy");
         assert!(detected.game_path.ends_with("Content"));
     }
@@ -1166,7 +1170,7 @@ mod tests {
             source: "Test".into(),
         };
         let plugin = HogwartsLegacyPlugin;
-        assert!(plugin.detect(&bottle).is_none(), "empty dir must not detect");
+        assert!(plugin.detect_wine(&bottle).is_none(), "empty dir must not detect");
     }
 
     // --- Mod type auto-detection tests ---

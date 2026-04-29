@@ -9,6 +9,7 @@
   } from "$lib/api";
   import { showError, showSuccess } from "$lib/stores";
   import type { DetectedGame, InstalledMod, FomodInstaller } from "$lib/types";
+  import { wineCtx } from "$lib/types";
 
   let {
     game,
@@ -68,7 +69,7 @@
       // Save the recipe
       await saveFomodRecipe(fomodTargetMod.id, fomodTargetMod.name, "", selections);
       // Redeploy to apply changes
-      await redeployAllMods(game.game_id, game.bottle_name);
+      await redeployAllMods(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       await onComplete();
       showSuccess(`Reconfigured FOMOD for "${fomodTargetMod.name}"`);
     } catch (e: unknown) {

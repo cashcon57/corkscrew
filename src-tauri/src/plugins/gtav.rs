@@ -44,6 +44,7 @@ use std::path::{Path, PathBuf};
 
 use crate::bottles::Bottle;
 use crate::games::{DetectedGame, GamePlugin};
+use crate::runtime::{GameRuntime, WineContext};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -117,7 +118,7 @@ impl GamePlugin for GtaVPlugin {
         EXECUTABLES
     }
 
-    fn detect(&self, bottle: &Bottle) -> Option<DetectedGame> {
+    fn detect_wine(&self, bottle: &Bottle) -> Option<DetectedGame> {
         let game_path = find_game_path(bottle)?;
 
         // Verify at least one of the known executables actually exists.
@@ -135,8 +136,11 @@ impl GamePlugin for GtaVPlugin {
             game_path,
             exe_path,
             data_dir,
-            bottle_name: bottle.name.clone(),
-            bottle_path: bottle.path.clone(),
+            runtime: GameRuntime::Wine(WineContext {
+                bottle_name: bottle.name.clone(),
+                bottle_path: bottle.path.clone(),
+                source: bottle.source.clone(),
+            }),
             steam_app_id: None,
         })
     }
@@ -432,7 +436,7 @@ fn strip_vdf_quotes(s: &str) -> String {
 
 /// Register the GTA V plugin with the global game plugin registry.
 pub fn register() {
-    crate::games::register_plugin(Box::new(GtaVPlugin));
+    crate::games::register_plugin(std::sync::Arc::new(GtaVPlugin));
 }
 
 // ---------------------------------------------------------------------------
@@ -540,7 +544,7 @@ mod tests {
             source: "Test".into(),
         };
         let plugin = GtaVPlugin;
-        assert!(plugin.detect(&bottle).is_none());
+        assert!(plugin.detect_wine(&bottle).is_none());
     }
 
     #[test]
@@ -562,7 +566,7 @@ mod tests {
             source: "Test".into(),
         };
         let plugin = GtaVPlugin;
-        let detected = plugin.detect(&bottle).expect("Steam install should detect");
+        let detected = plugin.detect_wine(&bottle).expect("Steam install should detect");
         assert_eq!(detected.game_id, "gtav");
         assert_eq!(detected.display_name, "Grand Theft Auto V");
         assert_eq!(detected.nexus_slug, "grandtheftautov");
@@ -586,7 +590,7 @@ mod tests {
             source: "Test".into(),
         };
         let plugin = GtaVPlugin;
-        let detected = plugin.detect(&bottle).expect("Rockstar install should detect");
+        let detected = plugin.detect_wine(&bottle).expect("Rockstar install should detect");
         assert_eq!(detected.game_id, "gtav");
     }
 
@@ -607,7 +611,7 @@ mod tests {
             source: "Test".into(),
         };
         let plugin = GtaVPlugin;
-        let detected = plugin.detect(&bottle).expect("Epic install should detect");
+        let detected = plugin.detect_wine(&bottle).expect("Epic install should detect");
         assert_eq!(detected.game_id, "gtav");
     }
 
@@ -661,7 +665,7 @@ mod tests {
             source: "Test".into(),
         };
         let plugin = GtaVPlugin;
-        let detected = plugin.detect(&bottle).unwrap();
+        let detected = plugin.detect_wine(&bottle).unwrap();
         let exe = detected.exe_path.unwrap();
         // exe_path (detection) should be GTA5.exe — the real binary.
         assert_eq!(
@@ -718,7 +722,7 @@ mod tests {
             path: bottle_path,
             source: "Test".into(),
         };
-        let detected = GtaVPlugin.detect(&bottle).expect("non-Steam detect");
+        let detected = GtaVPlugin.detect_wine(&bottle).expect("non-Steam detect");
         assert_eq!(detected.game_id, "gtav");
         assert_eq!(detected.game_path, game_dir);
     }
@@ -736,7 +740,7 @@ mod tests {
             path: bottle_path,
             source: "Test".into(),
         };
-        let detected = GtaVPlugin.detect(&bottle).expect("Enhanced edition detect");
+        let detected = GtaVPlugin.detect_wine(&bottle).expect("Enhanced edition detect");
         assert_eq!(detected.game_id, "gtav");
         assert_eq!(detected.game_path, game_dir);
     }
@@ -751,7 +755,7 @@ mod tests {
             path: bottle_path,
             source: "Test".into(),
         };
-        assert!(GtaVPlugin.detect(&bottle).is_some());
+        assert!(GtaVPlugin.detect_wine(&bottle).is_some());
     }
 
     #[test]
@@ -764,7 +768,7 @@ mod tests {
             path: bottle_path,
             source: "Test".into(),
         };
-        assert!(GtaVPlugin.detect(&bottle).is_some(), "top-level drag-drop");
+        assert!(GtaVPlugin.detect_wine(&bottle).is_some(), "top-level drag-drop");
     }
 
     #[test]
@@ -784,7 +788,7 @@ mod tests {
             path: bottle_path,
             source: "Test".into(),
         };
-        let detected = GtaVPlugin.detect(&bottle).expect("Xbox Game Pass detect");
+        let detected = GtaVPlugin.detect_wine(&bottle).expect("Xbox Game Pass detect");
         assert_eq!(detected.game_id, "gtav");
         assert!(detected.game_path.ends_with("Content"));
     }
@@ -805,7 +809,7 @@ mod tests {
             source: "Test".into(),
         };
         assert!(
-            GtaVPlugin.detect(&bottle).is_none(),
+            GtaVPlugin.detect_wine(&bottle).is_none(),
             "empty dir must not detect"
         );
     }

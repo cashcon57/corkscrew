@@ -98,6 +98,109 @@
 }
 
 /* ==============================
+   Native Mode Theme (M5 palette)
+   Deep black + blue→purple gradient accents matching the
+   Apple M5 chip marketing aesthetic.
+   ============================== */
+
+[data-theme="native"] {
+  /* Backgrounds — pure black + dim near-black surfaces matching the
+     Apple M5 marketing aesthetic. */
+  --bg-base: #000000;
+  --bg-base-vibrancy: rgba(0, 0, 0, 0.55);
+  --bg-primary: #06070d;
+  --bg-primary-vibrancy: rgba(6, 7, 13, 0.55);
+  --bg-secondary: #0a0c14;
+  --bg-tertiary: #11141d;
+  --bg-elevated: #11141d;
+
+  --bg-grouped: #06070d;
+  --bg-grouped-vibrancy: rgba(6, 7, 13, 0.50);
+  --bg-grouped-secondary: #0a0c14;
+  --bg-grouped-secondary-vibrancy: rgba(10, 12, 20, 0.55);
+  --bg-grouped-tertiary: #11141d;
+
+  /* Surfaces — extremely subtle, lets the gradient accents do the work. */
+  --surface: rgba(255, 255, 255, 0.03);
+  --surface-vibrancy: rgba(255, 255, 255, 0.04);
+  --surface-hover: rgba(255, 255, 255, 0.06);
+  --surface-active: rgba(255, 255, 255, 0.10);
+  --surface-subtle: rgba(255, 255, 255, 0.015);
+
+  --surface-glass: rgba(255, 255, 255, 0.025);
+  --surface-glass-hover: rgba(255, 255, 255, 0.05);
+  --surface-glass-active: rgba(255, 255, 255, 0.08);
+
+  /* Text — slightly higher contrast than dark theme; the deep black
+     ground demands more white. */
+  --text-primary: rgba(255, 255, 255, 0.92);
+  --text-secondary: rgba(255, 255, 255, 0.62);
+  --text-tertiary: rgba(255, 255, 255, 0.32);
+  --text-quaternary: rgba(255, 255, 255, 0.14);
+
+  /* M5 gradient palette — Apple's marketing stops for the M5 chip. */
+  --m5-cyan: #4ecbff;
+  --m5-blue: #5b73ff;
+  --m5-purple: #a855f7;
+  --m5-gradient: linear-gradient(135deg, var(--m5-cyan) 0%, var(--m5-blue) 50%, var(--m5-purple) 100%);
+  --m5-gradient-soft: linear-gradient(135deg, rgba(78, 203, 255, 0.18) 0%, rgba(91, 115, 255, 0.18) 50%, rgba(168, 85, 247, 0.18) 100%);
+
+  /* Accent / system-accent override — point at M5 blue so existing
+     button/link components inherit the gradient feel without
+     restyle. Decorative gradient glow available via --m5-gradient. */
+  --accent: var(--m5-blue);
+  --accent-hover: var(--m5-cyan);
+  --accent-subtle: rgba(91, 115, 255, 0.16);
+  --accent-muted: rgba(91, 115, 255, 0.28);
+  --accent-on: #ffffff;
+
+  --system-accent: var(--m5-blue);
+  --system-accent-hover: var(--m5-cyan);
+  --system-accent-subtle: rgba(91, 115, 255, 0.16);
+  --system-accent-on: #ffffff;
+
+  /* Semantic colors — keep the apple defaults; they remain readable
+     on deep black. */
+  --green: #30d158;
+  --green-subtle: rgba(48, 209, 88, 0.18);
+  --red: #ff453a;
+  --red-subtle: rgba(255, 69, 58, 0.18);
+  --yellow: #ffd60a;
+  --yellow-subtle: rgba(255, 214, 10, 0.18);
+  --blue: var(--m5-blue);
+  --blue-subtle: rgba(91, 115, 255, 0.18);
+
+  /* Separators — barely-there. */
+  --separator: rgba(255, 255, 255, 0.06);
+  --separator-opaque: #11141d;
+
+  /* Shadows — heavier on deep black to give surfaces lift. */
+  --shadow-sm: 0 1px 4px rgba(0, 0, 0, 0.45);
+  --shadow: 0 4px 16px rgba(0, 0, 0, 0.55);
+  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.65);
+  --shadow-glass: 0 8px 32px rgba(0, 0, 0, 0.55), 0 0 1px rgba(168, 85, 247, 0.20);
+
+  /* Glass edge glow — purple-tinted specular to match M5 gradient. */
+  --glass-edge-top: rgba(255, 255, 255, 0.14);
+  --glass-edge-bottom: rgba(168, 85, 247, 0.10);
+  --glass-edge-glow: rgba(91, 115, 255, 0.06);
+  --glass-edge-shadow: inset 0 1px 0 0 var(--glass-edge-top),
+                        inset 0 -1px 0 0 var(--glass-edge-bottom),
+                        inset 0 0 12px 0 var(--glass-edge-glow);
+  --glass-refraction: 0 0 0 1px rgba(168, 85, 247, 0.12);
+  --glass-blur: blur(40px) saturate(1.6);
+  --glass-blur-light: blur(20px) saturate(1.4);
+  --glass-blur-heavy: blur(60px) saturate(1.8);
+  --glass-tint: rgba(91, 115, 255, 0.03);
+
+  /* Scrollbar — subtle on deep black. */
+  --scrollbar-thumb: rgba(255, 255, 255, 0.12);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.22);
+
+  color-scheme: dark;
+}
+
+/* ==============================
    Light Theme
    ============================== */
 
@@ -486,7 +589,7 @@ button:focus-visible,
 
 .btn-accent {
   background: var(--system-accent);
-  color: #fff;
+  color: var(--system-accent-on);
 }
 
 .btn-accent:hover:not(:disabled) {
@@ -496,7 +599,7 @@ button:focus-visible,
 
 .btn-view-details {
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-on);
   flex: 1;
   justify-content: center;
 }
@@ -897,3 +1000,80 @@ button:focus-visible,
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ==============================
+   M5 Native-Mode Utility Classes
+   Opt-in glass aesthetic for components. Apply these class names to
+   elements inside components to get the M5 Liquid Glass look.
+   All selectors are scoped under [data-theme="native"] so they are
+   a complete no-op in dark/light/wine mode — no conditional rendering
+   needed in components. Components adopt these in Tasks 5.5 and 5.6+.
+   ============================== */
+
+/* Glass card — frosted surface with gradient border via ::before mask trick.
+   The card itself carries box-shadow which renders outside the box, so
+   overflow: hidden does NOT clip it. The ::before pseudo-element fakes a
+   gradient border using mask-composite exclusion on 1px padding. */
+[data-theme="native"] .native-glass-card {
+  background: var(--surface-glass);
+  -webkit-backdrop-filter: blur(24px) saturate(1.6);
+  backdrop-filter: blur(24px) saturate(1.6);
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background-clip: padding-box;
+  position: relative;
+  box-shadow: var(--shadow-glass);
+  overflow: hidden;
+}
+
+[data-theme="native"] .native-glass-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: var(--m5-gradient);
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+[data-theme="native"] .native-glass-card:hover::before {
+  opacity: 0.75;
+  transition: opacity 240ms ease;
+}
+
+/* Glass panel — heavier blur for full-bleed semi-transparent panels
+   (sidebars, bottom sheets, drawers). Uses the vibrancy background
+   token with a hard-border separator. */
+[data-theme="native"] .native-glass-panel {
+  background: var(--bg-primary-vibrancy, var(--bg-primary));
+  -webkit-backdrop-filter: blur(40px) saturate(1.8);
+  backdrop-filter: blur(40px) saturate(1.8);
+  border: 1px solid var(--separator);
+  box-shadow: var(--shadow-glass);
+}
+
+/* Gradient text — clips the M5 cyan→blue→purple gradient to the text
+   glyph shapes. text-shadow: none prevents the fallback from doubling
+   up when background-clip:text is supported. */
+[data-theme="native"] .m5-gradient-text {
+  background: var(--m5-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  /* Fallback for browsers without background-clip:text */
+  text-shadow: none;
+}
+
+/* Outside [data-theme="native"], these classes have no effect — they
+   render as the host element's normal styles. The selectors above
+   only apply when the body's data-theme attribute is "native". */

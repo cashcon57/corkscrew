@@ -5,6 +5,7 @@
   import InstructionParser from "$lib/components/InstructionParser.svelte";
   import { selectedGame, showError, showSuccess, collectionInstallStatus, collectionUninstallStatus, modStateVersion, installedMods, collectionList, activeCollection } from "$lib/stores";
   import type { CollectionInfo, CollectionMod, CollectionSearchResult, InstalledMod, NexusModInfo, CollectionRevision } from "$lib/types";
+  import { wineCtx } from "$lib/types";
   import {
     browseCollections,
     getCollection,
@@ -89,7 +90,7 @@
     });
 
     try {
-      const health = await checkDeploymentHealth(game.game_id, game.bottle_name);
+      const health = await checkDeploymentHealth(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       collectionHealth = { ...collectionHealth, [colName]: health };
     } catch {
       collectionHealth = { ...collectionHealth, [colName]: "error" };
@@ -148,7 +149,7 @@
     loadingLocalDetail = true;
     localDiff = null;
     try {
-      const allMods = await getInstalledMods(game.game_id, game.bottle_name);
+      const allMods = await getInstalledMods(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       localCollectionMods = allMods.filter(m => m.collection_name === col.name);
     } catch {
       localCollectionMods = [];
@@ -159,7 +160,7 @@
     if (col.slug) {
       localDiff = "loading";
       try {
-        localDiff = await getCollectionDiff(game.game_id, game.bottle_name, col.name);
+        localDiff = await getCollectionDiff(game.game_id, (wineCtx(game)?.bottle_name ?? ""), col.name);
       } catch {
         localDiff = "error";
       }
@@ -177,7 +178,7 @@
     if (!game) return;
     collectionDiffs = { ...collectionDiffs, [colName]: "loading" };
     try {
-      const diff = await getCollectionDiff(game.game_id, game.bottle_name, colName);
+      const diff = await getCollectionDiff(game.game_id, (wineCtx(game)?.bottle_name ?? ""), colName);
       collectionDiffs = { ...collectionDiffs, [colName]: diff };
     } catch {
       collectionDiffs = { ...collectionDiffs, [colName]: "error" };
@@ -189,7 +190,7 @@
     if (!game) return;
     loadingMyCollections = true;
     try {
-      myCollections = await listInstalledCollections(game.game_id, game.bottle_name);
+      myCollections = await listInstalledCollections(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
     } catch {
       myCollections = [];
     } finally {
@@ -214,7 +215,7 @@
         const col = myCollections.find(c => c.name === name);
         if (col && col.game_versions.length > 0) {
           try {
-            const status = await checkSkyrimVersion(game.game_id, game.bottle_name);
+            const status = await checkSkyrimVersion(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
             const detectedIsSE = status.current_version.startsWith("1.5.");
             const colTargetsSE = col.game_versions.some(v => v.startsWith("1.5."));
             const colTargetsAE = col.game_versions.some(v => v.startsWith("1.6."));
@@ -227,7 +228,7 @@
                 colTargetsSE ? cv.version.startsWith("1.5.") : cv.version.startsWith("1.6.")
               );
               if (match) {
-                await swapGameVersion(game.game_id, game.bottle_name, match.version);
+                await swapGameVersion(game.game_id, (wineCtx(game)?.bottle_name ?? ""), match.version);
                 showSuccess(`Switched game to v${match.version} for this collection`);
               }
             }
@@ -235,7 +236,7 @@
         }
       }
 
-      await switchCollection(game.game_id, game.bottle_name, name);
+      await switchCollection(game.game_id, (wineCtx(game)?.bottle_name ?? ""), name);
       showSuccess(`Switched to "${name}" — mods deployed`);
       modStateVersion.update(n => n + 1);
 
@@ -245,7 +246,7 @@
       // Proactive Community Shaders detection after deploy
       if (game.game_id === "skyrimse") {
         try {
-          const csCount = await quickCsModCount(game.game_id, game.bottle_name);
+          const csCount = await quickCsModCount(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
           if (csCount > 0) {
             showError(
               `Warning: ${csCount} Community Shaders mod(s) detected. These are incompatible with Wine/CrossOver. Go to Settings > Game > Shader Compatibility to convert or disable them.`
@@ -539,7 +540,7 @@
     const game = $selectedGame;
     if (game) {
       try {
-        const installed = await listInstalledCollections(game.game_id, game.bottle_name);
+        const installed = await listInstalledCollections(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
         if (installed.length === 0) {
           activeTab = "nexus";
         }
@@ -1682,7 +1683,7 @@
               rawInstructions={rawInstallInstructions}
               modNames={selectedMods.map(m => m.name)}
               gameId={$selectedGame?.game_id ?? ""}
-              bottleName={$selectedGame?.bottle_name ?? ""}
+              bottleName={($selectedGame ? wineCtx($selectedGame)?.bottle_name : null) ?? ""}
               platform="wine"
               gameVersion=""
             />
@@ -1780,7 +1781,7 @@
         <!-- Compatibility Check (Skyrim SE only) -->
         {#if selectedCollection.game_domain === "skyrimspecialedition" && $selectedGame}
           <div class="detail-section">
-            <CompatibilityPanel gameId={$selectedGame.game_id} bottleName={$selectedGame.bottle_name} />
+            <CompatibilityPanel gameId={$selectedGame.game_id} bottleName={(wineCtx($selectedGame)?.bottle_name ?? "")} />
           </div>
         {/if}
 

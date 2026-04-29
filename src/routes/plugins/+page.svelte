@@ -18,6 +18,7 @@
     MasterlistStatus,
     LoadOrderKindResponse,
   } from "$lib/types";
+  import { wineCtx } from "$lib/types";
   import PluginRulesPanel from "$lib/components/PluginRulesPanel.svelte";
   import HelpTooltip from "$lib/components/HelpTooltip.svelte";
   import FileBasedLoadOrderPanel from "$lib/components/FileBasedLoadOrderPanel.svelte";
@@ -78,7 +79,7 @@
     // Persist to backend
     try {
       const orderedNames = plugins.map(p => p.filename);
-      await reorderPlugins($selectedGame.game_id, $selectedGame.bottle_name, orderedNames);
+      await reorderPlugins($selectedGame.game_id, (wineCtx($selectedGame)?.bottle_name ?? ""), orderedNames);
     } catch (e: unknown) {
       showError(`Failed to reorder plugins: ${e}`);
       // Reload from disk on failure
@@ -95,7 +96,7 @@
     // game uses Bethesda-style plugin order.
     const game = $selectedGame;
     loadOrderKind = "loading";
-    getLoadOrderKind(game.game_id, game.bottle_name)
+    getLoadOrderKind(game.game_id, (wineCtx(game)?.bottle_name ?? ""))
       .then((resp: LoadOrderKindResponse) => {
         loadOrderKind = resp.kind;
         if (resp.kind === "plugins") {
@@ -119,7 +120,7 @@
     warnings = [];
     sortMessage = null;
     try {
-      plugins = await getPluginOrder(game.game_id, game.bottle_name);
+      plugins = await getPluginOrder(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       // Load masterlist freshness info in parallel (non-blocking)
       getMasterlistStatus(game.game_id)
         .then(s => masterlistInfo = s)
@@ -140,7 +141,7 @@
     try {
       const result = await sortPluginsLoot(
         $selectedGame.game_id,
-        $selectedGame.bottle_name
+        (wineCtx($selectedGame)?.bottle_name ?? "")
       );
       warnings = result.warnings;
 
@@ -148,7 +149,7 @@
         // Reload plugins from disk to get the sorted order
         plugins = await getPluginOrder(
           $selectedGame.game_id,
-          $selectedGame.bottle_name
+          (wineCtx($selectedGame)?.bottle_name ?? "")
         );
         sortMessage = `Sorted — ${result.plugins_moved} plugin${result.plugins_moved !== 1 ? "s" : ""} moved`;
       } else {
@@ -187,7 +188,7 @@
     try {
       plugins = await togglePlugin(
         $selectedGame.game_id,
-        $selectedGame.bottle_name,
+        (wineCtx($selectedGame)?.bottle_name ?? ""),
         plugin.filename,
         !plugin.enabled
       );
@@ -215,7 +216,7 @@
     try {
       plugins = await movePlugin(
         $selectedGame.game_id,
-        $selectedGame.bottle_name,
+        (wineCtx($selectedGame)?.bottle_name ?? ""),
         pluginName,
         newIndex
       );

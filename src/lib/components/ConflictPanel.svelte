@@ -2,6 +2,7 @@
   import { getConflicts, setModPriority, redeployAllMods } from "$lib/api";
   import { selectedGame, showError, showSuccess } from "$lib/stores";
   import type { FileConflict, ConflictModInfo } from "$lib/types";
+  import { wineCtx } from "$lib/types";
 
   // ---- Props ----
   interface Props {
@@ -47,7 +48,7 @@
     if (!game) return;
     loading = true;
     try {
-      conflicts = await getConflicts(game.game_id, game.bottle_name);
+      conflicts = await getConflicts(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
     } catch (e: unknown) {
       showError(`Failed to load conflicts: ${e}`);
     } finally {
@@ -123,7 +124,7 @@
     if (!game || redeploying) return;
     redeploying = true;
     try {
-      const result = await redeployAllMods(game.game_id, game.bottle_name);
+      const result = await redeployAllMods(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       showSuccess(`Redeployed ${result.deployed_count} files`);
       await loadConflicts();
     } catch (e: unknown) {

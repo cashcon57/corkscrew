@@ -4,6 +4,7 @@
 //! game and provides a `register()` function to insert it into the global
 //! plugin registry.
 
+pub mod baldurs_gate_3_native;
 pub mod crimson_desert;
 pub mod fallout4;
 pub mod fromsoft;
@@ -15,4 +16,5 @@ pub mod hogwarts_legacy;
 pub mod sims4;
 pub mod skyrim_plugins;
 pub mod skyrim_se;
+pub mod stardew_valley_native;
 pub mod thunderstore_games;

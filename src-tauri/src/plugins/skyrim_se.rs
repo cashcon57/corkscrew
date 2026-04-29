@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::bottles::Bottle;
 use crate::games::{DetectedGame, GamePlugin, LoadOrderKind};
+use crate::runtime::{GameRuntime, WineContext};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -82,7 +83,7 @@ impl GamePlugin for SkyrimSEPlugin {
         EXECUTABLES
     }
 
-    fn detect(&self, bottle: &Bottle) -> Option<DetectedGame> {
+    fn detect_wine(&self, bottle: &Bottle) -> Option<DetectedGame> {
         let game_path = find_game_path(bottle)?;
 
         // Verify at least one known executable exists (case-insensitive).
@@ -100,8 +101,11 @@ impl GamePlugin for SkyrimSEPlugin {
             game_path,
             exe_path,
             data_dir,
-            bottle_name: bottle.name.clone(),
-            bottle_path: bottle.path.clone(),
+            runtime: GameRuntime::Wine(WineContext {
+                bottle_name: bottle.name.clone(),
+                bottle_path: bottle.path.clone(),
+                source: bottle.source.clone(),
+            }),
             steam_app_id: None,
         })
     }
@@ -192,7 +196,7 @@ impl GamePlugin for SkyrimSEPlugin {
 
 /// Register the Skyrim SE plugin with the global game plugin registry.
 pub fn register() {
-    crate::games::register_plugin(Box::new(SkyrimSEPlugin));
+    crate::games::register_plugin(std::sync::Arc::new(SkyrimSEPlugin));
 }
 
 // ---------------------------------------------------------------------------
@@ -384,7 +388,7 @@ mod tests {
         };
 
         let plugin = SkyrimSEPlugin;
-        assert!(plugin.detect(&bottle).is_none());
+        assert!(plugin.detect_wine(&bottle).is_none());
     }
 
     #[test]
@@ -410,7 +414,7 @@ mod tests {
         };
 
         let plugin = SkyrimSEPlugin;
-        let detected = plugin.detect(&bottle);
+        let detected = plugin.detect_wine(&bottle);
         assert!(detected.is_some());
 
         let detected = detected.unwrap();
@@ -440,7 +444,7 @@ mod tests {
             source: "Test".into(),
         };
         let plugin = SkyrimSEPlugin;
-        let detected = plugin.detect(&bottle).expect("non-Steam detect");
+        let detected = plugin.detect_wine(&bottle).expect("non-Steam detect");
         assert_eq!(detected.game_id, "skyrimse");
         assert!(detected.game_path.ends_with("Skyrim Special Edition"));
     }
@@ -455,7 +459,7 @@ mod tests {
             source: "Test".into(),
         };
         let plugin = SkyrimSEPlugin;
-        assert!(plugin.detect(&bottle).is_some());
+        assert!(plugin.detect_wine(&bottle).is_some());
     }
 
     #[test]
@@ -468,7 +472,7 @@ mod tests {
             source: "Test".into(),
         };
         let plugin = SkyrimSEPlugin;
-        assert!(plugin.detect(&bottle).is_some(), "top-level drag-drop install");
+        assert!(plugin.detect_wine(&bottle).is_some(), "top-level drag-drop install");
     }
 
     #[test]
@@ -489,7 +493,7 @@ mod tests {
             source: "Test".into(),
         };
         let plugin = SkyrimSEPlugin;
-        let detected = plugin.detect(&bottle).expect("Game Pass detect");
+        let detected = plugin.detect_wine(&bottle).expect("Game Pass detect");
         assert_eq!(detected.game_id, "skyrimse");
         assert!(detected.game_path.ends_with("Content"));
     }
@@ -511,7 +515,7 @@ mod tests {
             source: "Test".into(),
         };
         let plugin = SkyrimSEPlugin;
-        assert!(plugin.detect(&bottle).is_none(), "empty dir must not detect");
+        assert!(plugin.detect_wine(&bottle).is_none(), "empty dir must not detect");
     }
 
     /// Verify that `check_steam_library_folders` finds a game installed on a
@@ -567,7 +571,7 @@ mod tests {
             source: "Test".into(),
         };
         let plugin = SkyrimSEPlugin;
-        let detected = plugin.detect(&bottle);
+        let detected = plugin.detect_wine(&bottle);
         assert!(
             detected.is_some(),
             "Skyrim SE on D: SteamLibrary should be detected via VDF"

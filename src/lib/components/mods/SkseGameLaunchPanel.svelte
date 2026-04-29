@@ -26,6 +26,7 @@
     gameLockOverridden,
   } from "$lib/stores";
   import type { DetectedGame, SkseStatus, DowngradeStatus } from "$lib/types";
+  import { wineCtx } from "$lib/types";
 
   let {
     game,
@@ -73,11 +74,11 @@
   $effect(() => {
     const g = game;
     if (g) {
-      getGameLockStatus(g.game_id, g.bottle_name).then(lock => {
+      getGameLockStatus(g.game_id, (wineCtx(g)?.bottle_name ?? "")).then(lock => {
         if (!get(gameLockOverridden)) {
           gameLock.set(lock);
           if (lock) {
-            startGameLockPolling(g.game_id, g.bottle_name);
+            startGameLockPolling(g.game_id, (wineCtx(g)?.bottle_name ?? ""));
           } else {
             stopGameLockPolling();
           }
@@ -98,13 +99,13 @@
 
   async function checkSkseStatus(g: DetectedGame, gen: number) {
     try {
-      const status = await checkSkse(g.game_id, g.bottle_name);
+      const status = await checkSkse(g.game_id, (wineCtx(g)?.bottle_name ?? ""));
       if (gen !== skseCheckGeneration) return;
       skse = status;
       skseStatus.set(skse);
       onSkseStatusChange(skse);
       if (!skse.installed) {
-        const dismissed = localStorage.getItem(`skse_dismissed:${g.game_id}:${g.bottle_name}`);
+        const dismissed = localStorage.getItem(`skse_dismissed:${g.game_id}:${(wineCtx(g)?.bottle_name ?? "")}`);
         if (!dismissed) showSksePrompt = true;
       }
     } catch {
@@ -124,14 +125,14 @@
   async function doLaunch(useSkse: boolean) {
     launching = true;
     try {
-      const result = await launchGame(game.game_id, game.bottle_name, useSkse);
+      const result = await launchGame(game.game_id, (wineCtx(game)?.bottle_name ?? ""), useSkse);
       if (result.success) {
         showSuccess(`Launched ${game.display_name}${useSkse ? " via SKSE" : ""} — Wine cursor fix applied`);
         if (result.warning) {
           showError(`SKSE warning: ${result.warning}`);
         }
         gameLockOverridden.set(false);
-        startGameLockPolling(game.game_id, game.bottle_name);
+        startGameLockPolling(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       }
     } catch (e: unknown) {
       showError(`Failed to launch: ${e}`);
@@ -178,7 +179,7 @@
   }
 
   async function handleForceUnlock() {
-    await forceUnlockGame(game.game_id, game.bottle_name);
+    await forceUnlockGame(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
     gameLock.set(null);
     gameLockOverridden.set(true);
     stopGameLockPolling();
@@ -194,7 +195,7 @@
   async function handleFixDisplay() {
     fixingDisplay = true;
     try {
-      const result = await fixSkyrimDisplay(game.bottle_name);
+      const result = await fixSkyrimDisplay((wineCtx(game)?.bottle_name ?? ""));
       if (result.fixed) {
         showSuccess(`Display fixed: ${result.applied.width}x${result.applied.height} fullscreen — game will open in exclusive fullscreen`);
       } else {
@@ -226,7 +227,7 @@
 
       const archivePath = typeof selected === "string" ? selected : String(selected);
       installingSkse = true;
-      skse = await installSkseFromArchive(game.game_id, game.bottle_name, archivePath);
+      skse = await installSkseFromArchive(game.game_id, (wineCtx(game)?.bottle_name ?? ""), archivePath);
       skseStatus.set(skse);
       onSkseStatusChange(skse);
       showSksePrompt = false;
@@ -241,7 +242,7 @@
   async function handleAutoInstallSkse() {
     try {
       installingSkse = true;
-      skse = await installSkseAuto(game.game_id, game.bottle_name);
+      skse = await installSkseAuto(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       skseStatus.set(skse);
       onSkseStatusChange(skse);
       showSksePrompt = false;
@@ -257,7 +258,7 @@
     try {
       installingSkse = true;
       showSkseInstallPrompt = false;
-      skse = await installSkseAuto(game.game_id, game.bottle_name);
+      skse = await installSkseAuto(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       skseStatus.set(skse);
       onSkseStatusChange(skse);
       showSksePrompt = false;
@@ -281,7 +282,7 @@
       const archivePath = typeof selected === "string" ? selected : String(selected);
       installingSkse = true;
       showSkseInstallPrompt = false;
-      skse = await installSkseFromArchive(game.game_id, game.bottle_name, archivePath);
+      skse = await installSkseFromArchive(game.game_id, (wineCtx(game)?.bottle_name ?? ""), archivePath);
       skseStatus.set(skse);
       onSkseStatusChange(skse);
       showSksePrompt = false;
@@ -296,11 +297,11 @@
 
   async function checkVersionStatus(g: DetectedGame, gen: number) {
     try {
-      const status = await checkSkyrimVersion(g.game_id, g.bottle_name);
+      const status = await checkSkyrimVersion(g.game_id, (wineCtx(g)?.bottle_name ?? ""));
       if (gen !== skseCheckGeneration) return;
       downgradeStatus = status;
       if (!status.is_downgraded) {
-        const dismissed = localStorage.getItem(`downgrade_dismissed:${g.game_id}:${g.bottle_name}`);
+        const dismissed = localStorage.getItem(`downgrade_dismissed:${g.game_id}:${(wineCtx(g)?.bottle_name ?? "")}`);
         if (!dismissed) showDowngradeBanner = true;
       }
     } catch {
@@ -311,7 +312,7 @@
   async function handleDowngrade() {
     downgrading = true;
     try {
-      const status = await downgradeSkyrim(game.game_id, game.bottle_name, "full");
+      const status = await downgradeSkyrim(game.game_id, (wineCtx(game)?.bottle_name ?? ""), "full");
       downgradeStatus = status;
       showDowngradeBanner = false;
       showSuccess(`Game downgraded to v${status.target_version}`);
@@ -323,12 +324,12 @@
   }
 
   function dismissDowngradeBanner() {
-    localStorage.setItem(`downgrade_dismissed:${game.game_id}:${game.bottle_name}`, "true");
+    localStorage.setItem(`downgrade_dismissed:${game.game_id}:${(wineCtx(game)?.bottle_name ?? "")}`, "true");
     showDowngradeBanner = false;
   }
 
   function dismissSksePrompt() {
-    localStorage.setItem(`skse_dismissed:${game.game_id}:${game.bottle_name}`, "true");
+    localStorage.setItem(`skse_dismissed:${game.game_id}:${(wineCtx(game)?.bottle_name ?? "")}`, "true");
     showSksePrompt = false;
   }
 
@@ -336,7 +337,7 @@
     if (!skse) return;
     const newValue = !skse.use_skse;
     try {
-      await setSksePreference(game.game_id, game.bottle_name, newValue);
+      await setSksePreference(game.game_id, (wineCtx(game)?.bottle_name ?? ""), newValue);
       skse = { ...skse, use_skse: newValue };
       skseStatus.set(skse);
       onSkseStatusChange(skse);

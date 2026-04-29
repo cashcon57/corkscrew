@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 
 use crate::bottles::Bottle;
 use crate::games::{DetectedGame, GamePlugin};
+use crate::runtime::{GameRuntime, WineContext};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -90,7 +91,7 @@ impl GamePlugin for CrimsonDesertPlugin {
         EXECUTABLES
     }
 
-    fn detect(&self, bottle: &Bottle) -> Option<DetectedGame> {
+    fn detect_wine(&self, bottle: &Bottle) -> Option<DetectedGame> {
         let game_path = find_game_path(bottle)?;
         if find_executable(&game_path).is_none() {
             return None;
@@ -104,8 +105,11 @@ impl GamePlugin for CrimsonDesertPlugin {
             game_path,
             exe_path,
             data_dir,
-            bottle_name: bottle.name.clone(),
-            bottle_path: bottle.path.clone(),
+            runtime: GameRuntime::Wine(WineContext {
+                bottle_name: bottle.name.clone(),
+                bottle_path: bottle.path.clone(),
+                source: bottle.source.clone(),
+            }),
             steam_app_id: None,
         })
     }
@@ -160,7 +164,7 @@ impl GamePlugin for CrimsonDesertPlugin {
 // ---------------------------------------------------------------------------
 
 pub fn register() {
-    crate::games::register_plugin(Box::new(CrimsonDesertPlugin));
+    crate::games::register_plugin(std::sync::Arc::new(CrimsonDesertPlugin));
 }
 
 // ---------------------------------------------------------------------------
@@ -390,7 +394,7 @@ mod tests {
             path: bottle_path,
             source: "T".into(),
         };
-        assert!(CrimsonDesertPlugin.detect(&b).is_none());
+        assert!(CrimsonDesertPlugin.detect_wine(&b).is_none());
     }
 
     #[test]
@@ -412,7 +416,7 @@ mod tests {
             path: bottle_path,
             source: "T".into(),
         };
-        let d = CrimsonDesertPlugin.detect(&b).expect("detection");
+        let d = CrimsonDesertPlugin.detect_wine(&b).expect("detection");
         assert_eq!(d.game_id, "crimsondesert");
         assert_eq!(d.data_dir, game_dir);
     }
@@ -436,7 +440,7 @@ mod tests {
             path: bottle_path,
             source: "T".into(),
         };
-        let d = CrimsonDesertPlugin.detect(&b).expect("detection");
+        let d = CrimsonDesertPlugin.detect_wine(&b).expect("detection");
         assert_eq!(d.game_id, "crimsondesert");
     }
 
@@ -461,7 +465,7 @@ mod tests {
             path: bottle_path,
             source: "T".into(),
         };
-        let d = CrimsonDesertPlugin.detect(&b).expect("non-Steam detect");
+        let d = CrimsonDesertPlugin.detect_wine(&b).expect("non-Steam detect");
         assert_eq!(d.game_id, "crimsondesert");
     }
 
@@ -474,7 +478,7 @@ mod tests {
             path: bottle_path,
             source: "T".into(),
         };
-        assert!(CrimsonDesertPlugin.detect(&b).is_some());
+        assert!(CrimsonDesertPlugin.detect_wine(&b).is_some());
     }
 
     #[test]
@@ -486,7 +490,7 @@ mod tests {
             source: "T".into(),
         };
         assert!(
-            CrimsonDesertPlugin.detect(&b).is_some(),
+            CrimsonDesertPlugin.detect_wine(&b).is_some(),
             "top-level drag-drop"
         );
     }
@@ -508,7 +512,7 @@ mod tests {
             path: bottle_path,
             source: "T".into(),
         };
-        let d = CrimsonDesertPlugin.detect(&b).expect("Xbox Game Pass detect");
+        let d = CrimsonDesertPlugin.detect_wine(&b).expect("Xbox Game Pass detect");
         assert_eq!(d.game_id, "crimsondesert");
         assert!(d.game_path.ends_with("Content"));
     }
@@ -529,7 +533,7 @@ mod tests {
             source: "T".into(),
         };
         assert!(
-            CrimsonDesertPlugin.detect(&b).is_none(),
+            CrimsonDesertPlugin.detect_wine(&b).is_none(),
             "empty dir must not detect"
         );
     }

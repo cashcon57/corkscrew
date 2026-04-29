@@ -68,14 +68,21 @@ pub async fn register_unregistered_game(
     let bottle = crate::bottles::find_bottle_by_name(&bottle_name)
         .ok_or_else(|| format!("Bottle not found: {bottle_name}"))?;
 
-    // Sanity: the exe must live inside the bottle. Reject otherwise to
-    // prevent registering arbitrary host paths via this command.
-    let canon_drive_c = std::fs::canonicalize(bottle.drive_c())
-        .map_err(|e| format!("canonicalize drive_c failed: {e}"))?;
+    // Sanity: the exe must live inside the bottle's root (any drive_X is
+    // allowed — Wine supports multi-drive bottles, and ME2 .bat launchers /
+    // games may legitimately live on drive_d, drive_e, etc). Reject anything
+    // outside the bottle root to prevent registering arbitrary host paths.
+    let canon_bottle = std::fs::canonicalize(&bottle.path)
+        .map_err(|e| format!("canonicalize bottle failed: {e}"))?;
     let canon_exe = std::fs::canonicalize(exe_path_p)
         .map_err(|e| format!("canonicalize exe failed: {e}"))?;
-    if !canon_exe.starts_with(&canon_drive_c) {
-        return Err("exe_path must live inside the bottle's drive_c".into());
+    if !canon_exe.starts_with(&canon_bottle) {
+        return Err("exe_path must live inside the bottle".into());
+    }
+    let canon_game_path = std::fs::canonicalize(game_path_p)
+        .map_err(|e| format!("canonicalize game_path failed: {e}"))?;
+    if !canon_game_path.starts_with(&canon_bottle) {
+        return Err("game_path must live inside the bottle".into());
     }
 
     let custom = CustomGame {

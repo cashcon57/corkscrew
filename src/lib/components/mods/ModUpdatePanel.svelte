@@ -3,6 +3,7 @@
   import { checkModUpdates } from "$lib/api";
   import { showError, showSuccess } from "$lib/stores";
   import type { DetectedGame, ModUpdateInfo } from "$lib/types";
+  import { wineCtx } from "$lib/types";
 
   let {
     game,
@@ -18,7 +19,7 @@
   async function handleCheckUpdates() {
     checkingUpdates = true;
     try {
-      modUpdates = await checkModUpdates(game.game_id, game.bottle_name);
+      modUpdates = await checkModUpdates(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       if (modUpdates.length === 0) {
         showSuccess("All mods are up to date");
       } else {

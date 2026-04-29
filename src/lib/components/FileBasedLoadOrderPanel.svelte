@@ -11,6 +11,7 @@
   } from "$lib/api";
   import { selectedGame, showError } from "$lib/stores";
   import type { DetectedGame, LoadOrderEntry } from "$lib/types";
+  import { wineCtx } from "$lib/types";
 
   let entries = $state<LoadOrderEntry[]>([]);
   let loading = $state(false);
@@ -44,7 +45,7 @@
   async function loadEntries(game: DetectedGame) {
     loading = true;
     try {
-      entries = await getFileBasedLoadOrder(game.game_id, game.bottle_name);
+      entries = await getFileBasedLoadOrder(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
     } catch (e: unknown) {
       showError(`Failed to load order: ${e}`);
       entries = [];
@@ -60,7 +61,7 @@
     try {
       await setFileBasedLoadOrder(
         $selectedGame.game_id,
-        $selectedGame.bottle_name,
+        (wineCtx($selectedGame)?.bottle_name ?? ""),
         entries,
       );
       savedMessage = "Saved";

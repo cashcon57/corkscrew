@@ -1,0 +1,367 @@
+{
+  "planPath": "docs/superpowers/plans/2026-04-28-native-macos-game-support.md",
+  "tasks": [
+    {
+      "id": 0,
+      "subject": "Task 1.1: Introduce GameRuntime types",
+      "status": "completed",
+      "completedSha": "bc5a62d",
+      "description": "**Goal:** Land the new GameRuntime / WineContext / NativeContext enum and helpers in a dedicated module. No consumers yet.\n\n**Files:**\n- Create: src-tauri/src/runtime.rs\n- Modify: src-tauri/src/lib.rs (add `pub mod runtime;`)\n\n**Verify:** `cd src-tauri && cargo test --lib runtime::` → 3 passed\n\n```json:metadata\n{\"files\": [\"src-tauri/src/runtime.rs\", \"src-tauri/src/lib.rs\"], \"verifyCommand\": \"cd src-tauri && cargo test --lib runtime::\", \"acceptanceCriteria\": [\"GameRuntime/WineContext/NativeContext defined and exported\", \"All three derive Clone/Debug/Serialize/Deserialize\", \"cargo build succeeds\", \"3 unit tests pass\"]}\n```"
+    },
+    {
+      "id": 1,
+      "subject": "Task 1.2: Add migration v23 — runtime column",
+      "status": "completed",
+      "completedSha": "3c3e2c8",
+      "notes": "games table did not exist pre-v23; migration creates it. Affects Task 1.3 scope: no existing DB read/write to refactor.",
+      "blockedBy": [0],
+      "description": "**Goal:** Schema supports both runtime types. Existing rows backfilled to 'wine'.\n\n**Files:**\n- Modify: src-tauri/src/migrations.rs (TARGET_VERSION → 23)\n\n**Verify:** `cd src-tauri && cargo test --lib migrations::` → all pass\n\n```json:metadata\n{\"files\": [\"src-tauri/src/migrations.rs\"], \"verifyCommand\": \"cd src-tauri && cargo test --lib migrations::\", \"acceptanceCriteria\": [\"TARGET_VERSION = 23\", \"runtime column added with 'wine' default\", \"native_app_path/native_data_root/native_architecture/native_sandboxed/native_source columns added\", \"existing rows backfilled\", \"idempotent\"]}\n```"
+    },
+    {
+      "id": 2,
+      "subject": "Task 1.3 (REVISED): Mechanical struct rename — DetectedGame.bottle_* → runtime: GameRuntime",
+      "status": "completed",
+      "completedSha": "9464e0a",
+      "notes": "15 files touched. WineContext also captures source (was previously dropped). steam_app_id now propagated from Steam appmanifest scanner (natural consequence of refactor).",
+      "blockedBy": [0, 1],
+      "description": "**Goal:** Pure mechanical struct rename. DetectedGame.bottle_name/.bottle_path move into runtime: GameRuntime::Wine(WineContext{...}). NO database.rs work — that's revised Task 2.7.\n\n**Files:**\n- Modify: src-tauri/src/games.rs (struct + constructors)\n- Modify: every other file that reads .bottle_name / .bottle_path on a DetectedGame (compile-driven)\n\n**Out of scope:** src-tauri/src/database.rs (no pre-existing games-table API to refactor; new API lives in revised Task 2.7).\n\n**Verify:** `cd src-tauri && cargo build && cargo test` → all 1353 tests pass.\n\n```json:metadata\n{\"files\": [\"src-tauri/src/games.rs\", \"src-tauri/src/game_registry.rs\", \"src-tauri/src/launcher.rs\", \"src-tauri/src/commands/\"], \"verifyCommand\": \"cd src-tauri && cargo test\", \"acceptanceCriteria\": [\"bottle_name/bottle_path removed from DetectedGame struct\", \"runtime: GameRuntime added\", \"all DetectedGame constructors build runtime: GameRuntime::Wine(WineContext{...}) correctly\", \"all readers go through runtime.wine()\", \"all 1353 existing tests pass with zero regressions\", \"NO changes to database.rs\"]}\n```"
+    },
+    {
+      "id": 3,
+      "subject": "Task 1.4: Split GamePlugin trait detect_wine + detect_native",
+      "status": "completed",
+      "completedSha": "4f8b0a5",
+      "notes": "14 files touched. wabbajack_installer.rs also had 2 call sites needing rename. detect_native_games() entry point added; detect_all_games() now includes both runtimes.",
+      "blockedBy": [2],
+      "description": "**Goal:** Plugin trait gains both methods; existing 20+ Wine plugins keep behavior.\n\n**Files:**\n- Modify: src-tauri/src/games.rs (trait)\n- Modify: all src-tauri/src/plugins/*.rs (mechanical rename fn detect → detect_wine)\n\n**Verify:** `cd src-tauri && cargo test`\n\n```json:metadata\n{\"files\": [\"src-tauri/src/games.rs\", \"src-tauri/src/plugins/\"], \"verifyCommand\": \"cd src-tauri && cargo test\", \"acceptanceCriteria\": [\"detect_wine + detect_native both default-implemented\", \"old detect removed from trait\", \"all Wine plugins use detect_wine\", \"detect_native_games() entrypoint added\"]}\n```"
+    },
+    {
+      "id": 4,
+      "subject": "Task 1.5: Split deployer into wine + native paths",
+      "status": "completed",
+      "completedSha": "b2b20bc",
+      "notes": "Implementer adapted spec: instead of renaming a non-existent `deploy()` function, added new abstraction layer (deploy_game/deploy_wine_game/deploy_native_game) ABOVE existing primitives. Cleaner outcome.",
+      "blockedBy": [3],
+      "description": "**Goal:** deploy_game() dispatcher; deploy_native_game stub refuses bundle writes by default.\n\n**Files:**\n- Modify: src-tauri/src/deployer.rs\n- Modify: callers (collection_installer, installer, commands)\n\n**Verify:** `cd src-tauri && cargo test --lib deployer::`\n\n```json:metadata\n{\"files\": [\"src-tauri/src/deployer.rs\"], \"verifyCommand\": \"cd src-tauri && cargo test --lib deployer::\", \"acceptanceCriteria\": [\"deploy_game dispatches by runtime\", \"deploy_wine_game = old behavior\", \"deploy_native_game stub refuses by default\", \"all callers go through dispatcher\"]}\n```"
+    },
+    {
+      "id": 5,
+      "subject": "Task 1.6: native_mode config flag + AppState plumbing",
+      "status": "completed",
+      "completedSha": "05218a6",
+      "notes": "Adapted to module-level config::get_config()/save_config() free functions (matches existing codebase pattern). spawn_blocking wraps the synchronous config IO in async tauri commands.",
+      "blockedBy": [4],
+      "description": "**Goal:** experimental.native_mode bool with get/set commands and Svelte store.\n\n**Files:**\n- Modify: src-tauri/src/config.rs\n- Modify: src-tauri/src/lib.rs (commands + handler registration)\n- Modify: src/lib/api.ts, src/lib/stores.ts\n\n**Verify:** `cargo test --lib config:: && npx svelte-check --threshold error`\n\n```json:metadata\n{\"files\": [\"src-tauri/src/config.rs\", \"src/lib/api.ts\", \"src/lib/stores.ts\"], \"verifyCommand\": \"cd src-tauri && cargo test --lib config::\", \"acceptanceCriteria\": [\"native_mode field with serde default false\", \"get_native_mode/set_native_mode commands\", \"TS api wrappers\", \"writable store\"]}\n```"
+    },
+    {
+      "id": 6,
+      "subject": "Task 2.1: plist crate + Info.plist reader",
+      "status": "completed",
+      "completedSha": "80d438a",
+      "blockedBy": [5],
+      "description": "**Goal:** Read CFBundleIdentifier/Executable/Version from .app's Info.plist.\n\n**Files:**\n- Modify: src-tauri/Cargo.toml (add plist=1)\n- Create: src-tauri/src/plist.rs\n- Create: src-tauri/tests/fixtures/Info.xml.plist\n\n**Verify:** `cargo test --lib plist::`\n\n```json:metadata\n{\"files\": [\"src-tauri/Cargo.toml\", \"src-tauri/src/plist.rs\"], \"verifyCommand\": \"cd src-tauri && cargo test --lib plist::\", \"acceptanceCriteria\": [\"read_info_plist returns 4 fields\", \"handles XML and binary plist\", \"errors on missing/malformed\"]}\n```"
+    },
+    {
+      "id": 7,
+      "subject": "Task 2.2: /Applications walker",
+      "status": "completed",
+      "completedSha": "4bf0621",
+      "notes": "Added Clone derive to InfoPlist (required for NativeAppCandidate's Clone). Approved by inspection — throughput mode skips individual review for simple Phase 2 tasks; comprehensive review at Task 2.7 integration point.",
+      "blockedBy": [6],
+      "description": "**Goal:** Walk /Applications + ~/Applications, return NativeAppCandidate list.\n\n**Files:**\n- Create: src-tauri/src/native_scanner.rs\n\n**Verify:** `cargo test --lib native_scanner::`\n\n```json:metadata\n{\"files\": [\"src-tauri/src/native_scanner.rs\"], \"verifyCommand\": \"cd src-tauri && cargo test --lib native_scanner::\", \"acceptanceCriteria\": [\"scan_applications_dirs finds .app bundles\", \"per-bundle Info.plist data captured\", \"source = SystemApplications\"]}\n```"
+    },
+    {
+      "id": 8,
+      "subject": "Task 2.3: Steam mac integration",
+      "status": "completed",
+      "completedSha": "80b1f95",
+      "notes": "Added canonicalize-based dedup so libraryfolders.vdf entries pointing at steam_root don't produce duplicate candidates.",
+      "blockedBy": [7],
+      "description": "**Goal:** Parse libraryfolders.vdf + appmanifest_*.acf for native Steam games.\n\n**Files:**\n- Modify: src-tauri/src/native_scanner.rs (scan_steam_mac)\n- Possibly extend: src-tauri/src/steam_integration.rs\n\n```json:metadata\n{\"files\": [\"src-tauri/src/native_scanner.rs\"], \"verifyCommand\": \"cd src-tauri && cargo test --lib native_scanner::steam\", \"acceptanceCriteria\": [\"libraryfolders.vdf parsed\", \"appmanifest scanned\", \"per-game candidate produced\"]}\n```"
+    },
+    {
+      "id": 9,
+      "subject": "Task 2.4: MAS sandbox detection",
+      "status": "completed",
+      "completedSha": "83df52c",
+      "blockedBy": [7],
+      "description": "**Goal:** Identify Mac App Store sandboxed games.\n\n**Files:**\n- Modify: src-tauri/src/native_scanner.rs\n\n```json:metadata\n{\"files\": [\"src-tauri/src/native_scanner.rs\"], \"verifyCommand\": \"cd src-tauri && cargo test --lib native_scanner::sandbox\", \"acceptanceCriteria\": [\"_MASReceipt presence → true\", \"/System/Applications → true\", \"applied to all candidates\"]}\n```"
+    },
+    {
+      "id": 10,
+      "subject": "Task 2.5: Mach-O architecture detection",
+      "status": "completed",
+      "completedSha": "560ab34",
+      "blockedBy": [7],
+      "description": "**Goal:** Identify AS / Intel / Universal per bundle.\n\n**Files:**\n- Modify: src-tauri/src/native_scanner.rs\n\n```json:metadata\n{\"files\": [\"src-tauri/src/native_scanner.rs\"], \"verifyCommand\": \"cd src-tauri && cargo test --lib native_scanner::arch\", \"acceptanceCriteria\": [\"recognizes 0xFEEDFACF / 0xCAFEBABE\", \"distinguishes arm64 / x86_64 / fat\", \"no new deps\"]}\n```"
+    },
+    {
+      "id": 11,
+      "subject": "Task 2.6: GOG mac scanner + manual file picker",
+      "status": "completed",
+      "completedSha": "fa0c907",
+      "notes": "Added Serialize to NativeAppCandidate + InfoPlist for Tauri command boundary. validate_manual_native_app helper is the testable surface; add_native_game_manually Tauri command is a thin wrapper.",
+      "blockedBy": [7],
+      "description": "**Goal:** ~/Games walker + add_native_game_manually command.\n\n**Files:**\n- Modify: src-tauri/src/native_scanner.rs, src-tauri/src/commands/game_state.rs\n\n```json:metadata\n{\"files\": [\"src-tauri/src/native_scanner.rs\", \"src-tauri/src/commands/game_state.rs\"], \"verifyCommand\": \"cd src-tauri && cargo test --lib native_scanner::gog\", \"acceptanceCriteria\": [\"~/Games walked\", \"manual command rejects non-.app paths\", \"command registered\"]}\n```"
+    },
+    {
+      "id": 12,
+      "subject": "Task 2.7 (REVISED): Aggregate scanner + games-table API in database.rs + persistence",
+      "status": "completed",
+      "completedSha": "946e1f0",
+      "notes": "Initial impl at 3ede24c. Code review flagged silent error swallowing in get_persisted_game (.ok() catching all rusqlite errors). Fixed at 946e1f0 with explicit QueryReturnedNoRows match + test. Two nits noted for later: N spawn_blocking calls in rescan_native_games (should batch); WineContext.source not persisted (schema TODO).",
+      "blockedBy": [8, 9, 10, 11],
+      "description": "**Goal:** scan_all_native() with dedup; FIRST games-table read/write API in database.rs (PersistedGame struct + upsert_game / list_persisted_games / get_persisted_game / delete_persisted_game); rescan_native_games command.\n\n**Scope expansion vs original plan:** This task absorbs the games-table API design that was originally implied to be part of Task 1.3. There is no pre-existing API to refactor — this task creates it.\n\n```json:metadata\n{\"files\": [\"src-tauri/src/native_scanner.rs\", \"src-tauri/src/database.rs\", \"src-tauri/src/lib.rs\"], \"verifyCommand\": \"cd src-tauri && cargo test --lib native_scanner::aggregate && cargo test --lib database::persisted_game\", \"acceptanceCriteria\": [\"scan_all_native dedupes by canonical bundle_path\", \"PersistedGame struct in database.rs\", \"4 new methods: upsert_game / list_persisted_games / get_persisted_game / delete_persisted_game\", \"Wine and Native variants both round-trip through persistence\", \"upsert is idempotent (replace not duplicate)\", \"rescan_native_games command persists each candidate\"]}\n```"
+    },
+    {
+      "id": 13,
+      "subject": "Task 2.8: TS types + frontend hook",
+      "status": "completed",
+      "completedSha": "1009d76",
+      "notes": "41 .svelte/.ts files updated (265 svelte-check errors → 0). wineCtx() exported helper for guard pattern. Reviewer flagged TopBarGameSelector ternary as Phase 5 cleanup nit.",
+      "blockedBy": [12],
+      "description": "**Goal:** TS types + rescanNativeGames wrapper.\n\n```json:metadata\n{\"files\": [\"src/lib/types.ts\", \"src/lib/api.ts\"], \"verifyCommand\": \"npx svelte-check --threshold error\", \"acceptanceCriteria\": [\"NativeAppCandidate / Architecture / NativeSource TS types\", \"rescanNativeGames wrapper\", \"svelte-check clean\"]}\n```"
+    },
+    {
+      "id": 14,
+      "subject": "Release v0.14.0 — phases 1+2 foundation",
+      "status": "ready_for_user",
+      "readyAtSha": "1009d76",
+      "notes": "Phase 1+2 fully complete. 1391 Rust tests + svelte-check clean on local CI. Per user's stored preference: confirm before shipping a release. Awaiting user authorization to run ./scripts/release.sh 0.14.0.",
+      "blockedBy": [13],
+      "description": "**Goal:** Cut v0.14.0 release with runtime split + scanner behind flag.\n\n```json:metadata\n{\"files\": [], \"verifyCommand\": \"./scripts/release.sh 0.14.0\", \"acceptanceCriteria\": [\"version bumped\", \"GitHub release published\", \"existing Wine functionality unchanged\"]}\n```"
+    },
+    {
+      "id": 15,
+      "subject": "Task 3.0: SPIKE — document SMAPI install procedure",
+      "status": "pending",
+      "blockedBy": [14],
+      "description": "**Goal:** Read SMAPI's install on macOS.command, document mutations + revert.\n\n**Files:**\n- Create: docs/superpowers/plans/2026-04-28-native-macos-game-support-smapi-install-spec.md\n\n```json:metadata\n{\"files\": [\"docs/superpowers/plans/2026-04-28-native-macos-game-support-smapi-install-spec.md\"], \"verifyCommand\": \"\", \"acceptanceCriteria\": [\"every install mutation documented\", \"revert procedure documented\", \"mods directory locations documented\"]}\n```"
+    },
+    {
+      "id": 16,
+      "subject": "Task 3.1: stardew_valley_native plugin scaffolding",
+      "status": "pending",
+      "blockedBy": [15],
+      "description": "**Goal:** Plugin compiles, registers, returns empty detect_native.\n\n```json:metadata\n{\"files\": [\"src-tauri/src/plugins/stardew_valley_native.rs\", \"src-tauri/src/plugins/mod.rs\", \"src-tauri/src/lib.rs\"], \"verifyCommand\": \"cd src-tauri && cargo test --lib plugins::stardew_valley_native\", \"acceptanceCriteria\": [\"plugin registered\", \"trait impl compiles\", \"registry lookup returns plugin\"]}\n```"
+    },
+    {
+      "id": 17,
+      "subject": "Task 3.2: Stardew detection by bundle identifier",
+      "status": "pending",
+      "blockedBy": [16],
+      "description": "**Goal:** Filter native candidates to find Stardew installs.\n\n```json:metadata\n{\"files\": [\"src-tauri/src/plugins/stardew_valley_native.rs\"], \"verifyCommand\": \"cd src-tauri && cargo test --lib plugins::stardew_valley_native\", \"acceptanceCriteria\": [\"matches com.chucklefish.stardewvalley\", \"falls back to executable name\", \"DetectedGame populated correctly\"]}\n```"
+    },
+    {
+      "id": 18,
+      "subject": "Task 3.3: SMAPI presence detection",
+      "status": "pending",
+      "blockedBy": [15],
+      "description": "**Goal:** is_installed + installed_version helpers.\n\n```json:metadata\n{\"files\": [\"src-tauri/src/smapi.rs\"], \"verifyCommand\": \"cd src-tauri && cargo test --lib smapi::\", \"acceptanceCriteria\": [\"is_installed checks SMAPI markers\", \"installed_version reads SMAPI manifest\"]}\n```"
+    },
+    {
+      "id": 19,
+      "subject": "Task 3.4: SMAPI auto-install",
+      "status": "pending",
+      "blockedBy": [18],
+      "description": "**Goal:** Port install on macOS.command using mod_tools GitHub fetcher.\n\n```json:metadata\n{\"files\": [\"src-tauri/src/smapi.rs\"], \"verifyCommand\": \"cd src-tauri && cargo test --lib smapi::install\", \"acceptanceCriteria\": [\"fetches latest release\", \"applies mutations per spike spec\", \"idempotent\", \"snapshot before mutation\"]}\n```"
+    },
+    {
+      "id": 20,
+      "subject": "Task 3.5: SMAPI uninstall / revert",
+      "status": "pending",
+      "blockedBy": [19],
+      "description": "**Goal:** Reverse install mutations.\n\n```json:metadata\n{\"files\": [\"src-tauri/src/smapi.rs\"], \"verifyCommand\": \"cd src-tauri && cargo test --lib smapi::uninstall\", \"acceptanceCriteria\": [\"byte-equal round-trip in fixtures\", \"no-op when not installed\"]}\n```"
+    },
+    {
+      "id": 21,
+      "subject": "Task 3.6: manifest.json parser + mods dir resolver",
+      "status": "pending",
+      "blockedBy": [17],
+      "description": "**Goal:** parse_manifest + resolve_mods_dir.\n\n```json:metadata\n{\"files\": [\"src-tauri/src/plugins/stardew_valley_native.rs\"], \"verifyCommand\": \"cd src-tauri && cargo test --lib plugins::stardew_valley_native\", \"acceptanceCriteria\": [\"extracts Name/Version/UniqueID/Dependencies/MinimumApiVersion\", \"resolves correct Mods dir per spike\"]}\n```"
+    },
+    {
+      "id": 22,
+      "subject": "Task 3.7: Stardew native deploy",
+      "status": "pending",
+      "blockedBy": [4, 21],
+      "description": "**Goal:** Implement deploy_native_game branch for Stardew.\n\n```json:metadata\n{\"files\": [\"src-tauri/src/deployer.rs\", \"src-tauri/src/plugins/stardew_valley_native.rs\"], \"verifyCommand\": \"cd src-tauri && cargo test --lib deployer\", \"acceptanceCriteria\": [\"copies/hardlinks mod files into Mods/<UniqueID>\", \"refuses paths outside Mods dir\", \"updates mod_dependencies\"]}\n```"
+    },
+    {
+      "id": 23,
+      "subject": "Task 3.8: Conflict + dependency surface",
+      "status": "pending",
+      "blockedBy": [22],
+      "description": "**Goal:** get_stardew_mod_status command.\n\n```json:metadata\n{\"files\": [\"src-tauri/src/plugins/stardew_valley_native.rs\", \"src-tauri/src/commands/mods.rs\"], \"verifyCommand\": \"cd src-tauri && cargo test --lib commands::mods\", \"acceptanceCriteria\": [\"unmet deps reported\", \"UniqueID conflicts reported\", \"reuses mod_dependencies storage\"]}\n```"
+    },
+    {
+      "id": 24,
+      "subject": "Task 3.9: Re-quarantine repair",
+      "status": "pending",
+      "blockedBy": [19],
+      "description": "**Goal:** clear_quarantine helper called pre-launch.\n\n```json:metadata\n{\"files\": [\"src-tauri/src/smapi.rs\"], \"verifyCommand\": \"cd src-tauri && cargo test --lib smapi::quarantine\", \"acceptanceCriteria\": [\"shells xattr -dr com.apple.quarantine\", \"idempotent\", \"called pre-launch when SMAPI present\"]}\n```"
+    },
+    {
+      "id": 25,
+      "subject": "Task 5.0: SPIKE — tauri-plugin-liquid-glass capability",
+      "status": "pending",
+      "blockedBy": [14],
+      "description": "**Goal:** Document plugin's runtime API surface.\n\n```json:metadata\n{\"files\": [\"docs/superpowers/plans/2026-04-28-native-macos-game-support-glass-spec.md\"], \"verifyCommand\": \"\", \"acceptanceCriteria\": [\"plugin commands listed\", \"runtime-toggle capability decided\", \"fallback path documented\"]}\n```"
+    },
+    {
+      "id": 26,
+      "subject": "Task 5.1: Tokenize hardcoded colors",
+      "status": "pending",
+      "blockedBy": [14],
+      "description": "**Goal:** Sweep components for #hex/rgb literals; convert to CSS vars.\n\n```json:metadata\n{\"files\": [\"src/app.css\", \"src/lib/components/\", \"src/routes/\"], \"verifyCommand\": \"npx svelte-check --threshold error\", \"acceptanceCriteria\": [\"no hardcoded colors in scoped styles\", \"existing dark theme unchanged\", \"svelte-check clean\"]}\n```"
+    },
+    {
+      "id": 27,
+      "subject": "Task 5.2: M5 native theme palette",
+      "status": "pending",
+      "blockedBy": [26],
+      "description": "**Goal:** [data-theme='native'] block with M5 colors + theme.ts toggle.\n\n```json:metadata\n{\"files\": [\"src/app.css\", \"src/lib/native/theme.ts\"], \"verifyCommand\": \"npx svelte-check --threshold error\", \"acceptanceCriteria\": [\"M5 palette tokens defined\", \"applyNativeTheme helper toggles body dataset\", \"vitest test passes\"]}\n```"
+    },
+    {
+      "id": 28,
+      "subject": "Task 5.3: Glass intensification utility classes",
+      "status": "pending",
+      "blockedBy": [27],
+      "description": "**Goal:** native-glass-card, native-glass-panel, m5-gradient-text.\n\n```json:metadata\n{\"files\": [\"src/app.css\"], \"verifyCommand\": \"npx svelte-check --threshold error\", \"acceptanceCriteria\": [\"three utility classes defined\", \"scoped under [data-theme='native']\", \"degrade to no-op outside\"]}\n```"
+    },
+    {
+      "id": 29,
+      "subject": "Task 5.4: Apply glass plugin ratchet",
+      "status": "pending",
+      "blockedBy": [25, 27],
+      "description": "**Goal:** Wire runtime intensity change per spike verdict.\n\n```json:metadata\n{\"files\": [\"src-tauri/src/lib.rs\", \"src/lib/native/theme.ts\"], \"verifyCommand\": \"manual smoke test\", \"acceptanceCriteria\": [\"toggle visibly intensifies vibrancy\", \"or restart-required path documented\"]}\n```"
+    },
+    {
+      "id": 30,
+      "subject": "Task 5.5: Mode-scoped /native/* routes",
+      "status": "pending",
+      "blockedBy": [28],
+      "description": "**Goal:** New routes under /native/* with M5 layout + theme injection.\n\n```json:metadata\n{\"files\": [\"src/routes/native/\", \"src/routes/+layout.svelte\"], \"verifyCommand\": \"npx svelte-check --threshold error\", \"acceptanceCriteria\": [\"/native/* routes mount applyNativeTheme\", \"Wine routes untouched\", \"manual smoke shows theme switch\"]}\n```"
+    },
+    {
+      "id": 31,
+      "subject": "Task 5.6: TopBarGameSelector native branch",
+      "status": "pending",
+      "blockedBy": [13, 30],
+      "description": "**Goal:** Lists native candidates with Apple Silicon / Intel / Universal badges.\n\n```json:metadata\n{\"files\": [\"src/lib/components/topbar/TopBarGameSelector.svelte\"], \"verifyCommand\": \"npx svelte-check --threshold error\", \"acceptanceCriteria\": [\"branches on nativeMode\", \"badges rendered\", \"sandboxed games disabled with tooltip\"]}\n```"
+    },
+    {
+      "id": 32,
+      "subject": "Task 5.7: Hide Wine-only features in native mode",
+      "status": "pending",
+      "blockedBy": [30],
+      "description": "**Goal:** Hide Wabbajack / SKSE / Wine diag / display fix.\n\n```json:metadata\n{\"files\": [\"src/lib/components/\", \"src/routes/\"], \"verifyCommand\": \"npx svelte-check --threshold error\", \"acceptanceCriteria\": [\"all Wine-only items hidden\", \"native nav: Mods/Discover/Settings\"]}\n```"
+    },
+    {
+      "id": 33,
+      "subject": "Task 5.8: First-run native mode banner",
+      "status": "pending",
+      "blockedBy": [30],
+      "description": "**Goal:** Banner promoting Native Mode when candidates detected.\n\n```json:metadata\n{\"files\": [\"src/lib/components/banners/NativeModeBanner.svelte\", \"src/routes/+layout.svelte\", \"src/lib/stores.ts\"], \"verifyCommand\": \"npx svelte-check --threshold error\", \"acceptanceCriteria\": [\"appears only when conditions met\", \"CTA toggles native mode\", \"dismissal persists\"]}\n```"
+    },
+    {
+      "id": 34,
+      "subject": "Release v0.15.0 — Stardew + UI shell",
+      "status": "pending",
+      "blockedBy": [22, 23, 24, 31, 32, 33],
+      "description": "**Goal:** Cut v0.15.0 with Stardew + native UI shell.\n\n```json:metadata\n{\"files\": [], \"verifyCommand\": \"./scripts/release.sh 0.15.0\", \"acceptanceCriteria\": [\"Stardew detected and modded end-to-end\", \"native theme visible behind feature flag\"]}\n```"
+    },
+    {
+      "id": 35,
+      "subject": "Task 4.0: SPIKE — BG3 modsettings.lsx schema",
+      "status": "pending",
+      "blockedBy": [34],
+      "description": "**Goal:** Document BG3 native paths + LSX schema.\n\n```json:metadata\n{\"files\": [\"docs/superpowers/plans/2026-04-28-native-macos-game-support-bg3-spec.md\"], \"verifyCommand\": \"\", \"acceptanceCriteria\": [\"modsettings.lsx path documented\", \"Mods/ path documented\", \"annotated example XML\", \"meta.lsx schema documented\"]}\n```"
+    },
+    {
+      "id": 36,
+      "subject": "Task 4.1: BG3 native plugin scaffolding",
+      "status": "pending",
+      "blockedBy": [35],
+      "description": "**Goal:** Same shape as Stardew scaffolding for BG3.\n\n```json:metadata\n{\"files\": [\"src-tauri/src/plugins/baldurs_gate_3_native.rs\"], \"verifyCommand\": \"cd src-tauri && cargo test --lib plugins::baldurs_gate_3_native\", \"acceptanceCriteria\": [\"plugin registered\", \"detects via CFBundleIdentifier per spike\"]}\n```"
+    },
+    {
+      "id": 37,
+      "subject": "Task 4.2: bg3_lsx parser/writer",
+      "status": "pending",
+      "blockedBy": [35],
+      "description": "**Goal:** read/write modsettings.lsx using quick-xml.\n\n```json:metadata\n{\"files\": [\"src-tauri/src/bg3_lsx.rs\"], \"verifyCommand\": \"cd src-tauri && cargo test --lib bg3_lsx::\", \"acceptanceCriteria\": [\"round-trips real fixture\", \"GustavDev preserved at top\", \"ordered Vec<ModEntry>\"]}\n```"
+    },
+    {
+      "id": 38,
+      "subject": "Task 4.3: .pak meta.lsx extraction",
+      "status": "pending",
+      "blockedBy": [37],
+      "description": "**Goal:** Read meta.lsx from .pak header (port BGMM reader).\n\n```json:metadata\n{\"files\": [\"src-tauri/src/bg3_lsx.rs\"], \"verifyCommand\": \"cd src-tauri && cargo test --lib bg3_lsx::pak\", \"acceptanceCriteria\": [\"parses LSPK header\", \"decompresses meta.lsx\", \"fixture .pak yields expected UUID\"]}\n```"
+    },
+    {
+      "id": 39,
+      "subject": "Task 4.4: BG3 native deploy",
+      "status": "pending",
+      "blockedBy": [36, 37, 38],
+      "description": "**Goal:** Copy .pak to Mods/, edit modsettings.lsx for load order.\n\n```json:metadata\n{\"files\": [\"src-tauri/src/deployer.rs\", \"src-tauri/src/plugins/baldurs_gate_3_native.rs\"], \"verifyCommand\": \"cd src-tauri && cargo test --lib deployer\", \"acceptanceCriteria\": [\"snapshot before deploy\", \".pak copied to Mods\", \"modsettings.lsx entry added\"]}\n```"
+    },
+    {
+      "id": 40,
+      "subject": "Task 4.5: BG3 load order UI hook",
+      "status": "pending",
+      "blockedBy": [39],
+      "description": "**Goal:** LoadOrderKind::FileBased pointing at modsettings.lsx.\n\n```json:metadata\n{\"files\": [\"src-tauri/src/plugins/baldurs_gate_3_native.rs\", \"src-tauri/src/commands/load_order.rs\"], \"verifyCommand\": \"cd src-tauri && cargo test --lib commands::load_order\", \"acceptanceCriteria\": [\"FileBased load order returned\", \"reorder writes through bg3_lsx\", \"GustavDev filtered from editable list\"]}\n```"
+    },
+    {
+      "id": 41,
+      "subject": "Task 4.6: BG3SE read-only status",
+      "status": "pending",
+      "blockedBy": [36],
+      "description": "**Goal:** Detect BG3SE; warn if outdated. Install deferred.\n\n```json:metadata\n{\"files\": [\"src-tauri/src/plugins/baldurs_gate_3_native.rs\"], \"verifyCommand\": \"cd src-tauri && cargo test --lib plugins::baldurs_gate_3_native\", \"acceptanceCriteria\": [\"detects loader file presence\", \"reports installed/version/mac_supported\"]}\n```"
+    },
+    {
+      "id": 42,
+      "subject": "Task 6.1: Native auto-snapshot integration",
+      "status": "pending",
+      "blockedBy": [22, 39],
+      "description": "**Goal:** auto_snapshot_before_destructive covers native paths.\n\n```json:metadata\n{\"files\": [\"src-tauri/src/rollback.rs\"], \"verifyCommand\": \"cd src-tauri && cargo test --lib rollback\", \"acceptanceCriteria\": [\"native deploys snapshot SMAPI launcher / modsettings.lsx\", \"DB snapshot row created\"]}\n```"
+    },
+    {
+      "id": 43,
+      "subject": "Task 6.2: Sandbox refusal with friendly error",
+      "status": "pending",
+      "blockedBy": [9],
+      "description": "**Goal:** All mutating commands short-circuit on sandboxed games; UI notice component.\n\n```json:metadata\n{\"files\": [\"src-tauri/src/commands/mods.rs\", \"src/lib/components/SandboxedGameNotice.svelte\"], \"verifyCommand\": \"cd src-tauri && cargo test --lib commands::mods && npx svelte-check --threshold error\", \"acceptanceCriteria\": [\"deploy/install/uninstall guarded\", \"frontend shows notice instead of mod UI\"]}\n```"
+    },
+    {
+      "id": 44,
+      "subject": "Task 6.3: Code-signing trust boundary docs",
+      "status": "pending",
+      "blockedBy": [42],
+      "description": "**Goal:** Update CLAUDE.md + new doc on what Corkscrew touches in .app bundles.\n\n```json:metadata\n{\"files\": [\"CLAUDE.md\", \"docs/native-trust-boundaries.md\"], \"verifyCommand\": \"\", \"acceptanceCriteria\": [\"trust boundary section added to CLAUDE.md\", \"per-game allowed mutations + revert documented\"]}\n```"
+    },
+    {
+      "id": 45,
+      "subject": "Task 6.4: 20+ native test sweep",
+      "status": "pending",
+      "blockedBy": [40, 41, 42, 43],
+      "description": "**Goal:** Total native-related tests ≥20 with strong error-path coverage.\n\n```json:metadata\n{\"files\": [\"src-tauri/src/\"], \"verifyCommand\": \"cd src-tauri && cargo test\", \"acceptanceCriteria\": [\"≥20 native tests across modules\", \"error paths covered (malformed plist, missing bundle, etc.)\", \"all green\"]}\n```"
+    },
+    {
+      "id": 46,
+      "subject": "Task 6.5: Lift native mode feature flag",
+      "status": "pending",
+      "blockedBy": [44, 45],
+      "description": "**Goal:** Native mode toggle visible by default.\n\n```json:metadata\n{\"files\": [\"src/lib/components/topbar/\", \"src/routes/settings/+page.svelte\"], \"verifyCommand\": \"npx svelte-check --threshold error\", \"acceptanceCriteria\": [\"toggle in topbar\", \"experimental gate removed\"]}\n```"
+    },
+    {
+      "id": 47,
+      "subject": "Release v0.16.0 — BG3 + Native Mode GA",
+      "status": "pending",
+      "blockedBy": [46],
+      "description": "**Goal:** Cut v0.16.0; lift the beta gate.\n\n```json:metadata\n{\"files\": [], \"verifyCommand\": \"./scripts/release.sh 0.16.0\", \"acceptanceCriteria\": [\"BG3 detected + modded end-to-end\", \"native mode GA\", \"sandbox refusal works\"]}\n```"
+    }
+  ],
+  "lastUpdated": "2026-04-28T22:00:00Z"
+}

@@ -4,11 +4,12 @@
 //! for detecting games inside Wine bottles managed by CrossOver, Whisky, etc.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
 use crate::bottles::Bottle;
+use crate::runtime::GameRuntime;
 
 // ---------------------------------------------------------------------------
 // GamePlugin trait
@@ -20,6 +21,13 @@ use crate::bottles::Bottle;
 /// global plugin registry via [`register_plugin`]. The trait is object-safe
 /// and requires `Send + Sync` so trait objects can be shared across Tauri's
 /// async runtime threads.
+///
+/// Game detection is split into two methods:
+/// - [`detect_wine`](GamePlugin::detect_wine): locates the game inside a Wine
+///   bottle. Wine plugins override this; native-only plugins leave it as `None`.
+/// - [`detect_native`](GamePlugin::detect_native): locates native macOS
+///   installations. Native plugins override this; Wine-only plugins leave it as
+///   an empty `Vec`.
 pub trait GamePlugin: Send + Sync {
     /// Unique identifier for this game (e.g. `"skyrimse"`).
     fn game_id(&self) -> &str;
@@ -33,9 +41,20 @@ pub trait GamePlugin: Send + Sync {
     /// Executable filenames used to verify a game installation.
     fn executables(&self) -> &[&str];
 
-    /// Attempt to locate this game inside `bottle`. Returns `Some(DetectedGame)`
-    /// if the game is found, or `None` otherwise.
-    fn detect(&self, bottle: &Bottle) -> Option<DetectedGame>;
+    /// Attempt to locate this game inside a Wine `bottle`. Returns
+    /// `Some(DetectedGame)` if the game is found, or `None` otherwise.
+    /// Default: `None` (not a Wine game). Wine plugins override this method.
+    fn detect_wine(&self, _bottle: &Bottle) -> Option<DetectedGame> {
+        None
+    }
+
+    /// Attempt to locate this game as a native macOS install. Returns one
+    /// entry per discovered installation (the same game can exist in multiple
+    /// Steam libraries or both `/Applications` and `~/Applications`). Default:
+    /// empty `Vec` (not a native game). Native plugins override this method.
+    fn detect_native(&self) -> Vec<DetectedGame> {
+        vec![]
+    }
 
     /// Return the directory where mods should be deployed for a given
     /// `game_path` (e.g. `<game_path>/Data` for Bethesda titles).
@@ -182,6 +201,28 @@ pub trait GamePlugin: Send + Sync {
     fn load_order_kind(&self, _game_path: &Path) -> LoadOrderKind {
         LoadOrderKind::None
     }
+
+    // -- Native deployment --
+
+    /// Deploy all staged mods for a native macOS game installation.
+    ///
+    /// The default implementation returns an error — only native game plugins
+    /// override this. Wine plugins leave it as the default and are never
+    /// dispatched here (see [`crate::deployer::deploy_native_game`]).
+    ///
+    /// Native plugins (Stardew Valley in Task 3.7, BG3 in Task 4.4) override
+    /// this to implement their per-game mod layout (SMAPI `<mods_dir>/<UniqueID>/`
+    /// for Stardew, etc.).
+    fn deploy_native(
+        &self,
+        _detected: &DetectedGame,
+        _db: &std::sync::Arc<crate::database::ModDatabase>,
+    ) -> std::result::Result<crate::deployer::DeployResult, crate::deployer::DeployerError> {
+        Err(crate::deployer::DeployerError::Other(format!(
+            "native deployment not implemented for {}; per-game plugin must provide it",
+            self.game_id()
+        )))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -234,13 +275,25 @@ pub enum LoadOrderFormat {
     /// children. Disabled entries are not representable in the upstream
     /// format, so writes drop them; toggle UX still works in-session.
     RimWorldXml,
+    /// Baldur's Gate 3 `modsettings.lsx` — Larian XML encoding. Read returns
+    /// only the community mods (the three master entries GustavDev, Gustav,
+    /// SharedDev are filtered out; they are always present and are not
+    /// user-controllable). Write preserves masters at the head of the list
+    /// and reorders only the community entries, carrying full `ModEntry`
+    /// data (Folder, Name, Version64) forward from the existing file by
+    /// UUID lookup. Dispatch is handled directly in the load-order commands
+    /// (not via the generic `encode_load_order` / `decode_load_order` path)
+    /// because the write phase requires read-then-merge semantics.
+    Bg3ModSettings,
 }
 
 // ---------------------------------------------------------------------------
 // DetectedGame
 // ---------------------------------------------------------------------------
 
-/// A game found inside a Wine bottle.
+/// A game found by Corkscrew. The `runtime` field discriminates between
+/// Wine/CrossOver games (carry a `WineContext` with bottle details) and
+/// native macOS games (carry a `NativeContext` with .app bundle details).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DetectedGame {
     /// Identifier matching [`GamePlugin::game_id`].
@@ -249,19 +302,20 @@ pub struct DetectedGame {
     pub display_name: String,
     /// Nexus Mods slug matching [`GamePlugin::nexus_slug`].
     pub nexus_slug: String,
-    /// Absolute path to the game installation directory inside the bottle.
+    /// Absolute path to the game installation directory. For Wine games
+    /// this lives inside the bottle's drive_c. For native games this is
+    /// the resolved game folder (typically `<app_bundle>/Contents/MacOS`
+    /// or as defined by the per-game native plugin).
     pub game_path: PathBuf,
-    /// Absolute path to the main game executable (e.g. SkyrimSE.exe).
+    /// Absolute path to the main game executable.
     pub exe_path: Option<PathBuf>,
     /// Absolute path to the data/mod deployment directory.
     pub data_dir: PathBuf,
-    /// Name of the bottle containing this game.
-    pub bottle_name: String,
-    /// Absolute path to the bottle root.
-    pub bottle_path: PathBuf,
-    /// Steam App ID, populated when known. Drives icon/logo fetching for
-    /// games discovered through the Steam appmanifest scanner that don't
-    /// have a hardcoded entry in the bundled Vortex game registry.
+    /// Runtime discriminator + per-runtime context (bottle for Wine, app
+    /// bundle metadata for Native). Replaces the previous `bottle_name`
+    /// and `bottle_path` fields.
+    pub runtime: GameRuntime,
+    /// Steam App ID, populated when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steam_app_id: Option<String>,
 }
@@ -271,7 +325,7 @@ pub struct DetectedGame {
 // ---------------------------------------------------------------------------
 
 /// Thread-safe storage for registered game plugins.
-type PluginRegistry = Mutex<Vec<Box<dyn GamePlugin + Send + Sync>>>;
+type PluginRegistry = Mutex<Vec<Arc<dyn GamePlugin + Send + Sync>>>;
 
 /// Global plugin registry, initialised on first access.
 fn registry() -> &'static PluginRegistry {
@@ -283,7 +337,11 @@ fn registry() -> &'static PluginRegistry {
 ///
 /// Plugins are typically registered at application startup. Duplicate
 /// registrations (same `game_id`) are silently ignored.
-pub fn register_plugin(plugin: Box<dyn GamePlugin + Send + Sync>) {
+///
+/// Takes `Arc<dyn GamePlugin>` so that callers can later retrieve the same
+/// `Arc` via [`clone_plugin_for_dispatch`] and call long-running methods
+/// (e.g. deploy) outside the registry lock.
+pub fn register_plugin(plugin: Arc<dyn GamePlugin + Send + Sync>) {
     let mut plugins = registry().lock().unwrap_or_else(|e| e.into_inner());
     // Prevent duplicate registrations.
     let id = plugin.game_id().to_owned();
@@ -301,7 +359,7 @@ pub fn detect_games(bottle: &Bottle) -> Vec<DetectedGame> {
     let plugins = registry().lock().unwrap_or_else(|e| e.into_inner());
     let mut found = Vec::new();
     for plugin in plugins.iter() {
-        if let Some(detected) = plugin.detect(bottle) {
+        if let Some(detected) = plugin.detect_wine(bottle) {
             found.push(detected);
         }
     }
@@ -314,7 +372,19 @@ pub fn detect_games(bottle: &Bottle) -> Vec<DetectedGame> {
     found
 }
 
-/// Scan **all** discoverable bottles for all recognized games.
+/// Scan native macOS installs for all registered native plugins. Each plugin
+/// returns 0+ DetectedGame entries (one per discovered installation). Returns
+/// an aggregated, ungrouped list — caller is responsible for any dedup logic.
+pub fn detect_native_games() -> Vec<DetectedGame> {
+    let plugins = registry().lock().unwrap_or_else(|e| e.into_inner());
+    let mut found = Vec::new();
+    for plugin in plugins.iter() {
+        found.extend(plugin.detect_native());
+    }
+    found
+}
+
+/// Scan **all** discoverable bottles and native installs for all recognized games.
 pub fn detect_all_games() -> Vec<DetectedGame> {
     use crate::bottles::detect_bottles;
 
@@ -322,6 +392,7 @@ pub fn detect_all_games() -> Vec<DetectedGame> {
     for bottle in detect_bottles() {
         found.extend(detect_games(&bottle));
     }
+    found.extend(detect_native_games());
     found
 }
 
@@ -341,13 +412,16 @@ pub fn detect_all_games_with_custom(db: &crate::database::ModDatabase) -> Vec<De
     // Auto-capture Steam depot manifests for all detected games.
     // This builds a local version history so we can offer automated
     // downgrades when a collection requires an older game version.
+    // Native games don't have bottles, so skip them.
     for game in &found {
-        let bottle = crate::bottles::Bottle {
-            name: game.bottle_name.clone(),
-            path: game.bottle_path.clone(),
-            source: String::new(),
-        };
-        crate::game_registry::capture_depot_manifests(db, &game.game_id, &bottle);
+        if let Some(wine) = game.runtime.wine() {
+            let bottle = crate::bottles::Bottle {
+                name: wine.bottle_name.clone(),
+                path: wine.bottle_path.clone(),
+                source: wine.source.clone(),
+            };
+            crate::game_registry::capture_depot_manifests(db, &game.game_id, &bottle);
+        }
     }
 
     found
@@ -380,6 +454,37 @@ where
         .map(|p| f(p.as_ref()))
 }
 
+/// Clone the `Arc<dyn GamePlugin>` for a given `game_id`, if registered.
+///
+/// The registry lock is held only while finding the entry and cloning the
+/// `Arc` — the lock is dropped before the caller uses the plugin. Use this
+/// for long-running operations (deploy, install, etc.) where holding the
+/// registry lock would block detection threads or other plugin lookups.
+///
+/// Contrast with [`with_plugin`], which holds the lock for the full duration
+/// of the closure. `with_plugin` is appropriate for cheap, microsecond-scale
+/// attribute reads; `clone_plugin_for_dispatch` is appropriate when the
+/// subsequent call can take hundreds of milliseconds (e.g. walking a staged
+/// mod directory to hardlink files).
+///
+/// # Example
+///
+/// ```ignore
+/// if let Some(plugin) = clone_plugin_for_dispatch("stardew_valley_native") {
+///     // Registry lock is already released here.
+///     plugin.deploy_native(&detected, &db)?;
+/// }
+/// ```
+pub fn clone_plugin_for_dispatch(
+    game_id: &str,
+) -> Option<Arc<dyn GamePlugin + Send + Sync>> {
+    let plugins = registry().lock().unwrap_or_else(|e| e.into_inner());
+    plugins
+        .iter()
+        .find(|p| p.game_id() == game_id)
+        .cloned()
+}
+
 /// Look up a registered plugin by its game id and return a reference to it.
 ///
 /// **Important**: This acquires the registry mutex lock. The returned guard
@@ -398,7 +503,7 @@ pub fn get_plugin_for_game(game_id: &str) -> Option<PluginRef> {
 /// A handle that keeps the registry lock held while providing access to a
 /// single plugin. Dereferences to `&dyn GamePlugin`.
 pub struct PluginRef {
-    guard: std::sync::MutexGuard<'static, Vec<Box<dyn GamePlugin + Send + Sync>>>,
+    guard: std::sync::MutexGuard<'static, Vec<Arc<dyn GamePlugin + Send + Sync>>>,
     index: usize,
 }
 
@@ -431,7 +536,7 @@ mod tests {
         fn executables(&self) -> &[&str] {
             &["test.exe"]
         }
-        fn detect(&self, _bottle: &Bottle) -> Option<DetectedGame> {
+        fn detect_wine(&self, _bottle: &Bottle) -> Option<DetectedGame> {
             None
         }
         fn get_data_dir(&self, game_path: &Path) -> PathBuf {
@@ -453,15 +558,15 @@ mod tests {
 
     #[test]
     fn register_and_lookup() {
-        register_plugin(Box::new(TestPlugin));
+        register_plugin(Arc::new(TestPlugin));
         let result = with_plugin("testgame", |p| p.display_name().to_owned());
         assert_eq!(result, Some("Test Game".to_owned()));
     }
 
     #[test]
     fn duplicate_registration_ignored() {
-        register_plugin(Box::new(TestPlugin));
-        register_plugin(Box::new(TestPlugin));
+        register_plugin(Arc::new(TestPlugin));
+        register_plugin(Arc::new(TestPlugin));
         let plugins = registry().lock().unwrap_or_else(|e| e.into_inner());
         let count = plugins.iter().filter(|p| p.game_id() == "testgame").count();
         assert_eq!(count, 1);

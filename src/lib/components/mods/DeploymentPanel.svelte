@@ -9,6 +9,7 @@
     onDeployProgress,
   } from "$lib/api";
   import type { DeploymentHealth, DeployProgress, DetectedGame } from "$lib/types";
+  import { wineCtx } from "$lib/types";
   import {
     showError,
     showSuccess,
@@ -48,7 +49,7 @@
   export async function refreshHealth(conflictCount: number) {
     const t0 = performance.now();
     try {
-      const stats = await getDeploymentStats(game.game_id, game.bottle_name);
+      const stats = await getDeploymentStats(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       deployHealth = { ...stats, conflict_count: conflictCount };
     } catch {
       deployHealth = null;
@@ -72,7 +73,7 @@
     deployProgress = 0;
     deployProgressText = "Computing diff...";
     try {
-      const incrResult = await deployIncremental(game.game_id, game.bottle_name);
+      const incrResult = await deployIncremental(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       const totalChanged = incrResult.files_added + incrResult.files_removed + incrResult.files_updated;
       if (incrResult.fallback_used) {
         showSuccess(`Deployed ${incrResult.files_added} files (full redeploy)${incrResult.fallback_used ? " (copy fallback used)" : ""}`);
@@ -102,7 +103,7 @@
             deployProgressText = `${p.current}/${p.total} ${p.mod_name}`;
           }
         });
-        const result = await redeployAllMods(game.game_id, game.bottle_name);
+        const result = await redeployAllMods(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
         showSuccess(`Deployed ${result.deployed_count} files (full redeploy)${result.fallback_used ? " (copy fallback used)" : ""}`);
         await onDeployComplete();
       } catch (e2: unknown) {
@@ -123,7 +124,7 @@
     }
     purging = true;
     try {
-      const removed = await purgeDeployment(game.game_id, game.bottle_name);
+      const removed = await purgeDeployment(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       showSuccess(`Purged ${removed.length} deployed files`);
       await onDeployComplete();
     } catch (e: unknown) {

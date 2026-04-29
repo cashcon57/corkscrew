@@ -4,15 +4,76 @@ export interface Bottle {
   source: string;
 }
 
+// ---------------------------------------------------------------------------
+// Native macOS game runtime types
+// ---------------------------------------------------------------------------
+
+/** CPU architecture of a native macOS game binary. Mirrors `runtime::Architecture`. */
+export type Architecture = 'apple_silicon' | 'intel_only' | 'universal' | 'unknown';
+
+/** How a native macOS game was discovered. Mirrors `runtime::NativeSource`. */
+export type NativeSource = 'system_applications' | 'steam' | 'gog' | 'manual' | 'app_store';
+
+/** Parsed subset of an `.app` bundle's `Contents/Info.plist`. Mirrors `plist::InfoPlist`. */
+export interface InfoPlist {
+  bundle_identifier: string;
+  bundle_executable: string;
+  short_version?: string | null;
+  category?: string | null;
+}
+
+/** A `.app` bundle discovered during a native scan. Mirrors `native_scanner::NativeAppCandidate`. */
+export interface NativeAppCandidate {
+  /** Absolute path to the `.app` bundle directory (PathBuf serialises as string). */
+  bundle_path: string;
+  info: InfoPlist;
+  architecture: Architecture;
+  source: NativeSource;
+  sandboxed: boolean;
+}
+
+/**
+ * Tagged-union runtime discriminator for detected games.
+ * Serialises as `{"runtime": "wine", ...}` or `{"runtime": "native", ...}`.
+ * Mirrors `runtime::GameRuntime` (`#[serde(tag = "runtime", rename_all = "lowercase")]`).
+ */
+export type GameRuntime =
+  | {
+      runtime: 'wine';
+      bottle_name: string;
+      /** PathBuf serialises as string. */
+      bottle_path: string;
+      source: string;
+    }
+  | {
+      runtime: 'native';
+      /** PathBuf serialises as string. */
+      app_bundle_path: string;
+      /** PathBuf serialises as string. */
+      game_data_root: string;
+      architecture: Architecture;
+      sandboxed: boolean;
+      source: NativeSource;
+    };
+
+// ---------------------------------------------------------------------------
+// DetectedGame
+// ---------------------------------------------------------------------------
+
 export interface DetectedGame {
   game_id: string;
   display_name: string;
   nexus_slug: string;
+  /** Absolute path to the game installation directory (PathBuf serialises as string). */
   game_path: string;
   exe_path: string | null;
   data_dir: string;
-  bottle_name: string;
-  bottle_path: string;
+  /**
+   * Runtime discriminator + per-runtime context. Replaces the former
+   * `bottle_name` / `bottle_path` fields. Narrow with
+   * `game.runtime.runtime === 'wine'` before accessing wine-specific fields.
+   */
+  runtime: GameRuntime;
   steam_app_id?: string;
 }
 
@@ -28,6 +89,22 @@ export interface KnownUninstalledGame {
   name: string;
   nexus_slug: string;
   source: "vortex_registry" | "vortex_extension_index";
+}
+
+/**
+ * Convenience narrower: returns the Wine runtime context if `game` is a
+ * Wine/CrossOver game, or `null` for native games.
+ *
+ * Use in call sites that formerly accessed `game.bottle_name` / `game.bottle_path`:
+ *
+ * ```ts
+ * const wine = wineCtx(game);
+ * const bottleName = wine?.bottle_name ?? '';
+ * const bottlePath = wine?.bottle_path ?? '';
+ * ```
+ */
+export function wineCtx(game: DetectedGame): { bottle_name: string; bottle_path: string; source: string } | null {
+  return game.runtime.runtime === 'wine' ? game.runtime : null;
 }
 
 /**

@@ -3,6 +3,7 @@
   import { selectedGame, showError, showSuccess } from "$lib/stores";
   import { importModlistPlan, executeModlistImport } from "$lib/api";
   import type { ImportPlan, ImportResult, ImportStatus } from "$lib/types";
+  import { wineCtx } from "$lib/types";
 
   // ---- Props ----
 
@@ -86,7 +87,7 @@
     currentStep = 2;
     planLoading = true;
     try {
-      importPlan = await importModlistPlan(filePath, game.game_id, game.bottle_name);
+      importPlan = await importModlistPlan(filePath, game.game_id, (wineCtx(game)?.bottle_name ?? ""));
     } catch (e: unknown) {
       showError(`Failed to generate import plan: ${e}`);
       currentStep = 1;
@@ -106,7 +107,7 @@
     importResult = null;
 
     try {
-      importResult = await executeModlistImport(filePath, game.game_id, game.bottle_name);
+      importResult = await executeModlistImport(filePath, game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       importErrors = importResult.errors;
       importComplete = true;
 

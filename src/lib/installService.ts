@@ -9,6 +9,7 @@ import { listen } from "@tauri-apps/api/event";
 import { collectionInstallStatus, selectedGame } from "$lib/stores";
 import type { CollectionInstallStatus, ModProgressDetail, LogEntry } from "$lib/stores";
 import type { InstallProgressEvent } from "$lib/types";
+import { wineCtx } from "$lib/types";
 import { get } from "svelte/store";
 import { triggerBackgroundHashing } from "$lib/hashingService";
 
@@ -628,7 +629,7 @@ function applyEvent(
         {
           const game = get(selectedGame);
           if (game && e.failed === 0) {
-            triggerBackgroundHashing(game.game_id, game.bottle_name).catch((err) => console.error('Failed to trigger background hashing:', err));
+            triggerBackgroundHashing(game.game_id, wineCtx(game)?.bottle_name ?? '').catch((err) => console.error('Failed to trigger background hashing:', err));
           }
         }
         break;

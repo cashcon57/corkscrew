@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 
 use crate::bottles::Bottle;
 use crate::games::{DetectedGame, GamePlugin};
+use crate::runtime::{GameRuntime, WineContext};
 
 const STEAM_COMMON: &[&str] = &["Program Files (x86)", "Steam", "steamapps", "common"];
 
@@ -163,7 +164,7 @@ impl GamePlugin for FromSoftPlugin {
         self.spec.executables
     }
 
-    fn detect(&self, bottle: &Bottle) -> Option<DetectedGame> {
+    fn detect_wine(&self, bottle: &Bottle) -> Option<DetectedGame> {
         let game_path = find_game_path(bottle, self.spec)?;
         let exe_path = find_executable(&game_path, self.spec.executables)?;
 
@@ -179,8 +180,11 @@ impl GamePlugin for FromSoftPlugin {
             game_path,
             exe_path: Some(exe_path),
             data_dir,
-            bottle_name: bottle.name.clone(),
-            bottle_path: bottle.path.clone(),
+            runtime: GameRuntime::Wine(WineContext {
+                bottle_name: bottle.name.clone(),
+                bottle_path: bottle.path.clone(),
+                source: bottle.source.clone(),
+            }),
             steam_app_id: None,
         })
     }
@@ -267,7 +271,7 @@ pub fn find_or_create_modengine_mod_dir(game_path: &Path) -> PathBuf {
 
 pub fn register_all() {
     for spec in SPECS {
-        crate::games::register_plugin(Box::new(FromSoftPlugin::new(spec)));
+        crate::games::register_plugin(std::sync::Arc::new(FromSoftPlugin::new(spec)));
     }
 }
 
@@ -688,7 +692,7 @@ mod tests {
 
         let b = make_bottle(bottle_path);
         let p = FromSoftPlugin::new(spec_for("sekiro"));
-        let d = p.detect(&b).expect("detection");
+        let d = p.detect_wine(&b).expect("detection");
         assert_eq!(d.game_id, "sekiro");
         assert_eq!(d.game_path, game_dir);
         assert_eq!(d.data_dir, game_dir.join("mod"));
@@ -707,7 +711,7 @@ mod tests {
 
         let b = make_bottle(bottle_path);
         let p = FromSoftPlugin::new(spec_for("eldenring"));
-        let d = p.detect(&b).expect("detection");
+        let d = p.detect_wine(&b).expect("detection");
         assert_eq!(d.game_id, "eldenring");
         assert_eq!(
             d.exe_path.as_deref(),
@@ -723,7 +727,7 @@ mod tests {
 
         let b = make_bottle(bottle_path);
         let p = FromSoftPlugin::new(spec_for("darksouls3"));
-        assert!(p.detect(&b).is_some());
+        assert!(p.detect_wine(&b).is_some());
     }
 
     #[test]
@@ -738,7 +742,7 @@ mod tests {
 
         let b = make_bottle(bottle_path);
         let p = FromSoftPlugin::new(spec_for("darksouls_remastered"));
-        assert!(p.detect(&b).is_some());
+        assert!(p.detect_wine(&b).is_some());
     }
 
     #[test]
@@ -753,7 +757,7 @@ mod tests {
 
         let b = make_bottle(bottle_path);
         let p = FromSoftPlugin::new(spec_for("armoredcore6"));
-        let d = p.detect(&b).expect("detection");
+        let d = p.detect_wine(&b).expect("detection");
         assert_eq!(d.nexus_slug, "armoredcore6firesofrubicon");
     }
 
@@ -773,7 +777,7 @@ mod tests {
 
         let b = make_bottle(bottle_path);
         let p = FromSoftPlugin::new(spec_for("eldenring"));
-        assert!(p.detect(&b).is_none());
+        assert!(p.detect_wine(&b).is_none());
     }
 
     #[test]
@@ -807,7 +811,7 @@ mod tests {
 
         let b = make_bottle(bottle_path);
         let p = FromSoftPlugin::new(spec_for("eldenring"));
-        let d = p.detect(&b).expect("should detect non-Steam install");
+        let d = p.detect_wine(&b).expect("should detect non-Steam install");
         assert_eq!(d.game_id, "eldenring");
         assert_eq!(d.game_path, game_dir);
     }
@@ -824,7 +828,7 @@ mod tests {
 
         let b = make_bottle(bottle_path);
         let p = FromSoftPlugin::new(spec_for("sekiro"));
-        let d = p.detect(&b).expect("should detect Games/ install");
+        let d = p.detect_wine(&b).expect("should detect Games/ install");
         assert_eq!(d.game_path, game_dir);
     }
 
@@ -836,7 +840,7 @@ mod tests {
 
         let b = make_bottle(bottle_path);
         let p = FromSoftPlugin::new(spec_for("darksouls3"));
-        let d = p.detect(&b).expect("should detect top-level drag-drop install");
+        let d = p.detect_wine(&b).expect("should detect top-level drag-drop install");
         assert_eq!(d.game_path, game_dir);
     }
 
@@ -853,7 +857,7 @@ mod tests {
 
         let b = make_bottle(bottle_path);
         let p = FromSoftPlugin::new(spec_for("eldenring"));
-        let d = p.detect(&b).expect("should detect Xbox Game Pass install");
+        let d = p.detect_wine(&b).expect("should detect Xbox Game Pass install");
         assert_eq!(d.game_path, content_dir);
     }
 
@@ -871,7 +875,7 @@ mod tests {
         let b = make_bottle(bottle_path);
         let p = FromSoftPlugin::new(spec_for("eldenring"));
         assert!(
-            p.detect(&b).is_none(),
+            p.detect_wine(&b).is_none(),
             "empty directory must not be detected"
         );
     }

@@ -2,6 +2,7 @@
   import { getConflicts } from "$lib/api";
   import { selectedGame } from "$lib/stores";
   import type { FileConflict } from "$lib/types";
+  import { wineCtx } from "$lib/types";
 
   interface Props {
     visible?: boolean;
@@ -54,7 +55,7 @@
     if (!game) return;
     loading = true;
     try {
-      conflicts = await getConflicts(game.game_id, game.bottle_name);
+      conflicts = await getConflicts(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       buildGraph();
       runSimulation();
     } catch {

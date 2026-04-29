@@ -35,6 +35,7 @@ use std::path::{Path, PathBuf};
 
 use crate::bottles::Bottle;
 use crate::games::{DetectedGame, GamePlugin};
+use crate::runtime::{GameRuntime, WineContext};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -112,7 +113,7 @@ impl GamePlugin for Sims4Plugin {
         EXECUTABLES
     }
 
-    fn detect(&self, bottle: &Bottle) -> Option<DetectedGame> {
+    fn detect_wine(&self, bottle: &Bottle) -> Option<DetectedGame> {
         let game_path = find_game_path(bottle)?;
         if !has_real_executable(&game_path) {
             return None;
@@ -141,8 +142,11 @@ impl GamePlugin for Sims4Plugin {
             game_path,
             exe_path,
             data_dir,
-            bottle_name: bottle.name.clone(),
-            bottle_path: bottle.path.clone(),
+            runtime: GameRuntime::Wine(WineContext {
+                bottle_name: bottle.name.clone(),
+                bottle_path: bottle.path.clone(),
+                source: bottle.source.clone(),
+            }),
             steam_app_id: None,
         })
     }
@@ -470,7 +474,7 @@ fn strip_vdf_quotes(s: &str) -> String {
 // ---------------------------------------------------------------------------
 
 pub fn register() {
-    crate::games::register_plugin(Box::new(Sims4Plugin));
+    crate::games::register_plugin(std::sync::Arc::new(Sims4Plugin));
 }
 
 // ---------------------------------------------------------------------------
@@ -540,7 +544,7 @@ mod tests {
         create_user_documents(&bottle_path);
 
         let bottle = make_bottle(bottle_path);
-        let detected = Sims4Plugin.detect(&bottle).expect("should detect");
+        let detected = Sims4Plugin.detect_wine(&bottle).expect("should detect");
         assert_eq!(detected.game_id, "sims4");
         assert_eq!(detected.game_path, game_dir);
         // data_dir lives outside the game install — under Documents.
@@ -563,7 +567,7 @@ mod tests {
         create_user_documents(&bottle_path);
 
         let bottle = make_bottle(bottle_path);
-        let detected = Sims4Plugin.detect(&bottle).expect("should detect");
+        let detected = Sims4Plugin.detect_wine(&bottle).expect("should detect");
         assert_eq!(detected.game_id, "sims4");
         assert_eq!(detected.game_path, game_dir);
     }
@@ -575,7 +579,7 @@ mod tests {
         fs::create_dir_all(bottle_path.join("drive_c")).unwrap();
 
         let bottle = make_bottle(bottle_path);
-        assert!(Sims4Plugin.detect(&bottle).is_none());
+        assert!(Sims4Plugin.detect_wine(&bottle).is_none());
     }
 
     #[test]
@@ -594,7 +598,7 @@ mod tests {
         fs::create_dir_all(bottle_path.join("drive_c")).unwrap();
 
         let bottle = make_bottle(bottle_path);
-        assert!(Sims4Plugin.detect(&bottle).is_none());
+        assert!(Sims4Plugin.detect_wine(&bottle).is_none());
     }
 
     #[test]
@@ -748,7 +752,7 @@ mod tests {
         create_user_documents(&bottle_path);
 
         let bottle = make_bottle(bottle_path);
-        let detected = Sims4Plugin.detect(&bottle).expect("non-Steam detect");
+        let detected = Sims4Plugin.detect_wine(&bottle).expect("non-Steam detect");
         assert_eq!(detected.game_id, "sims4");
         assert_eq!(detected.game_path, game_dir);
     }
@@ -761,7 +765,7 @@ mod tests {
         create_user_documents(&bottle_path);
 
         let bottle = make_bottle(bottle_path);
-        assert!(Sims4Plugin.detect(&bottle).is_some());
+        assert!(Sims4Plugin.detect_wine(&bottle).is_some());
     }
 
     #[test]
@@ -772,7 +776,7 @@ mod tests {
         create_user_documents(&bottle_path);
 
         let bottle = make_bottle(bottle_path);
-        assert!(Sims4Plugin.detect(&bottle).is_some(), "top-level drag-drop");
+        assert!(Sims4Plugin.detect_wine(&bottle).is_some(), "top-level drag-drop");
     }
 
     #[test]
@@ -791,7 +795,7 @@ mod tests {
         create_user_documents(&bottle_path);
 
         let bottle = make_bottle(bottle_path);
-        let detected = Sims4Plugin.detect(&bottle).expect("Xbox Game Pass detect");
+        let detected = Sims4Plugin.detect_wine(&bottle).expect("Xbox Game Pass detect");
         assert_eq!(detected.game_id, "sims4");
         assert_eq!(detected.game_path, game_dir);
     }
@@ -809,7 +813,7 @@ mod tests {
 
         let bottle = make_bottle(bottle_path);
         assert!(
-            Sims4Plugin.detect(&bottle).is_none(),
+            Sims4Plugin.detect_wine(&bottle).is_none(),
             "empty dir must not detect"
         );
     }

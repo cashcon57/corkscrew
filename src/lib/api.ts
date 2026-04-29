@@ -94,6 +94,7 @@ import type {
   LoadOrderEntry,
   LoadOrderKindResponse,
   KnownUninstalledGame,
+  NativeAppCandidate,
 } from "./types";
 
 // Bottles
@@ -345,6 +346,51 @@ export async function setConfigValue(
   value: string
 ): Promise<void> {
   return invoke("set_config_value", { key, value });
+}
+
+export async function getNativeMode(): Promise<boolean> {
+  return invoke<boolean>("get_native_mode");
+}
+
+export async function setNativeMode(enabled: boolean): Promise<void> {
+  return invoke<void>("set_native_mode", { enabled });
+}
+
+export async function getNativeModeVisible(): Promise<boolean> {
+  return invoke<boolean>("get_native_mode_visible");
+}
+
+export async function setNativeModeVisible(visible: boolean): Promise<void> {
+  return invoke<void>("set_native_mode_visible", { visible });
+}
+
+/**
+ * Apply a Liquid Glass intensity variant to the main window at runtime.
+ *
+ * Three levels correspond to the spike's recommended ladder:
+ * - "default" → Regular (variant 0) — startup default
+ * - "medium"  → Sidebar (variant 16)
+ * - "high"    → Inspector (variant 18) — deepest glass, used by native mode
+ *
+ * Safe no-op on Windows / Linux per plugin contract.
+ */
+export async function applyNativeWindowEffect(
+  intensity: "default" | "medium" | "high",
+): Promise<void> {
+  return invoke<void>("apply_native_window_effect", { intensity });
+}
+
+/** Trigger a full rescan of native macOS app locations and return all discovered candidates. */
+export async function rescanNativeGames(): Promise<NativeAppCandidate[]> {
+  return invoke<NativeAppCandidate[]>("rescan_native_games");
+}
+
+/**
+ * Validate a user-supplied `.app` path and return it as a `NativeAppCandidate`.
+ * Throws a string error if the path is not a valid `.app` bundle.
+ */
+export async function addNativeGameManually(appPath: string): Promise<NativeAppCandidate> {
+  return invoke<NativeAppCandidate>("add_native_game_manually", { appPath });
 }
 
 export async function getGameLogo(
@@ -2580,3 +2626,4 @@ export async function registerUnregisteredGame(args: {
     exePath: args.exePath,
   });
 }
+

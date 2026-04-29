@@ -11,6 +11,7 @@
   } from "$lib/api";
   import { bottles, games, selectedGame, currentPage } from "$lib/stores";
   import type { Bottle, DetectedGame, SteamStatus } from "$lib/types";
+  import { wineCtx } from "$lib/types";
 
   let { onComplete }: { onComplete: () => void } = $props();
 
@@ -226,12 +227,12 @@
               {#each detectedGames as game}
                 <button
                   class="game-item"
-                  class:selected={$selectedGame?.game_id === game.game_id && $selectedGame?.bottle_name === game.bottle_name}
+                  class:selected={$selectedGame?.game_id === game.game_id && ($selectedGame ? wineCtx($selectedGame)?.bottle_name : null) === wineCtx(game)?.bottle_name}
                   onclick={() => selectGame(game)}
                 >
                   <span class="game-item-name">{game.display_name}</span>
-                  <span class="game-item-bottle">{game.bottle_name}</span>
-                  {#if $selectedGame?.game_id === game.game_id && $selectedGame?.bottle_name === game.bottle_name}
+                  <span class="game-item-bottle">{(wineCtx(game)?.bottle_name ?? "")}</span>
+                  {#if $selectedGame?.game_id === game.game_id && ($selectedGame ? wineCtx($selectedGame)?.bottle_name : null) === wineCtx(game)?.bottle_name}
                     <svg class="game-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--green)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
                       <polyline points="20 6 9 17 4 12" />
                     </svg>

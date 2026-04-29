@@ -2,6 +2,7 @@
   import { selectedGame, showError, showSuccess } from "$lib/stores";
   import { listModVersions, rollbackModVersion } from "$lib/api";
   import type { InstalledMod, ModVersion } from "$lib/types";
+  import { wineCtx } from "$lib/types";
 
   // ---- Props ----
 
@@ -54,7 +55,7 @@
     if (!confirmRollback || !game) return;
     rollingBack = true;
     try {
-      await rollbackModVersion(mod.id, confirmRollback.id, game.game_id, game.bottle_name);
+      await rollbackModVersion(mod.id, confirmRollback.id, game.game_id, (wineCtx(game)?.bottle_name ?? ""));
 
       showSuccess(`Rolled back "${mod.name}" to version ${confirmRollback.version}`);
 

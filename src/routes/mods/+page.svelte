@@ -54,6 +54,7 @@
     onDeployStatusChanged,
   } from "$lib/api";
   import type { InstallProgressEvent, DeploymentHealth, ModTool, UserEndorsement } from "$lib/types";
+  import { wineCtx } from "$lib/types";
   import {
     selectedGame,
     installedMods,
@@ -70,6 +71,7 @@
     gameLockOverridden,
     wjInstallGeneration,
     modStateVersion,
+    nativeMode,
   } from "$lib/stores";
   import type { InstalledMod, DetectedGame, SkseStatus, DowngradeStatus, FileConflict, ModUpdateInfo, FomodInstaller } from "$lib/types";
   import { createModFilters } from "$lib/stores/modFilters.svelte";
@@ -276,14 +278,14 @@
     try {
       const cfg = await getConfig();
       const dismissed = (cfg as Record<string, unknown>)[
-        me2SetupDismissedKey(game.game_id, game.bottle_name)
+        me2SetupDismissedKey(game.game_id, (wineCtx(game)?.bottle_name ?? ""))
       ];
       if (dismissed === "true" || dismissed === true) {
         me2WizardGameId = null;
         me2WizardBottleName = null;
         return;
       }
-      const tools = await detectModTools(game.game_id, game.bottle_name);
+      const tools = await detectModTools(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       const me2 = tools.find((t) => t.id === "modengine2");
       if (me2?.detected_path) {
         me2WizardGameId = null;
@@ -291,7 +293,7 @@
         return;
       }
       me2WizardGameId = game.game_id;
-      me2WizardBottleName = game.bottle_name;
+      me2WizardBottleName = (wineCtx(game)?.bottle_name ?? "");
     } catch (err) {
       console.error("maybeShowMe2Wizard:", err);
       me2WizardGameId = null;
@@ -317,7 +319,7 @@
     if (!game || !me2WizardGameId || !me2WizardBottleName) return;
     me2WizardInstalling = true;
     try {
-      await installModTool("modengine2", game.game_id, game.bottle_name);
+      await installModTool("modengine2", game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       // Dismiss permanently once installed so the wizard doesn't reappear.
       await setConfigValue(
         me2SetupDismissedKey(me2WizardGameId, me2WizardBottleName),
@@ -428,7 +430,7 @@
 
   // Persistent search: restore from sessionStorage on mount
   function searchStorageKey(game: DetectedGame) {
-    return `corkscrew-search-${game.game_id}-${game.bottle_name}`;
+    return `corkscrew-search-${game.game_id}-${(wineCtx(game)?.bottle_name ?? "")}`;
   }
   let searchRestored = false;
 
@@ -458,7 +460,7 @@
     next.add(key);
     dismissedBanners = next;
     if (activeGame) {
-      const storeKey = `corkscrew-banners-${activeGame.game_id}-${activeGame.bottle_name}`;
+      const storeKey = `corkscrew-banners-${activeGame.game_id}-${(wineCtx(activeGame)?.bottle_name ?? "")}`;
       sessionStorage.setItem(storeKey, JSON.stringify([...next]));
     }
   }
@@ -638,9 +640,9 @@
     {
       const game = get(selectedGame);
       if (game) {
-        getGameLockStatus(game.game_id, game.bottle_name).then(lock => {
+        getGameLockStatus(game.game_id, (wineCtx(game)?.bottle_name ?? "")).then(lock => {
           gameLock.set(lock);
-          if (lock) startGameLockPolling(game.game_id, game.bottle_name);
+          if (lock) startGameLockPolling(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
         }).catch((err) => console.error('Initial game lock check failed:', err));
       }
     }
@@ -871,7 +873,7 @@
     await startBulkListener();
     try {
       const ids = Array.from(selectedModIds);
-      const result = await batchToggleMods(ids, activeGame.game_id, activeGame.bottle_name, true);
+      const result = await batchToggleMods(ids, activeGame.game_id, (wineCtx(activeGame)?.bottle_name ?? ""), true);
       selectedModIds = new Set();
       const count = parseInt(result, 10);
       if (count > 0) showSuccess(`Enabled ${count} mod${count === 1 ? "" : "s"}`);
@@ -894,7 +896,7 @@
     await startBulkListener();
     try {
       const ids = Array.from(selectedModIds);
-      const result = await batchToggleMods(ids, activeGame.game_id, activeGame.bottle_name, false);
+      const result = await batchToggleMods(ids, activeGame.game_id, (wineCtx(activeGame)?.bottle_name ?? ""), false);
       selectedModIds = new Set();
       const count = parseInt(result, 10);
       if (count > 0) showSuccess(`Disabled ${count} mod${count === 1 ? "" : "s"}`);
@@ -917,7 +919,7 @@
       await withReload(async () => {
         for (const id of selectedModIds) {
           if (activeGame) {
-            await uninstallMod(id, activeGame.game_id, activeGame.bottle_name);
+            await uninstallMod(id, activeGame.game_id, (wineCtx(activeGame)?.bottle_name ?? ""));
           }
         }
         selectedModIds = new Set();
@@ -1081,11 +1083,11 @@
   $effect(() => {
     const game = activeGame;
     if (game) {
-      getGameLockStatus(game.game_id, game.bottle_name).then(lock => {
+      getGameLockStatus(game.game_id, (wineCtx(game)?.bottle_name ?? "")).then(lock => {
         if (!get(gameLockOverridden)) {
           gameLock.set(lock);
           if (lock) {
-            startGameLockPolling(game.game_id, game.bottle_name);
+            startGameLockPolling(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
           } else {
             stopGameLockPolling();
           }
@@ -1106,7 +1108,7 @@
   // Initialized from the store — if mods are already loaded, we know the cache is warm.
   let cachedGameKey = $state<string | null>(
     $installedMods.length > 0 && $selectedGame
-      ? `${$selectedGame.game_id}:${$selectedGame.bottle_name}`
+      ? `${$selectedGame.game_id}:${(wineCtx($selectedGame)?.bottle_name ?? "")}`
       : null
   );
 
@@ -1117,13 +1119,13 @@
       filters.searchQuery = saved ?? "";
       searchRestored = true;
       // Restore dismissed banners
-      const bannerKey = `corkscrew-banners-${activeGame.game_id}-${activeGame.bottle_name}`;
+      const bannerKey = `corkscrew-banners-${activeGame.game_id}-${(wineCtx(activeGame)?.bottle_name ?? "")}`;
       const savedBanners = sessionStorage.getItem(bannerKey);
       dismissedBanners = savedBanners ? new Set(JSON.parse(savedBanners)) : new Set();
       // Clear selection
       selectedModIds = new Set();
       // Only reload if the game changed — skip if returning to the same page
-      const gameKey = `${activeGame.game_id}:${activeGame.bottle_name}`;
+      const gameKey = `${activeGame.game_id}:${(wineCtx(activeGame)?.bottle_name ?? "")}`;
       if (cachedGameKey !== gameKey) {
         const t0 = performance.now();
         // Try disk cache first for instant display
@@ -1193,7 +1195,7 @@
     const game = activeGame;
     if (game?.game_id === 'skyrimse') {
       const checkGame = game;
-      quickCsModCount(checkGame.game_id, checkGame.bottle_name)
+      quickCsModCount(checkGame.game_id, (wineCtx(checkGame)?.bottle_name ?? ""))
         .then(count => {
           if (activeGame === checkGame) { csModCount = count; csCheckDone = true; }
         })
@@ -1212,7 +1214,7 @@
   // Fresh data is fetched in the background and merged.
 
   function modCacheKey(game: DetectedGame): string {
-    return `corkscrew-mods-cache:${game.game_id}:${game.bottle_name}`;
+    return `corkscrew-mods-cache:${game.game_id}:${(wineCtx(game)?.bottle_name ?? "")}`;
   }
 
   function saveModCache(game: DetectedGame, mods: InstalledMod[]) {
@@ -1240,7 +1242,7 @@
     if (conflictDebounceTimer) clearTimeout(conflictDebounceTimer);
     conflictDebounceTimer = setTimeout(async () => {
       try {
-        conflicts = await getConflicts(game.game_id, game.bottle_name);
+        conflicts = await getConflicts(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       } catch {
         // Non-critical — keep existing conflict data
       }
@@ -1253,17 +1255,17 @@
     // Only show spinner if we have NO data at all (first ever load, no cache)
     if (showSpinner && $installedMods.length === 0) loadingMods = true;
     try {
-      const mods = await getInstalledModsSummary(game.game_id, game.bottle_name);
+      const mods = await getInstalledModsSummary(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       const t1 = performance.now();
       console.log(`[perf] getInstalledModsSummary: ${(t1 - t0).toFixed(0)}ms (${mods.length} mods)`);
       if (thisLoad !== loadGeneration) return;
       installedMods.set(mods);
-      cachedGameKey = `${game.game_id}:${game.bottle_name}`;
+      cachedGameKey = `${game.game_id}:${(wineCtx(game)?.bottle_name ?? "")}`;
       saveModCache(game, mods);
       loadingMods = false;
       // Background: conflicts
       const tc0 = performance.now();
-      getConflicts(game.game_id, game.bottle_name)
+      getConflicts(game.game_id, (wineCtx(game)?.bottle_name ?? ""))
         .then(c => {
           console.log(`[perf] getConflicts: ${(performance.now() - tc0).toFixed(0)}ms (${c.length} conflicts)`);
           if (thisLoad === loadGeneration) conflicts = c;
@@ -1272,7 +1274,7 @@
       // Background: endorsements
       loadEndorsements(game.nexus_slug);
       // Background: tools
-      detectModTools(game.game_id, game.bottle_name)
+      detectModTools(game.game_id, (wineCtx(game)?.bottle_name ?? ""))
         .then(tools => { if (thisLoad === loadGeneration) modTools = tools; })
         .catch((err) => console.error('Failed to detect mod tools:', err));
     } catch (e: unknown) {
@@ -1359,7 +1361,7 @@
 
     try {
       await withReload(async () => {
-        const removed = await uninstallMod(modId, game.game_id, game.bottle_name);
+        const removed = await uninstallMod(modId, game.game_id, (wineCtx(game)?.bottle_name ?? ""));
         showSuccess(`Uninstalled — ${(removed as string[]).length} files removed`);
         confirmUninstall = null;
       });
@@ -1390,7 +1392,7 @@
     installedMods.set($installedMods);
 
     try {
-      await toggleMod(mod.id, game.game_id, game.bottle_name, newEnabled);
+      await toggleMod(mod.id, game.game_id, (wineCtx(game)?.bottle_name ?? ""), newEnabled);
       // Refresh data in parallel, non-blocking (UI already updated)
       Promise.all([loadMods(game), refreshHealth(game)]).catch((err) => {
         console.error('Failed to sync after toggle:', err);
@@ -1432,12 +1434,12 @@
 
   async function checkSkseStatus(game: DetectedGame, gen: number) {
     try {
-      const status = await checkSkse(game.game_id, game.bottle_name);
+      const status = await checkSkse(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       if (gen !== skseCheckGeneration) return; // stale
       skse = status;
       skseStatus.set(skse);
       if (!skse.installed) {
-        const dismissed = localStorage.getItem(`skse_dismissed:${game.game_id}:${game.bottle_name}`);
+        const dismissed = localStorage.getItem(`skse_dismissed:${game.game_id}:${(wineCtx(game)?.bottle_name ?? "")}`);
         if (!dismissed) showSksePrompt = true;
       }
     } catch {
@@ -1465,7 +1467,7 @@
     if (!game) return;
     launching = true;
     try {
-      const result = await launchGame(game.game_id, game.bottle_name, useSkse);
+      const result = await launchGame(game.game_id, (wineCtx(game)?.bottle_name ?? ""), useSkse);
       if (result.success) {
         showSuccess(`Launched ${game.display_name}${useSkse ? " via SKSE" : ""} — Wine cursor fix applied`);
         if (result.warning) {
@@ -1473,7 +1475,7 @@
         }
         // Start polling game lock status
         gameLockOverridden.set(false);
-        startGameLockPolling(game.game_id, game.bottle_name);
+        startGameLockPolling(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       }
     } catch (e: unknown) {
       showError(`Failed to launch: ${e}`);
@@ -1529,7 +1531,7 @@
   async function handleForceUnlock() {
     const game = pickedGame ?? $selectedGame;
     if (!game) return;
-    await forceUnlockGame(game.game_id, game.bottle_name);
+    await forceUnlockGame(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
     gameLock.set(null);
     gameLockOverridden.set(true);
     stopGameLockPolling();
@@ -1547,7 +1549,7 @@
     if (!game) return;
     fixingDisplay = true;
     try {
-      const result = await fixSkyrimDisplay(game.bottle_name);
+      const result = await fixSkyrimDisplay((wineCtx(game)?.bottle_name ?? ""));
       if (result.fixed) {
         showSuccess(`Display fixed: ${result.applied.width}x${result.applied.height} fullscreen — game will open in exclusive fullscreen`);
       } else {
@@ -1581,7 +1583,7 @@
 
       const archivePath = typeof selected === "string" ? selected : String(selected);
       installingSkse = true;
-      skse = await installSkseFromArchive(game.game_id, game.bottle_name, archivePath);
+      skse = await installSkseFromArchive(game.game_id, (wineCtx(game)?.bottle_name ?? ""), archivePath);
       skseStatus.set(skse);
       showSksePrompt = false;
       showSuccess("SKSE installed successfully");
@@ -1597,7 +1599,7 @@
     if (!game) return;
     try {
       installingSkse = true;
-      skse = await installSkseAuto(game.game_id, game.bottle_name);
+      skse = await installSkseAuto(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       skseStatus.set(skse);
       showSksePrompt = false;
       showSuccess("SKSE auto-installed successfully");
@@ -1614,7 +1616,7 @@
     try {
       installingSkse = true;
       showSkseInstallPrompt = false;
-      skse = await installSkseAuto(game.game_id, game.bottle_name);
+      skse = await installSkseAuto(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       skseStatus.set(skse);
       showSksePrompt = false;
       showSuccess("SKSE installed — launching game");
@@ -1639,7 +1641,7 @@
       const archivePath = typeof selected === "string" ? selected : String(selected);
       installingSkse = true;
       showSkseInstallPrompt = false;
-      skse = await installSkseFromArchive(game.game_id, game.bottle_name, archivePath);
+      skse = await installSkseFromArchive(game.game_id, (wineCtx(game)?.bottle_name ?? ""), archivePath);
       skseStatus.set(skse);
       showSksePrompt = false;
       showSuccess("SKSE installed — launching game");
@@ -1653,11 +1655,11 @@
 
   async function checkVersionStatus(game: DetectedGame, gen: number) {
     try {
-      const status = await checkSkyrimVersion(game.game_id, game.bottle_name);
+      const status = await checkSkyrimVersion(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       if (gen !== skseCheckGeneration) return; // stale
       downgradeStatus = status;
       if (!status.is_downgraded) {
-        const dismissed = localStorage.getItem(`downgrade_dismissed:${game.game_id}:${game.bottle_name}`);
+        const dismissed = localStorage.getItem(`downgrade_dismissed:${game.game_id}:${(wineCtx(game)?.bottle_name ?? "")}`);
         if (!dismissed) showDowngradeBanner = true;
       }
     } catch {
@@ -1670,7 +1672,7 @@
     if (!game) return;
     downgrading = true;
     try {
-      const status = await downgradeSkyrim(game.game_id, game.bottle_name, "full");
+      const status = await downgradeSkyrim(game.game_id, (wineCtx(game)?.bottle_name ?? ""), "full");
       downgradeStatus = status;
       showDowngradeBanner = false;
       showSuccess(`Game downgraded to v${status.target_version}`);
@@ -1684,7 +1686,7 @@
   function dismissDowngradeBanner() {
     const game = pickedGame ?? $selectedGame;
     if (game) {
-      localStorage.setItem(`downgrade_dismissed:${game.game_id}:${game.bottle_name}`, "true");
+      localStorage.setItem(`downgrade_dismissed:${game.game_id}:${(wineCtx(game)?.bottle_name ?? "")}`, "true");
     }
     showDowngradeBanner = false;
   }
@@ -1757,7 +1759,7 @@
         }
       });
 
-      const mod = await installMod(filePath, game.game_id, game.bottle_name);
+      const mod = await installMod(filePath, game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       if (!mod) {
         console.error('Unexpected install result:', mod);
         return;
@@ -1793,7 +1795,7 @@
   function dismissSksePrompt() {
     const game = pickedGame ?? $selectedGame;
     if (game) {
-      localStorage.setItem(`skse_dismissed:${game.game_id}:${game.bottle_name}`, "true");
+      localStorage.setItem(`skse_dismissed:${game.game_id}:${(wineCtx(game)?.bottle_name ?? "")}`, "true");
     }
     showSksePrompt = false;
   }
@@ -1803,7 +1805,7 @@
     if (!game || !skse) return;
     const newValue = !skse.use_skse;
     try {
-      await setSksePreference(game.game_id, game.bottle_name, newValue);
+      await setSksePreference(game.game_id, (wineCtx(game)?.bottle_name ?? ""), newValue);
       skse = { ...skse, use_skse: newValue };
       skseStatus.set(skse);
     } catch (e: unknown) {
@@ -1851,7 +1853,7 @@
     launchingToolId = toolId;
     showToolsMenu = false;
     try {
-      await launchModTool(toolId, game.game_id, game.bottle_name);
+      await launchModTool(toolId, game.game_id, (wineCtx(game)?.bottle_name ?? ""));
     } catch (e: unknown) {
       showError(`Failed to launch tool: ${e}`);
     } finally {
@@ -1923,7 +1925,7 @@
     reordering = true;
 
     try {
-      await withReload(() => reorderMods(game.game_id, game.bottle_name, orderedIds));
+      await withReload(() => reorderMods(game.game_id, (wineCtx(game)?.bottle_name ?? ""), orderedIds));
     } catch (e: unknown) {
       showError(`Failed to reorder mods: ${e}`);
     } finally {
@@ -1937,7 +1939,7 @@
     if (!game) return;
     checkingUpdates = true;
     try {
-      modUpdates = await checkModUpdates(game.game_id, game.bottle_name);
+      modUpdates = await checkModUpdates(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       if (modUpdates.length === 0) {
         showSuccess("All mods are up to date");
       } else {
@@ -2006,7 +2008,7 @@
         // Save the recipe
         await saveFomodRecipe(fomodTargetMod!.id, fomodTargetMod!.name, "", selections);
         // Redeploy to apply changes
-        await redeployAllMods(game.game_id, game.bottle_name);
+        await redeployAllMods(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       });
       showSuccess(`Reconfigured FOMOD for "${fomodTargetMod!.name}"`);
     } catch (e: unknown) {
@@ -2030,7 +2032,7 @@
         defaultPath: `${game.display_name.replace(/[^a-zA-Z0-9]/g, "_")}_modlist.json`,
       });
       if (!outputPath) return;
-      await exportModlist(game.game_id, game.bottle_name, outputPath);
+      await exportModlist(game.game_id, (wineCtx(game)?.bottle_name ?? ""), outputPath);
       showSuccess(`Mod list exported to ${outputPath}`);
     } catch (e: unknown) {
       showError(`Export failed: ${e}`);
@@ -2049,7 +2051,7 @@
     } else {
       // Fallback if component not yet mounted
       try {
-        const stats = await getDeploymentStats(game.game_id, game.bottle_name);
+        const stats = await getDeploymentStats(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
         deployHealth = { ...stats, conflict_count: conflicts.length };
       } catch {
         deployHealth = null;
@@ -2085,7 +2087,7 @@
     const game = pickedGame ?? $selectedGame;
     if (!game || !mod.nexus_mod_id) return;
     try {
-      const updates = await checkModUpdates(game.game_id, game.bottle_name);
+      const updates = await checkModUpdates(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       const update = updates.find(u => u.mod_id === mod.id);
       if (update) {
         showSuccess(`Update available for "${mod.name}": v${update.latest_version}`);
@@ -2251,7 +2253,7 @@
   $effect(() => {
     if (activeGame && !categoriesBackfilled && $installedMods.length > 0) {
       categoriesBackfilled = true;
-      backfillCategories(activeGame.game_id, activeGame.bottle_name)
+      backfillCategories(activeGame.game_id, (wineCtx(activeGame)?.bottle_name ?? ""))
         .then((count) => { if (count > 0) loadMods(activeGame!); })
         .catch((err) => console.error('Failed to backfill categories:', err));
     }
@@ -2312,17 +2314,17 @@
         </div>
       {:else}
         <div class="game-cards">
-          {#each $games as game (game.game_id + game.bottle_name)}
+          {#each $games as game (game.game_id + (wineCtx(game)?.bottle_name ?? ""))}
             <button
               class="game-card"
-              class:game-card-hovered={hoveredGame === game.game_id + game.bottle_name}
-              onmouseenter={() => (hoveredGame = game.game_id + game.bottle_name)}
+              class:game-card-hovered={hoveredGame === game.game_id + (wineCtx(game)?.bottle_name ?? "")}
+              onmouseenter={() => (hoveredGame = game.game_id + (wineCtx(game)?.bottle_name ?? ""))}
               onmouseleave={() => (hoveredGame = null)}
               onclick={() => selectGameForMods(game)}
             >
               <div class="game-card-content">
                 <span class="game-card-name">{game.display_name}</span>
-                <span class="game-card-bottle">{game.bottle_name}</span>
+                <span class="game-card-bottle">{(wineCtx(game)?.bottle_name ?? "")}</span>
               </div>
               <div class="game-card-chevron">
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
@@ -2343,12 +2345,12 @@
       <div class="game-banner-info">
         <h2 class="game-banner-title">{activeGame.display_name}</h2>
         <div class="game-banner-meta">
-          <span class="meta-bottle">{activeGame.bottle_name}</span>
+          <span class="meta-bottle">{(wineCtx(activeGame)?.bottle_name ?? "")}</span>
           {#if modCount > 0}
             <span class="meta-separator">&middot;</span>
             <span class="meta-mods">{enabledCount}/{modCount} mods active</span>
           {/if}
-          {#if skse?.installed}
+          {#if !$nativeMode && skse?.installed}
             <span class="meta-separator">&middot;</span>
             <span class="meta-skse">SKSE {skse.version ?? ""}</span>
           {/if}
@@ -2598,6 +2600,7 @@
             Play{#if skse?.use_skse && activeGame?.game_id === "skyrimse"} (SKSE){/if}
           {/if}
         </button>
+        {#if !$nativeMode}
         {#if activeGame?.game_id === "skyrimse"}
           <button
             class="btn btn-play-dropdown"
@@ -2662,6 +2665,7 @@
             </button>
           </div>
         {/if}
+        {/if}<!-- end !nativeMode: SKSE dropdowns -->
       </div>
     </div>
 
@@ -2669,7 +2673,7 @@
     {#if isFromSoftGame(activeGame.game_id)}
       <RegulationConflictBanner
         gameId={activeGame.game_id}
-        bottleName={activeGame.bottle_name}
+        bottleName={(wineCtx(activeGame)?.bottle_name ?? "")}
         refreshKey={$modStateVersion}
       />
       {#if me2WizardGameId === activeGame.game_id}
@@ -3694,13 +3698,13 @@
         {#if activeGame && isFromSoftGame(activeGame.game_id)}
           <ModEngine2ConfigPanel
             gameId={activeGame.game_id}
-            bottleName={activeGame.bottle_name}
+            bottleName={(wineCtx(activeGame)?.bottle_name ?? "")}
           />
         {/if}
 
         <!-- Disk Budget -->
         {#if activeGame}
-          <DiskBudgetPanel gameId={activeGame.game_id} bottleName={activeGame.bottle_name} />
+          <DiskBudgetPanel gameId={activeGame.game_id} bottleName={(wineCtx(activeGame)?.bottle_name ?? "")} />
         {/if}
 
         <!-- Pre-flight Checks -->
@@ -3717,7 +3721,7 @@
             </button>
             {#if showPreflightPanel}
               <div class="collapsible-content">
-                <PreflightPanel gameId={activeGame.game_id} bottleName={activeGame.bottle_name} />
+                <PreflightPanel gameId={activeGame.game_id} bottleName={(wineCtx(activeGame)?.bottle_name ?? "")} />
               </div>
             {/if}
           </div>
@@ -3742,7 +3746,7 @@
             <div class="collapsible-content">
               <DependencyPanel
                 gameId={activeGame.game_id}
-                bottleName={activeGame.bottle_name}
+                bottleName={(wineCtx(activeGame)?.bottle_name ?? "")}
                 mods={$installedMods}
                 {selectedModId}
               />
@@ -3764,7 +3768,7 @@
           </button>
           {#if showSessionPanel && activeGame}
             <div class="collapsible-content">
-              <SessionHistoryPanel gameId={activeGame.game_id} bottleName={activeGame.bottle_name} />
+              <SessionHistoryPanel gameId={activeGame.game_id} bottleName={(wineCtx(activeGame)?.bottle_name ?? "")} />
             </div>
           {/if}
         </div>
@@ -3827,7 +3831,7 @@
 {#if showShaderWizard && activeGame}
   <ShaderConversionWizard
     gameId={activeGame.game_id}
-    bottleName={activeGame.bottle_name}
+    bottleName={(wineCtx(activeGame)?.bottle_name ?? "")}
     onComplete={() => { showShaderWizard = false; csCheckTrigger++; }}
     onCancel={() => { showShaderWizard = false; }}
   />
@@ -3843,7 +3847,7 @@
   onConfirm={async () => {
     if (duplicateDialog && activeGame) {
       try {
-        await withReload(() => uninstallMod(duplicateDialog!.oldMod.id, activeGame!.game_id, activeGame!.bottle_name));
+        await withReload(() => uninstallMod(duplicateDialog!.oldMod.id, activeGame!.game_id, wineCtx(activeGame!)?.bottle_name ?? ""));
         showSuccess(`Removed old version of "${duplicateDialog.oldMod.name}"`);
       } catch (e) {
         showError(`Failed to uninstall old version: ${e}`);
@@ -3904,8 +3908,8 @@
         deploying = true;
         try {
           await withReload(async () => {
-            await toggleMod(culprit.id, g.game_id, g.bottle_name, false);
-            await redeployAllMods(g.game_id, g.bottle_name);
+            await toggleMod(culprit.id, g.game_id, (wineCtx(g)?.bottle_name ?? ""), false);
+            await redeployAllMods(g.game_id, (wineCtx(g)?.bottle_name ?? ""));
           });
           showSuccess(`Disabled "${culprit.name}" — the likely culprit.`);
         } finally {

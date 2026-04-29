@@ -1,6 +1,7 @@
 <script lang="ts">
   import { selectedGame, showError, showSuccess } from "$lib/stores";
   import type { CachedVersion, DetectedGame } from "$lib/types";
+  import { wineCtx } from "$lib/types";
   import {
     swapGameVersion,
     startDepotDownload,
@@ -51,7 +52,7 @@
   async function handleSwapVersion(version: string) {
     versionSwapping = true;
     try {
-      await swapGameVersion(game.game_id, game.bottle_name, version);
+      await swapGameVersion(game.game_id, (wineCtx(game)?.bottle_name ?? ""), version);
       showSuccess(`Switched to v${version}. Nice.`);
       onproceed();
     } catch (e) {
@@ -67,18 +68,18 @@
       const automated = await startDepotDownload(game.game_id);
       if (!automated) {
         try {
-          const info = await getDepotDownloadCommand(game.game_id, game.bottle_name);
+          const info = await getDepotDownloadCommand(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
           await navigator.clipboard.writeText(info.command);
           showSuccess("Command copied! Paste it in the Steam console that opened.");
         } catch { /* ignore clipboard errors */ }
       }
       depotPollTimer = setInterval(async () => {
         try {
-          const result = await checkDepotReady(game.game_id, game.bottle_name);
+          const result = await checkDepotReady(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
           if (result) {
             if (depotPollTimer) clearInterval(depotPollTimer);
             depotPollTimer = null;
-            const status = await applyDowngrade(game.game_id, game.bottle_name);
+            const status = await applyDowngrade(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
             depotDownloading = false;
             showSuccess(`Switched to v${status.current_version}. Let's go.`);
             onproceed();
@@ -175,7 +176,7 @@
         const { invoke } = await import("@tauri-apps/api/core");
         const filesCopied = await invoke("dd_apply_depot", {
           gameId: game.game_id,
-          bottleName: game.bottle_name,
+          bottleName: (wineCtx(game)?.bottle_name ?? ""),
           depotDir,
         });
 

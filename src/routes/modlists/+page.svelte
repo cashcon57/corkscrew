@@ -18,6 +18,7 @@
   import { goto } from "$app/navigation";
   import { showError, showSuccess, selectedGame, wjInstallStatus } from "$lib/stores";
   import type { ModlistSummary, ParsedModlist, RequiredTool, WabbajackInstallStatus } from "$lib/types";
+  import { wineCtx } from "$lib/types";
   import { startWjInstallTracking, setWjInstallId, clearWjInstallStatus } from "$lib/wjInstallService";
   import { marked } from "marked";
   import DOMPurify from "dompurify";
@@ -328,7 +329,7 @@
     if (!game || !wabbajackFilePath) return;
 
     try {
-      const tools = await detectWabbajackTools(wabbajackFilePath, game.game_id, game.bottle_name);
+      const tools = await detectWabbajackTools(wabbajackFilePath, game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       const uninstalled = tools.filter((t) => !t.is_detected);
       if (uninstalled.length > 0) {
         pendingTools = tools;
@@ -354,9 +355,9 @@
     let downloadDir: string;
     try {
       const config = await getConfig();
-      downloadDir = config.download_dir || `${game.bottle_path}/drive_c/corkscrew_downloads`;
+      downloadDir = config.download_dir || `${(wineCtx(game)?.bottle_path ?? "")}/drive_c/corkscrew_downloads`;
     } catch {
-      downloadDir = `${game.bottle_path}/drive_c/corkscrew_downloads`;
+      downloadDir = `${(wineCtx(game)?.bottle_path ?? "")}/drive_c/corkscrew_downloads`;
     }
     const installDir = game.data_dir;
 
@@ -383,7 +384,7 @@
     // Start the install
     try {
       const id = await installWabbajackModlist(
-        wabbajackFilePath, game.game_id, game.bottle_name,
+        wabbajackFilePath, game.game_id, (wineCtx(game)?.bottle_name ?? ""),
         installDir, downloadDir,
       );
       setWjInstallId(id);
@@ -707,7 +708,7 @@
         <!-- Compatibility Check (Skyrim SE only) -->
         {#if selectedModlist.game === "skyrimspecialedition" && $selectedGame}
           <div class="detail-section">
-            <CompatibilityPanel gameId={$selectedGame.game_id} bottleName={$selectedGame.bottle_name} />
+            <CompatibilityPanel gameId={$selectedGame.game_id} bottleName={(wineCtx($selectedGame)?.bottle_name ?? "")} />
           </div>
         {/if}
 
@@ -885,7 +886,7 @@
         <!-- Compatibility Check -->
         {#if parsedModlist.game_name.includes("Skyrim") && $selectedGame}
           <div class="detail-section">
-            <CompatibilityPanel gameId={$selectedGame.game_id} bottleName={$selectedGame.bottle_name} />
+            <CompatibilityPanel gameId={$selectedGame.game_id} bottleName={(wineCtx($selectedGame)?.bottle_name ?? "")} />
           </div>
         {/if}
 
@@ -923,7 +924,7 @@
       <RequiredToolsPrompt
         tools={pendingTools}
         gameId={$selectedGame.game_id}
-        bottleName={$selectedGame.bottle_name}
+        bottleName={(wineCtx($selectedGame)?.bottle_name ?? "")}
         oncontinue={proceedWithInstall}
         oncancel={() => { showToolsPrompt = false; }}
       />

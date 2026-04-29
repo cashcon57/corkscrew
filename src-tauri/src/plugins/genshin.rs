@@ -38,6 +38,7 @@ use std::path::{Path, PathBuf};
 
 use crate::bottles::Bottle;
 use crate::games::{DetectedGame, GamePlugin};
+use crate::runtime::{GameRuntime, WineContext};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -123,7 +124,7 @@ impl GamePlugin for GenshinPlugin {
         EXECUTABLES
     }
 
-    fn detect(&self, bottle: &Bottle) -> Option<DetectedGame> {
+    fn detect_wine(&self, bottle: &Bottle) -> Option<DetectedGame> {
         let game_path = find_game_path(bottle)?;
         let exe_path = find_executable(&game_path);
         // Require the real executable to be present; an empty directory with
@@ -139,8 +140,11 @@ impl GamePlugin for GenshinPlugin {
             game_path,
             exe_path,
             data_dir,
-            bottle_name: bottle.name.clone(),
-            bottle_path: bottle.path.clone(),
+            runtime: GameRuntime::Wine(WineContext {
+                bottle_name: bottle.name.clone(),
+                bottle_path: bottle.path.clone(),
+                source: bottle.source.clone(),
+            }),
             steam_app_id: None,
         })
     }
@@ -224,7 +228,7 @@ impl GamePlugin for GenshinPlugin {
 // ---------------------------------------------------------------------------
 
 pub fn register() {
-    crate::games::register_plugin(Box::new(GenshinPlugin));
+    crate::games::register_plugin(std::sync::Arc::new(GenshinPlugin));
 }
 
 // ---------------------------------------------------------------------------
@@ -555,7 +559,7 @@ mod tests {
         };
 
         let plugin = GenshinPlugin;
-        assert!(plugin.detect(&bottle).is_none());
+        assert!(plugin.detect_wine(&bottle).is_none());
     }
 
     #[test]
@@ -580,7 +584,7 @@ mod tests {
         };
 
         let plugin = GenshinPlugin;
-        let detected = plugin.detect(&bottle).expect("should detect Steam install");
+        let detected = plugin.detect_wine(&bottle).expect("should detect Steam install");
         assert_eq!(detected.game_id, "genshin");
         assert_eq!(detected.game_path, inner_dir);
         assert!(detected.exe_path.unwrap().ends_with("GenshinImpact.exe"));
@@ -607,7 +611,7 @@ mod tests {
 
         let plugin = GenshinPlugin;
         let detected = plugin
-            .detect(&bottle)
+            .detect_wine(&bottle)
             .expect("should detect HoYoPlay install");
         assert_eq!(detected.game_id, "genshin");
         assert_eq!(detected.game_path, game_dir);
@@ -633,7 +637,7 @@ mod tests {
 
         let plugin = GenshinPlugin;
         let detected = plugin
-            .detect(&bottle)
+            .detect_wine(&bottle)
             .expect("should detect standalone install");
         assert_eq!(detected.game_path, game_dir);
     }
@@ -659,7 +663,7 @@ mod tests {
 
         let plugin = GenshinPlugin;
         let detected = plugin
-            .detect(&bottle)
+            .detect_wine(&bottle)
             .expect("should detect CN client via YuanShen.exe");
         assert_eq!(detected.game_id, "genshin");
         assert!(
@@ -695,7 +699,7 @@ mod tests {
 
         let plugin = GenshinPlugin;
         assert!(
-            plugin.detect(&bottle).is_none(),
+            plugin.detect_wine(&bottle).is_none(),
             "empty install dir must not register"
         );
     }
@@ -720,7 +724,7 @@ mod tests {
         };
 
         let plugin = GenshinPlugin;
-        let detected = plugin.detect(&bottle).unwrap();
+        let detected = plugin.detect_wine(&bottle).unwrap();
         assert_eq!(detected.data_dir, game_dir.join("Mods"));
     }
 
@@ -800,7 +804,7 @@ mod tests {
             path: bottle_path,
             source: "Test".into(),
         };
-        let detected = GenshinPlugin.detect(&bottle).expect("non-Steam detect");
+        let detected = GenshinPlugin.detect_wine(&bottle).expect("non-Steam detect");
         assert_eq!(detected.game_id, "genshin");
         assert_eq!(detected.game_path, game_dir);
     }
@@ -815,7 +819,7 @@ mod tests {
             path: bottle_path,
             source: "Test".into(),
         };
-        assert!(GenshinPlugin.detect(&bottle).is_some());
+        assert!(GenshinPlugin.detect_wine(&bottle).is_some());
     }
 
     #[test]
@@ -828,7 +832,7 @@ mod tests {
             path: bottle_path,
             source: "Test".into(),
         };
-        assert!(GenshinPlugin.detect(&bottle).is_some(), "top-level drag-drop");
+        assert!(GenshinPlugin.detect_wine(&bottle).is_some(), "top-level drag-drop");
     }
 
     #[test]
@@ -849,7 +853,7 @@ mod tests {
             path: bottle_path,
             source: "Test".into(),
         };
-        let detected = GenshinPlugin.detect(&bottle).expect("Xbox Game Pass detect");
+        let detected = GenshinPlugin.detect_wine(&bottle).expect("Xbox Game Pass detect");
         assert_eq!(detected.game_id, "genshin");
         assert!(detected.game_path.ends_with("Content"));
     }
@@ -872,7 +876,7 @@ mod tests {
             source: "Test".into(),
         };
         assert!(
-            GenshinPlugin.detect(&bottle).is_none(),
+            GenshinPlugin.detect_wine(&bottle).is_none(),
             "empty dir must not detect"
         );
     }

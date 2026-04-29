@@ -9,6 +9,7 @@
     CrashSeverity,
     Confidence,
   } from "$lib/types";
+  import { wineCtx } from "$lib/types";
   import {
     findCrashLogs,
     analyzeCrashLog,
@@ -47,7 +48,7 @@
   async function loadCrashLogs(g: DetectedGame) {
     loading = true;
     try {
-      logs = await findCrashLogs(g.game_id, g.bottle_name);
+      logs = await findCrashLogs(g.game_id, (wineCtx(g)?.bottle_name ?? ""));
     } catch (e: unknown) {
       showError(`Failed to load crash logs: ${e}`);
     } finally {
@@ -80,7 +81,7 @@
     if (!game || refreshing) return;
     refreshing = true;
     try {
-      logs = await findCrashLogs(game.game_id, game.bottle_name);
+      logs = await findCrashLogs(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       selectedLogFilename = null;
       selectedReport = null;
       showSuccess("Crash logs refreshed");
@@ -97,11 +98,11 @@
     try {
       switch (action.action_type) {
         case "SortLoadOrder":
-          await sortPluginsLoot(game.game_id, game.bottle_name);
+          await sortPluginsLoot(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
           showSuccess("Load order sorted");
           break;
         case "UpdateMod":
-          await checkModUpdates(game.game_id, game.bottle_name);
+          await checkModUpdates(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
           showSuccess(`Checking for updates${action.target ? ` for ${action.target}` : ""}`);
           break;
         case "VerifyIntegrity":

@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::bottles::Bottle;
 use crate::games::{DetectedGame, GamePlugin};
+use crate::runtime::{GameRuntime, WineContext};
 
 // ---------------------------------------------------------------------------
 // JSON schema
@@ -115,7 +116,7 @@ impl GamePlugin for RegistryGamePlugin {
         &[]
     }
 
-    fn detect(&self, bottle: &Bottle) -> Option<DetectedGame> {
+    fn detect_wine(&self, bottle: &Bottle) -> Option<DetectedGame> {
         let exe = self.entry.executable.as_deref()?;
         let game_path = find_game_path(bottle, self.entry)?;
 
@@ -145,9 +146,12 @@ impl GamePlugin for RegistryGamePlugin {
             game_path,
             exe_path,
             data_dir,
-            bottle_name: bottle.name.clone(),
-            bottle_path: bottle.path.clone(),
-            steam_app_id: None,
+            runtime: GameRuntime::Wine(WineContext {
+                bottle_name: bottle.name.clone(),
+                bottle_path: bottle.path.clone(),
+                source: bottle.source.clone(),
+            }),
+            steam_app_id: self.entry.steam_id.clone(),
         })
     }
 
@@ -195,30 +199,15 @@ fn find_game_path(bottle: &Bottle, entry: &GameEntry) -> Option<PathBuf> {
         }
     }
 
-    // 2. Check additional Steam library folders from libraryfolders.vdf.
-    if let Some(steam_dir) = bottle.find_path(&["Program Files (x86)", "Steam"]) {
-        let vdf_path = steam_dir.join("steamapps").join("libraryfolders.vdf");
-        let vdf_path = if vdf_path.exists() {
-            Some(vdf_path)
-        } else {
-            let alt = steam_dir.join("config").join("libraryfolders.vdf");
-            if alt.exists() {
-                Some(alt)
-            } else {
-                None
-            }
-        };
-
-        if let Some(vdf) = vdf_path {
-            if let Some(lib_paths) = parse_library_folders_vdf(&vdf) {
-                for lib_path in lib_paths {
-                    let common = lib_path.join("steamapps").join("common");
-                    if let Some(game_dir) = find_child_case_insensitive(&common, steam_dir_name) {
-                        if game_dir.is_dir() {
-                            return Some(game_dir);
-                        }
-                    }
-                }
+    // 2. Check additional Steam library folders. Uses the multi-drive
+    // resolver (`collect_steam_library_paths`) so generic registry games
+    // (the ~80 titles without a dedicated plugin) get the same multi-drive
+    // + libraryfolders.vdf treatment as Skyrim SE / Fallout 4 / Hogwarts.
+    for steamapps in collect_steam_library_paths(bottle) {
+        let common = steamapps.join("common");
+        if let Some(game_dir) = find_child_case_insensitive(&common, steam_dir_name) {
+            if game_dir.is_dir() {
+                return Some(game_dir);
             }
         }
     }
@@ -335,7 +324,7 @@ pub fn register_all() {
         if CUSTOM_PLUGIN_IDS.contains(&entry.game_id.as_str()) {
             continue;
         }
-        crate::games::register_plugin(Box::new(RegistryGamePlugin { entry }));
+        crate::games::register_plugin(std::sync::Arc::new(RegistryGamePlugin { entry }));
     }
 }
 
@@ -681,8 +670,11 @@ pub fn detect_unregistered_steam_games(
                 game_path: game_path.clone(),
                 exe_path,
                 data_dir: game_path,
-                bottle_name: bottle.name.clone(),
-                bottle_path: bottle.path.clone(),
+                runtime: GameRuntime::Wine(WineContext {
+                    bottle_name: bottle.name.clone(),
+                    bottle_path: bottle.path.clone(),
+                    source: bottle.source.clone(),
+                }),
                 steam_app_id: Some(manifest.app_id.clone()),
             });
         }
@@ -845,8 +837,11 @@ fn scan_steam_games_with_appid(bottle: &Bottle) -> Vec<UnregisteredSteamGame> {
                     game_path: game_path.clone(),
                     exe_path,
                     data_dir: game_path,
-                    bottle_name: bottle.name.clone(),
-                    bottle_path: bottle.path.clone(),
+                    runtime: GameRuntime::Wine(WineContext {
+                        bottle_name: bottle.name.clone(),
+                        bottle_path: bottle.path.clone(),
+                        source: bottle.source.clone(),
+                    }),
                     steam_app_id: None,
                 },
                 app_id: manifest.app_id,
@@ -1251,8 +1246,11 @@ pub fn load_custom_games(db: &crate::database::ModDatabase) -> Vec<DetectedGame>
                 game_path: PathBuf::from(row.get::<_, String>(3)?),
                 exe_path: row.get::<_, Option<String>>(4)?.map(PathBuf::from),
                 data_dir: PathBuf::from(row.get::<_, String>(5)?),
-                bottle_name: row.get(6)?,
-                bottle_path: PathBuf::from(row.get::<_, String>(7)?),
+                runtime: GameRuntime::Wine(WineContext {
+                    bottle_name: row.get(6)?,
+                    bottle_path: PathBuf::from(row.get::<_, String>(7)?),
+                    source: String::new(), // not stored in custom_games table (Task 2.7)
+                }),
                 steam_app_id: None,
             })
         })

@@ -2,6 +2,7 @@
   import { selectedGame } from "$lib/stores";
   import { toggleMod, redeployAllMods, getInstalledMods } from "$lib/api";
   import type { InstalledMod } from "$lib/types";
+  import { wineCtx } from "$lib/types";
 
   let { mods, onClose, onComplete }: {
     mods: InstalledMod[];
@@ -58,14 +59,14 @@
       // Disable all enabled mods first
       for (const mod of enabledMods) {
         if (mod.enabled) {
-          await toggleMod(mod.id, $selectedGame.game_id, $selectedGame.bottle_name, false);
+          await toggleMod(mod.id, $selectedGame.game_id, (wineCtx($selectedGame)?.bottle_name ?? ""), false);
         }
       }
       // Enable only the active batch
       for (const mod of activeBatch) {
-        await toggleMod(mod.id, $selectedGame.game_id, $selectedGame.bottle_name, true);
+        await toggleMod(mod.id, $selectedGame.game_id, (wineCtx($selectedGame)?.bottle_name ?? ""), true);
       }
-      await redeployAllMods($selectedGame.game_id, $selectedGame.bottle_name);
+      await redeployAllMods($selectedGame.game_id, (wineCtx($selectedGame)?.bottle_name ?? ""));
     } catch (e: unknown) {
       error = `Deploy failed: ${e instanceof Error ? e.message : String(e)}`;
     } finally {
@@ -121,14 +122,14 @@
     if (!$selectedGame) return;
     deploying = true;
     try {
-      const current = await getInstalledMods($selectedGame.game_id, $selectedGame.bottle_name);
+      const current = await getInstalledMods($selectedGame.game_id, (wineCtx($selectedGame)?.bottle_name ?? ""));
       for (const mod of current) {
         const shouldBeEnabled = originalEnabledIds.has(mod.id);
         if (mod.enabled !== shouldBeEnabled) {
-          await toggleMod(mod.id, $selectedGame.game_id, $selectedGame.bottle_name, shouldBeEnabled);
+          await toggleMod(mod.id, $selectedGame.game_id, (wineCtx($selectedGame)?.bottle_name ?? ""), shouldBeEnabled);
         }
       }
-      await redeployAllMods($selectedGame.game_id, $selectedGame.bottle_name);
+      await redeployAllMods($selectedGame.game_id, (wineCtx($selectedGame)?.bottle_name ?? ""));
     } catch {
       // Best effort restore
     } finally {

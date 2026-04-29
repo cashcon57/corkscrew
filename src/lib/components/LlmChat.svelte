@@ -6,6 +6,7 @@
   import { goto } from "$app/navigation";
   import { getInstalledMods, startOllama, checkMlxStatus, installMlx, deleteModel, getCachedMlxModels } from "$lib/api";
   import type { LlmBackend } from "$lib/types";
+  import { wineCtx } from "$lib/types";
   import {
     chatGetState,
     chatLoadModel,
@@ -316,8 +317,8 @@
     if (!game) return;
     try {
       const [crashes, starters] = await Promise.all([
-        chatCheckNewCrashes(game.game_id, game.bottle_name),
-        chatGetStarters(game.game_id, game.bottle_name, currentPageName),
+        chatCheckNewCrashes(game.game_id, (wineCtx(game)?.bottle_name ?? "")),
+        chatGetStarters(game.game_id, (wineCtx(game)?.bottle_name ?? ""), currentPageName),
       ]);
       conversationStarters = starters;
       if (crashes.count > 0) {
@@ -374,7 +375,7 @@
         const game = $selectedGame;
         if (game) {
           try {
-            const history = await chatGetHistory(game.game_id, game.bottle_name);
+            const history = await chatGetHistory(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
             historyMessages = history;
             historyCount = history.length;
           } catch { /* non-critical */ }
@@ -415,9 +416,9 @@
     loadingModelName = modelName;
     try {
       if (selectedBackend === "cloud") {
-        await chatLoadModel(modelName, game.game_id, game.bottle_name, currentPageName, "cloud", cloudProvider, cloudApiKey);
+        await chatLoadModel(modelName, game.game_id, (wineCtx(game)?.bottle_name ?? ""), currentPageName, "cloud", cloudProvider, cloudApiKey);
       } else {
-        await chatLoadModel(modelName, game.game_id, game.bottle_name, currentPageName, selectedBackend);
+        await chatLoadModel(modelName, game.game_id, (wineCtx(game)?.bottle_name ?? ""), currentPageName, selectedBackend);
       }
       chatState = await chatGetState();
       showModelPicker = false;
@@ -439,7 +440,7 @@
     if (!game) return;
     cloudConnecting = true;
     try {
-      await chatLoadModel("cloud", game.game_id, game.bottle_name, currentPageName, "cloud", cloudProvider, cloudApiKey);
+      await chatLoadModel("cloud", game.game_id, (wineCtx(game)?.bottle_name ?? ""), currentPageName, "cloud", cloudProvider, cloudApiKey);
       saveCloudConfig();
       chatState = await chatGetState();
       showModelPicker = false;
@@ -478,7 +479,7 @@
         // Auto-connect to Gemini via OAuth
         googleConnecting = true;
         try {
-          await chatLoadModel("gemini_oauth", game.game_id, game.bottle_name, currentPageName, "gemini_oauth");
+          await chatLoadModel("gemini_oauth", game.game_id, (wineCtx(game)?.bottle_name ?? ""), currentPageName, "gemini_oauth");
           chatState = await chatGetState();
           showModelPicker = false;
           resetAutoUnload();
@@ -514,7 +515,7 @@
     if (!game) return;
     googleConnecting = true;
     try {
-      await chatLoadModel("gemini_oauth", game.game_id, game.bottle_name, currentPageName, "gemini_oauth");
+      await chatLoadModel("gemini_oauth", game.game_id, (wineCtx(game)?.bottle_name ?? ""), currentPageName, "gemini_oauth");
       chatState = await chatGetState();
       showModelPicker = false;
       resetAutoUnload();
@@ -647,7 +648,7 @@
     }
 
     try {
-      const resp: ChatResponse = await chatSendMessage(msg, game.game_id, game.bottle_name, currentPageName);
+      const resp: ChatResponse = await chatSendMessage(msg, game.game_id, (wineCtx(game)?.bottle_name ?? ""), currentPageName);
       isStreaming = false;
       streamPhase = "idle";
       if (thinkingTimer) { clearInterval(thinkingTimer); thinkingTimer = null; }
@@ -679,7 +680,7 @@
       const modifyingTools = ["enable_mod", "disable_mod", "sort_load_order", "activate_profile", "redeploy_mods", "download_and_install_mod"];
       if (resp.tool_results?.some(tr => modifyingTools.includes(tr.tool_name))) {
         try {
-          const mods = await getInstalledMods(game.game_id, game.bottle_name);
+          const mods = await getInstalledMods(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
           installedMods.set(mods);
         } catch (_) { /* non-critical */ }
       }
@@ -710,7 +711,7 @@
   async function handleClear() {
     const game = $selectedGame;
     if (game) {
-      await chatClearHistory(game.game_id, game.bottle_name);
+      await chatClearHistory(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
     }
     chatState = await chatGetState();
     historyMessages = [];

@@ -2,17 +2,19 @@
   import { onMount, onDestroy } from "svelte";
   import "../app.css";
   import { goto } from "$app/navigation";
-  import { currentPage, errorMessage, successMessage, selectedGame, selectedBottle, showError, showSuccess, appVersion, collectionInstallStatus, collectionUninstallStatus, wjInstallStatus, updateReady as updateReadyStore, updateVersion as updateVersionStore, updateNotes as updateNotesStore, updateChecking as updateCheckingStore, updateError as updateErrorStore, setUpdateCheckFn, notificationCount, showNotificationLog, activeProfile, profileList, activeCollection, collectionList, sidebarCollapsed, controllerMode, pendingNxmInstall, nxmInstallComplete, showUninstalledGames, uninstalledGames } from "$lib/stores";
+  import { page } from "$app/state";
+  import { currentPage, errorMessage, successMessage, selectedGame, selectedBottle, showError, showSuccess, appVersion, collectionInstallStatus, collectionUninstallStatus, wjInstallStatus, updateReady as updateReadyStore, updateVersion as updateVersionStore, updateNotes as updateNotesStore, updateChecking as updateCheckingStore, updateError as updateErrorStore, setUpdateCheckFn, notificationCount, showNotificationLog, activeProfile, profileList, activeCollection, collectionList, sidebarCollapsed, controllerMode, pendingNxmInstall, nxmInstallComplete, showUninstalledGames, uninstalledGames, nativeMode, nativeModeVisible } from "$lib/stores";
   import { initTheme } from "$lib/theme";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
   import { getVersion } from "@tauri-apps/api/app";
-  import { downloadFromNexus, installMod, getAllGames, getDownloadQueue, retryDownload, cancelDownload, clearFinishedDownloads, onDownloadQueueUpdate, listProfiles, listInstalledCollections, getConfig, setConfigValue, launchGame, getAllInterruptedInstalls, resumeCollectionInstall, abandonCollectionInstall, getCheckpointModNames, getPendingWabbajackInstalls, dismissWabbajackInstall, checkSkyrimVersion, getPinnedGameVersion, pinGameVersion, checkSteamStatus, addToSteam, fetchUpdate, installUpdate, chatCheckNewCrashes, listKnownUninstalledGames } from "$lib/api";
+  import { downloadFromNexus, installMod, getAllGames, getDownloadQueue, retryDownload, cancelDownload, clearFinishedDownloads, onDownloadQueueUpdate, listProfiles, listInstalledCollections, getConfig, setConfigValue, launchGame, getAllInterruptedInstalls, resumeCollectionInstall, abandonCollectionInstall, getCheckpointModNames, getPendingWabbajackInstalls, dismissWabbajackInstall, checkSkyrimVersion, getPinnedGameVersion, pinGameVersion, checkSteamStatus, addToSteam, fetchUpdate, installUpdate, chatCheckNewCrashes, listKnownUninstalledGames, getNativeMode, getNativeModeVisible } from "$lib/api";
   import { resumeInstallTracking } from "$lib/installService";
   import { initHashingListener, destroyHashingListener, dismissHashingBanner } from "$lib/hashingService";
   import { hashingProgress } from "$lib/stores";
   import { cancelBackgroundHashing } from "$lib/api";
   import type { CollectionInstallCheckpoint, WabbajackInstallStatus } from "$lib/types";
+  import { wineCtx } from "$lib/types";
   import { get } from "svelte/store";
   import type { DetectedGame, QueueItem, KnownUninstalledGame } from "$lib/types";
   import NotificationLog from "$lib/components/mods/NotificationLog.svelte";
@@ -282,6 +284,19 @@
     window.addEventListener('error', handleGlobalError);
 
     loadDetectedGames();
+
+    // Hydrate nativeMode store from persisted config so the topbar
+    // toggle reflects the user's last-set state on cold launch.
+    getNativeMode()
+      .then((enabled: boolean) => nativeMode.set(enabled))
+      .catch((err: unknown) => console.warn('getNativeMode hydration failed:', err));
+
+    // Hydrate nativeModeVisible — controls whether the topbar toggle and
+    // first-run banner are shown at all (off by default).
+    getNativeModeVisible()
+      .then((visible: boolean) => nativeModeVisible.set(visible))
+      .catch((err: unknown) => console.warn('getNativeModeVisible hydration failed:', err));
+
     getVersion().then(async (v) => {
       appVersion.set(v);
       // Show "Updated successfully!" toast if the app version changed since last launch
@@ -605,7 +620,7 @@
           const lastBottle = (cfg as Record<string, unknown>).last_selected_bottle as string | undefined;
           if (lastGameId && lastBottle) {
             const match = detectedGames.find(
-              (g) => g.game_id === lastGameId && g.bottle_name === lastBottle
+              (g) => g.game_id === lastGameId && (wineCtx(g)?.bottle_name ?? "") === lastBottle
             );
             if (match) {
               pickGame(match);
@@ -631,10 +646,10 @@
 
   function pickGame(game: DetectedGame) {
     selectedGame.set(game);
-    selectedBottle.set(game.bottle_name);
+    selectedBottle.set((wineCtx(game)?.bottle_name ?? ""));
     // Remember the selected game so it persists across restarts
     setConfigValue("last_selected_game", game.game_id)
-      .then(() => setConfigValue("last_selected_bottle", game.bottle_name))
+      .then(() => setConfigValue("last_selected_bottle", (wineCtx(game)?.bottle_name ?? "")))
       .catch((err) => console.warn('Failed to persist selected game to config:', err));
     loadProfilesForGame(game);
     loadCollectionsForGame(game);
@@ -644,12 +659,12 @@
   async function checkGameVersion(game: DetectedGame) {
     if (game.game_id !== "skyrimse") return;
     try {
-      const status = await checkSkyrimVersion(game.game_id, game.bottle_name);
+      const status = await checkSkyrimVersion(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       const currentVersion = status.current_version;
-      const pinned = await getPinnedGameVersion(game.game_id, game.bottle_name);
+      const pinned = await getPinnedGameVersion(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       if (!pinned) {
         // First time seeing this game — pin without warning
-        await pinGameVersion(game.game_id, game.bottle_name, currentVersion);
+        await pinGameVersion(game.game_id, (wineCtx(game)?.bottle_name ?? ""), currentVersion);
       } else if (pinned !== currentVersion) {
         versionWarning = { oldVersion: pinned, newVersion: currentVersion };
       }
@@ -659,7 +674,7 @@
   function handleAcknowledgeVersion() {
     const game = $selectedGame;
     if (!game || !versionWarning) return;
-    pinGameVersion(game.game_id, game.bottle_name, versionWarning.newVersion);
+    pinGameVersion(game.game_id, (wineCtx(game)?.bottle_name ?? ""), versionWarning.newVersion);
     versionWarning = null;
   }
 
@@ -669,7 +684,7 @@
 
   async function loadProfilesForGame(game: DetectedGame) {
     try {
-      const profiles = await listProfiles(game.game_id, game.bottle_name);
+      const profiles = await listProfiles(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       profileList.set(profiles);
       const active = profiles.find(p => p.is_active) ?? null;
       activeProfile.set(active);
@@ -684,7 +699,7 @@
 
   async function loadCollectionsForGame(game: DetectedGame) {
     try {
-      const collections = await listInstalledCollections(game.game_id, game.bottle_name);
+      const collections = await listInstalledCollections(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       collectionList.set(collections);
       // Keep current active collection if it still exists in the new list,
       // otherwise clear it (no persistent is_active flag for collections)
@@ -715,7 +730,7 @@
     if (!$selectedGame || launching) return;
     launching = true;
     try {
-      const result = await launchGame($selectedGame.game_id, $selectedGame.bottle_name, useSkse);
+      const result = await launchGame($selectedGame.game_id, (wineCtx($selectedGame)?.bottle_name ?? ""), useSkse);
       if (result.success) {
         showSuccess(result.warning
           ? `Launched ${$selectedGame.display_name}. ${result.warning}`
@@ -757,9 +772,9 @@
         const match = allGames.find((g) => g.nexus_slug === nxmSlug);
         if (match) {
           game = match;
-          bottle = match.bottle_name;
+          bottle = (wineCtx(match)?.bottle_name ?? "");
           selectedGame.set(match);
-          selectedBottle.set(match.bottle_name);
+          selectedBottle.set((wineCtx(match)?.bottle_name ?? ""));
         } else {
           showError(`No installed game found for NexusMods domain "${nxmSlug}". Make sure the game is detected on the Dashboard.`);
           return;
@@ -1018,7 +1033,13 @@
       </button>
     </div>
 
-    <ul class="nav-list" style="--active-idx: {navItems.findIndex(i => i.id === $currentPage)}">
+    <ul class="nav-list" style="--active-idx: {$nativeMode
+      ? ((page.url.pathname as string) === '/native/mods' ? 0
+         : (page.url.pathname as string) === '/native/discover' ? 1
+         : (page.url.pathname as string) === '/native/settings' ? 2
+         : -1)
+      : navItems.findIndex(i => i.id === $currentPage)}">
+      {#if !$nativeMode}
       {#each navItems as item}
         <li>
           <button
@@ -1080,6 +1101,63 @@
           </button>
         </li>
       {/each}
+      {/if}
+
+      <!-- Native-only nav items — shown only when nativeMode is active -->
+      {#if $nativeMode}
+        <li>
+          <button
+            class="nav-item"
+            class:active={(page.url.pathname as string) === "/native/mods"}
+            onclick={() => goto("/native/mods").catch((err) => console.error("navigation to /native/mods failed:", err))}
+            title="Mods"
+          >
+            <span class="nav-icon">
+              <!-- Cube/package — mod archives -->
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M8 1.5L2.5 4.5v7l5.5 3 5.5-3v-7L8 1.5z" />
+                <path d="M2.5 4.5L8 7.5l5.5-3" />
+                <line x1="8" y1="7.5" x2="8" y2="14.5" />
+              </svg>
+            </span>
+            {#if !$sidebarCollapsed}<span class="nav-label">Mods</span>{/if}
+          </button>
+        </li>
+        <li>
+          <button
+            class="nav-item"
+            class:active={(page.url.pathname as string) === "/native/discover"}
+            onclick={() => goto("/native/discover").catch((err) => console.error("navigation to /native/discover failed:", err))}
+            title="Discover"
+          >
+            <span class="nav-icon">
+              <!-- Compass — exploration/discovery -->
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="8" cy="8" r="6.5" />
+                <path d="M5.5 5.5l2 4.5 4.5 2-2-4.5z" />
+              </svg>
+            </span>
+            {#if !$sidebarCollapsed}<span class="nav-label">Discover</span>{/if}
+          </button>
+        </li>
+        <li>
+          <button
+            class="nav-item"
+            class:active={(page.url.pathname as string) === "/native/settings"}
+            onclick={() => goto("/native/settings").catch((err) => console.error("navigation to /native/settings failed:", err))}
+            title="Settings"
+          >
+            <span class="nav-icon">
+              <!-- Gear — settings -->
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+                <circle cx="12" cy="12" r="3" />
+              </svg>
+            </span>
+            {#if !$sidebarCollapsed}<span class="nav-label">Settings</span>{/if}
+          </button>
+        </li>
+      {/if}
     </ul>
 
     <!-- Download progress mini-bar -->
@@ -1142,7 +1220,7 @@
               <polyline points="3 7 6 10 11 4" />
             </svg>
           {:else if $wjInstallStatus.phase === "failed"}
-            <svg class="status-check" width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="#ef4444" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <svg class="status-check" width="12" height="12" viewBox="0 0 14 14" fill="none" style="stroke: var(--red)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
               <line x1="3" y1="3" x2="11" y2="11" />
               <line x1="11" y1="3" x2="3" y2="11" />
             </svg>
@@ -1791,7 +1869,7 @@
     overflow: hidden;
     position: relative;
     transition: width var(--duration-slow) var(--ease-spring), min-width var(--duration-slow) var(--ease-spring);
-    border: 0.5px solid rgba(255, 255, 255, 0.06);
+    border: 0.5px solid var(--surface);
   }
 
   .sidebar.resizing {
@@ -1966,7 +2044,7 @@
     -webkit-backdrop-filter: blur(12px) saturate(1.3);
     border-radius: var(--radius);
     transition: top var(--duration) var(--ease-spring);
-    box-shadow: inset 0 0.5px 0 0 rgba(255,255,255,0.1), inset 0 -0.5px 0 0 rgba(255,255,255,0.04);
+    box-shadow: inset 0 0.5px 0 0 var(--separator), inset 0 -0.5px 0 0 var(--surface-glass);
     z-index: 0;
     pointer-events: none;
   }
@@ -2151,7 +2229,7 @@
     width: 7px;
     height: 7px;
     border-radius: 50%;
-    background: #ef4444;
+    background: var(--red);
     animation: crash-pulse 1.5s ease-in-out infinite;
   }
   @keyframes crash-pulse {
@@ -2196,7 +2274,7 @@
   }
 
   .update-check-btn.up-to-date {
-    color: #34c759;
+    color: var(--green);
   }
 
   .update-check-btn.update-avail {
@@ -2205,7 +2283,7 @@
   }
 
   .update-check-btn.ready {
-    color: #34c759;
+    color: var(--green);
     animation: pulse-glow-green 1.5s ease-in-out infinite;
   }
 
@@ -2319,13 +2397,13 @@
   }
 
   .update-pill.ready {
-    background: rgba(52, 199, 89, 0.15);
-    color: #34c759;
+    background: var(--green-subtle);
+    color: var(--green);
     animation: glass-glow-pulse 2s ease-in-out infinite;
   }
 
   .update-pill.downloading {
-    background: rgba(255, 255, 255, 0.06);
+    background: var(--surface);
     color: var(--text-tertiary);
     cursor: default;
   }
@@ -2445,7 +2523,7 @@
 
   .changelog-entry {
     padding: var(--space-2, 8px);
-    background: rgba(255, 255, 255, 0.03);
+    background: var(--surface-subtle);
     border-radius: var(--radius-sm, 4px);
     border: 1px solid var(--separator);
   }
@@ -2810,12 +2888,12 @@
 
   .queue-badge-active {
     background: var(--accent);
-    color: #fff;
+    color: var(--accent-on);
   }
 
   .queue-badge-error {
     background: var(--red);
-    color: #fff;
+    color: var(--system-accent-on);
   }
 
   .queue-popover {
@@ -2823,7 +2901,7 @@
     width: 300px;
     max-height: 400px;
     background: color-mix(in srgb, var(--bg-elevated) 72%, transparent);
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    border: 1px solid var(--separator);
     border-radius: var(--radius);
     box-shadow: var(--glass-refraction),
                 var(--glass-edge-shadow),
@@ -3080,11 +3158,11 @@
   }
 
   .status-spinner-red {
-    border-top-color: #ef4444;
+    border-top-color: var(--red);
   }
 
   .status-progress-fill-red {
-    background: #ef4444;
+    background: var(--red);
   }
 
   .sidebar.collapsed .sidebar-status-bar {
@@ -3150,7 +3228,7 @@
     background: color-mix(in srgb, var(--bg-secondary) 75%, transparent);
     backdrop-filter: var(--glass-blur-heavy);
     -webkit-backdrop-filter: var(--glass-blur-heavy);
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    border: 1px solid var(--separator);
     border-radius: var(--radius);
     padding: var(--space-6);
     max-width: 380px;
@@ -3250,7 +3328,7 @@
     padding: 10px 16px 8px;
   }
   .hashing-banner-icon {
-    color: #34c759;
+    color: var(--green);
     flex-shrink: 0;
   }
   .hashing-spinner {
@@ -3286,11 +3364,11 @@
   }
   .hashing-progress-track {
     height: 3px;
-    background: rgba(52, 199, 89, 0.12);
+    background: var(--green-subtle);
   }
   .hashing-progress-fill {
     height: 100%;
-    background: #34c759;
+    background: var(--green);
     transition: width 0.4s ease-out;
     border-radius: 0 2px 2px 0;
   }

@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use crate::bottles::Bottle;
 use crate::games::{DetectedGame, GamePlugin};
+use crate::runtime::{GameRuntime, WineContext};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -78,7 +79,7 @@ impl GamePlugin for Hades2Plugin {
         EXECUTABLES
     }
 
-    fn detect(&self, bottle: &Bottle) -> Option<DetectedGame> {
+    fn detect_wine(&self, bottle: &Bottle) -> Option<DetectedGame> {
         let game_path = find_game_path(bottle)?;
         if find_executable(&game_path).is_none() {
             return None;
@@ -92,8 +93,11 @@ impl GamePlugin for Hades2Plugin {
             game_path,
             exe_path,
             data_dir,
-            bottle_name: bottle.name.clone(),
-            bottle_path: bottle.path.clone(),
+            runtime: GameRuntime::Wine(WineContext {
+                bottle_name: bottle.name.clone(),
+                bottle_path: bottle.path.clone(),
+                source: bottle.source.clone(),
+            }),
             steam_app_id: None,
         })
     }
@@ -188,7 +192,7 @@ impl GamePlugin for Hades2Plugin {
 // ---------------------------------------------------------------------------
 
 pub fn register() {
-    crate::games::register_plugin(Box::new(Hades2Plugin));
+    crate::games::register_plugin(std::sync::Arc::new(Hades2Plugin));
 }
 
 // ---------------------------------------------------------------------------
@@ -405,7 +409,7 @@ mod tests {
             path: bottle_path,
             source: "Test".into(),
         };
-        assert!(Hades2Plugin.detect(&bottle).is_none());
+        assert!(Hades2Plugin.detect_wine(&bottle).is_none());
     }
 
     #[test]
@@ -427,7 +431,7 @@ mod tests {
             path: bottle_path,
             source: "Test".into(),
         };
-        let detected = Hades2Plugin.detect(&bottle).expect("detection");
+        let detected = Hades2Plugin.detect_wine(&bottle).expect("detection");
         assert_eq!(detected.game_id, "hades2");
         assert_eq!(detected.data_dir, game_dir.join("Content").join("Mods"));
     }
@@ -462,7 +466,7 @@ mod tests {
             path: bottle_path,
             source: "T".into(),
         };
-        let detected = Hades2Plugin.detect(&bottle).expect("non-Steam detect");
+        let detected = Hades2Plugin.detect_wine(&bottle).expect("non-Steam detect");
         assert_eq!(detected.game_id, "hades2");
         assert_eq!(detected.game_path, game_dir);
     }
@@ -477,7 +481,7 @@ mod tests {
             path: bottle_path,
             source: "T".into(),
         };
-        assert!(Hades2Plugin.detect(&bottle).is_some());
+        assert!(Hades2Plugin.detect_wine(&bottle).is_some());
     }
 
     #[test]
@@ -490,7 +494,7 @@ mod tests {
             path: bottle_path,
             source: "T".into(),
         };
-        assert!(Hades2Plugin.detect(&bottle).is_some(), "top-level drag-drop");
+        assert!(Hades2Plugin.detect_wine(&bottle).is_some(), "top-level drag-drop");
     }
 
     #[test]
@@ -510,7 +514,7 @@ mod tests {
             path: bottle_path,
             source: "T".into(),
         };
-        let detected = Hades2Plugin.detect(&bottle).expect("Xbox Game Pass detect");
+        let detected = Hades2Plugin.detect_wine(&bottle).expect("Xbox Game Pass detect");
         assert_eq!(detected.game_id, "hades2");
         assert!(detected.game_path.ends_with("Content"));
     }
@@ -528,7 +532,7 @@ mod tests {
             source: "T".into(),
         };
         assert!(
-            Hades2Plugin.detect(&bottle).is_none(),
+            Hades2Plugin.detect_wine(&bottle).is_none(),
             "empty dir must not detect"
         );
     }

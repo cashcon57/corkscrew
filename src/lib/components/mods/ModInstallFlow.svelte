@@ -10,6 +10,7 @@
     listInstalledCollections,
   } from "$lib/api";
   import type { InstallProgressEvent, DetectedGame, InstalledMod } from "$lib/types";
+  import { wineCtx } from "$lib/types";
   import {
     showError,
     showSuccess,
@@ -93,7 +94,7 @@
       pendingInstallFilePath = null;
       // Reload collections for the top bar
       try {
-        const collections = await listInstalledCollections(game.game_id, game.bottle_name);
+        const collections = await listInstalledCollections(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
         collectionList.set(collections);
       } catch { /* non-critical */ }
     }
@@ -143,7 +144,7 @@
       const mod = await installMod(
         filePath,
         game.game_id,
-        game.bottle_name
+        (wineCtx(game)?.bottle_name ?? "")
       );
       if (!mod || typeof mod !== 'object' || !('nexus_mod_id' in (mod as any))) {
         console.error('Unexpected install result:', mod);

@@ -1,6 +1,8 @@
 pub mod archive_preview;
 pub mod background_hash;
 pub mod baselines;
+pub mod bg3_lsx;
+pub mod bg3_pak;
 pub mod bottle_config;
 pub mod bottles;
 pub mod cleaner;
@@ -55,9 +57,12 @@ pub mod modlist_io;
 pub mod nexus;
 pub mod nexus_games_index;
 pub mod nexus_sso;
+pub mod bg3se;
+pub mod native_scanner;
 pub mod nxm_handler;
 pub mod oauth;
 pub mod platform;
+pub mod plist;
 pub mod plugins;
 pub mod preflight;
 pub mod prefix_setup;
@@ -67,8 +72,10 @@ pub mod progress;
 pub mod proton;
 pub mod regulation_conflicts;
 pub mod rollback;
+pub mod runtime;
 pub mod session_tracker;
 pub mod skse;
+pub mod smapi;
 pub mod staging;
 pub mod steam_integration;
 pub mod umu;
@@ -408,6 +415,8 @@ pub fn run() {
     plugins::sims4::register();
     plugins::gtav::register();
     plugins::genshin::register();
+    plugins::stardew_valley_native::register();
+    plugins::baldurs_gate_3_native::register();
     plugins::thunderstore_games::register_all();
     plugins::fromsoft::register_all();
     game_registry::register_all();
@@ -1217,6 +1226,8 @@ pub fn run() {
             commands::game_state::list_known_uninstalled_games_cmd,
             commands::game_state::scan_game_directory,
             commands::game_state::clean_game_directory,
+            // Native Game Manual Add
+            commands::game_state::add_native_game_manually,
             // Wabbajack Modlists
             commands::wabbajack::get_wabbajack_modlists,
             commands::wabbajack::parse_wabbajack_file,
@@ -1387,6 +1398,15 @@ pub fn run() {
             commands::config_commands::vortex_delete_cached_extension,
             commands::config_commands::vortex_get_extension_detail,
             commands::config_commands::get_vortex_extension_suggestions,
+            // Native Mode (experimental)
+            commands::config_commands::get_native_mode,
+            commands::config_commands::set_native_mode,
+            commands::config_commands::get_native_mode_visible,
+            commands::config_commands::set_native_mode_visible,
+            commands::native_cmds::rescan_native_games,
+            commands::native_cmds::get_bg3se_status,
+            commands::native_cmds::apply_native_window_effect,
+            commands::stardew_cmds::get_stardew_mod_status,
             // Download Queue
             commands::notifications::get_download_queue,
             commands::notifications::get_download_queue_counts,

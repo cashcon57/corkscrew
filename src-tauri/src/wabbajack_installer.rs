@@ -566,7 +566,7 @@ fn detect_installed_game_version(game_id: &str, bottle_name: &str) -> Option<Str
     let bottle = bottles.iter().find(|b| b.name == bottle_name)?;
 
     let game_path = crate::games::with_plugin(game_id, |plugin| {
-        plugin.detect(bottle).map(|g| g.game_path)
+        plugin.detect_wine(bottle).map(|g| g.game_path)
     })
     .flatten()?;
 
@@ -1660,7 +1660,7 @@ pub async fn install_wabbajack_modlist(
         let bottle = bottles.iter().find(|b| b.name == bottle_name);
         bottle
             .and_then(|b| {
-                crate::games::with_plugin(game_id, |plugin| plugin.detect(b).map(|g| g.data_dir))
+                crate::games::with_plugin(game_id, |plugin| plugin.detect_wine(b).map(|g| g.data_dir))
                     .flatten()
             })
             .unwrap_or_else(|| install_dir.join("Data"))

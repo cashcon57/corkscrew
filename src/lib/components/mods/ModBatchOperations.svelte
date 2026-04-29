@@ -6,6 +6,7 @@
   } from "$lib/api";
   import { showError, showSuccess, gameLock, gameLockOverridden } from "$lib/stores";
   import type { DetectedGame } from "$lib/types";
+  import { wineCtx } from "$lib/types";
 
   let {
     game,
@@ -53,7 +54,7 @@
     await startBulkListener();
     try {
       const ids = Array.from(selectedModIds);
-      const result = await batchToggleMods(ids, game.game_id, game.bottle_name, true);
+      const result = await batchToggleMods(ids, game.game_id, (wineCtx(game)?.bottle_name ?? ""), true);
       onClearSelection();
       await onComplete();
       const count = parseInt(result, 10);
@@ -76,7 +77,7 @@
     await startBulkListener();
     try {
       const ids = Array.from(selectedModIds);
-      const result = await batchToggleMods(ids, game.game_id, game.bottle_name, false);
+      const result = await batchToggleMods(ids, game.game_id, (wineCtx(game)?.bottle_name ?? ""), false);
       onClearSelection();
       await onComplete();
       const count = parseInt(result, 10);
@@ -98,7 +99,7 @@
     bulkOperating = "uninstalling";
     try {
       for (const id of selectedModIds) {
-        await uninstallMod(id, game.game_id, game.bottle_name);
+        await uninstallMod(id, game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       }
       onClearSelection();
       await onComplete();

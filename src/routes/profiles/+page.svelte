@@ -10,6 +10,7 @@
   } from "$lib/api";
   import { selectedGame, showError, showSuccess, modStateVersion } from "$lib/stores";
   import type { Profile } from "$lib/types";
+  import { wineCtx } from "$lib/types";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import SkeletonRows from "$lib/components/SkeletonRows.svelte";
 
@@ -33,7 +34,7 @@
     const t0 = performance.now();
     loading = true;
     try {
-      profiles = await listProfiles(game.game_id, game.bottle_name);
+      profiles = await listProfiles(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
     } catch (e: unknown) {
       showError(`Failed to load profiles: ${e}`);
     } finally {
@@ -46,9 +47,9 @@
     if (!game || !newProfileName.trim()) return;
     creating = true;
     try {
-      const id = await createProfile(game.game_id, game.bottle_name, newProfileName.trim());
+      const id = await createProfile(game.game_id, (wineCtx(game)?.bottle_name ?? ""), newProfileName.trim());
       // Save current state into the new profile
-      await saveProfileSnapshot(id, game.game_id, game.bottle_name);
+      await saveProfileSnapshot(id, game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       newProfileName = "";
       showSuccess("Profile created");
       await loadProfiles();
@@ -81,7 +82,7 @@
     if (!game) return;
     activating = id;
     try {
-      await activateProfile(id, game.game_id, game.bottle_name);
+      await activateProfile(id, game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       showSuccess("Profile activated");
       await loadProfiles();
       modStateVersion.update(n => n + 1);
@@ -95,7 +96,7 @@
   async function handleDeactivate(id: number) {
     if (!game) return;
     try {
-      await deactivateProfile(game.game_id, game.bottle_name);
+      await deactivateProfile(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       showSuccess("Profile deactivated");
       await loadProfiles();
     } catch (e: unknown) {
@@ -106,7 +107,7 @@
   async function handleSaveSnapshot(id: number) {
     if (!game) return;
     try {
-      await saveProfileSnapshot(id, game.game_id, game.bottle_name);
+      await saveProfileSnapshot(id, game.game_id, (wineCtx(game)?.bottle_name ?? ""));
       showSuccess("Profile state saved");
     } catch (e: unknown) {
       showError(`Failed to save profile: ${e}`);

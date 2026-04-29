@@ -19,7 +19,7 @@ pub enum MigrationError {
 pub type Result<T> = std::result::Result<T, MigrationError>;
 
 /// The current target schema version. Bump this when adding a new migration.
-const TARGET_VERSION: u32 = 22;
+const TARGET_VERSION: u32 = 23;
 
 /// Get the current schema version (0 if no version table exists).
 pub fn current_version(conn: &Connection) -> Result<u32> {
@@ -154,6 +154,11 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     if version == 21 {
         migrate_v21_to_v22(conn)?;
         version = 22;
+    }
+
+    if version == 22 {
+        migrate_v22_to_v23(conn)?;
+        version = 23;
     }
 
     let _ = version; // suppress unused warning when TARGET_VERSION == current
@@ -1088,6 +1093,100 @@ fn migrate_v21_to_v22(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Idempotency helpers (used by v23+)
+// ---------------------------------------------------------------------------
+
+/// Returns `true` if `column` exists in `table`.
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info(`{}`)", table))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Add `column` to `table` if it does not already exist.
+///
+/// **SAFETY:** `ddl` is interpolated verbatim into the SQL string. Callers
+/// MUST pass a literal column definition (`"runtime TEXT NOT NULL DEFAULT 'wine'"`),
+/// never a value derived from user input or external config. `table` is
+/// quoted with backticks but `ddl` is not — the column-definition grammar
+/// is too rich to safely escape.
+fn add_column_if_missing(conn: &Connection, table: &str, column: &str, ddl: &str) -> Result<()> {
+    if !column_exists(conn, table, column)? {
+        conn.execute(&format!("ALTER TABLE `{}` ADD COLUMN {}", table, ddl), [])?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Migration 22 → 23
+// ---------------------------------------------------------------------------
+
+/// Migration 22 → 23: Runtime discriminator + native game columns on `games`.
+///
+/// Introduces the `runtime` column so every game row is explicitly labelled
+/// `'wine'` or `'native'`. Six native-specific columns are added as nullable
+/// (or NOT NULL with a safe default); they are NULL for all existing Wine rows.
+///
+/// The `games` table itself is created here if it does not yet exist (it was not
+/// part of the pre-23 schema — games were detected at runtime, not persisted).
+/// Existing databases that were upgraded from v22 will have no rows in `games`,
+/// and all six new columns are added idempotently via `add_column_if_missing`.
+///
+/// `bottle_name` and `bottle_path` intentionally remain NOT NULL in this
+/// migration (SQLite cannot drop NOT NULL via ALTER). Native rows should pass
+/// empty strings until a future v24 rebuild makes those columns nullable.
+fn migrate_v22_to_v23(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+
+    // Create the games table if this is a fresh database or an older schema
+    // that never persisted games rows.
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS games (
+            game_id     TEXT    NOT NULL PRIMARY KEY,
+            bottle_name TEXT    NOT NULL DEFAULT '',
+            bottle_path TEXT    NOT NULL DEFAULT ''
+        );",
+    )?;
+
+    // Add runtime discriminator. Existing rows default to 'wine'.
+    add_column_if_missing(
+        &tx,
+        "games",
+        "runtime",
+        "runtime TEXT NOT NULL DEFAULT 'wine'",
+    )?;
+
+    // Native game fields — NULL for Wine games.
+    add_column_if_missing(&tx, "games", "native_app_path", "native_app_path TEXT")?;
+    add_column_if_missing(&tx, "games", "native_data_root", "native_data_root TEXT")?;
+    add_column_if_missing(
+        &tx,
+        "games",
+        "native_architecture",
+        "native_architecture TEXT",
+    )?;
+    add_column_if_missing(
+        &tx,
+        "games",
+        "native_sandboxed",
+        "native_sandboxed INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(&tx, "games", "native_source", "native_source TEXT")?;
+
+    tx.execute("UPDATE schema_version SET version = 23", [])?;
+
+    tx.commit()?;
+    log::info!("Migration 22 → 23 complete (runtime column + native game fields)");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1271,5 +1370,78 @@ mod tests {
             .query_row([], |row| row.get(0))
             .unwrap();
         assert!(index_exists, "v13 compound index should exist");
+    }
+
+    #[test]
+    fn v23_adds_runtime_column_with_wine_default() {
+        let conn = memory_db();
+        migrate(&conn).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 23);
+
+        // Insert a row using the v22 column set — runtime should default to 'wine'.
+        conn.execute(
+            "INSERT INTO games (game_id, bottle_name, bottle_path) VALUES ('test', 'b', '/p')",
+            [],
+        )
+        .unwrap();
+
+        let runtime: String = conn
+            .query_row(
+                "SELECT runtime FROM games WHERE game_id = 'test'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(runtime, "wine");
+    }
+
+    #[test]
+    fn v23_native_columns_nullable() {
+        let conn = memory_db();
+        migrate(&conn).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 23);
+
+        conn.execute(
+            "INSERT INTO games (game_id, runtime, native_app_path, native_architecture)
+             VALUES ('sdv', 'native', '/Applications/Stardew Valley.app', 'apple_silicon')",
+            [],
+        )
+        .unwrap();
+
+        let arch: String = conn
+            .query_row(
+                "SELECT native_architecture FROM games WHERE game_id = 'sdv'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(arch, "apple_silicon");
+
+        // native_data_root and native_source should be nullable (NULL for this row)
+        let data_root: Option<String> = conn
+            .query_row(
+                "SELECT native_data_root FROM games WHERE game_id = 'sdv'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            data_root.is_none(),
+            "native_data_root should be NULL when not provided"
+        );
+    }
+
+    #[test]
+    fn v23_migration_is_idempotent() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        // Calling the v23 migration directly a second time must not error.
+        migrate_v22_to_v23(&conn).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 23);
+        // And a row insertable under v23's column set still works.
+        conn.execute(
+            "INSERT INTO games (game_id, runtime) VALUES ('idemp', 'wine')",
+            [],
+        ).unwrap();
     }
 }
