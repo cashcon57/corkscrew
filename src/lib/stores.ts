@@ -1,5 +1,5 @@
 import { writable, derived } from "svelte/store";
-import type { Bottle, DetectedGame, InstalledMod, AppConfig, SkseStatus, Profile, CollectionSummary, FomodInstaller, GameLock, WjArchiveStatus } from "./types";
+import type { Bottle, DetectedGame, InstalledMod, AppConfig, SkseStatus, Profile, CollectionSummary, FomodInstaller, GameLock, WjArchiveStatus, KnownUninstalledGame } from "./types";
 
 // App state
 export const bottles = writable<Bottle[]>([]);
@@ -10,6 +10,13 @@ export const config = writable<AppConfig>({ nexus_api_key: null, download_dir: n
 // UI state
 export const selectedBottle = writable<string | null>(null);
 export const selectedGame = writable<DetectedGame | null>(null);
+
+// "Show uninstalled games in the game-selector dropdown" toggle. Persisted
+// via the config_value table (hydrated once on app startup) so the choice
+// survives restarts. The companion list of uninstalled games is lazy-fetched
+// when the toggle is first turned on.
+export const showUninstalledGames = writable<boolean>(false);
+export const uninstalledGames = writable<KnownUninstalledGame[]>([]);
 export const currentPage = writable<string>("mods");
 export const isLoading = writable<boolean>(false);
 export const errorMessage = writable<string | null>(null);

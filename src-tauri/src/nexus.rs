@@ -44,6 +44,9 @@ pub enum NexusError {
 
     #[error("Authentication error: {0}")]
     Auth(String),
+
+    #[error("Response parse error: {0}")]
+    ParseError(String),
 }
 
 pub type Result<T> = std::result::Result<T, NexusError>;
@@ -569,6 +572,24 @@ impl NexusClient {
     pub async fn validate_key(&self) -> Result<serde_json::Value> {
         let url = format!("{NEXUS_API_BASE}/users/validate.json");
         self.get_json(&url).await
+    }
+
+    /// Fetch the full NexusMods games list (`GET /v1/games.json`).
+    ///
+    /// Returns every game NexusMods knows about — ~3000 entries. Used by
+    /// the "show uninstalled games" feature to give users the full picture
+    /// of supported titles, not just the ~85 covered by the bundled
+    /// Vortex extension index.
+    pub async fn fetch_games_list(
+        &self,
+    ) -> Result<Vec<crate::nexus_games_index::NexusGame>> {
+        let url = format!("{NEXUS_API_BASE}/games.json");
+        let json: serde_json::Value = self.get_json(&url).await?;
+        let games: Vec<crate::nexus_games_index::NexusGame> =
+            serde_json::from_value(json).map_err(|e| {
+                NexusError::ParseError(format!("Failed to parse games list: {e}"))
+            })?;
+        Ok(games)
     }
 
     /// Fetch metadata for a single mod.

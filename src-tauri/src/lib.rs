@@ -52,6 +52,7 @@ pub mod mod_types;
 pub mod modengine2_config;
 pub mod modlist_io;
 pub mod nexus;
+pub mod nexus_games_index;
 pub mod nexus_sso;
 pub mod nxm_handler;
 pub mod oauth;
@@ -1212,6 +1213,7 @@ pub fn run() {
             commands::diagnostics::check_game_integrity,
             commands::diagnostics::has_game_snapshot,
             // Game Directory Cleaner
+            commands::game_state::list_known_uninstalled_games_cmd,
             commands::game_state::scan_game_directory,
             commands::game_state::clean_game_directory,
             // Wabbajack Modlists

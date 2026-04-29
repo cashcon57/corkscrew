@@ -2,19 +2,19 @@
   import { onMount, onDestroy } from "svelte";
   import "../app.css";
   import { goto } from "$app/navigation";
-  import { currentPage, errorMessage, successMessage, selectedGame, selectedBottle, showError, showSuccess, appVersion, collectionInstallStatus, collectionUninstallStatus, wjInstallStatus, updateReady as updateReadyStore, updateVersion as updateVersionStore, updateNotes as updateNotesStore, updateChecking as updateCheckingStore, updateError as updateErrorStore, setUpdateCheckFn, notificationCount, showNotificationLog, activeProfile, profileList, activeCollection, collectionList, sidebarCollapsed, controllerMode, pendingNxmInstall, nxmInstallComplete } from "$lib/stores";
+  import { currentPage, errorMessage, successMessage, selectedGame, selectedBottle, showError, showSuccess, appVersion, collectionInstallStatus, collectionUninstallStatus, wjInstallStatus, updateReady as updateReadyStore, updateVersion as updateVersionStore, updateNotes as updateNotesStore, updateChecking as updateCheckingStore, updateError as updateErrorStore, setUpdateCheckFn, notificationCount, showNotificationLog, activeProfile, profileList, activeCollection, collectionList, sidebarCollapsed, controllerMode, pendingNxmInstall, nxmInstallComplete, showUninstalledGames, uninstalledGames } from "$lib/stores";
   import { initTheme } from "$lib/theme";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
   import { getVersion } from "@tauri-apps/api/app";
-  import { downloadFromNexus, installMod, getAllGames, getDownloadQueue, retryDownload, cancelDownload, clearFinishedDownloads, onDownloadQueueUpdate, listProfiles, listInstalledCollections, getConfig, setConfigValue, launchGame, getAllInterruptedInstalls, resumeCollectionInstall, abandonCollectionInstall, getCheckpointModNames, getPendingWabbajackInstalls, dismissWabbajackInstall, checkSkyrimVersion, getPinnedGameVersion, pinGameVersion, checkSteamStatus, addToSteam, fetchUpdate, installUpdate, chatCheckNewCrashes } from "$lib/api";
+  import { downloadFromNexus, installMod, getAllGames, getDownloadQueue, retryDownload, cancelDownload, clearFinishedDownloads, onDownloadQueueUpdate, listProfiles, listInstalledCollections, getConfig, setConfigValue, launchGame, getAllInterruptedInstalls, resumeCollectionInstall, abandonCollectionInstall, getCheckpointModNames, getPendingWabbajackInstalls, dismissWabbajackInstall, checkSkyrimVersion, getPinnedGameVersion, pinGameVersion, checkSteamStatus, addToSteam, fetchUpdate, installUpdate, chatCheckNewCrashes, listKnownUninstalledGames } from "$lib/api";
   import { resumeInstallTracking } from "$lib/installService";
   import { initHashingListener, destroyHashingListener, dismissHashingBanner } from "$lib/hashingService";
   import { hashingProgress } from "$lib/stores";
   import { cancelBackgroundHashing } from "$lib/api";
   import type { CollectionInstallCheckpoint, WabbajackInstallStatus } from "$lib/types";
   import { get } from "svelte/store";
-  import type { DetectedGame, QueueItem } from "$lib/types";
+  import type { DetectedGame, QueueItem, KnownUninstalledGame } from "$lib/types";
   import NotificationLog from "$lib/components/mods/NotificationLog.svelte";
   import FirstRunWizard from "$lib/components/FirstRunWizard.svelte";
   import TelemetryBanner from "$lib/components/TelemetryBanner.svelte";
@@ -307,6 +307,16 @@
       const lastPage = (cfg as Record<string, unknown>).last_page as string | undefined;
       if (lastPage && ["mods", "discover", "plugins", "profiles", "logs", "settings"].includes(lastPage)) {
         currentPage.set(lastPage);
+      }
+      // Restore "show uninstalled games" toggle in the game selector.
+      const showUninstalled = (cfg as Record<string, unknown>).show_uninstalled_games;
+      if (showUninstalled === "true" || showUninstalled === true) {
+        showUninstalledGames.set(true);
+        // Lazy-fetch the list once the toggle is on so the dropdown has
+        // something to render the next time it's opened.
+        listKnownUninstalledGames()
+          .then((games: KnownUninstalledGame[]) => uninstalledGames.set(games))
+          .catch((err: unknown) => console.warn('Failed to load uninstalled games:', err));
       }
     }).catch((err) => console.warn('Failed to restore last page from config:', err));
 
@@ -1937,7 +1947,7 @@
   }
 
   .nav-list li {
-    height: 34px;
+    height: var(--nav-item-height, 34px);
     flex-shrink: 0;
   }
 
@@ -1946,9 +1956,11 @@
     position: absolute;
     left: var(--space-2);
     right: var(--space-2);
-    height: 34px;
-    /* 34px item height + 3px gap = 37px stride */
-    top: calc(var(--active-idx) * 37px);
+    /* Item height + flex gap. Both values are CSS variables on .nav-list
+       so controller mode can override them without repeating the pseudo-
+       element rule below. */
+    height: var(--nav-item-height, 34px);
+    top: calc(var(--active-idx) * var(--nav-item-stride, 37px));
     background: color-mix(in srgb, var(--accent) 15%, transparent);
     backdrop-filter: blur(12px) saturate(1.3);
     -webkit-backdrop-filter: blur(12px) saturate(1.3);
@@ -3098,6 +3110,15 @@
 
   :global(.controller-mode) .nav-item {
     padding: var(--space-3) var(--space-4);
+  }
+
+  /* Controller mode grows nav items to 44px — re-key the active-indicator
+     stride so the orange selector tracks the new row height (44px + 3px
+     flex gap = 47px stride). Without this the indicator stays at the
+     default 34px height + 37px stride and visually drifts after row 0. */
+  :global(.controller-mode) .nav-list {
+    --nav-item-height: 44px;
+    --nav-item-stride: 47px;
   }
 
   :global(.controller-mode) .sidebar-footer button,
