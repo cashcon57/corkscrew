@@ -1,6 +1,7 @@
 pub mod archive_preview;
 pub mod background_hash;
 pub mod baselines;
+pub mod bg3_lsx;
 pub mod bottle_config;
 pub mod bottles;
 pub mod cleaner;
