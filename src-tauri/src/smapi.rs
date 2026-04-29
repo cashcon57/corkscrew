@@ -1,4 +1,4 @@
-//! SMAPI (Stardew Modding API) detection — read-only.
+//! SMAPI (Stardew Modding API) detection and install.
 //!
 //! SMAPI is the canonical mod loader for Stardew Valley. Its installer
 //! mutates the game's .app bundle by renaming the vanilla
@@ -6,12 +6,27 @@
 //! and dropping a new launcher that loads SMAPI's runtime. We detect
 //! presence by checking for those markers.
 //!
-//! Mutation logic (install / uninstall) lives in Tasks 3.4 and 3.5.
-//! This module is read-only.
+//! ## Install procedure
+//!
+//! `install(app_bundle, installer_archive)` replicates the file-op steps
+//! from SMAPI's `install on macOS.command` + `InteractiveInstaller.cs`
+//! in pure Rust, without shelling out to the .NET installer binary.
+//!
+//! See the spike spec at `docs/superpowers/plans/2026-04-28-native-macos-game-support-smapi-install-spec.md`
+//! for the full procedure and source references.
+//!
+//! ## Deferred items
+//!
+//! - **Quarantine xattr clearing** (`xattr -d com.apple.quarantine`): deferred
+//!   to Task 3.9. The install succeeds without it; users may see a Gatekeeper
+//!   dialog on first launch which they can dismiss.
+//! - **Pre-install snapshot**: `rollback::create_snapshot` requires a
+//!   `&ModDatabase` which `install` does not have at this call site.
+//!   Integration deferred to Task 6.1.
 
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
@@ -22,6 +37,13 @@ pub enum SmapiError {
 
     #[error("{0}")]
     Other(String),
+}
+
+// Impl From<zip::result::ZipError> so we can use ? in zip operations.
+impl From<zip::result::ZipError> for SmapiError {
+    fn from(e: zip::result::ZipError) -> Self {
+        SmapiError::Other(e.to_string())
+    }
 }
 
 /// Marker file: SMAPI renames the vanilla launcher to this when installed.
@@ -62,6 +84,217 @@ pub fn installed_version(app_bundle: &Path) -> Option<String> {
     None
 }
 
+/// Install SMAPI into a Stardew Valley `.app` bundle.
+///
+/// # Arguments
+///
+/// * `app_bundle` — path to the `.app` directory (e.g. `Stardew Valley.app`).
+/// * `installer_archive` — path to the SMAPI installer zip
+///   (`SMAPI-X.Y.Z-installer.zip`).  The zip must contain a nested
+///   `install.dat` (a second zip with the actual bundle payload) somewhere
+///   in its directory tree — typically at `macOS/install.dat`.
+///
+/// # Procedure
+///
+/// Implements SMAPI's macOS install steps in order:
+///
+/// 1. Extract outer installer zip to a temp directory.
+/// 2. Locate `install.dat` (nested zip) in the extracted tree.
+/// 3. Extract `install.dat` to a second temp dir — that is the bundle payload.
+/// 4. Recursive-copy payload into `<app_bundle>/Contents/MacOS/`,
+///    **excluding** the `mcs` and `Mods` top-level directories.
+/// 5. Rename `Contents/MacOS/StardewValley` → `StardewValley-original`
+///    (idempotent: only if `StardewValley-original` does not yet exist).
+/// 6. Move `unix-launcher.sh` → `Contents/MacOS/StardewValley`.
+/// 7. `chmod 755` on `StardewValley` and `StardewModdingAPI`.
+/// 8. Copy `Stardew Valley.deps.json` → `StardewModdingAPI.deps.json`
+///    (if the source exists).
+/// 9. Create `Contents/MacOS/Mods/` if missing.
+///
+/// Quarantine xattr clearing and pre-install snapshot are deferred (see
+/// module-level doc).
+pub fn install(app_bundle: &Path, installer_archive: &Path) -> Result<(), SmapiError> {
+    // 0. Validate inputs.
+    if !app_bundle.is_dir() {
+        return Err(SmapiError::Other(format!(
+            "app_bundle is not a directory: {}",
+            app_bundle.display()
+        )));
+    }
+    if !installer_archive.is_file() {
+        return Err(SmapiError::Other(format!(
+            "installer archive not found: {}",
+            installer_archive.display()
+        )));
+    }
+
+    // 1. Extract the outer installer zip.
+    let outer_temp = tempfile::tempdir().map_err(SmapiError::Io)?;
+    extract_zip_into(installer_archive, outer_temp.path())?;
+
+    // 2. Locate install.dat in the extracted tree.
+    let install_dat = locate_install_dat(outer_temp.path()).ok_or_else(|| {
+        SmapiError::Other("install.dat not found in installer archive".to_string())
+    })?;
+
+    // 3. Extract install.dat (the inner zip) to a payload temp dir.
+    let payload_temp = tempfile::tempdir().map_err(SmapiError::Io)?;
+    extract_zip_into(&install_dat, payload_temp.path())?;
+
+    // 4. Recursive copy payload into <bundle>/Contents/MacOS/, excluding mcs and Mods.
+    let macos = app_bundle.join("Contents/MacOS");
+    fs::create_dir_all(&macos)?;
+    copy_dir_excluding(payload_temp.path(), &macos, &["mcs", "Mods"])?;
+
+    // 5. Rename StardewValley -> StardewValley-original (idempotent).
+    let launcher = macos.join("StardewValley");
+    let launcher_original = macos.join("StardewValley-original");
+    if !launcher_original.exists() && launcher.exists() {
+        fs::rename(&launcher, &launcher_original)?;
+    }
+
+    // 6. Move unix-launcher.sh -> StardewValley.
+    //    If StardewValley-original already existed on entry (second install),
+    //    the current StardewValley is the SMAPI launcher from the first pass;
+    //    we just overwrite it.
+    let unix_launcher = macos.join("unix-launcher.sh");
+    if unix_launcher.exists() {
+        // If the SMAPI launcher script is still present from a previous install,
+        // remove it before moving (rename is atomic only within the same device;
+        // on some filesystems it errors if dst exists and is a different type —
+        // plain fs::rename handles same-type overwrites on APFS/HFS+).
+        if launcher.exists() {
+            fs::remove_file(&launcher)?;
+        }
+        fs::rename(&unix_launcher, &launcher)?;
+    }
+
+    // 7. chmod 755 on the executable files.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for name in ["StardewValley", "StardewModdingAPI"] {
+            let p = macos.join(name);
+            if p.exists() {
+                let mut perms = fs::metadata(&p)?.permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(&p, perms)?;
+            }
+        }
+    }
+
+    // 8. Copy "Stardew Valley.deps.json" -> "StardewModdingAPI.deps.json".
+    let src_deps = macos.join("Stardew Valley.deps.json");
+    let dst_deps = macos.join("StardewModdingAPI.deps.json");
+    if src_deps.exists() {
+        fs::copy(&src_deps, &dst_deps)?;
+    }
+
+    // 9. Create Mods/ if missing.
+    let mods_dir = macos.join("Mods");
+    if !mods_dir.exists() {
+        fs::create_dir_all(&mods_dir)?;
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Private helpers
+// ---------------------------------------------------------------------------
+
+/// Extract every entry from `archive` into `dest`, creating directories as
+/// needed. Entries with unsafe paths (path traversal etc.) are silently
+/// skipped — `ZipEntry::enclosed_name()` returns `None` for those.
+fn extract_zip_into(archive: &Path, dest: &Path) -> Result<(), SmapiError> {
+    let file = fs::File::open(archive)?;
+    let mut zip = zip::ZipArchive::new(file)?;
+    for i in 0..zip.len() {
+        let mut entry = zip.by_index(i)?;
+        let entry_path = match entry.enclosed_name() {
+            Some(p) => dest.join(p),
+            None => continue, // unsafe path — skip
+        };
+        if entry.is_dir() {
+            fs::create_dir_all(&entry_path)?;
+        } else {
+            if let Some(parent) = entry_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let mut out = fs::File::create(&entry_path)?;
+            io::copy(&mut entry, &mut out)?;
+        }
+    }
+    Ok(())
+}
+
+/// Walk `root` recursively looking for a file named `install.dat`. Returns
+/// the path to the first one found, or `None` if the tree contains no such
+/// file.
+fn locate_install_dat(root: &Path) -> Option<PathBuf> {
+    fn recurse(dir: &Path, found: &mut Option<PathBuf>) {
+        if found.is_some() {
+            return;
+        }
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                if found.is_some() {
+                    return;
+                }
+                let path = entry.path();
+                if path.is_dir() {
+                    recurse(&path, found);
+                } else if path.file_name().and_then(|s| s.to_str()) == Some("install.dat") {
+                    *found = Some(path);
+                }
+            }
+        }
+    }
+    let mut found = None;
+    recurse(root, &mut found);
+    found
+}
+
+/// Copy every entry from `src` into `dst`, skipping any entry whose name
+/// (as an OS string) matches one of the names in `exclude_top_level`.
+/// Sub-directories not excluded at the top level are copied fully
+/// (i.e. exclusion only applies to the immediate children of `src`).
+fn copy_dir_excluding(src: &Path, dst: &Path, exclude_top_level: &[&str]) -> Result<(), SmapiError> {
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if exclude_top_level.contains(&name_str.as_ref()) {
+            continue;
+        }
+        let src_path = entry.path();
+        let dst_path = dst.join(&name);
+        if entry.file_type()?.is_dir() {
+            fs::create_dir_all(&dst_path)?;
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
+/// Recursively copy a directory tree from `src` into `dst`.
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), SmapiError> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
 /// Extract a SMAPI version from a deps.json blob. The format is .NET's
 /// dependency JSON; SMAPI's assembly version typically appears under
 /// targets.<framework>.StardewModdingAPI/<version>. We do a forgiving
@@ -93,15 +326,100 @@ fn extract_version_from_deps_json(contents: &str) -> Option<String> {
     None
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write as _;
+
+    // -----------------------------------------------------------------------
+    // Helpers shared by detection + install tests
+    // -----------------------------------------------------------------------
 
     fn make_macos_dir(dir: &Path) -> std::path::PathBuf {
         let macos = dir.join("Stardew Valley.app/Contents/MacOS");
         fs::create_dir_all(&macos).expect("mkdir");
         macos
     }
+
+    /// Build a minimal vanilla bundle with a `Contents/MacOS/StardewValley`
+    /// launcher script. Returns the `.app` path.
+    fn vanilla_bundle(dir: &Path) -> PathBuf {
+        let bundle = dir.join("Stardew Valley.app");
+        let macos = bundle.join("Contents/MacOS");
+        fs::create_dir_all(&macos).unwrap();
+        fs::write(
+            macos.join("StardewValley"),
+            b"#!/bin/bash\n# vanilla launcher\nexec ./StardewValley.bin\n",
+        )
+        .unwrap();
+        bundle
+    }
+
+    /// Build a synthetic `install.dat` in memory — this is the inner zip
+    /// (the payload extracted from the SMAPI installer).
+    fn build_install_dat() -> std::io::Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        {
+            let cursor = std::io::Cursor::new(&mut buf);
+            let mut zw = zip::ZipWriter::new(cursor);
+            let opts = zip::write::FileOptions::<()>::default();
+
+            zw.start_file("unix-launcher.sh", opts)?;
+            zw.write_all(b"#!/bin/bash\nexec ./StardewModdingAPI\n")?;
+
+            zw.start_file("StardewModdingAPI", opts)?;
+            zw.write_all(b"fake smapi binary")?;
+
+            zw.start_file("StardewModdingAPI.dll", opts)?;
+            zw.write_all(b"fake smapi dll")?;
+
+            zw.start_file("Stardew Valley.deps.json", opts)?;
+            zw.write_all(br#"{"libraries":{"StardewModdingAPI/4.1.10":{}}}"#)?;
+
+            // mcs and Mods — must NOT be copied per spike step 4.
+            zw.start_file("mcs/should-not-copy.txt", opts)?;
+            zw.write_all(b"mcs cleanup")?;
+
+            zw.start_file("Mods/should-not-copy/manifest.json", opts)?;
+            zw.write_all(b"{}")?;
+
+            // smapi-internal — SHOULD be copied.
+            zw.start_file("smapi-internal/config.json", opts)?;
+            zw.write_all(b"{}")?;
+
+            zw.finish()?;
+        }
+        Ok(buf)
+    }
+
+    /// Build a synthetic SMAPI installer zip that wraps the `install.dat`
+    /// at `macOS/install.dat` — matching real SMAPI release layout.
+    fn build_synthetic_installer_archive(out_path: &Path) -> std::io::Result<()> {
+        let outer_file = fs::File::create(out_path)?;
+        let mut outer_zip = zip::ZipWriter::new(outer_file);
+        let opts = zip::write::FileOptions::<()>::default();
+
+        let inner_buf = build_install_dat()?;
+
+        outer_zip.start_file("macOS/install.dat", opts)?;
+        outer_zip.write_all(&inner_buf)?;
+
+        // A top-level file that the installer ships alongside install.dat;
+        // Corkscrew ignores it, but it should not trip up our extractor.
+        outer_zip.start_file("README.txt", opts)?;
+        outer_zip.write_all(b"SMAPI installer\n")?;
+
+        outer_zip.finish()?;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Detection tests (unchanged from Task 3.3)
+    // -----------------------------------------------------------------------
 
     #[test]
     fn is_installed_returns_false_for_vanilla_bundle() {
@@ -176,5 +494,145 @@ mod tests {
         fs::write(macos.join("StardewModdingAPI.deps.json"), b"not valid json {").unwrap();
         let bundle = dir.path().join("Stardew Valley.app");
         assert_eq!(installed_version(&bundle), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // install() tests
+    // -----------------------------------------------------------------------
+
+    /// Happy path: install into a vanilla bundle; verify is_installed returns true.
+    #[test]
+    fn install_creates_smapi_markers_in_vanilla_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = vanilla_bundle(dir.path());
+
+        let archive_path = dir.path().join("smapi-installer.zip");
+        build_synthetic_installer_archive(&archive_path).unwrap();
+
+        install(&bundle, &archive_path).expect("install should succeed");
+
+        assert!(
+            is_installed(&bundle),
+            "is_installed should return true after install"
+        );
+
+        // Verify StardewModdingAPI exists with content.
+        let smapi_bin = bundle.join("Contents/MacOS/StardewModdingAPI");
+        assert!(smapi_bin.exists(), "StardewModdingAPI binary should exist");
+    }
+
+    /// Calling install twice succeeds and is_installed stays true.
+    #[test]
+    fn install_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = vanilla_bundle(dir.path());
+
+        let archive_path = dir.path().join("smapi-installer.zip");
+        build_synthetic_installer_archive(&archive_path).unwrap();
+
+        install(&bundle, &archive_path).expect("first install should succeed");
+        install(&bundle, &archive_path).expect("second install should succeed");
+
+        assert!(is_installed(&bundle), "is_installed should remain true after second install");
+    }
+
+    /// The first install must preserve the original vanilla launcher content
+    /// in StardewValley-original, and the second install must not overwrite it.
+    #[test]
+    fn install_preserves_stardewvalley_original_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = vanilla_bundle(dir.path());
+
+        // Record vanilla launcher content before any install.
+        let vanilla_content =
+            fs::read(bundle.join("Contents/MacOS/StardewValley")).unwrap();
+
+        let archive_path = dir.path().join("smapi-installer.zip");
+        build_synthetic_installer_archive(&archive_path).unwrap();
+
+        // First install.
+        install(&bundle, &archive_path).expect("first install");
+
+        let original_after_first =
+            fs::read(bundle.join("Contents/MacOS/StardewValley-original")).unwrap();
+        assert_eq!(
+            vanilla_content, original_after_first,
+            "StardewValley-original should equal vanilla content after first install"
+        );
+
+        // Second install must NOT overwrite StardewValley-original.
+        install(&bundle, &archive_path).expect("second install");
+
+        let original_after_second =
+            fs::read(bundle.join("Contents/MacOS/StardewValley-original")).unwrap();
+        assert_eq!(
+            vanilla_content, original_after_second,
+            "StardewValley-original must not change on second install"
+        );
+    }
+
+    /// mcs/ and Mods/ in the installer payload are excluded from the copy.
+    #[test]
+    fn install_skips_mcs_and_mods_during_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = vanilla_bundle(dir.path());
+
+        let archive_path = dir.path().join("smapi-installer.zip");
+        build_synthetic_installer_archive(&archive_path).unwrap();
+
+        install(&bundle, &archive_path).expect("install should succeed");
+
+        let macos = bundle.join("Contents/MacOS");
+
+        // mcs/ must not exist.
+        assert!(
+            !macos.join("mcs").exists(),
+            "mcs/ directory must not be copied into the bundle"
+        );
+
+        // The Mods/ path created by install() is the one we create (step 9),
+        // but it must NOT contain anything from the installer payload's Mods/.
+        // The synthetic payload puts "Mods/should-not-copy/manifest.json" —
+        // that specific file must not be present.
+        assert!(
+            !macos.join("Mods/should-not-copy/manifest.json").exists(),
+            "Mods/ payload content must not be copied into the bundle"
+        );
+    }
+
+    /// install() creates Contents/MacOS/Mods/ if it does not exist.
+    #[test]
+    fn install_creates_mods_directory_if_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = vanilla_bundle(dir.path());
+
+        // Confirm Mods/ is not present before install.
+        let mods_dir = bundle.join("Contents/MacOS/Mods");
+        assert!(!mods_dir.exists(), "precondition: Mods/ must not exist before install");
+
+        let archive_path = dir.path().join("smapi-installer.zip");
+        build_synthetic_installer_archive(&archive_path).unwrap();
+
+        install(&bundle, &archive_path).expect("install should succeed");
+
+        assert!(
+            mods_dir.is_dir(),
+            "Contents/MacOS/Mods/ must be created by install"
+        );
+    }
+
+    /// Passing a nonexistent bundle path returns an error.
+    #[test]
+    fn install_returns_error_for_nonexistent_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let archive_path = dir.path().join("smapi-installer.zip");
+        build_synthetic_installer_archive(&archive_path).unwrap();
+
+        let result = install(Path::new("/nonexistent/Foo.app"), &archive_path);
+        assert!(
+            result.is_err(),
+            "install should return Err for a nonexistent bundle"
+        );
     }
 }
