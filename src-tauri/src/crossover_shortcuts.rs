@@ -201,6 +201,29 @@ fn resolve_windows_path(bottle: &Bottle, win_path: &str) -> Option<PathBuf> {
     if !had_any {
         return None;
     }
+
+    // Final containment check: after case-insensitive resolution (which may
+    // follow symlinks on some filesystems), verify the result still lives
+    // inside the bottle root. This prevents symlink-escape attacks where a
+    // Wine game directory contains a symlink that points outside the bottle.
+    //
+    // We only apply this check when both the bottle root and the target path
+    // can be canonicalized (i.e. they both exist on disk). If either path
+    // doesn't exist yet (e.g. the exe hasn't been installed) we skip the check
+    // and let the caller's `exists()` check fail naturally.
+    if let (Ok(bottle_canonical), Ok(walk_canonical)) = (
+        bottle.path.canonicalize(),
+        walk.canonicalize(),
+    ) {
+        if !walk_canonical.starts_with(&bottle_canonical) {
+            log::warn!(
+                "resolve_windows_path: '{}' resolved outside bottle root — rejected",
+                win_path
+            );
+            return None;
+        }
+    }
+
     Some(walk)
 }
 
@@ -921,11 +944,45 @@ mod tests {
     }
 
     #[test]
-    fn resolve_windows_path_rejects_non_c_drives() {
+    fn resolve_windows_path_rejects_drive_when_directory_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let bottle = make_fake_bottle(tmp.path(), "b");
         assert!(resolve_windows_path(&bottle, "D:\\Games\\foo.exe").is_none());
         assert!(resolve_windows_path(&bottle, "\\\\server\\share\\foo.exe").is_none());
+    }
+
+    /// Verify the containment guard rejects a symlink that escapes the bottle.
+    #[test]
+    fn resolve_windows_path_rejects_symlink_escape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle = make_fake_bottle(tmp.path(), "b");
+
+        // Create a directory inside drive_c that contains a symlink pointing
+        // outside the bottle to the tmp dir itself.
+        let games_dir = bottle.drive_c().join("Games");
+        fs::create_dir_all(&games_dir).unwrap();
+        let outside = tmp.path().join("outside.exe");
+        fs::write(&outside, b"payload").unwrap();
+
+        // Create a symlink: drive_c/Games/evil.exe -> ../../outside.exe
+        // (points to a file outside the bottle root)
+        let symlink_target = games_dir.join("evil.exe");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &symlink_target).unwrap();
+        #[cfg(not(unix))]
+        {
+            // On non-Unix we can't create symlinks easily in tests; skip.
+            return;
+        }
+
+        // The file is reachable via the bottle path (no `..` in the Windows
+        // path), so the component walk won't catch it. The containment guard
+        // must reject it.
+        let result = resolve_windows_path(&bottle, "C:\\Games\\evil.exe");
+        assert!(
+            result.is_none(),
+            "symlink escape should be caught by containment guard"
+        );
     }
 
     #[test]
