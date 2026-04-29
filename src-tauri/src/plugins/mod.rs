@@ -15,4 +15,5 @@ pub mod hogwarts_legacy;
 pub mod sims4;
 pub mod skyrim_plugins;
 pub mod skyrim_se;
+pub mod stardew_valley_native;
 pub mod thunderstore_games;
