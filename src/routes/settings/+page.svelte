@@ -4,7 +4,9 @@
   import type { CleanReport, CleanResult, DowngradeStatus, DeploymentHealth, VerificationLevel, CachedVersion, DepotDownloadInfo, LaunchOptionsStatus } from "$lib/types";
   import { wineCtx } from "$lib/types";
   import type { SteamStatus } from "$lib/types";
-  import { config, showError, showSuccess, selectedGame, skseStatus, currentPage, appVersion, updateReady, updateVersion, updateNotes, updateChecking, updateError, triggerUpdateCheck, controllerMode, nativeMode } from "$lib/stores";
+  import { config, showError, showSuccess, selectedGame, skseStatus, currentPage, appVersion, updateReady, updateVersion, updateNotes, updateChecking, updateError, triggerUpdateCheck, controllerMode, nativeMode, nativeModeVisible } from "$lib/stores";
+  import { setNativeMode, setNativeModeVisible } from "$lib/api";
+  import { applyNativeTheme } from "$lib/native/theme";
   import type { AppConfig, ModTool, PlatformInfo, ToolInstallProgress, ToolUpdateInfo, VortexExtensionSummary, VortexGameRegistration } from "$lib/types";
   import { listen } from "@tauri-apps/api/event";
   import ThemeToggle from "$lib/components/ThemeToggle.svelte";
@@ -1000,6 +1002,23 @@
     }
   }
 
+  async function toggleNativeModeVisible() {
+    const next = !$nativeModeVisible;
+    try {
+      await setNativeModeVisible(next);
+      nativeModeVisible.set(next);
+      // If user disables visibility while currently in native mode, exit native mode.
+      if (!next && $nativeMode) {
+        await setNativeMode(false);
+        nativeMode.set(false);
+        await applyNativeTheme(false);
+      }
+    } catch (err) {
+      console.error("toggleNativeModeVisible failed:", err);
+      showError(`Failed to toggle Native Mode visibility: ${err}`);
+    }
+  }
+
   async function toggleTelemetry() {
     savingTelemetry = true;
     try {
@@ -1364,6 +1383,27 @@
           <button class="btn-link" onclick={() => openUrl("https://github.com/cashcon57/corkscrew/blob/main/PRIVACY.md")}>Privacy Policy</button>
           <button class="btn-link" onclick={() => openUrl("https://ko-fi.com/cash508287")}>Support</button>
         </div>
+      </div>
+      <div class="card-divider"></div>
+      <div class="card-row toggle-row">
+        <div class="toggle-info">
+          <span class="row-label">Show Native Mode toggle (in development)</span>
+          <span class="toggle-description native-warning">
+            <strong>⚠️ Native macOS Mode does NOT work yet.</strong>
+            It is in active development and will not function for modding native Stardew Valley or Baldur's Gate 3 installs at this time.
+            Enabling this surfaces the Native Mode toggle in the topbar so you can preview the in-progress UI.
+          </span>
+        </div>
+        <button
+          class="toggle-switch"
+          class:toggle-on={$nativeModeVisible}
+          onclick={toggleNativeModeVisible}
+          type="button"
+          role="switch"
+          aria-checked={$nativeModeVisible}
+        >
+          <span class="toggle-thumb"></span>
+        </button>
       </div>
     </div>
   </div>
@@ -3815,6 +3855,15 @@
     font-size: 12px;
     color: var(--text-tertiary);
     line-height: 1.4;
+  }
+  .toggle-description.native-warning {
+    color: var(--yellow, #ffd60a);
+  }
+  .toggle-description.native-warning strong {
+    color: var(--yellow, #ffd60a);
+    font-weight: 600;
+    display: block;
+    margin-bottom: 4px;
   }
 
   .toggle-switch {

@@ -700,3 +700,30 @@ pub async fn set_native_mode(enabled: bool) -> Result<(), String> {
     .await
     .map_err(crate::format_join_error)?
 }
+
+/// Returns the current value of the `experimental.native_mode_visible` config flag.
+///
+/// When `false` (the default), the Native Mode topbar toggle button and first-run
+/// banner are hidden. The user must opt in via Settings → About to surface them.
+#[tauri::command]
+pub async fn get_native_mode_visible() -> Result<bool, String> {
+    tokio::task::spawn_blocking(|| {
+        config::get_config()
+            .map(|cfg| cfg.experimental.native_mode_visible)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(crate::format_join_error)?
+}
+
+/// Persists `experimental.native_mode_visible` to the JSON config file.
+#[tauri::command]
+pub async fn set_native_mode_visible(visible: bool) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let mut cfg = config::get_config().map_err(|e| e.to_string())?;
+        cfg.experimental.native_mode_visible = visible;
+        config::save_config(&cfg).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(crate::format_join_error)?
+}

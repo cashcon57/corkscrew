@@ -68,6 +68,12 @@ pub struct ExperimentalConfig {
     /// only, as native-mode modding is not yet the primary supported workflow.
     #[serde(default)]
     pub native_mode: bool,
+
+    /// When true, the Native Mode toggle button is visible in the topbar and
+    /// the first-run banner can appear. Off by default — native macOS modding
+    /// is in active development and does not yet function for end users.
+    #[serde(default)]
+    pub native_mode_visible: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -512,6 +518,38 @@ mod tests {
         assert!(
             !cfg.experimental.native_mode,
             "old config without experimental block should default native_mode to false"
+        );
+    }
+
+    // native_mode_visible tests
+
+    #[test]
+    fn native_mode_visible_default_is_false() {
+        let cfg = AppConfig::default();
+        assert!(
+            !cfg.experimental.native_mode_visible,
+            "experimental.native_mode_visible should default to false"
+        );
+    }
+
+    #[test]
+    fn native_mode_visible_round_trips() {
+        let mut cfg = AppConfig::default();
+        cfg.experimental.native_mode_visible = true;
+        let json = serde_json::to_string(&cfg).unwrap();
+        let restored: AppConfig = serde_json::from_str(&json).unwrap();
+        assert!(
+            restored.experimental.native_mode_visible,
+            "native_mode_visible should survive a JSON round-trip as true"
+        );
+        // Also verify the false case is preserved independently
+        let mut cfg2 = AppConfig::default();
+        cfg2.experimental.native_mode_visible = false;
+        let json2 = serde_json::to_string(&cfg2).unwrap();
+        let restored2: AppConfig = serde_json::from_str(&json2).unwrap();
+        assert!(
+            !restored2.experimental.native_mode_visible,
+            "native_mode_visible should survive a JSON round-trip as false"
         );
     }
 }
