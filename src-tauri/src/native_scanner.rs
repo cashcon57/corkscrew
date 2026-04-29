@@ -499,6 +499,39 @@ pub(crate) fn scan_gog_mac_at(games_dir: &Path) -> Vec<NativeAppCandidate> {
 }
 
 // ---------------------------------------------------------------------
+// Aggregate scanner
+// ---------------------------------------------------------------------
+
+/// Aggregate scan: `/Applications` + Steam mac + GOG mac.
+///
+/// Deduplicates by canonicalized `bundle_path` so that an app discovered via
+/// multiple sources appears only once. Priority order: Steam first (most
+/// specific), then GOG, then `/Applications` (least specific). The
+/// first-discovered source wins when there is a conflict.
+///
+/// Callers should note that canonicalization requires the paths to exist on
+/// disk; if the path cannot be canonicalized the raw path is used for dedup
+/// instead (so the guard against duplicates is still best-effort for
+/// non-existent paths, which shouldn't occur in production).
+pub fn scan_all_native() -> Vec<NativeAppCandidate> {
+    let mut seen = std::collections::HashSet::new();
+    let mut results = Vec::new();
+    // Order matters for dedup — Steam first because it is most specific.
+    for batch in [scan_steam_mac(), scan_gog_mac(), scan_applications_dirs()] {
+        for cand in batch {
+            let key = cand
+                .bundle_path
+                .canonicalize()
+                .unwrap_or_else(|_| cand.bundle_path.clone());
+            if seen.insert(key) {
+                results.push(cand);
+            }
+        }
+    }
+    results
+}
+
+// ---------------------------------------------------------------------
 // Manual native game add
 // ---------------------------------------------------------------------
 
@@ -893,5 +926,69 @@ mod tests {
         let result = validate_manual_native_app(&bundle).expect("should succeed");
         assert_eq!(result.source, NativeSource::Manual);
         assert_eq!(result.info.bundle_identifier, "com.user.manual");
+    }
+
+    // -----------------------------------------------------------------
+    // Aggregate scanner dedup test
+    // -----------------------------------------------------------------
+
+    /// scan_all_native deduplicates when the same bundle_path appears in
+    /// multiple source batches. We synthesize this by scanning the same
+    /// directory twice via scan_steam_mac_at and scan_gog_mac_at and then
+    /// verifying scan_all_native (which calls all three scanners) doesn't
+    /// double-count when the underlying scanners return the same canonical
+    /// path.
+    ///
+    /// Implementation note: scan_all_native calls the public top-level
+    /// functions (scan_steam_mac, scan_gog_mac, scan_applications_dirs).
+    /// Those functions rely on the real home directory and Steam/GOG paths,
+    /// so we can't easily inject test roots. Instead, we test the dedup
+    /// logic directly by constructing two `NativeAppCandidate` lists that
+    /// share a bundle_path and verifying that our dedup key logic works.
+    /// The helper below mimics what scan_all_native does internally.
+    fn dedup_candidates(batches: Vec<Vec<NativeAppCandidate>>) -> Vec<NativeAppCandidate> {
+        let mut seen = std::collections::HashSet::new();
+        let mut results = Vec::new();
+        for batch in batches {
+            for cand in batch {
+                let key = cand
+                    .bundle_path
+                    .canonicalize()
+                    .unwrap_or_else(|_| cand.bundle_path.clone());
+                if seen.insert(key) {
+                    results.push(cand);
+                }
+            }
+        }
+        results
+    }
+
+    #[test]
+    fn scan_all_native_dedupes_overlapping_candidates() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = make_app(dir.path(), "SharedGame", "com.example.shared");
+
+        // Simulate the same app being found by both Steam and GOG scanners.
+        let steam_cand = NativeAppCandidate {
+            bundle_path: bundle.clone(),
+            info: crate::plist::read_info_plist(&bundle.join("Contents/Info.plist")).unwrap(),
+            architecture: Architecture::Unknown,
+            source: NativeSource::Steam,
+            sandboxed: false,
+        };
+        let gog_cand = NativeAppCandidate {
+            bundle_path: bundle.clone(),
+            info: crate::plist::read_info_plist(&bundle.join("Contents/Info.plist")).unwrap(),
+            architecture: Architecture::Unknown,
+            source: NativeSource::Gog,
+            sandboxed: false,
+        };
+
+        let results = dedup_candidates(vec![vec![steam_cand], vec![gog_cand]]);
+
+        assert_eq!(results.len(), 1, "duplicate bundle_path must be deduped");
+        // Steam source wins (it was first in priority order).
+        assert_eq!(results[0].source, NativeSource::Steam);
+        assert_eq!(results[0].info.bundle_identifier, "com.example.shared");
     }
 }

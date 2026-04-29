@@ -3411,6 +3411,260 @@ pub fn bsa_cache_clear_all(conn: &rusqlite::Connection) -> std::result::Result<(
 }
 
 // ---------------------------------------------------------------------------
+// Games Table API (PersistedGame — Wine + Native)
+// ---------------------------------------------------------------------------
+
+/// Persistence shape for the `games` table. Distinct from `DetectedGame`
+/// (transient runtime struct passed to frontend). `PersistedGame` is what we
+/// serialize to and deserialize from the `games` table introduced in v23.
+#[derive(Clone, Debug)]
+pub struct PersistedGame {
+    pub game_id: String,
+    pub runtime: crate::runtime::GameRuntime,
+}
+
+// -- private helpers --------------------------------------------------------
+
+fn arch_to_db_str(a: crate::runtime::Architecture) -> &'static str {
+    use crate::runtime::Architecture;
+    match a {
+        Architecture::AppleSilicon => "apple_silicon",
+        Architecture::IntelOnly => "intel_only",
+        Architecture::Universal => "universal",
+        Architecture::Unknown => "unknown",
+    }
+}
+
+fn source_to_db_str(s: crate::runtime::NativeSource) -> &'static str {
+    use crate::runtime::NativeSource;
+    match s {
+        NativeSource::SystemApplications => "system_applications",
+        NativeSource::Steam => "steam",
+        NativeSource::Gog => "gog",
+        NativeSource::Manual => "manual",
+        NativeSource::AppStore => "app_store",
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn row_to_runtime(
+    runtime_str: &str,
+    bottle_name: Option<String>,
+    bottle_path: Option<String>,
+    native_app_path: Option<String>,
+    native_data_root: Option<String>,
+    native_architecture: Option<String>,
+    native_sandboxed: i64,
+    native_source: Option<String>,
+) -> Result<crate::runtime::GameRuntime> {
+    use crate::runtime::{Architecture, GameRuntime, NativeContext, NativeSource, WineContext};
+    match runtime_str {
+        "wine" => Ok(GameRuntime::Wine(WineContext {
+            bottle_name: bottle_name.unwrap_or_default(),
+            bottle_path: std::path::PathBuf::from(bottle_path.unwrap_or_default()),
+            source: String::new(), // games table doesn't store wine source; acceptable
+        })),
+        "native" => {
+            let arch = match native_architecture.as_deref() {
+                Some("apple_silicon") => Architecture::AppleSilicon,
+                Some("intel_only") => Architecture::IntelOnly,
+                Some("universal") => Architecture::Universal,
+                _ => Architecture::Unknown,
+            };
+            let source = match native_source.as_deref() {
+                Some("system_applications") => NativeSource::SystemApplications,
+                Some("steam") => NativeSource::Steam,
+                Some("gog") => NativeSource::Gog,
+                Some("manual") => NativeSource::Manual,
+                Some("app_store") => NativeSource::AppStore,
+                _ => NativeSource::Manual, // safe fallback
+            };
+            Ok(GameRuntime::Native(NativeContext {
+                app_bundle_path: std::path::PathBuf::from(
+                    native_app_path.unwrap_or_default(),
+                ),
+                game_data_root: std::path::PathBuf::from(
+                    native_data_root.unwrap_or_default(),
+                ),
+                architecture: arch,
+                sandboxed: native_sandboxed != 0,
+                source,
+            }))
+        }
+        other => Err(DatabaseError::Other(format!(
+            "unknown runtime discriminator: {}",
+            other
+        ))),
+    }
+}
+
+// -- impl ModDatabase -------------------------------------------------------
+
+impl ModDatabase {
+    /// Insert or update a row in the `games` table. Idempotent — calling
+    /// twice with the same `game_id` replaces the row, doesn't insert a
+    /// duplicate.
+    pub fn upsert_game(&self, game: &PersistedGame) -> Result<()> {
+        use crate::runtime::GameRuntime;
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+
+        let (runtime_str, bottle_name, bottle_path, native_app_path, native_data_root,
+             native_architecture, native_sandboxed, native_source) = match &game.runtime {
+            GameRuntime::Wine(w) => (
+                "wine",
+                Some(w.bottle_name.clone()),
+                Some(w.bottle_path.to_string_lossy().into_owned()),
+                None::<String>,
+                None::<String>,
+                None::<String>,
+                0i64,
+                None::<String>,
+            ),
+            GameRuntime::Native(n) => (
+                "native",
+                None::<String>,
+                None::<String>,
+                Some(n.app_bundle_path.to_string_lossy().into_owned()),
+                Some(n.game_data_root.to_string_lossy().into_owned()),
+                Some(arch_to_db_str(n.architecture).to_string()),
+                if n.sandboxed { 1i64 } else { 0i64 },
+                Some(source_to_db_str(n.source).to_string()),
+            ),
+        };
+
+        conn.execute(
+            "INSERT OR REPLACE INTO games
+                (game_id, runtime, bottle_name, bottle_path,
+                 native_app_path, native_data_root, native_architecture,
+                 native_sandboxed, native_source)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                game.game_id,
+                runtime_str,
+                bottle_name.unwrap_or_default(),
+                bottle_path.unwrap_or_default(),
+                native_app_path,
+                native_data_root,
+                native_architecture,
+                native_sandboxed,
+                native_source,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Read all persisted games. Returns an empty `Vec` if the table is empty.
+    pub fn list_persisted_games(&self) -> Result<Vec<PersistedGame>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT game_id, runtime, bottle_name, bottle_path,
+                    native_app_path, native_data_root, native_architecture,
+                    native_sandboxed, native_source
+             FROM games",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                let game_id: String = row.get(0)?;
+                let runtime_str: String = row.get(1)?;
+                let bottle_name: Option<String> = row.get::<_, Option<String>>(2)?;
+                let bottle_path: Option<String> = row.get::<_, Option<String>>(3)?;
+                let native_app_path: Option<String> = row.get(4)?;
+                let native_data_root: Option<String> = row.get(5)?;
+                let native_architecture: Option<String> = row.get(6)?;
+                let native_sandboxed: i64 = row.get::<_, Option<i64>>(7)?.unwrap_or(0);
+                let native_source: Option<String> = row.get(8)?;
+                Ok((
+                    game_id,
+                    runtime_str,
+                    bottle_name,
+                    bottle_path,
+                    native_app_path,
+                    native_data_root,
+                    native_architecture,
+                    native_sandboxed,
+                    native_source,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        let mut games = Vec::with_capacity(rows.len());
+        for (game_id, runtime_str, bottle_name, bottle_path, native_app_path,
+             native_data_root, native_architecture, native_sandboxed, native_source) in rows
+        {
+            let runtime = row_to_runtime(
+                &runtime_str,
+                bottle_name,
+                bottle_path,
+                native_app_path,
+                native_data_root,
+                native_architecture,
+                native_sandboxed,
+                native_source,
+            )?;
+            games.push(PersistedGame { game_id, runtime });
+        }
+        Ok(games)
+    }
+
+    /// Read a single game by id. Returns `None` if not present.
+    pub fn get_persisted_game(&self, game_id: &str) -> Result<Option<PersistedGame>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT game_id, runtime, bottle_name, bottle_path,
+                    native_app_path, native_data_root, native_architecture,
+                    native_sandboxed, native_source
+             FROM games WHERE game_id = ?1",
+        )?;
+
+        let result: Option<(
+            String, String,
+            Option<String>, Option<String>,
+            Option<String>, Option<String>, Option<String>,
+            i64, Option<String>,
+        )> = stmt
+            .query_row(params![game_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<i64>>(7)?.unwrap_or(0),
+                    row.get::<_, Option<String>>(8)?,
+                ))
+            })
+            .ok();
+
+        match result {
+            None => Ok(None),
+            Some((game_id, runtime_str, bottle_name, bottle_path, native_app_path,
+                  native_data_root, native_architecture, native_sandboxed, native_source)) => {
+                let runtime = row_to_runtime(
+                    &runtime_str,
+                    bottle_name,
+                    bottle_path,
+                    native_app_path,
+                    native_data_root,
+                    native_architecture,
+                    native_sandboxed,
+                    native_source,
+                )?;
+                Ok(Some(PersistedGame { game_id, runtime }))
+            }
+        }
+    }
+
+    /// Delete a game by id. No-op if not present.
+    pub fn delete_persisted_game(&self, game_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute("DELETE FROM games WHERE game_id = ?1", params![game_id])?;
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -3815,5 +4069,134 @@ mod tests {
 
         assert!(bsa_cache_get(&conn, "A.bsa", "file1.dds").unwrap().is_none());
         assert!(bsa_cache_get(&conn, "B.bsa", "file2.dds").unwrap().is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // PersistedGame CRUD tests (games table API)
+    // -----------------------------------------------------------------------
+
+    fn make_wine_game(game_id: &str) -> PersistedGame {
+        use crate::runtime::{GameRuntime, WineContext};
+        PersistedGame {
+            game_id: game_id.to_string(),
+            runtime: GameRuntime::Wine(WineContext {
+                bottle_name: "GTS".to_string(),
+                bottle_path: std::path::PathBuf::from("/Users/x/Bottles/GTS"),
+                source: String::new(),
+            }),
+        }
+    }
+
+    fn make_native_game(game_id: &str) -> PersistedGame {
+        use crate::runtime::{Architecture, GameRuntime, NativeContext, NativeSource};
+        PersistedGame {
+            game_id: game_id.to_string(),
+            runtime: GameRuntime::Native(NativeContext {
+                app_bundle_path: std::path::PathBuf::from(
+                    "/Applications/Stardew Valley.app",
+                ),
+                game_data_root: std::path::PathBuf::from(
+                    "/Applications/Stardew Valley.app/Contents/MacOS",
+                ),
+                architecture: Architecture::AppleSilicon,
+                sandboxed: false,
+                source: NativeSource::Steam,
+            }),
+        }
+    }
+
+    #[test]
+    fn upsert_and_list_round_trips_wine_game() {
+        let (db, _tmp) = test_db();
+        let game = make_wine_game("skyrimse");
+        db.upsert_game(&game).unwrap();
+
+        let all = db.list_persisted_games().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].game_id, "skyrimse");
+        let w = all[0].runtime.wine().expect("should be Wine runtime");
+        assert_eq!(w.bottle_name, "GTS");
+        assert_eq!(w.bottle_path, std::path::PathBuf::from("/Users/x/Bottles/GTS"));
+    }
+
+    #[test]
+    fn upsert_and_list_round_trips_native_game() {
+        use crate::runtime::{Architecture, NativeSource};
+        let (db, _tmp) = test_db();
+        let game = make_native_game("stardew_valley_native");
+        db.upsert_game(&game).unwrap();
+
+        let all = db.list_persisted_games().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].game_id, "stardew_valley_native");
+        let n = all[0].runtime.native().expect("should be Native runtime");
+        assert_eq!(n.architecture, Architecture::AppleSilicon);
+        assert_eq!(n.source, NativeSource::Steam);
+        assert!(!n.sandboxed);
+        assert_eq!(
+            n.app_bundle_path,
+            std::path::PathBuf::from("/Applications/Stardew Valley.app")
+        );
+        assert_eq!(
+            n.game_data_root,
+            std::path::PathBuf::from("/Applications/Stardew Valley.app/Contents/MacOS")
+        );
+    }
+
+    #[test]
+    fn upsert_is_idempotent_replaces_not_duplicates() {
+        use crate::runtime::{GameRuntime, WineContext};
+        let (db, _tmp) = test_db();
+        db.upsert_game(&make_wine_game("skyrimse")).unwrap();
+        // Second upsert with updated bottle_name — must replace, not duplicate.
+        let updated = PersistedGame {
+            game_id: "skyrimse".to_string(),
+            runtime: GameRuntime::Wine(WineContext {
+                bottle_name: "NewBottle".to_string(),
+                bottle_path: std::path::PathBuf::from("/Users/x/Bottles/NewBottle"),
+                source: String::new(),
+            }),
+        };
+        db.upsert_game(&updated).unwrap();
+
+        let all = db.list_persisted_games().unwrap();
+        assert_eq!(all.len(), 1, "upsert must not duplicate rows");
+        let w = all[0].runtime.wine().unwrap();
+        assert_eq!(w.bottle_name, "NewBottle");
+    }
+
+    #[test]
+    fn get_persisted_game_returns_some_after_upsert() {
+        let (db, _tmp) = test_db();
+        db.upsert_game(&make_native_game("sdv")).unwrap();
+        let result = db.get_persisted_game("sdv").unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().game_id, "sdv");
+    }
+
+    #[test]
+    fn get_persisted_game_returns_none_for_unknown_id() {
+        let (db, _tmp) = test_db();
+        let result = db.get_persisted_game("does_not_exist").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn delete_persisted_game_removes_row() {
+        let (db, _tmp) = test_db();
+        db.upsert_game(&make_wine_game("skyrimse")).unwrap();
+        assert!(db.get_persisted_game("skyrimse").unwrap().is_some());
+        db.delete_persisted_game("skyrimse").unwrap();
+        assert!(db.get_persisted_game("skyrimse").unwrap().is_none());
+
+        // Also verify list is empty.
+        assert!(db.list_persisted_games().unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_persisted_game_is_noop_for_unknown_id() {
+        let (db, _tmp) = test_db();
+        // Must not error on missing id.
+        db.delete_persisted_game("nonexistent").unwrap();
     }
 }
