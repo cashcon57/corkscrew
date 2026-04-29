@@ -617,6 +617,7 @@ fn canonicalize_or(p: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::{GameRuntime, WineContext};
     use std::fs;
 
     fn make_fake_bottle(parent: &Path, name: &str) -> Bottle {
@@ -885,8 +886,11 @@ mod tests {
             game_path: game_path.clone(),
             exe_path: Some(exe.clone()),
             data_dir: game_path.clone(),
-            bottle_name: bottle.name.clone(),
-            bottle_path: bottle.path.clone(),
+            runtime: GameRuntime::Wine(WineContext {
+                bottle_name: bottle.name.clone(),
+                bottle_path: bottle.path.clone(),
+                source: bottle.source.clone(),
+            }),
             steam_app_id: None,
         }];
 

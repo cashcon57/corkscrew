@@ -38,6 +38,7 @@ use std::path::{Path, PathBuf};
 
 use crate::bottles::Bottle;
 use crate::games::{DetectedGame, GamePlugin};
+use crate::runtime::{GameRuntime, WineContext};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -123,8 +124,11 @@ impl GamePlugin for GenshinPlugin {
             game_path,
             exe_path,
             data_dir,
-            bottle_name: bottle.name.clone(),
-            bottle_path: bottle.path.clone(),
+            runtime: GameRuntime::Wine(WineContext {
+                bottle_name: bottle.name.clone(),
+                bottle_path: bottle.path.clone(),
+                source: bottle.source.clone(),
+            }),
             steam_app_id: None,
         })
     }

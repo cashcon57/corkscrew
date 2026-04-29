@@ -606,10 +606,13 @@ pub fn cli_list_games(db: &Arc<ModDatabase>) {
     let custom = crate::game_registry::load_custom_games(db);
     for game in &custom {
         if !all_games.iter().any(|g| g["id"] == game.game_id) {
+            let bottle_name = game.runtime.wine()
+                .map(|w| w.bottle_name.as_str())
+                .unwrap_or("");
             all_games.push(serde_json::json!({
                 "id": game.game_id,
                 "name": game.display_name,
-                "bottle": game.bottle_name,
+                "bottle": bottle_name,
                 "path": game.game_path.display().to_string(),
                 "executable": game.exe_path.as_ref().map(|p| p.display().to_string()),
                 "custom": true,

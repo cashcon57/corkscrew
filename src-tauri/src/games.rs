@@ -9,6 +9,7 @@ use std::sync::{Mutex, OnceLock};
 use serde::{Deserialize, Serialize};
 
 use crate::bottles::Bottle;
+use crate::runtime::GameRuntime;
 
 // ---------------------------------------------------------------------------
 // GamePlugin trait
@@ -240,7 +241,9 @@ pub enum LoadOrderFormat {
 // DetectedGame
 // ---------------------------------------------------------------------------
 
-/// A game found inside a Wine bottle.
+/// A game found by Corkscrew. The `runtime` field discriminates between
+/// Wine/CrossOver games (carry a `WineContext` with bottle details) and
+/// native macOS games (carry a `NativeContext` with .app bundle details).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DetectedGame {
     /// Identifier matching [`GamePlugin::game_id`].
@@ -249,19 +252,20 @@ pub struct DetectedGame {
     pub display_name: String,
     /// Nexus Mods slug matching [`GamePlugin::nexus_slug`].
     pub nexus_slug: String,
-    /// Absolute path to the game installation directory inside the bottle.
+    /// Absolute path to the game installation directory. For Wine games
+    /// this lives inside the bottle's drive_c. For native games this is
+    /// the resolved game folder (typically `<app_bundle>/Contents/MacOS`
+    /// or as defined by the per-game native plugin).
     pub game_path: PathBuf,
-    /// Absolute path to the main game executable (e.g. SkyrimSE.exe).
+    /// Absolute path to the main game executable.
     pub exe_path: Option<PathBuf>,
     /// Absolute path to the data/mod deployment directory.
     pub data_dir: PathBuf,
-    /// Name of the bottle containing this game.
-    pub bottle_name: String,
-    /// Absolute path to the bottle root.
-    pub bottle_path: PathBuf,
-    /// Steam App ID, populated when known. Drives icon/logo fetching for
-    /// games discovered through the Steam appmanifest scanner that don't
-    /// have a hardcoded entry in the bundled Vortex game registry.
+    /// Runtime discriminator + per-runtime context (bottle for Wine, app
+    /// bundle metadata for Native). Replaces the previous `bottle_name`
+    /// and `bottle_path` fields.
+    pub runtime: GameRuntime,
+    /// Steam App ID, populated when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steam_app_id: Option<String>,
 }
@@ -341,13 +345,16 @@ pub fn detect_all_games_with_custom(db: &crate::database::ModDatabase) -> Vec<De
     // Auto-capture Steam depot manifests for all detected games.
     // This builds a local version history so we can offer automated
     // downgrades when a collection requires an older game version.
+    // Native games don't have bottles, so skip them.
     for game in &found {
-        let bottle = crate::bottles::Bottle {
-            name: game.bottle_name.clone(),
-            path: game.bottle_path.clone(),
-            source: String::new(),
-        };
-        crate::game_registry::capture_depot_manifests(db, &game.game_id, &bottle);
+        if let Some(wine) = game.runtime.wine() {
+            let bottle = crate::bottles::Bottle {
+                name: wine.bottle_name.clone(),
+                path: wine.bottle_path.clone(),
+                source: wine.source.clone(),
+            };
+            crate::game_registry::capture_depot_manifests(db, &game.game_id, &bottle);
+        }
     }
 
     found
