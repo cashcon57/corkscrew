@@ -356,6 +356,22 @@ export async function setNativeMode(enabled: boolean): Promise<void> {
   return invoke<void>("set_native_mode", { enabled });
 }
 
+/**
+ * Apply a Liquid Glass intensity variant to the main window at runtime.
+ *
+ * Three levels correspond to the spike's recommended ladder:
+ * - "default" → Regular (variant 0) — startup default
+ * - "medium"  → Sidebar (variant 16)
+ * - "high"    → Inspector (variant 18) — deepest glass, used by native mode
+ *
+ * Safe no-op on Windows / Linux per plugin contract.
+ */
+export async function applyNativeWindowEffect(
+  intensity: "default" | "medium" | "high",
+): Promise<void> {
+  return invoke<void>("apply_native_window_effect", { intensity });
+}
+
 /** Trigger a full rescan of native macOS app locations and return all discovered candidates. */
 export async function rescanNativeGames(): Promise<NativeAppCandidate[]> {
   return invoke<NativeAppCandidate[]>("rescan_native_games");

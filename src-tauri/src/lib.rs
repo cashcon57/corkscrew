@@ -1402,6 +1402,7 @@ pub fn run() {
             commands::config_commands::set_native_mode,
             commands::native_cmds::rescan_native_games,
             commands::native_cmds::get_bg3se_status,
+            commands::native_cmds::apply_native_window_effect,
             commands::stardew_cmds::get_stardew_mod_status,
             // Download Queue
             commands::notifications::get_download_queue,
