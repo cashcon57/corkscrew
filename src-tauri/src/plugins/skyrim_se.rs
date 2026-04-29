@@ -241,35 +241,21 @@ fn check_steam_default(bottle: &Bottle) -> Option<PathBuf> {
     }
 }
 
-/// Parse `libraryfolders.vdf` and check each library for the game.
+/// Check all Steam library folders (including non-C: drives) for the game.
+///
+/// Delegates to [`crate::game_registry::collect_steam_library_paths`] which
+/// resolves Windows-style VDF path strings against every `drive_X` directory
+/// present in the bottle, rather than assuming paths are under `drive_c`.
 fn check_steam_library_folders(bottle: &Bottle) -> Option<PathBuf> {
-    let steam_dir = bottle.find_path(&["Program Files (x86)", "Steam"])?;
-    let vdf_path = steam_dir.join("steamapps").join("libraryfolders.vdf");
-
-    // Also try config/libraryfolders.vdf (older Steam layout).
-    let vdf_path = if vdf_path.exists() {
-        vdf_path
-    } else {
-        let alt = steam_dir.join("config").join("libraryfolders.vdf");
-        if alt.exists() {
-            alt
-        } else {
-            return None;
-        }
-    };
-
-    let library_paths = parse_library_folders_vdf(&vdf_path)?;
-
-    for lib_path in library_paths {
-        // Each library path contains a `steamapps/common` subdirectory.
-        let common = lib_path.join("steamapps").join("common");
+    let library_paths = crate::game_registry::collect_steam_library_paths(bottle);
+    for steamapps in library_paths {
+        let common = steamapps.join("common");
         if let Some(game_dir) = find_child_case_insensitive(&common, STEAM_GAME_DIR) {
             if game_dir.is_dir() {
                 return Some(game_dir);
             }
         }
     }
-
     None
 }
 
@@ -358,68 +344,6 @@ fn find_child_case_insensitive(parent: &Path, target: &str) -> Option<PathBuf> {
     None
 }
 
-/// Parse Steam's `libraryfolders.vdf` to extract additional library paths.
-///
-/// The VDF format is a simple key-value tree. We look for `"path"` keys
-/// and collect their string values. The paths inside a Wine bottle are
-/// Windows-style but actually map to the POSIX filesystem inside `drive_c`,
-/// so we normalise backslashes and attempt to resolve them.
-fn parse_library_folders_vdf(vdf_path: &Path) -> Option<Vec<PathBuf>> {
-    let content = fs::read_to_string(vdf_path).ok()?;
-    let mut paths = Vec::new();
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-
-        // Match lines like:  "path"		"C:\Program Files\Steam"
-        if let Some(rest) = strip_vdf_key(trimmed, "path") {
-            let value = strip_vdf_quotes(rest);
-            if !value.is_empty() {
-                // Normalise Windows path separators.
-                let normalised = value.replace('\\', "/");
-
-                // If it looks like a Windows absolute path (e.g. C:/...),
-                // we need to resolve it relative to the bottle's drive_c.
-                // However we don't have the bottle reference here, so we
-                // store the raw path and let the caller resolve it. Since
-                // most Steam library paths inside a bottle point back into
-                // the same prefix, just store as-is.
-                paths.push(PathBuf::from(normalised));
-            }
-        }
-    }
-
-    if paths.is_empty() {
-        None
-    } else {
-        Some(paths)
-    }
-}
-
-/// Strip a VDF key name and surrounding quotes from the start of a line,
-/// returning the remainder (the value portion).
-fn strip_vdf_key<'a>(line: &'a str, key: &str) -> Option<&'a str> {
-    let line = line.trim();
-
-    // Expected format: "key"  "value"
-    let expected_key = format!("\"{}\"", key);
-    if !line.starts_with(&expected_key) {
-        return None;
-    }
-
-    Some(line[expected_key.len()..].trim())
-}
-
-/// Remove surrounding double quotes from a VDF value string.
-fn strip_vdf_quotes(s: &str) -> String {
-    let s = s.trim();
-    if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
-        s[1..s.len() - 1].to_string()
-    } else {
-        s.to_string()
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -427,55 +351,6 @@ fn strip_vdf_quotes(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn strip_vdf_key_extracts_value() {
-        let line = r#""path"		"C:\SteamLibrary""#;
-        let rest = strip_vdf_key(line, "path").unwrap();
-        assert_eq!(strip_vdf_quotes(rest), r"C:\SteamLibrary");
-    }
-
-    #[test]
-    fn strip_vdf_key_returns_none_for_wrong_key() {
-        let line = r#""id"		"1""#;
-        assert!(strip_vdf_key(line, "path").is_none());
-    }
-
-    #[test]
-    fn strip_vdf_quotes_removes_quotes() {
-        assert_eq!(strip_vdf_quotes(r#""hello""#), "hello");
-        assert_eq!(strip_vdf_quotes("noquotes"), "noquotes");
-    }
-
-    #[test]
-    fn parse_vdf_extracts_paths() {
-        let tmp = tempfile::tempdir().unwrap();
-        let vdf = tmp.path().join("libraryfolders.vdf");
-        fs::write(
-            &vdf,
-            r#"
-"libraryfolders"
-{
-    "0"
-    {
-        "path"		"C:\Program Files (x86)\Steam"
-        "label"		""
-    }
-    "1"
-    {
-        "path"		"D:\SteamLibrary"
-        "label"		""
-    }
-}
-"#,
-        )
-        .unwrap();
-
-        let paths = parse_library_folders_vdf(&vdf).unwrap();
-        assert_eq!(paths.len(), 2);
-        assert_eq!(paths[0], PathBuf::from("C:/Program Files (x86)/Steam"));
-        assert_eq!(paths[1], PathBuf::from("D:/SteamLibrary"));
-    }
 
     #[test]
     fn plugin_metadata() {
@@ -637,5 +512,66 @@ mod tests {
         };
         let plugin = SkyrimSEPlugin;
         assert!(plugin.detect(&bottle).is_none(), "empty dir must not detect");
+    }
+
+    /// Verify that `check_steam_library_folders` finds a game installed on a
+    /// non-C: drive (e.g. a `D:\SteamLibrary` declared in libraryfolders.vdf).
+    ///
+    /// This is the regression case: the old local `parse_library_folders_vdf`
+    /// returned `D:/SteamLibrary` as a raw PathBuf that doesn't exist on the
+    /// host, so the game was never found. The new implementation delegates to
+    /// `game_registry::collect_steam_library_paths` which resolves Windows
+    /// paths against the actual bottle drive directories.
+    #[test]
+    fn detect_finds_game_on_non_c_steam_library_via_vdf() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("TestBottle");
+
+        // Create drive_c with Steam's VDF declaring a D: library.
+        let steam_dir = bottle_path
+            .join("drive_c")
+            .join("Program Files (x86)")
+            .join("Steam");
+        fs::create_dir_all(steam_dir.join("steamapps")).unwrap();
+
+        // Create drive_d with the SteamLibrary and game inside it.
+        let drive_d = bottle_path.join("drive_d");
+        let game_dir = drive_d
+            .join("SteamLibrary")
+            .join("steamapps")
+            .join("common")
+            .join("Skyrim Special Edition");
+        fs::create_dir_all(&game_dir).unwrap();
+        fs::write(game_dir.join("SkyrimSE.exe"), b"fake").unwrap();
+
+        // Write a libraryfolders.vdf on drive_c that declares the D: library.
+        let vdf_content = r#"
+"libraryfolders"
+{
+    "1"
+    {
+        "path"      "D:\\SteamLibrary"
+        "label"     ""
+    }
+}
+"#;
+        fs::write(
+            steam_dir.join("steamapps").join("libraryfolders.vdf"),
+            vdf_content,
+        )
+        .unwrap();
+
+        let bottle = Bottle {
+            name: "TestBottle".into(),
+            path: bottle_path,
+            source: "Test".into(),
+        };
+        let plugin = SkyrimSEPlugin;
+        let detected = plugin.detect(&bottle);
+        assert!(
+            detected.is_some(),
+            "Skyrim SE on D: SteamLibrary should be detected via VDF"
+        );
+        assert_eq!(detected.unwrap().game_id, "skyrimse");
     }
 }

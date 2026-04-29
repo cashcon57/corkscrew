@@ -477,7 +477,13 @@ fn resolve_windows_path_in_bottle(bottle: &Bottle, windows_path: &str) -> Option
 ///
 /// Dedup by canonical path so the same directory discovered via multiple
 /// sources is only returned once.
-fn collect_steam_library_paths(bottle: &Bottle) -> Vec<PathBuf> {
+/// Collect all candidate `steamapps/` directories for a bottle, resolving
+/// Windows-style VDF paths against every drive letter present in the bottle.
+///
+/// Exposed as `pub(crate)` so per-game plugins (skyrim_se, fallout4, etc.)
+/// can use the same multi-drive-aware logic instead of a drive_c-only local
+/// copy.
+pub(crate) fn collect_steam_library_paths(bottle: &Bottle) -> Vec<PathBuf> {
     use std::collections::HashSet;
 
     let mut paths: Vec<PathBuf> = Vec::new();

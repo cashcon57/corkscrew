@@ -643,33 +643,21 @@ fn check_steam_default(bottle: &Bottle) -> Option<PathBuf> {
 }
 
 /// Parse `libraryfolders.vdf` and check each library for the game.
+/// Check all Steam library folders (including non-C: drives) for the game.
+///
+/// Delegates to [`crate::game_registry::collect_steam_library_paths`] which
+/// resolves Windows-style VDF path strings against every `drive_X` directory
+/// present in the bottle, rather than assuming paths are under `drive_c`.
 fn check_steam_library_folders(bottle: &Bottle) -> Option<PathBuf> {
-    let steam_dir = bottle.find_path(&["Program Files (x86)", "Steam"])?;
-    let vdf_path = steam_dir.join("steamapps").join("libraryfolders.vdf");
-
-    // Also try config/libraryfolders.vdf (older Steam layout).
-    let vdf_path = if vdf_path.exists() {
-        vdf_path
-    } else {
-        let alt = steam_dir.join("config").join("libraryfolders.vdf");
-        if alt.exists() {
-            alt
-        } else {
-            return None;
-        }
-    };
-
-    let library_paths = parse_library_folders_vdf(&vdf_path)?;
-
-    for lib_path in library_paths {
-        let common = lib_path.join("steamapps").join("common");
+    let library_paths = crate::game_registry::collect_steam_library_paths(bottle);
+    for steamapps in library_paths {
+        let common = steamapps.join("common");
         if let Some(game_dir) = find_child_case_insensitive(&common, STEAM_GAME_DIR) {
             if game_dir.is_dir() {
                 return Some(game_dir);
             }
         }
     }
-
     None
 }
 
@@ -778,47 +766,6 @@ fn find_child_case_insensitive(parent: &Path, target: &str) -> Option<PathBuf> {
         }
     }
     None
-}
-
-/// Parse Steam's `libraryfolders.vdf` to extract additional library paths.
-fn parse_library_folders_vdf(vdf_path: &Path) -> Option<Vec<PathBuf>> {
-    let content = fs::read_to_string(vdf_path).ok()?;
-    let mut paths = Vec::new();
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = strip_vdf_key(trimmed, "path") {
-            let value = strip_vdf_quotes(rest);
-            if !value.is_empty() {
-                let normalised = value.replace('\\', "/");
-                paths.push(PathBuf::from(normalised));
-            }
-        }
-    }
-
-    if paths.is_empty() {
-        None
-    } else {
-        Some(paths)
-    }
-}
-
-fn strip_vdf_key<'a>(line: &'a str, key: &str) -> Option<&'a str> {
-    let line = line.trim();
-    let expected_key = format!("\"{}\"", key);
-    if !line.starts_with(&expected_key) {
-        return None;
-    }
-    Some(line[expected_key.len()..].trim())
-}
-
-fn strip_vdf_quotes(s: &str) -> String {
-    let s = s.trim();
-    if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
-        s[1..s.len() - 1].to_string()
-    } else {
-        s.to_string()
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1220,43 +1167,6 @@ mod tests {
         };
         let plugin = HogwartsLegacyPlugin;
         assert!(plugin.detect(&bottle).is_none(), "empty dir must not detect");
-    }
-
-    #[test]
-    fn strip_vdf_key_extracts_value() {
-        let line = r#""path"		"C:\SteamLibrary""#;
-        let rest = strip_vdf_key(line, "path").unwrap();
-        assert_eq!(strip_vdf_quotes(rest), r"C:\SteamLibrary");
-    }
-
-    #[test]
-    fn parse_vdf_extracts_paths() {
-        let tmp = tempfile::tempdir().unwrap();
-        let vdf = tmp.path().join("libraryfolders.vdf");
-        fs::write(
-            &vdf,
-            r#"
-"libraryfolders"
-{
-    "0"
-    {
-        "path"		"C:\Program Files (x86)\Steam"
-        "label"		""
-    }
-    "1"
-    {
-        "path"		"D:\SteamLibrary"
-        "label"		""
-    }
-}
-"#,
-        )
-        .unwrap();
-
-        let paths = parse_library_folders_vdf(&vdf).unwrap();
-        assert_eq!(paths.len(), 2);
-        assert_eq!(paths[0], PathBuf::from("C:/Program Files (x86)/Steam"));
-        assert_eq!(paths[1], PathBuf::from("D:/SteamLibrary"));
     }
 
     // --- Mod type auto-detection tests ---
