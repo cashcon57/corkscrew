@@ -372,81 +372,313 @@ pub struct SteamAppManifest {
     pub install_dir: String,
 }
 
+/// Drive letters that Wine exposes inside a bottle as `drive_X` directories.
+/// We check these when scanning for additional Steam library folders.
+const WINE_DRIVE_LETTERS: &[&str] = &["c", "d", "e", "f", "z"];
+
+/// Resolve a Windows absolute path (e.g. `D:\SteamLibrary`) to the
+/// corresponding host path inside a Wine bottle.
+///
+/// Rules:
+/// - Must begin with a single drive letter followed by `:\` or `:/`.
+/// - The drive letter maps to `<bottle_path>/drive_<letter>/`.
+/// - The rest of the path is appended with case-insensitive component
+///   resolution so the result works on case-sensitive filesystems.
+/// - Returns `None` if:
+///   - the path doesn't look like a Windows absolute path,
+///   - the drive directory doesn't exist in the bottle,
+///   - any intermediate component doesn't exist on disk, or
+///   - the resolved path would escape the bottle root (traversal guard).
+fn resolve_windows_path_in_bottle(bottle: &Bottle, windows_path: &str) -> Option<PathBuf> {
+    // Normalise backslashes and strip a leading drive letter.
+    let normalised = windows_path.replace('\\', "/");
+    let trimmed = normalised.trim();
+
+    // Expect `X:/…`
+    let mut chars = trimmed.chars();
+    let drive_letter = chars.next()?.to_ascii_lowercase();
+    if !drive_letter.is_ascii_alphabetic() {
+        return None;
+    }
+    let colon = chars.next()?;
+    if colon != ':' {
+        return None;
+    }
+    let slash = chars.next()?;
+    if slash != '/' {
+        return None;
+    }
+
+    // Build the host drive root: <bottle>/drive_X
+    let drive_dir = bottle.path.join(format!("drive_{}", drive_letter));
+    if !drive_dir.is_dir() {
+        return None;
+    }
+
+    // The remainder after `X:/`
+    let rel: &str = &trimmed[3..]; // safe: we consumed exactly 3 chars above
+
+    // Guard: reject any traversal attempts in the relative part.
+    if rel.split('/').any(|c| c == "..") {
+        log::warn!(
+            "resolve_windows_path_in_bottle: traversal attempt in '{}' — rejected",
+            windows_path
+        );
+        return None;
+    }
+
+    // Walk components case-insensitively so this works on case-sensitive FSes.
+    let mut current = drive_dir;
+    for component in rel.split('/').filter(|c| !c.is_empty()) {
+        let candidate = current.join(component);
+        if candidate.exists() {
+            current = candidate;
+        } else {
+            // Case-insensitive fallback.
+            let component_lower = component.to_lowercase();
+            let mut found = false;
+            if let Ok(entries) = fs::read_dir(&current) {
+                for entry in entries.flatten() {
+                    if entry.file_name().to_string_lossy().to_lowercase() == component_lower {
+                        current = entry.path();
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            if !found {
+                return None;
+            }
+        }
+    }
+
+    // Final containment check: resolved path must still be inside the bottle.
+    let bottle_canonical = bottle.path.canonicalize().ok()?;
+    let current_canonical = current.canonicalize().ok()?;
+    if !current_canonical.starts_with(&bottle_canonical) {
+        log::warn!(
+            "resolve_windows_path_in_bottle: '{}' resolved outside bottle — rejected",
+            windows_path
+        );
+        return None;
+    }
+
+    Some(current)
+}
+
+/// Collect all candidate `steamapps/` directories for a bottle.
+///
+/// Sources (in order):
+/// 1. Primary: `<bottle>/drive_c/Program Files (x86)/Steam/steamapps/`
+/// 2. Additional drives: for each `drive_X` that exists, check
+///    `drive_X/SteamLibrary/steamapps/` and
+///    `drive_X/Program Files (x86)/Steam/steamapps/`.
+/// 3. `libraryfolders.vdf` declared paths from the primary Steam install.
+///
+/// Dedup by canonical path so the same directory discovered via multiple
+/// sources is only returned once.
+fn collect_steam_library_paths(bottle: &Bottle) -> Vec<PathBuf> {
+    use std::collections::HashSet;
+
+    let mut paths: Vec<PathBuf> = Vec::new();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+
+    // Helper: add a steamapps path if it exists and wasn't already added.
+    let mut push = |p: PathBuf| {
+        if p.is_dir() {
+            let key = p.canonicalize().unwrap_or_else(|_| p.clone());
+            if seen.insert(key) {
+                paths.push(p);
+            }
+        }
+    };
+
+    // 1. Primary Steam library (drive_c, Program Files (x86)).
+    if let Some(p) = bottle.find_path(&["Program Files (x86)", "Steam", "steamapps"]) {
+        push(p);
+    }
+    // Also try Program Files (non-x86) on drive_c.
+    if let Some(p) = bottle.find_path(&["Program Files", "Steam", "steamapps"]) {
+        push(p);
+    }
+
+    // 2. Additional drive letters.
+    for letter in WINE_DRIVE_LETTERS {
+        let drive_dir = bottle.path.join(format!("drive_{}", letter));
+        if !drive_dir.is_dir() {
+            continue;
+        }
+
+        // drive_X/SteamLibrary/steamapps
+        let lib = drive_dir.join("SteamLibrary").join("steamapps");
+        push(lib);
+
+        // drive_X/Program Files (x86)/Steam/steamapps
+        let pf86 = drive_dir
+            .join("Program Files (x86)")
+            .join("Steam")
+            .join("steamapps");
+        push(pf86);
+    }
+
+    // 3. libraryfolders.vdf — parse from primary Steam install.
+    let vdf_candidates = [
+        bottle
+            .path
+            .join("drive_c")
+            .join("Program Files (x86)")
+            .join("Steam")
+            .join("steamapps")
+            .join("libraryfolders.vdf"),
+        bottle
+            .path
+            .join("drive_c")
+            .join("Program Files (x86)")
+            .join("Steam")
+            .join("config")
+            .join("libraryfolders.vdf"),
+    ];
+
+    for vdf_path in &vdf_candidates {
+        if !vdf_path.exists() {
+            continue;
+        }
+        if let Some(windows_paths) = parse_library_folders_vdf_raw(vdf_path) {
+            for win_path in windows_paths {
+                if let Some(host_dir) = resolve_windows_path_in_bottle(bottle, &win_path) {
+                    let steamapps = host_dir.join("steamapps");
+                    push(steamapps);
+                }
+            }
+        }
+        // Only parse the first VDF file found.
+        break;
+    }
+
+    paths
+}
+
+/// Parse Steam's `libraryfolders.vdf` and return the raw Windows-style path
+/// strings from `"path"` entries.  Handles `\\` → `\` unescaping.
+fn parse_library_folders_vdf_raw(vdf_path: &Path) -> Option<Vec<String>> {
+    let content = match fs::read_to_string(vdf_path) {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("Failed to read Steam VDF {}: {}", vdf_path.display(), e);
+            return None;
+        }
+    };
+    let mut raw_paths = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = strip_vdf_key(trimmed, "path") {
+            let value = strip_vdf_quotes(rest);
+            if !value.is_empty() {
+                // Unescape double-backslash sequences.
+                let unescaped = value.replace("\\\\", "\\");
+                raw_paths.push(unescaped);
+            }
+        }
+    }
+    if raw_paths.is_empty() {
+        None
+    } else {
+        Some(raw_paths)
+    }
+}
+
 /// Scan a bottle's steamapps directory for all appmanifest files.
 /// Returns games that are NOT already detected by registered plugins.
 pub fn detect_unregistered_steam_games(
     bottle: &Bottle,
     already_detected: &[DetectedGame],
 ) -> Vec<DetectedGame> {
-    let steamapps = match bottle.find_path(&["Program Files (x86)", "Steam", "steamapps"]) {
-        Some(p) => p,
-        None => return Vec::new(),
-    };
+    use std::collections::HashSet;
 
-    let mut found = Vec::new();
-    let Ok(entries) = fs::read_dir(&steamapps) else {
-        return found;
-    };
+    let library_paths = collect_steam_library_paths(bottle);
+    if library_paths.is_empty() {
+        return Vec::new();
+    }
 
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if !name.starts_with("appmanifest_") || !name.ends_with(".acf") {
+    let mut found: Vec<DetectedGame> = Vec::new();
+    // Dedup by canonical appmanifest path to avoid double-counting the same
+    // game when multiple sources resolve to the same library folder.
+    let mut seen_manifests: HashSet<PathBuf> = HashSet::new();
+
+    for steamapps in &library_paths {
+        let Ok(entries) = fs::read_dir(steamapps) else {
             continue;
-        }
-
-        let manifest = match parse_appmanifest(&entry.path()) {
-            Some(m) => m,
-            None => continue,
         };
 
-        // Skip if already detected by a registered plugin
-        let manifest_dir_lower = manifest.install_dir.to_lowercase();
-        if already_detected.iter().any(|g| {
-            g.game_path.file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| n.to_lowercase() == manifest_dir_lower)
-                .unwrap_or(false)
-            || g.game_path.to_string_lossy().to_lowercase().ends_with(&format!("/{}", manifest_dir_lower))
-            || g.game_path.to_string_lossy().to_lowercase().ends_with(&format!("\\{}", manifest_dir_lower))
-        }) {
-            continue;
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.starts_with("appmanifest_") || !name.ends_with(".acf") {
+                continue;
+            }
+
+            let acf_path = entry.path();
+
+            // Dedup: skip if we've already processed this manifest file.
+            let canonical_acf = acf_path.canonicalize().unwrap_or_else(|_| acf_path.clone());
+            if !seen_manifests.insert(canonical_acf) {
+                continue;
+            }
+
+            let manifest = match parse_appmanifest(&acf_path) {
+                Some(m) => m,
+                None => continue,
+            };
+
+            // Skip if already detected by a registered plugin.
+            let manifest_dir_lower = manifest.install_dir.to_lowercase();
+            if already_detected.iter().any(|g| {
+                g.game_path.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.to_lowercase() == manifest_dir_lower)
+                    .unwrap_or(false)
+                    || g.game_path
+                        .to_string_lossy()
+                        .to_lowercase()
+                        .ends_with(&format!("/{}", manifest_dir_lower))
+                    || g.game_path
+                        .to_string_lossy()
+                        .to_lowercase()
+                        .ends_with(&format!("\\{}", manifest_dir_lower))
+            }) {
+                continue;
+            }
+
+            // Resolve the actual game path.
+            let common = steamapps.join("common");
+            let game_path = match find_child_case_insensitive(&common, &manifest.install_dir) {
+                Some(p) if p.is_dir() => p,
+                _ => continue,
+            };
+
+            // Find the first .exe in the game directory (heuristic).
+            let exe_path = find_main_executable(&game_path);
+
+            // Derive a game_id from the app name.
+            let game_id = slugify_game_name(&manifest.name);
+
+            // Resolve the Nexus slug via curated index, fall back to slug.
+            let nexus_slug =
+                crate::vortex_index::lookup_extension_for_steam_appid(&manifest.app_id)
+                    .map(|e| e.nexus_slug.clone())
+                    .unwrap_or_else(|| game_id.replace('-', ""));
+
+            found.push(DetectedGame {
+                game_id: game_id.clone(),
+                display_name: manifest.name.clone(),
+                nexus_slug,
+                game_path: game_path.clone(),
+                exe_path,
+                data_dir: game_path,
+                bottle_name: bottle.name.clone(),
+                bottle_path: bottle.path.clone(),
+                steam_app_id: Some(manifest.app_id.clone()),
+            });
         }
-
-        // Resolve the actual game path
-        let common = steamapps.join("common");
-        let game_path = match find_child_case_insensitive(&common, &manifest.install_dir) {
-            Some(p) if p.is_dir() => p,
-            _ => continue,
-        };
-
-        // Find the first .exe in the game directory (heuristic)
-        let exe_path = find_main_executable(&game_path);
-
-        // Derive a game_id from the app name. The internal id is just for
-        // local identification — slugify is fine.
-        let game_id = slugify_game_name(&manifest.name);
-
-        // Resolve the *Nexus* slug separately. Nexus uses its own slugs that
-        // don't match our slugify output (Nexus drops dashes:
-        // "Tainted Grail: The Fall of Avalon" → "taintedgrailthefallofavalon",
-        // not "tainted-grail-the-fall-of-avalon"). The curated vortex_index
-        // ships the correct Nexus slug per Steam appid; consult it first and
-        // fall back to a dash-stripped slugify if the appid isn't indexed.
-        let nexus_slug = crate::vortex_index::lookup_extension_for_steam_appid(&manifest.app_id)
-            .map(|e| e.nexus_slug.clone())
-            .unwrap_or_else(|| game_id.replace('-', ""));
-
-        found.push(DetectedGame {
-            game_id: game_id.clone(),
-            display_name: manifest.name.clone(),
-            nexus_slug,
-            game_path: game_path.clone(),
-            exe_path,
-            data_dir: game_path,
-            bottle_name: bottle.name.clone(),
-            bottle_path: bottle.path.clone(),
-            steam_app_id: Some(manifest.app_id.clone()),
-        });
     }
 
     found
@@ -560,46 +792,59 @@ struct UnregisteredSteamGame {
 /// [`detect_unregistered_steam_games`] (callers all over the codebase use it),
 /// so we accept a small amount of duplication here.
 fn scan_steam_games_with_appid(bottle: &Bottle) -> Vec<UnregisteredSteamGame> {
-    let steamapps = match bottle.find_path(&["Program Files (x86)", "Steam", "steamapps"]) {
-        Some(p) => p,
-        None => return Vec::new(),
-    };
+    use std::collections::HashSet;
 
-    let mut out = Vec::new();
-    let Ok(entries) = fs::read_dir(&steamapps) else {
-        return out;
-    };
+    let library_paths = collect_steam_library_paths(bottle);
+    if library_paths.is_empty() {
+        return Vec::new();
+    }
 
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if !name.starts_with("appmanifest_") || !name.ends_with(".acf") {
+    let mut out: Vec<UnregisteredSteamGame> = Vec::new();
+    let mut seen_manifests: HashSet<PathBuf> = HashSet::new();
+
+    for steamapps in &library_paths {
+        let Ok(entries) = fs::read_dir(steamapps) else {
             continue;
+        };
+
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.starts_with("appmanifest_") || !name.ends_with(".acf") {
+                continue;
+            }
+
+            let acf_path = entry.path();
+            let canonical_acf = acf_path.canonicalize().unwrap_or_else(|_| acf_path.clone());
+            if !seen_manifests.insert(canonical_acf) {
+                continue;
+            }
+
+            let manifest = match parse_appmanifest(&acf_path) {
+                Some(m) => m,
+                None => continue,
+            };
+            let common = steamapps.join("common");
+            let game_path = match find_child_case_insensitive(&common, &manifest.install_dir) {
+                Some(p) if p.is_dir() => p,
+                _ => continue,
+            };
+            let exe_path = find_main_executable(&game_path);
+            let game_id = slugify_game_name(&manifest.name);
+            out.push(UnregisteredSteamGame {
+                game: DetectedGame {
+                    game_id: game_id.clone(),
+                    display_name: manifest.name.clone(),
+                    nexus_slug: game_id,
+                    game_path: game_path.clone(),
+                    exe_path,
+                    data_dir: game_path,
+                    bottle_name: bottle.name.clone(),
+                    bottle_path: bottle.path.clone(),
+                    steam_app_id: None,
+                },
+                app_id: manifest.app_id,
+            });
         }
-        let manifest = match parse_appmanifest(&entry.path()) {
-            Some(m) => m,
-            None => continue,
-        };
-        let common = steamapps.join("common");
-        let game_path = match find_child_case_insensitive(&common, &manifest.install_dir) {
-            Some(p) if p.is_dir() => p,
-            _ => continue,
-        };
-        let exe_path = find_main_executable(&game_path);
-        let game_id = slugify_game_name(&manifest.name);
-        out.push(UnregisteredSteamGame {
-            game: DetectedGame {
-                game_id: game_id.clone(),
-                display_name: manifest.name.clone(),
-                nexus_slug: game_id,
-                game_path: game_path.clone(),
-                exe_path,
-                data_dir: game_path,
-                bottle_name: bottle.name.clone(),
-                bottle_path: bottle.path.clone(),
-            steam_app_id: None,
-            },
-            app_id: manifest.app_id,
-        });
     }
     out
 }
@@ -1146,5 +1391,277 @@ mod tests {
         let _ = collect_extension_suggestions(&[]);
         let many: Vec<String> = vec!["skyrimse".into(), "fallout4".into()];
         let _ = collect_extension_suggestions(&many);
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-library Steam scanner tests
+    // -----------------------------------------------------------------------
+
+    /// Write a minimal appmanifest ACF file for testing.
+    fn write_appmanifest(dir: &Path, app_id: &str, name: &str, install_dir: &str) {
+        let content = format!(
+            "\"AppState\"\n{{\n\
+             \t\"appid\"\t\"{app_id}\"\n\
+             \t\"name\"\t\"{name}\"\n\
+             \t\"installdir\"\t\"{install_dir}\"\n\
+             \t\"StateFlags\"\t\"4\"\n\
+             }}\n"
+        );
+        fs::write(
+            dir.join(format!("appmanifest_{}.acf", app_id)),
+            content,
+        )
+        .unwrap();
+    }
+
+    /// Create a minimal Bottle pointing at a temp directory.
+    fn make_bottle(path: &Path) -> Bottle {
+        Bottle {
+            name: "Test".into(),
+            path: path.to_path_buf(),
+            source: "test".into(),
+        }
+    }
+
+    #[test]
+    fn multi_drive_steam_libraries_detected() {
+        let root = tempfile::tempdir().unwrap();
+        let bottle_path = root.path().to_path_buf();
+
+        // Primary Steam install on drive_c.
+        let primary_steamapps = bottle_path
+            .join("drive_c")
+            .join("Program Files (x86)")
+            .join("Steam")
+            .join("steamapps");
+        fs::create_dir_all(&primary_steamapps).unwrap();
+        let primary_common = primary_steamapps.join("common");
+        fs::create_dir_all(primary_common.join("GameOnC")).unwrap();
+        write_appmanifest(&primary_steamapps, "100", "Game On C", "GameOnC");
+
+        // Additional Steam library on drive_d.
+        let drive_d_steamapps = bottle_path
+            .join("drive_d")
+            .join("SteamLibrary")
+            .join("steamapps");
+        fs::create_dir_all(&drive_d_steamapps).unwrap();
+        let drive_d_common = drive_d_steamapps.join("common");
+        fs::create_dir_all(drive_d_common.join("GameOnD")).unwrap();
+        write_appmanifest(&drive_d_steamapps, "200", "Game On D", "GameOnD");
+
+        let bottle = make_bottle(&bottle_path);
+        let results = detect_unregistered_steam_games(&bottle, &[]);
+
+        let ids: Vec<&str> = results.iter().map(|g| g.game_id.as_str()).collect();
+        assert!(
+            ids.contains(&"game-on-c"),
+            "Expected game-on-c, got: {:?}",
+            ids
+        );
+        assert!(
+            ids.contains(&"game-on-d"),
+            "Expected game-on-d, got: {:?}",
+            ids
+        );
+        assert_eq!(results.len(), 2, "Should detect exactly 2 games, got: {:?}", ids);
+    }
+
+    #[test]
+    fn libraryfolders_vdf_parsed_and_scanned() {
+        let root = tempfile::tempdir().unwrap();
+        let bottle_path = root.path().to_path_buf();
+
+        // Primary Steam install — only used to host the VDF, no games here.
+        let primary_steamapps = bottle_path
+            .join("drive_c")
+            .join("Program Files (x86)")
+            .join("Steam")
+            .join("steamapps");
+        fs::create_dir_all(&primary_steamapps).unwrap();
+
+        // Write a realistic libraryfolders.vdf pointing at D:\SteamLibrary.
+        let vdf_content = "\"libraryfolders\"\n\
+            {\n\
+            \t\"0\"\n\
+            \t{\n\
+            \t\t\"path\"\t\t\"C:\\\\Program Files (x86)\\\\Steam\"\n\
+            \t\t\"label\"\t\t\"\"\n\
+            \t}\n\
+            \t\"1\"\n\
+            \t{\n\
+            \t\t\"path\"\t\t\"D:\\\\SteamLibrary\"\n\
+            \t\t\"label\"\t\t\"D Drive\"\n\
+            \t}\n\
+            }\n";
+        fs::write(primary_steamapps.join("libraryfolders.vdf"), vdf_content).unwrap();
+
+        // D:\SteamLibrary\steamapps — the VDF-declared library.
+        let d_steamapps = bottle_path
+            .join("drive_d")
+            .join("SteamLibrary")
+            .join("steamapps");
+        fs::create_dir_all(&d_steamapps).unwrap();
+        let d_common = d_steamapps.join("common");
+        fs::create_dir_all(d_common.join("CoolGame")).unwrap();
+        write_appmanifest(&d_steamapps, "999", "Cool Game", "CoolGame");
+
+        let bottle = make_bottle(&bottle_path);
+        let results = detect_unregistered_steam_games(&bottle, &[]);
+
+        let ids: Vec<&str> = results.iter().map(|g| g.game_id.as_str()).collect();
+        assert!(
+            ids.contains(&"cool-game"),
+            "Expected cool-game from VDF library, got: {:?}",
+            ids
+        );
+    }
+
+    #[test]
+    fn dedup_same_game_in_two_libraries() {
+        let root = tempfile::tempdir().unwrap();
+        let bottle_path = root.path().to_path_buf();
+
+        // The drive_d SteamLibrary folder is the canonical location.
+        let d_steamapps = bottle_path
+            .join("drive_d")
+            .join("SteamLibrary")
+            .join("steamapps");
+        fs::create_dir_all(&d_steamapps).unwrap();
+        let d_common = d_steamapps.join("common");
+        fs::create_dir_all(d_common.join("SharedGame")).unwrap();
+        write_appmanifest(&d_steamapps, "500", "Shared Game", "SharedGame");
+
+        // Primary drive_c Steam install — points at drive_d via VDF so the
+        // same library would be discovered twice.
+        let primary_steamapps = bottle_path
+            .join("drive_c")
+            .join("Program Files (x86)")
+            .join("Steam")
+            .join("steamapps");
+        fs::create_dir_all(&primary_steamapps).unwrap();
+
+        let vdf_content = "\"libraryfolders\"\n\
+            {\n\
+            \t\"1\"\n\
+            \t{\n\
+            \t\t\"path\"\t\t\"D:\\\\SteamLibrary\"\n\
+            \t}\n\
+            }\n";
+        fs::write(primary_steamapps.join("libraryfolders.vdf"), vdf_content).unwrap();
+
+        let bottle = make_bottle(&bottle_path);
+        let results = detect_unregistered_steam_games(&bottle, &[]);
+
+        assert_eq!(
+            results.len(),
+            1,
+            "Dedup should prevent double-counting — got: {:?}",
+            results.iter().map(|g| &g.game_id).collect::<Vec<_>>()
+        );
+        assert_eq!(results[0].game_id, "shared-game");
+    }
+
+    #[test]
+    fn no_vdf_falls_back_to_drive_scan_only() {
+        let root = tempfile::tempdir().unwrap();
+        let bottle_path = root.path().to_path_buf();
+
+        // drive_c primary — no VDF file.
+        let primary_steamapps = bottle_path
+            .join("drive_c")
+            .join("Program Files (x86)")
+            .join("Steam")
+            .join("steamapps");
+        fs::create_dir_all(&primary_steamapps).unwrap();
+        let c_common = primary_steamapps.join("common");
+        fs::create_dir_all(c_common.join("CGame")).unwrap();
+        write_appmanifest(&primary_steamapps, "10", "C Game", "CGame");
+
+        // drive_e SteamLibrary — no VDF reference.
+        let e_steamapps = bottle_path
+            .join("drive_e")
+            .join("SteamLibrary")
+            .join("steamapps");
+        fs::create_dir_all(&e_steamapps).unwrap();
+        let e_common = e_steamapps.join("common");
+        fs::create_dir_all(e_common.join("EGame")).unwrap();
+        write_appmanifest(&e_steamapps, "20", "E Game", "EGame");
+
+        let bottle = make_bottle(&bottle_path);
+        let results = detect_unregistered_steam_games(&bottle, &[]);
+
+        let ids: Vec<&str> = results.iter().map(|g| g.game_id.as_str()).collect();
+        assert!(ids.contains(&"c-game"), "Expected c-game, got: {:?}", ids);
+        assert!(ids.contains(&"e-game"), "Expected e-game, got: {:?}", ids);
+    }
+
+    #[test]
+    fn malformed_vdf_does_not_crash() {
+        let root = tempfile::tempdir().unwrap();
+        let bottle_path = root.path().to_path_buf();
+
+        let primary_steamapps = bottle_path
+            .join("drive_c")
+            .join("Program Files (x86)")
+            .join("Steam")
+            .join("steamapps");
+        fs::create_dir_all(&primary_steamapps).unwrap();
+
+        // Write a deliberately malformed VDF.
+        fs::write(
+            primary_steamapps.join("libraryfolders.vdf"),
+            "this is not valid vdf content\x00\x01\x02\n{{{{{}}",
+        )
+        .unwrap();
+
+        let bottle = make_bottle(&bottle_path);
+        // Should not panic — just return an empty list.
+        let results = detect_unregistered_steam_games(&bottle, &[]);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn resolve_windows_path_rejects_traversal() {
+        let root = tempfile::tempdir().unwrap();
+        let bottle_path = root.path().to_path_buf();
+        fs::create_dir_all(bottle_path.join("drive_c")).unwrap();
+
+        let bottle = make_bottle(&bottle_path);
+        // Traversal via `..` should be rejected.
+        assert!(
+            resolve_windows_path_in_bottle(&bottle, "C:\\..\\etc\\passwd").is_none(),
+            "Traversal path should be rejected"
+        );
+    }
+
+    #[test]
+    fn resolve_windows_path_missing_drive_returns_none() {
+        let root = tempfile::tempdir().unwrap();
+        let bottle_path = root.path().to_path_buf();
+        // Only drive_c exists.
+        fs::create_dir_all(bottle_path.join("drive_c")).unwrap();
+
+        let bottle = make_bottle(&bottle_path);
+        // E: drive doesn't exist in the bottle.
+        assert!(
+            resolve_windows_path_in_bottle(&bottle, "E:\\SteamLibrary").is_none(),
+            "Missing drive should return None"
+        );
+    }
+
+    #[test]
+    fn resolve_windows_path_valid_path() {
+        let root = tempfile::tempdir().unwrap();
+        let bottle_path = root.path().to_path_buf();
+        let target = bottle_path.join("drive_d").join("SteamLibrary");
+        fs::create_dir_all(&target).unwrap();
+
+        let bottle = make_bottle(&bottle_path);
+        let resolved = resolve_windows_path_in_bottle(&bottle, "D:\\SteamLibrary");
+        assert!(resolved.is_some(), "Should resolve D:\\SteamLibrary");
+        // Canonicalize both for comparison.
+        let resolved_canon = resolved.unwrap().canonicalize().unwrap();
+        let expected_canon = target.canonicalize().unwrap();
+        assert_eq!(resolved_canon, expected_canon);
     }
 }
