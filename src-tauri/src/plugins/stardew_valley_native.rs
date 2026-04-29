@@ -8,8 +8,88 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::Deserialize;
+use thiserror::Error;
+
 use crate::bottles::Bottle;
 use crate::games::{DetectedGame, GamePlugin};
+
+// ---------------------------------------------------------------------------
+// SMAPI manifest types
+// ---------------------------------------------------------------------------
+
+/// Error type for manifest parsing operations.
+#[derive(Debug, Error)]
+pub enum ManifestError {
+    #[error("manifest file not found: {0}")]
+    NotFound(String),
+    #[error("malformed manifest: {0}")]
+    Malformed(String),
+}
+
+/// A SMAPI mod dependency entry from `manifest.json`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct SdvDependency {
+    /// The unique identifier of the required mod.
+    #[serde(rename = "UniqueID")]
+    pub unique_id: String,
+    /// Whether this dependency is required for the mod to function.
+    /// Defaults to `true` per SMAPI convention when omitted.
+    #[serde(default = "default_required")]
+    pub is_required: bool,
+    /// Optional minimum version of the dependency required.
+    pub minimum_version: Option<String>,
+}
+
+fn default_required() -> bool {
+    true
+}
+
+/// Parsed representation of a SMAPI mod's `manifest.json`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct SdvModManifest {
+    /// The human-readable mod name (from `Name`).
+    pub name: String,
+    /// The mod version string (from `Version`).
+    pub version: String,
+    /// The globally-unique mod identifier (from `UniqueID`).
+    ///
+    /// SMAPI requires this field; parsing fails if it is absent.
+    #[serde(rename = "UniqueID")]
+    pub unique_id: String,
+    /// Optional list of mod dependencies (from `Dependencies`).
+    #[serde(default)]
+    pub dependencies: Vec<SdvDependency>,
+    /// The minimum SMAPI API version required by this mod.
+    pub minimum_api_version: Option<String>,
+}
+
+/// Parse a SMAPI mod's `manifest.json`.
+///
+/// Returns [`ManifestError::NotFound`] when the file does not exist and
+/// [`ManifestError::Malformed`] for I/O errors, JSON parse failures, or
+/// missing required fields (UniqueID is required per SMAPI convention).
+pub fn parse_manifest(path: &Path) -> Result<SdvModManifest, ManifestError> {
+    if !path.exists() {
+        return Err(ManifestError::NotFound(path.display().to_string()));
+    }
+    let contents = std::fs::read_to_string(path)
+        .map_err(|e| ManifestError::Malformed(format!("read failed: {}", e)))?;
+    serde_json::from_str(&contents)
+        .map_err(|e| ManifestError::Malformed(format!("json parse failed: {}", e)))
+}
+
+/// Return the canonical SMAPI mods directory for a detected Stardew Valley game.
+///
+/// SMAPI's installer places mods at `<gameDir>/Mods/`. For the native macOS
+/// install, that resolves to `<app_bundle>/Contents/MacOS/Mods/`. Whether
+/// SMAPI's runtime also reads from `~/Library/Application Support/StardewValley/Mods/`
+/// is an open spike TODO; this function returns the bundle-internal path only.
+pub fn resolve_mods_dir(detected: &DetectedGame) -> PathBuf {
+    detected.game_path.join("Mods")
+}
 
 /// Game plugin for Stardew Valley (native macOS).
 ///
@@ -303,6 +383,138 @@ mod tests {
             );
         }
     }
+
+    // -----------------------------------------------------------------------
+    // SMAPI manifest parser tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_manifest_extracts_required_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("manifest.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "Name": "Test Mod",
+                "Author": "tester",
+                "Version": "1.0.0",
+                "Description": "Hello",
+                "UniqueID": "tester.TestMod",
+                "EntryDll": "TestMod.dll"
+            }"#,
+        )
+        .unwrap();
+        let m = parse_manifest(&path).unwrap();
+        assert_eq!(m.name, "Test Mod");
+        assert_eq!(m.version, "1.0.0");
+        assert_eq!(m.unique_id, "tester.TestMod");
+        assert!(m.dependencies.is_empty());
+        assert!(m.minimum_api_version.is_none());
+    }
+
+    #[test]
+    fn parse_manifest_handles_dependencies() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("manifest.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "Name": "Dep Mod",
+                "Version": "0.1.0",
+                "UniqueID": "tester.DepMod",
+                "Dependencies": [
+                    { "UniqueID": "Pathoschild.ContentPatcher" },
+                    { "UniqueID": "tester.OtherMod", "IsRequired": false, "MinimumVersion": "1.2.3" }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let m = parse_manifest(&path).unwrap();
+        assert_eq!(m.dependencies.len(), 2);
+        assert_eq!(m.dependencies[0].unique_id, "Pathoschild.ContentPatcher");
+        assert!(m.dependencies[0].is_required, "default IsRequired = true");
+        assert!(!m.dependencies[1].is_required);
+        assert_eq!(
+            m.dependencies[1].minimum_version.as_deref(),
+            Some("1.2.3")
+        );
+    }
+
+    #[test]
+    fn parse_manifest_handles_minimum_api_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("manifest.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "Name": "API Mod",
+                "Version": "0.1.0",
+                "UniqueID": "tester.ApiMod",
+                "MinimumApiVersion": "4.0.0"
+            }"#,
+        )
+        .unwrap();
+        let m = parse_manifest(&path).unwrap();
+        assert_eq!(m.minimum_api_version.as_deref(), Some("4.0.0"));
+    }
+
+    #[test]
+    fn parse_manifest_returns_not_found_for_missing_file() {
+        let result = parse_manifest(Path::new("/nonexistent/manifest.json"));
+        assert!(matches!(result, Err(ManifestError::NotFound(_))));
+    }
+
+    #[test]
+    fn parse_manifest_returns_malformed_for_bad_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("manifest.json");
+        std::fs::write(&path, b"not json {").unwrap();
+        let result = parse_manifest(&path);
+        assert!(matches!(result, Err(ManifestError::Malformed(_))));
+    }
+
+    #[test]
+    fn parse_manifest_returns_malformed_for_missing_unique_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("manifest.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "Name": "No ID",
+                "Version": "0.1.0"
+            }"#,
+        )
+        .unwrap();
+        let result = parse_manifest(&path);
+        assert!(matches!(result, Err(ManifestError::Malformed(_))));
+    }
+
+    #[test]
+    fn resolve_mods_dir_returns_game_path_mods_for_native() {
+        let game_path =
+            std::path::PathBuf::from("/Applications/Stardew Valley.app/Contents/MacOS");
+        let detected = DetectedGame {
+            game_id: "stardew_valley_native".into(),
+            display_name: "Stardew Valley".into(),
+            nexus_slug: "stardewvalley".into(),
+            game_path: game_path.clone(),
+            exe_path: None,
+            data_dir: game_path.join("Mods"),
+            runtime: crate::runtime::GameRuntime::Native(crate::runtime::NativeContext {
+                app_bundle_path: std::path::PathBuf::from("/Applications/Stardew Valley.app"),
+                game_data_root: game_path.clone(),
+                architecture: crate::runtime::Architecture::AppleSilicon,
+                sandboxed: false,
+                source: crate::runtime::NativeSource::Steam,
+            }),
+            steam_app_id: Some("413150".into()),
+        };
+        assert_eq!(resolve_mods_dir(&detected), game_path.join("Mods"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Path shape tests (existing)
+    // -----------------------------------------------------------------------
 
     /// Verify path shapes: game_path, exe_path, data_dir all derive from
     /// <bundle>/Contents/MacOS as the spec requires.
