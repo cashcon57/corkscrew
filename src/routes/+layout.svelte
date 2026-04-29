@@ -8,7 +8,7 @@
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
   import { getVersion } from "@tauri-apps/api/app";
-  import { downloadFromNexus, installMod, getAllGames, getDownloadQueue, retryDownload, cancelDownload, clearFinishedDownloads, onDownloadQueueUpdate, listProfiles, listInstalledCollections, getConfig, setConfigValue, launchGame, getAllInterruptedInstalls, resumeCollectionInstall, abandonCollectionInstall, getCheckpointModNames, getPendingWabbajackInstalls, dismissWabbajackInstall, checkSkyrimVersion, getPinnedGameVersion, pinGameVersion, checkSteamStatus, addToSteam, fetchUpdate, installUpdate, chatCheckNewCrashes, listKnownUninstalledGames } from "$lib/api";
+  import { downloadFromNexus, installMod, getAllGames, getDownloadQueue, retryDownload, cancelDownload, clearFinishedDownloads, onDownloadQueueUpdate, listProfiles, listInstalledCollections, getConfig, setConfigValue, launchGame, getAllInterruptedInstalls, resumeCollectionInstall, abandonCollectionInstall, getCheckpointModNames, getPendingWabbajackInstalls, dismissWabbajackInstall, checkSkyrimVersion, getPinnedGameVersion, pinGameVersion, checkSteamStatus, addToSteam, fetchUpdate, installUpdate, chatCheckNewCrashes, listKnownUninstalledGames, getNativeMode } from "$lib/api";
   import { resumeInstallTracking } from "$lib/installService";
   import { initHashingListener, destroyHashingListener, dismissHashingBanner } from "$lib/hashingService";
   import { hashingProgress } from "$lib/stores";
@@ -285,6 +285,13 @@
     window.addEventListener('error', handleGlobalError);
 
     loadDetectedGames();
+
+    // Hydrate nativeMode store from persisted config so the topbar
+    // toggle reflects the user's last-set state on cold launch.
+    getNativeMode()
+      .then((enabled: boolean) => nativeMode.set(enabled))
+      .catch((err: unknown) => console.warn('getNativeMode hydration failed:', err));
+
     getVersion().then(async (v) => {
       appVersion.set(v);
       // Show "Updated successfully!" toast if the app version changed since last launch

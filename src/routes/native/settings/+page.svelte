@@ -1,9 +1,11 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
   import { setNativeMode } from "$lib/api";
+  import { nativeMode } from "$lib/stores";
 
   async function disableNativeMode() {
     await setNativeMode(false).catch((err) => console.error("setNativeMode(false) failed:", err));
+    nativeMode.set(false);
     goto("/");
   }
 </script>
