@@ -141,10 +141,17 @@ pub fn deploy_native_inner(
     modsettings_path: &Path,
 ) -> Result<DeployResult, DeployerError> {
     // 1. Reject Wine-hosted games — this function is native-only.
-    detected
+    // Also reject sandboxed bundles: the App Sandbox prevents file modifications.
+    let native_ctx = detected
         .runtime
         .native()
         .ok_or_else(|| DeployerError::Other("expected native runtime for BG3 deploy".into()))?;
+    if native_ctx.sandboxed {
+        return Err(DeployerError::Other(format!(
+            "native modding refused for sandboxed app: {}",
+            native_ctx.app_bundle_path.display()
+        )));
+    }
 
     // 2. Create directories.
     std::fs::create_dir_all(mods_dir)
@@ -191,6 +198,16 @@ pub fn deploy_native_inner(
     let canonical_mods_dir = mods_dir
         .canonicalize()
         .unwrap_or_else(|_| mods_dir.to_path_buf());
+
+    // Pre-deploy snapshot (best-effort — failure must not abort deploy).
+    if let Err(e) = crate::rollback::create_native_snapshot(
+        db,
+        &detected.game_id,
+        "bg3-deploy",
+        "Baldur's Gate 3 native deploy",
+    ) {
+        log::warn!("snapshot before BG3 deploy failed: {}", e);
+    }
 
     // 5. Walk enabled mods from the database.
     let enabled_mods = db
@@ -899,6 +916,91 @@ mod tests {
         assert!(
             mods_dir.join("valid.pak").exists(),
             "valid.pak should be deployed into mods_dir"
+        );
+    }
+
+    // ── Snapshot integration tests (Task 6.1) ───────────────────────────────
+
+    /// deploy_native_inner() creates a snapshot row in the DB before deploying.
+    #[test]
+    fn bg3_deploy_native_creates_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mods_dir = tmp.path().join("Mods");
+        let modsettings_path = tmp.path().join("PlayerProfiles/Public/modsettings.lsx");
+
+        let db_path = tmp.path().join("test.db");
+        let db = Arc::new(crate::database::ModDatabase::new(&db_path).unwrap());
+        // rollback schema is outside migrations; must be initialised explicitly.
+        crate::rollback::init_schema(&db).unwrap();
+
+        let pak_bytes = make_minimal_lspk("Mods/TestMod/meta.lsx", TEST_META_LSX_XML);
+        setup_mod_with_pak(
+            &db,
+            "baldurs_gate_3_native",
+            tmp.path(),
+            "TestMod.pak",
+            &pak_bytes,
+        );
+
+        let detected = fake_detected_native(tmp.path());
+        deploy_native_inner(&detected, &db, &mods_dir, &modsettings_path).unwrap();
+
+        let snapshots =
+            crate::rollback::list_snapshots(&db, "baldurs_gate_3_native", "").unwrap();
+        assert!(
+            !snapshots.is_empty(),
+            "deploy_native_inner should have created at least one snapshot"
+        );
+        assert_eq!(
+            snapshots[0].name, "bg3-deploy",
+            "snapshot name must be 'bg3-deploy'"
+        );
+    }
+
+    // ── Sandbox refusal tests (Task 6.2) ────────────────────────────────────
+
+    /// `deploy_native_inner` must return an error immediately when the game's
+    /// `NativeContext.sandboxed` flag is true. No files should be written and
+    /// the error message must mention "sandboxed".
+    #[test]
+    fn bg3_deploy_native_refuses_sandboxed_game() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mods_dir = tmp.path().join("Mods");
+        let modsettings_path = tmp.path().join("PlayerProfiles/Public/modsettings.lsx");
+
+        let db_path = tmp.path().join("test.db");
+        let db = Arc::new(crate::database::ModDatabase::new(&db_path).unwrap());
+
+        // Build a DetectedGame with sandboxed = true.
+        let detected = DetectedGame {
+            game_id: "baldurs_gate_3_native".into(),
+            display_name: "Baldur's Gate 3 (Native)".into(),
+            nexus_slug: "baldursgate3".into(),
+            game_path: tmp.path().to_path_buf(),
+            exe_path: Some(tmp.path().join("bg3")),
+            data_dir: tmp.path().join("Mods"),
+            runtime: GameRuntime::Native(NativeContext {
+                app_bundle_path: tmp.path().to_path_buf(),
+                game_data_root: tmp.path().to_path_buf(),
+                architecture: Architecture::Universal,
+                sandboxed: true, // ← sandboxed
+                source: NativeSource::Steam,
+            }),
+            steam_app_id: Some("1086940".into()),
+        };
+
+        let result = deploy_native_inner(&detected, &db, &mods_dir, &modsettings_path);
+
+        assert!(result.is_err(), "deploy_native_inner must refuse sandboxed game");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("sandboxed"),
+            "error must mention 'sandboxed': {msg}"
+        );
+        // mods_dir must not have been created.
+        assert!(
+            !mods_dir.exists(),
+            "mods_dir must not be created for sandboxed game"
         );
     }
 }

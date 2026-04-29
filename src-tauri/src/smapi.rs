@@ -15,15 +15,16 @@
 //! See the spike spec at `docs/superpowers/plans/2026-04-28-native-macos-game-support-smapi-install-spec.md`
 //! for the full procedure and source references.
 //!
-//! ## Deferred items
+//! ## Pre-operation snapshots
 //!
-//! - **Pre-install snapshot**: `rollback::create_snapshot` requires a
-//!   `&ModDatabase` which `install` does not have at this call site.
-//!   Integration deferred to Task 6.1.
+//! Both `install` and `uninstall` accept a `&Arc<ModDatabase>` and call
+//! `rollback::create_native_snapshot` (best-effort) before mutating the bundle.
+//! A snapshot failure is logged via `log::warn` and does NOT abort the operation.
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use thiserror::Error;
 
@@ -90,6 +91,8 @@ pub fn installed_version(app_bundle: &Path) -> Option<String> {
 ///   (`SMAPI-X.Y.Z-installer.zip`).  The zip must contain a nested
 ///   `install.dat` (a second zip with the actual bundle payload) somewhere
 ///   in its directory tree — typically at `macOS/install.dat`.
+/// * `db` — mod database; used to create a pre-install snapshot (best-effort,
+///   a snapshot failure does not abort the install).
 ///
 /// # Procedure
 ///
@@ -108,13 +111,22 @@ pub fn installed_version(app_bundle: &Path) -> Option<String> {
 ///    (if the source exists).
 /// 9. Create `Contents/MacOS/Mods/` if missing.
 ///
-/// Quarantine xattr clearing and pre-install snapshot are deferred (see
-/// module-level doc).
-pub fn install(app_bundle: &Path, installer_archive: &Path) -> Result<(), SmapiError> {
+/// Quarantine xattr clearing is handled by the caller via [`clear_quarantine`].
+pub fn install(
+    app_bundle: &Path,
+    installer_archive: &Path,
+    db: &Arc<crate::database::ModDatabase>,
+) -> Result<(), SmapiError> {
     // 0. Validate inputs.
     if !app_bundle.is_dir() {
         return Err(SmapiError::Other(format!(
             "app_bundle is not a directory: {}",
+            app_bundle.display()
+        )));
+    }
+    if crate::native_scanner::is_sandboxed(app_bundle) {
+        return Err(SmapiError::Other(format!(
+            "SMAPI cannot install in sandboxed bundle: {}",
             app_bundle.display()
         )));
     }
@@ -123,6 +135,16 @@ pub fn install(app_bundle: &Path, installer_archive: &Path) -> Result<(), SmapiE
             "installer archive not found: {}",
             installer_archive.display()
         )));
+    }
+
+    // Pre-install snapshot (best-effort — failure must not abort install).
+    if let Err(e) = crate::rollback::create_native_snapshot(
+        db,
+        "stardew_valley_native",
+        "smapi-install",
+        &format!("SMAPI install in {}", app_bundle.display()),
+    ) {
+        log::warn!("snapshot before SMAPI install failed: {}", e);
     }
 
     // 1. Extract the outer installer zip.
@@ -200,11 +222,23 @@ pub fn install(app_bundle: &Path, installer_archive: &Path) -> Result<(), SmapiE
 /// mutations made by `install`: deletes SMAPI files, restores the
 /// vanilla launcher from `StardewValley-original`, preserves `Mods/`.
 ///
+/// * `db` — mod database; used to create a pre-uninstall snapshot (best-effort,
+///   a snapshot failure does not abort the uninstall).
+///
 /// Idempotent: calling on a vanilla bundle is a no-op (returns Ok).
-pub fn uninstall(app_bundle: &Path) -> Result<(), SmapiError> {
+pub fn uninstall(
+    app_bundle: &Path,
+    db: &Arc<crate::database::ModDatabase>,
+) -> Result<(), SmapiError> {
     if !app_bundle.is_dir() {
         return Err(SmapiError::Other(format!(
             "not a directory: {}",
+            app_bundle.display()
+        )));
+    }
+    if crate::native_scanner::is_sandboxed(app_bundle) {
+        return Err(SmapiError::Other(format!(
+            "SMAPI cannot install in sandboxed bundle: {}",
             app_bundle.display()
         )));
     }
@@ -220,6 +254,16 @@ pub fn uninstall(app_bundle: &Path) -> Result<(), SmapiError> {
     // No-op if SMAPI isn't installed.
     if !is_installed(app_bundle) {
         return Ok(());
+    }
+
+    // Pre-uninstall snapshot (best-effort — failure must not abort uninstall).
+    if let Err(e) = crate::rollback::create_native_snapshot(
+        db,
+        "stardew_valley_native",
+        "smapi-uninstall",
+        &format!("SMAPI uninstall from {}", app_bundle.display()),
+    ) {
+        log::warn!("snapshot before SMAPI uninstall failed: {}", e);
     }
 
     let smapi_launcher = macos.join("StardewValley");
@@ -440,6 +484,18 @@ mod tests {
     // Helpers shared by detection + install tests
     // -----------------------------------------------------------------------
 
+    /// Create an in-memory `ModDatabase` in the given temp directory.
+    ///
+    /// Also initialises the rollback schema (`mod_snapshots` / `snapshot_entries`)
+    /// which lives outside the main migration chain and must be created explicitly.
+    fn make_db(dir: &Path) -> Arc<crate::database::ModDatabase> {
+        let db_path = dir.join("test.db");
+        let db = Arc::new(crate::database::ModDatabase::new(&db_path).unwrap());
+        crate::rollback::init_schema(&db).unwrap();
+        db
+    }
+
+
     fn make_macos_dir(dir: &Path) -> std::path::PathBuf {
         let macos = dir.join("Stardew Valley.app/Contents/MacOS");
         fs::create_dir_all(&macos).expect("mkdir");
@@ -606,11 +662,12 @@ mod tests {
     fn install_creates_smapi_markers_in_vanilla_bundle() {
         let dir = tempfile::tempdir().unwrap();
         let bundle = vanilla_bundle(dir.path());
+        let db = make_db(dir.path());
 
         let archive_path = dir.path().join("smapi-installer.zip");
         build_synthetic_installer_archive(&archive_path).unwrap();
 
-        install(&bundle, &archive_path).expect("install should succeed");
+        install(&bundle, &archive_path, &db).expect("install should succeed");
 
         assert!(
             is_installed(&bundle),
@@ -627,12 +684,13 @@ mod tests {
     fn install_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let bundle = vanilla_bundle(dir.path());
+        let db = make_db(dir.path());
 
         let archive_path = dir.path().join("smapi-installer.zip");
         build_synthetic_installer_archive(&archive_path).unwrap();
 
-        install(&bundle, &archive_path).expect("first install should succeed");
-        install(&bundle, &archive_path).expect("second install should succeed");
+        install(&bundle, &archive_path, &db).expect("first install should succeed");
+        install(&bundle, &archive_path, &db).expect("second install should succeed");
 
         assert!(is_installed(&bundle), "is_installed should remain true after second install");
     }
@@ -643,6 +701,7 @@ mod tests {
     fn install_preserves_stardewvalley_original_content() {
         let dir = tempfile::tempdir().unwrap();
         let bundle = vanilla_bundle(dir.path());
+        let db = make_db(dir.path());
 
         // Record vanilla launcher content before any install.
         let vanilla_content =
@@ -652,7 +711,7 @@ mod tests {
         build_synthetic_installer_archive(&archive_path).unwrap();
 
         // First install.
-        install(&bundle, &archive_path).expect("first install");
+        install(&bundle, &archive_path, &db).expect("first install");
 
         let original_after_first =
             fs::read(bundle.join("Contents/MacOS/StardewValley-original")).unwrap();
@@ -662,7 +721,7 @@ mod tests {
         );
 
         // Second install must NOT overwrite StardewValley-original.
-        install(&bundle, &archive_path).expect("second install");
+        install(&bundle, &archive_path, &db).expect("second install");
 
         let original_after_second =
             fs::read(bundle.join("Contents/MacOS/StardewValley-original")).unwrap();
@@ -677,11 +736,12 @@ mod tests {
     fn install_skips_mcs_and_mods_during_copy() {
         let dir = tempfile::tempdir().unwrap();
         let bundle = vanilla_bundle(dir.path());
+        let db = make_db(dir.path());
 
         let archive_path = dir.path().join("smapi-installer.zip");
         build_synthetic_installer_archive(&archive_path).unwrap();
 
-        install(&bundle, &archive_path).expect("install should succeed");
+        install(&bundle, &archive_path, &db).expect("install should succeed");
 
         let macos = bundle.join("Contents/MacOS");
 
@@ -706,6 +766,7 @@ mod tests {
     fn install_creates_mods_directory_if_missing() {
         let dir = tempfile::tempdir().unwrap();
         let bundle = vanilla_bundle(dir.path());
+        let db = make_db(dir.path());
 
         // Confirm Mods/ is not present before install.
         let mods_dir = bundle.join("Contents/MacOS/Mods");
@@ -714,7 +775,7 @@ mod tests {
         let archive_path = dir.path().join("smapi-installer.zip");
         build_synthetic_installer_archive(&archive_path).unwrap();
 
-        install(&bundle, &archive_path).expect("install should succeed");
+        install(&bundle, &archive_path, &db).expect("install should succeed");
 
         assert!(
             mods_dir.is_dir(),
@@ -726,11 +787,12 @@ mod tests {
     #[test]
     fn install_returns_error_for_nonexistent_bundle() {
         let dir = tempfile::tempdir().unwrap();
+        let db = make_db(dir.path());
 
         let archive_path = dir.path().join("smapi-installer.zip");
         build_synthetic_installer_archive(&archive_path).unwrap();
 
-        let result = install(Path::new("/nonexistent/Foo.app"), &archive_path);
+        let result = install(Path::new("/nonexistent/Foo.app"), &archive_path, &db);
         assert!(
             result.is_err(),
             "install should return Err for a nonexistent bundle"
@@ -747,7 +809,8 @@ mod tests {
     fn uninstall_returns_ok_when_smapi_not_installed() {
         let dir = tempfile::tempdir().unwrap();
         let bundle = vanilla_bundle(dir.path());
-        assert!(uninstall(&bundle).is_ok());
+        let db = make_db(dir.path());
+        assert!(uninstall(&bundle, &db).is_ok());
         // Bundle still vanilla.
         assert!(bundle.join("Contents/MacOS/StardewValley").exists());
     }
@@ -759,15 +822,16 @@ mod tests {
     fn uninstall_restores_vanilla_launcher() {
         let dir = tempfile::tempdir().unwrap();
         let bundle = vanilla_bundle(dir.path());
+        let db = make_db(dir.path());
         let vanilla_content =
             fs::read(bundle.join("Contents/MacOS/StardewValley")).unwrap();
 
         let archive = dir.path().join("smapi.zip");
         build_synthetic_installer_archive(&archive).unwrap();
-        install(&bundle, &archive).unwrap();
+        install(&bundle, &archive, &db).unwrap();
         assert!(is_installed(&bundle));
 
-        uninstall(&bundle).unwrap();
+        uninstall(&bundle, &db).unwrap();
         assert!(!is_installed(&bundle));
 
         let post = fs::read(bundle.join("Contents/MacOS/StardewValley")).unwrap();
@@ -780,11 +844,12 @@ mod tests {
     fn uninstall_removes_smapi_files() {
         let dir = tempfile::tempdir().unwrap();
         let bundle = vanilla_bundle(dir.path());
+        let db = make_db(dir.path());
         let archive = dir.path().join("smapi.zip");
         build_synthetic_installer_archive(&archive).unwrap();
-        install(&bundle, &archive).unwrap();
+        install(&bundle, &archive, &db).unwrap();
 
-        uninstall(&bundle).unwrap();
+        uninstall(&bundle, &db).unwrap();
 
         let macos = bundle.join("Contents/MacOS");
         for f in [
@@ -803,9 +868,10 @@ mod tests {
     fn uninstall_preserves_mods_directory() {
         let dir = tempfile::tempdir().unwrap();
         let bundle = vanilla_bundle(dir.path());
+        let db = make_db(dir.path());
         let archive = dir.path().join("smapi.zip");
         build_synthetic_installer_archive(&archive).unwrap();
-        install(&bundle, &archive).unwrap();
+        install(&bundle, &archive, &db).unwrap();
 
         // Add a user mod.
         let mods = bundle.join("Contents/MacOS/Mods");
@@ -813,7 +879,7 @@ mod tests {
         fs::create_dir_all(user_mod.parent().unwrap()).unwrap();
         fs::write(&user_mod, b"{\"Name\":\"MyMod\"}").unwrap();
 
-        uninstall(&bundle).unwrap();
+        uninstall(&bundle, &db).unwrap();
 
         assert!(mods.exists(), "Mods/ should persist after uninstall");
         assert!(user_mod.exists(), "user mod content should persist");
@@ -829,19 +895,22 @@ mod tests {
     fn uninstall_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let bundle = vanilla_bundle(dir.path());
+        let db = make_db(dir.path());
         let archive = dir.path().join("smapi.zip");
         build_synthetic_installer_archive(&archive).unwrap();
-        install(&bundle, &archive).unwrap();
-        uninstall(&bundle).unwrap();
+        install(&bundle, &archive, &db).unwrap();
+        uninstall(&bundle, &db).unwrap();
         // Second call is a no-op.
-        assert!(uninstall(&bundle).is_ok());
+        assert!(uninstall(&bundle, &db).is_ok());
         assert!(!is_installed(&bundle));
     }
 
     /// Passing a nonexistent bundle path to uninstall returns an error.
     #[test]
     fn uninstall_returns_error_for_nonexistent_bundle() {
-        let result = uninstall(Path::new("/nonexistent/Foo.app"));
+        let dir = tempfile::tempdir().unwrap();
+        let db = make_db(dir.path());
+        let result = uninstall(Path::new("/nonexistent/Foo.app"), &db);
         assert!(result.is_err(), "uninstall should return Err for a nonexistent bundle");
     }
 
@@ -877,5 +946,138 @@ mod tests {
         // It will return Ok even though there's no quarantine attribute present.
         let result = clear_quarantine(&bundle);
         assert!(result.is_ok(), "clear_quarantine should not panic on real macOS");
+    }
+
+    // -----------------------------------------------------------------------
+    // Snapshot integration tests (Task 6.1)
+    // -----------------------------------------------------------------------
+
+    /// install() creates a snapshot row in the DB before mutating the bundle.
+    #[test]
+    fn smapi_install_creates_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = vanilla_bundle(dir.path());
+        let db = make_db(dir.path());
+
+        let archive_path = dir.path().join("smapi-installer.zip");
+        build_synthetic_installer_archive(&archive_path).unwrap();
+
+        install(&bundle, &archive_path, &db).expect("install should succeed");
+
+        let snapshots =
+            crate::rollback::list_snapshots(&db, "stardew_valley_native", "").unwrap();
+        assert!(
+            !snapshots.is_empty(),
+            "install should have created at least one snapshot"
+        );
+        let snap = &snapshots[0];
+        assert_eq!(snap.name, "smapi-install");
+        assert!(
+            snap.description
+                .as_deref()
+                .unwrap_or("")
+                .contains("SMAPI install"),
+            "description should mention 'SMAPI install', got: {:?}",
+            snap.description
+        );
+    }
+
+    /// uninstall() creates a snapshot row in the DB before mutating the bundle.
+    #[test]
+    fn smapi_uninstall_creates_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = vanilla_bundle(dir.path());
+        let db = make_db(dir.path());
+
+        // First install SMAPI so there's something to uninstall.
+        let archive_path = dir.path().join("smapi-installer.zip");
+        build_synthetic_installer_archive(&archive_path).unwrap();
+        install(&bundle, &archive_path, &db).expect("install before uninstall test");
+
+        // Now uninstall.
+        uninstall(&bundle, &db).expect("uninstall should succeed");
+
+        // There should be at least one "smapi-uninstall" snapshot (install
+        // creates "smapi-install" first, then uninstall creates "smapi-uninstall").
+        let snapshots =
+            crate::rollback::list_snapshots(&db, "stardew_valley_native", "").unwrap();
+        let uninstall_snap = snapshots
+            .iter()
+            .find(|s| s.name == "smapi-uninstall");
+        assert!(
+            uninstall_snap.is_some(),
+            "uninstall should have created a 'smapi-uninstall' snapshot; got: {:?}",
+            snapshots.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Sandbox refusal tests (Task 6.2)
+    // -----------------------------------------------------------------------
+
+    /// Build a synthetic bundle that looks like a Mac App Store app by writing
+    /// the `Contents/_MASReceipt/receipt` marker file.
+    fn make_mas_bundle(dir: &Path, name: &str) -> PathBuf {
+        let bundle = dir.join(format!("{}.app", name));
+        let macos = bundle.join("Contents/MacOS");
+        let receipt_dir = bundle.join("Contents/_MASReceipt");
+        fs::create_dir_all(&macos).unwrap();
+        fs::create_dir_all(&receipt_dir).unwrap();
+        fs::write(
+            macos.join("StardewValley"),
+            b"#!/bin/bash\n# vanilla launcher\n",
+        )
+        .unwrap();
+        fs::write(receipt_dir.join("receipt"), b"fake mas receipt").unwrap();
+        bundle
+    }
+
+    /// `install` must return an error immediately for a sandboxed (MAS) bundle.
+    /// No SMAPI files should be written.
+    #[test]
+    fn smapi_install_refuses_sandboxed_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = make_mas_bundle(dir.path(), "Stardew Valley");
+        let db = make_db(dir.path());
+
+        let archive_path = dir.path().join("smapi-installer.zip");
+        build_synthetic_installer_archive(&archive_path).unwrap();
+
+        let result = install(&bundle, &archive_path, &db);
+
+        assert!(result.is_err(), "install must refuse sandboxed bundle");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("sandboxed"),
+            "error must mention 'sandboxed': {msg}"
+        );
+        // SMAPI must NOT have been installed.
+        assert!(
+            !is_installed(&bundle),
+            "SMAPI must not be installed in sandboxed bundle"
+        );
+    }
+
+    /// `uninstall` must return an error immediately for a sandboxed (MAS) bundle.
+    #[test]
+    fn smapi_uninstall_refuses_sandboxed_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = make_mas_bundle(dir.path(), "Stardew Valley Sandboxed");
+        let db = make_db(dir.path());
+
+        // Simulate a partially-installed SMAPI by writing the marker files
+        // directly (we bypass install() since it would also be refused).
+        let macos = bundle.join("Contents/MacOS");
+        fs::write(macos.join("StardewValley-original"), b"original").unwrap();
+        fs::write(macos.join("StardewModdingAPI"), b"smapi binary").unwrap();
+
+        let result = uninstall(&bundle, &db);
+
+        assert!(result.is_err(), "uninstall must refuse sandboxed bundle");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("sandboxed"),
+            "error must mention 'sandboxed': {msg}"
+        );
     }
 }

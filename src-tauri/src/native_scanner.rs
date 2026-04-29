@@ -174,8 +174,8 @@ fn detect_bundle_architecture(bundle: &Path, info: &InfoPlist) -> Architecture {
 ///    (Mail.app, Safari.app, etc.) are also sandboxed.
 ///
 /// Sandboxed apps cannot be modded — Corkscrew must refuse to deploy
-/// against them and surface a clear error in the UI (Task 6.3).
-fn is_sandboxed(bundle: &Path) -> bool {
+/// against them and surface a clear error in the UI (Task 6.2).
+pub fn is_sandboxed(bundle: &Path) -> bool {
     if bundle.starts_with("/System/Applications") {
         return true;
     }
@@ -559,6 +559,12 @@ pub fn validate_manual_native_app(app_path: &Path) -> Result<NativeAppCandidate,
         .map_err(|e| format!("could not read Info.plist: {}", e))?;
     let architecture = detect_bundle_architecture(app_path, &info);
     let sandboxed = is_sandboxed(app_path);
+    if sandboxed {
+        return Err(format!(
+            "cannot mod a sandboxed app: {}",
+            app_path.display()
+        ));
+    }
     Ok(NativeAppCandidate {
         bundle_path: app_path.to_path_buf(),
         info,
@@ -990,5 +996,35 @@ mod tests {
         // Steam source wins (it was first in priority order).
         assert_eq!(results[0].source, NativeSource::Steam);
         assert_eq!(results[0].info.bundle_identifier, "com.example.shared");
+    }
+
+    // -----------------------------------------------------------------
+    // validate_manual_native_app sandbox refusal tests (Task 6.2)
+    // -----------------------------------------------------------------
+
+    /// `validate_manual_native_app` must return an error for a bundle that
+    /// carries the `_MASReceipt/receipt` marker (Mac App Store sandboxed app).
+    /// The error message must mention "sandboxed".
+    #[test]
+    fn validate_manual_native_app_refuses_sandboxed() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Create a valid .app bundle with a MAS receipt.
+        let bundle = make_app(dir.path(), "SandboxedGame", "com.example.sandboxed");
+        let receipt_dir = bundle.join("Contents/_MASReceipt");
+        fs::create_dir_all(&receipt_dir).unwrap();
+        fs::write(receipt_dir.join("receipt"), b"fake receipt").unwrap();
+
+        let result = validate_manual_native_app(&bundle);
+
+        assert!(
+            result.is_err(),
+            "validate_manual_native_app must refuse sandboxed bundle"
+        );
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("sandboxed"),
+            "error must mention 'sandboxed': {msg}"
+        );
     }
 }

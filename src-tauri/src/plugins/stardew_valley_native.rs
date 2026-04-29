@@ -314,8 +314,31 @@ impl GamePlugin for StardewValleyNativePlugin {
         use crate::staging::is_safe_relative_path;
         use std::fs;
 
+        // Refuse to deploy into a sandboxed bundle — the App Sandbox prevents
+        // file modifications and any attempt would silently fail or crash.
+        let native = detected
+            .runtime
+            .native()
+            .ok_or_else(|| DeployerError::Other("expected native runtime".into()))?;
+        if native.sandboxed {
+            return Err(DeployerError::Other(format!(
+                "native modding refused for sandboxed app: {}",
+                native.app_bundle_path.display()
+            )));
+        }
+
         let mods_dir = resolve_mods_dir(detected);
         fs::create_dir_all(&mods_dir)?;
+
+        // Pre-deploy snapshot (best-effort — failure must not abort deploy).
+        if let Err(e) = crate::rollback::create_native_snapshot(
+            db,
+            &detected.game_id,
+            "stardew-deploy",
+            "Stardew Valley native deploy",
+        ) {
+            log::warn!("snapshot before stardew deploy failed: {}", e);
+        }
 
         // Native games have no bottle; use "" as the bottle_name sentinel.
         let enabled_mods = db
@@ -1121,5 +1144,107 @@ mod tests {
         assert_eq!(ctx.architecture, Architecture::AppleSilicon);
         assert_eq!(ctx.source, NativeSource::Steam);
         assert!(!ctx.sandboxed);
+    }
+
+    // -----------------------------------------------------------------------
+    // Snapshot integration tests (Task 6.1)
+    // -----------------------------------------------------------------------
+
+    /// deploy_native() creates a snapshot row in the DB before deploying mods.
+    #[test]
+    fn stardew_deploy_native_creates_snapshot() {
+        use std::sync::Arc;
+        let tmp = tempfile::tempdir().unwrap();
+
+        let game_path = tmp.path().join("MacOS");
+        let staging_dir = tmp.path().join("staging").join("my_mod");
+        std::fs::create_dir_all(&game_path).unwrap();
+        std::fs::create_dir_all(&staging_dir).unwrap();
+
+        std::fs::write(
+            staging_dir.join("manifest.json"),
+            r#"{"Name":"My Mod","Version":"1.0.0","UniqueID":"tester.MyMod"}"#,
+        )
+        .unwrap();
+
+        let db_path = tmp.path().join("test.db");
+        let db = Arc::new(crate::database::ModDatabase::new(&db_path).unwrap());
+        // rollback schema is outside migrations; must be initialised explicitly.
+        crate::rollback::init_schema(&db).unwrap();
+        let mod_id = db
+            .add_mod(
+                "stardew_valley_native",
+                "",
+                None,
+                "My Mod",
+                "1.0.0",
+                "MyMod.zip",
+                &[],
+            )
+            .unwrap();
+        db.set_staging_path(mod_id, &staging_dir.to_string_lossy())
+            .unwrap();
+
+        let detected = fake_detected_game(&game_path);
+        let plugin = StardewValleyNativePlugin;
+        plugin.deploy_native(&detected, &db).unwrap();
+
+        let snapshots =
+            crate::rollback::list_snapshots(&db, "stardew_valley_native", "").unwrap();
+        assert!(
+            !snapshots.is_empty(),
+            "deploy_native should have created at least one snapshot"
+        );
+        assert_eq!(
+            snapshots[0].name, "stardew-deploy",
+            "snapshot name must be 'stardew-deploy'"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Sandbox refusal tests (Task 6.2)
+    // -----------------------------------------------------------------------
+
+    /// `deploy_native` must return an error immediately when the game's
+    /// `NativeContext.sandboxed` flag is true. No mods should be written and
+    /// the error message must mention "sandboxed".
+    #[test]
+    fn stardew_deploy_native_refuses_sandboxed_game() {
+        use std::sync::Arc;
+        let tmp = tempfile::tempdir().unwrap();
+        let game_path = tmp.path().join("MacOS");
+        std::fs::create_dir_all(&game_path).unwrap();
+
+        let db_path = tmp.path().join("test.db");
+        let db = Arc::new(crate::database::ModDatabase::new(&db_path).unwrap());
+
+        // Build a DetectedGame with sandboxed = true.
+        let bundle_path = tmp.path().to_path_buf();
+        let detected = DetectedGame {
+            game_id: "stardew_valley_native".into(),
+            display_name: "Stardew Valley".into(),
+            nexus_slug: "stardewvalley".into(),
+            game_path: game_path.clone(),
+            exe_path: Some(game_path.join("StardewValley")),
+            data_dir: game_path.join("Mods"),
+            runtime: crate::runtime::GameRuntime::Native(crate::runtime::NativeContext {
+                app_bundle_path: bundle_path.clone(),
+                game_data_root: game_path.clone(),
+                architecture: Architecture::Universal,
+                sandboxed: true, // ← sandboxed
+                source: NativeSource::Steam,
+            }),
+            steam_app_id: Some("413150".into()),
+        };
+
+        let plugin = StardewValleyNativePlugin;
+        let result = plugin.deploy_native(&detected, &db);
+
+        assert!(result.is_err(), "deploy_native must refuse sandboxed game");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("sandboxed"),
+            "error must mention 'sandboxed': {msg}"
+        );
     }
 }
