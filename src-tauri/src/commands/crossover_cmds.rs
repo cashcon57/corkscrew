@@ -85,16 +85,21 @@ pub async fn register_unregistered_game(
         return Err("game_path must live inside the bottle".into());
     }
 
+    // Persist the canonicalized paths rather than the raw strings so any
+    // `..` redundancy in the caller-supplied path is normalized before the
+    // value lands in the custom_games DB. The canonical forms passed all
+    // the containment checks above, so they are guaranteed to live inside
+    // the bottle.
     let custom = CustomGame {
         game_id,
         display_name,
         nexus_slug,
-        game_path: game_path_p.display().to_string(),
-        exe_path: Some(exe_path_p.display().to_string()),
+        game_path: canon_game_path.display().to_string(),
+        exe_path: Some(canon_exe.display().to_string()),
         // Default mod deployment dir = game_path. Bethesda titles override
         // this elsewhere via a per-plugin module; for arbitrary games this
         // is the safe default.
-        data_dir: game_path_p.display().to_string(),
+        data_dir: canon_game_path.display().to_string(),
         bottle_name: bottle.name.clone(),
         bottle_path: bottle.path.display().to_string(),
         steam_app_id,
