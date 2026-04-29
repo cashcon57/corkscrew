@@ -370,16 +370,18 @@ fn merge_cxmenu_shortcuts(bottle: &Bottle, out: &mut Vec<CrossoverShortcut>) {
             continue;
         };
 
-        // Reject startup_wm_class values that don't look like plain exe names
-        // (no path separators, must end in .exe).
+        // Reject startup_wm_class values that look like paths (no separators
+        // allowed) or that don't end in a recognised executable extension
+        // (.exe or .bat for ME2 launchers).
+        let wm_lower = wm_class.to_lowercase();
         if wm_class.contains('\\')
             || wm_class.contains('/')
-            || !wm_class.to_lowercase().ends_with(".exe")
+            || (!wm_lower.ends_with(".exe") && !wm_lower.ends_with(".bat"))
         {
             continue;
         }
 
-        // Search drive_c for the exe (case-insensitive, depth-limited).
+        // Search drive_c for the executable (case-insensitive, depth-limited).
         let Some(host_target) = find_exe_in_drive_c(&drive_c, wm_class, 6) else {
             continue;
         };
@@ -493,14 +495,26 @@ fn is_lnk_path(p: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Return `true` if a Windows target path looks like a Mod Engine 2
+/// `launchmod_<slug>.bat` launcher. These are `.bat` files, not `.exe`
+/// files, so they need special-casing wherever we filter by extension.
+fn is_me2_bat_target(win_path_lower: &str) -> bool {
+    let filename = win_path_lower
+        .rsplit(|c| c == '\\' || c == '/')
+        .next()
+        .unwrap_or(win_path_lower);
+    filename.starts_with("launchmod_") && filename.ends_with(".bat")
+}
+
 fn parse_shortcut_file(bottle: &Bottle, lnk_path: &Path) -> Option<CrossoverShortcut> {
     let lnk = parselnk::Lnk::try_from(lnk_path).ok()?;
     let win_target = extract_lnk_target(&lnk)?;
 
-    // Only surface shortcuts that point at executables. CrossOver creates
-    // shortcuts for help files, URLs, and uninstallers we don't want.
+    // Only surface shortcuts that point at executables or recognised ME2
+    // launchers. CrossOver creates shortcuts for help files, URLs, and
+    // uninstallers we don't want.
     let win_lower = win_target.to_lowercase();
-    if !win_lower.ends_with(".exe") {
+    if !win_lower.ends_with(".exe") && !is_me2_bat_target(&win_lower) {
         return None;
     }
 
@@ -592,7 +606,11 @@ pub fn is_likely_game(shortcut: &CrossoverShortcut) -> bool {
     if exe_name.starts_with("cheatengine") {
         return false;
     }
-    if exe_name.starts_with("modengine") || exe_name.starts_with("launchmod_") {
+    // Reject the ModEngine2 tool binary itself (e.g. `modengine2.exe`,
+    // `modengine2_launcher.exe`) but ALLOW `launchmod_*.bat` — those are
+    // the actual per-game launch shortcuts that ME2 v2.x registers, and
+    // they ARE the thing users want to register as a "game".
+    if exe_name.starts_with("modengine") {
         return false;
     }
 
@@ -606,12 +624,16 @@ pub fn is_likely_game(shortcut: &CrossoverShortcut) -> bool {
         return false;
     }
 
-    // Size check: most real games are 5MB+. Read errors → keep (don't
-    // false-negative).
-    if let Ok(meta) = std::fs::metadata(&shortcut.host_target) {
-        let size = meta.len();
-        if size > 0 && size < 5 * 1024 * 1024 {
-            return false;
+    // Size check: most real game executables are 5 MB+. Batch files are
+    // inherently small, so skip the size filter for `.bat` targets.
+    // Read errors → keep (don't false-negative).
+    let is_bat = exe_name.ends_with(".bat");
+    if !is_bat {
+        if let Ok(meta) = std::fs::metadata(&shortcut.host_target) {
+            let size = meta.len();
+            if size > 0 && size < 5 * 1024 * 1024 {
+                return false;
+            }
         }
     }
 
@@ -1365,5 +1387,57 @@ mod tests {
 
         let shortcuts = scan_bottle_shortcuts(&bottle);
         assert_eq!(shortcuts.len(), 1, "expected dedup to 1, got {:?}", shortcuts);
+    }
+
+    // -----------------------------------------------------------------------
+    // End-to-end: ME2 .bat shortcut surfaces through list_unregistered_games
+    // -----------------------------------------------------------------------
+
+    /// Verify that a ME2 `launchmod_eldenring.bat` registered in `cxmenu.conf`
+    /// (the real-world path CrossOver uses) is surfaced by
+    /// `list_unregistered_games` with the correct `MatchHint`.
+    ///
+    /// This is the integration test the reviewer requested: it exercises the
+    /// full pipeline from cxmenu parsing → shortcut synthesis → `is_likely_game`
+    /// gate → `match_shortcut` → `list_unregistered_games` output.
+    #[test]
+    fn me2_bat_surfaces_in_list_unregistered_games_via_cxmenu() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle = make_fake_bottle(tmp.path(), "me2_test");
+
+        // Create the ME2 launcher bat file in a plausible location.
+        let me2_dir = bottle.drive_c().join("Games").join("ModEngine2");
+        fs::create_dir_all(&me2_dir).unwrap();
+        // .bat files are tiny by design — the size filter must not apply.
+        let bat = me2_dir.join("launchmod_eldenring.bat");
+        fs::write(&bat, b"@echo off\nstart \"\" eldenring.exe\n").unwrap();
+
+        // Register the bat via cxmenu.conf (the real CrossOver path).
+        let cxmenu = r#"
+[Desktop.C^3A_users_Public_Desktop/Elden+Ring+(ME2).url]
+"Type" = "Windows"
+"Mode" = "install"
+"StartupWMClass" = "launchmod_eldenring.bat"
+"#;
+        fs::write(bottle.path.join("cxmenu.conf"), cxmenu).unwrap();
+
+        // No pre-registered games.
+        let already: Vec<DetectedGame> = Vec::new();
+        let unreg = list_unregistered_games(&[bottle], &already);
+
+        assert_eq!(
+            unreg.len(),
+            1,
+            "expected 1 unregistered game (ME2 bat), got {:?}",
+            unreg
+        );
+        let u = &unreg[0];
+        assert_eq!(
+            u.shortcut.host_target, bat,
+            "host_target should be the bat file"
+        );
+        let hint = u.match_hint.as_ref().expect("ME2 bat should produce a match hint");
+        assert_eq!(hint.game_id, "eldenring");
+        assert_eq!(hint.source, MatchSource::Plugin);
     }
 }
