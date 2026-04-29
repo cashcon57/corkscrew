@@ -1400,6 +1400,8 @@ pub fn run() {
             // Native Mode (experimental)
             commands::config_commands::get_native_mode,
             commands::config_commands::set_native_mode,
+            commands::config_commands::get_native_mode_visible,
+            commands::config_commands::set_native_mode_visible,
             commands::native_cmds::rescan_native_games,
             commands::native_cmds::get_bg3se_status,
             commands::native_cmds::apply_native_window_effect,

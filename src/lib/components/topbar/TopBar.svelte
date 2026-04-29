@@ -4,7 +4,7 @@
   import TopBarModlistSelector from "./TopBarModlistSelector.svelte";
   import TopBarProfileSelector from "./TopBarProfileSelector.svelte";
   import type { DetectedGame } from "$lib/types";
-  import { nativeMode } from "$lib/stores";
+  import { nativeMode, nativeModeVisible } from "$lib/stores";
   import { setNativeMode } from "$lib/api";
   import { applyNativeTheme } from "$lib/native/theme";
 
@@ -97,29 +97,31 @@
       onClose={closeAll}
     />
 
-    <span class="topbar-separator topbar-separator-spacer"></span>
+    {#if $nativeModeVisible}
+      <span class="topbar-separator topbar-separator-spacer"></span>
 
-    <button
-      class="topbar-mode-toggle"
-      class:native-active={$nativeMode}
-      onclick={toggleNativeMode}
-      aria-label={$nativeMode ? "Switch to Wine Mode" : "Switch to Native Mode"}
-      title={$nativeMode ? "Switch to Wine Mode" : "Switch to Native Mode"}
-    >
-      {#if $nativeMode}
-        <!-- Sparkle — native mode active -->
-        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M8 1.5v3M8 11.5v3M1.5 8h3M11.5 8h3M3.5 3.5l2 2M10.5 10.5l2 2M3.5 12.5l2-2M10.5 5.5l2-2"/>
-        </svg>
-        <span>Wine</span>
-      {:else}
-        <!-- Sparkle — click to enter native mode -->
-        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M8 1.5v3M8 11.5v3M1.5 8h3M11.5 8h3M3.5 3.5l2 2M10.5 10.5l2 2M3.5 12.5l2-2M10.5 5.5l2-2"/>
-        </svg>
-        <span>Native</span>
-      {/if}
-    </button>
+      <button
+        class="topbar-mode-toggle"
+        class:native-active={$nativeMode}
+        onclick={toggleNativeMode}
+        aria-label={$nativeMode ? "Switch to Wine Mode" : "Switch to Native Mode"}
+        title={$nativeMode ? "Switch to Wine Mode" : "Switch to Native Mode"}
+      >
+        {#if $nativeMode}
+          <!-- Sparkle — native mode active -->
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M8 1.5v3M8 11.5v3M1.5 8h3M11.5 8h3M3.5 3.5l2 2M10.5 10.5l2 2M3.5 12.5l2-2M10.5 5.5l2-2"/>
+          </svg>
+          <span>Wine</span>
+        {:else}
+          <!-- Sparkle — click to enter native mode -->
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M8 1.5v3M8 11.5v3M1.5 8h3M11.5 8h3M3.5 3.5l2 2M10.5 10.5l2 2M3.5 12.5l2-2M10.5 5.5l2-2"/>
+          </svg>
+          <span>Native</span>
+        {/if}
+      </button>
+    {/if}
   </div>
 </div>
 

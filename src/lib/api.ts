@@ -356,6 +356,14 @@ export async function setNativeMode(enabled: boolean): Promise<void> {
   return invoke<void>("set_native_mode", { enabled });
 }
 
+export async function getNativeModeVisible(): Promise<boolean> {
+  return invoke<boolean>("get_native_mode_visible");
+}
+
+export async function setNativeModeVisible(visible: boolean): Promise<void> {
+  return invoke<void>("set_native_mode_visible", { visible });
+}
+
 /**
  * Apply a Liquid Glass intensity variant to the main window at runtime.
  *

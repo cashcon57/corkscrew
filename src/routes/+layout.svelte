@@ -3,12 +3,12 @@
   import "../app.css";
   import { goto } from "$app/navigation";
   import { page } from "$app/state";
-  import { currentPage, errorMessage, successMessage, selectedGame, selectedBottle, showError, showSuccess, appVersion, collectionInstallStatus, collectionUninstallStatus, wjInstallStatus, updateReady as updateReadyStore, updateVersion as updateVersionStore, updateNotes as updateNotesStore, updateChecking as updateCheckingStore, updateError as updateErrorStore, setUpdateCheckFn, notificationCount, showNotificationLog, activeProfile, profileList, activeCollection, collectionList, sidebarCollapsed, controllerMode, pendingNxmInstall, nxmInstallComplete, showUninstalledGames, uninstalledGames, nativeMode } from "$lib/stores";
+  import { currentPage, errorMessage, successMessage, selectedGame, selectedBottle, showError, showSuccess, appVersion, collectionInstallStatus, collectionUninstallStatus, wjInstallStatus, updateReady as updateReadyStore, updateVersion as updateVersionStore, updateNotes as updateNotesStore, updateChecking as updateCheckingStore, updateError as updateErrorStore, setUpdateCheckFn, notificationCount, showNotificationLog, activeProfile, profileList, activeCollection, collectionList, sidebarCollapsed, controllerMode, pendingNxmInstall, nxmInstallComplete, showUninstalledGames, uninstalledGames, nativeMode, nativeModeVisible } from "$lib/stores";
   import { initTheme } from "$lib/theme";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
   import { getVersion } from "@tauri-apps/api/app";
-  import { downloadFromNexus, installMod, getAllGames, getDownloadQueue, retryDownload, cancelDownload, clearFinishedDownloads, onDownloadQueueUpdate, listProfiles, listInstalledCollections, getConfig, setConfigValue, launchGame, getAllInterruptedInstalls, resumeCollectionInstall, abandonCollectionInstall, getCheckpointModNames, getPendingWabbajackInstalls, dismissWabbajackInstall, checkSkyrimVersion, getPinnedGameVersion, pinGameVersion, checkSteamStatus, addToSteam, fetchUpdate, installUpdate, chatCheckNewCrashes, listKnownUninstalledGames, getNativeMode } from "$lib/api";
+  import { downloadFromNexus, installMod, getAllGames, getDownloadQueue, retryDownload, cancelDownload, clearFinishedDownloads, onDownloadQueueUpdate, listProfiles, listInstalledCollections, getConfig, setConfigValue, launchGame, getAllInterruptedInstalls, resumeCollectionInstall, abandonCollectionInstall, getCheckpointModNames, getPendingWabbajackInstalls, dismissWabbajackInstall, checkSkyrimVersion, getPinnedGameVersion, pinGameVersion, checkSteamStatus, addToSteam, fetchUpdate, installUpdate, chatCheckNewCrashes, listKnownUninstalledGames, getNativeMode, getNativeModeVisible } from "$lib/api";
   import { resumeInstallTracking } from "$lib/installService";
   import { initHashingListener, destroyHashingListener, dismissHashingBanner } from "$lib/hashingService";
   import { hashingProgress } from "$lib/stores";
@@ -28,7 +28,6 @@
   import { getNotificationCount, logNotification, recordErrorEvent } from "$lib/api";
   import LlmChat from "$lib/components/LlmChat.svelte";
   import { initSentry, captureError } from "$lib/sentry";
-  import NativeModeBanner from "$lib/components/banners/NativeModeBanner.svelte";
 
   const navItems = [
     { id: "discover", label: "Discover" },
@@ -291,6 +290,12 @@
     getNativeMode()
       .then((enabled: boolean) => nativeMode.set(enabled))
       .catch((err: unknown) => console.warn('getNativeMode hydration failed:', err));
+
+    // Hydrate nativeModeVisible — controls whether the topbar toggle and
+    // first-run banner are shown at all (off by default).
+    getNativeModeVisible()
+      .then((visible: boolean) => nativeModeVisible.set(visible))
+      .catch((err: unknown) => console.warn('getNativeModeVisible hydration failed:', err));
 
     getVersion().then(async (v) => {
       appVersion.set(v);
@@ -1726,8 +1731,6 @@
           </div>
         </div>
       {/if}
-
-      <NativeModeBanner />
 
       {#key $currentPage}
         <div class="page-transition-wrapper">

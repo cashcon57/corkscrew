@@ -340,3 +340,8 @@ export const gameLockOverridden = writable<boolean>(false);
 // Experimental: Native Mode (macOS-native modding for supported games).
 // Hydrated from the backend config in Task 5.5 (Mode-scoped routing).
 export const nativeMode = writable<boolean>(false);
+
+// Controls visibility of the Native Mode topbar toggle and first-run banner.
+// Off by default — native macOS modding is in active development and does not
+// yet function for end users. The user opts in via Settings → About.
+export const nativeModeVisible = writable<boolean>(false);
