@@ -28,6 +28,7 @@
   import { getNotificationCount, logNotification, recordErrorEvent } from "$lib/api";
   import LlmChat from "$lib/components/LlmChat.svelte";
   import { initSentry, captureError } from "$lib/sentry";
+  import NativeModeBanner from "$lib/components/banners/NativeModeBanner.svelte";
 
   const navItems = [
     { id: "discover", label: "Discover" },
@@ -1715,6 +1716,8 @@
           </div>
         </div>
       {/if}
+
+      <NativeModeBanner />
 
       {#key $currentPage}
         <div class="page-transition-wrapper">
