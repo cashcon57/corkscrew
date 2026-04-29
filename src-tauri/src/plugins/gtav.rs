@@ -384,7 +384,7 @@ fn strip_vdf_quotes(s: &str) -> String {
 
 /// Register the GTA V plugin with the global game plugin registry.
 pub fn register() {
-    crate::games::register_plugin(Box::new(GtaVPlugin));
+    crate::games::register_plugin(std::sync::Arc::new(GtaVPlugin));
 }
 
 // ---------------------------------------------------------------------------

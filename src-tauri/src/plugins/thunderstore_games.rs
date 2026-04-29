@@ -256,7 +256,7 @@ impl GamePlugin for ThunderstorePlugin {
 
 pub fn register_all() {
     for spec in SPECS {
-        crate::games::register_plugin(Box::new(ThunderstorePlugin::new(spec)));
+        crate::games::register_plugin(std::sync::Arc::new(ThunderstorePlugin::new(spec)));
     }
 }
 

@@ -462,7 +462,7 @@ fn normalise_path(path: &Path) -> PathBuf {
 // ---------------------------------------------------------------------------
 
 pub fn register() {
-    crate::games::register_plugin(Box::new(StardewValleyNativePlugin));
+    crate::games::register_plugin(std::sync::Arc::new(StardewValleyNativePlugin));
 }
 
 // ---------------------------------------------------------------------------
@@ -505,7 +505,7 @@ mod tests {
 
     #[test]
     fn stardew_valley_native_plugin_registers() {
-        crate::games::register_plugin(Box::new(StardewValleyNativePlugin));
+        crate::games::register_plugin(std::sync::Arc::new(StardewValleyNativePlugin));
         let result = with_plugin("stardew_valley_native", |p| p.display_name().to_owned());
         assert_eq!(result, Some("Stardew Valley (Native)".to_owned()));
     }

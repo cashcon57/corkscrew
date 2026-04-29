@@ -339,7 +339,7 @@ pub fn register_all() {
         if CUSTOM_PLUGIN_IDS.contains(&entry.game_id.as_str()) {
             continue;
         }
-        crate::games::register_plugin(Box::new(RegistryGamePlugin { entry }));
+        crate::games::register_plugin(std::sync::Arc::new(RegistryGamePlugin { entry }));
     }
 }
 

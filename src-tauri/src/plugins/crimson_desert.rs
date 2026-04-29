@@ -148,7 +148,7 @@ impl GamePlugin for CrimsonDesertPlugin {
 // ---------------------------------------------------------------------------
 
 pub fn register() {
-    crate::games::register_plugin(Box::new(CrimsonDesertPlugin));
+    crate::games::register_plugin(std::sync::Arc::new(CrimsonDesertPlugin));
 }
 
 // ---------------------------------------------------------------------------

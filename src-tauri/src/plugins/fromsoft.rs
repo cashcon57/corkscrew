@@ -254,7 +254,7 @@ pub fn find_or_create_modengine_mod_dir(game_path: &Path) -> PathBuf {
 
 pub fn register_all() {
     for spec in SPECS {
-        crate::games::register_plugin(Box::new(FromSoftPlugin::new(spec)));
+        crate::games::register_plugin(std::sync::Arc::new(FromSoftPlugin::new(spec)));
     }
 }
 

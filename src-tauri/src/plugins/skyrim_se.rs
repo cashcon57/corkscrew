@@ -183,7 +183,7 @@ impl GamePlugin for SkyrimSEPlugin {
 
 /// Register the Skyrim SE plugin with the global game plugin registry.
 pub fn register() {
-    crate::games::register_plugin(Box::new(SkyrimSEPlugin));
+    crate::games::register_plugin(std::sync::Arc::new(SkyrimSEPlugin));
 }
 
 // ---------------------------------------------------------------------------

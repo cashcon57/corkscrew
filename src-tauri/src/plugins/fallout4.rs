@@ -173,7 +173,7 @@ impl GamePlugin for Fallout4Plugin {
 
 /// Register the Fallout 4 plugin with the global game plugin registry.
 pub fn register() {
-    crate::games::register_plugin(Box::new(Fallout4Plugin));
+    crate::games::register_plugin(std::sync::Arc::new(Fallout4Plugin));
 }
 
 // ---------------------------------------------------------------------------

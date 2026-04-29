@@ -579,7 +579,7 @@ fn resolve_case_insensitive_path(base: &Path, components: &[&str]) -> Option<Pat
 
 /// Register the Hogwarts Legacy plugin with the global game plugin registry.
 pub fn register() {
-    crate::games::register_plugin(Box::new(HogwartsLegacyPlugin));
+    crate::games::register_plugin(std::sync::Arc::new(HogwartsLegacyPlugin));
 }
 
 // ---------------------------------------------------------------------------

@@ -435,7 +435,7 @@ fn strip_vdf_quotes(s: &str) -> String {
 // ---------------------------------------------------------------------------
 
 pub fn register() {
-    crate::games::register_plugin(Box::new(Sims4Plugin));
+    crate::games::register_plugin(std::sync::Arc::new(Sims4Plugin));
 }
 
 // ---------------------------------------------------------------------------

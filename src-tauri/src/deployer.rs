@@ -1696,20 +1696,20 @@ pub fn deploy_native_game(
     detected: &crate::games::DetectedGame,
     db: &std::sync::Arc<ModDatabase>,
 ) -> Result<DeployResult> {
-    // Dispatch to the registered plugin. `with_plugin` holds the registry
-    // lock only for the duration of the closure, so `deploy_native` is called
-    // inside the lock. This is intentional: native deploy implementations
-    // must be synchronous (no async, no blocking network), matching the
-    // sync guarantees of `with_plugin`.
-    match crate::games::with_plugin(&detected.game_id, |plugin| {
-        plugin.deploy_native(detected, db)
-    }) {
-        Some(result) => result,
-        None => Err(DeployerError::Other(format!(
+    // Clone the Arc out of the registry so the registry lock is dropped
+    // before we call deploy_native. Deploying walks every staged file and
+    // performs hardlink / copy operations, which can take hundreds of
+    // milliseconds — holding the registry mutex that entire time would block
+    // detect_all_games, detect_native_games, and any other thread that calls
+    // with_plugin or register_plugin.
+    let plugin = crate::games::clone_plugin_for_dispatch(&detected.game_id)
+        .ok_or_else(|| DeployerError::Other(format!(
             "native deployment not implemented for {}; per-game plugin must provide it",
             detected.game_id
-        ))),
-    }
+        )))?;
+
+    // Registry lock is released here. deploy_native may take arbitrarily long.
+    plugin.deploy_native(detected, db)
 }
 
 // ---------------------------------------------------------------------------

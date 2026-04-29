@@ -179,7 +179,7 @@ impl GamePlugin for Hades2Plugin {
 // ---------------------------------------------------------------------------
 
 pub fn register() {
-    crate::games::register_plugin(Box::new(Hades2Plugin));
+    crate::games::register_plugin(std::sync::Arc::new(Hades2Plugin));
 }
 
 // ---------------------------------------------------------------------------

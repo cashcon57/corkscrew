@@ -4,7 +4,7 @@
 //! for detecting games inside Wine bottles managed by CrossOver, Whisky, etc.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -315,7 +315,7 @@ pub struct DetectedGame {
 // ---------------------------------------------------------------------------
 
 /// Thread-safe storage for registered game plugins.
-type PluginRegistry = Mutex<Vec<Box<dyn GamePlugin + Send + Sync>>>;
+type PluginRegistry = Mutex<Vec<Arc<dyn GamePlugin + Send + Sync>>>;
 
 /// Global plugin registry, initialised on first access.
 fn registry() -> &'static PluginRegistry {
@@ -327,7 +327,11 @@ fn registry() -> &'static PluginRegistry {
 ///
 /// Plugins are typically registered at application startup. Duplicate
 /// registrations (same `game_id`) are silently ignored.
-pub fn register_plugin(plugin: Box<dyn GamePlugin + Send + Sync>) {
+///
+/// Takes `Arc<dyn GamePlugin>` so that callers can later retrieve the same
+/// `Arc` via [`clone_plugin_for_dispatch`] and call long-running methods
+/// (e.g. deploy) outside the registry lock.
+pub fn register_plugin(plugin: Arc<dyn GamePlugin + Send + Sync>) {
     let mut plugins = registry().lock().unwrap_or_else(|e| e.into_inner());
     // Prevent duplicate registrations.
     let id = plugin.game_id().to_owned();
@@ -440,6 +444,37 @@ where
         .map(|p| f(p.as_ref()))
 }
 
+/// Clone the `Arc<dyn GamePlugin>` for a given `game_id`, if registered.
+///
+/// The registry lock is held only while finding the entry and cloning the
+/// `Arc` — the lock is dropped before the caller uses the plugin. Use this
+/// for long-running operations (deploy, install, etc.) where holding the
+/// registry lock would block detection threads or other plugin lookups.
+///
+/// Contrast with [`with_plugin`], which holds the lock for the full duration
+/// of the closure. `with_plugin` is appropriate for cheap, microsecond-scale
+/// attribute reads; `clone_plugin_for_dispatch` is appropriate when the
+/// subsequent call can take hundreds of milliseconds (e.g. walking a staged
+/// mod directory to hardlink files).
+///
+/// # Example
+///
+/// ```ignore
+/// if let Some(plugin) = clone_plugin_for_dispatch("stardew_valley_native") {
+///     // Registry lock is already released here.
+///     plugin.deploy_native(&detected, &db)?;
+/// }
+/// ```
+pub fn clone_plugin_for_dispatch(
+    game_id: &str,
+) -> Option<Arc<dyn GamePlugin + Send + Sync>> {
+    let plugins = registry().lock().unwrap_or_else(|e| e.into_inner());
+    plugins
+        .iter()
+        .find(|p| p.game_id() == game_id)
+        .cloned()
+}
+
 /// Look up a registered plugin by its game id and return a reference to it.
 ///
 /// **Important**: This acquires the registry mutex lock. The returned guard
@@ -458,7 +493,7 @@ pub fn get_plugin_for_game(game_id: &str) -> Option<PluginRef> {
 /// A handle that keeps the registry lock held while providing access to a
 /// single plugin. Dereferences to `&dyn GamePlugin`.
 pub struct PluginRef {
-    guard: std::sync::MutexGuard<'static, Vec<Box<dyn GamePlugin + Send + Sync>>>,
+    guard: std::sync::MutexGuard<'static, Vec<Arc<dyn GamePlugin + Send + Sync>>>,
     index: usize,
 }
 
@@ -513,15 +548,15 @@ mod tests {
 
     #[test]
     fn register_and_lookup() {
-        register_plugin(Box::new(TestPlugin));
+        register_plugin(Arc::new(TestPlugin));
         let result = with_plugin("testgame", |p| p.display_name().to_owned());
         assert_eq!(result, Some("Test Game".to_owned()));
     }
 
     #[test]
     fn duplicate_registration_ignored() {
-        register_plugin(Box::new(TestPlugin));
-        register_plugin(Box::new(TestPlugin));
+        register_plugin(Arc::new(TestPlugin));
+        register_plugin(Arc::new(TestPlugin));
         let plugins = registry().lock().unwrap_or_else(|e| e.into_inner());
         let count = plugins.iter().filter(|p| p.game_id() == "testgame").count();
         assert_eq!(count, 1);

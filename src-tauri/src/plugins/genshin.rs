@@ -212,7 +212,7 @@ impl GamePlugin for GenshinPlugin {
 // ---------------------------------------------------------------------------
 
 pub fn register() {
-    crate::games::register_plugin(Box::new(GenshinPlugin));
+    crate::games::register_plugin(std::sync::Arc::new(GenshinPlugin));
 }
 
 // ---------------------------------------------------------------------------
