@@ -511,10 +511,229 @@ pub fn cli_scan_bottle(bottle_name: &str) {
         }
     };
 
-    println!("=== Bottle: {} ===", bottle.name);
-    println!("Path:   {}", bottle.path.display());
-    println!("Engine: {:?}", bottle.source);
-    println!("Exists: {}", bottle.exists());
+    // -----------------------------------------------------------------------
+    // Header section
+    // -----------------------------------------------------------------------
+    let is_sandboxed = {
+        let p = bottle.path.to_string_lossy();
+        p.contains("Containers/com.codeweavers.CrossOver")
+    };
+
+    println!("=== Corkscrew Bottle Diagnostic ===");
+    println!("Corkscrew version : {}", env!("CARGO_PKG_VERSION"));
+    println!("Bottle name       : {}", bottle.name);
+    println!("Bottle path       : {}", bottle.path.display());
+    println!("Engine            : {}", bottle.source);
+    println!(
+        "Sandboxed         : {} ({})",
+        is_sandboxed,
+        if is_sandboxed {
+            "App Store / Setapp CrossOver"
+        } else {
+            "direct install"
+        }
+    );
+    println!("drive_c exists    : {}", bottle.exists());
+    println!();
+
+    // -----------------------------------------------------------------------
+    // drive_X directories present in this bottle
+    // -----------------------------------------------------------------------
+    let drive_dirs: Vec<String> = {
+        let mut v = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&bottle.path) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_lowercase();
+                if name.starts_with("drive_") && entry.path().is_dir() {
+                    v.push(entry.file_name().to_string_lossy().into_owned());
+                }
+            }
+        }
+        v.sort();
+        v
+    };
+    println!("=== Drive directories ({}) ===", drive_dirs.len());
+    if drive_dirs.is_empty() {
+        println!("(none)");
+    } else {
+        for d in &drive_dirs {
+            println!("  {}", d);
+        }
+    }
+    println!();
+
+    // -----------------------------------------------------------------------
+    // cxmenu.conf: presence, entry count, and a sample of section headers
+    // -----------------------------------------------------------------------
+    let cxmenu_path = bottle.path.join("cxmenu.conf");
+    println!("=== cxmenu.conf ===");
+    if cxmenu_path.is_file() {
+        match std::fs::read_to_string(&cxmenu_path) {
+            Ok(content) => {
+                let total_lines = content.lines().count();
+                let section_headers: Vec<&str> = content
+                    .lines()
+                    .filter(|l| {
+                        let t = l.trim();
+                        t.starts_with('[') && t.ends_with(']')
+                    })
+                    .collect();
+                println!("Present    : yes");
+                println!("Total lines: {}", total_lines);
+                println!("Sections   : {}", section_headers.len());
+                println!("First 5 sections:");
+                for header in section_headers.iter().take(5) {
+                    let truncated = if header.len() > 80 {
+                        format!("{}...", &header[..77])
+                    } else {
+                        header.to_string()
+                    };
+                    println!("  {}", truncated);
+                }
+            }
+            Err(e) => {
+                println!("Present    : yes (unreadable: {})", e);
+            }
+        }
+    } else {
+        println!("Present    : no");
+    }
+    println!();
+
+    // -----------------------------------------------------------------------
+    // SteamLibrary detection: walk drive_X dirs for Steam paths
+    // -----------------------------------------------------------------------
+    println!("=== Steam library paths ===");
+    let mut steam_library_paths: Vec<String> = Vec::new();
+
+    for drive_dir in &drive_dirs {
+        let drive_path = bottle.path.join(drive_dir);
+
+        // Check for a standalone SteamLibrary directory at the drive root
+        let standalone = drive_path.join("SteamLibrary");
+        if standalone.is_dir() {
+            steam_library_paths.push(format!("{} (standalone)", standalone.display()));
+        }
+
+        // Check for Steam's libraryfolders.vdf which lists all library roots
+        let vdf_path = drive_path
+            .join("Program Files (x86)")
+            .join("Steam")
+            .join("steamapps")
+            .join("libraryfolders.vdf");
+        if vdf_path.is_file() {
+            steam_library_paths.push(format!("{} (libraryfolders.vdf present)", vdf_path.display()));
+            // Parse declared library paths from the VDF
+            if let Ok(content) = std::fs::read_to_string(&vdf_path) {
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if let Some(rest) = trimmed.strip_prefix("\"path\"") {
+                        let rest = rest.trim().trim_matches('"');
+                        if !rest.is_empty() {
+                            steam_library_paths.push(format!(
+                                "  declared: {}",
+                                rest.replace('\\', "/")
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Also check the case-variant: Program Files\Steam
+        let vdf_path2 = drive_path
+            .join("Program Files")
+            .join("Steam")
+            .join("steamapps")
+            .join("libraryfolders.vdf");
+        if vdf_path2.is_file() && vdf_path2 != vdf_path {
+            steam_library_paths.push(format!("{} (libraryfolders.vdf present)", vdf_path2.display()));
+        }
+    }
+
+    if steam_library_paths.is_empty() {
+        println!("(none found)");
+    } else {
+        for p in &steam_library_paths {
+            println!("  {}", p);
+        }
+    }
+    println!();
+
+    // -----------------------------------------------------------------------
+    // Per-scan-path .lnk file counts (Start Menu / Desktop)
+    // -----------------------------------------------------------------------
+    println!("=== .lnk file counts per scan path ===");
+    {
+        // Mirrors the paths that crossover_shortcuts::scan_bottle_shortcuts walks.
+        // We replicate the path logic here so this section is self-contained and
+        // doesn't depend on crossover_shortcuts internals.
+        let users_dir = bottle.path.join("drive_c").join("users");
+        let mut scan_paths: Vec<PathBuf> = Vec::new();
+
+        if users_dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&users_dir) {
+                for entry in entries.flatten() {
+                    let user = entry.path();
+                    if !user.is_dir() {
+                        continue;
+                    }
+                    // Windows XP-style Start Menu
+                    scan_paths.push(user.join("Start Menu").join("Programs"));
+                    // Vista+ style
+                    scan_paths.push(
+                        user.join("AppData")
+                            .join("Roaming")
+                            .join("Microsoft")
+                            .join("Windows")
+                            .join("Start Menu")
+                            .join("Programs"),
+                    );
+                    // Desktop
+                    scan_paths.push(user.join("Desktop"));
+                }
+            }
+        }
+
+        // Common (all users) paths
+        scan_paths.push(
+            bottle.path
+                .join("drive_c")
+                .join("ProgramData")
+                .join("Microsoft")
+                .join("Windows")
+                .join("Start Menu")
+                .join("Programs"),
+        );
+
+        let mut any_found = false;
+        for scan_path in &scan_paths {
+            if !scan_path.exists() {
+                continue;
+            }
+            let lnk_count = walkdir::WalkDir::new(scan_path)
+                .follow_links(false)
+                .into_iter()
+                .flatten()
+                .filter(|e| {
+                    e.file_type().is_file()
+                        && e.path()
+                            .extension()
+                            .map(|x| x.to_string_lossy().to_lowercase() == "lnk")
+                            .unwrap_or(false)
+                })
+                .count();
+            println!(
+                "  {} .lnk files  ->  {}",
+                lnk_count,
+                scan_path.display()
+            );
+            any_found = true;
+        }
+        if !any_found {
+            println!("  (no scan paths exist in this bottle)");
+        }
+    }
     println!();
 
     // --- Detected games (Steam appmanifest + plugin-registered) ---

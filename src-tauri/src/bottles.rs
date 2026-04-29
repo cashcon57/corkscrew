@@ -241,10 +241,23 @@ struct SearchLocation {
 #[cfg(target_os = "macos")]
 fn platform_search_locations(home: &Path) -> Vec<SearchLocation> {
     vec![
-        // CrossOver
+        // CrossOver (unsandboxed — direct install from CodeWeavers website)
         SearchLocation {
             source: "CrossOver",
             path: home
+                .join("Library")
+                .join("Application Support")
+                .join("CrossOver")
+                .join("Bottles"),
+        },
+        // CrossOver (sandboxed — Mac App Store or Setapp install)
+        SearchLocation {
+            source: "CrossOver",
+            path: home
+                .join("Library")
+                .join("Containers")
+                .join("com.codeweavers.CrossOver")
+                .join("Data")
                 .join("Library")
                 .join("Application Support")
                 .join("CrossOver")
@@ -419,6 +432,75 @@ fn platform_search_locations(home: &Path) -> Vec<SearchLocation> {
 /// layout so we can handle it specially.
 #[cfg(target_os = "linux")]
 const DIRECT_PREFIX_SOURCE: &str = "Wine";
+
+/// Deduplicate a list of bottles by name (case-insensitive).
+///
+/// When the same bottle name is present in multiple scan roots (e.g. both the
+/// unsandboxed and sandboxed CrossOver paths), retain only the instance whose
+/// `bottle.toml` has the most recent modification time.  If no `bottle.toml`
+/// is found in either path, the first occurrence wins.
+fn deduplicate_bottles_by_name(bottles: Vec<Bottle>) -> Vec<Bottle> {
+    use std::collections::HashMap;
+
+    // Preserve insertion order so that the output is deterministic.  We build
+    // a map from lowercase name -> index into `result`, and update the entry
+    // whenever we find a newer mtime.
+    let mut result: Vec<Bottle> = Vec::with_capacity(bottles.len());
+    let mut name_to_idx: HashMap<String, usize> = HashMap::new();
+
+    for bottle in bottles {
+        let key = bottle.name.to_lowercase();
+        match name_to_idx.get(&key).copied() {
+            None => {
+                // First time we see this name.
+                name_to_idx.insert(key, result.len());
+                result.push(bottle);
+            }
+            Some(existing_idx) => {
+                // We've already seen a bottle with this name — keep the one
+                // with the newer bottle.toml (or drive_c) mtime.
+                if bottle_mtime(&bottle) > bottle_mtime(&result[existing_idx]) {
+                    log::debug!(
+                        "CrossOver bottle '{}': preferring path {} over {}",
+                        bottle.name,
+                        bottle.path.display(),
+                        result[existing_idx].path.display()
+                    );
+                    result[existing_idx] = bottle;
+                }
+            }
+        }
+    }
+
+    result
+}
+
+/// Return the mtime of a bottle as seconds since the Unix epoch.
+///
+/// We check `bottle.toml` first (CrossOver writes this on last use), then fall
+/// back to `drive_c` itself.  Returns `0` if neither is readable.
+fn bottle_mtime(bottle: &Bottle) -> u64 {
+    // Try bottle.toml first — CrossOver updates it on every launch.
+    let toml_path = bottle.path.join("bottle.toml");
+    if let Ok(meta) = fs::metadata(&toml_path) {
+        if let Ok(modified) = meta.modified() {
+            return modified
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+        }
+    }
+    // Fall back to drive_c mtime.
+    if let Ok(meta) = fs::metadata(bottle.drive_c()) {
+        if let Ok(modified) = meta.modified() {
+            return modified
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+        }
+    }
+    0
+}
 
 /// Scan a single search location and collect any valid bottles it contains.
 fn collect_bottles_from(location: &SearchLocation, bottles: &mut Vec<Bottle>) {
@@ -906,6 +988,13 @@ pub fn detect_bottles() -> Vec<Bottle> {
         collect_bottles_from(location, &mut bottles);
     }
 
+    // Deduplicate: if the same bottle name appears more than once (e.g. both
+    // sandboxed and unsandboxed CrossOver paths), keep the one whose
+    // bottle.toml has the most recent mtime.  This ensures we always point at
+    // the active install regardless of which CrossOver distribution variant the
+    // user has.
+    bottles = deduplicate_bottles_by_name(bottles);
+
     // Enrich Heroic bottles with game metadata
     let heroic_games = detect_heroic_games();
     if !heroic_games.is_empty() {
@@ -1222,5 +1311,97 @@ mod tests {
             bottle.users_dir(),
             PathBuf::from("/fake/bottle/drive_c/users")
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Fix 2: sandboxed CrossOver path — deduplication tests
+    // -----------------------------------------------------------------------
+
+    /// Both unsandboxed and sandboxed paths produce bottles when they exist.
+    #[test]
+    fn deduplicate_bottles_unique_names_preserved() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let path_a = create_fake_bottle(tmp.path(), "Alpha");
+        let path_b = create_fake_bottle(tmp.path(), "Beta");
+
+        let bottles = vec![
+            Bottle { name: "Alpha".into(), path: path_a.clone(), source: "CrossOver".into() },
+            Bottle { name: "Beta".into(), path: path_b.clone(), source: "CrossOver".into() },
+        ];
+
+        let deduped = deduplicate_bottles_by_name(bottles);
+        assert_eq!(deduped.len(), 2);
+        assert_eq!(deduped[0].name, "Alpha");
+        assert_eq!(deduped[1].name, "Beta");
+    }
+
+    /// When the same name appears twice with no bottle.toml, the first path wins.
+    #[test]
+    fn deduplicate_bottles_duplicate_no_toml_first_wins() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let path_a = create_fake_bottle(tmp.path(), "MySkyrim_a");
+        let path_b = create_fake_bottle(tmp.path(), "MySkyrim_b");
+
+        let bottles = vec![
+            Bottle { name: "MySkyrim".into(), path: path_a.clone(), source: "CrossOver".into() },
+            Bottle { name: "MySkyrim".into(), path: path_b.clone(), source: "CrossOver".into() },
+        ];
+
+        let deduped = deduplicate_bottles_by_name(bottles);
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(deduped[0].path, path_a);
+    }
+
+    /// When the same name appears twice and the second has a newer bottle.toml, the
+    /// second (sandboxed) path wins.
+    #[test]
+    fn deduplicate_bottles_newer_toml_wins() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // First bottle: older bottle.toml
+        let path_old = create_fake_bottle(tmp.path(), "MySkyrim_old");
+        let old_toml = path_old.join("bottle.toml");
+        fs::write(&old_toml, "[bottle]\nname = \"MySkyrim\"\n").unwrap();
+
+        // Small sleep is not reliable in unit tests — instead we manually set mtimes
+        // using filetime so the test is deterministic regardless of filesystem
+        // resolution.
+        let old_time = filetime::FileTime::from_unix_time(1_000_000, 0);
+        filetime::set_file_mtime(&old_toml, old_time).unwrap();
+
+        // Second bottle: newer bottle.toml
+        let path_new = create_fake_bottle(tmp.path(), "MySkyrim_new");
+        let new_toml = path_new.join("bottle.toml");
+        fs::write(&new_toml, "[bottle]\nname = \"MySkyrim\"\n").unwrap();
+        let new_time = filetime::FileTime::from_unix_time(2_000_000, 0);
+        filetime::set_file_mtime(&new_toml, new_time).unwrap();
+
+        let bottles = vec![
+            Bottle { name: "MySkyrim".into(), path: path_old.clone(), source: "CrossOver".into() },
+            Bottle { name: "MySkyrim".into(), path: path_new.clone(), source: "CrossOver".into() },
+        ];
+
+        let deduped = deduplicate_bottles_by_name(bottles);
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(deduped[0].path, path_new, "newer bottle.toml should win");
+    }
+
+    /// Case-insensitive dedup: "Skyrim" and "skyrim" treated as the same bottle.
+    #[test]
+    fn deduplicate_bottles_case_insensitive() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let path_a = create_fake_bottle(tmp.path(), "SkyrimA");
+        let path_b = create_fake_bottle(tmp.path(), "SkyrimB");
+
+        let bottles = vec![
+            Bottle { name: "Skyrim".into(), path: path_a.clone(), source: "CrossOver".into() },
+            Bottle { name: "SKYRIM".into(), path: path_b.clone(), source: "CrossOver".into() },
+        ];
+
+        let deduped = deduplicate_bottles_by_name(bottles);
+        assert_eq!(deduped.len(), 1, "case-insensitive duplicate should be collapsed to one entry");
     }
 }
