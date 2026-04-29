@@ -54,6 +54,7 @@ pub mod modlist_io;
 pub mod nexus;
 pub mod nexus_games_index;
 pub mod nexus_sso;
+pub mod native_scanner;
 pub mod nxm_handler;
 pub mod oauth;
 pub mod platform;

@@ -16,7 +16,7 @@ use std::path::Path;
 use serde::Deserialize;
 use thiserror::Error;
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct InfoPlist {
     #[serde(rename = "CFBundleIdentifier")]
     pub bundle_identifier: String,
