@@ -37,6 +37,23 @@ pub struct NativeAppCandidate {
     pub sandboxed: bool,
 }
 
+/// Detect whether a bundle is Mac App Store sandboxed.
+///
+/// Two indicators:
+/// 1. Presence of `Contents/_MASReceipt/receipt` — the App Store
+///    cryptographic receipt. Definitive.
+/// 2. Path under `/System/Applications` — Apple's system apps
+///    (Mail.app, Safari.app, etc.) are also sandboxed.
+///
+/// Sandboxed apps cannot be modded — Corkscrew must refuse to deploy
+/// against them and surface a clear error in the UI (Task 6.3).
+fn is_sandboxed(bundle: &Path) -> bool {
+    if bundle.starts_with("/System/Applications") {
+        return true;
+    }
+    bundle.join("Contents/_MASReceipt/receipt").exists()
+}
+
 /// Walk `/Applications` and `~/Applications` for `.app` bundles.
 ///
 /// Returns one [`NativeAppCandidate`] per discovered bundle that has a
@@ -86,11 +103,11 @@ pub(crate) fn scan_dir(dir: &Path) -> Vec<NativeAppCandidate> {
             continue;
         };
         results.push(NativeAppCandidate {
-            bundle_path: p,
+            bundle_path: p.clone(),
             info,
             architecture: Architecture::Unknown,
             source: NativeSource::SystemApplications,
-            sandboxed: false,
+            sandboxed: is_sandboxed(&p),
         });
     }
     results
@@ -177,11 +194,11 @@ pub(crate) fn scan_steam_mac_at(steam_root: &Path) -> Vec<NativeAppCandidate> {
                     continue;
                 };
                 results.push(NativeAppCandidate {
-                    bundle_path: bundle,
+                    bundle_path: bundle.clone(),
                     info,
                     architecture: Architecture::Unknown,
                     source: NativeSource::Steam,
-                    sandboxed: false,
+                    sandboxed: is_sandboxed(&bundle),
                 });
             }
         }
@@ -500,5 +517,49 @@ mod tests {
             candidates.is_empty(),
             "missing libraryfolders.vdf → should return empty Vec"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Sandbox detection tests
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn is_sandboxed_returns_true_for_app_with_mas_receipt() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bundle = dir.path().join("MASApp.app");
+        fs::create_dir_all(bundle.join("Contents/_MASReceipt")).unwrap();
+        fs::write(bundle.join("Contents/_MASReceipt/receipt"), b"fake receipt").unwrap();
+        assert!(is_sandboxed(&bundle));
+    }
+
+    #[test]
+    fn is_sandboxed_returns_false_for_app_without_mas_receipt() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bundle = dir.path().join("Plain.app");
+        fs::create_dir_all(bundle.join("Contents")).unwrap();
+        assert!(!is_sandboxed(&bundle));
+    }
+
+    #[test]
+    fn is_sandboxed_returns_true_for_system_applications_path() {
+        // Path-based; we don't need the file to exist for this branch.
+        let p = Path::new("/System/Applications/Mail.app");
+        assert!(is_sandboxed(p));
+    }
+
+    #[test]
+    fn scan_dir_marks_mas_apps_sandboxed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plain = make_app(dir.path(), "Plain", "com.example.plain");
+        let mas = make_app(dir.path(), "MASApp", "com.example.mas");
+        fs::create_dir_all(mas.join("Contents/_MASReceipt")).unwrap();
+        fs::write(mas.join("Contents/_MASReceipt/receipt"), b"r").unwrap();
+
+        let candidates = scan_dir(dir.path());
+        assert_eq!(candidates.len(), 2);
+        let plain_c = candidates.iter().find(|c| c.bundle_path == plain).unwrap();
+        let mas_c = candidates.iter().find(|c| c.bundle_path == mas).unwrap();
+        assert!(!plain_c.sandboxed);
+        assert!(mas_c.sandboxed);
     }
 }
