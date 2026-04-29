@@ -199,6 +199,68 @@ pub fn install(app_bundle: &Path, installer_archive: &Path) -> Result<(), SmapiE
     Ok(())
 }
 
+/// Uninstall SMAPI from a Stardew Valley `.app` bundle. Reverses the
+/// mutations made by `install`: deletes SMAPI files, restores the
+/// vanilla launcher from `StardewValley-original`, preserves `Mods/`.
+///
+/// Idempotent: calling on a vanilla bundle is a no-op (returns Ok).
+pub fn uninstall(app_bundle: &Path) -> Result<(), SmapiError> {
+    if !app_bundle.is_dir() {
+        return Err(SmapiError::Other(format!(
+            "not a directory: {}",
+            app_bundle.display()
+        )));
+    }
+
+    let macos = app_bundle.join("Contents/MacOS");
+    if !macos.is_dir() {
+        return Err(SmapiError::Other(format!(
+            "missing Contents/MacOS in bundle: {}",
+            app_bundle.display()
+        )));
+    }
+
+    // No-op if SMAPI isn't installed.
+    if !is_installed(app_bundle) {
+        return Ok(());
+    }
+
+    let smapi_launcher = macos.join("StardewValley");
+    let vanilla_renamed = macos.join("StardewValley-original");
+
+    // 1. Delete the SMAPI launcher (we'll restore vanilla in step 2).
+    if smapi_launcher.exists() {
+        fs::remove_file(&smapi_launcher)?;
+    }
+
+    // 2. Restore vanilla launcher.
+    if vanilla_renamed.exists() {
+        fs::rename(&vanilla_renamed, &smapi_launcher)?;
+    }
+
+    // 3-5. Delete SMAPI files (best-effort — missing files are fine).
+    for name in [
+        "StardewModdingAPI",
+        "StardewModdingAPI.dll",
+        "StardewModdingAPI.deps.json",
+    ] {
+        let p = macos.join(name);
+        if p.exists() {
+            fs::remove_file(&p)?;
+        }
+    }
+
+    // 6. Delete smapi-internal/ recursively.
+    let smapi_internal = macos.join("smapi-internal");
+    if smapi_internal.exists() {
+        fs::remove_dir_all(&smapi_internal)?;
+    }
+
+    // 7. Preserve Mods/ (intentional — per official SMAPI uninstall behavior).
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
@@ -634,5 +696,113 @@ mod tests {
             result.is_err(),
             "install should return Err for a nonexistent bundle"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // uninstall() tests
+    // -----------------------------------------------------------------------
+
+    /// Uninstalling a vanilla bundle (SMAPI not installed) is a no-op: Ok,
+    /// and the launcher file is still present and unchanged.
+    #[test]
+    fn uninstall_returns_ok_when_smapi_not_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = vanilla_bundle(dir.path());
+        assert!(uninstall(&bundle).is_ok());
+        // Bundle still vanilla.
+        assert!(bundle.join("Contents/MacOS/StardewValley").exists());
+    }
+
+    /// install → uninstall restores the vanilla launcher byte-for-byte.
+    /// This is the round-trip property: post-uninstall launcher must equal
+    /// the content that existed before any install was run.
+    #[test]
+    fn uninstall_restores_vanilla_launcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = vanilla_bundle(dir.path());
+        let vanilla_content =
+            fs::read(bundle.join("Contents/MacOS/StardewValley")).unwrap();
+
+        let archive = dir.path().join("smapi.zip");
+        build_synthetic_installer_archive(&archive).unwrap();
+        install(&bundle, &archive).unwrap();
+        assert!(is_installed(&bundle));
+
+        uninstall(&bundle).unwrap();
+        assert!(!is_installed(&bundle));
+
+        let post = fs::read(bundle.join("Contents/MacOS/StardewValley")).unwrap();
+        assert_eq!(post, vanilla_content, "launcher byte-equal to pre-install");
+    }
+
+    /// After uninstall, SMAPI executable, dll, deps.json, and smapi-internal/
+    /// are all gone, and StardewValley-original is also gone (renamed back).
+    #[test]
+    fn uninstall_removes_smapi_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = vanilla_bundle(dir.path());
+        let archive = dir.path().join("smapi.zip");
+        build_synthetic_installer_archive(&archive).unwrap();
+        install(&bundle, &archive).unwrap();
+
+        uninstall(&bundle).unwrap();
+
+        let macos = bundle.join("Contents/MacOS");
+        for f in [
+            "StardewModdingAPI",
+            "StardewModdingAPI.dll",
+            "StardewModdingAPI.deps.json",
+        ] {
+            assert!(!macos.join(f).exists(), "{f} should have been deleted");
+        }
+        assert!(!macos.join("smapi-internal").exists(), "smapi-internal/ should have been deleted");
+        assert!(!macos.join("StardewValley-original").exists(), "StardewValley-original should have been renamed back");
+    }
+
+    /// Contents/MacOS/Mods/ and everything inside it survive uninstall.
+    #[test]
+    fn uninstall_preserves_mods_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = vanilla_bundle(dir.path());
+        let archive = dir.path().join("smapi.zip");
+        build_synthetic_installer_archive(&archive).unwrap();
+        install(&bundle, &archive).unwrap();
+
+        // Add a user mod.
+        let mods = bundle.join("Contents/MacOS/Mods");
+        let user_mod = mods.join("MyMod/manifest.json");
+        fs::create_dir_all(user_mod.parent().unwrap()).unwrap();
+        fs::write(&user_mod, b"{\"Name\":\"MyMod\"}").unwrap();
+
+        uninstall(&bundle).unwrap();
+
+        assert!(mods.exists(), "Mods/ should persist after uninstall");
+        assert!(user_mod.exists(), "user mod content should persist");
+        assert_eq!(
+            fs::read(&user_mod).unwrap(),
+            b"{\"Name\":\"MyMod\"}",
+            "user mod content must be byte-equal after uninstall"
+        );
+    }
+
+    /// Calling uninstall twice succeeds; the second call is a no-op.
+    #[test]
+    fn uninstall_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = vanilla_bundle(dir.path());
+        let archive = dir.path().join("smapi.zip");
+        build_synthetic_installer_archive(&archive).unwrap();
+        install(&bundle, &archive).unwrap();
+        uninstall(&bundle).unwrap();
+        // Second call is a no-op.
+        assert!(uninstall(&bundle).is_ok());
+        assert!(!is_installed(&bundle));
+    }
+
+    /// Passing a nonexistent bundle path to uninstall returns an error.
+    #[test]
+    fn uninstall_returns_error_for_nonexistent_bundle() {
+        let result = uninstall(Path::new("/nonexistent/Foo.app"));
+        assert!(result.is_err(), "uninstall should return Err for a nonexistent bundle");
     }
 }
