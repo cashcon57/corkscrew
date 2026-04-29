@@ -38,6 +38,23 @@ const GOG_ROOTS: &[&[&str]] = &[
     &["Program Files (x86)", "GOG Galaxy", "Games"],
 ];
 
+/// Generic non-Steam roots for manual / drag-drop / Game Pass installs.
+/// These are checked AFTER the Steam and GOG paths. Each entry is a prefix
+/// under `drive_c`; the spec's `steam_dirs` folder name is appended when
+/// scanning. Game Pass installs have a trailing `Content/` sub-directory
+/// that is handled separately in `check_non_steam_paths`.
+const NON_STEAM_ROOTS: &[&[&str]] = &[
+    &["Program Files (x86)"],
+    &["Program Files"],
+    &["Games"],
+    // Top-level drag-drop convention: game folder directly under drive_c root.
+    &[],
+];
+
+/// Game Pass for PC default install root. The game directory inside here has
+/// a `Content/` subdirectory that is the actual game root.
+const XBOX_GAMES_ROOT: &[&str] = &["XboxGames"];
+
 /// Static spec for one FromSoftware game. Adding a game = add a row here.
 pub struct FromSoftGameSpec {
     pub game_id: &'static str,
@@ -271,7 +288,13 @@ fn find_game_path(bottle: &Bottle, spec: &FromSoftGameSpec) -> Option<PathBuf> {
     if let Some(p) = check_steam_library_folders(bottle, spec) {
         return Some(p);
     }
-    check_gog_paths(bottle, spec)
+    if let Some(p) = check_gog_paths(bottle, spec) {
+        return Some(p);
+    }
+    if let Some(p) = check_non_steam_paths(bottle, spec) {
+        return Some(p);
+    }
+    check_xbox_games_paths(bottle, spec)
 }
 
 fn check_steam_default(bottle: &Bottle, spec: &FromSoftGameSpec) -> Option<PathBuf> {
@@ -339,6 +362,64 @@ fn check_gog_paths(bottle: &Bottle, spec: &FromSoftGameSpec) -> Option<PathBuf> 
                 if dir.is_dir() && find_executable(&dir, spec.executables).is_some() {
                     return Some(dir);
                 }
+            }
+        }
+    }
+    None
+}
+
+/// Check generic non-Steam install roots (Program Files, Games/, top-level
+/// drag-drop). Also probes a `Game/` sub-directory to match ER/AC6/DS3
+/// layouts where the real exe lives one level deeper.
+fn check_non_steam_paths(bottle: &Bottle, spec: &FromSoftGameSpec) -> Option<PathBuf> {
+    for root in NON_STEAM_ROOTS {
+        let root_path = if root.is_empty() {
+            bottle.path.join("drive_c")
+        } else {
+            match bottle.find_path(root) {
+                Some(p) => p,
+                None => continue,
+            }
+        };
+        if !root_path.is_dir() {
+            continue;
+        }
+        for name in spec.steam_dirs {
+            if let Some(dir) = find_child_ci(&root_path, name) {
+                if dir.is_dir() && find_executable(&dir, spec.executables).is_some() {
+                    return Some(dir);
+                }
+                // Also probe `Game/` sub-dir (ER / AC6 layout).
+                if dir.is_dir() {
+                    let sub = dir.join("Game");
+                    if sub.is_dir() && find_executable(&sub, spec.executables).is_some() {
+                        return Some(sub);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Check Xbox Game Pass installs. Game Pass puts games under
+/// `XboxGames/<GameDir>/Content/`.
+fn check_xbox_games_paths(bottle: &Bottle, spec: &FromSoftGameSpec) -> Option<PathBuf> {
+    let Some(xbox_root) = bottle.find_path(XBOX_GAMES_ROOT) else {
+        return None;
+    };
+    if !xbox_root.is_dir() {
+        return None;
+    }
+    for name in spec.steam_dirs {
+        if let Some(dir) = find_child_ci(&xbox_root, name) {
+            if !dir.is_dir() {
+                continue;
+            }
+            // Game Pass content lives under <GameDir>/Content/.
+            let content_dir = dir.join("Content");
+            if content_dir.is_dir() && find_executable(&content_dir, spec.executables).is_some() {
+                return Some(content_dir);
             }
         }
     }
@@ -704,5 +785,94 @@ mod tests {
         assert!(ids.contains(&"darksouls_remastered"));
         assert!(ids.contains(&"armoredcore6"));
         assert_eq!(ids.len(), SPECS.len());
+    }
+
+    /// Helper to make a bottle and place a game at `<bottle>/drive_c/<subpath...>/<exe>`.
+    fn make_game_at(bottle_path: &Path, subpath: &[&str], exe: &str) -> PathBuf {
+        let mut game_dir = bottle_path.join("drive_c");
+        for p in subpath {
+            game_dir = game_dir.join(p);
+        }
+        fs::create_dir_all(&game_dir).unwrap();
+        fs::write(game_dir.join(exe), b"fake").unwrap();
+        game_dir
+    }
+
+    #[test]
+    fn detect_eldenring_in_program_files_x86() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("Bottle");
+        let game_dir =
+            make_game_at(&bottle_path, &["Program Files (x86)", "ELDEN RING"], "eldenring.exe");
+
+        let b = make_bottle(bottle_path);
+        let p = FromSoftPlugin::new(spec_for("eldenring"));
+        let d = p.detect(&b).expect("should detect non-Steam install");
+        assert_eq!(d.game_id, "eldenring");
+        assert_eq!(d.game_path, game_dir);
+    }
+
+    #[test]
+    fn detect_sekiro_in_games_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("Bottle");
+        let game_dir = make_game_at(
+            &bottle_path,
+            &["Games", "SEKIRO Shadows Die Twice"],
+            "sekiro.exe",
+        );
+
+        let b = make_bottle(bottle_path);
+        let p = FromSoftPlugin::new(spec_for("sekiro"));
+        let d = p.detect(&b).expect("should detect Games/ install");
+        assert_eq!(d.game_path, game_dir);
+    }
+
+    #[test]
+    fn detect_darksouls3_at_drive_c_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("Bottle");
+        let game_dir = make_game_at(&bottle_path, &["DARK SOULS III"], "DarkSoulsIII.exe");
+
+        let b = make_bottle(bottle_path);
+        let p = FromSoftPlugin::new(spec_for("darksouls3"));
+        let d = p.detect(&b).expect("should detect top-level drag-drop install");
+        assert_eq!(d.game_path, game_dir);
+    }
+
+    #[test]
+    fn detect_eldenring_in_xbox_games_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("Bottle");
+        // Game Pass layout: XboxGames/<GameDir>/Content/<exe>
+        let content_dir = make_game_at(
+            &bottle_path,
+            &["XboxGames", "ELDEN RING", "Content"],
+            "eldenring.exe",
+        );
+
+        let b = make_bottle(bottle_path);
+        let p = FromSoftPlugin::new(spec_for("eldenring"));
+        let d = p.detect(&b).expect("should detect Xbox Game Pass install");
+        assert_eq!(d.game_path, content_dir);
+    }
+
+    #[test]
+    fn detect_requires_exe_in_non_steam_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("Bottle");
+        // Create the folder but NO exe.
+        let game_dir = bottle_path
+            .join("drive_c")
+            .join("Program Files")
+            .join("ELDEN RING");
+        fs::create_dir_all(&game_dir).unwrap();
+
+        let b = make_bottle(bottle_path);
+        let p = FromSoftPlugin::new(spec_for("eldenring"));
+        assert!(
+            p.detect(&b).is_none(),
+            "empty directory must not be detected"
+        );
     }
 }

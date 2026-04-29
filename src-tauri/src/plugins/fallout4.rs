@@ -33,6 +33,19 @@ const GOG_PATHS: &[&[&str]] = &[
     &["Games", "Fallout 4"],
 ];
 
+/// Additional non-Steam, non-GOG install paths. Each is anchored by the real
+/// executable check to prevent false-positives from empty directories.
+const NON_STEAM_PATHS: &[&[&str]] = &[
+    &["Program Files (x86)", "Fallout 4"],
+    &["Program Files", "Fallout 4"],
+    &["Games", "Fallout 4"],
+    // Top-level drag-drop convention.
+    &["Fallout 4"],
+];
+
+/// Xbox Game Pass install path.
+const XBOX_GAMES_PATH: &[&str] = &["XboxGames", "Fallout 4", "Content"];
+
 /// The `plugins.txt` path relative to `AppData\Local`.
 const PLUGINS_TXT_RELATIVE: &[&str] = &["Fallout4", "plugins.txt"];
 
@@ -193,7 +206,13 @@ fn find_game_path(bottle: &Bottle) -> Option<PathBuf> {
         return Some(path);
     }
 
-    None
+    // 4. Generic non-Steam paths (manual installs, drag-drop).
+    if let Some(path) = check_non_steam_paths(bottle) {
+        return Some(path);
+    }
+
+    // 5. Xbox Game Pass install.
+    check_xbox_games_path(bottle)
 }
 
 /// Check the default Steam common directory.
@@ -241,9 +260,32 @@ fn check_steam_library_folders(bottle: &Bottle) -> Option<PathBuf> {
 fn check_gog_paths(bottle: &Bottle) -> Option<PathBuf> {
     for parts in GOG_PATHS {
         if let Some(path) = bottle.find_path(parts) {
-            if path.is_dir() {
+            if path.is_dir() && has_executable(&path) {
                 return Some(path);
             }
+        }
+    }
+    None
+}
+
+/// Check generic non-Steam / non-GOG install paths, anchored by the real
+/// executable to prevent false-positives from empty directories.
+fn check_non_steam_paths(bottle: &Bottle) -> Option<PathBuf> {
+    for parts in NON_STEAM_PATHS {
+        if let Some(path) = bottle.find_path(parts) {
+            if path.is_dir() && has_executable(&path) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+/// Check Xbox Game Pass install location.
+fn check_xbox_games_path(bottle: &Bottle) -> Option<PathBuf> {
+    if let Some(path) = bottle.find_path(XBOX_GAMES_PATH) {
+        if path.is_dir() && has_executable(&path) {
+            return Some(path);
         }
     }
     None
@@ -430,5 +472,98 @@ mod tests {
         let detected = plugin.detect(&bottle);
         assert!(detected.is_some());
         assert_eq!(detected.unwrap().game_id, "fallout4");
+    }
+
+    fn make_fo4_bottle_with_game(subpath: &[&str]) -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("TestBottle");
+        let mut game_dir = bottle_path.join("drive_c");
+        for p in subpath {
+            game_dir = game_dir.join(p);
+        }
+        fs::create_dir_all(&game_dir).unwrap();
+        fs::write(game_dir.join("Fallout4.exe"), b"fake").unwrap();
+        (tmp, bottle_path)
+    }
+
+    #[test]
+    fn detect_finds_game_in_program_files_x86() {
+        let (_tmp, bottle_path) =
+            make_fo4_bottle_with_game(&["Program Files (x86)", "Fallout 4"]);
+        let bottle = Bottle {
+            name: "TestBottle".into(),
+            path: bottle_path,
+            source: "Test".into(),
+        };
+        let detected = Fallout4Plugin.detect(&bottle).expect("non-Steam detect");
+        assert_eq!(detected.game_id, "fallout4");
+    }
+
+    #[test]
+    fn detect_finds_game_in_games_dir() {
+        let (_tmp, bottle_path) = make_fo4_bottle_with_game(&["Games", "Fallout 4"]);
+        let bottle = Bottle {
+            name: "TestBottle".into(),
+            path: bottle_path,
+            source: "Test".into(),
+        };
+        assert!(Fallout4Plugin.detect(&bottle).is_some());
+    }
+
+    #[test]
+    fn detect_finds_game_at_drive_c_root() {
+        let (_tmp, bottle_path) = make_fo4_bottle_with_game(&["Fallout 4"]);
+        let bottle = Bottle {
+            name: "TestBottle".into(),
+            path: bottle_path,
+            source: "Test".into(),
+        };
+        assert!(
+            Fallout4Plugin.detect(&bottle).is_some(),
+            "top-level drag-drop install"
+        );
+    }
+
+    #[test]
+    fn detect_finds_game_in_xbox_games() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("TestBottle");
+        let game_dir = bottle_path
+            .join("drive_c")
+            .join("XboxGames")
+            .join("Fallout 4")
+            .join("Content");
+        fs::create_dir_all(&game_dir).unwrap();
+        fs::write(game_dir.join("Fallout4.exe"), b"fake").unwrap();
+
+        let bottle = Bottle {
+            name: "TestBottle".into(),
+            path: bottle_path,
+            source: "Test".into(),
+        };
+        let detected = Fallout4Plugin.detect(&bottle).expect("Game Pass detect");
+        assert_eq!(detected.game_id, "fallout4");
+        assert!(detected.game_path.ends_with("Content"));
+    }
+
+    #[test]
+    fn detect_non_steam_requires_exe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("TestBottle");
+        let game_dir = bottle_path
+            .join("drive_c")
+            .join("Program Files")
+            .join("Fallout 4");
+        fs::create_dir_all(&game_dir).unwrap();
+
+        let bottle = Bottle {
+            name: "TestBottle".into(),
+            path: bottle_path,
+            source: "Test".into(),
+        };
+        assert!(
+            Fallout4Plugin.detect(&bottle).is_none(),
+            "empty dir must not detect"
+        );
     }
 }

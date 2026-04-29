@@ -42,6 +42,19 @@ const GOG_PATHS: &[&[&str]] = &[
     &["Games", "Skyrim Special Edition"],
 ];
 
+/// Additional non-Steam, non-GOG install paths to check.
+/// Covers manual installs, drag-drop, and Game Pass for PC.
+const NON_STEAM_PATHS: &[&[&str]] = &[
+    &["Program Files (x86)", "Skyrim Special Edition"],
+    &["Program Files", "Skyrim Special Edition"],
+    &["Games", "Skyrim Special Edition"],
+    // Top-level drag-drop (no parent directory).
+    &["Skyrim Special Edition"],
+];
+
+/// Game Pass install path. Content lives at `XboxGames/<GameDir>/Content/`.
+const XBOX_GAMES_PATH: &[&str] = &["XboxGames", "Skyrim Special Edition", "Content"];
+
 /// The `plugins.txt` path relative to `AppData\Local`.
 const PLUGINS_TXT_RELATIVE: &[&str] = &["Skyrim Special Edition", "plugins.txt"];
 
@@ -189,8 +202,9 @@ pub fn register() {
 /// Attempt to locate the Skyrim SE installation directory inside a bottle.
 ///
 /// Checks the default Steam common directory first, then parses
-/// `libraryfolders.vdf` for additional Steam library paths, and finally
-/// checks well-known GOG installation paths.
+/// `libraryfolders.vdf` for additional Steam library paths, checks
+/// well-known GOG installation paths, and finally falls back to common
+/// non-Steam install locations (manual installs, Game Pass, etc.).
 fn find_game_path(bottle: &Bottle) -> Option<PathBuf> {
     // 1. Default Steam library location.
     if let Some(path) = check_steam_default(bottle) {
@@ -207,7 +221,13 @@ fn find_game_path(bottle: &Bottle) -> Option<PathBuf> {
         return Some(path);
     }
 
-    None
+    // 4. Generic non-Steam paths (manual installs, drag-drop).
+    if let Some(path) = check_non_steam_paths(bottle) {
+        return Some(path);
+    }
+
+    // 5. Xbox Game Pass install.
+    check_xbox_games_path(bottle)
 }
 
 /// Check the default Steam common directory.
@@ -257,9 +277,32 @@ fn check_steam_library_folders(bottle: &Bottle) -> Option<PathBuf> {
 fn check_gog_paths(bottle: &Bottle) -> Option<PathBuf> {
     for parts in GOG_PATHS {
         if let Some(path) = bottle.find_path(parts) {
-            if path.is_dir() {
+            if path.is_dir() && has_executable(&path) {
                 return Some(path);
             }
+        }
+    }
+    None
+}
+
+/// Check generic non-Steam / non-GOG install paths, anchored by the real
+/// executable to prevent false-positives from empty directories.
+fn check_non_steam_paths(bottle: &Bottle) -> Option<PathBuf> {
+    for parts in NON_STEAM_PATHS {
+        if let Some(path) = bottle.find_path(parts) {
+            if path.is_dir() && has_executable(&path) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+/// Check Xbox Game Pass install location.
+fn check_xbox_games_path(bottle: &Bottle) -> Option<PathBuf> {
+    if let Some(path) = bottle.find_path(XBOX_GAMES_PATH) {
+        if path.is_dir() && has_executable(&path) {
+            return Some(path);
         }
     }
     None
@@ -498,5 +541,101 @@ mod tests {
         let detected = detected.unwrap();
         assert_eq!(detected.game_id, "skyrimse");
         assert_eq!(detected.game_path, game_dir);
+    }
+
+    fn make_skyrimse_bottle_with_game(subpath: &[&str]) -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("TestBottle");
+        let mut game_dir = bottle_path.join("drive_c");
+        for p in subpath {
+            game_dir = game_dir.join(p);
+        }
+        fs::create_dir_all(&game_dir).unwrap();
+        fs::write(game_dir.join("SkyrimSE.exe"), b"fake").unwrap();
+        (tmp, bottle_path)
+    }
+
+    #[test]
+    fn detect_finds_game_in_program_files_x86() {
+        let (_tmp, bottle_path) =
+            make_skyrimse_bottle_with_game(&["Program Files (x86)", "Skyrim Special Edition"]);
+        let bottle = Bottle {
+            name: "TestBottle".into(),
+            path: bottle_path.clone(),
+            source: "Test".into(),
+        };
+        let plugin = SkyrimSEPlugin;
+        let detected = plugin.detect(&bottle).expect("non-Steam detect");
+        assert_eq!(detected.game_id, "skyrimse");
+        assert!(detected.game_path.ends_with("Skyrim Special Edition"));
+    }
+
+    #[test]
+    fn detect_finds_game_in_games_dir() {
+        let (_tmp, bottle_path) =
+            make_skyrimse_bottle_with_game(&["Games", "Skyrim Special Edition"]);
+        let bottle = Bottle {
+            name: "TestBottle".into(),
+            path: bottle_path,
+            source: "Test".into(),
+        };
+        let plugin = SkyrimSEPlugin;
+        assert!(plugin.detect(&bottle).is_some());
+    }
+
+    #[test]
+    fn detect_finds_game_at_drive_c_root() {
+        let (_tmp, bottle_path) =
+            make_skyrimse_bottle_with_game(&["Skyrim Special Edition"]);
+        let bottle = Bottle {
+            name: "TestBottle".into(),
+            path: bottle_path,
+            source: "Test".into(),
+        };
+        let plugin = SkyrimSEPlugin;
+        assert!(plugin.detect(&bottle).is_some(), "top-level drag-drop install");
+    }
+
+    #[test]
+    fn detect_finds_game_in_xbox_games() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("TestBottle");
+        let game_dir = bottle_path
+            .join("drive_c")
+            .join("XboxGames")
+            .join("Skyrim Special Edition")
+            .join("Content");
+        fs::create_dir_all(&game_dir).unwrap();
+        fs::write(game_dir.join("SkyrimSE.exe"), b"fake").unwrap();
+
+        let bottle = Bottle {
+            name: "TestBottle".into(),
+            path: bottle_path,
+            source: "Test".into(),
+        };
+        let plugin = SkyrimSEPlugin;
+        let detected = plugin.detect(&bottle).expect("Game Pass detect");
+        assert_eq!(detected.game_id, "skyrimse");
+        assert!(detected.game_path.ends_with("Content"));
+    }
+
+    #[test]
+    fn detect_non_steam_requires_exe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("TestBottle");
+        // Create folder without exe.
+        let game_dir = bottle_path
+            .join("drive_c")
+            .join("Program Files")
+            .join("Skyrim Special Edition");
+        fs::create_dir_all(&game_dir).unwrap();
+
+        let bottle = Bottle {
+            name: "TestBottle".into(),
+            path: bottle_path,
+            source: "Test".into(),
+        };
+        let plugin = SkyrimSEPlugin;
+        assert!(plugin.detect(&bottle).is_none(), "empty dir must not detect");
     }
 }

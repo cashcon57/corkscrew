@@ -65,6 +65,19 @@ const EA_PATHS: &[&[&str]] = &[
     &["Program Files (x86)", "Electronic Arts", "The Sims 4"],
 ];
 
+/// Additional non-EA / non-Steam install paths (manual installs, drag-drop).
+/// Each is validated by `has_real_executable` to prevent false-positives.
+const NON_STEAM_PATHS: &[&[&str]] = &[
+    &["Program Files (x86)", "The Sims 4"],
+    &["Program Files", "The Sims 4"],
+    &["Games", "The Sims 4"],
+    // Top-level drag-drop convention.
+    &["The Sims 4"],
+];
+
+/// Xbox Game Pass install path.
+const XBOX_GAMES_PATH: &[&str] = &["XboxGames", "The Sims 4", "Content"];
+
 /// Default `Resource.cfg` content (5-deep recursion — community standard).
 pub const DEFAULT_RESOURCE_CFG: &str = "Priority 500\n\
 DirectoryFiles enabled autoupdate\n\
@@ -267,7 +280,10 @@ fn find_game_path(bottle: &Bottle) -> Option<PathBuf> {
     if let Some(p) = check_ea_paths(bottle) {
         return Some(p);
     }
-    None
+    if let Some(p) = check_non_steam_paths(bottle) {
+        return Some(p);
+    }
+    check_xbox_games_path(bottle)
 }
 
 fn check_steam_default(bottle: &Bottle) -> Option<PathBuf> {
@@ -311,9 +327,32 @@ fn check_steam_library_folders(bottle: &Bottle) -> Option<PathBuf> {
 fn check_ea_paths(bottle: &Bottle) -> Option<PathBuf> {
     for parts in EA_PATHS {
         if let Some(p) = bottle.find_path(parts) {
-            if p.is_dir() {
+            if p.is_dir() && has_real_executable(&p) {
                 return Some(p);
             }
+        }
+    }
+    None
+}
+
+/// Check generic non-Steam / non-EA install paths, anchored by the real
+/// executable check.
+fn check_non_steam_paths(bottle: &Bottle) -> Option<PathBuf> {
+    for parts in NON_STEAM_PATHS {
+        if let Some(p) = bottle.find_path(parts) {
+            if p.is_dir() && has_real_executable(&p) {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// Check Xbox Game Pass install location.
+fn check_xbox_games_path(bottle: &Bottle) -> Option<PathBuf> {
+    if let Some(p) = bottle.find_path(XBOX_GAMES_PATH) {
+        if p.is_dir() && has_real_executable(&p) {
+            return Some(p);
         }
     }
     None
@@ -688,5 +727,90 @@ mod tests {
             .expect("saves dir");
         let expected = docs.join("Electronic Arts").join("The Sims 4").join("saves");
         assert_eq!(saves, expected);
+    }
+
+    fn make_sims4_at(bottle_path: &Path, subpath: &[&str]) -> PathBuf {
+        let mut game_root = bottle_path.join("drive_c");
+        for p in subpath {
+            game_root = game_root.join(p);
+        }
+        let bin_dir = game_root.join("Game").join("Bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        fs::write(bin_dir.join("TS4_x64.exe"), b"fake").unwrap();
+        game_root
+    }
+
+    #[test]
+    fn detect_finds_game_in_program_files_x86() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("TestBottle");
+        let game_dir = make_sims4_at(&bottle_path, &["Program Files (x86)", "The Sims 4"]);
+        create_user_documents(&bottle_path);
+
+        let bottle = make_bottle(bottle_path);
+        let detected = Sims4Plugin.detect(&bottle).expect("non-Steam detect");
+        assert_eq!(detected.game_id, "sims4");
+        assert_eq!(detected.game_path, game_dir);
+    }
+
+    #[test]
+    fn detect_finds_game_in_games_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("TestBottle");
+        make_sims4_at(&bottle_path, &["Games", "The Sims 4"]);
+        create_user_documents(&bottle_path);
+
+        let bottle = make_bottle(bottle_path);
+        assert!(Sims4Plugin.detect(&bottle).is_some());
+    }
+
+    #[test]
+    fn detect_finds_game_at_drive_c_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("TestBottle");
+        make_sims4_at(&bottle_path, &["The Sims 4"]);
+        create_user_documents(&bottle_path);
+
+        let bottle = make_bottle(bottle_path);
+        assert!(Sims4Plugin.detect(&bottle).is_some(), "top-level drag-drop");
+    }
+
+    #[test]
+    fn detect_finds_game_in_xbox_games() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("TestBottle");
+        // XboxGames/<GameDir>/Content is the game root.
+        let game_dir = bottle_path
+            .join("drive_c")
+            .join("XboxGames")
+            .join("The Sims 4")
+            .join("Content");
+        let bin_dir = game_dir.join("Game").join("Bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        fs::write(bin_dir.join("TS4_x64.exe"), b"fake").unwrap();
+        create_user_documents(&bottle_path);
+
+        let bottle = make_bottle(bottle_path);
+        let detected = Sims4Plugin.detect(&bottle).expect("Xbox Game Pass detect");
+        assert_eq!(detected.game_id, "sims4");
+        assert_eq!(detected.game_path, game_dir);
+    }
+
+    #[test]
+    fn detect_non_steam_requires_exe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("TestBottle");
+        // Create the dir but no exe.
+        let game_dir = bottle_path
+            .join("drive_c")
+            .join("Program Files")
+            .join("The Sims 4");
+        fs::create_dir_all(&game_dir).unwrap();
+
+        let bottle = make_bottle(bottle_path);
+        assert!(
+            Sims4Plugin.detect(&bottle).is_none(),
+            "empty dir must not detect"
+        );
     }
 }

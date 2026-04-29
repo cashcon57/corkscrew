@@ -84,6 +84,22 @@ const STANDALONE_PATHS: &[&[&str]] = &[
     ],
 ];
 
+/// Additional generic non-Steam paths. These are checked AFTER the
+/// HoYoPlay and standalone paths, and only for installs that don't follow
+/// Genshin's usual nested `Genshin Impact/Genshin Impact game/` layout.
+/// Each path points directly at the inner game directory that contains
+/// the executable.
+const NON_STEAM_PATHS: &[&[&str]] = &[
+    // Drag-drop of the inner "Genshin Impact game" folder directly.
+    &["Program Files (x86)", "Genshin Impact game"],
+    &["Program Files", "Genshin Impact game"],
+    &["Games", "Genshin Impact game"],
+    &["Genshin Impact game"],
+];
+
+/// Xbox Game Pass install path.
+const XBOX_GAMES_PATH: &[&str] = &["XboxGames", "Genshin Impact game", "Content"];
+
 // ---------------------------------------------------------------------------
 // Plugin
 // ---------------------------------------------------------------------------
@@ -238,7 +254,8 @@ pub fn find_or_create_genshin_mods_dir(game_path: &Path) -> std::io::Result<Path
 /// Attempt to locate the Genshin Impact installation directory inside a bottle.
 ///
 /// Order: Steam default → Steam library folders (libraryfolders.vdf) →
-/// HoYoPlay launcher → standalone/miHoYo install paths.
+/// HoYoPlay launcher → standalone/miHoYo install paths → generic non-Steam
+/// paths → Xbox Game Pass.
 fn find_game_path(bottle: &Bottle) -> Option<PathBuf> {
     if let Some(p) = check_steam_default(bottle) {
         return Some(p);
@@ -252,7 +269,10 @@ fn find_game_path(bottle: &Bottle) -> Option<PathBuf> {
     if let Some(p) = check_standalone_paths(bottle) {
         return Some(p);
     }
-    None
+    if let Some(p) = check_non_steam_paths(bottle) {
+        return Some(p);
+    }
+    check_xbox_games_path(bottle)
 }
 
 /// Check Steam's default common folder. The Steam release uses a nested
@@ -310,9 +330,31 @@ fn check_hoyoplay_paths(bottle: &Bottle) -> Option<PathBuf> {
 fn check_standalone_paths(bottle: &Bottle) -> Option<PathBuf> {
     for parts in STANDALONE_PATHS {
         if let Some(p) = bottle.find_path(parts) {
-            if p.is_dir() {
+            if p.is_dir() && find_executable(&p).is_some() {
                 return Some(p);
             }
+        }
+    }
+    None
+}
+
+/// Check generic non-Steam paths (direct drag-drop of the inner game dir).
+fn check_non_steam_paths(bottle: &Bottle) -> Option<PathBuf> {
+    for parts in NON_STEAM_PATHS {
+        if let Some(p) = bottle.find_path(parts) {
+            if p.is_dir() && find_executable(&p).is_some() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// Check Xbox Game Pass install location.
+fn check_xbox_games_path(bottle: &Bottle) -> Option<PathBuf> {
+    if let Some(p) = bottle.find_path(XBOX_GAMES_PATH) {
+        if p.is_dir() && find_executable(&p).is_some() {
+            return Some(p);
         }
     }
     None
@@ -735,5 +777,103 @@ mod tests {
         let paths = parse_library_folders_vdf(&vdf).unwrap();
         assert_eq!(paths.len(), 2);
         assert_eq!(paths[1], PathBuf::from("D:/Games/Steam"));
+    }
+
+    fn make_genshin_at(bottle_path: &Path, subpath: &[&str]) -> PathBuf {
+        let mut game_dir = bottle_path.join("drive_c");
+        for p in subpath {
+            game_dir = game_dir.join(p);
+        }
+        fs::create_dir_all(&game_dir).unwrap();
+        fs::write(game_dir.join("GenshinImpact.exe"), b"fake").unwrap();
+        fs::create_dir_all(bottle_path.join("drive_c")).unwrap();
+        game_dir
+    }
+
+    #[test]
+    fn detect_finds_game_in_program_files_x86_direct() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("TestBottle");
+        let game_dir = make_genshin_at(&bottle_path, &["Program Files (x86)", "Genshin Impact game"]);
+        let bottle = Bottle {
+            name: "TestBottle".into(),
+            path: bottle_path,
+            source: "Test".into(),
+        };
+        let detected = GenshinPlugin.detect(&bottle).expect("non-Steam detect");
+        assert_eq!(detected.game_id, "genshin");
+        assert_eq!(detected.game_path, game_dir);
+    }
+
+    #[test]
+    fn detect_finds_game_in_games_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("TestBottle");
+        make_genshin_at(&bottle_path, &["Games", "Genshin Impact game"]);
+        let bottle = Bottle {
+            name: "TestBottle".into(),
+            path: bottle_path,
+            source: "Test".into(),
+        };
+        assert!(GenshinPlugin.detect(&bottle).is_some());
+    }
+
+    #[test]
+    fn detect_finds_game_at_drive_c_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("TestBottle");
+        make_genshin_at(&bottle_path, &["Genshin Impact game"]);
+        let bottle = Bottle {
+            name: "TestBottle".into(),
+            path: bottle_path,
+            source: "Test".into(),
+        };
+        assert!(GenshinPlugin.detect(&bottle).is_some(), "top-level drag-drop");
+    }
+
+    #[test]
+    fn detect_finds_game_in_xbox_games() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("TestBottle");
+        let game_dir = bottle_path
+            .join("drive_c")
+            .join("XboxGames")
+            .join("Genshin Impact game")
+            .join("Content");
+        fs::create_dir_all(&game_dir).unwrap();
+        fs::write(game_dir.join("GenshinImpact.exe"), b"fake").unwrap();
+        fs::create_dir_all(bottle_path.join("drive_c")).unwrap();
+
+        let bottle = Bottle {
+            name: "TestBottle".into(),
+            path: bottle_path,
+            source: "Test".into(),
+        };
+        let detected = GenshinPlugin.detect(&bottle).expect("Xbox Game Pass detect");
+        assert_eq!(detected.game_id, "genshin");
+        assert!(detected.game_path.ends_with("Content"));
+    }
+
+    #[test]
+    fn detect_non_steam_requires_exe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("TestBottle");
+        // Create the directory but no exe.
+        let game_dir = bottle_path
+            .join("drive_c")
+            .join("Games")
+            .join("Genshin Impact game");
+        fs::create_dir_all(&game_dir).unwrap();
+        fs::create_dir_all(bottle_path.join("drive_c")).unwrap();
+
+        let bottle = Bottle {
+            name: "TestBottle".into(),
+            path: bottle_path,
+            source: "Test".into(),
+        };
+        assert!(
+            GenshinPlugin.detect(&bottle).is_none(),
+            "empty dir must not detect"
+        );
     }
 }

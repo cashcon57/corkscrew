@@ -37,6 +37,22 @@ const STEAM_GAME_DIRS: &[&str] = &["Crimson Desert"];
 
 const STEAM_APP_ID: &str = "3321460";
 
+/// Additional non-Steam install paths. Each is validated by the executable
+/// check (including sub-directory probing) to prevent false-positives.
+const NON_STEAM_PATHS: &[&[&str]] = &[
+    &["Program Files (x86)", "Crimson Desert"],
+    &["Program Files", "Crimson Desert"],
+    &["Games", "Crimson Desert"],
+    // Top-level drag-drop convention.
+    &["Crimson Desert"],
+    // Pearl Abyss launcher (PA Launcher) typically installs to Program Files.
+    &["Program Files", "Pearl Abyss", "Crimson Desert"],
+    &["Program Files (x86)", "Pearl Abyss", "Crimson Desert"],
+];
+
+/// Xbox Game Pass install path.
+const XBOX_GAMES_PATH: &[&str] = &["XboxGames", "Crimson Desert", "Content"];
+
 /// Whether Crimson Desert support has been end-to-end tested. Pre-release
 /// (March 2026 launch) so we cannot verify mod install + launch yet — set to
 /// `false` so a future frontend filter can hide it from default browse.
@@ -155,7 +171,13 @@ fn find_game_path(bottle: &Bottle) -> Option<PathBuf> {
     if let Some(p) = check_steam_default(bottle) {
         return Some(p);
     }
-    check_steam_library_folders(bottle)
+    if let Some(p) = check_steam_library_folders(bottle) {
+        return Some(p);
+    }
+    if let Some(p) = check_non_steam_paths(bottle) {
+        return Some(p);
+    }
+    check_xbox_games_path(bottle)
 }
 
 fn check_steam_default(bottle: &Bottle) -> Option<PathBuf> {
@@ -165,6 +187,29 @@ fn check_steam_default(bottle: &Bottle) -> Option<PathBuf> {
             if dir.is_dir() {
                 return Some(dir);
             }
+        }
+    }
+    None
+}
+
+/// Check generic non-Steam install paths. Uses the same executable probing as
+/// the Steam path (including sub-directory fallback for `bin64/` etc.).
+fn check_non_steam_paths(bottle: &Bottle) -> Option<PathBuf> {
+    for parts in NON_STEAM_PATHS {
+        if let Some(path) = bottle.find_path(parts) {
+            if path.is_dir() && find_executable(&path).is_some() {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+/// Check Xbox Game Pass install location.
+fn check_xbox_games_path(bottle: &Bottle) -> Option<PathBuf> {
+    if let Some(path) = bottle.find_path(XBOX_GAMES_PATH) {
+        if path.is_dir() && find_executable(&path).is_some() {
+            return Some(path);
         }
     }
     None
@@ -393,5 +438,99 @@ mod tests {
         };
         let d = CrimsonDesertPlugin.detect(&b).expect("detection");
         assert_eq!(d.game_id, "crimsondesert");
+    }
+
+    fn make_cd_bottle_with_game(subpath: &[&str]) -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("Bottle");
+        let mut game_dir = bottle_path.join("drive_c");
+        for p in subpath {
+            game_dir = game_dir.join(p);
+        }
+        fs::create_dir_all(&game_dir).unwrap();
+        fs::write(game_dir.join("CrimsonDesert.exe"), b"fake").unwrap();
+        (tmp, bottle_path)
+    }
+
+    #[test]
+    fn detect_finds_game_in_program_files() {
+        let (_tmp, bottle_path) =
+            make_cd_bottle_with_game(&["Program Files", "Crimson Desert"]);
+        let b = Bottle {
+            name: "T".into(),
+            path: bottle_path,
+            source: "T".into(),
+        };
+        let d = CrimsonDesertPlugin.detect(&b).expect("non-Steam detect");
+        assert_eq!(d.game_id, "crimsondesert");
+    }
+
+    #[test]
+    fn detect_finds_game_in_games_dir() {
+        let (_tmp, bottle_path) =
+            make_cd_bottle_with_game(&["Games", "Crimson Desert"]);
+        let b = Bottle {
+            name: "T".into(),
+            path: bottle_path,
+            source: "T".into(),
+        };
+        assert!(CrimsonDesertPlugin.detect(&b).is_some());
+    }
+
+    #[test]
+    fn detect_finds_game_at_drive_c_root() {
+        let (_tmp, bottle_path) = make_cd_bottle_with_game(&["Crimson Desert"]);
+        let b = Bottle {
+            name: "T".into(),
+            path: bottle_path,
+            source: "T".into(),
+        };
+        assert!(
+            CrimsonDesertPlugin.detect(&b).is_some(),
+            "top-level drag-drop"
+        );
+    }
+
+    #[test]
+    fn detect_finds_game_in_xbox_games() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("Bottle");
+        let game_dir = bottle_path
+            .join("drive_c")
+            .join("XboxGames")
+            .join("Crimson Desert")
+            .join("Content");
+        fs::create_dir_all(&game_dir).unwrap();
+        fs::write(game_dir.join("CrimsonDesert.exe"), b"fake").unwrap();
+
+        let b = Bottle {
+            name: "T".into(),
+            path: bottle_path,
+            source: "T".into(),
+        };
+        let d = CrimsonDesertPlugin.detect(&b).expect("Xbox Game Pass detect");
+        assert_eq!(d.game_id, "crimsondesert");
+        assert!(d.game_path.ends_with("Content"));
+    }
+
+    #[test]
+    fn detect_non_steam_requires_exe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("Bottle");
+        let game_dir = bottle_path
+            .join("drive_c")
+            .join("Program Files")
+            .join("Crimson Desert");
+        fs::create_dir_all(&game_dir).unwrap();
+
+        let b = Bottle {
+            name: "T".into(),
+            path: bottle_path,
+            source: "T".into(),
+        };
+        assert!(
+            CrimsonDesertPlugin.detect(&b).is_none(),
+            "empty dir must not detect"
+        );
     }
 }

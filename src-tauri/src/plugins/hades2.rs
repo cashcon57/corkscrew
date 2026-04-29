@@ -39,6 +39,19 @@ const GOG_PATHS: &[&[&str]] = &[
     &["Games", "Hades II"],
 ];
 
+/// Additional non-Steam / non-GOG install paths (manual installs, drag-drop).
+/// Each is anchored by the executable check to prevent false-positives.
+const NON_STEAM_PATHS: &[&[&str]] = &[
+    &["Program Files (x86)", "Hades II"],
+    &["Program Files", "Hades II"],
+    &["Games", "Hades II"],
+    // Top-level drag-drop convention.
+    &["Hades II"],
+];
+
+/// Xbox Game Pass install path.
+const XBOX_GAMES_PATH: &[&str] = &["XboxGames", "Hades II", "Content"];
+
 /// Steam App ID for Hades II (early access).
 const STEAM_APP_ID: &str = "1145350";
 
@@ -192,7 +205,10 @@ fn find_game_path(bottle: &Bottle) -> Option<PathBuf> {
     if let Some(p) = check_gog_paths(bottle) {
         return Some(p);
     }
-    None
+    if let Some(p) = check_non_steam_paths(bottle) {
+        return Some(p);
+    }
+    check_xbox_games_path(bottle)
 }
 
 fn check_steam_default(bottle: &Bottle) -> Option<PathBuf> {
@@ -236,9 +252,31 @@ fn check_steam_library_folders(bottle: &Bottle) -> Option<PathBuf> {
 fn check_gog_paths(bottle: &Bottle) -> Option<PathBuf> {
     for parts in GOG_PATHS {
         if let Some(p) = bottle.find_path(parts) {
-            if p.is_dir() {
+            if p.is_dir() && find_executable(&p).is_some() {
                 return Some(p);
             }
+        }
+    }
+    None
+}
+
+/// Check generic non-Steam / non-GOG install paths, anchored by the executable.
+fn check_non_steam_paths(bottle: &Bottle) -> Option<PathBuf> {
+    for parts in NON_STEAM_PATHS {
+        if let Some(p) = bottle.find_path(parts) {
+            if p.is_dir() && find_executable(&p).is_some() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// Check Xbox Game Pass install location.
+fn check_xbox_games_path(bottle: &Bottle) -> Option<PathBuf> {
+    if let Some(p) = bottle.find_path(XBOX_GAMES_PATH) {
+        if p.is_dir() && find_executable(&p).is_some() {
+            return Some(p);
         }
     }
     None
@@ -402,5 +440,96 @@ mod tests {
         assert_eq!(p.categorize_mod_file("MyMod/textures/foo.png"), Some("texture".into()));
         assert_eq!(p.categorize_mod_file("MyMod/audio/boom.ogg"), Some("sound".into()));
         assert_eq!(p.categorize_mod_file("MyMod/README.md"), None);
+    }
+
+    fn make_hades2_at(bottle_path: &Path, subpath: &[&str]) -> PathBuf {
+        let mut game_dir = bottle_path.join("drive_c");
+        for p in subpath {
+            game_dir = game_dir.join(p);
+        }
+        fs::create_dir_all(&game_dir).unwrap();
+        fs::write(game_dir.join("Hades2.exe"), b"fake").unwrap();
+        game_dir
+    }
+
+    #[test]
+    fn detect_finds_game_in_program_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("Bottle");
+        let game_dir = make_hades2_at(&bottle_path, &["Program Files", "Hades II"]);
+        let bottle = Bottle {
+            name: "T".into(),
+            path: bottle_path,
+            source: "T".into(),
+        };
+        let detected = Hades2Plugin.detect(&bottle).expect("non-Steam detect");
+        assert_eq!(detected.game_id, "hades2");
+        assert_eq!(detected.game_path, game_dir);
+    }
+
+    #[test]
+    fn detect_finds_game_in_games_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("Bottle");
+        make_hades2_at(&bottle_path, &["Games", "Hades II"]);
+        let bottle = Bottle {
+            name: "T".into(),
+            path: bottle_path,
+            source: "T".into(),
+        };
+        assert!(Hades2Plugin.detect(&bottle).is_some());
+    }
+
+    #[test]
+    fn detect_finds_game_at_drive_c_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("Bottle");
+        make_hades2_at(&bottle_path, &["Hades II"]);
+        let bottle = Bottle {
+            name: "T".into(),
+            path: bottle_path,
+            source: "T".into(),
+        };
+        assert!(Hades2Plugin.detect(&bottle).is_some(), "top-level drag-drop");
+    }
+
+    #[test]
+    fn detect_finds_game_in_xbox_games() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("Bottle");
+        let game_dir = bottle_path
+            .join("drive_c")
+            .join("XboxGames")
+            .join("Hades II")
+            .join("Content");
+        fs::create_dir_all(&game_dir).unwrap();
+        fs::write(game_dir.join("Hades2.exe"), b"fake").unwrap();
+
+        let bottle = Bottle {
+            name: "T".into(),
+            path: bottle_path,
+            source: "T".into(),
+        };
+        let detected = Hades2Plugin.detect(&bottle).expect("Xbox Game Pass detect");
+        assert_eq!(detected.game_id, "hades2");
+        assert!(detected.game_path.ends_with("Content"));
+    }
+
+    #[test]
+    fn detect_non_steam_requires_exe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("Bottle");
+        let game_dir = bottle_path.join("drive_c").join("Games").join("Hades II");
+        fs::create_dir_all(&game_dir).unwrap();
+
+        let bottle = Bottle {
+            name: "T".into(),
+            path: bottle_path,
+            source: "T".into(),
+        };
+        assert!(
+            Hades2Plugin.detect(&bottle).is_none(),
+            "empty dir must not detect"
+        );
     }
 }

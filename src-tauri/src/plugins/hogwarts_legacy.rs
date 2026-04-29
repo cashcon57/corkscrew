@@ -41,6 +41,24 @@ const EPIC_PATHS: &[&[&str]] = &[
     &["Program Files (x86)", "Epic Games", "Hogwarts Legacy"],
 ];
 
+/// Additional non-Steam / non-Epic install paths. Each is anchored by the
+/// `Phoenix/Binaries/Win64/HogwartsLegacy.exe` check to prevent false
+/// positives from empty directories.
+const NON_STEAM_PATHS: &[&[&str]] = &[
+    &["Program Files (x86)", "Hogwarts Legacy"],
+    &["Program Files", "Hogwarts Legacy"],
+    &["Games", "Hogwarts Legacy"],
+    // Top-level drag-drop convention.
+    &["Hogwarts Legacy"],
+    // GOG (Hogwarts Legacy is available on GOG).
+    &["GOG Games", "Hogwarts Legacy"],
+    &["Program Files", "GOG Galaxy", "Games", "Hogwarts Legacy"],
+    &["Program Files (x86)", "GOG Galaxy", "Games", "Hogwarts Legacy"],
+];
+
+/// Xbox Game Pass install path.
+const XBOX_GAMES_PATH: &[&str] = &["XboxGames", "Hogwarts Legacy", "Content"];
+
 /// Subdirectory containing the real game executable.
 const PHOENIX_BIN_DIR: &[&str] = &["Phoenix", "Binaries", "Win64"];
 
@@ -585,8 +603,9 @@ pub fn register() {
 /// Attempt to locate the Hogwarts Legacy installation directory inside a bottle.
 ///
 /// Checks the default Steam common directory first, then parses
-/// `libraryfolders.vdf` for additional Steam library paths, and finally
-/// checks Epic Games Store installation paths.
+/// `libraryfolders.vdf` for additional Steam library paths, checks Epic Games
+/// Store installation paths, and finally falls back to generic non-Steam
+/// locations (GOG, manual installs, Game Pass, etc.).
 fn find_game_path(bottle: &Bottle) -> Option<PathBuf> {
     // 1. Default Steam library location.
     if let Some(path) = check_steam_default(bottle) {
@@ -603,7 +622,13 @@ fn find_game_path(bottle: &Bottle) -> Option<PathBuf> {
         return Some(path);
     }
 
-    None
+    // 4. Generic non-Steam / GOG / manual install paths.
+    if let Some(path) = check_non_steam_paths(bottle) {
+        return Some(path);
+    }
+
+    // 5. Xbox Game Pass install.
+    check_xbox_games_path(bottle)
 }
 
 /// Check the default Steam common directory.
@@ -652,9 +677,33 @@ fn check_steam_library_folders(bottle: &Bottle) -> Option<PathBuf> {
 fn check_epic_paths(bottle: &Bottle) -> Option<PathBuf> {
     for parts in EPIC_PATHS {
         if let Some(path) = bottle.find_path(parts) {
-            if path.is_dir() {
+            if path.is_dir() && has_real_executable(&path) {
                 return Some(path);
             }
+        }
+    }
+    None
+}
+
+/// Check generic non-Steam / non-Epic install paths (GOG, manual, drag-drop).
+/// Every candidate is validated against `has_real_executable` to prevent
+/// false-positives from empty directories.
+fn check_non_steam_paths(bottle: &Bottle) -> Option<PathBuf> {
+    for parts in NON_STEAM_PATHS {
+        if let Some(path) = bottle.find_path(parts) {
+            if path.is_dir() && has_real_executable(&path) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+/// Check Xbox Game Pass install location.
+fn check_xbox_games_path(bottle: &Bottle) -> Option<PathBuf> {
+    if let Some(path) = bottle.find_path(XBOX_GAMES_PATH) {
+        if path.is_dir() && has_real_executable(&path) {
+            return Some(path);
         }
     }
     None
@@ -1072,6 +1121,105 @@ mod tests {
             "exe_path should be in Phoenix/Binaries/Win64, got: {}",
             exe_path.display()
         );
+    }
+
+    #[test]
+    fn detect_finds_game_in_program_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("TestBottle");
+        let game_dir = bottle_path
+            .join("drive_c")
+            .join("Program Files")
+            .join("Hogwarts Legacy");
+        create_hl_install(&bottle_path, &game_dir);
+
+        let bottle = Bottle {
+            name: "TestBottle".into(),
+            path: bottle_path,
+            source: "Test".into(),
+        };
+        let plugin = HogwartsLegacyPlugin;
+        let detected = plugin.detect(&bottle).expect("Program Files detect");
+        assert_eq!(detected.game_id, "hogwartslegacy");
+        assert_eq!(detected.game_path, game_dir);
+    }
+
+    #[test]
+    fn detect_finds_game_in_games_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("TestBottle");
+        let game_dir = bottle_path
+            .join("drive_c")
+            .join("Games")
+            .join("Hogwarts Legacy");
+        create_hl_install(&bottle_path, &game_dir);
+
+        let bottle = Bottle {
+            name: "TestBottle".into(),
+            path: bottle_path,
+            source: "Test".into(),
+        };
+        let plugin = HogwartsLegacyPlugin;
+        assert!(plugin.detect(&bottle).is_some());
+    }
+
+    #[test]
+    fn detect_finds_game_at_drive_c_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("TestBottle");
+        let game_dir = bottle_path.join("drive_c").join("Hogwarts Legacy");
+        create_hl_install(&bottle_path, &game_dir);
+
+        let bottle = Bottle {
+            name: "TestBottle".into(),
+            path: bottle_path,
+            source: "Test".into(),
+        };
+        let plugin = HogwartsLegacyPlugin;
+        assert!(plugin.detect(&bottle).is_some(), "top-level drag-drop");
+    }
+
+    #[test]
+    fn detect_finds_game_in_xbox_games() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("TestBottle");
+        let game_dir = bottle_path
+            .join("drive_c")
+            .join("XboxGames")
+            .join("Hogwarts Legacy")
+            .join("Content");
+        create_hl_install(&bottle_path, &game_dir);
+
+        let bottle = Bottle {
+            name: "TestBottle".into(),
+            path: bottle_path,
+            source: "Test".into(),
+        };
+        let plugin = HogwartsLegacyPlugin;
+        let detected = plugin.detect(&bottle).expect("Xbox Game Pass detect");
+        assert_eq!(detected.game_id, "hogwartslegacy");
+        assert!(detected.game_path.ends_with("Content"));
+    }
+
+    #[test]
+    fn detect_non_steam_requires_phoenix_exe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("TestBottle");
+        let game_dir = bottle_path
+            .join("drive_c")
+            .join("Program Files (x86)")
+            .join("Hogwarts Legacy");
+        // Only create the directory, no exe.
+        fs::create_dir_all(&game_dir).unwrap();
+        fs::create_dir_all(bottle_path.join("drive_c")).unwrap();
+
+        let bottle = Bottle {
+            name: "TestBottle".into(),
+            path: bottle_path,
+            source: "Test".into(),
+        };
+        let plugin = HogwartsLegacyPlugin;
+        assert!(plugin.detect(&bottle).is_none(), "empty dir must not detect");
     }
 
     #[test]

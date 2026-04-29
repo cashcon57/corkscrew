@@ -71,6 +71,28 @@ const EPIC_PATHS: &[&[&str]] = &[
     &["Program Files (x86)", "Epic Games", "GTAV"],
 ];
 
+/// Additional non-Steam / non-Epic install paths. Covers manual installs,
+/// drag-drop, and the "Enhanced" edition naming. Each is anchored by
+/// `has_any_executable` to prevent false-positives.
+const NON_STEAM_PATHS: &[&[&str]] = &[
+    // "Enhanced" edition naming (newer PC release).
+    &["Program Files (x86)", "Grand Theft Auto V Enhanced"],
+    &["Program Files", "Grand Theft Auto V Enhanced"],
+    &["Games", "Grand Theft Auto V Enhanced"],
+    &["Grand Theft Auto V Enhanced"],
+    // Classic naming.
+    &["Program Files (x86)", "Grand Theft Auto V"],
+    &["Program Files", "Grand Theft Auto V"],
+    &["Games", "Grand Theft Auto V"],
+    &["Grand Theft Auto V"],
+];
+
+/// Xbox Game Pass install path (uses "Grand Theft Auto V" naming).
+const XBOX_GAMES_PATHS: &[&[&str]] = &[
+    &["XboxGames", "Grand Theft Auto V Enhanced", "Content"],
+    &["XboxGames", "Grand Theft Auto V", "Content"],
+];
+
 // ---------------------------------------------------------------------------
 // GtaVPlugin
 // ---------------------------------------------------------------------------
@@ -234,7 +256,12 @@ fn find_game_path(bottle: &Bottle) -> Option<PathBuf> {
     if let Some(path) = check_paths(bottle, EPIC_PATHS) {
         return Some(path);
     }
-    None
+    // 5. Generic non-Steam paths (manual installs, drag-drop, Enhanced edition).
+    if let Some(path) = check_non_steam_paths(bottle) {
+        return Some(path);
+    }
+    // 6. Xbox Game Pass installs.
+    check_xbox_games_paths(bottle)
 }
 
 fn check_steam_default(bottle: &Bottle) -> Option<PathBuf> {
@@ -275,7 +302,32 @@ fn check_steam_library_folders(bottle: &Bottle) -> Option<PathBuf> {
 fn check_paths(bottle: &Bottle, candidates: &[&[&str]]) -> Option<PathBuf> {
     for parts in candidates {
         if let Some(path) = bottle.find_path(parts) {
-            if path.is_dir() {
+            if path.is_dir() && has_any_executable(&path) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+/// Check generic non-Steam / non-launcher install paths, anchored by the
+/// executable check.
+fn check_non_steam_paths(bottle: &Bottle) -> Option<PathBuf> {
+    for parts in NON_STEAM_PATHS {
+        if let Some(path) = bottle.find_path(parts) {
+            if path.is_dir() && has_any_executable(&path) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+/// Check Xbox Game Pass install locations.
+fn check_xbox_games_paths(bottle: &Bottle) -> Option<PathBuf> {
+    for parts in XBOX_GAMES_PATHS {
+        if let Some(path) = bottle.find_path(parts) {
+            if path.is_dir() && has_any_executable(&path) {
                 return Some(path);
             }
         }
@@ -644,5 +696,117 @@ mod tests {
         assert_eq!(paths.len(), 2);
         assert_eq!(paths[0], PathBuf::from("C:/Program Files (x86)/Steam"));
         assert_eq!(paths[1], PathBuf::from("D:/SteamLibrary"));
+    }
+
+    fn make_gtav_at(bottle_path: &Path, subpath: &[&str]) -> PathBuf {
+        let mut game_dir = bottle_path.join("drive_c");
+        for p in subpath {
+            game_dir = game_dir.join(p);
+        }
+        fs::create_dir_all(&game_dir).unwrap();
+        fs::write(game_dir.join("GTA5.exe"), b"fake").unwrap();
+        game_dir
+    }
+
+    #[test]
+    fn detect_finds_game_in_program_files_x86() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("TestBottle");
+        let game_dir = make_gtav_at(&bottle_path, &["Program Files (x86)", "Grand Theft Auto V"]);
+        let bottle = Bottle {
+            name: "TestBottle".into(),
+            path: bottle_path,
+            source: "Test".into(),
+        };
+        let detected = GtaVPlugin.detect(&bottle).expect("non-Steam detect");
+        assert_eq!(detected.game_id, "gtav");
+        assert_eq!(detected.game_path, game_dir);
+    }
+
+    #[test]
+    fn detect_finds_enhanced_edition() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("TestBottle");
+        let game_dir = make_gtav_at(
+            &bottle_path,
+            &["Program Files", "Grand Theft Auto V Enhanced"],
+        );
+        let bottle = Bottle {
+            name: "TestBottle".into(),
+            path: bottle_path,
+            source: "Test".into(),
+        };
+        let detected = GtaVPlugin.detect(&bottle).expect("Enhanced edition detect");
+        assert_eq!(detected.game_id, "gtav");
+        assert_eq!(detected.game_path, game_dir);
+    }
+
+    #[test]
+    fn detect_finds_game_in_games_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("TestBottle");
+        make_gtav_at(&bottle_path, &["Games", "Grand Theft Auto V"]);
+        let bottle = Bottle {
+            name: "TestBottle".into(),
+            path: bottle_path,
+            source: "Test".into(),
+        };
+        assert!(GtaVPlugin.detect(&bottle).is_some());
+    }
+
+    #[test]
+    fn detect_finds_game_at_drive_c_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("TestBottle");
+        make_gtav_at(&bottle_path, &["Grand Theft Auto V"]);
+        let bottle = Bottle {
+            name: "TestBottle".into(),
+            path: bottle_path,
+            source: "Test".into(),
+        };
+        assert!(GtaVPlugin.detect(&bottle).is_some(), "top-level drag-drop");
+    }
+
+    #[test]
+    fn detect_finds_game_in_xbox_games() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("TestBottle");
+        let game_dir = bottle_path
+            .join("drive_c")
+            .join("XboxGames")
+            .join("Grand Theft Auto V")
+            .join("Content");
+        fs::create_dir_all(&game_dir).unwrap();
+        fs::write(game_dir.join("GTA5.exe"), b"fake").unwrap();
+
+        let bottle = Bottle {
+            name: "TestBottle".into(),
+            path: bottle_path,
+            source: "Test".into(),
+        };
+        let detected = GtaVPlugin.detect(&bottle).expect("Xbox Game Pass detect");
+        assert_eq!(detected.game_id, "gtav");
+        assert!(detected.game_path.ends_with("Content"));
+    }
+
+    #[test]
+    fn detect_non_steam_requires_exe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("TestBottle");
+        let game_dir = bottle_path
+            .join("drive_c")
+            .join("Program Files")
+            .join("Grand Theft Auto V");
+        fs::create_dir_all(&game_dir).unwrap();
+
+        let bottle = Bottle {
+            name: "TestBottle".into(),
+            path: bottle_path,
+            source: "Test".into(),
+        };
+        assert!(
+            GtaVPlugin.detect(&bottle).is_none(),
+            "empty dir must not detect"
+        );
     }
 }
