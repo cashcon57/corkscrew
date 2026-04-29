@@ -145,6 +145,9 @@ parselnk = { version = "0.1", default-features = false }
 # Preserves table-of-arrays layout for `[[extension.mod_loader.mods]]`.
 toml = { version = "0.8", features = ["preserve_order"] }
 
+# Info.plist reader (macOS .app bundle metadata — XML and binary plist support).
+plist = "1"
+
 # WebDriver E2E testing — debug builds only, compiled out of release
 [target.'cfg(debug_assertions)'.dependencies]
 tauri-plugin-webdriver = "0.2"

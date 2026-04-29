@@ -1176,6 +1176,7 @@ dependencies = [
  "once_cell",
  "parselnk",
  "pelite",
+ "plist",
  "qbsdiff",
  "quick-xml 0.38.4",
  "rayon",

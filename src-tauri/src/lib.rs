@@ -57,6 +57,7 @@ pub mod nexus_sso;
 pub mod nxm_handler;
 pub mod oauth;
 pub mod platform;
+pub mod plist;
 pub mod plugins;
 pub mod preflight;
 pub mod prefix_setup;
