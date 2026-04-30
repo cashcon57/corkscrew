@@ -298,7 +298,10 @@ fn find_game_path(bottle: &Bottle, spec: &FromSoftGameSpec) -> Option<PathBuf> {
     if let Some(p) = check_non_steam_paths(bottle, spec) {
         return Some(p);
     }
-    check_xbox_games_paths(bottle, spec)
+    if let Some(p) = check_xbox_games_paths(bottle, spec) {
+        return Some(p);
+    }
+    check_user_documents_paths(bottle, spec)
 }
 
 fn check_steam_default(bottle: &Bottle, spec: &FromSoftGameSpec) -> Option<PathBuf> {
@@ -424,6 +427,53 @@ fn check_xbox_games_paths(bottle: &Bottle, spec: &FromSoftGameSpec) -> Option<Pa
             let content_dir = dir.join("Content");
             if content_dir.is_dir() && find_executable(&content_dir, spec.executables).is_some() {
                 return Some(content_dir);
+            }
+        }
+    }
+    None
+}
+
+/// Probe `<bottle>/drive_c/users/<user>/Documents/Games/<game-folder>/` and
+/// `<bottle>/drive_c/users/<user>/Documents/<game-folder>/` for FromSoft game
+/// installs.
+///
+/// CrossOver typically symlinks the bottle's `Documents` directory to the
+/// host `~/Documents`, so games kept at `~/Documents/Games/<name>/` on the
+/// macOS host are reachable through the bottle filesystem. `is_dir()` follows
+/// symlinks by default, so the symlink path is transparent to this check.
+fn check_user_documents_paths(bottle: &Bottle, spec: &FromSoftGameSpec) -> Option<PathBuf> {
+    let users_dir = bottle.users_dir();
+    let Ok(entries) = fs::read_dir(&users_dir) else {
+        return None;
+    };
+    for user_entry in entries.flatten() {
+        let user_dir = user_entry.path();
+        if !user_dir.is_dir() {
+            continue;
+        }
+        let docs = user_dir.join("Documents");
+        if !docs.is_dir() {
+            continue;
+        }
+        // Two roots: Documents/Games/ (convention) and Documents/ directly.
+        let roots = [docs.join("Games"), docs];
+        for root in &roots {
+            if !root.is_dir() {
+                continue;
+            }
+            for name in spec.steam_dirs {
+                if let Some(dir) = find_child_ci(root, name) {
+                    if dir.is_dir() && find_executable(&dir, spec.executables).is_some() {
+                        return Some(dir);
+                    }
+                    // Also probe `Game/` sub-dir (ER / AC6 layout).
+                    if dir.is_dir() {
+                        let sub = dir.join("Game");
+                        if sub.is_dir() && find_executable(&sub, spec.executables).is_some() {
+                            return Some(sub);
+                        }
+                    }
+                }
             }
         }
     }
@@ -878,5 +928,27 @@ mod tests {
             p.detect_wine(&b).is_none(),
             "empty directory must not be detected"
         );
+    }
+
+    #[test]
+    fn detect_eldenring_in_documents_games() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("Bottle");
+        // Layout: <bottle>/drive_c/users/crossover/Documents/Games/ELDEN RING/eldenring.exe
+        let game_dir = bottle_path
+            .join("drive_c")
+            .join("users")
+            .join("crossover")
+            .join("Documents")
+            .join("Games")
+            .join("ELDEN RING");
+        fs::create_dir_all(&game_dir).unwrap();
+        fs::write(game_dir.join("eldenring.exe"), b"fake").unwrap();
+
+        let b = make_bottle(bottle_path);
+        let p = FromSoftPlugin::new(spec_for("eldenring"));
+        let d = p.detect_wine(&b).expect("should detect Documents/Games install");
+        assert_eq!(d.game_id, "eldenring");
+        assert_eq!(d.game_path, game_dir);
     }
 }

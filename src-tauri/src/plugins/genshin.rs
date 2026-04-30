@@ -276,7 +276,10 @@ fn find_game_path(bottle: &Bottle) -> Option<PathBuf> {
     if let Some(p) = check_non_steam_paths(bottle) {
         return Some(p);
     }
-    check_xbox_games_path(bottle)
+    if let Some(p) = check_xbox_games_path(bottle) {
+        return Some(p);
+    }
+    check_user_documents_paths(bottle)
 }
 
 /// Check Steam's default common folder. The Steam release uses a nested
@@ -359,6 +362,67 @@ fn check_xbox_games_path(bottle: &Bottle) -> Option<PathBuf> {
     if let Some(p) = bottle.find_path(XBOX_GAMES_PATH) {
         if p.is_dir() && find_executable(&p).is_some() {
             return Some(p);
+        }
+    }
+    None
+}
+
+/// Probe `<bottle>/drive_c/users/<user>/Documents/Games/<game-folder>/` and
+/// `<bottle>/drive_c/users/<user>/Documents/<game-folder>/` for Genshin installs.
+///
+/// CrossOver typically symlinks the bottle's `Documents` directory to the
+/// host `~/Documents`, so games kept at `~/Documents/Games/<name>/` on the
+/// macOS host are reachable through the bottle filesystem.
+///
+/// Genshin uses a nested layout (`Genshin Impact/Genshin Impact game/`) under
+/// Steam; we probe both the outer container name and the flat inner name since
+/// users in Documents/ may drop either level.
+fn check_user_documents_paths(bottle: &Bottle) -> Option<PathBuf> {
+    let users_dir = bottle.users_dir();
+    let Ok(entries) = fs::read_dir(&users_dir) else {
+        return None;
+    };
+    // Names to look for directly inside Documents/Games/ or Documents/.
+    // These cover: outer container, inner game dir, CN client name.
+    const GAME_DIRS: &[&str] = &[
+        "Genshin Impact game",
+        "Genshin Impact",
+        "YuanShen Game",
+        "YuanShen",
+    ];
+    for user_entry in entries.flatten() {
+        let user_dir = user_entry.path();
+        if !user_dir.is_dir() {
+            continue;
+        }
+        let docs = user_dir.join("Documents");
+        if !docs.is_dir() {
+            continue;
+        }
+        // Two roots: Documents/Games/ (convention) and Documents/ directly.
+        let roots = [docs.join("Games"), docs];
+        for root in &roots {
+            if !root.is_dir() {
+                continue;
+            }
+            for name in GAME_DIRS {
+                if let Some(dir) = find_child_case_insensitive(root, name) {
+                    if !dir.is_dir() {
+                        continue;
+                    }
+                    // If this is an outer container, try to descend into the
+                    // inner game directory (mirrors Steam layout).
+                    if let Some(inner) = descend_into_inner_game_dir(&dir) {
+                        if find_executable(&inner).is_some() {
+                            return Some(inner);
+                        }
+                    }
+                    // Also check the directory itself directly.
+                    if find_executable(&dir).is_some() {
+                        return Some(dir);
+                    }
+                }
+            }
         }
     }
     None
@@ -879,5 +943,31 @@ mod tests {
             GenshinPlugin.detect_wine(&bottle).is_none(),
             "empty dir must not detect"
         );
+    }
+
+    #[test]
+    fn detect_finds_game_in_documents_games() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("TestBottle");
+        // Layout: <bottle>/drive_c/users/crossover/Documents/Games/Genshin Impact game/
+        let game_dir = bottle_path
+            .join("drive_c")
+            .join("users")
+            .join("crossover")
+            .join("Documents")
+            .join("Games")
+            .join("Genshin Impact game");
+        create_genshin_install(&bottle_path, &game_dir, "GenshinImpact.exe");
+
+        let bottle = Bottle {
+            name: "TestBottle".into(),
+            path: bottle_path,
+            source: "Test".into(),
+        };
+        let detected = GenshinPlugin
+            .detect_wine(&bottle)
+            .expect("should detect Documents/Games install");
+        assert_eq!(detected.game_id, "genshin");
+        assert_eq!(detected.game_path, game_dir);
     }
 }

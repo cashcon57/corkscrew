@@ -216,7 +216,12 @@ fn find_game_path(bottle: &Bottle) -> Option<PathBuf> {
     }
 
     // 5. Xbox Game Pass install.
-    check_xbox_games_path(bottle)
+    if let Some(path) = check_xbox_games_path(bottle) {
+        return Some(path);
+    }
+
+    // 6. Host Documents folder (via CrossOver symlink).
+    check_user_documents_paths(bottle)
 }
 
 /// Check the default Steam common directory.
@@ -286,6 +291,42 @@ fn check_xbox_games_path(bottle: &Bottle) -> Option<PathBuf> {
 /// Check whether a directory contains at least one known executable.
 fn has_executable(game_path: &Path) -> bool {
     find_executable(game_path).is_some()
+}
+
+/// Probe `<bottle>/drive_c/users/<user>/Documents/Games/Fallout 4/` and
+/// `<bottle>/drive_c/users/<user>/Documents/Fallout 4/` for game installs.
+///
+/// CrossOver typically symlinks the bottle's `Documents` directory to the
+/// host `~/Documents`, so games kept at `~/Documents/Games/<name>/` on the
+/// macOS host are reachable through the bottle filesystem.
+fn check_user_documents_paths(bottle: &Bottle) -> Option<PathBuf> {
+    let users_dir = bottle.users_dir();
+    let Ok(entries) = fs::read_dir(&users_dir) else {
+        return None;
+    };
+    for user_entry in entries.flatten() {
+        let user_dir = user_entry.path();
+        if !user_dir.is_dir() {
+            continue;
+        }
+        let docs = user_dir.join("Documents");
+        if !docs.is_dir() {
+            continue;
+        }
+        // Two roots: Documents/Games/ (convention) and Documents/ directly.
+        let roots = [docs.join("Games"), docs];
+        for root in &roots {
+            if !root.is_dir() {
+                continue;
+            }
+            if let Some(dir) = find_child_case_insensitive(root, STEAM_GAME_DIR) {
+                if dir.is_dir() && has_executable(&dir) {
+                    return Some(dir);
+                }
+            }
+        }
+    }
+    None
 }
 
 fn find_executable(game_path: &Path) -> Option<PathBuf> {
@@ -516,5 +557,32 @@ mod tests {
             Fallout4Plugin.detect_wine(&bottle).is_none(),
             "empty dir must not detect"
         );
+    }
+
+    #[test]
+    fn detect_finds_game_in_documents_games() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("TestBottle");
+        // Layout: <bottle>/drive_c/users/crossover/Documents/Games/Fallout 4/Fallout4.exe
+        let game_dir = bottle_path
+            .join("drive_c")
+            .join("users")
+            .join("crossover")
+            .join("Documents")
+            .join("Games")
+            .join("Fallout 4");
+        fs::create_dir_all(&game_dir).unwrap();
+        fs::write(game_dir.join("Fallout4.exe"), b"fake").unwrap();
+
+        let bottle = Bottle {
+            name: "TestBottle".into(),
+            path: bottle_path,
+            source: "Test".into(),
+        };
+        let detected = Fallout4Plugin
+            .detect_wine(&bottle)
+            .expect("should detect Documents/Games install");
+        assert_eq!(detected.game_id, "fallout4");
+        assert_eq!(detected.game_path, game_dir);
     }
 }

@@ -287,7 +287,10 @@ fn find_game_path(bottle: &Bottle) -> Option<PathBuf> {
     if let Some(p) = check_non_steam_paths(bottle) {
         return Some(p);
     }
-    check_xbox_games_path(bottle)
+    if let Some(p) = check_xbox_games_path(bottle) {
+        return Some(p);
+    }
+    check_user_documents_paths(bottle)
 }
 
 fn check_steam_default(bottle: &Bottle) -> Option<PathBuf> {
@@ -357,6 +360,47 @@ fn check_xbox_games_path(bottle: &Bottle) -> Option<PathBuf> {
     if let Some(p) = bottle.find_path(XBOX_GAMES_PATH) {
         if p.is_dir() && has_real_executable(&p) {
             return Some(p);
+        }
+    }
+    None
+}
+
+/// Probe `<bottle>/drive_c/users/<user>/Documents/Games/The Sims 4/` and
+/// `<bottle>/drive_c/users/<user>/Documents/The Sims 4/` for game installs.
+///
+/// CrossOver typically symlinks the bottle's `Documents` directory to the
+/// host `~/Documents`, so games kept at `~/Documents/Games/<name>/` on the
+/// macOS host are reachable through the bottle filesystem.
+///
+/// Sims 4 uses a `Game/Bin/` sub-directory for the executable. Validation
+/// requires `TS4_x64.exe` in `<root>/Game/Bin/` (mirrors `has_real_executable`).
+fn check_user_documents_paths(bottle: &Bottle) -> Option<PathBuf> {
+    let users_dir = bottle.users_dir();
+    let Ok(entries) = fs::read_dir(&users_dir) else {
+        return None;
+    };
+    for user_entry in entries.flatten() {
+        let user_dir = user_entry.path();
+        if !user_dir.is_dir() {
+            continue;
+        }
+        let docs = user_dir.join("Documents");
+        if !docs.is_dir() {
+            continue;
+        }
+        // Two roots: Documents/Games/ (convention) and Documents/ directly.
+        let roots = [docs.join("Games"), docs];
+        for root in &roots {
+            if !root.is_dir() {
+                continue;
+            }
+            for name in STEAM_GAME_DIRS {
+                if let Some(dir) = find_child_case_insensitive(root, name) {
+                    if dir.is_dir() && has_real_executable(&dir) {
+                        return Some(dir);
+                    }
+                }
+            }
         }
     }
     None
@@ -816,5 +860,30 @@ mod tests {
             Sims4Plugin.detect_wine(&bottle).is_none(),
             "empty dir must not detect"
         );
+    }
+
+    #[test]
+    fn detect_finds_game_in_documents_games() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("TestBottle");
+        // Layout: <bottle>/drive_c/users/crossover/Documents/Games/The Sims 4/
+        // with the real exe at Game/Bin/TS4_x64.exe
+        let game_dir = bottle_path
+            .join("drive_c")
+            .join("users")
+            .join("crossover")
+            .join("Documents")
+            .join("Games")
+            .join("The Sims 4");
+        create_sims4_install(&bottle_path, &game_dir);
+        // Also create the Documents dir so data_dir can be resolved.
+        create_user_documents(&bottle_path);
+
+        let bottle = make_bottle(bottle_path);
+        let detected = Sims4Plugin
+            .detect_wine(&bottle)
+            .expect("should detect Documents/Games install");
+        assert_eq!(detected.game_id, "sims4");
+        assert_eq!(detected.game_path, game_dir);
     }
 }

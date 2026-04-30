@@ -632,7 +632,12 @@ fn find_game_path(bottle: &Bottle) -> Option<PathBuf> {
     }
 
     // 5. Xbox Game Pass install.
-    check_xbox_games_path(bottle)
+    if let Some(path) = check_xbox_games_path(bottle) {
+        return Some(path);
+    }
+
+    // 6. Host Documents folder (via CrossOver symlink).
+    check_user_documents_paths(bottle)
 }
 
 /// Check the default Steam common directory.
@@ -696,6 +701,45 @@ fn check_xbox_games_path(bottle: &Bottle) -> Option<PathBuf> {
     if let Some(path) = bottle.find_path(XBOX_GAMES_PATH) {
         if path.is_dir() && has_real_executable(&path) {
             return Some(path);
+        }
+    }
+    None
+}
+
+/// Probe `<bottle>/drive_c/users/<user>/Documents/Games/Hogwarts Legacy/` and
+/// `<bottle>/drive_c/users/<user>/Documents/Hogwarts Legacy/` for game installs.
+///
+/// CrossOver typically symlinks the bottle's `Documents` directory to the
+/// host `~/Documents`, so games kept at `~/Documents/Games/<name>/` on the
+/// macOS host are reachable through the bottle filesystem.
+///
+/// Validation requires the real executable in `Phoenix/Binaries/Win64/` to
+/// prevent false-positives from empty directories (mirrors `has_real_executable`).
+fn check_user_documents_paths(bottle: &Bottle) -> Option<PathBuf> {
+    let users_dir = bottle.users_dir();
+    let Ok(entries) = fs::read_dir(&users_dir) else {
+        return None;
+    };
+    for user_entry in entries.flatten() {
+        let user_dir = user_entry.path();
+        if !user_dir.is_dir() {
+            continue;
+        }
+        let docs = user_dir.join("Documents");
+        if !docs.is_dir() {
+            continue;
+        }
+        // Two roots: Documents/Games/ (convention) and Documents/ directly.
+        let roots = [docs.join("Games"), docs];
+        for root in &roots {
+            if !root.is_dir() {
+                continue;
+            }
+            if let Some(dir) = find_child_case_insensitive(root, STEAM_GAME_DIR) {
+                if dir.is_dir() && has_real_executable(&dir) {
+                    return Some(dir);
+                }
+            }
         }
     }
     None
@@ -1171,6 +1215,34 @@ mod tests {
         };
         let plugin = HogwartsLegacyPlugin;
         assert!(plugin.detect_wine(&bottle).is_none(), "empty dir must not detect");
+    }
+
+    #[test]
+    fn detect_finds_game_in_documents_games() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("TestBottle");
+        // Layout: <bottle>/drive_c/users/crossover/Documents/Games/Hogwarts Legacy/
+        // with the real exe at Phoenix/Binaries/Win64/HogwartsLegacy.exe
+        let game_dir = bottle_path
+            .join("drive_c")
+            .join("users")
+            .join("crossover")
+            .join("Documents")
+            .join("Games")
+            .join("Hogwarts Legacy");
+        create_hl_install(&bottle_path, &game_dir);
+
+        let bottle = Bottle {
+            name: "TestBottle".into(),
+            path: bottle_path,
+            source: "Test".into(),
+        };
+        let plugin = HogwartsLegacyPlugin;
+        let detected = plugin
+            .detect_wine(&bottle)
+            .expect("should detect Documents/Games install");
+        assert_eq!(detected.game_id, "hogwartslegacy");
+        assert_eq!(detected.game_path, game_dir);
     }
 
     // --- Mod type auto-detection tests ---

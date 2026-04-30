@@ -265,7 +265,11 @@ fn find_game_path(bottle: &Bottle) -> Option<PathBuf> {
         return Some(path);
     }
     // 6. Xbox Game Pass installs.
-    check_xbox_games_paths(bottle)
+    if let Some(path) = check_xbox_games_paths(bottle) {
+        return Some(path);
+    }
+    // 7. Host Documents folder (via CrossOver symlink).
+    check_user_documents_paths(bottle)
 }
 
 fn check_steam_default(bottle: &Bottle) -> Option<PathBuf> {
@@ -333,6 +337,50 @@ fn check_xbox_games_paths(bottle: &Bottle) -> Option<PathBuf> {
         if let Some(path) = bottle.find_path(parts) {
             if path.is_dir() && has_any_executable(&path) {
                 return Some(path);
+            }
+        }
+    }
+    None
+}
+
+/// Probe `<bottle>/drive_c/users/<user>/Documents/Games/Grand Theft Auto V/` and
+/// `<bottle>/drive_c/users/<user>/Documents/Grand Theft Auto V/` for GTA V installs.
+///
+/// CrossOver typically symlinks the bottle's `Documents` directory to the
+/// host `~/Documents`, so games kept at `~/Documents/Games/<name>/` on the
+/// macOS host are reachable through the bottle filesystem.
+fn check_user_documents_paths(bottle: &Bottle) -> Option<PathBuf> {
+    let users_dir = bottle.users_dir();
+    let Ok(entries) = fs::read_dir(&users_dir) else {
+        return None;
+    };
+    // All GTA V directory names we scan for (Steam + Enhanced naming).
+    const GAME_DIRS: &[&str] = &[
+        "Grand Theft Auto V Enhanced",
+        "Grand Theft Auto V",
+        "GTAV",
+    ];
+    for user_entry in entries.flatten() {
+        let user_dir = user_entry.path();
+        if !user_dir.is_dir() {
+            continue;
+        }
+        let docs = user_dir.join("Documents");
+        if !docs.is_dir() {
+            continue;
+        }
+        // Two roots: Documents/Games/ (convention) and Documents/ directly.
+        let roots = [docs.join("Games"), docs];
+        for root in &roots {
+            if !root.is_dir() {
+                continue;
+            }
+            for name in GAME_DIRS {
+                if let Some(dir) = find_child_case_insensitive(root, name) {
+                    if dir.is_dir() && has_any_executable(&dir) {
+                        return Some(dir);
+                    }
+                }
             }
         }
     }
@@ -812,5 +860,31 @@ mod tests {
             GtaVPlugin.detect_wine(&bottle).is_none(),
             "empty dir must not detect"
         );
+    }
+
+    #[test]
+    fn detect_finds_game_in_documents_games() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("TestBottle");
+        // Layout: <bottle>/drive_c/users/crossover/Documents/Games/Grand Theft Auto V/
+        let game_dir = bottle_path
+            .join("drive_c")
+            .join("users")
+            .join("crossover")
+            .join("Documents")
+            .join("Games")
+            .join("Grand Theft Auto V");
+        create_gtav_install(&bottle_path, &game_dir, false);
+
+        let bottle = Bottle {
+            name: "TestBottle".into(),
+            path: bottle_path,
+            source: "Test".into(),
+        };
+        let detected = GtaVPlugin
+            .detect_wine(&bottle)
+            .expect("should detect Documents/Games install");
+        assert_eq!(detected.game_id, "gtav");
+        assert_eq!(detected.game_path, game_dir);
     }
 }
