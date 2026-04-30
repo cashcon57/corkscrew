@@ -44,7 +44,7 @@ jobs:
         uses: cargo-bins/cargo-binstall@main
 
       - name: Install Tauri CLI
-        run: cargo binstall tauri-cli@2.10.0 --no-confirm
+        run: cargo binstall tauri-cli@2.11.0 --no-confirm --locked
 
       - name: Build
         env:
@@ -148,7 +148,7 @@ jobs:
         uses: cargo-bins/cargo-binstall@main
 
       - name: Install Tauri CLI
-        run: cargo binstall tauri-cli@2.10.0 --no-confirm
+        run: cargo binstall tauri-cli@2.11.0 --no-confirm --locked
 
       - name: Import Apple Developer certificate
         env:
