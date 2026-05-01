@@ -61,7 +61,7 @@
   async function refresh() {
     loading = true;
     try {
-      unregistered = await listUnregisteredCrossoverGames();
+      unregistered = (await listUnregisteredCrossoverGames()) ?? [];
     } catch (err: unknown) {
       console.error(
         "UnregisteredGamesBanner: list_unregistered_crossover_games failed:",

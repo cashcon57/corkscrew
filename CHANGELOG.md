@@ -2,6 +2,13 @@
 
 All notable changes to Corkscrew are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.14.4] - 2026-05-01
+
+### Fixed
+
+- `wineCtx()` crashes with "undefined is not an object" when called with a null/undefined game during reactive state initialization (Fixes RUST-G)
+- `UnregisteredGamesBanner` crashes with "null is not an object" when backend returns null instead of empty array (Fixes RUST-C)
+
 ## [0.14.3] - 2026-05-01
 
 ### Fixed
