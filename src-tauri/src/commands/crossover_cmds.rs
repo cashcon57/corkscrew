@@ -107,3 +107,18 @@ pub async fn register_unregistered_game(
 
     save_custom_game(&state.db, &custom)
 }
+
+/// Probe a user-selected directory for any known game executables.
+///
+/// Returns all matching games so the frontend can auto-fill the "Add Game"
+/// form (game_id, display_name, nexus_slug, exe_path). Returns an empty
+/// list when no known game is found — the user must fill the form manually.
+#[tauri::command]
+pub async fn identify_game_at_path(
+    path: String,
+) -> Result<Vec<crate::games::GameIdentification>, String> {
+    let dir = std::path::PathBuf::from(path);
+    tokio::task::spawn_blocking(move || Ok(crate::games::identify_at_path(&dir)))
+        .await
+        .map_err(|e| format!("identify task failed: {e}"))?
+}

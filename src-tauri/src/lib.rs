@@ -1460,6 +1460,7 @@ pub fn run() {
             // CrossOver shortcut auto-discovery (unregistered games)
             commands::crossover_cmds::list_unregistered_crossover_games,
             commands::crossover_cmds::register_unregistered_game,
+            commands::crossover_cmds::identify_game_at_path,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

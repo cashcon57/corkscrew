@@ -2,6 +2,14 @@
 
 All notable changes to Corkscrew are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.14.5] - 2026-05-01
+
+### Added
+
+- **Wine Dashboard: "Scan for Games" button** — re-runs the full bottle and game detection scan on demand, without restarting the app
+- **Wine Dashboard: "Add Game" button** — manually register a game by selecting its folder; auto-identifies the game from known executables (game ID, display name, Nexus slug auto-filled), then saves it as a custom game associated with the chosen Wine bottle
+- **Broad-scan fallback for all game plugins** — game detection now scans every subdirectory under `Documents/Games/` and `Documents/` for matching executables, catching non-standard folder names like `ELDEN.RING.v1.16.1.ALL.DLC`. Previously only Steam-standard folder names were matched. Applied to all 9 Wine game plugins (FromSoftware, Skyrim SE, Fallout 4, Hogwarts Legacy, GTA V, Crimson Desert, Genshin Impact, Sims 4, Hades 2, Thunderstore games)
+
 ## [0.14.4] - 2026-05-01
 
 ### Fixed

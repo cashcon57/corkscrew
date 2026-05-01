@@ -1,18 +1,28 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { getBottles, getAllGames, getBottleSettingDefs, setBottleSetting } from "$lib/api";
+  import {
+    getBottles,
+    getAllGames,
+    getBottleSettingDefs,
+    setBottleSetting,
+    identifyGameAtPath,
+    registerUnregisteredGame,
+    type GameIdentification,
+  } from "$lib/api";
   import {
     bottles,
     games,
     selectedGame,
     currentPage,
     showError,
+    showSuccess,
   } from "$lib/stores";
   import type { Bottle, DetectedGame, BottleSettingDef } from "$lib/types";
   import { wineCtx } from "$lib/types";
   import GameSupportBadge from "$lib/components/GameSupportBadge.svelte";
   import UnregisteredGamesBanner from "$lib/components/UnregisteredGamesBanner.svelte";
   import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+  import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
 
   let loadingState = $state<"idle" | "loading" | "done">("idle");
   const isMac = typeof navigator !== "undefined" && navigator.platform?.startsWith("Mac");
@@ -64,6 +74,90 @@
   function selectGame(game: DetectedGame) {
     selectedGame.set(game);
     currentPage.set("mods");
+  }
+
+  // --- Scan for Games ---
+  let scanning = $state(false);
+  async function rescanGames() {
+    scanning = true;
+    try {
+      const [b, g] = await Promise.all([getBottles(), getAllGames()]);
+      bottles.set(b);
+      games.set(g);
+      showSuccess(`Found ${g.length} game${g.length === 1 ? "" : "s"}`);
+    } catch (e: unknown) {
+      showError(`Scan failed: ${e}`);
+    }
+    scanning = false;
+  }
+
+  // --- Add Game modal ---
+  let addGameOpen = $state(false);
+  let addGamePath = $state("");
+  let addGameIdentified = $state<GameIdentification[]>([]);
+  let addGameSelected = $state(0);
+  let addGameId = $state("");
+  let addGameName = $state("");
+  let addGameSlug = $state("");
+  let addGameBottle = $state("");
+  let addGameSaving = $state(false);
+  let addGameIdentifying = $state(false);
+
+  async function openAddGame() {
+    const dir = await dialogOpen({ directory: true, multiple: false, title: "Select game folder" });
+    if (!dir || Array.isArray(dir)) return;
+    addGamePath = dir;
+    addGameIdentifying = true;
+    addGameIdentified = [];
+    addGameId = "";
+    addGameName = "";
+    addGameSlug = "";
+    addGameBottle = $bottles[0]?.name ?? "";
+    addGameSelected = 0;
+    try {
+      addGameIdentified = await identifyGameAtPath(dir);
+      if (addGameIdentified.length > 0) {
+        applyIdentification(0);
+      }
+    } catch (e: unknown) {
+      showError(`Identification failed: ${e}`);
+    }
+    addGameIdentifying = false;
+    addGameOpen = true;
+  }
+
+  function applyIdentification(idx: number) {
+    addGameSelected = idx;
+    const g = addGameIdentified[idx];
+    if (!g) return;
+    addGameId = g.game_id;
+    addGameName = g.display_name;
+    addGameSlug = g.nexus_slug;
+  }
+
+  async function saveAddGame() {
+    if (!addGameId.trim() || !addGameName.trim() || !addGameBottle) return;
+    const identification = addGameIdentified[addGameSelected];
+    const exePath = identification?.exe_path ?? addGamePath;
+    const gamePath = identification?.game_path ?? addGamePath;
+    addGameSaving = true;
+    try {
+      await registerUnregisteredGame({
+        bottleName: addGameBottle,
+        gameId: addGameId.trim(),
+        displayName: addGameName.trim(),
+        nexusSlug: addGameSlug.trim(),
+        steamAppId: null,
+        gamePath,
+        exePath,
+      });
+      addGameOpen = false;
+      showSuccess(`${addGameName} added — rescanning…`);
+      await rescanGames();
+    } catch (e: unknown) {
+      showError(`Failed to add game: ${e}`);
+    }
+    addGameSaving = false;
   }
 
   const sourceColors: Record<string, { color: string; bg: string; gradient: string }> = {
@@ -125,6 +219,25 @@
               <span class="stat-label">{$games.length === 1 ? "Game" : "Games"}</span>
             </div>
           </div>
+          <button class="header-btn" onclick={rescanGames} disabled={scanning} title="Re-run game detection">
+            {#if scanning}
+              <svg class="btn-spinner" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
+              </svg>
+            {:else}
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 2v6h-6" /><path d="M3 12a9 9 0 0 1 15-6.7L21 8" />
+                <path d="M3 22v-6h6" /><path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
+              </svg>
+            {/if}
+            Scan for Games
+          </button>
+          <button class="header-btn header-btn-primary" onclick={openAddGame} title="Manually add a game by selecting its folder">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
+            Add Game
+          </button>
         {/if}
       </div>
     </header>
@@ -434,6 +547,94 @@
 
     {/if}
   </div>
+
+  <!-- Add Game Modal -->
+  {#if addGameOpen}
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="modal-overlay" onclick={(e) => { if (e.target === e.currentTarget) addGameOpen = false; }}>
+      <div class="modal">
+        <div class="modal-header">
+          <h3 class="modal-title">Add Game</h3>
+          <button class="modal-close" onclick={() => addGameOpen = false} aria-label="Close">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+
+        <div class="modal-body">
+          <!-- Selected path -->
+          <div class="modal-field">
+            <label class="modal-label">Game folder</label>
+            <div class="modal-path">{addGamePath}</div>
+          </div>
+
+          {#if addGameIdentifying}
+            <div class="modal-identifying">
+              <div class="spinner-sm"><div class="spinner-ring"></div></div>
+              Identifying game…
+            </div>
+          {:else if addGameIdentified.length > 1}
+            <div class="modal-field">
+              <label class="modal-label">Detected game</label>
+              <div class="modal-match-list">
+                {#each addGameIdentified as g, i}
+                  <button
+                    class="modal-match-btn"
+                    class:selected={addGameSelected === i}
+                    onclick={() => applyIdentification(i)}
+                  >{g.display_name}</button>
+                {/each}
+                <button
+                  class="modal-match-btn"
+                  class:selected={addGameSelected === addGameIdentified.length}
+                  onclick={() => { addGameSelected = addGameIdentified.length; addGameId = ""; addGameName = ""; addGameSlug = ""; }}
+                >Enter manually</button>
+              </div>
+            </div>
+          {:else if addGameIdentified.length === 0}
+            <p class="modal-hint">No known game detected — fill in the details below.</p>
+          {/if}
+
+          <div class="modal-field">
+            <label class="modal-label" for="ag-name">Display name</label>
+            <input id="ag-name" class="modal-input" type="text" bind:value={addGameName} placeholder="Elden Ring" />
+          </div>
+          <div class="modal-field-row">
+            <div class="modal-field">
+              <label class="modal-label" for="ag-id">Game ID</label>
+              <input id="ag-id" class="modal-input" type="text" bind:value={addGameId} placeholder="eldenring" />
+            </div>
+            <div class="modal-field">
+              <label class="modal-label" for="ag-slug">Nexus slug</label>
+              <input id="ag-slug" class="modal-input" type="text" bind:value={addGameSlug} placeholder="eldenring" />
+            </div>
+          </div>
+          <div class="modal-field">
+            <label class="modal-label" for="ag-bottle">Wine bottle</label>
+            <select id="ag-bottle" class="modal-select" bind:value={addGameBottle}>
+              {#each $bottles as b}
+                <option value={b.name}>{b.name} ({b.source})</option>
+              {/each}
+            </select>
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <button class="modal-btn" onclick={() => addGameOpen = false}>Cancel</button>
+          <button
+            class="modal-btn modal-btn-primary"
+            onclick={saveAddGame}
+            disabled={addGameSaving || !addGameId.trim() || !addGameName.trim() || !addGameBottle}
+          >
+            {addGameSaving ? "Saving…" : "Add Game"}
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
 {:else if $currentPage === "mods"}
   {#await import("./mods/+page.svelte")}
     <div class="page-loading"><div class="spinner"><div class="spinner-ring"></div></div></div>
@@ -555,6 +756,243 @@
     font-size: 12px;
     color: var(--text-tertiary);
     font-weight: 500;
+  }
+
+  .header-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-4);
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    background: var(--surface);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+    box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
+    white-space: nowrap;
+  }
+  .header-btn:hover:not(:disabled) {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+    border-color: var(--separator-strong);
+  }
+  .header-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .header-btn-primary {
+    color: var(--accent);
+    border-color: var(--accent-dim, rgba(10, 132, 255, 0.35));
+  }
+  .header-btn-primary:hover:not(:disabled) {
+    background: rgba(10, 132, 255, 0.08);
+    color: var(--accent);
+  }
+  .btn-spinner {
+    animation: spin 1s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ============================================
+     Add Game Modal
+     ============================================ */
+
+  .modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    backdrop-filter: blur(4px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
+
+  .modal {
+    background: var(--surface-elevated, var(--surface));
+    border: 1px solid var(--separator);
+    border-radius: var(--radius-lg);
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+    width: min(500px, 92vw);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-5) var(--space-6);
+    border-bottom: 1px solid var(--separator);
+  }
+
+  .modal-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .modal-close {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    border: none;
+    color: var(--text-tertiary);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+  .modal-close:hover {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+  }
+
+  .modal-body {
+    padding: var(--space-5) var(--space-6);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+
+  .modal-field {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .modal-field-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-4);
+  }
+
+  .modal-label {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .modal-path {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    font-family: var(--font-mono, monospace);
+    background: var(--surface);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius-sm);
+    padding: var(--space-2) var(--space-3);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .modal-input,
+  .modal-select {
+    font-size: 14px;
+    color: var(--text-primary);
+    background: var(--surface);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius-sm);
+    padding: var(--space-2) var(--space-3);
+    outline: none;
+    width: 100%;
+    transition: border-color 0.15s;
+  }
+  .modal-input:focus,
+  .modal-select:focus {
+    border-color: var(--accent, #0a84ff);
+  }
+
+  .modal-match-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+
+  .modal-match-btn {
+    font-size: 13px;
+    padding: var(--space-1) var(--space-3);
+    border-radius: var(--radius);
+    border: 1px solid var(--separator);
+    background: var(--surface);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+  }
+  .modal-match-btn:hover,
+  .modal-match-btn.selected {
+    background: rgba(10, 132, 255, 0.1);
+    border-color: rgba(10, 132, 255, 0.4);
+    color: var(--accent, #0a84ff);
+  }
+
+  .modal-hint {
+    font-size: 13px;
+    color: var(--text-tertiary);
+  }
+
+  .modal-identifying {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    font-size: 13px;
+    color: var(--text-secondary);
+  }
+
+  .spinner-sm {
+    width: 16px;
+    height: 16px;
+  }
+  .spinner-sm .spinner-ring {
+    width: 16px;
+    height: 16px;
+    border-width: 2px;
+  }
+
+  .modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-3);
+    padding: var(--space-4) var(--space-6);
+    border-top: 1px solid var(--separator);
+  }
+
+  .modal-btn {
+    padding: var(--space-2) var(--space-5);
+    font-size: 13px;
+    font-weight: 500;
+    border-radius: var(--radius);
+    border: 1px solid var(--separator);
+    background: var(--surface);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+  .modal-btn:hover:not(:disabled) {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+  }
+  .modal-btn-primary {
+    background: var(--accent, #0a84ff);
+    border-color: transparent;
+    color: #fff;
+  }
+  .modal-btn-primary:hover:not(:disabled) {
+    filter: brightness(1.1);
+    background: var(--accent, #0a84ff);
+    color: #fff;
+  }
+  .modal-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
   }
 
   /* ============================================

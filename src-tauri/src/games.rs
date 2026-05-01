@@ -485,6 +485,71 @@ pub fn clone_plugin_for_dispatch(
         .cloned()
 }
 
+/// Metadata returned by [`identify_at_path`] for a single matching plugin.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GameIdentification {
+    pub game_id: String,
+    pub display_name: String,
+    pub nexus_slug: String,
+    /// Absolute path to the found executable.
+    pub exe_path: String,
+    /// Absolute path to the game directory containing (or parent of) the exe.
+    pub game_path: String,
+}
+
+/// Probe `path` for any known game executables and return all matching plugins.
+///
+/// Checks `path` itself and common subdirectories (`Game`, `Binaries/Win64`,
+/// `bin64`). Returns every plugin that matches so the caller can present a
+/// pick-list when more than one hits (e.g. a multi-game install folder).
+pub fn identify_at_path(path: &Path) -> Vec<GameIdentification> {
+    let plugins = registry().lock().unwrap_or_else(|e| e.into_inner());
+    let mut results = Vec::new();
+
+    let mut candidates = vec![path.to_path_buf()];
+    for sub in &["Game", "Binaries/Win64", "bin64"] {
+        let p = path.join(sub);
+        if p.is_dir() {
+            candidates.push(p);
+        }
+    }
+
+    'plugins: for plugin in plugins.iter() {
+        let exes_lower: Vec<String> = plugin
+            .executables()
+            .iter()
+            .map(|e| e.to_lowercase())
+            .collect();
+
+        for candidate_dir in &candidates {
+            let Ok(entries) = std::fs::read_dir(candidate_dir) else {
+                continue;
+            };
+            let mut best: Option<(usize, PathBuf)> = None;
+            for entry in entries.flatten() {
+                let fname = entry.file_name().to_string_lossy().to_lowercase();
+                if let Some(idx) = exes_lower.iter().position(|e| e == &fname) {
+                    if best.as_ref().map_or(true, |(b, _)| idx < *b) {
+                        best = Some((idx, entry.path()));
+                    }
+                }
+            }
+            if let Some((_, exe_path)) = best {
+                results.push(GameIdentification {
+                    game_id: plugin.game_id().to_owned(),
+                    display_name: plugin.display_name().to_owned(),
+                    nexus_slug: plugin.nexus_slug().to_owned(),
+                    exe_path: exe_path.display().to_string(),
+                    game_path: candidate_dir.display().to_string(),
+                });
+                continue 'plugins;
+            }
+        }
+    }
+
+    results
+}
+
 /// Look up a registered plugin by its game id and return a reference to it.
 ///
 /// **Important**: This acquires the registry mutex lock. The returned guard

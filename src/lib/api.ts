@@ -2627,3 +2627,17 @@ export async function registerUnregisteredGame(args: {
   });
 }
 
+export interface GameIdentification {
+  game_id: string;
+  display_name: string;
+  nexus_slug: string;
+  exe_path: string;
+  game_path: string;
+}
+
+export async function identifyGameAtPath(
+  path: string,
+): Promise<GameIdentification[]> {
+  return invoke("identify_game_at_path", { path });
+}
+
