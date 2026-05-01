@@ -60,8 +60,9 @@ pub async fn get_games(bottle_name: Option<String>) -> Result<Vec<DetectedGame>,
 }
 
 #[tauri::command]
-pub async fn get_all_games() -> Result<Vec<DetectedGame>, String> {
-    tokio::task::spawn_blocking(move || Ok(games::detect_all_games()))
+pub async fn get_all_games(state: State<'_, AppState>) -> Result<Vec<DetectedGame>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || Ok(games::detect_all_games_with_custom(&db)))
         .await
         .map_err(crate::format_join_error)?
 }
