@@ -43,7 +43,7 @@ sevenz-rust2 = "0.20"
 unrar = "0.5"
 tar = "0.4"
 flate2 = "1"
-xz2 = "0.1"
+xz2 = { version = "0.1", features = ["static"] }
 bzip2 = "0.6"
 
 # XML parsing (FOMOD)

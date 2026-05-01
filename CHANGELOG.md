@@ -2,6 +2,14 @@
 
 All notable changes to Corkscrew are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.14.3] - 2026-05-01
+
+### Fixed
+
+- macOS: app fails to launch with "Library not loaded: /opt/homebrew/opt/xz/lib/liblzma.5.dylib"
+  on machines without Homebrew's `xz` package installed. Switched `xz2` to static linking so
+  liblzma is compiled into the binary instead of resolved at runtime.
+
 ## [0.14.2] - 2026-04-28
 
 ### Fixed
