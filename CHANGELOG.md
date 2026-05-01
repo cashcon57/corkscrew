@@ -2,6 +2,15 @@
 
 All notable changes to Corkscrew are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.14.2] - 2026-04-28
+
+### Fixed
+
+- macOS 26 Tahoe: "cannot be opened because of a problem" error on launch — the
+  rebuilt DMG was not notarized (appdmg replaced Tauri's signed DMG without
+  re-submitting to Apple). DMG is now notarized and stapled after rebuild.
+  Workaround for existing v0.14.1 installs: `xattr -dr com.apple.quarantine /Applications/Corkscrew.app`
+
 ## [0.9.55] - 2026-03-31
 
 ### Added

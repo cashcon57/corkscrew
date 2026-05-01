@@ -188,6 +188,23 @@ jobs:
       - name: Rebuild DMG with appdmg
         run: ./scripts/rebuild-dmg.sh ${{ matrix.target }}
 
+      - name: Notarize and staple rebuilt DMG
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          DMG=$(find "src-tauri/target/${{ matrix.target }}/release/bundle/dmg" -name '*.dmg' | head -1)
+          echo "Notarizing rebuilt DMG: $DMG"
+          xcrun notarytool submit "$DMG" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          echo "Stapling notarization ticket..."
+          xcrun stapler staple "$DMG"
+          echo "Done — DMG is notarized and stapled"
+
       - name: Collect artifacts
         run: |
           mkdir -p flat-artifacts
