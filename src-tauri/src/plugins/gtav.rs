@@ -382,6 +382,20 @@ fn check_user_documents_paths(bottle: &Bottle) -> Option<PathBuf> {
                     }
                 }
             }
+            // Broad fallback: scan every subdir of this root and check for the
+            // game's executables. Catches non-standard folder names that won't
+            // match GAME_DIRS.
+            if let Ok(entries) = fs::read_dir(root) {
+                for entry in entries.flatten() {
+                    let dir = entry.path();
+                    if !dir.is_dir() {
+                        continue;
+                    }
+                    if has_any_executable(&dir) {
+                        return Some(dir);
+                    }
+                }
+            }
         }
     }
     None

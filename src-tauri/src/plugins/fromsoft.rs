@@ -475,6 +475,24 @@ fn check_user_documents_paths(bottle: &Bottle, spec: &FromSoftGameSpec) -> Optio
                     }
                 }
             }
+            // Broad fallback: scan every subdir of this root and check for the
+            // game's executables. Catches non-standard folder names like
+            // "ELDEN.RING.v1.16.1.ALL.DLC" that won't match steam_dirs.
+            if let Ok(entries) = fs::read_dir(root) {
+                for entry in entries.flatten() {
+                    let dir = entry.path();
+                    if !dir.is_dir() {
+                        continue;
+                    }
+                    if find_executable(&dir, spec.executables).is_some() {
+                        return Some(dir);
+                    }
+                    let sub = dir.join("Game");
+                    if sub.is_dir() && find_executable(&sub, spec.executables).is_some() {
+                        return Some(sub);
+                    }
+                }
+            }
         }
     }
     None
