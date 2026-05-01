@@ -534,6 +534,16 @@ Full license text: https://www.gnu.org/licenses/gpl-3.0.html
 
 ---
 
+## Special Thanks
+
+Community members who've gone above and beyond helping improve Corkscrew:
+
+| User          | Contribution                                                               |
+|---------------|----------------------------------------------------------------------------|
+| **@maq6teen** | Diagnosed the `liblzma` missing dependency crash on macOS Tahoe (v0.14.3) |
+
+---
+
 ## Support
 
 If Corkscrew is useful to you:
