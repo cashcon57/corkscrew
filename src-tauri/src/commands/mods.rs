@@ -39,6 +39,56 @@ use tauri::{AppHandle, State};
 
 // --- Tauri Commands ---
 
+/// Resolve the **effective** deploy directory for a mod by consulting the
+/// per-game routing layers used by [`install_mod_cmd`]. Centralised so the
+/// NXM auto-install path can apply the same routing instead of dumping
+/// everything into `data_dir`.
+///
+/// Routing order:
+/// 1. Per-plugin Vortex mod-type detection (`detect_mod_type_from_files` +
+///    `vortex_mod_types`).
+/// 2. Archive-shape `mod_types` registry, used when the plugin opts out of
+///    legacy behaviour (`use_legacy_data_dir() == false`) or no plugin is
+///    registered.
+/// 3. Fallback to `data_dir`.
+fn resolve_effective_deploy_dir(
+    game_id: &str,
+    game: &DetectedGame,
+    data_dir: &Path,
+    mod_name: &str,
+    staged_files: &[String],
+) -> (PathBuf, Option<String>) {
+    let detected_mod_type = games::with_plugin(game_id, |plugin| {
+        plugin.detect_mod_type_from_files(staged_files)
+    })
+    .flatten();
+
+    let use_legacy = games::with_plugin(game_id, |p| p.use_legacy_data_dir())
+        .unwrap_or(false);
+
+    if let Some(ref mod_type_id) = detected_mod_type {
+        let target = games::with_plugin(game_id, |plugin| {
+            plugin
+                .vortex_mod_types()
+                .into_iter()
+                .find(|t| t.id == *mod_type_id)
+                .map(|t| t.target_path)
+        })
+        .flatten();
+        if let Some(rel_path) = target {
+            return (game.game_path.join(rel_path), detected_mod_type);
+        }
+        return (data_dir.to_path_buf(), detected_mod_type);
+    }
+
+    if !use_legacy {
+        let target = mod_types::resolve_install_target(&game.game_path, mod_name, staged_files);
+        return (target.target_dir, Some(target.type_id.to_string()));
+    }
+
+    (data_dir.to_path_buf(), None)
+}
+
 #[tauri::command]
 pub async fn get_bottles() -> Result<Vec<Bottle>, String> {
     tokio::task::spawn_blocking(move || Ok(bottles::detect_bottles()))
@@ -1073,14 +1123,26 @@ pub async fn download_from_nexus(
         db.store_file_hashes(mod_id, &staging_result.hashes)
             .map_err(|e| e.to_string())?;
 
-        // 4. Deploy
+        // 4. Resolve routing (BepInEx plugins, UE ~mods/, Vortex mod types,
+        // etc.) — same logic the manual install path uses. Previously the
+        // NXM auto-install dumped everything into `data_dir`, which broke
+        // non-Bethesda games and routed mods.
+        let (effective_dir, _routed_type) = resolve_effective_deploy_dir(
+            &game_id,
+            &game,
+            &data_dir,
+            &mod_name,
+            &staging_result.files,
+        );
+
+        // 5. Deploy
         if let Err(e) = deployer::deploy_mod(
             db,
             &game_id,
             &bottle_name,
             mod_id,
             &staging_result.staging_path,
-            &data_dir,
+            &effective_dir,
             &staging_result.files,
         ) {
             let _ = staging::remove_staging(&staging_result.staging_path);

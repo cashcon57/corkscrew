@@ -39,6 +39,17 @@ const INSTALL_SPEED_WINDOW_MS = 30000;
 let eventQueue: InstallProgressEvent[] = [];
 let rafId: number | null = null;
 
+// Game/bottle captured at install start. Completion handlers must use these
+// instead of reading `selectedGame` live — the user can switch games while
+// an install is running, which would otherwise cause the post-install
+// background hash to run against the wrong game.
+let installGameContext: { gameId: string; bottleName: string } | null = null;
+
+// Cap on in-memory log entries. Large collection installs (559+ mods) can
+// generate thousands of log lines; unbounded growth slows reactive updates
+// and bloats memory.
+const MAX_LOG_ENTRIES = 1000;
+
 function calculateSpeed(currentBytes: number): number {
   const now = Date.now();
   cumulativeDownloaded = currentBytes;
@@ -130,6 +141,14 @@ export async function startInstallTracking(
 ) {
   // Clean up any previous tracking
   stopInstallTracking();
+
+  // Capture the install's game/bottle target NOW, so a later game switch
+  // doesn't redirect completion-time side effects (background hashing) to
+  // the wrong game.
+  const startGame = get(selectedGame);
+  installGameContext = startGame
+    ? { gameId: startGame.game_id, bottleName: wineCtx(startGame)?.bottle_name ?? "" }
+    : null;
 
   const now = Date.now();
 
@@ -256,7 +275,9 @@ function flushEventQueue() {
     }
 
     if (newLogs.length > 0) {
-      next.logEntries = [...next.logEntries, ...newLogs];
+      const merged = [...next.logEntries, ...newLogs];
+      next.logEntries =
+        merged.length > MAX_LOG_ENTRIES ? merged.slice(-MAX_LOG_ENTRIES) : merged;
     }
 
     next.overallProgress = computeOverallProgress(next);
@@ -625,12 +646,14 @@ function applyEvent(
           clearInterval(timer);
           timer = null;
         }
-        // Kick off background file hashing (non-blocking)
-        {
-          const game = get(selectedGame);
-          if (game && e.failed === 0) {
-            triggerBackgroundHashing(game.game_id, wineCtx(game)?.bottle_name ?? '').catch((err) => console.error('Failed to trigger background hashing:', err));
-          }
+        // Kick off background file hashing (non-blocking). Use the
+        // captured install-start context, NOT the currently selected
+        // game — the user may have switched games during the install.
+        if (installGameContext && e.failed === 0) {
+          const ctx = installGameContext;
+          triggerBackgroundHashing(ctx.gameId, ctx.bottleName).catch((err) =>
+            console.error("Failed to trigger background hashing:", err),
+          );
         }
         break;
     }
@@ -645,6 +668,12 @@ export async function resumeInstallTracking(
   modNames?: string[],
 ) {
   stopInstallTracking();
+
+  // Capture install target at resume time; same reasoning as startInstallTracking.
+  const startGame = get(selectedGame);
+  installGameContext = startGame
+    ? { gameId: startGame.game_id, bottleName: wineCtx(startGame)?.bottle_name ?? "" }
+    : null;
 
   const now = Date.now();
 
@@ -738,6 +767,7 @@ export function stopInstallTracking() {
   lastInstallSpeed = 0;
   eventQueue = [];
   if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
+  installGameContext = null;
 }
 
 /** Mark install as finished and deactivate after a delay. */

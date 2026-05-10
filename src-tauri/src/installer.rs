@@ -463,14 +463,24 @@ fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
             continue;
         }
 
-        // Convert CP437-encoded filenames to UTF-8 (common in old DOS-era archives)
-        // Note: CP437 high-byte table (0x80-0xFF) is null-free; check above is defense-in-depth
-        let decoded_name = if raw_name.iter().any(|&b| b >= 0x80) {
-            let converted = cp437_to_utf8(raw_name);
-            debug!("CP437 filename converted: {:?} -> {}", raw_name, converted);
-            converted
-        } else {
+        // Decode filename, preferring UTF-8 over CP437.
+        //
+        // ZIP spec: when general-purpose bit 11 is set the filename is UTF-8;
+        // when unset it's CP437. Modern archives produced by anything except
+        // legacy DOS tools use UTF-8 even without setting the bit. Probing
+        // UTF-8 first protects valid `café.txt`-style filenames from being
+        // corrupted by an unconditional CP437 decode of any byte >= 0x80.
+        let decoded_name = if raw_name.iter().all(|&b| b < 0x80) {
             entry.name().to_string()
+        } else {
+            match std::str::from_utf8(raw_name) {
+                Ok(s) => s.to_string(),
+                Err(_) => {
+                    let converted = cp437_to_utf8(raw_name);
+                    debug!("CP437 filename converted: {:?} -> {}", raw_name, converted);
+                    converted
+                }
+            }
         };
 
         let relative = PathBuf::from(&decoded_name);
@@ -608,14 +618,24 @@ fn extract_zip_with_progress(
             continue;
         }
 
-        // Convert CP437-encoded filenames to UTF-8 (common in old DOS-era archives)
-        // Note: CP437 high-byte table (0x80-0xFF) is null-free; check above is defense-in-depth
-        let decoded_name = if raw_name.iter().any(|&b| b >= 0x80) {
-            let converted = cp437_to_utf8(raw_name);
-            debug!("CP437 filename converted: {:?} -> {}", raw_name, converted);
-            converted
-        } else {
+        // Decode filename, preferring UTF-8 over CP437.
+        //
+        // ZIP spec: when general-purpose bit 11 is set the filename is UTF-8;
+        // when unset it's CP437. Modern archives produced by anything except
+        // legacy DOS tools use UTF-8 even without setting the bit. Probing
+        // UTF-8 first protects valid `café.txt`-style filenames from being
+        // corrupted by an unconditional CP437 decode of any byte >= 0x80.
+        let decoded_name = if raw_name.iter().all(|&b| b < 0x80) {
             entry.name().to_string()
+        } else {
+            match std::str::from_utf8(raw_name) {
+                Ok(s) => s.to_string(),
+                Err(_) => {
+                    let converted = cp437_to_utf8(raw_name);
+                    debug!("CP437 filename converted: {:?} -> {}", raw_name, converted);
+                    converted
+                }
+            }
         };
 
         let relative = PathBuf::from(&decoded_name);
@@ -1037,12 +1057,32 @@ fn extract_tar<R: io::Read>(
             .map_err(|e| InstallerError::Tar(e.to_string()))?
             .into_owned();
 
+        // Component-level traversal check. The previous `starts_with(dest_dir)`
+        // check was lexical only — `Data/../../outside` would pass it because
+        // the string prefix matches before path normalization.
+        if rel_path
+            .components()
+            .any(|c| matches!(
+                c,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            ))
+        {
+            warn!(
+                "Skipping tar path traversal attempt: {}",
+                rel_path.display()
+            );
+            continue;
+        }
+
         let out_path = dest_dir.join(&rel_path);
 
-        // Path traversal check
+        // Defense in depth: also keep the prefix check for any edge cases the
+        // component scan misses.
         if !out_path.starts_with(dest_dir) {
             warn!(
-                "Skipping tar entry with path traversal: {}",
+                "Skipping tar entry outside dest_dir: {}",
                 rel_path.display()
             );
             continue;
@@ -1301,15 +1341,15 @@ pub fn install_mod(
     _mod_version: &str,
     _nexus_mod_id: Option<i64>,
 ) -> Result<Vec<String>> {
-    // 1. Extract into a temp directory.
-    let temp_dir = std::env::temp_dir().join(format!("corkscrew_install_{}", std::process::id()));
-    if temp_dir.exists() {
-        fs::remove_dir_all(&temp_dir)?;
-    }
-    fs::create_dir_all(&temp_dir)?;
-
-    // Make sure we clean up the temp dir even on early return.
-    let _cleanup = TempDirGuard(temp_dir.clone());
+    // 1. Extract into a unique temp directory. Use `tempfile::Builder` so
+    // concurrent installs in the same process don't collide on a shared
+    // PID-derived path — and so cleanup is handled by RAII drop without a
+    // race against sibling installs.
+    let temp_dir_handle = tempfile::Builder::new()
+        .prefix("corkscrew_install_")
+        .tempdir()
+        .map_err(InstallerError::Io)?;
+    let temp_dir = temp_dir_handle.path().to_path_buf();
 
     info!(
         "Extracting archive {} -> {}",
@@ -1418,19 +1458,6 @@ pub fn uninstall_mod_files(data_dir: &Path, installed_files: &[String]) -> Resul
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// RAII guard that removes a temporary directory when dropped.
-struct TempDirGuard(PathBuf);
-
-impl Drop for TempDirGuard {
-    fn drop(&mut self) {
-        if self.0.exists() {
-            if let Err(e) = fs::remove_dir_all(&self.0) {
-                warn!("Failed to clean up temp dir {}: {}", self.0.display(), e);
-            }
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Tests

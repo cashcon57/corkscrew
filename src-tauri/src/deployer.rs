@@ -198,9 +198,29 @@ pub struct DeployResult {
 // ---------------------------------------------------------------------------
 
 /// Test whether hardlinks work between staging_dir and data_dir.
+///
+/// Uses unique probe filenames so concurrent callers (or a previous
+/// interrupted run that left stale files behind) don't collide on a
+/// shared `.corkscrew_hardlink_test` name and delete each other's probe.
 pub fn test_hardlink_support(staging_dir: &Path, data_dir: &Path) -> bool {
-    let test_src = staging_dir.join(".corkscrew_hardlink_test");
-    let test_dst = data_dir.join(".corkscrew_hardlink_test");
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let stem = format!(
+        ".corkscrew_hardlink_test_{}_{}_{}",
+        std::process::id(),
+        nanos,
+        n
+    );
+
+    let test_src = staging_dir.join(&stem);
+    let test_dst = data_dir.join(&stem);
 
     if fs::write(&test_src, b"test").is_err() {
         return false;
