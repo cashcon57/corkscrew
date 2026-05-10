@@ -240,6 +240,7 @@ pub fn test_hardlink_support(staging_dir: &Path, data_dir: &Path) -> bool {
 /// Uses parallel file I/O via rayon for maximum throughput on multi-core
 /// systems. Conflict resolution uses bulk-loaded in-memory lookups, and
 /// deployment entries are batch-inserted in a single transaction.
+#[allow(clippy::too_many_arguments)]
 pub fn deploy_mod(
     db: &ModDatabase,
     game_id: &str,
@@ -248,6 +249,7 @@ pub fn deploy_mod(
     staging_path: &Path,
     data_dir: &Path,
     files: &[String],
+    deploy_target: &str,
 ) -> Result<DeployResult> {
     deploy_mod_inner(
         db,
@@ -257,6 +259,7 @@ pub fn deploy_mod(
         staging_path,
         data_dir,
         files,
+        deploy_target,
         None,
     )
 }
@@ -270,6 +273,7 @@ fn deploy_mod_inner(
     staging_path: &Path,
     data_dir: &Path,
     files: &[String],
+    deploy_target: &str,
     progress: Option<&DeployProgressCb>,
 ) -> Result<DeployResult> {
     use rayon::prelude::*;
@@ -476,7 +480,7 @@ fn deploy_mod_inner(
         .collect();
 
     // Phase 2: Batch-insert all deployment entries in a single transaction.
-    let batch: Vec<(&str, &str, i64, &str, &str, &str)> = results
+    let batch: Vec<(&str, &str, i64, &str, &str, &str, &str)> = results
         .iter()
         .filter_map(|opt| {
             opt.as_ref().map(|(rel_path, method)| {
@@ -487,6 +491,7 @@ fn deploy_mod_inner(
                     rel_path.as_str(),
                     staging_str.as_str(),
                     *method,
+                    deploy_target,
                 )
             })
         })
@@ -556,6 +561,7 @@ pub fn deploy_mod_atomic(
     data_dir: &Path,
     files: &[String],
     game_path: &Path,
+    deploy_target: &str,
 ) -> Result<DeployResult> {
     match deploy_mod(
         db,
@@ -565,6 +571,7 @@ pub fn deploy_mod_atomic(
         staging_path,
         data_dir,
         files,
+        deploy_target,
     ) {
         Ok(result) => Ok(result),
         Err(e) => {
@@ -590,6 +597,7 @@ pub fn deploy_mod_atomic_with_progress(
     files: &[String],
     progress: &DeployProgressCb,
     game_path: &Path,
+    deploy_target: &str,
 ) -> Result<DeployResult> {
     match deploy_mod_inner(
         db,
@@ -599,6 +607,7 @@ pub fn deploy_mod_atomic_with_progress(
         staging_path,
         data_dir,
         files,
+        deploy_target,
         Some(progress),
     ) {
         Ok(result) => Ok(result),
@@ -832,6 +841,7 @@ where
                     &staging_path,
                     effective_dir,
                     &files,
+                    &mod_target,
                 )?;
 
                 files_so_far += file_count;
@@ -1063,6 +1073,9 @@ struct DesiredFile {
     mod_id: i64,
     staging_path: PathBuf,
     sha256: Option<String>,
+    /// `data`, `root`, or `custom` — comes from the per-mod stored target
+    /// so incremental rewrites preserve the original deploy destination.
+    deploy_target: String,
 }
 
 /// The computed diff between the desired deployment state and the current one.
@@ -1126,6 +1139,10 @@ fn compute_desired_state(
         let files = crate::staging::list_staging_files(&staging_path)
             .map_err(|e| DeployerError::Other(e.to_string()))?;
 
+        let deploy_target = db
+            .get_deploy_target_for_mod(m.id)
+            .unwrap_or_else(|_| "data".to_string());
+
         for rel_path in files {
             let sha256 = hash_map.get(&(m.id, rel_path.clone())).cloned();
 
@@ -1137,6 +1154,7 @@ fn compute_desired_state(
                     mod_id: m.id,
                     staging_path: staging_path.clone(),
                     sha256,
+                    deploy_target: deploy_target.clone(),
                 },
             );
         }
@@ -1399,7 +1417,7 @@ pub fn deploy_incremental(
     }
 
     // Step 5b: Update files where the owning mod changed
-    let update_owned: Vec<(i64, String, String, Option<String>)> = diff
+    let update_owned: Vec<(i64, String, String, Option<String>, String)> = diff
         .to_update
         .par_iter()
         .filter_map(|(old_entry, new_desired)| {
@@ -1422,6 +1440,7 @@ pub fn deploy_incremental(
                         new_desired.relative_path.clone(),
                         new_desired.staging_path.to_string_lossy().to_string(),
                         new_desired.sha256.clone(),
+                        new_desired.deploy_target.clone(),
                     ))
                 }
                 None => {
@@ -1435,9 +1454,9 @@ pub fn deploy_incremental(
         })
         .collect();
 
-    let update_entries: Vec<(&str, &str, i64, &str, &str, &str, Option<&str>)> = update_owned
+    let update_entries: Vec<(&str, &str, i64, &str, &str, &str, Option<&str>, &str)> = update_owned
         .iter()
-        .map(|(mod_id, rel_path, staging_path, sha256)| {
+        .map(|(mod_id, rel_path, staging_path, sha256, deploy_target)| {
             (
                 game_id,
                 bottle_name,
@@ -1446,6 +1465,7 @@ pub fn deploy_incremental(
                 staging_path.as_str(),
                 if can_hardlink { "hardlink" } else { "copy" },
                 sha256.as_deref(),
+                deploy_target.as_str(),
             )
         })
         .collect();
@@ -1456,7 +1476,7 @@ pub fn deploy_incremental(
     }
 
     // Step 5c: Add new files
-    let add_results: Vec<Option<(i64, String, String, Option<String>)>> = diff
+    let add_results: Vec<Option<(i64, String, String, Option<String>, String)>> = diff
         .to_add
         .par_iter()
         .map(|desired_file| {
@@ -1479,6 +1499,7 @@ pub fn deploy_incremental(
                         desired_file.relative_path.clone(),
                         desired_file.staging_path.to_string_lossy().to_string(),
                         desired_file.sha256.clone(),
+                        desired_file.deploy_target.clone(),
                     ))
                 }
                 None => {
@@ -1493,11 +1514,11 @@ pub fn deploy_incremental(
         .collect();
 
     // Batch-insert new manifest entries
-    let add_entries: Vec<(&str, &str, i64, &str, &str, &str, Option<&str>)> = add_results
+    let add_entries: Vec<(&str, &str, i64, &str, &str, &str, Option<&str>, &str)> = add_results
         .iter()
         .filter_map(|opt| {
             opt.as_ref()
-                .map(|(mod_id, rel_path, staging_path, sha256)| {
+                .map(|(mod_id, rel_path, staging_path, sha256, deploy_target)| {
                     (
                         game_id,
                         bottle_name,
@@ -1506,6 +1527,7 @@ pub fn deploy_incremental(
                         staging_path.as_str(),
                         if can_hardlink { "hardlink" } else { "copy" },
                         sha256.as_deref(),
+                        deploy_target.as_str(),
                     )
                 })
         })
@@ -1787,7 +1809,7 @@ mod tests {
 
         let files = vec!["meshes/test.nif".to_string(), "mod.esp".to_string()];
         let result = deploy_mod(
-            &db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &files,
+            &db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &files, "data",
         )
         .unwrap();
 
@@ -1811,7 +1833,7 @@ mod tests {
         create_staging_file(&staging, "test.esp", b"esp");
 
         deploy_mod(
-            &db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &files,
+            &db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &files, "data",
         )
         .unwrap();
         assert!(data_dir.join("test.esp").exists());
@@ -1849,12 +1871,12 @@ mod tests {
         create_staging_file(&staging2, "shared.esp", b"high priority data");
 
         deploy_mod(
-            &db, "skyrimse", "Gaming", mod1, &staging1, &data_dir, &files,
+            &db, "skyrimse", "Gaming", mod1, &staging1, &data_dir, &files, "data",
         )
         .unwrap();
 
         deploy_mod(
-            &db, "skyrimse", "Gaming", mod2, &staging2, &data_dir, &files,
+            &db, "skyrimse", "Gaming", mod2, &staging2, &data_dir, &files, "data",
         )
         .unwrap();
 
@@ -2193,6 +2215,7 @@ mod tests {
                     entry.staging_path.as_str(),
                     entry.deploy_method.as_str(),
                     Some(hash.as_str()),
+                    entry.deploy_target.as_str(),
                 )];
                 db.batch_add_deployment_entries_with_hashes(&entries)
                     .unwrap();

@@ -350,12 +350,14 @@ pub async fn download_and_install_nexus_mod(
         &staging_result.staging_path,
         &data_dir,
         &staging_result.files,
+        "data",
     )
     .map_err(|e| {
         let _ = staging::remove_staging(&staging_result.staging_path);
         let _ = db.remove_mod(db_mod_id);
         format!("Deploy failed: {e}")
     })?;
+    let _ = db.set_deploy_target_for_mod(db_mod_id, "data");
 
     // Set source
     let _ = db.set_mod_source(

@@ -4554,7 +4554,17 @@ async fn stage_and_deploy(
     let is_root_archive = !root_files.is_empty();
     let is_root_heuristic = crate::collections::looks_like_root_files(&files_to_deploy);
     let is_root = is_root_metadata || is_root_archive || is_root_heuristic;
-    let deploy_target_str = if is_root { "root" } else { "data" };
+    // Look up vortex mod-type routing once; we use it both to compute the
+    // canonical deploy_target for the manifest and to choose effective_dir
+    // below. (`resolve_vortex_mod_type` is a cheap registry lookup.)
+    let vortex_dir = resolve_vortex_mod_type(game_id, mod_entry, game_path);
+    let deploy_target_str = if is_root {
+        "root"
+    } else if vortex_dir.is_some() {
+        "custom"
+    } else {
+        "data"
+    };
     if is_root {
         log::info!(
             "Mod '{}' detected as root mod (metadata={}, archive_root={}, heuristic={}, type={:?}, files={:?}) — deploying to game root",
@@ -4572,12 +4582,12 @@ async fn stage_and_deploy(
         let gid = game_id.to_string();
         let bn = bottle_name.to_string();
         let sp = staging_result.staging_path.clone();
-        let effective_dir = if is_root {
-            game_path.to_path_buf()
-        } else if let Some(vortex_dir) = resolve_vortex_mod_type(game_id, mod_entry, game_path) {
-            vortex_dir
+        let (effective_dir, deploy_target_for_cb) = if is_root {
+            (game_path.to_path_buf(), "root".to_string())
+        } else if let Some(ref vdir) = vortex_dir {
+            (vdir.clone(), "custom".to_string())
         } else {
-            data_dir.to_path_buf()
+            (data_dir.to_path_buf(), "data".to_string())
         };
         let gp = game_path.to_path_buf();
         let files = files_to_deploy.clone();
@@ -4615,6 +4625,7 @@ async fn stage_and_deploy(
                 &files,
                 &progress_cb,
                 &gp,
+                &deploy_target_for_cb,
             )
         })
         .await
@@ -4641,10 +4652,10 @@ async fn stage_and_deploy(
         }
     }
 
-    // Record deploy target if root mod
-    if is_root {
-        let _ = db.set_deploy_target_for_mod(mod_id, deploy_target_str);
-    }
+    // Record deploy target for every mod, not just root mods. This is the
+    // single source of truth toggle / redeploy uses to put files back in
+    // the right place.
+    let _ = db.set_deploy_target_for_mod(mod_id, deploy_target_str);
 
     // If the collection manifest marks this mod as disabled, disable it after deploy
     if mod_entry.install_disabled {

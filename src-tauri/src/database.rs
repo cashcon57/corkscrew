@@ -206,6 +206,39 @@ pub struct ModDatabase {
 }
 
 /// Detect if a path is on a network filesystem where WAL mode may fail.
+/// Copy the database file to a timestamped sibling before a schema migration
+/// that rebuilds tables. Best-effort: the caller logs and continues on failure.
+///
+/// File pattern: `<db>.pre-v{target}-{YYYYMMDD-HHMMSS}.backup`. Backups live
+/// next to the DB so they're easy to spot and easy to swap back manually.
+fn snapshot_db_file(db_path: &Path, from_version: u32) -> std::io::Result<()> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let backup_name = format!(
+        "{}.pre-v{}-from-v{}-ts{}.backup",
+        db_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("mods.db"),
+        crate::migrations::TARGET_VERSION,
+        from_version,
+        secs,
+    );
+    let backup_path = db_path.with_file_name(backup_name);
+
+    std::fs::copy(db_path, &backup_path)?;
+    log::info!(
+        "Pre-migration DB snapshot: {} -> {}",
+        db_path.display(),
+        backup_path.display()
+    );
+    Ok(())
+}
+
 fn is_network_filesystem(path: &Path) -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -293,6 +326,22 @@ impl ModDatabase {
         #[cfg(not(target_os = "linux"))]
         let busy_timeout = std::time::Duration::from_secs(5);
         conn.busy_timeout(busy_timeout)?;
+
+        // If a migration is about to rebuild the deployment_manifest table
+        // (v23 → v24), copy the DB file to a timestamped backup first so
+        // the rebuild can be recovered from if anything goes wrong. Only
+        // takes a snapshot when there's actually data to protect: a brand
+        // new DB at version 0 doesn't get one.
+        let starting_version = crate::migrations::current_version(&conn)
+            .map_err(|e| DatabaseError::Other(format!("Read schema version failed: {}", e)))?;
+        if starting_version > 0 && starting_version < crate::migrations::TARGET_VERSION {
+            if let Err(e) = snapshot_db_file(db_path, starting_version) {
+                log::warn!(
+                    "Pre-migration DB snapshot failed (continuing anyway): {}",
+                    e
+                );
+            }
+        }
 
         // Run schema migrations
         crate::migrations::migrate(&conn)
@@ -806,6 +855,12 @@ impl ModDatabase {
     }
 
     /// Batch-insert deployment entries in a single transaction for maximum throughput.
+    ///
+    /// `deploy_target` is now part of the UNIQUE key (see migration v24);
+    /// each call writes the explicit value passed in instead of inferring it
+    /// from a sibling row by relative_path. This prevents target drift when
+    /// two mods legitimately share a relative_path under different targets
+    /// (e.g. `data/` vs `BepInEx/plugins/`).
     pub fn batch_add_deployment_entries(
         &self,
         entries: &[(
@@ -815,25 +870,19 @@ impl ModDatabase {
             &str, // relative_path
             &str, // staging_path
             &str, // deploy_method
+            &str, // deploy_target
         )],
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let deployed_at = chrono::Utc::now().to_rfc3339();
         let tx = conn.unchecked_transaction()?;
         {
-            // Preserve existing deploy_target via COALESCE — if a row already
-            // exists for this (game_id, bottle_name, relative_path), keep its
-            // deploy_target; otherwise default to 'data'.
             let mut stmt = tx.prepare_cached(
                 "INSERT OR REPLACE INTO deployment_manifest
                     (game_id, bottle_name, mod_id, relative_path, staging_path, deploy_method, sha256, deployed_at, deploy_target)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7,
-                    COALESCE(
-                        (SELECT deploy_target FROM deployment_manifest
-                         WHERE game_id = ?1 AND bottle_name = ?2 AND relative_path = ?4),
-                        'data'))",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8)",
             )?;
-            for (game_id, bottle_name, mod_id, rel_path, staging_path, method) in entries {
+            for (game_id, bottle_name, mod_id, rel_path, staging_path, method, deploy_target) in entries {
                 stmt.execute(params![
                     game_id,
                     bottle_name,
@@ -841,7 +890,8 @@ impl ModDatabase {
                     rel_path,
                     staging_path,
                     method,
-                    deployed_at
+                    deployed_at,
+                    deploy_target,
                 ])?;
             }
         }
@@ -1121,9 +1171,12 @@ impl ModDatabase {
     /// Batch-insert deployment entries WITH sha256 values in a single transaction.
     ///
     /// Used by incremental deployment to record new/updated entries with their
-    /// hash values from the file_hashes table.
+    /// hash values from the file_hashes table. `deploy_target` is required and
+    /// part of the UNIQUE key as of migration v24.
     ///
-    /// Tuple fields: (game_id, bottle_name, mod_id, relative_path, staging_path, deploy_method, sha256)
+    /// Tuple fields:
+    /// (game_id, bottle_name, mod_id, relative_path, staging_path,
+    ///  deploy_method, sha256, deploy_target)
     #[allow(clippy::type_complexity)]
     pub fn batch_add_deployment_entries_with_hashes(
         &self,
@@ -1135,23 +1188,19 @@ impl ModDatabase {
             &str,         // staging_path
             &str,         // deploy_method
             Option<&str>, // sha256
+            &str,         // deploy_target
         )],
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let deployed_at = chrono::Utc::now().to_rfc3339();
         let tx = conn.unchecked_transaction()?;
         {
-            // Preserve existing deploy_target via COALESCE (see batch_add_deployment_entries)
             let mut stmt = tx.prepare_cached(
                 "INSERT OR REPLACE INTO deployment_manifest
                     (game_id, bottle_name, mod_id, relative_path, staging_path, deploy_method, sha256, deployed_at, deploy_target)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
-                    COALESCE(
-                        (SELECT deploy_target FROM deployment_manifest
-                         WHERE game_id = ?1 AND bottle_name = ?2 AND relative_path = ?4),
-                        'data'))",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )?;
-            for (game_id, bottle_name, mod_id, rel_path, staging_path, method, sha256) in entries {
+            for (game_id, bottle_name, mod_id, rel_path, staging_path, method, sha256, deploy_target) in entries {
                 stmt.execute(params![
                     game_id,
                     bottle_name,
@@ -1160,7 +1209,8 @@ impl ModDatabase {
                     staging_path,
                     method,
                     sha256,
-                    deployed_at
+                    deployed_at,
+                    deploy_target,
                 ])?;
             }
         }
@@ -3874,6 +3924,7 @@ mod tests {
                 "/staging/file1.esp",
                 "hardlink",
                 Some("abc123"),
+                "data",
             ),
             (
                 "skyrimse",
@@ -3883,11 +3934,12 @@ mod tests {
                 "/staging/file2.esp",
                 "copy",
                 None,
+                "data",
             ),
         ];
-        let entries_ref: Vec<(&str, &str, i64, &str, &str, &str, Option<&str>)> = entries
+        let entries_ref: Vec<(&str, &str, i64, &str, &str, &str, Option<&str>, &str)> = entries
             .iter()
-            .map(|(a, b, c, d, e, f, g)| (*a, *b, *c, *d, *e, *f, g.as_deref()))
+            .map(|(a, b, c, d, e, f, g, h)| (*a, *b, *c, *d, *e, *f, g.as_deref(), *h))
             .collect();
         db.batch_add_deployment_entries_with_hashes(&entries_ref)
             .unwrap();

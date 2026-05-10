@@ -1829,6 +1829,10 @@ pub async fn install_wabbajack_modlist(
             &game_dir,
             &deploy_files,
             &game_dir,
+            // WJ deploys everything into the game root (mirrors the modlist's
+            // baked-in install layout). Tag the manifest as "root" so toggle/
+            // redeploy preserves that target.
+            "root",
         ) {
             Ok(deploy_result) => {
                 emit_progress(

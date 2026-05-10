@@ -302,6 +302,12 @@ pub async fn rollback_mod_version(
                 .unwrap_or_default();
 
             if !files.is_empty() {
+                // Preserve original deploy target on rollback. Rollback
+                // restores a prior version of the same mod, so the
+                // deployment destination shouldn't change.
+                let mod_target = db
+                    .get_deploy_target_for_mod(mod_id)
+                    .unwrap_or_else(|_| "data".to_string());
                 let _ = deployer::deploy_mod_atomic(
                     &db,
                     &game_id,
@@ -311,6 +317,7 @@ pub async fn rollback_mod_version(
                     &data_dir,
                     &files,
                     &game_path,
+                    &mod_target,
                 );
             }
         }

@@ -19,7 +19,7 @@ pub enum MigrationError {
 pub type Result<T> = std::result::Result<T, MigrationError>;
 
 /// The current target schema version. Bump this when adding a new migration.
-const TARGET_VERSION: u32 = 23;
+pub const TARGET_VERSION: u32 = 24;
 
 /// Get the current schema version (0 if no version table exists).
 pub fn current_version(conn: &Connection) -> Result<u32> {
@@ -159,6 +159,11 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     if version == 22 {
         migrate_v22_to_v23(conn)?;
         version = 23;
+    }
+
+    if version == 23 {
+        migrate_v23_to_v24(conn)?;
+        version = 24;
     }
 
     let _ = version; // suppress unused warning when TARGET_VERSION == current
@@ -1187,6 +1192,73 @@ fn migrate_v22_to_v23(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Migration v23 → v24: extend `deployment_manifest` UNIQUE constraint to
+/// include `deploy_target`.
+///
+/// **Why.** Prior to v24 the table's UNIQUE constraint was
+/// `(game_id, bottle_name, relative_path)`. With BepInEx / UE / Vortex
+/// routing, two mods can legitimately land the same `relative_path` under
+/// different deploy targets (e.g. `data/` vs `BepInEx/plugins/`). The
+/// previous schema collapsed those rows; insert-or-replace also dropped
+/// the original deploy_target via COALESCE-by-path. v24 rebuilds the
+/// table with `UNIQUE(game_id, bottle_name, deploy_target, relative_path)`
+/// so callers can pass `deploy_target` explicitly and the manifest stops
+/// drifting.
+///
+/// SQLite requires a full table rebuild to change a UNIQUE constraint:
+/// new table → copy rows → drop old → rename → recreate indexes.
+fn migrate_v23_to_v24(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+
+    tx.execute_batch(
+        "CREATE TABLE deployment_manifest_v24 (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            game_id       TEXT    NOT NULL,
+            bottle_name   TEXT    NOT NULL,
+            mod_id        INTEGER NOT NULL REFERENCES installed_mods(id) ON DELETE CASCADE,
+            relative_path TEXT    NOT NULL,
+            staging_path  TEXT    NOT NULL,
+            deploy_method TEXT    NOT NULL,
+            sha256        TEXT,
+            deployed_at   TEXT    NOT NULL,
+            deploy_target TEXT    NOT NULL DEFAULT 'data',
+            UNIQUE(game_id, bottle_name, deploy_target, relative_path)
+        );",
+    )?;
+
+    // Copy every existing row, preserving the deploy_target value added in v14.
+    tx.execute_batch(
+        "INSERT INTO deployment_manifest_v24
+            (id, game_id, bottle_name, mod_id, relative_path, staging_path,
+             deploy_method, sha256, deployed_at, deploy_target)
+         SELECT id, game_id, bottle_name, mod_id, relative_path, staging_path,
+                deploy_method, sha256, deployed_at,
+                COALESCE(deploy_target, 'data')
+         FROM deployment_manifest;",
+    )?;
+
+    tx.execute_batch(
+        "DROP TABLE deployment_manifest;
+         ALTER TABLE deployment_manifest_v24 RENAME TO deployment_manifest;
+         CREATE INDEX IF NOT EXISTS idx_manifest_game_bottle
+             ON deployment_manifest (game_id, bottle_name);
+         CREATE INDEX IF NOT EXISTS idx_manifest_mod
+             ON deployment_manifest (mod_id);
+         CREATE INDEX IF NOT EXISTS idx_manifest_game_bottle_mod
+             ON deployment_manifest (game_id, bottle_name, mod_id);
+         CREATE INDEX IF NOT EXISTS idx_manifest_target
+             ON deployment_manifest (game_id, bottle_name, deploy_target);",
+    )?;
+
+    tx.execute("UPDATE schema_version SET version = 24", [])?;
+
+    tx.commit()?;
+    log::info!(
+        "Migration 23 → 24 complete (deployment_manifest UNIQUE now includes deploy_target)"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1376,7 +1448,7 @@ mod tests {
     fn v23_adds_runtime_column_with_wine_default() {
         let conn = memory_db();
         migrate(&conn).unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 23);
+        assert_eq!(current_version(&conn).unwrap(), TARGET_VERSION);
 
         // Insert a row using the v22 column set — runtime should default to 'wine'.
         conn.execute(
@@ -1395,11 +1467,98 @@ mod tests {
         assert_eq!(runtime, "wine");
     }
 
+    /// One-off smoke test: if a real user DB is sitting at the well-known
+    /// location, copy it to a scratch path and run the v24 migration against
+    /// it to verify row preservation + final schema. Always passes on CI
+    /// (file doesn't exist there); locally validates against actual data.
+    #[test]
+    fn v24_real_db_smoke() {
+        let candidate = "/tmp/corkscrew-migration-test.db";
+        if !std::path::Path::new(candidate).exists() {
+            eprintln!("(skipping v24_real_db_smoke — no scratch DB at {})", candidate);
+            return;
+        }
+        let conn = Connection::open(candidate).expect("open scratch DB");
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+
+        let pre_v = current_version(&conn).unwrap();
+        let pre_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM deployment_manifest", [], |r| r.get(0))
+            .unwrap();
+        eprintln!("smoke before: version={} rows={}", pre_v, pre_count);
+
+        migrate(&conn).expect("migration must succeed on real DB");
+
+        let post_v = current_version(&conn).unwrap();
+        let post_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM deployment_manifest", [], |r| r.get(0))
+            .unwrap();
+        eprintln!("smoke after:  version={} rows={}", post_v, post_count);
+
+        assert_eq!(post_v, TARGET_VERSION, "schema should be at TARGET_VERSION");
+        assert_eq!(
+            pre_count, post_count,
+            "row count must survive deployment_manifest rebuild"
+        );
+    }
+
+    #[test]
+    fn v24_deployment_manifest_unique_includes_deploy_target() {
+        let conn = memory_db();
+        migrate(&conn).unwrap();
+
+        // Add a fake mod so the FK constraint is satisfied. Use only columns
+        // that have been present since v1 + use NULL/empty for everything else
+        // so this test isn't coupled to later schema additions.
+        conn.execute_batch(
+            "INSERT INTO installed_mods
+                (id, game_id, bottle_name, name, version, archive_name, installed_files, installed_at)
+             VALUES (1, 'skyrimse', 'b', 'M', '1', 'a.zip', '[]', '2026-01-01');",
+        ).unwrap();
+
+        // Two rows that previously would have collided on
+        // UNIQUE(game_id, bottle_name, relative_path). Under v24 they are
+        // distinguishable by deploy_target and must both succeed.
+        conn.execute(
+            "INSERT INTO deployment_manifest
+                (game_id, bottle_name, mod_id, relative_path, staging_path, deploy_method, deployed_at, deploy_target)
+             VALUES ('skyrimse', 'b', 1, 'foo.dll', '/s', 'hardlink', 't', 'data')",
+            [],
+        )
+        .unwrap();
+
+        let inserted_root = conn.execute(
+            "INSERT INTO deployment_manifest
+                (game_id, bottle_name, mod_id, relative_path, staging_path, deploy_method, deployed_at, deploy_target)
+             VALUES ('skyrimse', 'b', 1, 'foo.dll', '/s2', 'hardlink', 't', 'root')",
+            [],
+        );
+        assert!(
+            inserted_root.is_ok(),
+            "v24 UNIQUE constraint must allow same relative_path under a different deploy_target"
+        );
+
+        // Indexes from earlier migrations must still exist after the table rebuild.
+        for idx in &[
+            "idx_manifest_game_bottle",
+            "idx_manifest_mod",
+            "idx_manifest_game_bottle_mod",
+            "idx_manifest_target",
+        ] {
+            let exists: bool = conn
+                .prepare("SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='index' AND name = ?1")
+                .unwrap()
+                .query_row([idx], |r| r.get(0))
+                .unwrap();
+            assert!(exists, "missing index after v24 rebuild: {}", idx);
+        }
+    }
+
     #[test]
     fn v23_native_columns_nullable() {
         let conn = memory_db();
         migrate(&conn).unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 23);
+        assert_eq!(current_version(&conn).unwrap(), TARGET_VERSION);
 
         conn.execute(
             "INSERT INTO games (game_id, runtime, native_app_path, native_architecture)

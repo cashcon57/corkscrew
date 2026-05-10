@@ -10,12 +10,18 @@ All notable changes to Corkscrew are documented here. This project follows [Sema
 
 ### Fixed
 
+- **Deploy target drift in the deployment manifest** (schema migration v24): the manifest's UNIQUE constraint was `(game_id, bottle_name, relative_path)` and inserts preserved `deploy_target` via COALESCE-by-path. Two mods that legitimately shared a relative_path under different targets (`data/` vs `BepInEx/plugins/<mod>/`, vs game-root) collapsed into one row and lost their original target. The manifest is now rebuilt with `UNIQUE(game_id, bottle_name, deploy_target, relative_path)`, callers pass `deploy_target` explicitly through `deploy_mod` / `batch_add_deployment_entries[_with_hashes]`, and the on-disk DB is snapshotted to a timestamped `.backup` sibling before the rebuild runs.
+- **Toggle/redeploy ignored stored deploy_target**: enabling a previously-disabled BepInEx/UE/Vortex/root mod redeployed its files to `data/` regardless of where they originally went. `toggle_mod`, batch toggle, and rollback now read the per-mod stored target and pick the matching effective directory (game root / vortex mod-type path / data dir).
 - **Concurrent install temp-dir collision**: `install_mod` used `temp_dir/corkscrew_install_{PID}`, so two parallel installs in the same process collided on the same path and could delete each other's extracting files. Now uses `tempfile::Builder` for a unique per-install directory with RAII cleanup.
 - **Non-ASCII ZIP filename corruption**: ZIP filenames containing UTF-8 bytes ≥ 0x80 (e.g. `café.txt`) were unconditionally re-decoded as CP437, corrupting valid UTF-8 names. The decoder now probes UTF-8 first and only falls back to CP437 when the byte sequence is not valid UTF-8 (legacy DOS archives).
 - **Hardlink probe filename collision**: the hardlink-support test used a fixed `.corkscrew_hardlink_test` filename in both staging and data dirs. Concurrent probes (or stale files from an interrupted run) could interfere. Now uses a per-call unique stem with PID + nanosecond + counter suffix.
 - **NXM auto-install bypassed routing**: Nexus 1-click downloads with auto-install always deployed straight to `data_dir`, ignoring the per-game routing layers used by the manual install path (Vortex mod-type detection, BepInEx plugins → `BepInEx/plugins/<modname>/`, UE paks → `~mods/`, etc.). Both paths now share the same `resolve_effective_deploy_dir` helper.
 - **Collection completion hashed wrong game on game switch**: when an install finished after the user switched games, the post-install background hash ran against the currently selected game instead of the install target. Game ID and bottle name are now captured at install start.
 - **Install logs grew unbounded**: `collectionInstallStatus.logEntries` had no cap; large collection installs (559+ mods) accumulated thousands of entries, slowing reactive updates and bloating memory. Now capped at 1000 entries via tail-slice.
+
+### Changed
+
+- `deploy_mod` / `deploy_mod_atomic` / `deploy_mod_atomic_with_progress` now take an explicit `deploy_target: &str` argument. All in-tree call sites (manual install, NXM auto-install, collection install, Wabbajack install, toggle, rollback, batch toggle, incremental deploy) updated to pass the correct value. Custom downstreams calling these functions need to add the argument.
 
 ## [0.14.6] - 2026-05-01
 

@@ -560,6 +560,10 @@ pub async fn install_mod_cmd(
             },
         );
 
+        // Decide deploy_target up front (used by both the deployer and the
+        // per-mod row update below).
+        let deploy_target_str = if effective_dir != data_dir { "custom" } else { "data" };
+
         if let Err(e) = deployer::deploy_mod(
             &db,
             &game_id,
@@ -568,6 +572,7 @@ pub async fn install_mod_cmd(
             &staging_result.staging_path,
             &effective_dir,
             &staging_result.files,
+            deploy_target_str,
         ) {
             let _ = staging::remove_staging(&staging_result.staging_path);
             let _ = db.remove_mod(mod_id);
@@ -582,10 +587,12 @@ pub async fn install_mod_cmd(
             return Err(format!("Deploy failed: {}", e));
         }
 
-        // Record detected mod type and fire post-deploy hook
+        // Update the per-mod stored deploy_target so toggle / redeploy use
+        // the same target later.
+        let _ = db.set_deploy_target_for_mod(mod_id, deploy_target_str);
+
+        // Fire post-deploy hook
         if let Some(ref mod_type_id) = detected_mod_type {
-            let deploy_target = if effective_dir != data_dir { "custom" } else { "data" };
-            let _ = db.set_deploy_target_for_mod(mod_id, deploy_target);
             games::with_plugin(&game_id, |plugin| {
                 plugin.on_mod_deployed(
                     &game.game_path,
@@ -732,17 +739,40 @@ pub async fn toggle_mod(
                 .unwrap_or_default();
 
             if enabled {
-                // Re-deploy from staging
+                // Re-deploy from staging using the mod's ORIGINAL deploy
+                // target. Previously this always sent files to `data_dir`,
+                // which broke BepInEx / UE / Vortex-routed mods after a
+                // disable → enable round-trip.
                 let files =
                     staging::list_staging_files(&staging_path).map_err(|e| e.to_string())?;
+                let mod_target = db
+                    .get_deploy_target_for_mod(mod_id)
+                    .unwrap_or_else(|_| "data".to_string());
+                let effective_dir = match mod_target.as_str() {
+                    "root" => game.game_path.clone(),
+                    "custom" => {
+                        // Recompute from staged file shape — we don't store
+                        // the custom path itself, only the kind.
+                        let (dir, _) = resolve_effective_deploy_dir(
+                            &game_id,
+                            &game,
+                            &data_dir,
+                            "",
+                            &files,
+                        );
+                        dir
+                    }
+                    _ => data_dir.clone(),
+                };
                 deployer::deploy_mod(
                     &db,
                     &game_id,
                     &bottle_name,
                     mod_id,
                     &staging_path,
-                    &data_dir,
+                    &effective_dir,
                     &files,
+                    &mod_target,
                 )
                 .map_err(|e| e.to_string())?;
             } else {
@@ -913,14 +943,28 @@ pub async fn batch_toggle_mods(
                         staging::list_staging_files(&staging_path)
                             .map_err(|e| e.to_string())
                             .and_then(|files| {
+                                let mod_target = db
+                                    .get_deploy_target_for_mod(*mod_id)
+                                    .unwrap_or_else(|_| "data".to_string());
+                                let effective_dir = match mod_target.as_str() {
+                                    "root" => game.game_path.clone(),
+                                    "custom" => {
+                                        let (dir, _) = resolve_effective_deploy_dir(
+                                            &game_id, &game, &data_dir, "", &files,
+                                        );
+                                        dir
+                                    }
+                                    _ => data_dir.clone(),
+                                };
                                 deployer::deploy_mod(
                                     &db,
                                     &game_id,
                                     &bottle_name,
                                     *mod_id,
                                     &staging_path,
-                                    &data_dir,
+                                    &effective_dir,
                                     &files,
+                                    &mod_target,
                                 )
                                 .map(|_| ())
                                 .map_err(|e| e.to_string())
@@ -1136,6 +1180,7 @@ pub async fn download_from_nexus(
         );
 
         // 5. Deploy
+        let deploy_target_str = if effective_dir != data_dir { "custom" } else { "data" };
         if let Err(e) = deployer::deploy_mod(
             db,
             &game_id,
@@ -1144,11 +1189,13 @@ pub async fn download_from_nexus(
             &staging_result.staging_path,
             &effective_dir,
             &staging_result.files,
+            deploy_target_str,
         ) {
             let _ = staging::remove_staging(&staging_result.staging_path);
             let _ = db.remove_mod(mod_id);
             return Err(format!("Deploy failed: {}", e));
         }
+        let _ = db.set_deploy_target_for_mod(mod_id, deploy_target_str);
 
         if game_id == "skyrimse" {
             let _ = crate::sync_plugins_for_game(&game, &bottle);
