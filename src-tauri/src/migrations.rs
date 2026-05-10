@@ -1467,6 +1467,131 @@ mod tests {
         assert_eq!(runtime, "wine");
     }
 
+    /// End-to-end smoke for the v23→v24 migration WITH real-shaped data,
+    /// going through `ModDatabase::new` so we also exercise the pre-migration
+    /// DB-file snapshot path. Builds a synthetic v23 DB on disk, populates
+    /// it with rows that would have collided under the old UNIQUE constraint,
+    /// then runs the production open path and verifies row preservation +
+    /// backup-file creation.
+    #[test]
+    fn v24_full_open_path_with_synthetic_v23_db() {
+        use crate::database::ModDatabase;
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("mods.db");
+
+        // Build a v23-only DB by stopping the chain at 23.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            migrate_v0_to_v1(&conn).unwrap();
+            migrate_v1_to_v2(&conn).unwrap();
+            migrate_v2_to_v3(&conn).unwrap();
+            migrate_v3_to_v4(&conn).unwrap();
+            migrate_v4_to_v5(&conn).unwrap();
+            migrate_v5_to_v6(&conn).unwrap();
+            migrate_v6_to_v7(&conn).unwrap();
+            migrate_v7_to_v8(&conn).unwrap();
+            migrate_v8_to_v9(&conn).unwrap();
+            migrate_v9_to_v10(&conn).unwrap();
+            migrate_v10_to_v11(&conn).unwrap();
+            migrate_v11_to_v12(&conn).unwrap();
+            migrate_v12_to_v13(&conn).unwrap();
+            migrate_v13_to_v14(&conn).unwrap();
+            migrate_v14_to_v15(&conn).unwrap();
+            migrate_v15_to_v16(&conn).unwrap();
+            migrate_v16_to_v17(&conn).unwrap();
+            migrate_v17_to_v18(&conn).unwrap();
+            migrate_v18_to_v19(&conn).unwrap();
+            migrate_v19_to_v20(&conn).unwrap();
+            migrate_v20_to_v21(&conn).unwrap();
+            migrate_v21_to_v22(&conn).unwrap();
+            migrate_v22_to_v23(&conn).unwrap();
+            assert_eq!(current_version(&conn).unwrap(), 23);
+
+            // Insert one mod and two manifest rows that map the SAME
+            // relative_path under different deploy_targets. Under the old
+            // v23 UNIQUE this would have collapsed to one; v24 should
+            // preserve both.
+            conn.execute(
+                "INSERT INTO installed_mods (id, game_id, bottle_name, name, version, archive_name, installed_files, installed_at)
+                 VALUES (42, 'skyrimse', 'b', 'TestMod', '1.0', 'm.zip', '[\"foo.dll\"]', '2026-01-01')",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO deployment_manifest
+                    (game_id, bottle_name, mod_id, relative_path, staging_path, deploy_method, deployed_at, deploy_target)
+                 VALUES ('skyrimse', 'b', 42, 'foo.dll', '/s/a', 'hardlink', '2026-01-01', 'data')",
+                [],
+            ).unwrap();
+            // Note: this row will COLLIDE with the one above under the v23
+            // UNIQUE — INSERT OR REPLACE would lose it. Insert with a
+            // different relative_path so both survive the synthetic setup,
+            // then assert the post-migration state allows the previously-
+            // forbidden combination.
+            conn.execute(
+                "INSERT INTO deployment_manifest
+                    (game_id, bottle_name, mod_id, relative_path, staging_path, deploy_method, deployed_at, deploy_target)
+                 VALUES ('skyrimse', 'b', 42, 'bar.dll', '/s/b', 'hardlink', '2026-01-01', 'root')",
+                [],
+            ).unwrap();
+        }
+
+        let pre_size = std::fs::metadata(&db_path).unwrap().len();
+
+        // Now run the production open path (triggers backup + migration).
+        let db = ModDatabase::new(&db_path).expect("ModDatabase::new must succeed");
+        drop(db);
+
+        // 1. Schema is at TARGET_VERSION.
+        let conn = Connection::open(&db_path).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), TARGET_VERSION);
+
+        // 2. Both manifest rows survived.
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM deployment_manifest", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 2, "manifest rows must survive rebuild");
+
+        // 3. New UNIQUE: insert a duplicate-by-path row under a different
+        //    deploy_target — must succeed.
+        let insert = conn.execute(
+            "INSERT INTO deployment_manifest
+                (game_id, bottle_name, mod_id, relative_path, staging_path, deploy_method, deployed_at, deploy_target)
+             VALUES ('skyrimse', 'b', 42, 'foo.dll', '/s/c', 'hardlink', '2026-01-02', 'root')",
+            [],
+        );
+        assert!(insert.is_ok(), "v24 UNIQUE must permit different deploy_target");
+
+        // 4. Backup file exists next to the DB.
+        let parent = db_path.parent().unwrap();
+        let entries: Vec<_> = std::fs::read_dir(parent)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        let backup_found = entries.iter().any(|name| name.contains(".pre-v") && name.ends_with(".backup"));
+        assert!(
+            backup_found,
+            "expected a pre-migration backup file next to the DB, found: {:?}",
+            entries
+        );
+
+        // Sanity: backup file size matches pre-migration size.
+        let backup_name = entries
+            .iter()
+            .find(|n| n.contains(".pre-v") && n.ends_with(".backup"))
+            .unwrap();
+        let backup_size = std::fs::metadata(parent.join(backup_name)).unwrap().len();
+        assert_eq!(
+            backup_size, pre_size,
+            "backup size must match pre-migration DB size"
+        );
+
+        eprintln!(
+            "v24 full-open smoke: migrated and backed up {} ({} bytes)",
+            backup_name, backup_size
+        );
+    }
+
     /// One-off smoke test: if a real user DB is sitting at the well-known
     /// location, copy it to a scratch path and run the v24 migration against
     /// it to verify row preservation + final schema. Always passes on CI
