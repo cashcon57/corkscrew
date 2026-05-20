@@ -1150,7 +1150,7 @@ dependencies = [
 
 [[package]]
 name = "corkscrew"
-version = "0.14.8"
+version = "0.14.9"
 dependencies = [
  "anyhow",
  "ba2",
