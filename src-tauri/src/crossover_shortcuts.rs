@@ -575,8 +575,13 @@ pub fn is_likely_game(shortcut: &CrossoverShortcut) -> bool {
         return false;
     }
 
-    // Hard-coded exclusions for well-known non-games.
+    // Hard-coded exclusions for well-known non-games. These are storefronts,
+    // launchers, system tools, and utilities — none of them are something a
+    // user wants Corkscrew to surface as "an unregistered game" in their
+    // bottle. (Steam itself was the trigger for this list growing — its
+    // CrossOver shortcut was being flagged alongside actual games.)
     const EXCLUDED_EXES: &[&str] = &[
+        // System / general tools
         "notepad.exe",
         "notepad++.exe",
         "regedit.exe",
@@ -595,6 +600,32 @@ pub fn is_likely_game(shortcut: &CrossoverShortcut) -> bool {
         "uninstall.exe",
         "setup.exe",
         "installer.exe",
+        // Storefronts / launchers — never the "game" itself
+        "steam.exe",
+        "steamwebhelper.exe",
+        "epicgameslauncher.exe",
+        "epicwebhelper.exe",
+        "goggalaxy.exe",
+        "galaxyclient.exe",
+        "galaxyclient-service.exe",
+        "battle.net.exe",
+        "battle.net launcher.exe",
+        "origin.exe",
+        "originwebhelperservice.exe",
+        "eadesktop.exe",
+        "ealauncher.exe",
+        "uplay.exe",
+        "upc.exe",
+        "ubisoftconnect.exe",
+        "ubisoft connect.exe",
+        "ubisoftgamelauncher.exe",
+        "rockstargameslauncher.exe",
+        "launcher.exe",
+        "bethesda.net_launcher.exe",
+        "bethesdanetlauncher.exe",
+        "itch.exe",
+        "itch-setup.exe",
+        "amazongameslauncher.exe",
     ];
     if EXCLUDED_EXES.contains(&exe_name.as_str()) {
         return false;
@@ -897,6 +928,53 @@ mod tests {
         assert!(!is_likely_game(&make_sc(setup, "setup")));
         assert!(!is_likely_game(&make_sc(unins, "unins000")));
         assert!(is_likely_game(&make_sc(game, "eldenring")));
+    }
+
+    #[test]
+    fn is_likely_game_excludes_storefronts_and_launchers() {
+        // Regression for "Add Game" banner surfacing Steam itself as an
+        // unregistered game. Every storefront / publisher launcher should
+        // be filtered out.
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle = make_fake_bottle(tmp.path(), "test");
+        let games_dir = bottle.drive_c().join("Games");
+        fs::create_dir_all(&games_dir).unwrap();
+
+        let big = vec![0u8; 6 * 1024 * 1024];
+
+        let make_sc = |target: PathBuf, name: &str| CrossoverShortcut {
+            bottle_name: bottle.name.clone(),
+            display_name: name.to_string(),
+            source_lnk_path: PathBuf::from("/dev/null"),
+            windows_target: format!("C:\\Games\\{}", name),
+            host_target: target,
+            working_directory: None,
+            icon_path: None,
+        };
+
+        for exe_name in &[
+            "steam.exe",
+            "steamwebhelper.exe",
+            "EpicGamesLauncher.exe",
+            "GalaxyClient.exe",
+            "Battle.net.exe",
+            "Origin.exe",
+            "EADesktop.exe",
+            "UbisoftConnect.exe",
+            "uplay.exe",
+            "RockstarGamesLauncher.exe",
+            "BethesdaNetLauncher.exe",
+            "itch.exe",
+            "AmazonGamesLauncher.exe",
+        ] {
+            let p = games_dir.join(exe_name);
+            fs::write(&p, &big).unwrap();
+            assert!(
+                !is_likely_game(&make_sc(p, exe_name)),
+                "{} must not be surfaced as an unregistered game",
+                exe_name
+            );
+        }
     }
 
     #[test]

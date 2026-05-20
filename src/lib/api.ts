@@ -2615,6 +2615,7 @@ export async function registerUnregisteredGame(args: {
   steamAppId: string | null;
   gamePath: string;
   exePath: string;
+  dataDir?: string | null;
 }): Promise<void> {
   return invoke("register_unregistered_game", {
     bottleName: args.bottleName,
@@ -2624,6 +2625,7 @@ export async function registerUnregisteredGame(args: {
     steamAppId: args.steamAppId,
     gamePath: args.gamePath,
     exePath: args.exePath,
+    dataDir: args.dataDir ?? null,
   });
 }
 
@@ -2661,6 +2663,25 @@ export async function updateCustomGamePaths(args: {
     gamePath: args.gamePath,
     exePath: args.exePath,
     dataDir: args.dataDir ?? null,
+  });
+}
+
+export interface NexusGameSummary {
+  id: number;
+  name: string;
+  domain_name: string;
+  genre: string;
+  mods: number;
+  downloads: number;
+}
+
+export async function searchNexusGames(
+  query: string,
+  limit?: number,
+): Promise<NexusGameSummary[]> {
+  return invoke("search_nexus_games_cmd", {
+    query,
+    limit: limit ?? null,
   });
 }
 

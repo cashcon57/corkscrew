@@ -1512,6 +1512,7 @@ pub fn run() {
             commands::crossover_cmds::identify_game_at_path,
             commands::crossover_cmds::remove_custom_game_cmd,
             commands::crossover_cmds::update_custom_game_paths_cmd,
+            commands::crossover_cmds::search_nexus_games_cmd,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

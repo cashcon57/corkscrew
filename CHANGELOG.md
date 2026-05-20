@@ -2,6 +2,26 @@
 
 All notable changes to Corkscrew are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.14.9] - 2026-05-11
+
+### Added
+
+- **Add Game modal redesign**: Browse… file/folder pickers for both the game folder and the executable (the old form only accepted the folder via OS dialog and synthesised an exe path, which broke for any game not auto-identified). Optional `data_dir` override behind an "Advanced" toggle so Bethesda/BG3-style layouts can point at `<game>/Data` or similar at registration time. `register_unregistered_game` Tauri command now accepts an optional `data_dir` parameter and validates it (canonicalize + bottle containment) the same way as `game_path` / `exe_path`.
+- **NexusMods games search picker**: new modal opened from the Add Game form. Type-as-you-go search against the cached `/v1/games.json` list (~3000 entries), debounced 250 ms, sorted by mod count desc, capped at 30 results. Clicking a result fills the Nexus slug and (if blank) the display name. Backed by a new `search_nexus_games_cmd` Tauri command. When the cache is missing AND the user is signed out, the picker surfaces a friendly "Sign in to NexusMods" hint instead of the raw 401 string.
+
+### Fixed
+
+- **Storefront/launcher noise in the "unregistered games" banner**: Steam, Epic Games Launcher, GOG Galaxy, Battle.net, Origin, EA Desktop, Ubisoft Connect, Uplay, Rockstar Launcher, Bethesda Net Launcher, itch, and Amazon Games Launcher are now excluded from `is_likely_game()`. Previously Corkscrew would suggest registering Steam itself as a "game" inside the user's Steam CrossOver bottle. New regression test covers the full set.
+- **Security: `update_custom_game_paths_cmd` did not validate `data_dir`**: the Edit Custom Game flow accepted an arbitrary string and wrote it to the DB without canonicalize or bottle-containment checks (`register_unregistered_game` was already strict). Crafted input could redirect future mod deploys at `~/.ssh` or `/etc`. Now applies the exact same exists + canonicalize + `starts_with(canon_bottle)` validation as registration.
+- **Nexus search picker debounce timer leaked on close**: closing the picker (Cancel / X / overlay click / result selection) didn't clear the pending `setTimeout`, so a stale 250 ms timer could fire after close and overwrite results on the next session. Now cleared on every close path and nulled when it fires.
+- **Concurrent Nexus search races could clobber newer results**: fast typing across the debounce boundary could leave an older slow `searchNexusGames` resolving after a newer one. Added a monotonic `nexusSearchSeq` counter — each call snapshots at start and only writes back if its snapshot still matches.
+- **Concurrent folder identifications could race the same way**: clicking Browse… twice rapidly could leave the older identification overwriting the newer folder's match list. Added an `identifySeq` guard plus a re-entry check so the Browse button is effectively disabled while identification is in flight.
+- **Nexus picker autofocus didn't fire on open**: HTML `autofocus` only triggers on initial document parse, not on dynamic Svelte `{#if}` mount. Switched to `bind:this` + a `$effect` that focuses the search input the moment the picker mounts. Closing the picker now returns focus to the Search… button that opened it.
+- **Modal accessibility on the new dialogs**: Add Game, Edit Custom Game, and the Nexus picker now declare `role="dialog"` + `aria-modal="true"` + `aria-labelledby` pointing at their title, and `Escape` closes each one. The Advanced toggle gets `aria-expanded` + `aria-controls`. The Nexus slug help moved from a `title=""` tooltip (hover-only) to inline `aria-describedby` help text.
+- **Empty-bottles dead end in Add Game**: previously the bottle dropdown rendered with zero options and Save stayed disabled with no explanation. Now shows an explicit "No Wine bottles detected — install CrossOver/Whisky/Moonshine first" message in place of the dropdown.
+- **Browse… dialogs now seed `defaultPath`** from the current game folder / exe so the user isn't dropped at `$HOME` every time.
+- **`openAddGame` cancel-then-stuck UX**: previously the modal only appeared after the OS folder picker resolved, so cancelling left no visible feedback. Now opens the modal first and auto-triggers the picker async — cancel leaves the user in a usable empty form.
+
 ## [0.14.8] - 2026-05-11
 
 ### Fixed

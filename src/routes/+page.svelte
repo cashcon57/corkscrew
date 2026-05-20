@@ -9,7 +9,9 @@
     registerUnregisteredGame,
     removeCustomGame,
     updateCustomGamePaths,
+    searchNexusGames,
     type GameIdentification,
+    type NexusGameSummary,
   } from "$lib/api";
   import {
     bottles,
@@ -172,6 +174,9 @@
   // --- Add Game modal ---
   let addGameOpen = $state(false);
   let addGamePath = $state("");
+  let addGameExe = $state("");
+  let addGameDataDir = $state("");
+  let addGameShowAdvanced = $state(false);
   let addGameIdentified = $state<GameIdentification[]>([]);
   let addGameSelected = $state(0);
   let addGameId = $state("");
@@ -181,27 +186,119 @@
   let addGameSaving = $state(false);
   let addGameIdentifying = $state(false);
 
-  async function openAddGame() {
-    const dir = await dialogOpen({ directory: true, multiple: false, title: "Select game folder" });
-    if (!dir || Array.isArray(dir)) return;
-    addGamePath = dir;
-    addGameIdentifying = true;
+  // --- Nexus search picker (embedded in Add/Edit modals) ---
+  let nexusPickerOpen = $state(false);
+  let nexusPickerTarget = $state<"add" | "edit">("add");
+  let nexusPickerQuery = $state("");
+  let nexusPickerResults = $state<NexusGameSummary[]>([]);
+  let nexusPickerLoading = $state(false);
+  let nexusPickerError = $state<string | null>(null);
+  let nexusPickerNeedsAuth = $state(false);
+  let nexusPickerTimer: ReturnType<typeof setTimeout> | null = null;
+  /// Monotonically increasing search ID. Each `runNexusSearch` snapshots
+  /// the current value at start; on resolve, only commits its results if
+  /// the snapshot still matches — drops stale responses from prior keystrokes.
+  let nexusSearchSeq = 0;
+  let nexusSearchInputEl: HTMLInputElement | null = $state(null);
+  let nexusPickerTriggerEl: HTMLElement | null = null;
+
+  function clearNexusPickerTimer() {
+    if (nexusPickerTimer) {
+      clearTimeout(nexusPickerTimer);
+      nexusPickerTimer = null;
+    }
+  }
+
+  function closeNexusPicker() {
+    clearNexusPickerTimer();
+    nexusPickerOpen = false;
+    // Return focus to whoever opened the picker (Search… button).
+    nexusPickerTriggerEl?.focus();
+  }
+
+  $effect(() => {
+    if (nexusPickerOpen && nexusSearchInputEl) {
+      // Svelte mounts `{#if}` content asynchronously, so a plain `autofocus`
+      // attribute doesn't fire. Run focus through an effect once the input
+      // ref binds.
+      nexusSearchInputEl.focus();
+    }
+  });
+
+  function resetAddGameState() {
+    addGamePath = "";
+    addGameExe = "";
+    addGameDataDir = "";
+    addGameShowAdvanced = false;
     addGameIdentified = [];
+    addGameSelected = 0;
     addGameId = "";
     addGameName = "";
     addGameSlug = "";
     addGameBottle = $bottles[0]?.name ?? "";
-    addGameSelected = 0;
+  }
+
+  async function openAddGame() {
+    resetAddGameState();
+    addGameOpen = true;
+    // Auto-launch the folder picker so the modal feels responsive instead
+    // of greeting the user with an empty form. If they cancel the OS
+    // dialog the modal stays open (was previously left closed, which made
+    // the button feel broken).
+    setTimeout(() => {
+      void pickAddGameFolder();
+    }, 0);
+  }
+
+  /// Monotonic identification request ID. Each `pickAddGameFolder` snapshots
+  /// the current value at start; on resolve, only commits results if the
+  /// snapshot still matches — drops stale identifications from prior picks.
+  let identifySeq = 0;
+
+  async function pickAddGameFolder() {
+    if (addGameIdentifying) return; // ignore re-entry while a probe is in flight
+    const dir = await dialogOpen({
+      directory: true,
+      multiple: false,
+      title: "Select game folder",
+      defaultPath: addGamePath || undefined,
+    });
+    if (!dir || Array.isArray(dir)) return;
+    addGamePath = dir;
+    addGameIdentifying = true;
+    const seq = ++identifySeq;
+    // Don't clobber user-entered fields if they already typed something.
+    const hadCustomEntry = addGameId.trim() !== "" || addGameSlug.trim() !== "";
     try {
-      addGameIdentified = await identifyGameAtPath(dir);
-      if (addGameIdentified.length > 0) {
+      const identified = await identifyGameAtPath(dir);
+      if (seq !== identifySeq) return; // newer pick superseded us
+      addGameIdentified = identified;
+      if (addGameIdentified.length > 0 && !hadCustomEntry) {
         applyIdentification(0);
+      } else if (hadCustomEntry) {
+        // Move highlight to the "manual" sentinel so the chip matches the
+        // actual values shown in the inputs.
+        addGameSelected = addGameIdentified.length;
+      } else {
+        addGameSelected = 0;
       }
     } catch (e: unknown) {
+      if (seq !== identifySeq) return;
       showError(`Identification failed: ${e}`);
+    } finally {
+      if (seq === identifySeq) addGameIdentifying = false;
     }
-    addGameIdentifying = false;
-    addGameOpen = true;
+  }
+
+  async function pickAddGameExe() {
+    const file = await dialogOpen({
+      directory: false,
+      multiple: false,
+      title: "Select game executable",
+      defaultPath: addGameExe || addGamePath || undefined,
+    });
+    if (!file || Array.isArray(file)) return;
+    addGameExe = file;
   }
 
   function applyIdentification(idx: number) {
@@ -211,13 +308,32 @@
     addGameId = g.game_id;
     addGameName = g.display_name;
     addGameSlug = g.nexus_slug;
+    addGameExe = g.exe_path;
+    // Always sync gamePath to the identified location (handles `Game/` subdir).
+    addGamePath = g.game_path;
+  }
+
+  function enterManualEntry() {
+    addGameSelected = addGameIdentified.length; // "manual" sentinel
+    addGameId = "";
+    addGameName = "";
+    addGameSlug = "";
+    // Keep folder + exe — user may have typed them already.
+  }
+
+  function addGameCanSave(): boolean {
+    return (
+      !addGameSaving &&
+      !!addGameId.trim() &&
+      !!addGameName.trim() &&
+      !!addGameBottle &&
+      !!addGamePath.trim() &&
+      !!addGameExe.trim()
+    );
   }
 
   async function saveAddGame() {
-    if (!addGameId.trim() || !addGameName.trim() || !addGameBottle) return;
-    const identification = addGameIdentified[addGameSelected];
-    const exePath = identification?.exe_path ?? addGamePath;
-    const gamePath = identification?.game_path ?? addGamePath;
+    if (!addGameCanSave()) return;
     addGameSaving = true;
     try {
       await registerUnregisteredGame({
@@ -226,8 +342,9 @@
         displayName: addGameName.trim(),
         nexusSlug: addGameSlug.trim(),
         steamAppId: null,
-        gamePath,
-        exePath,
+        gamePath: addGamePath.trim(),
+        exePath: addGameExe.trim(),
+        dataDir: addGameDataDir.trim() || null,
       });
       addGameOpen = false;
       showSuccess(`${addGameName} added — rescanning…`);
@@ -236,6 +353,81 @@
       showError(`Failed to add game: ${e}`);
     }
     addGameSaving = false;
+  }
+
+  function openNexusPicker(target: "add" | "edit", trigger?: HTMLElement | null) {
+    nexusPickerTarget = target;
+    nexusPickerTriggerEl = trigger ?? null;
+    nexusPickerQuery = target === "add" ? addGameName : "";
+    nexusPickerResults = [];
+    nexusPickerError = null;
+    nexusPickerNeedsAuth = false;
+    nexusPickerOpen = true;
+    void runNexusSearch();
+  }
+
+  function scheduleNexusSearch() {
+    clearNexusPickerTimer();
+    nexusPickerTimer = setTimeout(() => {
+      nexusPickerTimer = null;
+      void runNexusSearch();
+    }, 250);
+  }
+
+  async function runNexusSearch() {
+    const seq = ++nexusSearchSeq;
+    nexusPickerLoading = true;
+    nexusPickerError = null;
+    nexusPickerNeedsAuth = false;
+    try {
+      const results = await searchNexusGames(nexusPickerQuery, 30);
+      if (seq !== nexusSearchSeq) return; // stale response — drop
+      nexusPickerResults = results;
+    } catch (e: unknown) {
+      if (seq !== nexusSearchSeq) return;
+      const msg = String(e);
+      // Detect the 401 path so we can show a friendlier message + signal
+      // to the template that a "Sign in" button is appropriate.
+      if (/sign[- ]?in required/i.test(msg) || /401/.test(msg)) {
+        nexusPickerNeedsAuth = true;
+        nexusPickerError =
+          "NexusMods sign-in required to search the full games list.";
+      } else {
+        nexusPickerError = msg;
+      }
+      nexusPickerResults = [];
+    } finally {
+      if (seq === nexusSearchSeq) nexusPickerLoading = false;
+    }
+  }
+
+  function pickNexusGame(game: NexusGameSummary) {
+    if (nexusPickerTarget === "add") {
+      addGameSlug = game.domain_name;
+      if (!addGameName.trim()) addGameName = game.name;
+    }
+    closeNexusPicker();
+  }
+
+  function onNexusPickerKeydown(e: KeyboardEvent) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      closeNexusPicker();
+    }
+  }
+
+  function onAddGameKeydown(e: KeyboardEvent) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      addGameOpen = false;
+    }
+  }
+
+  function onEditGameKeydown(e: KeyboardEvent) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      editGameOpen = false;
+    }
   }
 
   const sourceColors: Record<string, { color: string; bg: string; gradient: string }> = {
@@ -663,10 +855,14 @@
   {#if addGameOpen}
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="modal-overlay" onclick={(e) => { if (e.target === e.currentTarget) addGameOpen = false; }}>
-      <div class="modal">
+    <div
+      class="modal-overlay"
+      onclick={(e) => { if (e.target === e.currentTarget) addGameOpen = false; }}
+      onkeydown={onAddGameKeydown}
+    >
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="add-game-title">
         <div class="modal-header">
-          <h3 class="modal-title">Add Game</h3>
+          <h3 class="modal-title" id="add-game-title">Add Game</h3>
           <button class="modal-close" onclick={() => addGameOpen = false} aria-label="Close">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
               <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
@@ -675,10 +871,19 @@
         </div>
 
         <div class="modal-body">
-          <!-- Selected path -->
+          <!-- Game folder + Browse -->
           <div class="modal-field">
-            <label class="modal-label">Game folder</label>
-            <div class="modal-path">{addGamePath}</div>
+            <label class="modal-label" for="ag-folder">Game folder</label>
+            <div class="modal-field-row" style="grid-template-columns: 1fr auto;">
+              <input
+                id="ag-folder"
+                class="modal-input"
+                type="text"
+                bind:value={addGamePath}
+                placeholder="/path/to/game"
+              />
+              <button class="modal-btn" onclick={pickAddGameFolder} type="button">Browse…</button>
+            </div>
           </div>
 
           {#if addGameIdentifying}
@@ -700,18 +905,39 @@
                 <button
                   class="modal-match-btn"
                   class:selected={addGameSelected === addGameIdentified.length}
-                  onclick={() => { addGameSelected = addGameIdentified.length; addGameId = ""; addGameName = ""; addGameSlug = ""; }}
+                  onclick={enterManualEntry}
                 >Enter manually</button>
               </div>
             </div>
-          {:else if addGameIdentified.length === 0}
-            <p class="modal-hint">No known game detected — fill in the details below.</p>
+          {:else if addGameIdentified.length === 0 && addGamePath}
+            <p class="modal-hint">
+              No known game detected at this folder — fill in the details below,
+              or use the Nexus search to find a matching slug.
+            </p>
           {/if}
 
+          <!-- Executable -->
+          <div class="modal-field">
+            <label class="modal-label" for="ag-exe">Executable</label>
+            <div class="modal-field-row" style="grid-template-columns: 1fr auto;">
+              <input
+                id="ag-exe"
+                class="modal-input"
+                type="text"
+                bind:value={addGameExe}
+                placeholder="/path/to/game/Game.exe"
+              />
+              <button class="modal-btn" onclick={pickAddGameExe} type="button">Browse…</button>
+            </div>
+          </div>
+
+          <!-- Display name -->
           <div class="modal-field">
             <label class="modal-label" for="ag-name">Display name</label>
             <input id="ag-name" class="modal-input" type="text" bind:value={addGameName} placeholder="Elden Ring" />
           </div>
+
+          <!-- Game ID + Nexus slug (with search) -->
           <div class="modal-field-row">
             <div class="modal-field">
               <label class="modal-label" for="ag-id">Game ID</label>
@@ -719,16 +945,69 @@
             </div>
             <div class="modal-field">
               <label class="modal-label" for="ag-slug">Nexus slug</label>
-              <input id="ag-slug" class="modal-input" type="text" bind:value={addGameSlug} placeholder="eldenring" />
+              <div class="modal-field-row" style="grid-template-columns: 1fr auto;">
+                <input
+                  id="ag-slug"
+                  class="modal-input"
+                  type="text"
+                  bind:value={addGameSlug}
+                  placeholder="eldenring"
+                  aria-describedby="ag-slug-help"
+                />
+                <button
+                  class="modal-btn"
+                  onclick={(e) => openNexusPicker("add", e.currentTarget)}
+                  type="button"
+                >Search…</button>
+              </div>
+              <p class="modal-help-inline" id="ag-slug-help">
+                The URL segment from <code>nexusmods.com/&lt;slug&gt;</code> — use Search… if you don't know it.
+              </p>
             </div>
           </div>
+
+          <!-- Bottle -->
           <div class="modal-field">
             <label class="modal-label" for="ag-bottle">Wine bottle</label>
-            <select id="ag-bottle" class="modal-select" bind:value={addGameBottle}>
-              {#each $bottles as b}
-                <option value={b.name}>{b.name} ({b.source})</option>
-              {/each}
-            </select>
+            {#if $bottles.length === 0}
+              <p class="modal-hint" style="color: var(--danger, #ff453a);">
+                No Wine bottles detected. Install CrossOver, Whisky, Moonshine, or
+                another Wine front-end first.
+              </p>
+            {:else}
+              <select id="ag-bottle" class="modal-select" bind:value={addGameBottle}>
+                {#each $bottles as b}
+                  <option value={b.name}>{b.name} ({b.source})</option>
+                {/each}
+              </select>
+            {/if}
+          </div>
+
+          <!-- Advanced (data dir override) -->
+          <div class="modal-field">
+            <button
+              type="button"
+              class="modal-advanced-toggle"
+              onclick={() => addGameShowAdvanced = !addGameShowAdvanced}
+              aria-expanded={addGameShowAdvanced}
+              aria-controls="ag-data-dir"
+            >
+              {addGameShowAdvanced ? "▾" : "▸"} Advanced
+            </button>
+            {#if addGameShowAdvanced}
+              <p class="modal-hint">
+                Override the mod deployment directory. Leave blank to default
+                to the game folder. Bethesda games typically want
+                <code>&lt;game folder&gt;/Data</code>; most others leave this empty.
+              </p>
+              <input
+                id="ag-data-dir"
+                class="modal-input"
+                type="text"
+                bind:value={addGameDataDir}
+                placeholder="(default: same as game folder)"
+              />
+            {/if}
           </div>
         </div>
 
@@ -737,10 +1016,85 @@
           <button
             class="modal-btn modal-btn-primary"
             onclick={saveAddGame}
-            disabled={addGameSaving || !addGameId.trim() || !addGameName.trim() || !addGameBottle}
+            disabled={!addGameCanSave()}
           >
             {addGameSaving ? "Saving…" : "Add Game"}
           </button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  <!-- Nexus Games Search Picker -->
+  {#if nexusPickerOpen}
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="modal-overlay nexus-picker-overlay"
+      onclick={(e) => { if (e.target === e.currentTarget) closeNexusPicker(); }}
+      onkeydown={onNexusPickerKeydown}
+    >
+      <div
+        class="modal nexus-picker-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="nexus-picker-title"
+      >
+        <div class="modal-header">
+          <h3 class="modal-title" id="nexus-picker-title">Search NexusMods Games</h3>
+          <button class="modal-close" onclick={closeNexusPicker} aria-label="Close">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+        <div class="modal-body">
+          <input
+            class="modal-input"
+            type="text"
+            placeholder="Type to search (e.g. skyrim, elden, baldur)"
+            bind:value={nexusPickerQuery}
+            bind:this={nexusSearchInputEl}
+            oninput={scheduleNexusSearch}
+            aria-label="Search NexusMods games"
+          />
+          {#if nexusPickerLoading}
+            <div class="modal-identifying">
+              <div class="spinner-sm"><div class="spinner-ring"></div></div>
+              Loading NexusMods games…
+            </div>
+          {:else if nexusPickerNeedsAuth}
+            <p class="modal-hint" style="color: var(--danger, #ff453a);">
+              {nexusPickerError}
+            </p>
+            <p class="modal-help-inline">
+              Sign in via <strong>Settings → NexusMods</strong> and then try again.
+              Corkscrew needs an authenticated session to fetch the games list.
+            </p>
+          {:else if nexusPickerError}
+            <p class="modal-hint" style="color: var(--danger, #ff453a);">
+              {nexusPickerError}
+            </p>
+          {:else if nexusPickerResults.length === 0}
+            <p class="modal-hint">No matching Nexus games — try a different query.</p>
+          {:else}
+            <ul class="nexus-results">
+              {#each nexusPickerResults as g}
+                <li>
+                  <button class="nexus-result-row" onclick={() => pickNexusGame(g)}>
+                    <span class="nexus-result-name">{g.name}</span>
+                    <span class="nexus-result-meta">
+                      <code>{g.domain_name}</code>
+                      <span class="nexus-result-mods">{g.mods.toLocaleString()} mods</span>
+                    </span>
+                  </button>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        </div>
+        <div class="modal-footer">
+          <button class="modal-btn" onclick={closeNexusPicker}>Cancel</button>
         </div>
       </div>
     </div>
@@ -750,10 +1104,14 @@
   {#if editGameOpen}
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="modal-overlay" onclick={(e) => { if (e.target === e.currentTarget) editGameOpen = false; }}>
-      <div class="modal">
+    <div
+      class="modal-overlay"
+      onclick={(e) => { if (e.target === e.currentTarget) editGameOpen = false; }}
+      onkeydown={onEditGameKeydown}
+    >
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="edit-game-title">
         <div class="modal-header">
-          <h3 class="modal-title">Edit {editGameDisplayName}</h3>
+          <h3 class="modal-title" id="edit-game-title">Edit {editGameDisplayName}</h3>
           <button class="modal-close" onclick={() => editGameOpen = false} aria-label="Close">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
               <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
@@ -1101,6 +1459,101 @@
   .modal-hint {
     font-size: 13px;
     color: var(--text-tertiary);
+  }
+  .modal-hint code {
+    font-family: var(--font-mono, monospace);
+    background: var(--surface);
+    padding: 1px 4px;
+    border-radius: var(--radius-sm);
+  }
+
+  .modal-help-inline {
+    margin-top: var(--space-1);
+    font-size: 11px;
+    color: var(--text-tertiary);
+  }
+  .modal-help-inline code {
+    font-family: var(--font-mono, monospace);
+    background: var(--surface);
+    padding: 1px 4px;
+    border-radius: var(--radius-sm);
+  }
+
+  .modal-advanced-toggle {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    text-align: left;
+  }
+  .modal-advanced-toggle:hover {
+    color: var(--text-primary);
+  }
+
+  .nexus-picker-modal {
+    width: min(560px, 92vw);
+  }
+
+  .nexus-results {
+    list-style: none;
+    padding: 0;
+    margin: var(--space-3) 0 0;
+    max-height: 340px;
+    overflow-y: auto;
+    border: 1px solid var(--separator);
+    border-radius: var(--radius);
+    background: var(--surface);
+  }
+
+  .nexus-result-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding: var(--space-2) var(--space-3);
+    font-size: 13px;
+    color: var(--text-primary);
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid var(--separator);
+    cursor: pointer;
+    text-align: left;
+  }
+  .nexus-result-row:last-child {
+    border-bottom: none;
+  }
+  .nexus-result-row:hover {
+    background: var(--surface-hover);
+  }
+
+  .nexus-result-name {
+    font-weight: 500;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .nexus-result-meta {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    font-size: 11px;
+    color: var(--text-tertiary);
+  }
+  .nexus-result-meta code {
+    font-family: var(--font-mono, monospace);
+    color: var(--accent, #0a84ff);
+    background: var(--accent-subtle, rgba(10, 132, 255, 0.1));
+    padding: 1px 5px;
+    border-radius: var(--radius-sm);
+  }
+  .nexus-result-mods {
+    font-variant-numeric: tabular-nums;
   }
 
   .modal-identifying {
