@@ -514,6 +514,7 @@ mod tests {
                 source: NativeSource::Steam,
             }),
             steam_app_id: Some("1086940".into()),
+            is_custom: false,
         }
     }
 
@@ -987,6 +988,7 @@ mod tests {
                 source: NativeSource::Steam,
             }),
             steam_app_id: Some("1086940".into()),
+            is_custom: false,
         };
 
         let result = deploy_native_inner(&detected, &db, &mods_dir, &modsettings_path);

@@ -104,7 +104,7 @@ pub mod commands;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use lru::LruCache;
 use tauri::{AppHandle, Emitter, Manager};
@@ -160,19 +160,62 @@ pub(crate) fn resolve_bottle(bottle_name: &str) -> Result<Bottle, String> {
         .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))
 }
 
+/// Global DB handle so module-level helpers (`resolve_game`, `detect_games`)
+/// can reach custom-added games registered via the Wine Dashboard "Add Game"
+/// button without changing 90+ call-site signatures. Populated by the Tauri
+/// setup hook in `run()` immediately after `ModDatabase::new`.
+static GLOBAL_DB: OnceLock<Arc<ModDatabase>> = OnceLock::new();
+
+pub(crate) fn set_global_db(db: Arc<ModDatabase>) {
+    let _ = GLOBAL_DB.set(db);
+}
+
+pub(crate) fn global_db() -> Option<Arc<ModDatabase>> {
+    GLOBAL_DB.get().cloned()
+}
+
 /// Resolve a bottle + game pair, returning both plus the data directory.
+///
+/// Lookup order: registered plugin detection first (steamapps/common,
+/// Documents/Games, …), then custom games saved via the Wine Dashboard
+/// "Add Game" button. Without the custom-games fallback every command path
+/// that calls `resolve_game` — launch, install, mod ops, redeploy — errors
+/// out with "Game '<id>' not found in bottle '<name>'" for users who
+/// registered the game manually, even though the Dashboard happily lists it.
 pub(crate) fn resolve_game(
     game_id: &str,
     bottle_name: &str,
 ) -> Result<(Bottle, DetectedGame, PathBuf), String> {
     let bottle = resolve_bottle(bottle_name)?;
     let detected_games = games::detect_games(&bottle);
-    let game = detected_games
-        .into_iter()
-        .find(|g| g.game_id == game_id)
-        .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
-    let data_dir = PathBuf::from(&game.data_dir);
-    Ok((bottle, game, data_dir))
+    if let Some(game) = detected_games.into_iter().find(|g| g.game_id == game_id) {
+        let data_dir = PathBuf::from(&game.data_dir);
+        return Ok((bottle, game, data_dir));
+    }
+
+    // Plugin detection missed; check custom_games scoped to this bottle.
+    if let Some(db) = global_db() {
+        for cg in game_registry::load_custom_games(&db) {
+            if cg.game_id != game_id {
+                continue;
+            }
+            let matches_bottle = cg
+                .runtime
+                .wine()
+                .map(|w| w.bottle_name == bottle_name)
+                .unwrap_or(false);
+            if !matches_bottle {
+                continue;
+            }
+            let data_dir = PathBuf::from(&cg.data_dir);
+            return Ok((bottle, cg, data_dir));
+        }
+    }
+
+    Err(format!(
+        "Game '{}' not found in bottle '{}'",
+        game_id, bottle_name
+    ))
 }
 
 /// Format a `tokio::task::JoinError` with panic details when available.
@@ -424,6 +467,12 @@ pub fn run() {
     // Initialize database
     let db_path = config::db_path();
     let db = Arc::new(ModDatabase::new(&db_path).expect("Failed to initialize mod database"));
+
+    // Publish DB to the module-level GLOBAL_DB so `resolve_game` /
+    // `detect_games` can fall back to custom games saved via the Wine
+    // Dashboard "Add Game" button. Must run before any command/registry
+    // setup that might call into resolve_game.
+    set_global_db(db.clone());
 
     // Register any previously-cached Vortex extensions as game plugins
     vortex_registry::register_all_cached(&db);
@@ -1461,6 +1510,8 @@ pub fn run() {
             commands::crossover_cmds::list_unregistered_crossover_games,
             commands::crossover_cmds::register_unregistered_game,
             commands::crossover_cmds::identify_game_at_path,
+            commands::crossover_cmds::remove_custom_game_cmd,
+            commands::crossover_cmds::update_custom_game_paths_cmd,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

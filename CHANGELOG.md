@@ -2,6 +2,18 @@
 
 All notable changes to Corkscrew are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.14.8] - 2026-05-11
+
+### Fixed
+
+- **Custom games failed to launch with `Game '<id>' not found in bottle '<name>'`**: every command that resolved a game/bottle pair (`launch_game_cmd`, install, deploy, mod ops, redeploy, tool actions, …) called `resolve_game`, which only iterated registered plugins' `detect_wine`. Custom games saved via the Wine Dashboard "Add Game" button were visible in the dashboard (`get_all_games` → `detect_all_games_with_custom`) but invisible to every action. `resolve_game` now falls back to `custom_games` rows scoped to the supplied `bottle_name` via a process-wide `GLOBAL_DB` `OnceLock` populated at startup.
+
+### Added
+
+- **Manage custom games from the Wine Dashboard**: game cards added via "Add Game" now show a `Custom` badge plus two new icons in the path row — a pencil to **edit** paths (folder + exe) and a trash icon to **remove** the registration (files untouched). Addresses user reports of "no way to even modify the game's path or remove and re-add it" after a botched Add Game submission or after moving a game folder.
+- Backed by two new bottle-scoped helpers and Tauri commands: `remove_custom_game_for_bottle` / `remove_custom_game_cmd` and `update_custom_game_paths` / `update_custom_game_paths_cmd`. Update validates that new paths exist on disk and stay inside the bottle root (same containment check as `register_unregistered_game`). CLI `--remove-custom-game` keeps the legacy game-id-only path for power-user scripts.
+- `DetectedGame.is_custom: bool` (serde default `false`) — set to `true` when the row came from `custom_games`; used by the frontend to decide whether to render the badge and the Edit/Remove buttons. All 16 in-tree `DetectedGame` initializers updated.
+
 ## [0.14.7] - 2026-05-10
 
 ### Security

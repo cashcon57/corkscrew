@@ -152,6 +152,7 @@ impl GamePlugin for RegistryGamePlugin {
                 source: bottle.source.clone(),
             }),
             steam_app_id: self.entry.steam_id.clone(),
+            is_custom: false,
         })
     }
 
@@ -675,6 +676,7 @@ pub fn detect_unregistered_steam_games(
                     source: bottle.source.clone(),
                 }),
                 steam_app_id: Some(manifest.app_id.clone()),
+                is_custom: false,
             });
         }
     }
@@ -842,6 +844,7 @@ fn scan_steam_games_with_appid(bottle: &Bottle) -> Vec<UnregisteredSteamGame> {
                         source: bottle.source.clone(),
                     }),
                     steam_app_id: None,
+                    is_custom: false,
                 },
                 app_id: manifest.app_id,
             });
@@ -1251,6 +1254,7 @@ pub fn load_custom_games(db: &crate::database::ModDatabase) -> Vec<DetectedGame>
                     source: String::new(), // not stored in custom_games table (Task 2.7)
                 }),
                 steam_app_id: None,
+                is_custom: true,
             })
         })
         .ok();
@@ -1287,7 +1291,44 @@ pub fn save_custom_game(
     Ok(())
 }
 
-/// Remove a custom game from the database.
+/// Update the on-disk paths for an existing custom-games row. Used by the
+/// Wine Dashboard "Edit Custom Game" flow when a user needs to repoint the
+/// registration after moving the game folder, swapping exe (real vs
+/// launcher), or correcting an Add-Game form mistake.
+///
+/// Display metadata (display_name, nexus_slug) is intentionally NOT touched
+/// — `register_unregistered_game` is the canonical place to set those.
+/// This helper exists strictly for path corrections.
+pub fn update_custom_game_paths(
+    db: &crate::database::ModDatabase,
+    game_id: &str,
+    bottle_name: &str,
+    game_path: &str,
+    exe_path: &str,
+    data_dir: &str,
+) -> Result<(), String> {
+    let conn = db
+        .conn()
+        .map_err(|e| format!("No database connection: {e}"))?;
+    let rows = conn
+        .execute(
+            "UPDATE custom_games
+             SET game_path = ?1, exe_path = ?2, data_dir = ?3
+             WHERE game_id = ?4 AND bottle_name = ?5",
+            rusqlite::params![game_path, exe_path, data_dir, game_id, bottle_name],
+        )
+        .map_err(|e| format!("Failed to update custom game: {e}"))?;
+    if rows == 0 {
+        return Err(format!(
+            "No custom game '{}' registered in bottle '{}'",
+            game_id, bottle_name
+        ));
+    }
+    Ok(())
+}
+
+/// Remove a custom game from the database (all bottles). Kept for the CLI
+/// `--remove-custom-game` path that doesn't take a bottle argument.
 pub fn remove_custom_game(db: &crate::database::ModDatabase, game_id: &str) -> Result<(), String> {
     let conn = db
         .conn()
@@ -1300,6 +1341,33 @@ pub fn remove_custom_game(db: &crate::database::ModDatabase, game_id: &str) -> R
     Ok(())
 }
 
+/// Remove a single (game_id, bottle_name) custom-games row. Preferred over
+/// `remove_custom_game` for UI surfaces where the user expects to delete
+/// exactly one card — the same game_id can legitimately exist in multiple
+/// bottles (e.g. "skyrimse" in both a CrossOver bottle and a Whisky bottle).
+pub fn remove_custom_game_for_bottle(
+    db: &crate::database::ModDatabase,
+    game_id: &str,
+    bottle_name: &str,
+) -> Result<(), String> {
+    let conn = db
+        .conn()
+        .map_err(|e| format!("No database connection: {e}"))?;
+    let rows = conn
+        .execute(
+            "DELETE FROM custom_games WHERE game_id = ?1 AND bottle_name = ?2",
+            rusqlite::params![game_id, bottle_name],
+        )
+        .map_err(|e| format!("Failed to remove custom game: {e}"))?;
+    if rows == 0 {
+        return Err(format!(
+            "No custom game '{}' registered in bottle '{}'",
+            game_id, bottle_name
+        ));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1307,6 +1375,82 @@ pub fn remove_custom_game(db: &crate::database::ModDatabase, game_id: &str) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn make_tempdb() -> (crate::database::ModDatabase, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("mods.db");
+        let db = crate::database::ModDatabase::new(&db_path).expect("open db");
+        (db, tmp)
+    }
+
+    fn insert_custom(db: &crate::database::ModDatabase, game_id: &str, bottle: &str, gp: &str) {
+        let row = CustomGame {
+            game_id: game_id.to_string(),
+            display_name: game_id.to_string(),
+            nexus_slug: game_id.to_string(),
+            game_path: gp.to_string(),
+            exe_path: Some(format!("{}/game.exe", gp)),
+            data_dir: gp.to_string(),
+            bottle_name: bottle.to_string(),
+            bottle_path: format!("/fake/bottle/{}", bottle),
+            steam_app_id: None,
+        };
+        save_custom_game(db, &row).unwrap();
+    }
+
+    #[test]
+    fn remove_custom_game_for_bottle_scopes_by_bottle() {
+        let (db, _tmp) = make_tempdb();
+        insert_custom(&db, "skyrimse", "Steam", "/a");
+        // PK is game_id today so we can't dupe rows; assert the function
+        // refuses an unknown bottle and removes the matching one.
+        let err = remove_custom_game_for_bottle(&db, "skyrimse", "OtherBottle");
+        assert!(err.is_err(), "wrong bottle should not delete");
+
+        remove_custom_game_for_bottle(&db, "skyrimse", "Steam").unwrap();
+        let loaded = load_custom_games(&db);
+        assert!(loaded.is_empty(), "row should be gone");
+    }
+
+    #[test]
+    fn update_custom_game_paths_rewrites_paths() {
+        let (db, _tmp) = make_tempdb();
+        insert_custom(&db, "skyrimse", "Steam", "/old/path");
+
+        update_custom_game_paths(
+            &db,
+            "skyrimse",
+            "Steam",
+            "/new/path",
+            "/new/path/game.exe",
+            "/new/path/Data",
+        )
+        .unwrap();
+
+        let loaded = load_custom_games(&db);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].game_path.to_string_lossy(), "/new/path");
+        assert_eq!(
+            loaded[0].exe_path.as_ref().unwrap().to_string_lossy(),
+            "/new/path/game.exe"
+        );
+        assert_eq!(loaded[0].data_dir.to_string_lossy(), "/new/path/Data");
+        assert!(loaded[0].is_custom, "must be flagged as custom");
+    }
+
+    #[test]
+    fn update_custom_game_paths_errors_on_unknown_row() {
+        let (db, _tmp) = make_tempdb();
+        let result = update_custom_game_paths(
+            &db,
+            "nonexistent",
+            "Steam",
+            "/x",
+            "/x/y.exe",
+            "/x",
+        );
+        assert!(result.is_err());
+    }
 
     #[test]
     fn registry_parses_successfully() {

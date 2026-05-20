@@ -2641,3 +2641,26 @@ export async function identifyGameAtPath(
   return invoke("identify_game_at_path", { path });
 }
 
+export async function removeCustomGame(
+  gameId: string,
+  bottleName: string,
+): Promise<void> {
+  return invoke("remove_custom_game_cmd", { gameId, bottleName });
+}
+
+export async function updateCustomGamePaths(args: {
+  gameId: string;
+  bottleName: string;
+  gamePath: string;
+  exePath: string;
+  dataDir?: string | null;
+}): Promise<void> {
+  return invoke("update_custom_game_paths_cmd", {
+    gameId: args.gameId,
+    bottleName: args.bottleName,
+    gamePath: args.gamePath,
+    exePath: args.exePath,
+    dataDir: args.dataDir ?? null,
+  });
+}
+

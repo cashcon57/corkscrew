@@ -318,6 +318,12 @@ pub struct DetectedGame {
     /// Steam App ID, populated when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steam_app_id: Option<String>,
+    /// `true` when the game came from the custom_games DB table (user added
+    /// it via the Wine Dashboard "Add Game" button) rather than plugin
+    /// detection. The frontend uses this to decide whether to show a
+    /// "Remove" button on the card.
+    #[serde(default)]
+    pub is_custom: bool,
 }
 
 // ---------------------------------------------------------------------------

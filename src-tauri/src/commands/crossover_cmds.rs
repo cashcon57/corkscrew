@@ -122,3 +122,78 @@ pub async fn identify_game_at_path(
         .await
         .map_err(|e| format!("identify task failed: {e}"))?
 }
+
+/// Remove a custom-added game from the database. Scoped by (game_id,
+/// bottle_name) — the same game_id can legitimately exist in multiple
+/// bottles, so a card-level Remove must not blow them all away.
+#[tauri::command]
+pub async fn remove_custom_game_cmd(
+    game_id: String,
+    bottle_name: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::game_registry::remove_custom_game_for_bottle(&db, &game_id, &bottle_name)
+    })
+    .await
+    .map_err(|e| format!("remove task failed: {e}"))?
+}
+
+/// Update the game_path / exe_path / data_dir for an existing custom game.
+/// Re-validates that paths exist and stay inside the bottle (same checks as
+/// `register_unregistered_game`) before writing.
+#[tauri::command]
+pub async fn update_custom_game_paths_cmd(
+    game_id: String,
+    bottle_name: String,
+    game_path: String,
+    exe_path: String,
+    data_dir: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let game_path_p = Path::new(&game_path);
+    let exe_path_p = Path::new(&exe_path);
+
+    if !game_path_p.is_dir() {
+        return Err(format!("game_path does not exist: {}", game_path));
+    }
+    if !exe_path_p.is_file() {
+        return Err(format!("exe_path does not exist: {}", exe_path));
+    }
+
+    let bottle = crate::bottles::find_bottle_by_name(&bottle_name)
+        .ok_or_else(|| format!("Bottle not found: {bottle_name}"))?;
+    let canon_bottle = std::fs::canonicalize(&bottle.path)
+        .map_err(|e| format!("canonicalize bottle failed: {e}"))?;
+    let canon_exe = std::fs::canonicalize(exe_path_p)
+        .map_err(|e| format!("canonicalize exe failed: {e}"))?;
+    if !canon_exe.starts_with(&canon_bottle) {
+        return Err("exe_path must live inside the bottle".into());
+    }
+    let canon_game_path = std::fs::canonicalize(game_path_p)
+        .map_err(|e| format!("canonicalize game_path failed: {e}"))?;
+    if !canon_game_path.starts_with(&canon_bottle) {
+        return Err("game_path must live inside the bottle".into());
+    }
+
+    // Default data_dir to game_path when not supplied — matches the
+    // behaviour of `register_unregistered_game`.
+    let data_dir_str = data_dir.unwrap_or_else(|| canon_game_path.display().to_string());
+
+    let db = state.db.clone();
+    let game_path_owned = canon_game_path.display().to_string();
+    let exe_path_owned = canon_exe.display().to_string();
+    tokio::task::spawn_blocking(move || {
+        crate::game_registry::update_custom_game_paths(
+            &db,
+            &game_id,
+            &bottle_name,
+            &game_path_owned,
+            &exe_path_owned,
+            &data_dir_str,
+        )
+    })
+    .await
+    .map_err(|e| format!("update task failed: {e}"))?
+}

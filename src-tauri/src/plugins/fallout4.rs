@@ -98,6 +98,7 @@ impl GamePlugin for Fallout4Plugin {
                 source: bottle.source.clone(),
             }),
             steam_app_id: None,
+            is_custom: false,
         })
     }
 

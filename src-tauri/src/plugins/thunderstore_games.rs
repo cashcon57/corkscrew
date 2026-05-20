@@ -208,6 +208,7 @@ impl GamePlugin for ThunderstorePlugin {
                 source: bottle.source.clone(),
             }),
             steam_app_id: None,
+            is_custom: false,
         })
     }
 

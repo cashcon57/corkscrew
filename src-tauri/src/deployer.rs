@@ -2351,6 +2351,7 @@ mod tests {
                 source: NativeSource::Manual,
             }),
             steam_app_id: None,
+            is_custom: false,
         };
 
         let (db, _tmp, _, _) = setup();

@@ -257,6 +257,7 @@ fn detect_from_candidates(
                     source: c.source,
                 }),
                 steam_app_id,
+                is_custom: false,
             }
         })
         .collect()
@@ -806,6 +807,7 @@ mod tests {
                 source: crate::runtime::NativeSource::Steam,
             }),
             steam_app_id: Some("413150".into()),
+            is_custom: false,
         };
         assert_eq!(resolve_mods_dir(&detected), game_path.join("Mods"));
     }
@@ -835,6 +837,7 @@ mod tests {
                 source: NativeSource::Steam,
             }),
             steam_app_id: Some("413150".into()),
+            is_custom: false,
         }
     }
 
@@ -1235,6 +1238,7 @@ mod tests {
                 source: NativeSource::Steam,
             }),
             steam_app_id: Some("413150".into()),
+            is_custom: false,
         };
 
         let plugin = StardewValleyNativePlugin;

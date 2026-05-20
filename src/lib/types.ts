@@ -75,6 +75,13 @@ export interface DetectedGame {
    */
   runtime: GameRuntime;
   steam_app_id?: string;
+  /**
+   * `true` when this game came from the user-managed `custom_games` DB
+   * table (registered via Wine Dashboard → "Add Game") rather than from
+   * a registered plugin's auto-detection. UI shows a Remove button on
+   * these cards.
+   */
+  is_custom?: boolean;
 }
 
 /**

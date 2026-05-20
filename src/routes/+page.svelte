@@ -7,6 +7,8 @@
     setBottleSetting,
     identifyGameAtPath,
     registerUnregisteredGame,
+    removeCustomGame,
+    updateCustomGamePaths,
     type GameIdentification,
   } from "$lib/api";
   import {
@@ -74,6 +76,82 @@
   function selectGame(game: DetectedGame) {
     selectedGame.set(game);
     currentPage.set("mods");
+  }
+
+  // --- Edit Custom Game modal ---
+  let editGameOpen = $state(false);
+  let editGameId = $state("");
+  let editGameDisplayName = $state("");
+  let editGameBottle = $state("");
+  let editGameGamePath = $state("");
+  let editGameExePath = $state("");
+  let editGameSaving = $state(false);
+
+  async function openEditGame(game: DetectedGame, e: MouseEvent) {
+    e.stopPropagation();
+    const bottle = wineCtx(game)?.bottle_name ?? "";
+    if (!bottle) return;
+    editGameId = game.game_id;
+    editGameDisplayName = game.display_name;
+    editGameBottle = bottle;
+    editGameGamePath = game.game_path;
+    editGameExePath = game.exe_path ?? "";
+    editGameOpen = true;
+  }
+
+  async function pickEditGamePath() {
+    const dir = await dialogOpen({ directory: true, multiple: false, title: "Select new game folder" });
+    if (!dir || Array.isArray(dir)) return;
+    editGameGamePath = dir;
+    // If exe still under the old root, try to keep filename + repoint to new root.
+    if (editGameExePath) {
+      const exeName = editGameExePath.split("/").pop() ?? "";
+      if (exeName) editGameExePath = `${dir.replace(/\/$/, "")}/${exeName}`;
+    }
+  }
+
+  async function pickEditExePath() {
+    const file = await dialogOpen({ directory: false, multiple: false, title: "Select game executable" });
+    if (!file || Array.isArray(file)) return;
+    editGameExePath = file;
+  }
+
+  async function saveEditGame() {
+    if (!editGameGamePath.trim() || !editGameExePath.trim()) return;
+    editGameSaving = true;
+    try {
+      await updateCustomGamePaths({
+        gameId: editGameId,
+        bottleName: editGameBottle,
+        gamePath: editGameGamePath.trim(),
+        exePath: editGameExePath.trim(),
+        dataDir: null,
+      });
+      editGameOpen = false;
+      showSuccess(`Updated ${editGameDisplayName}`);
+      await rescanGames();
+    } catch (err: unknown) {
+      showError(`Failed to update: ${err}`);
+    }
+    editGameSaving = false;
+  }
+
+  async function removeGame(game: DetectedGame, e: MouseEvent) {
+    e.stopPropagation();
+    const bottle = wineCtx(game)?.bottle_name ?? "";
+    if (!bottle) return;
+    const ok = window.confirm(
+      `Remove ${game.display_name} from bottle "${bottle}"?\n\n` +
+        "This deletes the registration only — the actual game files are not touched.",
+    );
+    if (!ok) return;
+    try {
+      await removeCustomGame(game.game_id, bottle);
+      showSuccess(`Removed ${game.display_name}`);
+      await rescanGames();
+    } catch (err: unknown) {
+      showError(`Failed to remove game: ${err}`);
+    }
   }
 
   // --- Scan for Games ---
@@ -490,6 +568,9 @@
                   <div class="card-top-left">
                     <span class="game-tag">{game.game_id}</span>
                     <GameSupportBadge gameId={game.game_id} hideWhenVerified />
+                    {#if game.is_custom}
+                      <span class="custom-badge" title="Added manually via Add Game">Custom</span>
+                    {/if}
                   </div>
                   <svg class="card-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <polyline points="9 18 15 12 9 6" />
@@ -534,6 +615,36 @@
                         <rect x="4" y="2" width="16" height="20" rx="2" />
                         <path d="M9 22v-4h6v4" />
                         <path d="M8 6h.01M16 6h.01M12 6h.01M8 10h.01M16 10h.01M12 10h.01M8 14h.01M16 14h.01M12 14h.01" />
+                      </svg>
+                    </span>
+                  {/if}
+                  {#if game.is_custom}
+                    <!-- svelte-ignore a11y_click_events_have_key_events -->
+                    <span
+                      class="open-folder-btn"
+                      role="button"
+                      tabindex="-1"
+                      title="Edit paths for this manually-added game"
+                      onclick={(e) => openEditGame(game, e)}
+                    >
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M12 20h9" />
+                        <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4z" />
+                      </svg>
+                    </span>
+                    <!-- svelte-ignore a11y_click_events_have_key_events -->
+                    <span
+                      class="open-folder-btn remove-game-btn"
+                      role="button"
+                      tabindex="-1"
+                      title="Remove this manually-added game (does not delete files)"
+                      onclick={(e) => removeGame(game, e)}
+                    >
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <polyline points="3 6 5 6 21 6" />
+                        <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                        <path d="M10 11v6M14 11v6" />
+                        <path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2" />
                       </svg>
                     </span>
                   {/if}
@@ -629,6 +740,59 @@
             disabled={addGameSaving || !addGameId.trim() || !addGameName.trim() || !addGameBottle}
           >
             {addGameSaving ? "Saving…" : "Add Game"}
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  <!-- Edit Custom Game Modal -->
+  {#if editGameOpen}
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="modal-overlay" onclick={(e) => { if (e.target === e.currentTarget) editGameOpen = false; }}>
+      <div class="modal">
+        <div class="modal-header">
+          <h3 class="modal-title">Edit {editGameDisplayName}</h3>
+          <button class="modal-close" onclick={() => editGameOpen = false} aria-label="Close">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+        <div class="modal-body">
+          <p class="modal-hint">
+            Repoint a manually-added game. Use this when the game folder moves,
+            you switch between launcher and real exe, or you fix an Add Game
+            mistake. Files on disk are not touched.
+          </p>
+          <div class="modal-field">
+            <label class="modal-label" for="eg-id">Game ID · Bottle</label>
+            <div class="modal-path">{editGameId} · {editGameBottle}</div>
+          </div>
+          <div class="modal-field">
+            <label class="modal-label" for="eg-game-path">Game folder</label>
+            <div class="modal-field-row" style="grid-template-columns: 1fr auto;">
+              <input id="eg-game-path" class="modal-input" type="text" bind:value={editGameGamePath} />
+              <button class="modal-btn" onclick={pickEditGamePath} type="button">Browse…</button>
+            </div>
+          </div>
+          <div class="modal-field">
+            <label class="modal-label" for="eg-exe-path">Executable</label>
+            <div class="modal-field-row" style="grid-template-columns: 1fr auto;">
+              <input id="eg-exe-path" class="modal-input" type="text" bind:value={editGameExePath} />
+              <button class="modal-btn" onclick={pickEditExePath} type="button">Browse…</button>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="modal-btn" onclick={() => editGameOpen = false}>Cancel</button>
+          <button
+            class="modal-btn modal-btn-primary"
+            onclick={saveEditGame}
+            disabled={editGameSaving || !editGameGamePath.trim() || !editGameExePath.trim()}
+          >
+            {editGameSaving ? "Saving…" : "Save changes"}
           </button>
         </div>
       </div>
@@ -1268,6 +1432,24 @@
     padding: 2px var(--space-2);
     border-radius: var(--radius-sm);
     line-height: 1.5;
+  }
+
+  .custom-badge {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #e8a317;
+    background: rgba(232, 163, 23, 0.14);
+    border: 1px solid rgba(232, 163, 23, 0.25);
+    padding: 1px var(--space-2);
+    border-radius: var(--radius-sm);
+    line-height: 1.5;
+  }
+
+  .remove-game-btn:hover {
+    color: #ff453a;
+    background: rgba(255, 69, 58, 0.12);
   }
 
   .card-chevron {
