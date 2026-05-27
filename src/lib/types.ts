@@ -111,8 +111,9 @@ export interface KnownUninstalledGame {
  * ```
  */
 export function wineCtx(game: DetectedGame | null | undefined): { bottle_name: string; bottle_path: string; source: string } | null {
-  if (!game?.runtime) return null;
-  return game.runtime.runtime === 'wine' ? game.runtime : null;
+  const r = game?.runtime;
+  if (!r) return null;
+  return r.runtime === 'wine' ? r : null;
 }
 
 /**
