@@ -57,6 +57,26 @@ fn is_protected_extension(rel_path: &str) -> bool {
     false
 }
 
+fn should_copy_instead_of_hardlink(rel_path: &str) -> bool {
+    let lower = rel_path.replace('\\', "/").to_lowercase();
+    let path = Path::new(&lower);
+    if matches!(
+        path.extension().and_then(|ext| ext.to_str()),
+        Some("ini" | "toml" | "json" | "yaml" | "yml" | "log" | "cfg" | "txt")
+    ) {
+        return true;
+    }
+
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    file_name.starts_with("enb")
+        || file_name.starts_with("reshade")
+        || file_name == "dxgi.ini"
+        || file_name == "d3d11.ini"
+}
+
 /// Build a set of known vanilla file paths for a game (lowercase, for O(1) lookup).
 /// Returns None if no baseline is available for the game.
 fn build_vanilla_set(game_id: &str) -> Option<std::collections::HashSet<String>> {
@@ -557,7 +577,7 @@ fn deploy_mod_mapped_inner(
                 }
             }
 
-            let method = if can_hardlink {
+            let method = if can_hardlink && !should_copy_instead_of_hardlink(rel_path) {
                 match fs::hard_link(&src, &dst) {
                     Ok(_) => {
                         // Post-deploy symlink check to tighten TOCTOU window
@@ -1574,7 +1594,7 @@ fn restore_next_winner_with_mods(
 
             let can_hardlink = same_filesystem(&staging_path, deploy_base);
             let copy_method = platform::detect_copy_method(&staging_path, deploy_base);
-            let method = if can_hardlink {
+            let method = if can_hardlink && !should_copy_instead_of_hardlink(rel_path) {
                 match fs::hard_link(&src, &dst) {
                     Ok(_) => "hardlink",
                     Err(e) => {
@@ -1807,6 +1827,12 @@ fn deployed_entry_matches_desired(
         return false;
     }
 
+    if current_entry.deploy_method == "hardlink"
+        && should_copy_instead_of_hardlink(&desired_file.relative_path)
+    {
+        return false;
+    }
+
     match (&current_entry.sha256, &desired_file.sha256) {
         (Some(current_hash), Some(desired_hash)) => current_hash == desired_hash,
         // Safe legacy-manifest fallback: if the desired state has a content
@@ -1885,6 +1911,7 @@ fn compute_diff(
 /// Priority chain: hardlink → reflink/clonefile → copy.
 /// Returns the deploy method used ("hardlink" or "copy"), or None on failure.
 fn deploy_single_file(
+    rel_path: &str,
     src: &Path,
     dst: &Path,
     can_hardlink: bool,
@@ -1915,7 +1942,7 @@ fn deploy_single_file(
         }
     }
 
-    if can_hardlink {
+    if can_hardlink && !should_copy_instead_of_hardlink(rel_path) {
         match fs::hard_link(src, dst) {
             Ok(_) => Some("hardlink"),
             Err(e) => {
@@ -2151,7 +2178,13 @@ pub fn deploy_incremental(
             let can_hardlink = same_filesystem(&new_desired.staging_path, &base);
             let copy_method = platform::detect_copy_method(&new_desired.staging_path, &base);
 
-            match deploy_single_file(&src, &dst, can_hardlink, copy_method) {
+            match deploy_single_file(
+                &new_desired.relative_path,
+                &src,
+                &dst,
+                can_hardlink,
+                copy_method,
+            ) {
                 Some(method) => {
                     updated_count.fetch_add(1, Ordering::Relaxed);
                     if method == "copy" {
@@ -2232,7 +2265,13 @@ pub fn deploy_incremental(
             let can_hardlink = same_filesystem(&desired_file.staging_path, &base);
             let copy_method = platform::detect_copy_method(&desired_file.staging_path, &base);
 
-            match deploy_single_file(&src, &dst, can_hardlink, copy_method) {
+            match deploy_single_file(
+                &desired_file.relative_path,
+                &src,
+                &dst,
+                can_hardlink,
+                copy_method,
+            ) {
                 Some(method) => {
                     added_count.fetch_add(1, Ordering::Relaxed);
                     if method == "copy" {
@@ -2825,6 +2864,151 @@ mod tests {
             .get_deployment_manifest("skyrimse", "Gaming")
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn mutable_file_classes_use_copy_but_large_assets_can_hardlink() {
+        assert!(should_copy_instead_of_hardlink("SKSE/Plugins/Example.ini"));
+        assert!(should_copy_instead_of_hardlink(
+            "Data/SKSE/Plugins/Foo.toml"
+        ));
+        assert!(should_copy_instead_of_hardlink("enbseries.ini"));
+        assert!(should_copy_instead_of_hardlink("ReShadePreset.ini"));
+        assert!(!should_copy_instead_of_hardlink(
+            "textures/actors/dragon.dds"
+        ));
+        assert!(!should_copy_instead_of_hardlink("meshes/armor/foo.nif"));
+        assert!(!should_copy_instead_of_hardlink("Skyrim - Textures.bsa"));
+    }
+
+    #[test]
+    fn deploy_mod_atomic_ini_uses_copy_not_hardlink() {
+        let (db, _tmp, staging, data_dir) = setup();
+        let files = vec!["SKSE/Plugins/Example.ini".to_string()];
+        let mod_id = db
+            .add_mod(
+                "skyrimse",
+                "Gaming",
+                None,
+                "MutableConfig",
+                "1.0",
+                "mutable-config.zip",
+                &files,
+            )
+            .unwrap();
+        create_staging_file(&staging, "SKSE/Plugins/Example.ini", b"setting=staging");
+
+        deploy_mod_atomic(
+            &db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &files, &data_dir, "data",
+        )
+        .unwrap();
+
+        fs::write(
+            data_dir.join("SKSE/Plugins/Example.ini"),
+            b"setting=runtime",
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read(staging.join("SKSE/Plugins/Example.ini")).unwrap(),
+            b"setting=staging"
+        );
+        let manifest = db.get_deployment_manifest("skyrimse", "Gaming").unwrap();
+        assert_eq!(manifest[0].deploy_method, "copy");
+    }
+
+    #[test]
+    fn undeploy_restore_next_winner_ini_uses_copy_not_hardlink() {
+        let (db, _tmp, staging_low, data_dir) = setup();
+        let staging_high = staging_low.parent().unwrap().join("staging-high-config");
+        fs::create_dir_all(&staging_high).unwrap();
+        let files = vec!["SKSE/Plugins/Restore.ini".to_string()];
+
+        let low_id = db
+            .add_mod(
+                "skyrimse",
+                "Gaming",
+                None,
+                "LowConfig",
+                "1.0",
+                "low.zip",
+                &files,
+            )
+            .unwrap();
+        db.set_mod_priority(low_id, 0).unwrap();
+        db.set_staging_path(low_id, staging_low.to_str().unwrap())
+            .unwrap();
+        create_staging_file(&staging_low, "SKSE/Plugins/Restore.ini", b"low=staging");
+        deploy_mod_atomic(
+            &db,
+            "skyrimse",
+            "Gaming",
+            low_id,
+            &staging_low,
+            &data_dir,
+            &files,
+            &data_dir,
+            "data",
+        )
+        .unwrap();
+
+        let high_id = db
+            .add_mod(
+                "skyrimse",
+                "Gaming",
+                None,
+                "HighConfig",
+                "1.0",
+                "high.zip",
+                &files,
+            )
+            .unwrap();
+        db.set_mod_priority(high_id, 10).unwrap();
+        db.set_staging_path(high_id, staging_high.to_str().unwrap())
+            .unwrap();
+        create_staging_file(&staging_high, "SKSE/Plugins/Restore.ini", b"high=staging");
+        deploy_mod_atomic(
+            &db,
+            "skyrimse",
+            "Gaming",
+            high_id,
+            &staging_high,
+            &data_dir,
+            &files,
+            &data_dir,
+            "data",
+        )
+        .unwrap();
+
+        db.set_enabled(high_id, false).unwrap();
+        fs::remove_file(data_dir.join("SKSE/Plugins/Restore.ini")).unwrap();
+        let all_mods = db.list_mods("skyrimse", "Gaming").unwrap();
+        restore_next_winner_with_mods(
+            &db,
+            &all_mods,
+            "SKSE/Plugins/Restore.ini",
+            "data",
+            &data_dir,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(data_dir.join("SKSE/Plugins/Restore.ini")).unwrap(),
+            b"low=staging"
+        );
+        fs::write(data_dir.join("SKSE/Plugins/Restore.ini"), b"low=runtime").unwrap();
+
+        assert_eq!(
+            fs::read(staging_low.join("SKSE/Plugins/Restore.ini")).unwrap(),
+            b"low=staging"
+        );
+        let manifest = db.get_deployment_manifest("skyrimse", "Gaming").unwrap();
+        let restored = manifest
+            .iter()
+            .find(|entry| {
+                entry.mod_id == low_id && entry.relative_path == "SKSE/Plugins/Restore.ini"
+            })
+            .unwrap();
+        assert_eq!(restored.deploy_method, "copy");
     }
 
     #[test]
@@ -3532,6 +3716,69 @@ mod tests {
         assert!(manifest
             .iter()
             .any(|e| e.relative_path == "shared.ini" && e.deploy_target == "root"));
+    }
+
+    #[test]
+    fn incremental_deploy_repairs_legacy_hardlinked_mutable_file() {
+        let (db, _tmp, _, data_dir) = setup();
+        let staging_root = _tmp.path().join("staging_root");
+        fs::create_dir_all(&staging_root).unwrap();
+        let (mod_id, staging) = add_test_mod(
+            &db,
+            &staging_root,
+            "LegacyHardlinkedConfig",
+            0,
+            &[
+                ("SKSE/Plugins/Legacy.ini", b"setting=staging"),
+                ("textures/a.dds", b"a"),
+                ("textures/b.dds", b"b"),
+                ("meshes/c.nif", b"c"),
+                ("meshes/d.nif", b"d"),
+                ("sound/e.wav", b"e"),
+            ],
+        );
+        db.set_deploy_target_for_mod(mod_id, "data").unwrap();
+        let rel_path = "SKSE/Plugins/Legacy.ini";
+        let src = staging.join(rel_path);
+        let dst = data_dir.join(rel_path);
+        let staging_str = staging.to_string_lossy().to_string();
+        for extra_rel_path in [
+            rel_path,
+            "textures/a.dds",
+            "textures/b.dds",
+            "meshes/c.nif",
+            "meshes/d.nif",
+            "sound/e.wav",
+        ] {
+            let extra_src = staging.join(extra_rel_path);
+            let extra_dst = data_dir.join(extra_rel_path);
+            fs::create_dir_all(extra_dst.parent().unwrap()).unwrap();
+            fs::hard_link(&extra_src, &extra_dst).unwrap();
+            let extra_hash = crate::platform::fast_hash(&extra_src).unwrap();
+            db.batch_add_deployment_entries_with_hashes(&[(
+                "skyrimse",
+                "Gaming",
+                mod_id,
+                extra_rel_path,
+                staging_str.as_str(),
+                "hardlink",
+                Some(extra_hash.as_str()),
+                "data",
+            )])
+            .unwrap();
+        }
+
+        let result = deploy_incremental(&db, "skyrimse", "Gaming", &data_dir, &data_dir).unwrap();
+        assert_eq!(result.files_updated, 1);
+        fs::write(&dst, b"setting=runtime").unwrap();
+
+        assert_eq!(fs::read(&src).unwrap(), b"setting=staging");
+        let manifest = db.get_deployment_manifest("skyrimse", "Gaming").unwrap();
+        let repaired = manifest
+            .iter()
+            .find(|entry| entry.mod_id == mod_id && entry.relative_path == rel_path)
+            .unwrap();
+        assert_eq!(repaired.deploy_method, "copy");
     }
 
     #[test]
