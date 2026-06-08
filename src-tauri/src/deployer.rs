@@ -173,6 +173,12 @@ pub enum DeployerError {
     #[error("Staging directory not found: {0}")]
     StagingNotFound(PathBuf),
 
+    #[error("Deploy mod {mod_id} failed for {failed_files:?}")]
+    DeployFailed {
+        mod_id: i64,
+        failed_files: Vec<String>,
+    },
+
     #[error("{0}")]
     Other(String),
 }
@@ -389,6 +395,9 @@ fn deploy_mod_mapped_inner(
     let missing_count = AtomicUsize::new(0);
     let junk_count = AtomicUsize::new(0);
     let fallback_used = AtomicBool::new(false);
+    let failure_count = AtomicUsize::new(0);
+    let failure_messages = std::sync::Mutex::new(Vec::<String>::new());
+    let conflict_backups = std::sync::Mutex::new(Vec::<(PathBuf, PathBuf)>::new());
     // Phase 1: Parallel file I/O — resolve conflicts, then hardlink or copy.
     // Collect successful deployments for batch database insert.
     let results: Vec<Option<(String, &str, Option<String>)>> = mappings
@@ -400,6 +409,15 @@ fn deploy_mod_mapped_inner(
             if !crate::staging::is_safe_relative_path(source_rel_path)
                 || !crate::staging::is_safe_relative_path(rel_path)
             {
+                failure_count.fetch_add(1, Ordering::Relaxed);
+                if let Ok(mut failures) = failure_messages.lock() {
+                    if failures.len() < 10 {
+                        failures.push(format!(
+                            "unsafe mapping {} -> {}",
+                            source_rel_path, rel_path
+                        ));
+                    }
+                }
                 warn!(
                     "Deploy: skipping unsafe mapping: {} -> {}",
                     source_rel_path, rel_path
@@ -410,6 +428,12 @@ fn deploy_mod_mapped_inner(
             // Defense-in-depth: post-join canonicalization check
             let src = staging_path.join(source_rel_path);
             if src.exists() && !crate::staging::validate_path_within_base(staging_path, &src) {
+                failure_count.fetch_add(1, Ordering::Relaxed);
+                if let Ok(mut failures) = failure_messages.lock() {
+                    if failures.len() < 10 {
+                        failures.push(format!("staging escape {}", source_rel_path));
+                    }
+                }
                 warn!(
                     "Deploy: path escaped staging after join: {}",
                     source_rel_path
@@ -428,6 +452,12 @@ fn deploy_mod_mapped_inner(
 
             if !src.exists() {
                 missing_count.fetch_add(1, Ordering::Relaxed);
+                failure_count.fetch_add(1, Ordering::Relaxed);
+                if let Ok(mut failures) = failure_messages.lock() {
+                    if failures.len() < 10 {
+                        failures.push(format!("missing source {}", source_rel_path));
+                    }
+                }
                 if missing_count.load(Ordering::Relaxed) <= 5 {
                     warn!(
                         "Deploy: source file not found in staging: {} (mod {})",
@@ -464,8 +494,36 @@ fn deploy_mod_mapped_inner(
                     skipped_count.fetch_add(1, Ordering::Relaxed);
                     return None;
                 }
-                // We win — remove existing deployed file
+                // We win — remove existing deployed file, but first snapshot it
+                // so a later failure in this same deploy attempt can restore
+                // the lower-priority owner instead of leaving manifest/disk
+                // inconsistent.
                 if dst.exists() {
+                    let backup_path = std::env::temp_dir().join(format!(
+                        "corkscrew-deploy-rollback-{}-{}-{}-{}",
+                        mod_id,
+                        std::process::id(),
+                        std::thread::current().name().unwrap_or("worker"),
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_nanos())
+                            .unwrap_or_default()
+                    ));
+                    if let Err(e) = fs::copy(&dst, &backup_path) {
+                        failure_count.fetch_add(1, Ordering::Relaxed);
+                        if let Ok(mut failures) = failure_messages.lock() {
+                            if failures.len() < 10 {
+                                failures.push(format!(
+                                    "failed to snapshot displaced file {}: {}",
+                                    rel_path, e
+                                ));
+                            }
+                        }
+                        return None;
+                    }
+                    if let Ok(mut backups) = conflict_backups.lock() {
+                        backups.push((dst.clone(), backup_path));
+                    }
                     let _ = fs::remove_file(&dst);
                 }
             } else if dst.exists() {
@@ -481,8 +539,33 @@ fn deploy_mod_mapped_inner(
                     skipped_count.fetch_add(1, Ordering::Relaxed);
                     return None;
                 }
-                // For non-protected files (textures, scripts, etc.), remove
-                // the existing file so the hardlink can succeed.
+                // For non-protected files (textures, scripts, etc.), snapshot
+                // before removal so a later failure in this same deploy
+                // attempt can restore unmanaged/vanilla loose files.
+                let backup_path = std::env::temp_dir().join(format!(
+                    "corkscrew-deploy-rollback-unmanaged-{}-{}-{}",
+                    mod_id,
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos())
+                        .unwrap_or_default()
+                ));
+                if let Err(e) = fs::copy(&dst, &backup_path) {
+                    failure_count.fetch_add(1, Ordering::Relaxed);
+                    if let Ok(mut failures) = failure_messages.lock() {
+                        if failures.len() < 10 {
+                            failures.push(format!(
+                                "failed to snapshot unmanaged file {}: {}",
+                                rel_path, e
+                            ));
+                        }
+                    }
+                    return None;
+                }
+                if let Ok(mut backups) = conflict_backups.lock() {
+                    backups.push((dst.clone(), backup_path));
+                }
                 let _ = fs::remove_file(&dst);
             }
 
@@ -493,8 +576,13 @@ fn deploy_mod_mapped_inner(
             // Symlink re-check immediately before file operation to minimize TOCTOU window
             if let Ok(meta) = fs::symlink_metadata(&dst) {
                 if meta.file_type().is_symlink() {
+                    failure_count.fetch_add(1, Ordering::Relaxed);
+                    if let Ok(mut failures) = failure_messages.lock() {
+                        if failures.len() < 10 {
+                            failures.push(format!("pre-deploy symlink target {}", rel_path));
+                        }
+                    }
                     warn!("Pre-deploy symlink detected: {}", dst.display());
-                    skipped_count.fetch_add(1, Ordering::Relaxed);
                     return None;
                 }
             }
@@ -506,6 +594,15 @@ fn deploy_mod_mapped_inner(
                         if let Ok(meta) = fs::symlink_metadata(&dst) {
                             if meta.file_type().is_symlink() {
                                 let _ = fs::remove_file(&dst);
+                                failure_count.fetch_add(1, Ordering::Relaxed);
+                                if let Ok(mut failures) = failure_messages.lock() {
+                                    if failures.len() < 10 {
+                                        failures.push(format!(
+                                            "post-deploy symlink target {}",
+                                            rel_path
+                                        ));
+                                    }
+                                }
                                 warn!("Post-deploy symlink detected, removed: {}", dst.display());
                                 return None;
                             }
@@ -520,6 +617,15 @@ fn deploy_mod_mapped_inner(
                             e
                         );
                         if let Err(copy_err) = platform::fast_copy(&src, &dst, copy_method) {
+                            failure_count.fetch_add(1, Ordering::Relaxed);
+                            if let Ok(mut failures) = failure_messages.lock() {
+                                if failures.len() < 10 {
+                                    failures.push(format!(
+                                        "copy failed {} -> {}: {}",
+                                        source_rel_path, rel_path, copy_err
+                                    ));
+                                }
+                            }
                             warn!(
                                 "Copy also failed for {} → {}: {}",
                                 src.display(),
@@ -534,6 +640,15 @@ fn deploy_mod_mapped_inner(
                 }
             } else {
                 if let Err(copy_err) = platform::fast_copy(&src, &dst, copy_method) {
+                    failure_count.fetch_add(1, Ordering::Relaxed);
+                    if let Ok(mut failures) = failure_messages.lock() {
+                        if failures.len() < 10 {
+                            failures.push(format!(
+                                "copy failed {} -> {}: {}",
+                                source_rel_path, rel_path, copy_err
+                            ));
+                        }
+                    }
                     warn!(
                         "Copy failed for {} → {}: {}",
                         src.display(),
@@ -559,6 +674,38 @@ fn deploy_mod_mapped_inner(
         })
         .collect();
 
+    let final_failures = failure_count.load(Ordering::Relaxed);
+    if final_failures > 0 {
+        let deployed_rel_paths: Vec<String> = results
+            .iter()
+            .filter_map(|opt| opt.as_ref().map(|(rel_path, _, _)| rel_path.clone()))
+            .collect();
+        for rel_path in &deployed_rel_paths {
+            let dst = data_dir.join(rel_path);
+            let _ = fs::remove_file(&dst);
+            prune_empty_dirs(&dst, data_dir);
+        }
+        if let Ok(backups) = conflict_backups.lock() {
+            for (dst, backup) in backups.iter() {
+                if let Some(parent) = dst.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                let _ = fs::copy(backup, dst);
+                let _ = fs::remove_file(backup);
+            }
+        }
+        let failed_files = failure_messages
+            .lock()
+            .ok()
+            .map(|failures| failures.clone())
+            .filter(|failures| !failures.is_empty())
+            .unwrap_or_else(|| vec!["unknown deployment failure".to_string()]);
+        return Err(DeployerError::DeployFailed {
+            mod_id,
+            failed_files,
+        });
+    }
+
     // Phase 2: Batch-insert all deployment entries in a single transaction.
     let batch: Vec<(&str, &str, i64, &str, &str, &str, Option<&str>, &str)> = results
         .iter()
@@ -579,8 +726,23 @@ fn deploy_mod_mapped_inner(
         .collect();
 
     if !batch.is_empty() {
-        db.batch_add_deployment_entries_with_hashes(&batch)
-            .map_err(|e| DeployerError::Database(e.to_string()))?;
+        if let Err(e) = db.batch_add_deployment_entries_with_hashes(&batch) {
+            for (rel_path, _, _) in results.iter().filter_map(|opt| opt.as_ref()) {
+                let dst = data_dir.join(rel_path);
+                let _ = fs::remove_file(&dst);
+                prune_empty_dirs(&dst, data_dir);
+            }
+            if let Ok(backups) = conflict_backups.lock() {
+                for (dst, backup) in backups.iter() {
+                    if let Some(parent) = dst.parent() {
+                        let _ = fs::create_dir_all(parent);
+                    }
+                    let _ = fs::copy(backup, dst);
+                    let _ = fs::remove_file(backup);
+                }
+            }
+            return Err(DeployerError::Database(e.to_string()));
+        }
     }
 
     let final_deployed = deployed_count.load(Ordering::Relaxed);
@@ -603,23 +765,29 @@ fn deploy_mod_mapped_inner(
 
     let final_junk = junk_count.load(Ordering::Relaxed);
 
-    // If we expected to deploy files but none succeeded, warn but don't error.
-    // This can happen legitimately: FOMOD reconfiguration, stale staging, or
-    // mods consisting entirely of metadata files (meta.ini, fomod/, etc.).
+    // If expected deployable files exist but none succeeded, fail closed. Pure
+    // metadata/junk-only mods still succeed as no-op because deployable == 0.
     let deployable = mappings.len().saturating_sub(final_junk);
     if final_deployed == 0 && deployable > 0 {
-        warn!(
-            "Deploy mod {}: 0 of {} deployable files deployed (junk={}, missing={}) \
-             staging_path={}, data_dir={}, exists=({}, {})",
+        return Err(DeployerError::DeployFailed {
             mod_id,
-            deployable,
-            final_junk,
-            final_missing,
-            staging_path.display(),
-            data_dir.display(),
-            staging_path.exists(),
-            data_dir.exists(),
-        );
+            failed_files: vec![format!(
+                "0 of {} deployable files deployed (junk={}, missing={}) staging_path={} data_dir={} exists=({}, {})",
+                deployable,
+                final_junk,
+                final_missing,
+                staging_path.display(),
+                data_dir.display(),
+                staging_path.exists(),
+                data_dir.exists(),
+            )],
+        });
+    }
+
+    if let Ok(backups) = conflict_backups.lock() {
+        for (_, backup) in backups.iter() {
+            let _ = fs::remove_file(backup);
+        }
     }
 
     Ok(DeployResult {
@@ -735,11 +903,7 @@ pub fn deploy_mod_atomic(
     ) {
         Ok(result) => Ok(result),
         Err(e) => {
-            warn!(
-                "deploy_mod failed for mod {}, rolling back partially deployed files: {}",
-                mod_id, e
-            );
-            let _ = undeploy_mod(db, game_id, bottle_name, mod_id, data_dir, game_path);
+            warn!("deploy_mod failed for mod {}: {}", mod_id, e);
             Err(e)
         }
     }
@@ -777,11 +941,7 @@ pub fn deploy_mod_atomic_with_progress(
     ) {
         Ok(result) => Ok(result),
         Err(e) => {
-            warn!(
-                "deploy_mod failed for mod {}, rolling back partially deployed files: {}",
-                mod_id, e
-            );
-            let _ = undeploy_mod(db, game_id, bottle_name, mod_id, data_dir, game_path);
+            warn!("deploy_mod failed for mod {}: {}", mod_id, e);
             Err(e)
         }
     }
@@ -816,11 +976,7 @@ pub fn deploy_mod_atomic_mapped_with_progress(
     ) {
         Ok(result) => Ok(result),
         Err(e) => {
-            warn!(
-                "deploy_mod_mapped failed for mod {}, rolling back partially deployed files: {}",
-                mod_id, e
-            );
-            let _ = undeploy_mod(db, game_id, bottle_name, mod_id, data_dir, game_path);
+            warn!("deploy_mod_mapped failed for mod {}: {}", mod_id, e);
             Err(e)
         }
     }
@@ -2527,6 +2683,284 @@ mod tests {
         assert_eq!(result.skipped_count, 0);
         assert!(data_dir.join("meshes/test.nif").exists());
         assert!(data_dir.join("mod.esp").exists());
+    }
+
+    #[test]
+    fn deploy_mod_atomic_missing_expected_file_rolls_back_partial_deploy() {
+        let (db, _tmp, staging, data_dir) = setup();
+        let files = vec!["present.esp".to_string(), "missing.esp".to_string()];
+        let mod_id = db
+            .add_mod(
+                "skyrimse",
+                "Gaming",
+                None,
+                "PartialFail",
+                "1.0",
+                "partial.zip",
+                &files,
+            )
+            .unwrap();
+        create_staging_file(&staging, "present.esp", b"present");
+
+        let result = deploy_mod_atomic(
+            &db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &files, &data_dir, "data",
+        );
+
+        assert!(result.is_err());
+        assert!(!data_dir.join("present.esp").exists());
+        assert!(
+            db.get_deployment_manifest("skyrimse", "Gaming")
+                .unwrap()
+                .is_empty(),
+            "failed atomic deploy must not leave manifest rows"
+        );
+    }
+
+    #[test]
+    fn deploy_mod_atomic_failed_redeploy_preserves_existing_manifest_and_file() {
+        let (db, _tmp, staging, data_dir) = setup();
+        let files = vec!["stable.esp".to_string()];
+        let mod_id = db
+            .add_mod(
+                "skyrimse",
+                "Gaming",
+                None,
+                "Existing",
+                "1.0",
+                "existing.zip",
+                &files,
+            )
+            .unwrap();
+        create_staging_file(&staging, "stable.esp", b"stable");
+        deploy_mod_atomic(
+            &db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &files, &data_dir, "data",
+        )
+        .unwrap();
+        let retry_files = vec!["stable.esp".to_string(), "missing.esp".to_string()];
+
+        let result = deploy_mod_atomic(
+            &db,
+            "skyrimse",
+            "Gaming",
+            mod_id,
+            &staging,
+            &data_dir,
+            &retry_files,
+            &data_dir,
+            "data",
+        );
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(data_dir.join("stable.esp")).unwrap(), b"stable");
+        let manifest = db.get_deployment_manifest("skyrimse", "Gaming").unwrap();
+        assert_eq!(manifest.len(), 1);
+        assert_eq!(manifest[0].mod_id, mod_id);
+        assert_eq!(manifest[0].relative_path, "stable.esp");
+    }
+
+    #[test]
+    fn deploy_mod_atomic_conflict_failure_restores_displaced_owner_file() {
+        let (db, _tmp, staging_low, data_dir) = setup();
+        let staging_high = staging_low.parent().unwrap().join("staging-high");
+        fs::create_dir_all(&staging_high).unwrap();
+        let shared = vec!["shared.esp".to_string()];
+        let low_id = db
+            .add_mod("skyrimse", "Gaming", None, "Low", "1.0", "low.zip", &shared)
+            .unwrap();
+        db.set_mod_priority(low_id, 0).unwrap();
+        create_staging_file(&staging_low, "shared.esp", b"low");
+        deploy_mod_atomic(
+            &db,
+            "skyrimse",
+            "Gaming",
+            low_id,
+            &staging_low,
+            &data_dir,
+            &shared,
+            &data_dir,
+            "data",
+        )
+        .unwrap();
+
+        let high_files = vec!["shared.esp".to_string(), "missing.esp".to_string()];
+        let high_id = db
+            .add_mod(
+                "skyrimse",
+                "Gaming",
+                None,
+                "High",
+                "1.0",
+                "high.zip",
+                &high_files,
+            )
+            .unwrap();
+        db.set_mod_priority(high_id, 10).unwrap();
+        create_staging_file(&staging_high, "shared.esp", b"high");
+
+        let result = deploy_mod_atomic(
+            &db,
+            "skyrimse",
+            "Gaming",
+            high_id,
+            &staging_high,
+            &data_dir,
+            &high_files,
+            &data_dir,
+            "data",
+        );
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(data_dir.join("shared.esp")).unwrap(), b"low");
+        let manifest = db.get_deployment_manifest("skyrimse", "Gaming").unwrap();
+        assert_eq!(manifest.len(), 1);
+        assert_eq!(manifest[0].mod_id, low_id);
+    }
+
+    #[test]
+    fn deploy_mod_atomic_unsafe_mapping_fails_and_rolls_back_valid_file() {
+        let (db, _tmp, staging, data_dir) = setup();
+        let files = vec!["safe.esp".to_string(), "../evil.esp".to_string()];
+        let mod_id = db
+            .add_mod(
+                "skyrimse",
+                "Gaming",
+                None,
+                "UnsafeMapping",
+                "1.0",
+                "unsafe.zip",
+                &files,
+            )
+            .unwrap();
+        create_staging_file(&staging, "safe.esp", b"safe");
+        let progress = |_done: u64, _total: u64| {};
+        let mappings = vec![
+            DeployFileMapping {
+                source_relative_path: "safe.esp".to_string(),
+                relative_path: "safe.esp".to_string(),
+            },
+            DeployFileMapping {
+                source_relative_path: "../evil.esp".to_string(),
+                relative_path: "evil.esp".to_string(),
+            },
+        ];
+
+        let result = deploy_mod_atomic_mapped_with_progress(
+            &db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &mappings, &progress,
+            &data_dir, "data",
+        );
+
+        assert!(result.is_err());
+        assert!(!data_dir.join("safe.esp").exists());
+        assert!(db
+            .get_deployment_manifest("skyrimse", "Gaming")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn deploy_mod_atomic_unmanaged_file_restored_when_later_file_fails() {
+        let (db, _tmp, staging, data_dir) = setup();
+        let files = vec!["textures/foo.dds".to_string(), "missing.esp".to_string()];
+        let mod_id = db
+            .add_mod(
+                "skyrimse",
+                "Gaming",
+                None,
+                "UnmanagedRestore",
+                "1.0",
+                "unmanaged.zip",
+                &files,
+            )
+            .unwrap();
+        create_staging_file(&staging, "textures/foo.dds", b"mod texture");
+        let existing = data_dir.join("textures/foo.dds");
+        fs::create_dir_all(existing.parent().unwrap()).unwrap();
+        fs::write(&existing, b"unmanaged texture").unwrap();
+
+        let result = deploy_mod_atomic(
+            &db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &files, &data_dir, "data",
+        );
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(existing).unwrap(), b"unmanaged texture");
+        assert!(db
+            .get_deployment_manifest("skyrimse", "Gaming")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn deploy_mod_atomic_source_symlink_escape_fails_and_rolls_back_valid_file() {
+        let (db, tmp, staging, data_dir) = setup();
+        let files = vec!["safe.esp".to_string(), "escape.esp".to_string()];
+        let mod_id = db
+            .add_mod(
+                "skyrimse",
+                "Gaming",
+                None,
+                "SymlinkEscape",
+                "1.0",
+                "escape.zip",
+                &files,
+            )
+            .unwrap();
+        create_staging_file(&staging, "safe.esp", b"safe");
+        let outside = tmp.path().join("outside.esp");
+        fs::write(&outside, b"outside").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, staging.join("escape.esp")).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&outside, staging.join("escape.esp")).unwrap();
+
+        let result = deploy_mod_atomic(
+            &db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &files, &data_dir, "data",
+        );
+
+        assert!(result.is_err());
+        assert!(!data_dir.join("safe.esp").exists());
+        assert!(db
+            .get_deployment_manifest("skyrimse", "Gaming")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn deploy_mod_atomic_zero_success_returns_error() {
+        let (db, _tmp, staging, data_dir) = setup();
+        let files = vec!["mod.esp".to_string()];
+        let mod_id = db
+            .add_mod(
+                "skyrimse",
+                "Gaming",
+                None,
+                "ZeroSuccess",
+                "1.0",
+                "zero.zip",
+                &files,
+            )
+            .unwrap();
+        create_staging_file(&staging, "mod.esp", b"esp data");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(staging.join("mod.esp"), data_dir.join("mod.esp")).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(staging.join("mod.esp"), data_dir.join("mod.esp"))
+            .unwrap();
+
+        let result = deploy_mod_atomic(
+            &db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &files, &data_dir, "data",
+        );
+
+        assert!(result.is_err());
+        assert!(fs::symlink_metadata(data_dir.join("mod.esp"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(
+            db.get_deployment_manifest("skyrimse", "Gaming")
+                .unwrap()
+                .is_empty(),
+            "zero-success deploy must not write manifest rows"
+        );
     }
 
     #[test]
