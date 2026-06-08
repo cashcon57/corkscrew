@@ -528,45 +528,15 @@ fn deploy_mod_mapped_inner(
                 }
             } else if dst.exists() {
                 // File exists on disk but is NOT in the deployment manifest.
-                // This is likely a vanilla game file. Do NOT overwrite it —
-                // removing the existing file and deploying over it would make
-                // the vanilla file unrecoverable on undeploy/purge.
-                if is_protected_extension(rel_path) {
-                    warn!(
-                        "Deploy: skipping {} — would overwrite unmanaged vanilla file",
-                        rel_path
-                    );
-                    skipped_count.fetch_add(1, Ordering::Relaxed);
-                    return None;
-                }
-                // For non-protected files (textures, scripts, etc.), snapshot
-                // before removal so a later failure in this same deploy
-                // attempt can restore unmanaged/vanilla loose files.
-                let backup_path = std::env::temp_dir().join(format!(
-                    "corkscrew-deploy-rollback-unmanaged-{}-{}-{}",
-                    mod_id,
-                    std::process::id(),
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_nanos())
-                        .unwrap_or_default()
-                ));
-                if let Err(e) = fs::copy(&dst, &backup_path) {
-                    failure_count.fetch_add(1, Ordering::Relaxed);
-                    if let Ok(mut failures) = failure_messages.lock() {
-                        if failures.len() < 10 {
-                            failures.push(format!(
-                                "failed to snapshot unmanaged file {}: {}",
-                                rel_path, e
-                            ));
-                        }
-                    }
-                    return None;
-                }
-                if let Ok(mut backups) = conflict_backups.lock() {
-                    backups.push((dst.clone(), backup_path));
-                }
-                let _ = fs::remove_file(&dst);
+                // This is likely vanilla/user-managed loose content. Do NOT
+                // remove or overwrite it; Corkscrew would have no manifest row
+                // to restore it on undeploy/purge.
+                warn!(
+                    "Deploy: skipping {} — would overwrite unmanaged loose file",
+                    rel_path
+                );
+                skipped_count.fetch_add(1, Ordering::Relaxed);
+                return None;
             }
 
             if let Some(parent) = dst.parent() {
@@ -2851,6 +2821,38 @@ mod tests {
 
         assert!(result.is_err());
         assert!(!data_dir.join("safe.esp").exists());
+        assert!(db
+            .get_deployment_manifest("skyrimse", "Gaming")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn deploy_mod_atomic_unmanaged_loose_file_is_not_overwritten() {
+        let (db, _tmp, staging, data_dir) = setup();
+        let files = vec!["textures/foo.dds".to_string()];
+        let mod_id = db
+            .add_mod(
+                "skyrimse",
+                "Gaming",
+                None,
+                "UnmanagedConflict",
+                "1.0",
+                "unmanaged-conflict.zip",
+                &files,
+            )
+            .unwrap();
+        create_staging_file(&staging, "textures/foo.dds", b"mod texture");
+        let existing = data_dir.join("textures/foo.dds");
+        fs::create_dir_all(existing.parent().unwrap()).unwrap();
+        fs::write(&existing, b"unmanaged texture").unwrap();
+
+        let result = deploy_mod_atomic(
+            &db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &files, &data_dir, "data",
+        );
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(existing).unwrap(), b"unmanaged texture");
         assert!(db
             .get_deployment_manifest("skyrimse", "Gaming")
             .unwrap()
