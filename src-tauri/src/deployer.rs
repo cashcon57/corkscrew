@@ -3460,6 +3460,79 @@ mod tests {
     }
 
     #[test]
+    fn incremental_deploy_same_relative_path_root_and_data_update_independently() {
+        let (db, _tmp, _, data_dir) = setup();
+        let game_root = _tmp.path().join("game_root");
+        fs::create_dir_all(&game_root).unwrap();
+        let staging_root = _tmp.path().join("staging_root");
+        fs::create_dir_all(&staging_root).unwrap();
+
+        let (data_mod, data_staging) = add_test_mod(
+            &db,
+            &staging_root,
+            "DataSamePath",
+            0,
+            &[("shared.ini", b"data v1"), ("data_anchor.txt", b"anchor")],
+        );
+        deploy_mod(
+            &db,
+            "skyrimse",
+            "Gaming",
+            data_mod,
+            &data_staging,
+            &data_dir,
+            &["shared.ini".to_string(), "data_anchor.txt".to_string()],
+            "data",
+        )
+        .unwrap();
+
+        let (root_mod, root_staging) = add_test_mod(
+            &db,
+            &staging_root,
+            "RootSamePath",
+            0,
+            &[("shared.ini", b"root v1"), ("root_anchor.txt", b"anchor")],
+        );
+        deploy_mod(
+            &db,
+            "skyrimse",
+            "Gaming",
+            root_mod,
+            &root_staging,
+            &game_root,
+            &["shared.ini".to_string(), "root_anchor.txt".to_string()],
+            "root",
+        )
+        .unwrap();
+
+        fs::write(data_staging.join("shared.ini"), b"data v2").unwrap();
+        let data_hash = crate::platform::fast_hash(&data_staging.join("shared.ini")).unwrap();
+        db.store_file_hashes(data_mod, &[("shared.ini".to_string(), data_hash, 7)])
+            .unwrap();
+
+        let r = deploy_incremental(&db, "skyrimse", "Gaming", &data_dir, &game_root).unwrap();
+
+        assert_eq!(r.files_updated, 1);
+        assert_eq!(
+            fs::read_to_string(data_dir.join("shared.ini")).unwrap(),
+            "data v2"
+        );
+        assert_eq!(
+            fs::read_to_string(game_root.join("shared.ini")).unwrap(),
+            "root v1"
+        );
+        assert!(data_dir.join("data_anchor.txt").exists());
+        assert!(game_root.join("root_anchor.txt").exists());
+        let manifest = db.get_deployment_manifest("skyrimse", "Gaming").unwrap();
+        assert!(manifest
+            .iter()
+            .any(|e| e.relative_path == "shared.ini" && e.deploy_target == "data"));
+        assert!(manifest
+            .iter()
+            .any(|e| e.relative_path == "shared.ini" && e.deploy_target == "root"));
+    }
+
+    #[test]
     fn incremental_deploy_removes_root_target_from_game_root() {
         let (db, _tmp, _, data_dir) = setup();
         let game_root = _tmp.path().join("game_root");
