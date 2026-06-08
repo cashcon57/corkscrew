@@ -391,7 +391,7 @@ fn deploy_mod_mapped_inner(
     let fallback_used = AtomicBool::new(false);
     // Phase 1: Parallel file I/O — resolve conflicts, then hardlink or copy.
     // Collect successful deployments for batch database insert.
-    let results: Vec<Option<(String, &str)>> = mappings
+    let results: Vec<Option<(String, &str, Option<String>)>> = mappings
         .par_iter()
         .map(|mapping| {
             let source_rel_path = &mapping.source_relative_path;
@@ -554,15 +554,16 @@ fn deploy_mod_mapped_inner(
                     cb(done as u64, total);
                 }
             }
-            Some((rel_path.clone(), method))
+            let hash = crate::platform::fast_hash(&src).ok();
+            Some((rel_path.clone(), method, hash))
         })
         .collect();
 
     // Phase 2: Batch-insert all deployment entries in a single transaction.
-    let batch: Vec<(&str, &str, i64, &str, &str, &str, &str)> = results
+    let batch: Vec<(&str, &str, i64, &str, &str, &str, Option<&str>, &str)> = results
         .iter()
         .filter_map(|opt| {
-            opt.as_ref().map(|(rel_path, method)| {
+            opt.as_ref().map(|(rel_path, method, hash)| {
                 (
                     game_id,
                     bottle_name,
@@ -570,6 +571,7 @@ fn deploy_mod_mapped_inner(
                     rel_path.as_str(),
                     staging_str.as_str(),
                     *method,
+                    hash.as_deref(),
                     manifest_deploy_target,
                 )
             })
@@ -577,7 +579,7 @@ fn deploy_mod_mapped_inner(
         .collect();
 
     if !batch.is_empty() {
-        db.batch_add_deployment_entries(&batch)
+        db.batch_add_deployment_entries_with_hashes(&batch)
             .map_err(|e| DeployerError::Database(e.to_string()))?;
     }
 
@@ -1659,6 +1661,49 @@ fn compute_desired_state(
     Ok(desired)
 }
 
+fn deployment_identity_matches(
+    current_entry: &crate::database::DeploymentEntry,
+    desired_file: &DesiredFile,
+) -> bool {
+    // Deployment target is part of DeploymentKey, but keep this explicit so
+    // callers cannot accidentally treat same-path/different-target entries as
+    // equivalent if the key shape changes later.
+    current_entry.deploy_target == desired_file.deploy_target
+        && current_entry.mod_id == desired_file.mod_id
+        && Path::new(&current_entry.staging_path) == desired_file.staging_path.as_path()
+}
+
+fn deployed_entry_matches_desired(
+    current_entry: &crate::database::DeploymentEntry,
+    desired_file: &DesiredFile,
+) -> bool {
+    if !deployment_identity_matches(current_entry, desired_file) {
+        return false;
+    }
+
+    match (&current_entry.sha256, &desired_file.sha256) {
+        (Some(current_hash), Some(desired_hash)) => current_hash == desired_hash,
+        // Safe legacy-manifest fallback: if the desired state has a content
+        // hash and the current manifest does not, force an update so the
+        // deployed file and manifest are refreshed rather than assuming the
+        // old file is still correct.
+        (None, Some(_)) => false,
+        // If the desired hash is unavailable, compute_diff has no deployment
+        // base to verify the filesystem hash safely; leave unchanged when all
+        // durable identity fields above match.
+        (Some(_), None) | (None, None) => true,
+    }
+}
+
+fn is_hash_backfill_update(
+    current_entry: &crate::database::DeploymentEntry,
+    desired_file: &DesiredFile,
+) -> bool {
+    deployment_identity_matches(current_entry, desired_file)
+        && current_entry.sha256.is_none()
+        && desired_file.sha256.is_some()
+}
+
 /// Compare the desired state against the current deployment manifest to
 /// produce a diff of what needs to change.
 fn compute_diff(
@@ -1674,17 +1719,17 @@ fn compute_diff(
     let mut unchanged: usize = 0;
 
     // Files in desired but not in current → add
-    // Files in both but different mod_id → update
+    // Files in both but changed identity/content → update
     for (deployment_key, desired_file) in desired {
         match current.get(deployment_key) {
             None => {
                 to_add.push(desired_file.clone());
             }
             Some(current_entry) => {
-                if current_entry.mod_id != desired_file.mod_id {
-                    to_update.push((current_entry.clone(), desired_file.clone()));
-                } else {
+                if deployed_entry_matches_desired(current_entry, desired_file) {
                     unchanged += 1;
+                } else {
+                    to_update.push((current_entry.clone(), desired_file.clone()));
                 }
             }
         }
@@ -1836,8 +1881,22 @@ pub fn deploy_incremental(
         )));
     }
 
-    // Step 4: If changes exceed 80% of total, fall back to full redeploy
-    if total_files > 0 && total_changes * 100 / total_files.max(1) > 80 {
+    let only_hash_backfill_updates = diff.to_add.is_empty()
+        && diff.to_remove.is_empty()
+        && !diff.to_update.is_empty()
+        && diff
+            .to_update
+            .iter()
+            .all(|(current, desired)| is_hash_backfill_update(current, desired));
+
+    // Step 4: If changes exceed 80% of total, fall back to full redeploy.
+    // Do not route pure legacy hash backfills through full redeploy: full
+    // redeploy entries may also lack hashes, causing repeated fallback loops
+    // instead of refreshing the manifest hashes once.
+    if total_files > 0
+        && total_changes * 100 / total_files.max(1) > 80
+        && !only_hash_backfill_updates
+    {
         info!(
             "Incremental diff covers {}% of files — falling back to full redeploy",
             total_changes * 100 / total_files.max(1)
@@ -2640,6 +2699,55 @@ mod tests {
         }
 
         (mod_id, staging)
+    }
+
+    #[test]
+    fn compute_diff_updates_same_mod_same_path_when_staging_hash_changes() {
+        let mut desired = std::collections::HashMap::new();
+        desired.insert(
+            ("textures/foo.dds".to_string(), "data".to_string()),
+            DesiredFile {
+                relative_path: "textures/foo.dds".to_string(),
+                source_relative_path: "textures/foo.dds".to_string(),
+                mod_id: 42,
+                staging_path: PathBuf::from("/tmp/corkscrew/staging/mod42"),
+                sha256: Some("new-hash".to_string()),
+                deploy_target: "data".to_string(),
+            },
+        );
+
+        let mut current = std::collections::HashMap::new();
+        current.insert(
+            ("textures/foo.dds".to_string(), "data".to_string()),
+            crate::database::DeploymentEntry {
+                id: 1,
+                game_id: "skyrimse".to_string(),
+                bottle_name: "Gaming".to_string(),
+                mod_id: 42,
+                relative_path: "textures/foo.dds".to_string(),
+                staging_path: "/tmp/corkscrew/staging/mod42".to_string(),
+                deploy_method: "copy".to_string(),
+                sha256: Some("old-hash".to_string()),
+                deployed_at: "2026-06-08T00:00:00Z".to_string(),
+                mod_name: "HashChanged".to_string(),
+                deploy_target: "data".to_string(),
+            },
+        );
+
+        let diff = compute_diff(&desired, &current);
+
+        assert_eq!(diff.to_update.len(), 1);
+        assert_eq!(diff.unchanged, 0);
+        assert_eq!(diff.to_add.len(), 0);
+        assert_eq!(diff.to_remove.len(), 0);
+
+        current
+            .get_mut(&("textures/foo.dds".to_string(), "data".to_string()))
+            .unwrap()
+            .sha256 = None;
+        let legacy_manifest_diff = compute_diff(&desired, &current);
+        assert_eq!(legacy_manifest_diff.to_update.len(), 1);
+        assert_eq!(legacy_manifest_diff.unchanged, 0);
     }
 
     #[test]
