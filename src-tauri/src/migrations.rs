@@ -19,7 +19,7 @@ pub enum MigrationError {
 pub type Result<T> = std::result::Result<T, MigrationError>;
 
 /// The current target schema version. Bump this when adding a new migration.
-pub const TARGET_VERSION: u32 = 24;
+pub const TARGET_VERSION: u32 = 25;
 
 /// Get the current schema version (0 if no version table exists).
 pub fn current_version(conn: &Connection) -> Result<u32> {
@@ -164,6 +164,11 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     if version == 23 {
         migrate_v23_to_v24(conn)?;
         version = 24;
+    }
+
+    if version == 24 {
+        migrate_v24_to_v25(conn)?;
+        version = 25;
     }
 
     let _ = version; // suppress unused warning when TARGET_VERSION == current
@@ -1259,6 +1264,65 @@ fn migrate_v23_to_v24(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Migration v24 → v25: persist per-mod deploy target independently from
+/// `deployment_manifest` rows.
+///
+/// The manifest is intentionally purgeable during a full redeploy. Keeping the
+/// mod-level deploy target (`data`, `root`, or future `custom`) only in manifest
+/// rows meant a purge erased the original target and redeploy defaulted to
+/// `data`. This durable column survives manifest purges and is backfilled from
+/// existing manifest rows where possible.
+fn migrate_v24_to_v25(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+
+    match tx.execute_batch(
+        "ALTER TABLE installed_mods
+            ADD COLUMN deploy_target TEXT NOT NULL DEFAULT 'data';",
+    ) {
+        Ok(_) => {}
+        Err(e) => {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column") {
+                return Err(MigrationError::Sqlite(e));
+            }
+        }
+    }
+    match tx.execute_batch(
+        "ALTER TABLE installed_mods
+            ADD COLUMN deploy_base_path TEXT;",
+    ) {
+        Ok(_) => {}
+        Err(e) => {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column") {
+                return Err(MigrationError::Sqlite(e));
+            }
+        }
+    }
+
+    // Backfill from current manifest rows. Prefer any non-data target when a
+    // legacy mod somehow has mixed rows; otherwise default remains `data`.
+    tx.execute_batch(
+        "UPDATE installed_mods
+         SET deploy_target = COALESCE((
+             SELECT dm.deploy_target
+             FROM deployment_manifest dm
+             WHERE dm.mod_id = installed_mods.id
+             ORDER BY CASE COALESCE(dm.deploy_target, 'data') WHEN 'data' THEN 1 ELSE 0 END,
+                      dm.id
+             LIMIT 1
+         ), 'data');
+
+         CREATE INDEX IF NOT EXISTS idx_installed_mods_deploy_target
+             ON installed_mods (deploy_target);",
+    )?;
+
+    tx.execute("UPDATE schema_version SET version = 25", [])?;
+    tx.commit()?;
+    log::info!("Migration 24 → 25 complete (durable installed_mods.deploy_target)");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1320,7 +1384,9 @@ mod tests {
 
         // Verify indexes exist
         let indexes: Vec<String> = conn
-            .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='error_events'")
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='error_events'",
+            )
             .unwrap()
             .query_map([], |row| row.get(0))
             .unwrap()
@@ -1559,7 +1625,10 @@ mod tests {
              VALUES ('skyrimse', 'b', 42, 'foo.dll', '/s/c', 'hardlink', '2026-01-02', 'root')",
             [],
         );
-        assert!(insert.is_ok(), "v24 UNIQUE must permit different deploy_target");
+        assert!(
+            insert.is_ok(),
+            "v24 UNIQUE must permit different deploy_target"
+        );
 
         // 4. Backup file exists next to the DB.
         let parent = db_path.parent().unwrap();
@@ -1568,7 +1637,9 @@ mod tests {
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
-        let backup_found = entries.iter().any(|name| name.contains(".pre-v") && name.ends_with(".backup"));
+        let backup_found = entries
+            .iter()
+            .any(|name| name.contains(".pre-v") && name.ends_with(".backup"));
         assert!(
             backup_found,
             "expected a pre-migration backup file next to the DB, found: {:?}",
@@ -1600,7 +1671,10 @@ mod tests {
     fn v24_real_db_smoke() {
         let candidate = "/tmp/corkscrew-migration-test.db";
         if !std::path::Path::new(candidate).exists() {
-            eprintln!("(skipping v24_real_db_smoke — no scratch DB at {})", candidate);
+            eprintln!(
+                "(skipping v24_real_db_smoke — no scratch DB at {})",
+                candidate
+            );
             return;
         }
         let conn = Connection::open(candidate).expect("open scratch DB");
@@ -1680,6 +1754,43 @@ mod tests {
     }
 
     #[test]
+    fn v25_backfills_durable_deploy_target_from_manifest() {
+        let conn = memory_db();
+        conn.execute_batch(
+            "CREATE TABLE schema_version (version INTEGER NOT NULL);
+             INSERT INTO schema_version (version) VALUES (24);
+             CREATE TABLE installed_mods (
+                 id INTEGER PRIMARY KEY,
+                 game_id TEXT NOT NULL,
+                 bottle_name TEXT NOT NULL,
+                 name TEXT NOT NULL
+             );
+             CREATE TABLE deployment_manifest (
+                 id INTEGER PRIMARY KEY,
+                 mod_id INTEGER NOT NULL,
+                 deploy_target TEXT NOT NULL DEFAULT 'data'
+             );
+             INSERT INTO installed_mods (id, game_id, bottle_name, name)
+                 VALUES (77, 'skyrimse', 'b', 'RootMod');
+             INSERT INTO deployment_manifest (mod_id, deploy_target)
+                 VALUES (77, 'root');",
+        )
+        .unwrap();
+
+        migrate_v24_to_v25(&conn).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 25);
+
+        let target: String = conn
+            .query_row(
+                "SELECT deploy_target FROM installed_mods WHERE id = 77",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(target, "root");
+    }
+
+    #[test]
     fn v23_native_columns_nullable() {
         let conn = memory_db();
         migrate(&conn).unwrap();
@@ -1726,6 +1837,7 @@ mod tests {
         conn.execute(
             "INSERT INTO games (game_id, runtime) VALUES ('idemp', 'wine')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
     }
 }

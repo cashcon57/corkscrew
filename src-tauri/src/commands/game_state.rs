@@ -9,7 +9,7 @@ use crate::games;
 use crate::plugins;
 use crate::rollback;
 use crate::rollback::{ModSnapshot, ModVersion};
-use crate::{AppState, auto_snapshot_before_destructive, resolve_game};
+use crate::{auto_snapshot_before_destructive, resolve_game, AppState};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -178,7 +178,6 @@ pub async fn force_unlock_game(
     Ok(state.game_locks.force_unlock(&game_id, &bottle_name))
 }
 
-
 // --- Deploy Journal Commands ---
 
 #[tauri::command]
@@ -212,7 +211,6 @@ pub async fn heal_deployment(
     .map_err(crate::format_join_error)?
 }
 
-
 // --- Game Version Pinning ---
 
 #[tauri::command]
@@ -239,7 +237,6 @@ pub async fn pin_game_version(
         .set_pinned_game_version(&game_id, &bottle_name, &version)
         .map_err(|e| format!("Failed to pin version: {}", e))
 }
-
 
 // --- Mod Rollback & Snapshots ---
 
@@ -308,13 +305,28 @@ pub async fn rollback_mod_version(
                 let mod_target = db
                     .get_deploy_target_for_mod(mod_id)
                     .unwrap_or_else(|_| "data".to_string());
+                let rollback_base;
+                let deploy_base = if mod_target == "root" {
+                    &game_path
+                } else if mod_target == "custom" {
+                    rollback_base = db
+                        .get_deploy_base_path_for_mod(mod_id)
+                        .map_err(|e| e.to_string())?
+                        .map(PathBuf::from)
+                        .ok_or_else(|| {
+                            "Cannot safely roll back custom deploy target without durable base path metadata".to_string()
+                        })?;
+                    &rollback_base
+                } else {
+                    &data_dir
+                };
                 let _ = deployer::deploy_mod_atomic(
                     &db,
                     &game_id,
                     &bottle_name,
                     mod_id,
                     staging_path,
-                    &data_dir,
+                    deploy_base,
                     &files,
                     &game_path,
                     &mod_target,
@@ -369,13 +381,15 @@ pub async fn list_mod_snapshots(
 }
 
 #[tauri::command]
-pub async fn delete_mod_snapshot(snapshot_id: i64, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn delete_mod_snapshot(
+    snapshot_id: i64,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || rollback::delete_snapshot(&db, snapshot_id))
         .await
         .map_err(crate::format_join_error)?
 }
-
 
 // --- Game Directory Cleaner ---
 
@@ -459,4 +473,3 @@ pub async fn clean_game_directory(
     .await
     .map_err(crate::format_join_error)?
 }
-

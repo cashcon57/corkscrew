@@ -507,6 +507,8 @@ mod tests {
             source_type: "manual".into(),
             collection_optional: false,
             file_count: 0,
+            deploy_target: "data".into(),
+            deploy_base_path: None,
         }
     }
 
