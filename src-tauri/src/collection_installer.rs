@@ -195,13 +195,9 @@ fn pick_extraction_temp_base(data_dir: &Path, download_dir: &Path) -> PathBuf {
             let _ = std::fs::remove_file(&probe);
             return preferred;
         }
-        log::warn!(
-            "Extraction temp at data_dir is not writable, falling back to download_dir"
-        );
+        log::warn!("Extraction temp at data_dir is not writable, falling back to download_dir");
     } else {
-        log::warn!(
-            "Cannot create extraction temp at data_dir, falling back to download_dir"
-        );
+        log::warn!("Cannot create extraction temp at data_dir, falling back to download_dir");
     }
     let fallback = download_dir.join(".collection_extraction_temp");
     if std::fs::create_dir_all(&fallback).is_ok() {
@@ -1235,9 +1231,15 @@ pub async fn install_collection(
             let _dl_permit = match dl_sem_c.acquire().await {
                 Ok(permit) => permit,
                 Err(_) => {
-                    done_c.lock().unwrap_or_else(|e| e.into_inner()).insert(order_pos);
+                    done_c
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(order_pos);
                     notify_c.notify_waiters();
-                    return (order_pos, Err(InstallError::Failed("download semaphore closed".into())));
+                    return (
+                        order_pos,
+                        Err(InstallError::Failed("download semaphore closed".into())),
+                    );
                 }
             };
 
@@ -1354,9 +1356,15 @@ pub async fn install_collection(
                     let _ext_permit = match ext_sem_c.acquire().await {
                         Ok(permit) => permit,
                         Err(_) => {
-                            done_c.lock().unwrap_or_else(|e| e.into_inner()).insert(order_pos);
+                            done_c
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .insert(order_pos);
                             notify_c.notify_waiters();
-                            return (order_pos, Err(InstallError::Failed("extract semaphore closed".into())));
+                            return (
+                                order_pos,
+                                Err(InstallError::Failed("extract semaphore closed".into())),
+                            );
                         }
                     };
 
@@ -1366,8 +1374,8 @@ pub async fn install_collection(
                         // Extract under install destination (or download dir
                         // fallback) — `/tmp` on Linux is tmpfs and OOMs on
                         // multi-GB pak extracts. Cleaned up on success.
-                        let temp_dir = extract_base_c
-                            .join(format!("corkscrew_extract_{}", order_pos));
+                        let temp_dir =
+                            extract_base_c.join(format!("corkscrew_extract_{}", order_pos));
 
                         // Spawn dir-size poller for progress tracking
                         let poller_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1791,8 +1799,8 @@ pub async fn install_collection(
 
                         let estimated_total = arc_size.saturating_mul(3);
                         // Avoid /tmp on Linux (tmpfs OOM on multi-GB paks).
-                        let temp_dir = extraction_temp_base
-                            .join(format!("corkscrew_extract_{}", order_pos));
+                        let temp_dir =
+                            extraction_temp_base.join(format!("corkscrew_extract_{}", order_pos));
 
                         let poller_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
                         let poller_stop_c = poller_stop.clone();
@@ -2925,7 +2933,9 @@ pub async fn install_collection(
                 })
             });
         if has_lua_or_logic && !hogwarts_legacy::is_ue4ss_installed(&game_path) {
-            log::info!("HL post-install: Lua/Logic mods detected but UE4SS missing — auto-installing");
+            log::info!(
+                "HL post-install: Lua/Logic mods detected but UE4SS missing — auto-installing"
+            );
             let _ = app.emit(
                 INSTALL_PROGRESS_EVENT,
                 InstallProgress::StepChanged {
@@ -2943,7 +2953,12 @@ pub async fn install_collection(
             // A previous version incorrectly used data_dir (Paks/~mods) as the
             // base, creating Paks/Tools/ue4ss/. Clean up if present.
             let toxic_tools = data_dir.parent().unwrap_or(&data_dir).join("Tools");
-            if toxic_tools.exists() && toxic_tools.to_string_lossy().to_lowercase().contains("paks") {
+            if toxic_tools.exists()
+                && toxic_tools
+                    .to_string_lossy()
+                    .to_lowercase()
+                    .contains("paks")
+            {
                 log::warn!(
                     "HL: removing toxic Tools/ directory under Paks/: {}",
                     toxic_tools.display()
@@ -3213,6 +3228,41 @@ enum InstallError {
         instructions: Option<String>,
     },
     Failed(String),
+}
+
+/// Convert a deployer result into collection-install state.
+///
+/// Collection installs are fail-closed: any deploy error means the mod is not
+/// installed. In particular, zero-file deploy failures ("0 of ... files
+/// deployed") must not be downgraded to success because that leaves an
+/// installed DB row with no deployed files.
+fn handle_collection_deploy_result(
+    db: &Arc<ModDatabase>,
+    mod_id: i64,
+    game_id: &str,
+    bottle_name: &str,
+    data_dir: &Path,
+    game_path: &Path,
+    staging_path: &Path,
+    deploy_result: deployer::Result<deployer::DeployResult>,
+) -> Result<(), InstallError> {
+    match deploy_result {
+        Ok(result) if result.deployed_count > 0 => Ok(()),
+        Ok(_) => {
+            let _ = deployer::undeploy_mod(db, game_id, bottle_name, mod_id, data_dir, game_path);
+            let _ = staging::remove_staging(staging_path);
+            let _ = db.remove_mod(mod_id);
+            Err(InstallError::Failed(
+                "Deploy failed: 0 files deployed".to_string(),
+            ))
+        }
+        Err(e) => {
+            let _ = deployer::undeploy_mod(db, game_id, bottle_name, mod_id, data_dir, game_path);
+            let _ = staging::remove_staging(staging_path);
+            let _ = db.remove_mod(mod_id);
+            Err(InstallError::Failed(format!("Deploy failed: {}", e)))
+        }
+    }
 }
 
 /// Install a single mod from a collection entry.
@@ -3966,53 +4016,6 @@ async fn stage_and_deploy(
             .map(|c| c.to_string().chars().take(200).collect::<String>())
     );
 
-    // Check for MO2-style "Root" folder in staging. If present, the files
-    // inside it should be deployed to game_path (root), not data_dir.
-    // We flatten Root/* up into staging root so they deploy correctly.
-    let has_root_folder = {
-        let root_candidate = staging_result.staging_path.join("Root");
-        let root_candidate_lc = staging_result.staging_path.join("root");
-        if root_candidate.is_dir() {
-            Some(root_candidate)
-        } else if root_candidate_lc.is_dir() {
-            Some(root_candidate_lc)
-        } else {
-            None
-        }
-    };
-    let mut root_files: Vec<String> = Vec::new();
-    if let Some(ref root_dir) = has_root_folder {
-        // Collect files from Root/ and move them up to staging root.
-        // These will be deployed to game_path instead of data_dir.
-        for entry in walkdir::WalkDir::new(root_dir)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-        {
-            if let Ok(rel) = entry.path().strip_prefix(root_dir) {
-                let dest = staging_result.staging_path.join(rel);
-                if let Some(parent) = dest.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                if std::fs::rename(entry.path(), &dest).is_ok()
-                    || std::fs::copy(entry.path(), &dest).map(|_| ()).is_ok()
-                {
-                    root_files.push(rel.to_string_lossy().replace('\\', "/"));
-                }
-            }
-        }
-        // Clean up the Root/ folder after flattening
-        let _ = std::fs::remove_dir_all(root_dir);
-        if !root_files.is_empty() {
-            log::info!(
-                "[stage_deploy] Flattened {} files from Root/ folder for '{}': {:?}",
-                root_files.len(),
-                mod_name,
-                &root_files,
-            );
-        }
-    }
-
     // Detect game version for FOMOD gameDependency evaluation.
     // For Skyrim SE, this determines whether SE (1.5.97) or AE (1.6.x) DLL
     // variants are selected by version-conditional FOMOD steps.
@@ -4307,7 +4310,7 @@ async fn stage_and_deploy(
     // other (conflicting) mod's version wins. This matches Vortex's semantics:
     // the collection author marks specific files to exclude from a mod when
     // those files conflict with another mod that should provide them instead.
-    let mut files_to_deploy = if !mod_entry.file_overrides.is_empty() {
+    let files_to_deploy = if !mod_entry.file_overrides.is_empty() {
         let before = files_to_deploy.len();
         let filtered: Vec<String> = files_to_deploy
             .into_iter()
@@ -4344,17 +4347,18 @@ async fn stage_and_deploy(
         files_to_deploy
     };
 
-    // Include flattened Root/ files in the deploy list (they were moved
-    // into staging root above, so the deployer can find them).
-    if !root_files.is_empty() {
-        let mut merged = files_to_deploy;
-        for rf in &root_files {
-            if !merged.iter().any(|f| f == rf) {
-                merged.push(rf.clone());
-            }
-        }
-        files_to_deploy = merged;
+    let mut deploy_batches =
+        split_collection_root_data_files(&staging_result.staging_path, files_to_deploy)
+            .map_err(|e| InstallError::Failed(format!("Root/Data split failed: {}", e)))?;
+    if !deploy_batches.root_files.is_empty() {
+        log::info!(
+            "[stage_deploy] Split {} Root/ files for '{}' to game root: {:?}",
+            deploy_batches.root_files.len(),
+            mod_name,
+            &deploy_batches.root_files,
+        );
     }
+    let mut files_to_deploy = deploy_batches.data_files.clone();
 
     // Unreal Engine PAK game filter: when the data directory is a PAK-based
     // mod folder (contains "Paks" in path), filter out files that should NOT
@@ -4416,10 +4420,7 @@ async fn stage_and_deploy(
                 let fname = lower.rsplit('/').next().unwrap_or(&lower);
 
                 // PAK/UCAS/UTOC → keep for data_dir deployment (flattened below)
-                if fname.ends_with(".pak")
-                    || fname.ends_with(".ucas")
-                    || fname.ends_with(".utoc")
-                {
+                if fname.ends_with(".pak") || fname.ends_with(".ucas") || fname.ends_with(".utoc") {
                     return true;
                 }
 
@@ -4458,8 +4459,8 @@ async fn stage_and_deploy(
                 if lower.starts_with("manifest/")
                     || lower.starts_with("content/")
                     || [
-                        ".txt", ".md", ".html", ".pdf", ".png", ".jpg", ".jpeg",
-                        ".gif", ".bat", ".exe", ".py", ".json", ".csv",
+                        ".txt", ".md", ".html", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".bat",
+                        ".exe", ".py", ".json", ".csv",
                     ]
                     .iter()
                     .any(|ext| fname.ends_with(ext))
@@ -4517,8 +4518,88 @@ async fn stage_and_deploy(
             dropped_count,
         );
     }
+    deploy_batches.data_files = files_to_deploy;
 
-    // Update DB with staging info (brief locks)
+    // Promote pure root mods (metadata or root-file heuristics) into the root batch.
+    // MO2 Root/ archive files stay split: only files under Root/ go to game root,
+    // while ordinary staged files continue to Data/custom.
+    let is_root_metadata = crate::collections::is_root_mod(mod_entry);
+    let is_root_heuristic = deploy_batches.root_files.is_empty()
+        && crate::collections::looks_like_root_files(&deploy_batches.data_files);
+    if is_root_metadata || is_root_heuristic {
+        deploy_batches
+            .root_files
+            .extend(
+                deploy_batches
+                    .data_files
+                    .drain(..)
+                    .map(|f| CollectionRootFile {
+                        source_relative_path: f.clone(),
+                        relative_path: f,
+                    }),
+            );
+        deploy_batches.root_files.sort();
+        deploy_batches.root_files.dedup();
+    }
+
+    let vortex_dir = resolve_vortex_mod_type(game_id, mod_entry, game_path);
+    let data_deploy_target = if vortex_dir.is_some() {
+        "custom"
+    } else {
+        "data"
+    };
+    let deploy_target_str =
+        if !deploy_batches.root_files.is_empty() && !deploy_batches.data_files.is_empty() {
+            "mixed"
+        } else if !deploy_batches.data_files.is_empty() {
+            data_deploy_target
+        } else if !deploy_batches.root_files.is_empty() {
+            "root"
+        } else if is_root_metadata || is_root_heuristic {
+            "root"
+        } else {
+            data_deploy_target
+        };
+    if deploy_batches.root_files.is_empty() && deploy_batches.data_files.is_empty() {
+        let _ = staging::remove_staging(&staging_result.staging_path);
+        let _ = db.remove_mod(mod_id);
+        return Err(InstallError::Failed(format!(
+            "No deployable files remained for '{}' after collection split/filtering",
+            mod_name
+        )));
+    }
+
+    let deploy_file_targets: Vec<crate::database::DeployFileTarget> = deploy_batches
+        .data_files
+        .iter()
+        .map(|f| crate::database::DeployFileTarget {
+            source_relative_path: f.clone(),
+            relative_path: f.clone(),
+            deploy_target: data_deploy_target.to_string(),
+        })
+        .chain(
+            deploy_batches
+                .root_files
+                .iter()
+                .map(|f| crate::database::DeployFileTarget {
+                    source_relative_path: f.source_relative_path.clone(),
+                    relative_path: f.relative_path.clone(),
+                    deploy_target: "root".to_string(),
+                }),
+        )
+        .collect();
+    let files_to_deploy: Vec<String> = deploy_batches
+        .data_files
+        .iter()
+        .chain(
+            deploy_batches
+                .root_files
+                .iter()
+                .map(|f| &f.source_relative_path),
+        )
+        .cloned()
+        .collect();
+
     let _ = app.emit(
         INSTALL_PROGRESS_EVENT,
         InstallProgress::StepChanged {
@@ -4534,6 +4615,8 @@ async fn stage_and_deploy(
         .map_err(|e| InstallError::Failed(e.to_string()))?;
     db.store_file_hashes(mod_id, &staging_result.hashes)
         .map_err(|e| InstallError::Failed(e.to_string()))?;
+    db.set_deploy_file_targets_for_mod(mod_id, &deploy_file_targets)
+        .map_err(|e| InstallError::Failed(e.to_string()))?;
 
     // Deploy: heavy I/O — run on a blocking thread
     let _ = app.emit(
@@ -4545,35 +4628,22 @@ async fn stage_and_deploy(
         },
     );
 
-    // Determine if this is a root mod (deploy to game root vs Data folder).
-    // Detection priority (OR'd — first match wins):
-    //   1. Collection metadata (mod_type == "dinput"/"enb"/"rootmod")
-    //   2. Archive had a "Root" folder (MO2 convention, flattened above)
-    //   3. File heuristic (all staged files are known root DLLs like d3dx9_42.dll)
-    let is_root_metadata = crate::collections::is_root_mod(mod_entry);
-    let is_root_archive = !root_files.is_empty();
-    let is_root_heuristic = crate::collections::looks_like_root_files(&files_to_deploy);
-    let is_root = is_root_metadata || is_root_archive || is_root_heuristic;
-    // Look up vortex mod-type routing once; we use it both to compute the
-    // canonical deploy_target for the manifest and to choose effective_dir
-    // below. (`resolve_vortex_mod_type` is a cheap registry lookup.)
-    let vortex_dir = resolve_vortex_mod_type(game_id, mod_entry, game_path);
-    let deploy_target_str = if is_root {
-        "root"
-    } else if vortex_dir.is_some() {
-        "custom"
-    } else {
-        "data"
-    };
-    if is_root {
+    if !deploy_batches.root_files.is_empty() {
         log::info!(
-            "Mod '{}' detected as root mod (metadata={}, archive_root={}, heuristic={}, type={:?}, files={:?}) — deploying to game root",
+            "Mod '{}' deploying {} Root/ file(s) to game root (metadata={}, heuristic={}, type={:?})",
             mod_name,
+            deploy_batches.root_files.len(),
             is_root_metadata,
-            is_root_archive,
             is_root_heuristic,
             mod_entry.mod_type,
-            &files_to_deploy,
+        );
+    }
+    if !deploy_batches.data_files.is_empty() {
+        log::info!(
+            "Mod '{}' deploying {} file(s) to {} target",
+            mod_name,
+            deploy_batches.data_files.len(),
+            data_deploy_target,
         );
     }
 
@@ -4582,18 +4652,14 @@ async fn stage_and_deploy(
         let gid = game_id.to_string();
         let bn = bottle_name.to_string();
         let sp = staging_result.staging_path.clone();
-        let (effective_dir, deploy_target_for_cb) = if is_root {
-            (game_path.to_path_buf(), "root".to_string())
-        } else if let Some(ref vdir) = vortex_dir {
-            (vdir.clone(), "custom".to_string())
-        } else {
-            (data_dir.to_path_buf(), "data".to_string())
-        };
         let gp = game_path.to_path_buf();
-        let files = files_to_deploy.clone();
+        let root_files = deploy_batches.root_files.clone();
+        let data_files = deploy_batches.data_files.clone();
+        let data_effective_dir = vortex_dir.clone().unwrap_or_else(|| data_dir.to_path_buf());
+        let data_target = data_deploy_target.to_string();
         let app_deploy = app.clone();
 
-        let deploy_result = tokio::task::spawn_blocking(move || {
+        let deploy_results = tokio::task::spawn_blocking(move || {
             let last_emit = std::sync::Mutex::new(
                 std::time::Instant::now()
                     .checked_sub(std::time::Duration::from_secs(1))
@@ -4615,40 +4681,59 @@ async fn stage_and_deploy(
                     *last = std::time::Instant::now();
                 }
             };
-            deployer::deploy_mod_atomic_with_progress(
-                &db_c,
-                &gid,
-                &bn,
-                mod_id,
-                &sp,
-                &effective_dir,
-                &files,
-                &progress_cb,
-                &gp,
-                &deploy_target_for_cb,
-            )
+
+            let mut results = Vec::new();
+            if !root_files.is_empty() {
+                let mappings: Vec<deployer::DeployFileMapping> = root_files
+                    .iter()
+                    .map(|f| deployer::DeployFileMapping {
+                        source_relative_path: f.source_relative_path.clone(),
+                        relative_path: f.relative_path.clone(),
+                    })
+                    .collect();
+                results.push(deployer::deploy_mod_atomic_mapped_with_progress(
+                    &db_c,
+                    &gid,
+                    &bn,
+                    mod_id,
+                    &sp,
+                    &gp,
+                    &mappings,
+                    &progress_cb,
+                    &gp,
+                    "root",
+                ));
+            }
+            if !data_files.is_empty() {
+                results.push(deployer::deploy_mod_atomic_with_progress(
+                    &db_c,
+                    &gid,
+                    &bn,
+                    mod_id,
+                    &sp,
+                    &data_effective_dir,
+                    &data_files,
+                    &progress_cb,
+                    &gp,
+                    &data_target,
+                ));
+            }
+            results
         })
         .await
         .map_err(|e| InstallError::Failed(format!("Deploy join error: {}", e)))?;
 
-        if let Err(e) = deploy_result {
-            let err_msg = e.to_string();
-            // If deploy failed because 0 files could be found, keep staging + DB
-            // entry so a "redeploy" can fix it later. Only remove staging for
-            // truly fatal errors (I/O, DB, etc.).
-            if err_msg.contains("0 of") && err_msg.contains("files deployed") {
-                log::warn!(
-                    "Deploy returned 0 files for mod {} — keeping staging for later redeploy: {}",
-                    mod_id,
-                    err_msg
-                );
-                // Still return Ok so the mod appears as "installed" — the user
-                // can trigger a redeploy to actually link the files.
-            } else {
-                let _ = staging::remove_staging(&staging_result.staging_path);
-                let _ = db.remove_mod(mod_id);
-                return Err(InstallError::Failed(format!("Deploy failed: {}", e)));
-            }
+        for deploy_result in deploy_results {
+            handle_collection_deploy_result(
+                db,
+                mod_id,
+                game_id,
+                bottle_name,
+                data_dir,
+                game_path,
+                &staging_result.staging_path,
+                deploy_result,
+            )?;
         }
     }
 
@@ -5108,9 +5193,202 @@ fn apply_collection_plugin_order(
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
+struct CollectionRootFile {
+    source_relative_path: String,
+    relative_path: String,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct CollectionDeployBatches {
+    root_files: Vec<CollectionRootFile>,
+    data_files: Vec<String>,
+}
+
+fn split_collection_root_data_files(
+    staging_path: &Path,
+    files_to_deploy: Vec<String>,
+) -> std::io::Result<CollectionDeployBatches> {
+    let root_dir = {
+        let root_candidate = staging_path.join("Root");
+        let root_candidate_lc = staging_path.join("root");
+        if root_candidate.is_dir() {
+            Some(root_candidate)
+        } else if root_candidate_lc.is_dir() {
+            Some(root_candidate_lc)
+        } else {
+            None
+        }
+    };
+
+    let mut root_files = Vec::new();
+    if let Some(ref root_dir) = root_dir {
+        let root_prefix = root_dir
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Root".to_string());
+        for f in files_to_deploy.iter() {
+            let normalized = f.replace('\\', "/");
+            let mut parts = normalized.splitn(2, '/');
+            let first = parts.next().unwrap_or("");
+            if !first.eq_ignore_ascii_case("Root") {
+                continue;
+            }
+            let Some(rel_part) = parts.next() else {
+                continue;
+            };
+            let rel_norm = rel_part.to_string();
+            let source_norm = format!("{}/{}", root_prefix, rel_norm).replace('\\', "/");
+            if !root_dir.join(&rel_norm).is_file() {
+                continue;
+            }
+            if !crate::staging::is_safe_relative_path(&rel_norm)
+                || !crate::staging::is_safe_relative_path(&source_norm)
+            {
+                log::warn!(
+                    "Skipping unsafe Root/ file during collection deploy: {}",
+                    rel_norm
+                );
+                continue;
+            }
+            root_files.push(CollectionRootFile {
+                source_relative_path: source_norm,
+                relative_path: rel_norm,
+            });
+        }
+    }
+
+    let data_files: Vec<String> = files_to_deploy
+        .into_iter()
+        .filter(|f| {
+            let normalized = f.replace('\\', "/");
+            let first = normalized.split('/').next().unwrap_or("");
+            !first.eq_ignore_ascii_case("Root")
+        })
+        .collect();
+
+    root_files.sort();
+    root_files.dedup();
+
+    Ok(CollectionDeployBatches {
+        root_files,
+        data_files,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    fn test_db() -> (Arc<ModDatabase>, TempDir) {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("collection_installer.db");
+        let db = Arc::new(ModDatabase::new(&db_path).unwrap());
+        (db, tmp)
+    }
+
+    #[test]
+    fn zero_file_deploy_error_fails_and_cleans_installed_mod_state() {
+        let (db, _tmp) = test_db();
+        let staging_tmp = TempDir::new().unwrap();
+        let staging_path = staging_tmp.path().join("staged-mod");
+        std::fs::create_dir_all(&staging_path).unwrap();
+
+        let mod_id = db
+            .add_mod(
+                "skyrimse",
+                "test-bottle",
+                Some(42),
+                "Zero Deploy Mod",
+                "1.0.0",
+                "zero.zip",
+                &["missing.esp".to_string()],
+            )
+            .unwrap();
+
+        let game_path = staging_tmp.path().join("game");
+        let data_dir = game_path.join("Data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let result = handle_collection_deploy_result(
+            &db,
+            mod_id,
+            "skyrimse",
+            "test-bottle",
+            &data_dir,
+            &game_path,
+            &staging_path,
+            Err(deployer::DeployerError::Other(
+                "0 of 1 files deployed".to_string(),
+            )),
+        );
+
+        assert!(
+            matches!(result, Err(InstallError::Failed(message)) if message.contains("0 of 1 files deployed"))
+        );
+        assert!(
+            db.get_mod(mod_id).unwrap().is_none(),
+            "failed zero-file deploy must not leave the mod installed"
+        );
+        assert!(
+            !staging_path.exists(),
+            "failed zero-file deploy has no explicit resumable state, so staging is cleaned"
+        );
+    }
+
+    #[test]
+    fn zero_file_deploy_ok_result_fails_and_cleans_installed_mod_state() {
+        let (db, _tmp) = test_db();
+        let staging_tmp = TempDir::new().unwrap();
+        let staging_path = staging_tmp.path().join("staged-zero-ok-mod");
+        std::fs::create_dir_all(&staging_path).unwrap();
+
+        let mod_id = db
+            .add_mod(
+                "skyrimse",
+                "test-bottle",
+                Some(43),
+                "Zero Ok Deploy Mod",
+                "1.0.0",
+                "zero-ok.zip",
+                &["missing.esp".to_string()],
+            )
+            .unwrap();
+
+        let game_path = staging_tmp.path().join("game-ok");
+        let data_dir = game_path.join("Data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let result = handle_collection_deploy_result(
+            &db,
+            mod_id,
+            "skyrimse",
+            "test-bottle",
+            &data_dir,
+            &game_path,
+            &staging_path,
+            Ok(deployer::DeployResult {
+                deployed_count: 0,
+                skipped_count: 0,
+                fallback_used: false,
+            }),
+        );
+
+        assert!(
+            matches!(result, Err(InstallError::Failed(message)) if message.contains("0 files deployed"))
+        );
+        assert!(db.get_mod(mod_id).unwrap().is_none());
+        assert!(!staging_path.exists());
+    }
+
+    fn unique_temp_dir(name: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("corkscrew-{name}-{nanos}"))
+    }
 
     #[test]
     fn test_parse_fomod_choices_valid() {
@@ -5169,5 +5447,42 @@ mod tests {
         let result = parse_fomod_choices(&json).unwrap();
         assert_eq!(result["Resolution"], vec!["4K", "Parallax"]);
         assert_eq!(result["Compatibility"], vec!["USSEP Patch"]);
+    }
+
+    #[test]
+    fn split_collection_root_data_files_separates_mixed_skyrim_mod() {
+        let staging = unique_temp_dir("split-root-data");
+        std::fs::create_dir_all(staging.join("Root")).unwrap();
+        std::fs::create_dir_all(staging.join("Scripts")).unwrap();
+        std::fs::create_dir_all(staging.join("SKSE/Plugins")).unwrap();
+        std::fs::write(staging.join("Root/skse64_loader.exe"), b"loader").unwrap();
+        std::fs::write(staging.join("Scripts/Foo.pex"), b"script").unwrap();
+        std::fs::write(staging.join("SKSE/Plugins/Foo.dll"), b"dll").unwrap();
+
+        let batches = split_collection_root_data_files(
+            &staging,
+            vec![
+                "Root/skse64_loader.exe".to_string(),
+                "Scripts/Foo.pex".to_string(),
+                "SKSE/Plugins/Foo.dll".to_string(),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            batches.root_files,
+            vec![CollectionRootFile {
+                source_relative_path: "Root/skse64_loader.exe".to_string(),
+                relative_path: "skse64_loader.exe".to_string(),
+            }]
+        );
+        assert_eq!(
+            batches.data_files,
+            vec!["Scripts/Foo.pex", "SKSE/Plugins/Foo.dll"]
+        );
+        assert!(staging.join("Root/skse64_loader.exe").exists());
+        assert!(!staging.join("skse64_loader.exe").exists());
+
+        let _ = std::fs::remove_dir_all(staging);
     }
 }

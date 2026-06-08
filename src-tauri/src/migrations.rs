@@ -19,7 +19,7 @@ pub enum MigrationError {
 pub type Result<T> = std::result::Result<T, MigrationError>;
 
 /// The current target schema version. Bump this when adding a new migration.
-pub const TARGET_VERSION: u32 = 25;
+pub const TARGET_VERSION: u32 = 26;
 
 /// Get the current schema version (0 if no version table exists).
 pub fn current_version(conn: &Connection) -> Result<u32> {
@@ -169,6 +169,11 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     if version == 24 {
         migrate_v24_to_v25(conn)?;
         version = 25;
+    }
+
+    if version == 25 {
+        migrate_v25_to_v26(conn)?;
+        version = 26;
     }
 
     let _ = version; // suppress unused warning when TARGET_VERSION == current
@@ -1320,6 +1325,30 @@ fn migrate_v24_to_v25(conn: &Connection) -> Result<()> {
     tx.execute("UPDATE schema_version SET version = 25", [])?;
     tx.commit()?;
     log::info!("Migration 24 → 25 complete (durable installed_mods.deploy_target)");
+    Ok(())
+}
+
+/// Migration 25 → 26: Durable per-file deploy target metadata for mixed mods.
+fn migrate_v25_to_v26(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS mod_deploy_file_targets (
+            mod_id               INTEGER NOT NULL REFERENCES installed_mods(id) ON DELETE CASCADE,
+            source_relative_path TEXT    NOT NULL,
+            relative_path        TEXT    NOT NULL,
+            deploy_target        TEXT    NOT NULL DEFAULT 'data',
+            PRIMARY KEY (mod_id, relative_path, deploy_target)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_mod_deploy_file_targets_mod
+            ON mod_deploy_file_targets (mod_id);
+
+        CREATE INDEX IF NOT EXISTS idx_mod_deploy_file_targets_source
+            ON mod_deploy_file_targets (mod_id, source_relative_path);",
+    )?;
+    tx.execute("UPDATE schema_version SET version = 26", [])?;
+    tx.commit()?;
+    log::info!("Migration 25 → 26 complete (durable per-file deploy targets)");
     Ok(())
 }
 

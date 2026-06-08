@@ -193,6 +193,12 @@ pub struct DeployResult {
     pub fallback_used: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeployFileMapping {
+    pub source_relative_path: String,
+    pub relative_path: String,
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -276,8 +282,6 @@ fn deploy_mod_inner(
     deploy_target: &str,
     progress: Option<&DeployProgressCb>,
 ) -> Result<DeployResult> {
-    use rayon::prelude::*;
-
     if !staging_path.exists() {
         return Err(DeployerError::StagingNotFound(staging_path.to_path_buf()));
     }
@@ -330,44 +334,96 @@ fn deploy_mod_inner(
         .get_all_mod_priorities()
         .map_err(|e| DeployerError::Database(e.to_string()))?;
 
-    let deployed_count = AtomicUsize::new(0);
-    let skipped_count = AtomicUsize::new(0);
-    let missing_count = AtomicUsize::new(0);
-    let junk_count = AtomicUsize::new(0);
-    let fallback_used = AtomicBool::new(false);
     let staging_str = staging_path.to_string_lossy().to_string();
     let manifest_deploy_target = if deploy_target == "custom" {
         format!("custom:{}", data_dir.to_string_lossy())
     } else {
         deploy_target.to_string()
     };
+    let mappings: Vec<DeployFileMapping> = files
+        .iter()
+        .map(|rel_path| DeployFileMapping {
+            source_relative_path: rel_path.clone(),
+            relative_path: rel_path.clone(),
+        })
+        .collect();
+    deploy_mod_mapped_inner(
+        db,
+        game_id,
+        bottle_name,
+        mod_id,
+        staging_path,
+        data_dir,
+        &mappings,
+        &manifest_deploy_target,
+        progress,
+        can_hardlink,
+        copy_method,
+        my_priority,
+        deployed_map,
+        priorities,
+        staging_str,
+    )
+}
 
+#[allow(clippy::too_many_arguments)]
+fn deploy_mod_mapped_inner(
+    db: &ModDatabase,
+    game_id: &str,
+    bottle_name: &str,
+    mod_id: i64,
+    staging_path: &Path,
+    data_dir: &Path,
+    mappings: &[DeployFileMapping],
+    manifest_deploy_target: &str,
+    progress: Option<&DeployProgressCb>,
+    can_hardlink: bool,
+    copy_method: platform::FsCopyMethod,
+    my_priority: i32,
+    deployed_map: std::collections::HashMap<(String, String), i64>,
+    priorities: std::collections::HashMap<i64, i64>,
+    staging_str: String,
+) -> Result<DeployResult> {
+    let deployed_count = AtomicUsize::new(0);
+    let skipped_count = AtomicUsize::new(0);
+    let missing_count = AtomicUsize::new(0);
+    let junk_count = AtomicUsize::new(0);
+    let fallback_used = AtomicBool::new(false);
     // Phase 1: Parallel file I/O — resolve conflicts, then hardlink or copy.
     // Collect successful deployments for batch database insert.
-    let results: Vec<Option<(String, &str)>> = files
+    let results: Vec<Option<(String, &str)>> = mappings
         .par_iter()
-        .map(|rel_path| {
+        .map(|mapping| {
+            let source_rel_path = &mapping.source_relative_path;
+            let rel_path = &mapping.relative_path;
             // Defense-in-depth: reject path traversal (string-level check)
-            if !crate::staging::is_safe_relative_path(rel_path) {
-                warn!("Deploy: skipping unsafe relative path: {}", rel_path);
+            if !crate::staging::is_safe_relative_path(source_rel_path)
+                || !crate::staging::is_safe_relative_path(rel_path)
+            {
+                warn!(
+                    "Deploy: skipping unsafe mapping: {} -> {}",
+                    source_rel_path, rel_path
+                );
                 return None;
             }
 
             // Defense-in-depth: post-join canonicalization check
-            let src = staging_path.join(rel_path);
+            let src = staging_path.join(source_rel_path);
             if src.exists() && !crate::staging::validate_path_within_base(staging_path, &src) {
-                warn!("Deploy: path escaped staging after join: {}", rel_path);
+                warn!(
+                    "Deploy: path escaped staging after join: {}",
+                    source_rel_path
+                );
                 return None;
             }
 
             // Defense-in-depth: skip packaging junk (fomod/, meta.ini, etc.)
-            if crate::installer::is_deploy_junk(std::path::Path::new(rel_path)) {
-                debug!("Deploy: skipping junk file: {}", rel_path);
+            if crate::installer::is_deploy_junk(std::path::Path::new(source_rel_path)) {
+                debug!("Deploy: skipping junk file: {}", source_rel_path);
                 junk_count.fetch_add(1, Ordering::Relaxed);
                 return None;
             }
 
-            let src = staging_path.join(rel_path);
             let dst = data_dir.join(rel_path);
 
             if !src.exists() {
@@ -395,7 +451,10 @@ fn deploy_mod_inner(
             }
 
             // Conflict resolution via in-memory lookup
-            let normalized_key = (rel_path.replace('\\', "/"), manifest_deploy_target.clone());
+            let normalized_key = (
+                rel_path.replace('\\', "/"),
+                manifest_deploy_target.to_string(),
+            );
             if let Some(&owner_mod_id) = deployed_map.get(&normalized_key) {
                 if owner_mod_id == mod_id {
                     return None; // already deployed by us
@@ -489,7 +548,7 @@ fn deploy_mod_inner(
 
             let done = deployed_count.fetch_add(1, Ordering::Relaxed) + 1;
             if let Some(cb) = &progress {
-                let total = files.len() as u64;
+                let total = mappings.len() as u64;
                 let interval = (total / 50).clamp(10, 100);
                 if (done as u64).is_multiple_of(interval) || done as u64 == total {
                     cb(done as u64, total);
@@ -511,7 +570,7 @@ fn deploy_mod_inner(
                     rel_path.as_str(),
                     staging_str.as_str(),
                     *method,
-                    manifest_deploy_target.as_str(),
+                    manifest_deploy_target,
                 )
             })
         })
@@ -545,7 +604,7 @@ fn deploy_mod_inner(
     // If we expected to deploy files but none succeeded, warn but don't error.
     // This can happen legitimately: FOMOD reconfiguration, stale staging, or
     // mods consisting entirely of metadata files (meta.ini, fomod/, etc.).
-    let deployable = files.len().saturating_sub(final_junk);
+    let deployable = mappings.len().saturating_sub(final_junk);
     if final_deployed == 0 && deployable > 0 {
         warn!(
             "Deploy mod {}: 0 of {} deployable files deployed (junk={}, missing={}) \
@@ -566,6 +625,80 @@ fn deploy_mod_inner(
         skipped_count: final_skipped,
         fallback_used: final_fallback,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn deploy_mod_mapped_with_progress(
+    db: &ModDatabase,
+    game_id: &str,
+    bottle_name: &str,
+    mod_id: i64,
+    staging_path: &Path,
+    data_dir: &Path,
+    mappings: &[DeployFileMapping],
+    deploy_target: &str,
+    progress: &DeployProgressCb,
+) -> Result<DeployResult> {
+    if !staging_path.exists() {
+        return Err(DeployerError::StagingNotFound(staging_path.to_path_buf()));
+    }
+    let can_hardlink = same_filesystem(staging_path, data_dir);
+    let copy_method = platform::detect_copy_method(staging_path, data_dir);
+    if !can_hardlink {
+        let deploy_size = crate::disk_budget::dir_size(staging_path);
+        crate::disk_budget::check_space_guard(data_dir, deploy_size)
+            .map_err(DeployerError::Other)?;
+    }
+    let mod_info = db
+        .get_mod(mod_id)
+        .map_err(|e| DeployerError::Database(e.to_string()))?
+        .ok_or_else(|| DeployerError::Database(format!("Mod {} not found", mod_id)))?;
+    let deploy_base = data_dir.to_string_lossy().to_string();
+    let deploy_base_path = if deploy_target == "custom" {
+        Some(deploy_base.as_str())
+    } else {
+        None
+    };
+    db.set_deploy_target_for_mod_with_base(mod_id, deploy_target, deploy_base_path)
+        .map_err(|e| DeployerError::Database(e.to_string()))?;
+    let manifest = db
+        .get_deployment_manifest(game_id, bottle_name)
+        .map_err(|e| DeployerError::Database(e.to_string()))?;
+    let deployed_map: std::collections::HashMap<(String, String), i64> = manifest
+        .iter()
+        .map(|e| {
+            (
+                (e.relative_path.replace('\\', "/"), e.deploy_target.clone()),
+                e.mod_id,
+            )
+        })
+        .collect();
+    let priorities = db
+        .get_all_mod_priorities()
+        .map_err(|e| DeployerError::Database(e.to_string()))?;
+    let staging_str = staging_path.to_string_lossy().to_string();
+    let manifest_deploy_target = if deploy_target == "custom" {
+        format!("custom:{}", data_dir.to_string_lossy())
+    } else {
+        deploy_target.to_string()
+    };
+    deploy_mod_mapped_inner(
+        db,
+        game_id,
+        bottle_name,
+        mod_id,
+        staging_path,
+        data_dir,
+        mappings,
+        &manifest_deploy_target,
+        Some(progress),
+        can_hardlink,
+        copy_method,
+        mod_info.install_priority,
+        deployed_map,
+        priorities,
+        staging_str,
+    )
 }
 
 /// Deploy a mod atomically: if deployment fails partway through, roll back
@@ -644,6 +777,45 @@ pub fn deploy_mod_atomic_with_progress(
         Err(e) => {
             warn!(
                 "deploy_mod failed for mod {}, rolling back partially deployed files: {}",
+                mod_id, e
+            );
+            let _ = undeploy_mod(db, game_id, bottle_name, mod_id, data_dir, game_path);
+            Err(e)
+        }
+    }
+}
+
+pub fn deploy_mod_atomic_mapped_with_progress(
+    db: &ModDatabase,
+    game_id: &str,
+    bottle_name: &str,
+    mod_id: i64,
+    staging_path: &Path,
+    data_dir: &Path,
+    mappings: &[DeployFileMapping],
+    progress: &DeployProgressCb,
+    game_path: &Path,
+    deploy_target: &str,
+) -> Result<DeployResult> {
+    let deploy_base = match deploy_target {
+        "root" => game_path,
+        _ => data_dir,
+    };
+    match deploy_mod_mapped_with_progress(
+        db,
+        game_id,
+        bottle_name,
+        mod_id,
+        staging_path,
+        deploy_base,
+        mappings,
+        deploy_target,
+        progress,
+    ) {
+        Ok(result) => Ok(result),
+        Err(e) => {
+            warn!(
+                "deploy_mod_mapped failed for mod {}, rolling back partially deployed files: {}",
                 mod_id, e
             );
             let _ = undeploy_mod(db, game_id, bottle_name, mod_id, data_dir, game_path);
@@ -861,6 +1033,7 @@ where
             .unwrap_or_else(|_| "data".to_string());
         if target != "data"
             && target != "root"
+            && target != "mixed"
             && db
                 .get_deploy_base_path_for_mod(m.id)
                 .map_err(|e| DeployerError::Database(e.to_string()))?
@@ -913,6 +1086,80 @@ where
                 let mod_target = db
                     .get_deploy_target_for_mod(m.id)
                     .unwrap_or_else(|_| "data".to_string());
+
+                if mod_target == "mixed" {
+                    let file_targets = db
+                        .get_deploy_file_targets_for_mod(m.id)
+                        .map_err(|e| DeployerError::Database(e.to_string()))?;
+                    let mut batches: std::collections::BTreeMap<String, Vec<DeployFileMapping>> =
+                        std::collections::BTreeMap::new();
+                    for file in files {
+                        let target = file_targets.get(&file).cloned().unwrap_or(
+                            crate::database::DeployFileTarget {
+                                source_relative_path: file.clone(),
+                                relative_path: file.clone(),
+                                deploy_target: "data".to_string(),
+                            },
+                        );
+                        batches
+                            .entry(target.deploy_target.clone())
+                            .or_default()
+                            .push(DeployFileMapping {
+                                source_relative_path: target.source_relative_path,
+                                relative_path: target.relative_path,
+                            });
+                    }
+
+                    for (target, batch_files) in batches {
+                        let custom_base;
+                        let effective_dir = if target == "root" {
+                            game_path
+                        } else if target == "data" {
+                            data_dir
+                        } else if target == "custom" {
+                            custom_base = PathBuf::from(
+                                db.get_deploy_base_path_for_mod(m.id)
+                                    .map_err(|e| DeployerError::Database(e.to_string()))?
+                                    .ok_or_else(|| {
+                                        DeployerError::Other(format!(
+                                            "Full redeploy cannot safely route mixed custom deploy target for mod '{}' without durable custom target path metadata",
+                                            m.name
+                                        ))
+                                    })?,
+                            );
+                            custom_base.as_path()
+                        } else {
+                            return Err(DeployerError::Other(format!(
+                                "Full redeploy cannot safely route mixed deploy_target '{}' for mod '{}'",
+                                target, m.name
+                            )));
+                        };
+                        let progress = |_done: u64, _total: u64| {};
+                        let result = deploy_mod_mapped_with_progress(
+                            db,
+                            game_id,
+                            bottle_name,
+                            m.id,
+                            &staging_path,
+                            effective_dir,
+                            &batch_files,
+                            &target,
+                            &progress,
+                        )?;
+                        files_so_far += batch_files.len();
+                        total_deployed += result.deployed_count;
+                        total_skipped += result.skipped_count;
+                        any_fallback = any_fallback || result.fallback_used;
+                    }
+                    db.set_deploy_target_for_mod_with_base(
+                        m.id,
+                        "mixed",
+                        m.deploy_base_path.as_deref(),
+                    )
+                    .map_err(|e| DeployerError::Database(e.to_string()))?;
+                    continue;
+                }
+
                 let custom_base;
                 let effective_dir = if mod_target == "root" {
                     game_path
@@ -932,17 +1179,50 @@ where
                     custom_base.as_path()
                 };
 
+                let file_targets = db
+                    .get_deploy_file_targets_for_mod(m.id)
+                    .map_err(|e| DeployerError::Database(e.to_string()))?;
                 let file_count = files.len();
-                let result = deploy_mod(
-                    db,
-                    game_id,
-                    bottle_name,
-                    m.id,
-                    &staging_path,
-                    effective_dir,
-                    &files,
-                    &mod_target,
-                )?;
+                let result = if file_targets.is_empty() {
+                    deploy_mod(
+                        db,
+                        game_id,
+                        bottle_name,
+                        m.id,
+                        &staging_path,
+                        effective_dir,
+                        &files,
+                        &mod_target,
+                    )?
+                } else {
+                    let mappings: Vec<DeployFileMapping> = files
+                        .iter()
+                        .map(|file| {
+                            file_targets
+                                .get(file)
+                                .map(|target| DeployFileMapping {
+                                    source_relative_path: target.source_relative_path.clone(),
+                                    relative_path: target.relative_path.clone(),
+                                })
+                                .unwrap_or_else(|| DeployFileMapping {
+                                    source_relative_path: file.clone(),
+                                    relative_path: file.clone(),
+                                })
+                        })
+                        .collect();
+                    let progress = |_done: u64, _total: u64| {};
+                    deploy_mod_mapped_with_progress(
+                        db,
+                        game_id,
+                        bottle_name,
+                        m.id,
+                        &staging_path,
+                        effective_dir,
+                        &mappings,
+                        &mod_target,
+                        &progress,
+                    )?
+                };
 
                 files_so_far += file_count;
                 total_deployed += result.deployed_count;
@@ -1211,6 +1491,7 @@ fn restore_next_winner_with_mods(
 #[derive(Debug, Clone)]
 struct DesiredFile {
     relative_path: String,
+    source_relative_path: String,
     mod_id: i64,
     staging_path: PathBuf,
     sha256: Option<String>,
@@ -1316,6 +1597,12 @@ fn compute_desired_state(
         let deploy_target = db
             .get_deploy_target_for_mod(m.id)
             .unwrap_or_else(|_| "data".to_string());
+        let deploy_file_targets = if deploy_target == "mixed" {
+            db.get_deploy_file_targets_for_mod(m.id)
+                .map_err(|e| DeployerError::Database(e.to_string()))?
+        } else {
+            std::collections::HashMap::new()
+        };
 
         let manifest_deploy_target = if deploy_target == "custom" {
             m.deploy_base_path
@@ -1327,17 +1614,43 @@ fn compute_desired_state(
         };
 
         for rel_path in files {
-            let sha256 = hash_map.get(&(m.id, rel_path.clone())).cloned();
+            let (source_rel_path, file_deploy_target, target_rel_path) = if deploy_target == "mixed"
+            {
+                if let Some(target) = deploy_file_targets.get(&rel_path) {
+                    let target_name = if target.deploy_target == "custom" {
+                        m.deploy_base_path
+                            .as_ref()
+                            .map(|base| format!("custom:{base}"))
+                            .unwrap_or_else(|| target.deploy_target.clone())
+                    } else {
+                        target.deploy_target.clone()
+                    };
+                    (
+                        target.source_relative_path.clone(),
+                        target_name,
+                        target.relative_path.clone(),
+                    )
+                } else {
+                    (rel_path.clone(), "data".to_string(), rel_path.clone())
+                }
+            } else {
+                (
+                    rel_path.clone(),
+                    manifest_deploy_target.clone(),
+                    rel_path.clone(),
+                )
+            };
 
             // Last writer wins for the same deployment identity (same target + path).
             desired.insert(
-                (rel_path.clone(), manifest_deploy_target.clone()),
+                (target_rel_path.clone(), file_deploy_target.clone()),
                 DesiredFile {
-                    relative_path: rel_path,
+                    relative_path: target_rel_path,
+                    source_relative_path: source_rel_path.clone(),
                     mod_id: m.id,
                     staging_path: staging_path.clone(),
-                    sha256,
-                    deploy_target: manifest_deploy_target.clone(),
+                    sha256: hash_map.get(&(m.id, source_rel_path)).cloned(),
+                    deploy_target: file_deploy_target,
                 },
             );
         }
@@ -1641,7 +1954,9 @@ pub fn deploy_incremental(
                 }
             };
             let dst = base.join(&new_desired.relative_path);
-            let src = new_desired.staging_path.join(&new_desired.relative_path);
+            let src = new_desired
+                .staging_path
+                .join(&new_desired.source_relative_path);
 
             if !src.exists() {
                 warn!("Incremental update: source not found: {}", src.display());
@@ -1720,7 +2035,9 @@ pub fn deploy_incremental(
                 }
             };
             let dst = base.join(&desired_file.relative_path);
-            let src = desired_file.staging_path.join(&desired_file.relative_path);
+            let src = desired_file
+                .staging_path
+                .join(&desired_file.source_relative_path);
 
             if !src.exists() {
                 warn!("Incremental add: source not found: {}", src.display());
@@ -2031,6 +2348,95 @@ mod tests {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(full, content).unwrap();
+    }
+
+    #[test]
+    fn redeploy_all_preserves_mixed_root_data_file_targets_after_manifest_purge() {
+        let (db, tmp, staging, data_dir) = setup();
+        let game_root = tmp.path().join("game_root");
+        fs::create_dir_all(&game_root).unwrap();
+
+        let mod_id = db
+            .add_mod(
+                "skyrimse",
+                "Gaming",
+                None,
+                "Mixed Root Data Mod",
+                "1.0",
+                "mixed.zip",
+                &[
+                    "skse64_loader.exe".to_string(),
+                    "Scripts/Foo.pex".to_string(),
+                    "SKSE/Plugins/Foo.dll".to_string(),
+                ],
+            )
+            .unwrap();
+        db.set_staging_path(mod_id, &staging.to_string_lossy())
+            .unwrap();
+
+        create_staging_file(&staging, "skse64_loader.exe", b"loader");
+        create_staging_file(&staging, "Scripts/Foo.pex", b"script");
+        create_staging_file(&staging, "SKSE/Plugins/Foo.dll", b"plugin");
+
+        deploy_mod(
+            &db,
+            "skyrimse",
+            "Gaming",
+            mod_id,
+            &staging,
+            &game_root,
+            &["skse64_loader.exe".to_string()],
+            "root",
+        )
+        .unwrap();
+        deploy_mod(
+            &db,
+            "skyrimse",
+            "Gaming",
+            mod_id,
+            &staging,
+            &data_dir,
+            &[
+                "Scripts/Foo.pex".to_string(),
+                "SKSE/Plugins/Foo.dll".to_string(),
+            ],
+            "data",
+        )
+        .unwrap();
+        db.set_deploy_target_for_mod(mod_id, "mixed").unwrap();
+        db.set_deploy_file_targets_for_mod(
+            mod_id,
+            &[
+                crate::database::DeployFileTarget {
+                    source_relative_path: "skse64_loader.exe".to_string(),
+                    relative_path: "skse64_loader.exe".to_string(),
+                    deploy_target: "root".to_string(),
+                },
+                crate::database::DeployFileTarget {
+                    source_relative_path: "Scripts/Foo.pex".to_string(),
+                    relative_path: "Scripts/Foo.pex".to_string(),
+                    deploy_target: "data".to_string(),
+                },
+                crate::database::DeployFileTarget {
+                    source_relative_path: "SKSE/Plugins/Foo.dll".to_string(),
+                    relative_path: "SKSE/Plugins/Foo.dll".to_string(),
+                    deploy_target: "data".to_string(),
+                },
+            ],
+        )
+        .unwrap();
+
+        purge_deployment(&db, "skyrimse", "Gaming", &data_dir, &game_root).unwrap();
+        assert!(!game_root.join("skse64_loader.exe").exists());
+        assert!(!data_dir.join("Scripts/Foo.pex").exists());
+
+        redeploy_all(&db, "skyrimse", "Gaming", &data_dir, &game_root).unwrap();
+
+        assert!(game_root.join("skse64_loader.exe").exists());
+        assert!(!data_dir.join("skse64_loader.exe").exists());
+        assert!(data_dir.join("Scripts/Foo.pex").exists());
+        assert!(data_dir.join("SKSE/Plugins/Foo.dll").exists());
+        assert!(!game_root.join("Scripts/Foo.pex").exists());
     }
 
     #[test]

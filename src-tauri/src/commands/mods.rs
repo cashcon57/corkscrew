@@ -752,40 +752,155 @@ pub async fn toggle_mod(
                 let mod_target = db
                     .get_deploy_target_for_mod(mod_id)
                     .unwrap_or_else(|_| "data".to_string());
-                let effective_dir = match mod_target.as_str() {
-                    "root" => game.game_path.clone(),
-                    "custom" => {
-                        if let Some(base) = db
-                            .get_deploy_base_path_for_mod(mod_id)
-                            .map_err(|e| e.to_string())?
-                        {
-                            PathBuf::from(base)
-                        } else {
-                            // Recompute from staged file shape only for legacy custom mods
-                            // installed before deploy_base_path existed.
-                            let (dir, _) = resolve_effective_deploy_dir(
-                                &game_id, &game, &data_dir, "", &files,
-                            );
-                            dir
-                        }
-                    }
-                    _ => data_dir.clone(),
-                };
                 db.set_enabled(mod_id, true).map_err(|e| e.to_string())?;
-                deployer::deploy_mod(
-                    &db,
-                    &game_id,
-                    &bottle_name,
-                    mod_id,
-                    &staging_path,
-                    &effective_dir,
-                    &files,
-                    &mod_target,
-                )
-                .map_err(|e| {
-                    let _ = db.set_enabled(mod_id, false);
-                    e.to_string()
-                })?;
+                if mod_target == "mixed" {
+                    let file_targets = db
+                        .get_deploy_file_targets_for_mod(mod_id)
+                        .map_err(|e| e.to_string())?;
+                    let mut batches: std::collections::BTreeMap<
+                        String,
+                        Vec<deployer::DeployFileMapping>,
+                    > = std::collections::BTreeMap::new();
+                    for file in files {
+                        let target = file_targets.get(&file).cloned().unwrap_or(
+                            crate::database::DeployFileTarget {
+                                source_relative_path: file.clone(),
+                                relative_path: file.clone(),
+                                deploy_target: "data".to_string(),
+                            },
+                        );
+                        batches
+                            .entry(target.deploy_target.clone())
+                            .or_default()
+                            .push(deployer::DeployFileMapping {
+                                source_relative_path: target.source_relative_path,
+                                relative_path: target.relative_path,
+                            });
+                    }
+                    for (target, batch_files) in batches {
+                        let target_dir = match target.as_str() {
+                            "root" => game.game_path.clone(),
+                            "custom" => db
+                                .get_deploy_base_path_for_mod(mod_id)
+                                .map_err(|e| e.to_string())?
+                                .map(PathBuf::from)
+                                .ok_or_else(|| {
+                                    "Mixed custom deploy target missing durable base path"
+                                        .to_string()
+                                })?,
+                            _ => data_dir.clone(),
+                        };
+                        let progress = |_done: u64, _total: u64| {};
+                        deployer::deploy_mod_mapped_with_progress(
+                            &db,
+                            &game_id,
+                            &bottle_name,
+                            mod_id,
+                            &staging_path,
+                            &target_dir,
+                            &batch_files,
+                            &target,
+                            &progress,
+                        )
+                        .map_err(|e| {
+                            let _ = deployer::undeploy_mod(
+                                &db,
+                                &game_id,
+                                &bottle_name,
+                                mod_id,
+                                &data_dir,
+                                &game.game_path,
+                            );
+                            let _ = db.set_enabled(mod_id, false);
+                            e.to_string()
+                        })?;
+                    }
+                    db.set_deploy_target_for_mod_with_base(
+                        mod_id,
+                        "mixed",
+                        installed_mod.deploy_base_path.as_deref(),
+                    )
+                    .map_err(|e| e.to_string())?;
+                } else {
+                    let effective_dir = match mod_target.as_str() {
+                        "root" => game.game_path.clone(),
+                        "custom" => {
+                            if let Some(base) = db
+                                .get_deploy_base_path_for_mod(mod_id)
+                                .map_err(|e| e.to_string())?
+                            {
+                                PathBuf::from(base)
+                            } else {
+                                // Recompute from staged file shape only for legacy custom mods
+                                // installed before deploy_base_path existed.
+                                let (dir, _) = resolve_effective_deploy_dir(
+                                    &game_id, &game, &data_dir, "", &files,
+                                );
+                                dir
+                            }
+                        }
+                        _ => data_dir.clone(),
+                    };
+                    let file_targets = db
+                        .get_deploy_file_targets_for_mod(mod_id)
+                        .map_err(|e| e.to_string())?;
+                    if file_targets.is_empty() {
+                        deployer::deploy_mod(
+                            &db,
+                            &game_id,
+                            &bottle_name,
+                            mod_id,
+                            &staging_path,
+                            &effective_dir,
+                            &files,
+                            &mod_target,
+                        )
+                        .map_err(|e| {
+                            let _ = db.set_enabled(mod_id, false);
+                            e.to_string()
+                        })?;
+                    } else {
+                        let mappings: Vec<deployer::DeployFileMapping> = files
+                            .iter()
+                            .map(|file| {
+                                file_targets
+                                    .get(file)
+                                    .map(|target| deployer::DeployFileMapping {
+                                        source_relative_path: target.source_relative_path.clone(),
+                                        relative_path: target.relative_path.clone(),
+                                    })
+                                    .unwrap_or_else(|| deployer::DeployFileMapping {
+                                        source_relative_path: file.clone(),
+                                        relative_path: file.clone(),
+                                    })
+                            })
+                            .collect();
+                        let progress = |_done: u64, _total: u64| {};
+                        deployer::deploy_mod_mapped_with_progress(
+                            &db,
+                            &game_id,
+                            &bottle_name,
+                            mod_id,
+                            &staging_path,
+                            &effective_dir,
+                            &mappings,
+                            &mod_target,
+                            &progress,
+                        )
+                        .map_err(|e| {
+                            let _ = deployer::undeploy_mod(
+                                &db,
+                                &game_id,
+                                &bottle_name,
+                                mod_id,
+                                &data_dir,
+                                &game.game_path,
+                            );
+                            let _ = db.set_enabled(mod_id, false);
+                            e.to_string()
+                        })?;
+                    }
+                }
             } else {
                 // Undeploy (remove from game dir, keep staging intact)
                 deployer::undeploy_mod(
@@ -960,32 +1075,138 @@ pub async fn batch_toggle_mods(
                                 let mod_target = db
                                     .get_deploy_target_for_mod(*mod_id)
                                     .unwrap_or_else(|_| "data".to_string());
-                                let effective_dir = match mod_target.as_str() {
-                                    "root" => game.game_path.clone(),
-                                    "custom" => db
-                                        .get_deploy_base_path_for_mod(*mod_id)
-                                        .map_err(|e| e.to_string())?
-                                        .map(PathBuf::from)
-                                        .unwrap_or_else(|| {
-                                            let (dir, _) = resolve_effective_deploy_dir(
-                                                &game_id, &game, &data_dir, "", &files,
+                                if mod_target == "mixed" {
+                                    let file_targets = db
+                                        .get_deploy_file_targets_for_mod(*mod_id)
+                                        .map_err(|e| e.to_string())?;
+                                    let mut batches: std::collections::BTreeMap<
+                                        String,
+                                        Vec<deployer::DeployFileMapping>,
+                                    > = std::collections::BTreeMap::new();
+                                    for file in files {
+                                        let target = file_targets.get(&file).cloned().unwrap_or(
+                                            crate::database::DeployFileTarget {
+                                                source_relative_path: file.clone(),
+                                                relative_path: file.clone(),
+                                                deploy_target: "data".to_string(),
+                                            },
+                                        );
+                                        batches
+                                            .entry(target.deploy_target.clone())
+                                            .or_default()
+                                            .push(deployer::DeployFileMapping {
+                                                source_relative_path: target.source_relative_path,
+                                                relative_path: target.relative_path,
+                                            });
+                                    }
+                                    for (target, batch_files) in batches {
+                                        let target_dir = match target.as_str() {
+                                            "root" => game.game_path.clone(),
+                                            "custom" => db
+                                                .get_deploy_base_path_for_mod(*mod_id)
+                                                .map_err(|e| e.to_string())?
+                                                .map(PathBuf::from)
+                                                .ok_or_else(|| {
+                                                    "Mixed custom deploy target missing durable base path".to_string()
+                                                })?,
+                                            _ => data_dir.clone(),
+                                        };
+                                        let progress = |_done: u64, _total: u64| {};
+                                        deployer::deploy_mod_mapped_with_progress(
+                                            &db,
+                                            &game_id,
+                                            &bottle_name,
+                                            *mod_id,
+                                            &staging_path,
+                                            &target_dir,
+                                            &batch_files,
+                                            &target,
+                                            &progress,
+                                        )
+                                        .map_err(|e| {
+                                            let _ = deployer::undeploy_mod(
+                                                &db,
+                                                &game_id,
+                                                &bottle_name,
+                                                *mod_id,
+                                                &data_dir,
+                                                &game.game_path,
                                             );
-                                            dir
-                                        }),
-                                    _ => data_dir.clone(),
-                                };
-                                deployer::deploy_mod(
-                                    &db,
-                                    &game_id,
-                                    &bottle_name,
-                                    *mod_id,
-                                    &staging_path,
-                                    &effective_dir,
-                                    &files,
-                                    &mod_target,
-                                )
-                                .map(|_| ())
-                                .map_err(|e| e.to_string())
+                                            e.to_string()
+                                        })?;
+                                    }
+                                    db.set_deploy_target_for_mod_with_base(
+                                        *mod_id,
+                                        "mixed",
+                                        installed_mod.deploy_base_path.as_deref(),
+                                    )
+                                    .map_err(|e| e.to_string())?;
+                                    Ok(())
+                                } else {
+                                    let effective_dir = match mod_target.as_str() {
+                                        "root" => game.game_path.clone(),
+                                        "custom" => db
+                                            .get_deploy_base_path_for_mod(*mod_id)
+                                            .map_err(|e| e.to_string())?
+                                            .map(PathBuf::from)
+                                            .unwrap_or_else(|| {
+                                                let (dir, _) = resolve_effective_deploy_dir(
+                                                    &game_id, &game, &data_dir, "", &files,
+                                                );
+                                                dir
+                                            }),
+                                        _ => data_dir.clone(),
+                                    };
+                                    let file_targets = db
+                                        .get_deploy_file_targets_for_mod(*mod_id)
+                                        .map_err(|e| e.to_string())?;
+                                    if file_targets.is_empty() {
+                                        deployer::deploy_mod(
+                                            &db,
+                                            &game_id,
+                                            &bottle_name,
+                                            *mod_id,
+                                            &staging_path,
+                                            &effective_dir,
+                                            &files,
+                                            &mod_target,
+                                        )
+                                        .map(|_| ())
+                                        .map_err(|e| e.to_string())
+                                    } else {
+                                        let mappings: Vec<deployer::DeployFileMapping> = files
+                                            .iter()
+                                            .map(|file| {
+                                                file_targets
+                                                    .get(file)
+                                                    .map(|target| deployer::DeployFileMapping {
+                                                        source_relative_path: target
+                                                            .source_relative_path
+                                                            .clone(),
+                                                        relative_path: target.relative_path.clone(),
+                                                    })
+                                                    .unwrap_or_else(|| deployer::DeployFileMapping {
+                                                        source_relative_path: file.clone(),
+                                                        relative_path: file.clone(),
+                                                    })
+                                            })
+                                            .collect();
+                                        let progress = |_done: u64, _total: u64| {};
+                                        deployer::deploy_mod_mapped_with_progress(
+                                            &db,
+                                            &game_id,
+                                            &bottle_name,
+                                            *mod_id,
+                                            &staging_path,
+                                            &effective_dir,
+                                            &mappings,
+                                            &mod_target,
+                                            &progress,
+                                        )
+                                        .map(|_| ())
+                                        .map_err(|e| e.to_string())
+                                    }
+                                }
                             })
                     } else {
                         deployer::undeploy_mod(

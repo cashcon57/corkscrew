@@ -118,6 +118,13 @@ pub struct DeploymentEntry {
 /// deployed under different targets (`data`, `root`, or future custom roots).
 pub type DeploymentKey = (String, String); // (relative_path, deploy_target)
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeployFileTarget {
+    pub source_relative_path: String,
+    pub relative_path: String,
+    pub deploy_target: String,
+}
+
 // ---------------------------------------------------------------------------
 // DownloadRecord
 // ---------------------------------------------------------------------------
@@ -1083,6 +1090,60 @@ impl ModDatabase {
             )
             .ok();
         Ok(result.flatten())
+    }
+
+    /// Persist durable per-file deploy targets for mixed root/data mods.
+    pub fn set_deploy_file_targets_for_mod(
+        &self,
+        mod_id: i64,
+        targets: &[DeployFileTarget],
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM mod_deploy_file_targets WHERE mod_id = ?1",
+            params![mod_id],
+        )?;
+        for target in targets {
+            tx.execute(
+                "INSERT INTO mod_deploy_file_targets (mod_id, source_relative_path, relative_path, deploy_target)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    mod_id,
+                    target.source_relative_path,
+                    target.relative_path,
+                    target.deploy_target
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Return durable per-file deploy targets for mixed root/data mods, keyed by
+    /// staging source path. The value carries the deployment identity (target
+    /// relative path + target root), which can differ for MO2 Root/* files.
+    pub fn get_deploy_file_targets_for_mod(
+        &self,
+        mod_id: i64,
+    ) -> Result<HashMap<String, DeployFileTarget>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT source_relative_path, relative_path, deploy_target FROM mod_deploy_file_targets WHERE mod_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![mod_id], |row| {
+            Ok(DeployFileTarget {
+                source_relative_path: row.get::<_, String>(0)?,
+                relative_path: row.get::<_, String>(1)?,
+                deploy_target: row.get::<_, String>(2)?,
+            })
+        })?;
+        let mut targets = HashMap::new();
+        for row in rows {
+            let target = row?;
+            targets.insert(target.source_relative_path.clone(), target);
+        }
+        Ok(targets)
     }
 
     /// Get deployment manifest for a game/bottle.
