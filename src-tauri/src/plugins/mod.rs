@@ -6,6 +6,7 @@
 
 pub mod baldurs_gate_3_native;
 pub mod crimson_desert;
+pub mod crimson_desert_native;
 pub mod fallout4;
 pub mod fromsoft;
 pub mod genshin;
@@ -13,6 +14,7 @@ pub mod gtav;
 pub mod hades2;
 pub mod hl_merger;
 pub mod hogwarts_legacy;
+pub mod paralives_native;
 pub mod sims4;
 pub mod skyrim_plugins;
 pub mod skyrim_se;

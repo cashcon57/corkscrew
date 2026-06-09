@@ -411,9 +411,11 @@ pub fn run() {
     plugins::hogwarts_legacy::register();
     plugins::hades2::register();
     plugins::crimson_desert::register();
+    plugins::crimson_desert_native::register();
     plugins::sims4::register();
     plugins::gtav::register();
     plugins::genshin::register();
+    plugins::paralives_native::register();
     plugins::stardew_valley_native::register();
     plugins::baldurs_gate_3_native::register();
     plugins::thunderstore_games::register_all();
