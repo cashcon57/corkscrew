@@ -6,9 +6,12 @@
 //! - `apply_native_window_effect`: set the Liquid Glass variant on the main
 //!   window at runtime — used by the native-mode toggle.
 
+#[cfg(target_os = "macos")]
 use tauri::{Manager, State};
 
+#[cfg(target_os = "macos")]
 use crate::native_scanner::{scan_all_native, NativeAppCandidate};
+#[cfg(target_os = "macos")]
 use crate::AppState;
 
 /// Aggregate scan: `/Applications` + Steam mac + GOG mac.
@@ -21,6 +24,7 @@ use crate::AppState;
 ///
 /// Returns the full list of candidates including their architecture and
 /// sandbox metadata so the frontend can display discovery results.
+#[cfg(target_os = "macos")]
 #[tauri::command]
 pub async fn rescan_native_games(
     state: State<'_, AppState>,
@@ -64,6 +68,7 @@ pub async fn rescan_native_games(
 ///
 /// Cross-platform safety: the underlying plugin is a safe no-op on
 /// Windows and Linux — no `#[cfg]` guard is required at call sites.
+#[cfg(target_os = "macos")]
 #[tauri::command]
 pub async fn apply_native_window_effect(
     intensity: String,
@@ -102,6 +107,7 @@ pub async fn apply_native_window_effect(
 /// Pass the absolute path to the game's Steam install directory (the directory
 /// that CONTAINS `Paralives.app`, not the bundle itself), e.g.
 /// `/Users/user/Library/Application Support/Steam/steamapps/common/Paralives`.
+#[cfg(target_os = "macos")]
 #[tauri::command]
 pub async fn get_paralives_bepinex_status(
     game_install_dir: String,
@@ -126,6 +132,7 @@ pub async fn get_paralives_bepinex_status(
 ///   CONTAINS `Paralives.app` (e.g. `.../steamapps/common/Paralives`).
 /// * `app_bundle_path` — absolute path to `Paralives.app` itself. Its parent
 ///   must equal `game_install_dir`.
+#[cfg(target_os = "macos")]
 #[tauri::command]
 pub async fn install_paralives_bepinex(
     game_install_dir: String,
@@ -150,6 +157,7 @@ pub async fn install_paralives_bepinex(
 /// or reinstall the game.
 ///
 /// Idempotent: if BepInEx is not installed, returns Ok immediately.
+#[cfg(target_os = "macos")]
 #[tauri::command]
 pub async fn uninstall_paralives_bepinex(
     game_install_dir: String,
@@ -170,6 +178,7 @@ pub async fn uninstall_paralives_bepinex(
 /// Result of manually adding a native game via file picker. The frontend
 /// uses `matched_plugin` to decide whether to prompt the user to use
 /// the matched plugin or register as a generic unsupported game.
+#[cfg(target_os = "macos")]
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct ManualNativeAddResult {
     pub candidate: crate::native_scanner::NativeAppCandidate,
@@ -184,6 +193,7 @@ pub struct ManualNativeAddResult {
 /// If `matched_plugin` is `Some`, the frontend should prompt the user to
 /// confirm use of the matched plugin. If it is `None`, register as
 /// generic unsupported.
+#[cfg(target_os = "macos")]
 #[tauri::command]
 pub async fn add_manual_native_game(app_path: String) -> Result<ManualNativeAddResult, String> {
     let path = std::path::PathBuf::from(app_path);
@@ -212,6 +222,7 @@ pub async fn add_manual_native_game(app_path: String) -> Result<ManualNativeAddR
 /// survives app restarts. On the next `getAllGames()` refresh, the game
 /// will appear via `detect_native_games()` (plugin-matched) or via the
 /// stored `PersistedGame` (generic).
+#[cfg(target_os = "macos")]
 #[tauri::command]
 pub async fn register_manual_native_game(
     state: State<'_, AppState>,
@@ -403,6 +414,7 @@ pub async fn get_stardew_smapi_status(
 /// Returns [`crate::bg3se::Bg3seStatus`] — see that struct for field semantics,
 /// especially `mac_supported` which distinguishes a correctly-installed macOS
 /// dylib from a mis-dropped Windows `DWrite.dll`.
+#[cfg(target_os = "macos")]
 #[tauri::command]
 pub async fn get_bg3se_status(app_bundle: String) -> Result<crate::bg3se::Bg3seStatus, String> {
     let path = std::path::PathBuf::from(app_bundle);

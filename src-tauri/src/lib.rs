@@ -1445,13 +1445,21 @@ pub fn run() {
             commands::config_commands::set_native_mode,
             commands::config_commands::get_native_mode_visible,
             commands::config_commands::set_native_mode_visible,
+            #[cfg(target_os = "macos")]
             commands::native_cmds::rescan_native_games,
+            #[cfg(target_os = "macos")]
             commands::native_cmds::add_manual_native_game,
+            #[cfg(target_os = "macos")]
             commands::native_cmds::register_manual_native_game,
+            #[cfg(target_os = "macos")]
             commands::native_cmds::get_bg3se_status,
+            #[cfg(target_os = "macos")]
             commands::native_cmds::get_paralives_bepinex_status,
+            #[cfg(target_os = "macos")]
             commands::native_cmds::install_paralives_bepinex,
+            #[cfg(target_os = "macos")]
             commands::native_cmds::uninstall_paralives_bepinex,
+            #[cfg(target_os = "macos")]
             commands::native_cmds::apply_native_window_effect,
             #[cfg(target_os = "macos")]
             commands::native_cmds::install_stardew_smapi,
