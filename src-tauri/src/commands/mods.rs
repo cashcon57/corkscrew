@@ -96,12 +96,29 @@ pub enum GameSupportTier {
 }
 
 /// Game IDs that have a dedicated, end-to-end-tested Rust plugin.
-const VERIFIED_PLUGIN_IDS: &[&str] = &["skyrimse", "fallout4", "hogwartslegacy"];
+const VERIFIED_PLUGIN_IDS: &[&str] = &[
+    "skyrimse",
+    "fallout4",
+    "hogwartslegacy",
+    // Native macOS plugins — install + deploy + launch verified end-to-end
+    // against real installs (Paralives 5/31/2026, BG3 6/9/2026, Stardew via
+    // SMAPI). Crimson Desert native is intentionally listed below as
+    // experimental because deploy is gated behind a VERIFIED const pending
+    // real-install confirmation of the PAZ overlay path.
+    "stardew_valley_native",
+    "paralives_native",
+    "baldurs_gate_3_native",
+];
 
 /// Game IDs whose dedicated Rust plugin is known to be experimental.
 /// We hard-code these rather than thread a `verified()` accessor through the
 /// `GamePlugin` trait — the set is small and stable.
-const EXPERIMENTAL_PLUGIN_IDS: &[&str] = &["hades2", "crimsondesert", "genshin"];
+const EXPERIMENTAL_PLUGIN_IDS: &[&str] = &[
+    "hades2",
+    "crimsondesert",
+    "crimson_desert_native",
+    "genshin",
+];
 
 #[tauri::command]
 pub fn get_game_support_tier(
