@@ -1,11 +1,21 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { selectedGame } from "$lib/stores";
-  import { getInstalledMods, toggleMod, uninstallMod } from "$lib/api";
+  import { selectedGame, showError, showSuccess } from "$lib/stores";
+  import {
+    getInstalledMods,
+    toggleMod,
+    uninstallMod,
+    installMod,
+    analyzeConflicts,
+  } from "$lib/api";
   import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
   import GameIcon from "$lib/components/GameIcon.svelte";
   import { wineCtx } from "$lib/types";
-  import type { InstalledMod, DetectedGame } from "$lib/types";
+  import type {
+    InstalledMod,
+    DetectedGame,
+    ConflictSuggestion,
+  } from "$lib/types";
 
   // ---------------------------------------------------------------------------
   // State
@@ -25,6 +35,16 @@
 
   // Batch select
   let selectedModIds = $state(new Set<number>());
+
+  // Drag-drop install state
+  let draggingOver = $state(false);
+  let installing = $state(false);
+
+  // Conflict panel state
+  let conflictsExpanded = $state(false);
+  let conflictsLoading = $state(false);
+  let conflictsError = $state<string | null>(null);
+  let conflictSuggestions = $state<ConflictSuggestion[]>([]);
 
   // ---------------------------------------------------------------------------
   // Derived
@@ -220,6 +240,89 @@
     );
   }
 
+  // ---------------------------------------------------------------------------
+  // Drag-and-drop install
+  // ---------------------------------------------------------------------------
+
+  function handleDragOver(e: DragEvent) {
+    e.preventDefault();
+    if (installing) return;
+    draggingOver = true;
+  }
+
+  function handleDragLeave() {
+    draggingOver = false;
+  }
+
+  async function handleDrop(e: DragEvent) {
+    e.preventDefault();
+    draggingOver = false;
+    if (installing) return;
+    const g = $selectedGame;
+    if (!g || !e.dataTransfer?.files?.length) return;
+
+    const file = e.dataTransfer.files[0];
+    const ext = file.name.split(".").pop()?.toLowerCase();
+    // Native mode: drop Bethesda .ba2/.bsa; only loose archives accepted
+    if (!ext || !["zip", "7z", "rar"].includes(ext)) {
+      showError("Unsupported file type. Use .zip, .7z, or .rar archives.");
+      return;
+    }
+
+    const filePath = (file as File & { path?: string }).path;
+    if (!filePath) {
+      showError("Could not read file path from drop event.");
+      return;
+    }
+
+    installing = true;
+    try {
+      const installed = await installMod(filePath, g.game_id, nativeBottleName(g));
+      showSuccess(`Installed "${installed.name}" successfully`);
+      await loadMods();
+    } catch (e) {
+      console.error("installMod failed:", e);
+      showError(`Install failed: ${e}`);
+    } finally {
+      installing = false;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Conflict panel
+  // ---------------------------------------------------------------------------
+
+  async function loadConflicts() {
+    const g = $selectedGame;
+    if (!g) return;
+    conflictsLoading = true;
+    conflictsError = null;
+    try {
+      const resp = await analyzeConflicts(g.game_id, nativeBottleName(g));
+      conflictSuggestions = resp.suggestions;
+    } catch (e) {
+      console.error("analyzeConflicts failed:", e);
+      conflictsError = String(e);
+      conflictSuggestions = [];
+    } finally {
+      conflictsLoading = false;
+    }
+  }
+
+  function toggleConflictsPanel() {
+    conflictsExpanded = !conflictsExpanded;
+    if (conflictsExpanded && conflictSuggestions.length === 0 && !conflictsLoading) {
+      void loadConflicts();
+    }
+  }
+
+  function loserNames(s: ConflictSuggestion): string {
+    return s.mods
+      .filter((m) => m.mod_id !== s.suggested_winner_id)
+      .map((m) => m.mod_name)
+      .join(", ");
+  }
+
   function formatDate(iso: string | null | undefined): string {
     if (!iso) return "—";
     try {
@@ -245,7 +348,35 @@
   }
 </script>
 
-<div class="mods-page">
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div
+  class="mods-page"
+  class:drag-active={draggingOver}
+  ondragover={handleDragOver}
+  ondragleave={handleDragLeave}
+  ondrop={handleDrop}
+  role="application"
+>
+  {#if draggingOver}
+    <div class="drop-overlay">
+      <div class="drop-overlay-content">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+          <polyline points="7 10 12 15 17 10" />
+          <line x1="12" y1="15" x2="12" y2="3" />
+        </svg>
+        <p>Drop mod archive to install</p>
+      </div>
+    </div>
+  {/if}
+  {#if installing}
+    <div class="drop-overlay">
+      <div class="drop-overlay-content">
+        <span class="spinner"></span>
+        <p>Installing...</p>
+      </div>
+    </div>
+  {/if}
   {#if !$selectedGame}
     <!-- No game selected -->
     <div class="empty-state">
@@ -350,6 +481,88 @@
         </div>
         {#if searchQuery}
           <span class="filter-count">{filteredMods.length} of {mods.length}</span>
+        {/if}
+      </div>
+    {/if}
+
+    <!-- ======================================================
+         Conflicts Panel (collapsible)
+         ====================================================== -->
+    {#if mods.length > 0}
+      <div class="conflicts-panel" class:conflicts-expanded={conflictsExpanded}>
+        <button
+          type="button"
+          class="conflicts-toggle"
+          onclick={toggleConflictsPanel}
+          aria-expanded={conflictsExpanded}
+        >
+          <svg
+            class="conflicts-chevron"
+            class:conflicts-chevron-open={conflictsExpanded}
+            width="12"
+            height="12"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <polyline points="9 18 15 12 9 6" />
+          </svg>
+          <span class="conflicts-title">Conflicts</span>
+          {#if conflictSuggestions.length > 0}
+            <span class="conflicts-count">{conflictSuggestions.length}</span>
+          {/if}
+          {#if conflictsExpanded}
+            <span class="conflicts-spacer"></span>
+            <button
+              type="button"
+              class="btn btn-ghost btn-sm"
+              onclick={(e) => { e.stopPropagation(); void loadConflicts(); }}
+              title="Re-scan conflicts"
+              disabled={conflictsLoading}
+            >Rescan</button>
+          {/if}
+        </button>
+
+        {#if conflictsExpanded}
+          <div class="conflicts-body">
+            {#if conflictsLoading}
+              <div class="conflicts-empty">
+                <span class="spinner"></span>
+                <span>Analyzing conflicts...</span>
+              </div>
+            {:else if conflictsError}
+              <div class="conflicts-empty conflicts-error">
+                Failed to analyze: {conflictsError}
+              </div>
+            {:else if conflictSuggestions.length === 0}
+              <div class="conflicts-empty">No file conflicts detected.</div>
+            {:else}
+              <div class="conflicts-list">
+                {#each conflictSuggestions as s (s.relative_path)}
+                  <div class="conflict-row">
+                    <div class="conflict-path" title={s.relative_path}>{s.relative_path}</div>
+                    <div class="conflict-meta">
+                      <span class="conflict-label">Winner:</span>
+                      <span class="conflict-winner">{s.suggested_winner_name}</span>
+                      {#if loserNames(s)}
+                        <span class="conflict-label">Losers:</span>
+                        <span class="conflict-losers" title={loserNames(s)}>{loserNames(s)}</span>
+                      {/if}
+                    </div>
+                  </div>
+                {/each}
+              </div>
+              <div class="conflicts-footer">
+                <button class="btn btn-ghost btn-sm" disabled title="Coming soon">
+                  Resolve in advanced view
+                </button>
+              </div>
+            {/if}
+          </div>
         {/if}
       </div>
     {/if}
@@ -1381,5 +1594,185 @@
   .footer-selected {
     color: var(--system-accent);
     font-weight: 600;
+  }
+
+  /* ============================
+     Drop Overlay (drag-drop install)
+     ============================ */
+  .drag-active {
+    outline: 2px dashed var(--accent);
+    outline-offset: -2px;
+    border-radius: var(--radius-lg);
+  }
+
+  .drop-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 200;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: color-mix(in srgb, var(--bg-base, var(--bg-primary)) 85%, transparent);
+    backdrop-filter: var(--glass-blur-light);
+    border-radius: var(--radius-lg);
+    pointer-events: none;
+  }
+
+  .drop-overlay-content {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-3);
+    color: var(--accent);
+  }
+
+  .drop-overlay-content p {
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+
+  /* ============================
+     Conflicts Panel
+     ============================ */
+  .conflicts-panel {
+    background: var(--surface);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius);
+    flex-shrink: 0;
+    overflow: hidden;
+  }
+
+  .conflicts-toggle {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    width: 100%;
+    padding: var(--space-2) var(--space-3);
+    background: transparent;
+    border: none;
+    color: var(--text-primary);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    text-align: left;
+    transition: background var(--duration-fast) var(--ease);
+  }
+
+  .conflicts-toggle:hover {
+    background: var(--surface-hover);
+  }
+
+  .conflicts-chevron {
+    color: var(--text-tertiary);
+    transition: transform var(--duration-fast) var(--ease);
+    flex-shrink: 0;
+  }
+
+  .conflicts-chevron-open {
+    transform: rotate(90deg);
+  }
+
+  .conflicts-title {
+    color: var(--text-primary);
+  }
+
+  .conflicts-count {
+    background: var(--red-subtle);
+    color: var(--red);
+    padding: 1px 7px;
+    border-radius: 100px;
+    font-size: 11px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .conflicts-spacer {
+    flex: 1;
+  }
+
+  .conflicts-body {
+    border-top: 1px solid var(--separator);
+    padding: var(--space-2) var(--space-3);
+    max-height: 280px;
+    overflow-y: auto;
+  }
+
+  .conflicts-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    padding: var(--space-4);
+    font-size: 13px;
+    color: var(--text-tertiary);
+  }
+
+  .conflicts-error {
+    color: var(--red);
+  }
+
+  .conflicts-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .conflict-row {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: var(--space-2) var(--space-3);
+    background: var(--surface-subtle, var(--bg-secondary));
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--separator);
+  }
+
+  .conflict-path {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .conflict-meta {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-1) var(--space-2);
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+
+  .conflict-label {
+    color: var(--text-tertiary);
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 10px;
+    letter-spacing: 0.04em;
+  }
+
+  .conflict-winner {
+    color: var(--green, #30d158);
+    font-weight: 600;
+  }
+
+  .conflict-losers {
+    color: var(--text-tertiary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 360px;
+  }
+
+  .conflicts-footer {
+    display: flex;
+    justify-content: flex-end;
+    padding-top: var(--space-2);
+    margin-top: var(--space-2);
+    border-top: 1px solid var(--separator);
   }
 </style>
