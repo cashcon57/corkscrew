@@ -87,7 +87,11 @@ These rules exist because violating them caused real bugs. Follow them exactly.
 
 ### Native mode trust boundaries
 
-Corkscrew mutates `.app` bundles in exactly one game-specific way: **Stardew Valley** — SMAPI's launcher patch renames `Contents/MacOS/StardewValley` → `StardewValley-original` and installs a new launcher script. This invalidates the bundle's Apple Developer ID signature; that is intentional and expected SMAPI behavior, not a Corkscrew choice. **Baldur's Gate 3** mods live entirely outside the bundle in `~/Documents/` — the `.app` itself is never touched, and bundle signing is preserved.
+Corkscrew has three documented trust-boundary mutations for native games:
+
+1. **Stardew Valley (SMAPI)** — launcher patch renames `Contents/MacOS/StardewValley` → `StardewValley-original` and installs a new launcher script. Invalidates Apple Developer ID signature; intentional SMAPI behavior.
+2. **Paralives (BepInEx — opt-in)** — `codesign --remove-signature Paralives.app` is run so BepInEx's doorstop loader can inject into the game. Only triggered after explicit user consent dialog. Does NOT touch `.app` binary contents. User restores signature via Steam "Verify integrity" or reinstall.
+3. **Baldur's Gate 3** — mods live entirely outside the bundle in `~/Documents/`; the `.app` itself is never touched and bundle signing is preserved.
 
 Sandboxed bundles (Mac App Store `_MASReceipt/receipt` or `/System/Applications/` path) are **refused outright** — enforced in `smapi::install`, `smapi::uninstall`, both native `deploy_native` paths, and `native_scanner::validate_manual_native_app`.
 

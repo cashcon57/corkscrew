@@ -1408,6 +1408,8 @@ pub fn run() {
             commands::native_cmds::rescan_native_games,
             commands::native_cmds::get_bg3se_status,
             commands::native_cmds::get_paralives_bepinex_status,
+            commands::native_cmds::install_paralives_bepinex,
+            commands::native_cmds::uninstall_paralives_bepinex,
             commands::native_cmds::apply_native_window_effect,
             commands::stardew_cmds::get_stardew_mod_status,
             // Download Queue

@@ -52,6 +52,65 @@ Run `smapi::uninstall(&app_bundle, &db)`. The procedure:
 
 The byte-equal round-trip property is pinned by the `uninstall_restores_vanilla_launcher` test in `smapi.rs`.
 
+## Paralives (BepInEx — opt-in)
+
+BepInEx is the community script-mod runtime for IL2CPP Unity games. Paralives ships a Unity IL2CPP build on macOS Apple Silicon; BepInEx 6.x macOS ARM64 is the appropriate flavor.
+
+Install and uninstall are gated behind an explicit multi-step consent dialog in the frontend. The user must check a checkbox acknowledging the mutations before the Install button activates.
+
+### What Corkscrew touches
+
+| Path | Action | Reason |
+|---|---|---|
+| `<game_install>/BepInEx/` | Created + populated | BepInEx core, plugins, config directories |
+| `<game_install>/libdoorstop.dylib` | Added | BepInEx's macOS code-injection loader (the "doorstop") |
+| `<game_install>/doorstop_config.ini` | Added | Doorstop configuration |
+| `<game_install>/run_bepinex.sh` | Added | Shell launcher script |
+| `<game_install>/changelog.txt` | Added | BepInEx release notes (source of the version string) |
+| `<game_install>/Paralives.app` **SIGNATURE** | **Removed** via `codesign --remove-signature` | BepInEx's doorstop loader requires an unsigned bundle to inject |
+
+**Only the signature metadata is stripped** — the `.app`'s actual binary contents (`Contents/MacOS/Paralives`, frameworks, etc.) are never touched.
+
+### Why the .app signature is removed
+
+BepInEx's doorstop mechanism injects a native library (`libdoorstop.dylib`) into the game process at launch. macOS Gatekeeper blocks library injection into code-signed binaries. Removing the Apple Developer ID signature disables that protection specifically for this bundle, allowing BepInEx to initialize before Unity's main code runs.
+
+This is the same class of mutation as SMAPI's launcher patch on Stardew Valley — both invalidate the Apple Developer ID signature. The key difference is that SMAPI replaces the launcher binary, while BepInEx strips the signature and relies on an environment-variable-based injection hook.
+
+### What Corkscrew does NOT touch
+
+- The actual binary contents of `Paralives.app` (only signature metadata is removed)
+- `~/Library/Application Support/com.Paralives.Paralives/` (save data, settings)
+- Any other game files in the install directory beyond the BepInEx items listed above
+- User-installed BepInEx plugin mods in `BepInEx/plugins/`
+
+### Gatekeeper behavior after install
+
+macOS Gatekeeper will display a warning dialog the first time Paralives launches after signature removal. The user must click "Open" (or go to System Settings → Privacy & Security → Open Anyway). Subsequent launches proceed without the prompt because Gatekeeper records the user's approval.
+
+### Revert procedure
+
+Corkscrew **cannot** re-sign the `.app` on behalf of Paralives Studio — we do not hold the private key. To restore the original signed `.app`:
+
+1. **Steam "Verify integrity of game files"** (recommended) — Steam re-downloads and replaces the signed `.app`.
+2. **Reinstall the game** — equivalent to option 1 with a full download.
+3. **Snapshot restore** — `rollback::create_native_snapshot` is called before install, so the Corkscrew rollback UI can restore the pre-install mod-list state. Note: the snapshot does not contain `.app` file bytes — it records mod-list state only. File restoration requires Steam or reinstall.
+
+### Risk acknowledgment
+
+BepInEx 6.x IL2CPP for Apple Silicon is **experimental** as of mid-2026. Paralives game updates may include new Unity versions that break the doorstop injection point, requiring a BepInEx update before mods load again. The consent dialog surfaces this risk to the user before any mutation occurs.
+
+### Source of consent
+
+Mutations only occur when:
+
+1. The user navigates to Settings → Native.
+2. The user clicks "Install BepInEx".
+3. The user reads and checks the consent checkbox acknowledging the four numbered warnings.
+4. The user clicks the "Install BepInEx" button in the consent dialog (only enabled after checkbox).
+
+No automation or silent install path exists. The `install_paralives_bepinex` Tauri command is only wired to this frontend flow.
+
 ## Baldur's Gate 3
 
 ### What Corkscrew touches

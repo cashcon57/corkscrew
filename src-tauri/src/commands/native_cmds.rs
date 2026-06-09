@@ -110,6 +110,59 @@ pub async fn get_paralives_bepinex_status(
     Ok(crate::paralives_bepinex::detect(&path))
 }
 
+/// Install BepInEx 6.x IL2CPP macOS ARM64 into a Paralives game install directory.
+///
+/// Downloads the latest BepInEx 6.x macOS ARM64 release from GitHub, extracts
+/// it into `game_install_dir`, and removes the Apple Developer ID signature from
+/// `app_bundle_path` so BepInEx's doorstop loader can inject into the game.
+///
+/// This is a TRUST-BOUNDARY MUTATION — the caller MUST gate this behind the
+/// consent dialog in the frontend before invoking. The frontend consent flow is
+/// the only permitted entry point.
+///
+/// # Arguments
+///
+/// * `game_install_dir` — absolute path to the Steam install directory that
+///   CONTAINS `Paralives.app` (e.g. `.../steamapps/common/Paralives`).
+/// * `app_bundle_path` — absolute path to `Paralives.app` itself. Its parent
+///   must equal `game_install_dir`.
+#[tauri::command]
+pub async fn install_paralives_bepinex(
+    game_install_dir: String,
+    app_bundle_path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let install_dir = std::path::PathBuf::from(game_install_dir);
+    let bundle = std::path::PathBuf::from(app_bundle_path);
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::paralives_bepinex::install(&install_dir, &bundle, &db)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Uninstall BepInEx from a Paralives game install directory.
+///
+/// Removes BepInEx marker files/directories. Does NOT restore the `.app`
+/// signature — the user must use Steam's "Verify integrity of game files"
+/// or reinstall the game.
+///
+/// Idempotent: if BepInEx is not installed, returns Ok immediately.
+#[tauri::command]
+pub async fn uninstall_paralives_bepinex(
+    game_install_dir: String,
+) -> Result<(), String> {
+    let install_dir = std::path::PathBuf::from(game_install_dir);
+    tokio::task::spawn_blocking(move || {
+        crate::paralives_bepinex::uninstall(&install_dir)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Return the BG3 Script Extender detection status for the given `.app` bundle.
 ///
 /// Pass the absolute path to the `.app` bundle directory (e.g.

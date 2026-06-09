@@ -393,6 +393,53 @@ export async function addNativeGameManually(appPath: string): Promise<NativeAppC
   return invoke<NativeAppCandidate>("add_native_game_manually", { appPath });
 }
 
+// --- Paralives BepInEx (Layer 3) ---
+
+export interface ParalivesBepInExStatus {
+  installed: boolean;
+  loader_path: string | null;
+  version: string | null;
+  mac_supported: boolean;
+}
+
+/**
+ * Get BepInEx detection status for a Paralives game install directory.
+ * Read-only — no mutations. Pass the directory that CONTAINS Paralives.app.
+ */
+export async function getParalivesBepInExStatus(
+  gameInstallDir: string,
+): Promise<ParalivesBepInExStatus> {
+  return invoke<ParalivesBepInExStatus>("get_paralives_bepinex_status", { gameInstallDir });
+}
+
+/**
+ * Install BepInEx 6.x IL2CPP macOS ARM64 into a Paralives game install directory.
+ *
+ * Downloads the latest macOS ARM64 release from GitHub, extracts it into
+ * `gameInstallDir`, and removes the Apple Developer ID signature from
+ * `appBundlePath` so BepInEx's doorstop loader can inject into the game.
+ *
+ * ONLY call this after the user has completed the consent dialog — this is a
+ * trust-boundary mutation that invalidates the Paralives.app signature.
+ */
+export async function installParalivesBepInEx(
+  gameInstallDir: string,
+  appBundlePath: string,
+): Promise<void> {
+  return invoke<void>("install_paralives_bepinex", { gameInstallDir, appBundlePath });
+}
+
+/**
+ * Uninstall BepInEx from a Paralives game install directory.
+ *
+ * Removes BepInEx marker files. Does NOT restore the .app signature —
+ * the user should use Steam's "Verify integrity of game files" or reinstall.
+ * Idempotent: safe to call when BepInEx is not installed.
+ */
+export async function uninstallParalivesBepInEx(gameInstallDir: string): Promise<void> {
+  return invoke<void>("uninstall_paralives_bepinex", { gameInstallDir });
+}
+
 export async function getGameLogo(
   gameId: string,
   steamAppId?: string,
