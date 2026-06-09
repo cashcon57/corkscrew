@@ -23,11 +23,19 @@
 //! byte-patches that need PAZ extraction) is a separate future project,
 //! not Phase 1.
 //!
-//! DEPLOY IS BLOCKED on verifying the PAZ overlay tree location: does
-//! it live at `<game_install>/Paz/` (writable, no signing impact) or
-//! inside `.app/Contents/Resources/` (writing breaks code signing)?
-//! Until verified on a real install, deploy_native returns a typed
-//! BLOCKED error explaining the situation.
+//! Trust boundary: PAZ overlays live INSIDE the `.app` bundle at
+//! `<bundle>/Contents/Resources/packages/`. This is confirmed by the
+//! 2026-06-09 web-research pass (CDUMM `MACOS.md` + Enki013 macOS mod
+//! manager source) and contradicts spec §8's original working hypothesis
+//! that the `.app` was "just a launcher" with PAZ groups at a sibling
+//! `Paz/` directory. Writing into the bundle WILL invalidate the Apple
+//! Developer ID signature — accepted, same pattern as SMAPI on Stardew
+//! Valley and BepInEx on Paralives. The frontend MUST surface a consent
+//! dialog before first deploy; see [`bundle_signing_will_be_invalidated`].
+//!
+//! DEPLOY IS BLOCKED on real-install verification of the exact bundle
+//! path + PAPGT format reverse-engineering. Until verified, deploy_native
+//! returns a typed BLOCKED error explaining the situation.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -51,38 +59,77 @@ use crate::staging::is_safe_relative_path;
 /// confirmed:
 ///
 /// 1. **Install layout verified on a real macOS Crimson Desert install.** PAZ
-///    overlay groups live at `<game_install>/<NNNN>/0.paz` + `<NNNN>/0.pamt`
-///    and `meta/0.papgt` lives at `<game_install>/meta/0.papgt` — both outside
-///    the `.app` bundle, so the Apple Developer ID signature is preserved.
-///    See `docs/superpowers/plans/2026-05-02-crimson-desert-native-spec.md`
-///    §10.5 and the standing verification procedure for the exact paths to
-///    check before flipping this.
-/// 2. **PAPGT registry format reverse-engineered.** Copying overlay files into
-///    `<game_install>/<NNNN>/` is necessary but not sufficient — the engine
-///    only loads groups listed in `meta/0.papgt`. Until [`PapgtEditor`] can
-///    safely append entries (Phase 1b), enabling deploy would silently produce
+///    overlay groups live INSIDE the `.app` bundle at
+///    `<bundle>/Contents/Resources/packages/<NNNN>/0.paz` + `<NNNN>/0.pamt`
+///    and `meta/0.papgt` lives at `<bundle>/Contents/Resources/packages/meta/0.papgt`.
+///    This is the path confirmed empirically by CDUMM `MACOS.md` and the
+///    Enki013 macOS mod manager (2026-06-09 web research). It is NOT the
+///    spec's original `<game_root>/Paz/` working assumption — that has been
+///    overturned. See `docs/superpowers/research/2026-06-09-crimson-desert-macos-layout.md`
+///    and updated spec §8 + §10 for the verification procedure.
+/// 2. **Steam bundle ID empirically confirmed.** The Steam build uses
+///    `com.pearlabyss.CrimsonDesert.steam` (with `.steam` suffix) per the
+///    June 2026 crash dump; the App Store build uses
+///    `com.pearlabyss.CrimsonDesert` (no suffix). Detection accepts both.
+/// 3. **Bundle code-signing invalidation acknowledged + consent UI shipped.**
+///    Writing into `<bundle>/Contents/Resources/packages/` invalidates the
+///    Apple Developer ID signature. This is the SAME trust-boundary mutation
+///    as SMAPI on Stardew Valley and BepInEx on Paralives. The frontend MUST
+///    surface a consent dialog before the first deploy — `bundle_signing_will_be_invalidated()`
+///    exposes the flag for the dialog gate.
+/// 4. **PAPGT registry format reverse-engineered.** Copying overlay files into
+///    `<bundle>/Contents/Resources/packages/<NNNN>/` is necessary but not
+///    sufficient — the engine only loads groups listed in
+///    `<packages>/meta/0.papgt`. Until [`PapgtEditor`] can safely append
+///    entries (Phase 1b — unchanged), enabling deploy would silently produce
 ///    a "deployed but not loaded" outcome.
-/// 3. **Frontend anti-cheat warning surfaced.** The spec §9 Step 6 calls for a
-///    pre-deploy notice screen explaining the EULA / online-mode risk. That
-///    component lives in `src/routes/native/` and is tracked separately —
-///    deploy must not run before the user has accepted that warning.
-/// 4. **Snapshot/restore round-trip tested end-to-end** with at least one
+/// 5. **Snapshot/restore round-trip tested end-to-end** with at least one
 ///    real overlay mod deploy + uninstall + revert-to-vanilla cycle.
 const VERIFIED: bool = false;
 
-const CD_BUNDLE_IDENTIFIER: &str = "com.pearlabyss.CrimsonDesert";
+/// Inclusive bundle-identifier prefix accepted by detection.
+///
+/// Matches both `com.pearlabyss.CrimsonDesert` (App Store) and
+/// `com.pearlabyss.CrimsonDesert.steam` (Steam). Compared lowercase to
+/// tolerate inconsistent casing across builds.
+const CD_BUNDLE_IDENTIFIER_PREFIX: &str = "com.pearlabyss.crimsondesert";
 
-/// Candidate executable names inside `Contents/MacOS/`.
-///
-/// The authoritative name is an open spike question (see spec open question #2).
-/// These cover known possibilities from community tools and Pearl Abyss naming
-/// conventions — `CrimsonDesert_Steam` is a community-observed Steam wrapper
-/// variant that may or may not exist. Refine after verifying a real install.
-///
-/// TODO: verify with real install — run `ls "<app>/Contents/MacOS/"`.
+/// Primary executable name inside `Contents/MacOS/` (App Store build,
+/// and most-common community pattern).
 const CD_BUNDLE_EXECUTABLE: &str = "Crimson Desert";
 
+/// Steam build's executable name inside `Contents/MacOS/`.
+///
+/// Confirmed by the June 2026 Steam crash dump: the Steam build ships
+/// `CrimsonDesert_Steam.app/Contents/MacOS/CrimsonDesert_Steam`. The space-
+/// separated `CD_BUNDLE_EXECUTABLE` (`Crimson Desert`) is the App Store /
+/// retail naming.
+const CD_BUNDLE_EXECUTABLE_STEAM: &str = "CrimsonDesert_Steam";
+
 const CD_STEAM_APP_ID: &str = "3321460";
+
+/// User-facing notice describing the bundle-mutation trust boundary.
+///
+/// The native deploy writes PAZ overlay files into
+/// `<bundle>/Contents/Resources/packages/` — INSIDE the `.app` bundle. This
+/// invalidates the Apple Developer ID signature. This is the SAME class of
+/// mutation as SMAPI on Stardew Valley and BepInEx on Paralives. macOS will
+/// continue to launch a previously-run app even after its signature is
+/// invalidated, so the practical impact is bounded: the user may see an App
+/// Management permission prompt on first deploy, and Gatekeeper will not
+/// re-verify the bundle. The frontend MUST surface this notice and obtain
+/// explicit consent before the first deploy. See
+/// [`bundle_signing_will_be_invalidated`] for the runtime flag.
+pub const BUNDLE_MUTATION_NOTICE: &str =
+    "Deploying mods for Crimson Desert writes PAZ overlay files into the game's \
+     `.app` bundle at Contents/Resources/packages/. This invalidates the \
+     bundle's Apple Developer ID signature — the SAME trust-boundary mutation \
+     as SMAPI on Stardew Valley and BepInEx on Paralives. macOS will continue \
+     to launch the previously-run app, but Gatekeeper will not re-verify the \
+     bundle. On first deploy macOS may prompt for App Management permission \
+     (System Settings → Privacy & Security → App Management). Corkscrew takes \
+     a snapshot before mutating, but the recommended revert is Steam → \
+     'Verify integrity of game files' or reinstall.";
 
 /// Bottle sentinel for native mods (no Wine bottle).
 const CD_NATIVE_BOTTLE_SENTINEL: &str = "";
@@ -119,28 +166,35 @@ fn detect_from_candidates(
         // DetectedGame that would fail at deploy time.
         .filter(|c| c.architecture != crate::runtime::Architecture::IntelOnly)
         .filter(|c| {
+            // Bundle ID: accept both App Store (`com.pearlabyss.CrimsonDesert`)
+            // and Steam (`com.pearlabyss.CrimsonDesert.steam`) variants. The
+            // Steam suffix is confirmed by the June 2026 crash dump.
             // Case-insensitive — Info.plist authors are inconsistent about casing.
-            c.info.bundle_identifier.eq_ignore_ascii_case(CD_BUNDLE_IDENTIFIER)
+            let bid_lower = c.info.bundle_identifier.to_ascii_lowercase();
+            bid_lower.starts_with(CD_BUNDLE_IDENTIFIER_PREFIX)
                 || c.info.bundle_executable.eq_ignore_ascii_case(CD_BUNDLE_EXECUTABLE)
-                // Also accept the no-space community variant.
+                || c.info.bundle_executable.eq_ignore_ascii_case(CD_BUNDLE_EXECUTABLE_STEAM)
+                // Also accept the no-space community variant (Pearl Abyss
+                // pattern parallel to the Windows `CrimsonDesert.exe`).
                 || c.info.bundle_executable.eq_ignore_ascii_case("CrimsonDesert")
         })
         .map(|c| {
-            // Game install root: for Steam, the .app lives inside the Steam
-            // common dir, e.g. `common/Crimson Desert/CrimsonDesert_Steam.app`.
-            // The PAZ group tree is expected at the *parent* of the .app bundle
-            // (the install root), not inside the bundle itself.
-            //
-            // OPEN QUESTION (spike §10.3 / §10.5): if PAZ groups turn out to
-            // live inside `Contents/Resources/`, this mapping must be revised.
-            // Until then, install_root = .app parent is the working assumption.
+            // RESOLVED 2026-06-09: PAZ overlay groups live INSIDE the `.app`
+            // bundle at `Contents/Resources/packages/`. Confirmed by CDUMM
+            // MACOS.md and Enki013 macOS mod manager (research doc at
+            // docs/superpowers/research/2026-06-09-crimson-desert-macos-layout.md).
+            // The spec's original §8 hypothesis (PAZ at <game_root>/Paz/) is
+            // overturned. install_root therefore points INSIDE the bundle.
             let install_root = c
                 .bundle_path
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| c.bundle_path.clone());
+                .join("Contents")
+                .join("Resources")
+                .join("packages");
 
-            let game_path = install_root.clone();
+            // game_path is the .app bundle itself (the game root on macOS —
+            // CDUMM MACOS.md: "the .app bundle itself is the game root on
+            // macOS. There is no separate launcher").
+            let game_path = c.bundle_path.clone();
 
             // Executable path inside the bundle's MacOS directory.
             let exe_path = Some(
@@ -150,10 +204,11 @@ fn detect_from_candidates(
                     .join(&c.info.bundle_executable),
             );
 
-            // PAZ overlay tree lives at <game_install>/Paz/ — pending verification.
-            // See spec open question #5: if groups are inside Contents/Resources/
-            // this breaks code signing and the deploy path must be redesigned.
-            let data_dir = game_path.join("Paz");
+            // data_dir is the packages root — same path as install_root.
+            // Writing here invalidates the bundle's code signature; this is
+            // accepted under the same trust-boundary precedent as SMAPI /
+            // BepInEx. See BUNDLE_MUTATION_NOTICE.
+            let data_dir = install_root.clone();
 
             let steam_app_id = if c.source == crate::runtime::NativeSource::Steam {
                 Some(CD_STEAM_APP_ID.to_string())
@@ -200,9 +255,11 @@ impl GamePlugin for CrimsonDesertNativePlugin {
 
     fn executables(&self) -> &[&str] {
         // Executable names inside Contents/MacOS/. Space variant is the
-        // typical Pearl Abyss macOS naming; no-space variant is a community-
-        // observed fallback. See spike open question #2 for TODO.
-        &["Crimson Desert", "CrimsonDesert"]
+        // App Store / retail Pearl Abyss naming. `CrimsonDesert_Steam` is
+        // the Steam build's executable, confirmed by the June 2026 crash
+        // dump. No-space `CrimsonDesert` covers any other Pearl Abyss
+        // pattern parallel to the Windows `CrimsonDesert.exe`.
+        &["Crimson Desert", "CrimsonDesert", "CrimsonDesert_Steam"]
     }
 
     /// Wine detection is not applicable — this is a native-only plugin.
@@ -216,12 +273,13 @@ impl GamePlugin for CrimsonDesertNativePlugin {
 
     /// Returns the PAZ overlay tree root relative to the game install path.
     ///
-    /// Working assumption: `<game_install>/Paz/`. If PAZ groups live inside
-    /// `.app/Contents/Resources/` (spike open question #5), this must be
-    /// updated — writing into the bundle would break code signing and require
-    /// a different deploy strategy.
+    /// RESOLVED 2026-06-09: PAZ groups live INSIDE the `.app` bundle at
+    /// `Contents/Resources/packages/` (CDUMM MACOS.md + Enki013 macOS tool).
+    /// `game_path` is the `.app` bundle on native macOS, so the data dir
+    /// nests beneath it. Writing here invalidates the bundle signature —
+    /// see [`BUNDLE_MUTATION_NOTICE`].
     fn get_data_dir(&self, game_path: &Path) -> PathBuf {
-        game_path.join("Paz")
+        game_path.join("Contents").join("Resources").join("packages")
     }
 
     /// Crimson Desert has no plugin/load-order manifest.
@@ -269,11 +327,13 @@ impl GamePlugin for CrimsonDesertNativePlugin {
 
         if !VERIFIED {
             return Err(DeployerError::Other(
-                "Crimson Desert native deploy is implemented but gated off pending \
-                 PAZ overlay path verification on a real install. See \
-                 docs/superpowers/plans/2026-05-02-crimson-desert-native-spec.md \
-                 §10.5 for the verification procedure and flip VERIFIED=true in \
-                 plugins/crimson_desert_native.rs when confirmed."
+                "Crimson Desert native deploy is implemented but gated off pending: \
+                 (1) real-install confirmation of bundle ID + PAZ path \
+                 `<bundle>/Contents/Resources/packages/`, (2) PAPGT format \
+                 reverse-engineering, (3) frontend bundle-signing consent dialog. \
+                 See docs/superpowers/research/2026-06-09-crimson-desert-macos-layout.md \
+                 and updated docs/superpowers/plans/2026-05-02-crimson-desert-native-spec.md \
+                 §8 + §10, then flip VERIFIED=true in plugins/crimson_desert_native.rs."
                     .into(),
             ));
         }
@@ -284,21 +344,47 @@ impl GamePlugin for CrimsonDesertNativePlugin {
 }
 
 // ---------------------------------------------------------------------------
+// Bundle-signing trust boundary
+// ---------------------------------------------------------------------------
+
+/// Whether deploying mods for Crimson Desert will invalidate the `.app`
+/// bundle's Apple Developer ID signature.
+///
+/// Always returns `true` for Crimson Desert: PAZ overlays live inside
+/// `<bundle>/Contents/Resources/packages/`, and writing there breaks the
+/// bundle signature. This matches the SMAPI (Stardew Valley) and BepInEx
+/// (Paralives) trust-boundary precedent. The frontend MUST query this and
+/// display [`BUNDLE_MUTATION_NOTICE`] (or an equivalent consent dialog)
+/// before the first deploy.
+pub fn bundle_signing_will_be_invalidated() -> bool {
+    true
+}
+
+// ---------------------------------------------------------------------------
 // Install-root resolution
 // ---------------------------------------------------------------------------
 
 /// Resolve the Crimson Desert install root for deploy.
 ///
-/// Matches spec §9 Step 3: prefer `NativeContext::game_data_root` (the resolved
-/// parent of the `.app` bundle as captured at detection time), falling back to
-/// `DetectedGame::game_path` for manually-registered installs that lack a
-/// native runtime context.
+/// Returns the PAZ packages directory INSIDE the `.app` bundle —
+/// `<bundle>/Contents/Resources/packages/`. Prefers
+/// `NativeContext::game_data_root` (set at detection time to the packages
+/// path), falling back to `<game_path>/Contents/Resources/packages` for
+/// manually-registered installs that lack a native runtime context (manual
+/// adds typically point `game_path` at the `.app` bundle).
+///
+/// RESOLVED 2026-06-09: previous implementation returned the `.app` parent;
+/// that was based on the spec §8 hypothesis that PAZ groups lived outside
+/// the bundle, which the web-research pass overturned.
 pub fn resolve_game_install_root(detected: &DetectedGame) -> PathBuf {
+    if let Some(native) = detected.runtime.native() {
+        return native.game_data_root.clone();
+    }
     detected
-        .runtime
-        .native()
-        .map(|n| n.game_data_root.clone())
-        .unwrap_or_else(|| detected.game_path.clone())
+        .game_path
+        .join("Contents")
+        .join("Resources")
+        .join("packages")
 }
 
 // ---------------------------------------------------------------------------
@@ -751,8 +837,14 @@ mod tests {
         fake_detected_at(Path::new(game_path))
     }
 
-    /// Build a synthetic `DetectedGame` rooted at an arbitrary path. Used by
-    /// tempdir tests that need a real, existing install root.
+    /// Build a synthetic `DetectedGame` rooted at an arbitrary install root.
+    /// Used by tempdir tests that need a real, existing install root.
+    ///
+    /// Note: `install_root` here represents the PAZ packages directory —
+    /// the value returned by `resolve_game_install_root`. For tests using
+    /// a tempdir, this is just the tempdir itself; the synthetic
+    /// `app_bundle_path` is set to a sibling under the tempdir so that
+    /// the native runtime context is well-formed.
     fn fake_detected_at(install_root: &Path) -> DetectedGame {
         DetectedGame {
             game_id: "crimson_desert_native".into(),
@@ -760,7 +852,7 @@ mod tests {
             nexus_slug: "crimsondesert".into(),
             game_path: install_root.to_path_buf(),
             exe_path: None,
-            data_dir: install_root.join("Paz"),
+            data_dir: install_root.to_path_buf(),
             runtime: GameRuntime::Native(NativeContext {
                 app_bundle_path: install_root.join("Crimson Desert.app"),
                 game_data_root: install_root.to_path_buf(),
@@ -941,15 +1033,15 @@ mod tests {
     // ── Data dir ─────────────────────────────────────────────────────────────
 
     #[test]
-    fn data_dir_is_paz_subdir_of_install_root() {
+    fn data_dir_is_packages_inside_bundle() {
         let p = CrimsonDesertNativePlugin;
-        let install_root = PathBuf::from(
-            "/Users/x/Library/Application Support/Steam/steamapps/common/Crimson Desert",
+        let bundle = PathBuf::from(
+            "/Users/x/Library/Application Support/Steam/steamapps/common/Crimson Desert/CrimsonDesert_Steam.app",
         );
         assert_eq!(
-            p.get_data_dir(&install_root),
-            install_root.join("Paz"),
-            "data_dir must be <install_root>/Paz"
+            p.get_data_dir(&bundle),
+            bundle.join("Contents").join("Resources").join("packages"),
+            "data_dir must be <bundle>/Contents/Resources/packages"
         );
     }
 
@@ -986,14 +1078,16 @@ mod tests {
             game_id: "crimson_desert_native".into(),
             display_name: "Crimson Desert".into(),
             nexus_slug: "crimsondesert".into(),
-            game_path: PathBuf::from("/fake"),
+            game_path: PathBuf::from("/fake/Crimson Desert.app"),
             exe_path: None,
-            data_dir: PathBuf::from("/fake/Paz"),
+            data_dir: PathBuf::from("/fake/Crimson Desert.app/Contents/Resources/packages"),
             runtime: GameRuntime::Native(NativeContext {
                 app_bundle_path: PathBuf::from(
                     "/Library/Containers/com.pearlabyss.CrimsonDesert/Crimson Desert.app",
                 ),
-                game_data_root: PathBuf::from("/fake"),
+                game_data_root: PathBuf::from(
+                    "/Library/Containers/com.pearlabyss.CrimsonDesert/Crimson Desert.app/Contents/Resources/packages",
+                ),
                 architecture: Architecture::AppleSilicon,
                 sandboxed: true, // App Store sandboxed
                 source: NativeSource::AppStore,
@@ -1020,12 +1114,16 @@ mod tests {
             game_id: "crimson_desert_native".into(),
             display_name: "Crimson Desert".into(),
             nexus_slug: "crimsondesert".into(),
-            game_path: PathBuf::from("/fake"),
+            game_path: PathBuf::from("/Applications/Crimson Desert.app"),
             exe_path: None,
-            data_dir: PathBuf::from("/fake/Paz"),
+            data_dir: PathBuf::from(
+                "/Applications/Crimson Desert.app/Contents/Resources/packages",
+            ),
             runtime: GameRuntime::Native(NativeContext {
                 app_bundle_path: PathBuf::from("/Applications/Crimson Desert.app"),
-                game_data_root: PathBuf::from("/fake"),
+                game_data_root: PathBuf::from(
+                    "/Applications/Crimson Desert.app/Contents/Resources/packages",
+                ),
                 architecture: Architecture::IntelOnly, // should not exist
                 sandboxed: false,
                 source: NativeSource::Steam,
@@ -1139,7 +1237,7 @@ mod tests {
             nexus_slug: "crimsondesert".into(),
             game_path: install_root.clone(),
             exe_path: None,
-            data_dir: install_root.join("Paz"),
+            data_dir: install_root.clone(),
             runtime: GameRuntime::Native(NativeContext {
                 app_bundle_path: install_root.join("Crimson Desert.app"),
                 game_data_root: install_root.clone(),
@@ -1319,5 +1417,115 @@ mod tests {
             msg.contains("VERIFIED") || msg.contains("gated"),
             "expected gated/VERIFIED message, got: {msg}"
         );
+    }
+
+    // ── Reconciliation with 2026-06-09 web-research findings ────────────────
+    //
+    // The web-research pass overturned three spec §8 assumptions. These tests
+    // pin down the new behavior so a future refactor cannot quietly regress
+    // back to the pre-research layout.
+
+    #[test]
+    fn detect_native_accepts_steam_suffix_bundle_id() {
+        // Steam build's bundle ID has a `.steam` suffix (per June 2026 crash
+        // dump). The prefix-match logic must accept it without falling back
+        // to executable-name detection.
+        let candidates = vec![fake_candidate(
+            "/Users/x/Library/Application Support/Steam/steamapps/common/Crimson Desert/CrimsonDesert_Steam.app",
+            "com.pearlabyss.CrimsonDesert.steam",
+            "irrelevant", // intentionally non-matching executable name
+            false,
+            NativeSource::Steam,
+            Architecture::AppleSilicon,
+        )];
+        let result = detect_from_candidates(candidates);
+        assert_eq!(
+            result.len(),
+            1,
+            "Steam .steam-suffix bundle ID must match"
+        );
+        assert_eq!(result[0].game_id, "crimson_desert_native");
+    }
+
+    #[test]
+    fn detect_native_accepts_crimson_desert_steam_executable() {
+        // Steam build's executable is `CrimsonDesert_Steam` (per the June 2026
+        // crash dump). Detection must accept it as a fallback when the bundle
+        // ID does not match (e.g. manual install with unusual Info.plist).
+        let candidates = vec![fake_candidate(
+            "/Applications/CrimsonDesert_Steam.app",
+            "com.unknown.foo",
+            "CrimsonDesert_Steam",
+            false,
+            NativeSource::Steam,
+            Architecture::AppleSilicon,
+        )];
+        let result = detect_from_candidates(candidates);
+        assert_eq!(
+            result.len(),
+            1,
+            "CrimsonDesert_Steam executable must match"
+        );
+    }
+
+    #[test]
+    fn resolve_game_install_root_points_inside_bundle() {
+        // Spec §8 originally placed PAZ groups at <game_root>/Paz/ outside the
+        // bundle. Research findings put them at <bundle>/Contents/Resources/packages/.
+        // resolve_game_install_root must return the in-bundle packages path.
+        let bundle = PathBuf::from(
+            "/Users/x/Library/Application Support/Steam/steamapps/common/Crimson Desert/CrimsonDesert_Steam.app",
+        );
+        let expected = bundle.join("Contents").join("Resources").join("packages");
+
+        // Path via NativeContext (the common case post-detection).
+        let detected = DetectedGame {
+            game_id: "crimson_desert_native".into(),
+            display_name: "Crimson Desert".into(),
+            nexus_slug: "crimsondesert".into(),
+            game_path: bundle.clone(),
+            exe_path: None,
+            data_dir: expected.clone(),
+            runtime: GameRuntime::Native(NativeContext {
+                app_bundle_path: bundle.clone(),
+                game_data_root: expected.clone(),
+                architecture: Architecture::AppleSilicon,
+                sandboxed: false,
+                source: NativeSource::Steam,
+            }),
+            steam_app_id: Some(CD_STEAM_APP_ID.into()),
+        };
+        assert_eq!(resolve_game_install_root(&detected), expected);
+
+        // Fallback path for a manually-registered install with no native
+        // runtime context: derive the packages dir from game_path (the bundle).
+        let manual = DetectedGame {
+            game_id: "crimson_desert_native".into(),
+            display_name: "Crimson Desert".into(),
+            nexus_slug: "crimsondesert".into(),
+            game_path: bundle.clone(),
+            exe_path: None,
+            data_dir: PathBuf::new(),
+            runtime: GameRuntime::Wine(crate::runtime::WineContext {
+                bottle_name: "unused".into(),
+                bottle_path: PathBuf::new(),
+                source: "Wine".into(),
+            }),
+            steam_app_id: None,
+        };
+        assert_eq!(resolve_game_install_root(&manual), expected);
+    }
+
+    #[test]
+    fn bundle_signing_will_be_invalidated_returns_true() {
+        // Sanity: Crimson Desert deploy writes into the bundle and breaks the
+        // signature. Frontend queries this for the consent-dialog gate.
+        assert!(
+            bundle_signing_will_be_invalidated(),
+            "Crimson Desert deploy MUST flag bundle-signing invalidation"
+        );
+        // The notice text must mention the actual mutation site so the dialog
+        // is informative.
+        assert!(BUNDLE_MUTATION_NOTICE.contains("Contents/Resources/packages"));
     }
 }
