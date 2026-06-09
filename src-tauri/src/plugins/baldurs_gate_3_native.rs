@@ -47,15 +47,20 @@ use crate::staging::is_safe_relative_path;
 /// — independent of the .app bundle location.
 pub struct BaldursGate3NativePlugin;
 
+/// CFBundleIdentifier for Baldur's Gate 3 (native macOS).
+///
+/// Verified empirically from the user's real BG3 install at
+/// `~/Library/Application Support/Steam/steamapps/common/Baldurs Gate 3/Baldur's Gate 3.app`.
+const BG3_BUNDLE_IDENTIFIER: &str = "com.larian.bg3";
+
+/// Steam App ID for Baldur's Gate 3.
+const BG3_STEAM_APP_ID: &str = "1086940";
+
 /// Candidate executable names for BG3 on macOS.
 ///
-/// The authoritative macOS executable name is an open spike question
-/// (Task 4.0). These names cover the known possibilities:
-/// - `"Baldur's Gate 3"` — likely launcher / wrapper name
-/// - `"bg3"` — Vulkan backend executable (known from Linux)
-/// - `"bg3_dx11"` — DX11-compat backend (placeholder; may not exist on macOS)
-///
-/// Refine after Task 4.0 spike returns confirmed macOS executable names.
+/// The primary executable (CFBundleExecutable) verified from the real install
+/// is `"Baldur's Gate 3"` (with apostrophe and spaces). `"bg3"` and
+/// `"bg3_dx11"` are retained as fallbacks for non-standard packaging.
 const EXECUTABLES: &[&str] = &["Baldur's Gate 3", "bg3", "bg3_dx11"];
 
 /// Bottle sentinel for native mods (no Wine bottle — same convention as Stardew).
@@ -111,6 +116,65 @@ fn bootstrap_master_entries() -> Vec<ModEntry> {
         mk("Gustav", MASTER_GUSTAV_UUID, "36028797018963968"),
         mk("SharedDev", MASTER_SHARED_DEV_UUID, "36028797018963968"),
     ]
+}
+
+// ---------------------------------------------------------------------------
+// Detection helper (pure function for testability)
+// ---------------------------------------------------------------------------
+
+/// Filter `native_scanner` candidates to BG3 installs and produce
+/// `DetectedGame` entries. Pure function — the `GamePlugin::detect_native`
+/// impl wraps this with the actual scanner call.
+///
+/// Accepts candidates matching:
+/// - `bundle_identifier == "com.larian.bg3"` (case-insensitive, primary), OR
+/// - `bundle_executable` is one of the names in `EXECUTABLES` (fallback).
+///
+/// Sandboxed candidates are always rejected.
+fn detect_from_candidates(
+    candidates: Vec<crate::native_scanner::NativeAppCandidate>,
+) -> Vec<DetectedGame> {
+    candidates
+        .into_iter()
+        .filter(|c| !c.sandboxed)
+        .filter(|c| {
+            let id = c.info.bundle_identifier.to_ascii_lowercase();
+            if id == BG3_BUNDLE_IDENTIFIER {
+                return true;
+            }
+            let exe = c.info.bundle_executable.as_str();
+            EXECUTABLES
+                .iter()
+                .any(|&name| name.eq_ignore_ascii_case(exe))
+        })
+        .map(|c| {
+            let game_path = c.bundle_path.join("Contents").join("MacOS");
+            let exe_name = c.info.bundle_executable.clone();
+            let exe_path = Some(game_path.join(&exe_name));
+            let data_dir = resolve_mods_dir();
+            let steam_app_id = if c.source == crate::runtime::NativeSource::Steam {
+                Some(BG3_STEAM_APP_ID.to_string())
+            } else {
+                None
+            };
+            DetectedGame {
+                game_id: "baldurs_gate_3_native".to_string(),
+                display_name: "Baldur's Gate 3".to_string(),
+                nexus_slug: "baldursgate3".to_string(),
+                game_path: game_path.clone(),
+                exe_path,
+                data_dir,
+                runtime: crate::runtime::GameRuntime::Native(crate::runtime::NativeContext {
+                    app_bundle_path: c.bundle_path,
+                    game_data_root: game_path,
+                    architecture: c.architecture,
+                    sandboxed: false,
+                    source: c.source,
+                }),
+                steam_app_id,
+            }
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -404,12 +468,12 @@ impl GamePlugin for BaldursGate3NativePlugin {
         EXECUTABLES
     }
 
-    /// Detection is a stub for this scaffold task.
+    /// Detect native BG3 installs by scanning all native app candidates.
     ///
-    /// Real detection (bundle identifier lookup, Steam appmanifest scan)
-    /// arrives in Task 4.2. Returns empty until then.
+    /// Matches on `CFBundleIdentifier == "com.larian.bg3"` (primary) or
+    /// executable name fallback. Sandboxed App Store bundles are refused.
     fn detect_native(&self) -> Vec<DetectedGame> {
-        Vec::new()
+        detect_from_candidates(crate::native_scanner::scan_all_native())
     }
 
     /// Returns the BG3 mods directory relative to `game_path`.
@@ -484,6 +548,31 @@ mod tests {
     use std::io::Write;
     use std::sync::Arc;
     use tempfile::NamedTempFile;
+
+    // ── Detection test infrastructure ───────────────────────────────────────
+
+    /// Build a synthetic `NativeAppCandidate` for use in detection unit tests.
+    fn fake_candidate(
+        bundle_path: &str,
+        bundle_id: &str,
+        exe_name: &str,
+        sandboxed: bool,
+        source: NativeSource,
+        arch: Architecture,
+    ) -> crate::native_scanner::NativeAppCandidate {
+        crate::native_scanner::NativeAppCandidate {
+            bundle_path: std::path::PathBuf::from(bundle_path),
+            info: crate::plist::InfoPlist {
+                bundle_identifier: bundle_id.to_string(),
+                bundle_executable: exe_name.to_string(),
+                short_version: None,
+                category: None,
+            },
+            architecture: arch,
+            source,
+            sandboxed,
+        }
+    }
 
     // ── Shared test infrastructure ──────────────────────────────────────────
 
@@ -588,10 +677,146 @@ mod tests {
         assert_eq!(plugin.get_data_dir(p), p.join("Mods"));
     }
 
+    // ── Detection tests ─────────────────────────────────────────────────────
+
     #[test]
-    fn bg3_detect_native_is_empty_in_scaffold() {
+    fn bg3_detect_filters_by_bundle_id() {
+        let candidates = vec![
+            fake_candidate(
+                "/Users/user/Library/Application Support/Steam/steamapps/common/Baldurs Gate 3/Baldur's Gate 3.app",
+                BG3_BUNDLE_IDENTIFIER,
+                "Baldur's Gate 3",
+                false,
+                NativeSource::Steam,
+                Architecture::AppleSilicon,
+            ),
+            fake_candidate(
+                "/Applications/OtherGame.app",
+                "com.other.app",
+                "OtherGame",
+                false,
+                NativeSource::SystemApplications,
+                Architecture::Universal,
+            ),
+        ];
+
+        let results = detect_from_candidates(candidates);
+        assert_eq!(results.len(), 1, "only BG3 bundle should match");
+        assert_eq!(results[0].game_id, "baldurs_gate_3_native");
+        assert_eq!(results[0].display_name, "Baldur's Gate 3");
+    }
+
+    #[test]
+    fn bg3_detect_accepts_executable_name_fallback() {
+        let candidates = vec![fake_candidate(
+            "/Users/user/Games/BG3/Baldur's Gate 3.app",
+            "com.unknown.thing",     // non-standard bundle id
+            "Baldur's Gate 3",       // matching executable name
+            false,
+            NativeSource::Manual,
+            Architecture::AppleSilicon,
+        )];
+
+        let results = detect_from_candidates(candidates);
+        assert_eq!(
+            results.len(),
+            1,
+            "executable-name fallback should match non-standard bundle"
+        );
+        assert_eq!(results[0].game_id, "baldurs_gate_3_native");
+    }
+
+    #[test]
+    fn bg3_detect_skips_sandboxed() {
+        let candidates = vec![
+            fake_candidate(
+                "/Applications/Baldur's Gate 3.app",
+                BG3_BUNDLE_IDENTIFIER,
+                "Baldur's Gate 3",
+                true, // sandboxed
+                NativeSource::AppStore,
+                Architecture::AppleSilicon,
+            ),
+            fake_candidate(
+                "/Users/user/Games/BG3/Baldur's Gate 3.app",
+                BG3_BUNDLE_IDENTIFIER,
+                "Baldur's Gate 3",
+                false, // not sandboxed
+                NativeSource::Steam,
+                Architecture::AppleSilicon,
+            ),
+        ];
+
+        let results = detect_from_candidates(candidates);
+        assert_eq!(results.len(), 1, "sandboxed candidate must be skipped");
+        let ctx = match &results[0].runtime {
+            crate::runtime::GameRuntime::Native(n) => n,
+            _ => panic!("expected Native runtime"),
+        };
+        assert!(!ctx.sandboxed);
+    }
+
+    #[test]
+    fn bg3_detect_steam_source_populates_app_id() {
+        let candidates = vec![fake_candidate(
+            "/Users/user/Library/Application Support/Steam/steamapps/common/Baldurs Gate 3/Baldur's Gate 3.app",
+            BG3_BUNDLE_IDENTIFIER,
+            "Baldur's Gate 3",
+            false,
+            NativeSource::Steam,
+            Architecture::AppleSilicon,
+        )];
+
+        let results = detect_from_candidates(candidates);
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].steam_app_id,
+            Some(BG3_STEAM_APP_ID.to_string()),
+            "Steam source must set steam_app_id to {}", BG3_STEAM_APP_ID
+        );
+    }
+
+    #[test]
+    fn bg3_detect_non_steam_source_omits_app_id() {
+        let candidates = vec![fake_candidate(
+            "/Applications/Baldur's Gate 3.app",
+            BG3_BUNDLE_IDENTIFIER,
+            "Baldur's Gate 3",
+            false,
+            NativeSource::SystemApplications,
+            Architecture::Universal,
+        )];
+
+        let results = detect_from_candidates(candidates);
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].steam_app_id.is_none(),
+            "non-Steam source must not set steam_app_id"
+        );
+    }
+
+    #[test]
+    fn bg3_detect_returns_empty_vec_with_empty_candidates() {
+        let results = detect_from_candidates(vec![]);
+        assert!(results.is_empty(), "empty candidates must yield empty results");
+    }
+
+    /// Integration test: requires the user's BG3 install to be present.
+    /// Gated with #[ignore] so CI skips it.
+    #[test]
+    #[ignore]
+    fn bg3_detect_native_finds_steam_install_on_this_machine() {
         let plugin = BaldursGate3NativePlugin;
-        assert!(plugin.detect_native().is_empty());
+        let results = plugin.detect_native();
+        assert!(
+            !results.is_empty(),
+            "expected to find BG3 at ~/Library/Application Support/Steam/steamapps/common/Baldurs Gate 3/"
+        );
+        assert_eq!(results[0].game_id, "baldurs_gate_3_native");
+        assert_eq!(
+            results[0].steam_app_id,
+            Some(BG3_STEAM_APP_ID.to_string())
+        );
     }
 
     // ── deploy_native_inner tests (Task 4.4) ────────────────────────────────
