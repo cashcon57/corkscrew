@@ -38,7 +38,10 @@
   .native-shell {
     min-height: 100vh;
     padding: 0;
-    background: var(--bg-base);
+    /* No background here — let html/body's vibrancy-managed background
+       come through. Setting var(--bg-base) was painting a near-opaque
+       slab over the Tauri window vibrancy, defeating the translucency. */
+    background: transparent;
     color: var(--text-primary);
   }
 </style>

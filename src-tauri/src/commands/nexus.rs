@@ -9,7 +9,7 @@ use crate::nexus_sso;
 use crate::nxm_handler;
 use crate::oauth::{NexusUserInfo, TokenPair};
 use crate::staging;
-use crate::{AppState, nexus_client, resolve_game};
+use crate::{AppState, nexus_client, resolve_game_any_runtime};
 use std::path::PathBuf;
 use tauri::Emitter;
 use tauri::{AppHandle, State};
@@ -304,7 +304,7 @@ pub async fn download_and_install_nexus_mod(
         }),
     );
 
-    let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
+    let (_opt_bottle, game, data_dir) = resolve_game_any_runtime(&game_id, &bottle_name)?;
     let db = &state.db;
 
     let next_priority = db
@@ -367,9 +367,11 @@ pub async fn download_and_install_nexus_mod(
         )),
     );
 
-    // Sync plugins if Skyrim
+    // Sync plugins if Skyrim — Wine-only, requires a bottle.
     if game_id == "skyrimse" {
-        let _ = crate::sync_plugins_for_game(&game, &bottle);
+        if let Some(ref bottle) = _opt_bottle {
+            let _ = crate::sync_plugins_for_game(&game, bottle);
+        }
     }
 
     // Auto-delete archive if setting enabled

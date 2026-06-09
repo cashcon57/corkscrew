@@ -104,21 +104,25 @@
    ============================== */
 
 [data-theme="native"] {
-  /* Backgrounds — pure black + dim near-black surfaces matching the
-     Apple M5 marketing aesthetic. */
-  --bg-base: #000000;
-  --bg-base-vibrancy: rgba(0, 0, 0, 0.55);
-  --bg-primary: #06070d;
-  --bg-primary-vibrancy: rgba(6, 7, 13, 0.55);
-  --bg-secondary: #0a0c14;
-  --bg-tertiary: #11141d;
-  --bg-elevated: #11141d;
+  /* Backgrounds — near-black opaque fallback + translucent vibrancy
+     tokens that match Wine's translucency depth (~0.40). When
+     html.vibrancy-active is set, the vibrancy variants take over so
+     the desktop wallpaper shows through the window. The deep-black
+     M5 aesthetic comes from accents + gradient borders, not from a
+     solid black slab covering everything. */
+  --bg-base: #0a0c14;
+  --bg-base-vibrancy: rgba(10, 12, 20, 0.40);
+  --bg-primary: #11141d;
+  --bg-primary-vibrancy: rgba(17, 20, 29, 0.42);
+  --bg-secondary: #161924;
+  --bg-tertiary: #1b1f2a;
+  --bg-elevated: #1b1f2a;
 
-  --bg-grouped: #06070d;
-  --bg-grouped-vibrancy: rgba(6, 7, 13, 0.50);
-  --bg-grouped-secondary: #0a0c14;
-  --bg-grouped-secondary-vibrancy: rgba(10, 12, 20, 0.55);
-  --bg-grouped-tertiary: #11141d;
+  --bg-grouped: #11141d;
+  --bg-grouped-vibrancy: rgba(17, 20, 29, 0.35);
+  --bg-grouped-secondary: #161924;
+  --bg-grouped-secondary-vibrancy: rgba(22, 25, 36, 0.40);
+  --bg-grouped-tertiary: #1b1f2a;
 
   /* Surfaces — extremely subtle, lets the gradient accents do the work. */
   --surface: rgba(255, 255, 255, 0.03);
