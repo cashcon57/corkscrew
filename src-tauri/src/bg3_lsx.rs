@@ -11,15 +11,36 @@ use std::io::Write;
 use std::path::Path;
 
 // ─── Master UUIDs ────────────────────────────────────────────────────────────
+//
+// As of BG3 Patch 8 (game version 4.8.0.700) Larian unified the main game
+// module into a single `GustavX` master entry. Pre-Patch-8 installs shipped
+// a trio of `GustavDev` / `Gustav` / `SharedDev`. Corkscrew recognises BOTH
+// shapes via `is_master_entry`, and preserves whichever set the user's
+// existing `modsettings.lsx` already contains — we never replace one with
+// the other. The modern `MASTER_GUSTAV_X_UUID` is the only entry we write
+// when bootstrapping a fresh `modsettings.lsx` from scratch.
 
-/// GustavDev — development/debug version of the main game module. Must be first.
+/// GustavDev — pre-Patch-8 development/debug main game module.
+///
+/// Retained for backward compatibility: if a user's existing
+/// `modsettings.lsx` references this UUID, Corkscrew preserves it.
+/// Never written by `bootstrap_master_entries` on fresh installs.
 pub const MASTER_GUSTAV_DEV_UUID: &str = "28ac9ce2-2aba-8cda-b3b5-6e922f71b6b8";
 
-/// Gustav — base game campaign module.
+/// Gustav — pre-Patch-8 base game campaign module.
+///
+/// Retained for backward compatibility (see `MASTER_GUSTAV_DEV_UUID`).
 pub const MASTER_GUSTAV_UUID: &str = "991c9c7a-fb80-40cb-8f0d-b92d4e80e9b1";
 
-/// SharedDev — shared developer content module.
+/// SharedDev — pre-Patch-8 shared developer content module.
+///
+/// Retained for backward compatibility (see `MASTER_GUSTAV_DEV_UUID`).
 pub const MASTER_SHARED_DEV_UUID: &str = "3d0c5ff8-c95d-c907-ff3e-34b204f1c630";
+
+/// GustavX — Patch 8+ unified main game master. Replaced the
+/// pre-Patch-8 trio of GustavDev/Gustav/SharedDev. As of game version
+/// 4.8.0.700, this is the ONLY master entry vanilla ships.
+pub const MASTER_GUSTAV_X_UUID: &str = "cb555efe-2d9e-131f-8195-a89329d218ea";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -95,13 +116,19 @@ impl Default for ModEntry {
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
-/// Returns true if the given UUID (case-insensitive) is one of the three Larian
-/// master module UUIDs. Callers should refuse to reorder or remove master entries.
+/// Returns true if the given UUID (case-insensitive) is one of Larian's
+/// master module UUIDs.
+///
+/// Recognises the modern Patch 8+ `GustavX` master AND the legacy
+/// pre-Patch-8 trio (`GustavDev` / `Gustav` / `SharedDev`). Callers
+/// should refuse to reorder or remove master entries regardless of which
+/// generation the file uses.
 pub fn is_master_entry(uuid: &str) -> bool {
     let lower = uuid.to_lowercase();
     lower == MASTER_GUSTAV_DEV_UUID
         || lower == MASTER_GUSTAV_UUID
         || lower == MASTER_SHARED_DEV_UUID
+        || lower == MASTER_GUSTAV_X_UUID
 }
 
 /// Convert a `ModuleInfo` (from `meta.lsx`) into a `ModEntry` suitable for
@@ -626,6 +653,22 @@ mod tests {
             MASTER_GUSTAV_DEV_UUID.to_uppercase().as_str()
         ));
         assert!(!is_master_entry("00000000-0000-0000-0000-000000000000"));
+    }
+
+    #[test]
+    fn is_master_uuid_recognises_gustav_x() {
+        // Patch 8+ unified master must be recognised.
+        assert!(is_master_entry(MASTER_GUSTAV_X_UUID));
+        assert!(is_master_entry(MASTER_GUSTAV_X_UUID.to_uppercase().as_str()));
+    }
+
+    #[test]
+    fn is_master_uuid_still_recognises_legacy_trio() {
+        // Pre-Patch-8 masters must still be recognised so users on older
+        // installs don't see their masters classified as community mods.
+        assert!(is_master_entry(MASTER_GUSTAV_DEV_UUID));
+        assert!(is_master_entry(MASTER_GUSTAV_UUID));
+        assert!(is_master_entry(MASTER_SHARED_DEV_UUID));
     }
 
     #[test]

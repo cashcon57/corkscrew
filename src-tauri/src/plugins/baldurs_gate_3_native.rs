@@ -15,16 +15,19 @@
 //! 3. Copy (hardlink-first, copy fallback) the `.pak` into the mods dir.
 //! 4. Upsert the corresponding `ModuleShortDesc` entry in
 //!    `modsettings.lsx` via `bg3_lsx::write_modsettings`.
-//! 5. If `modsettings.lsx` is absent, bootstrap it with the three master
-//!    entries (GustavDev, Gustav, SharedDev).
+//! 5. If `modsettings.lsx` is absent, bootstrap it with the modern
+//!    Patch 8+ `GustavX` master entry (UUID
+//!    cb555efe-2d9e-131f-8195-a89329d218ea). Older installs that
+//!    already contain the pre-Patch-8 trio
+//!    (GustavDev/Gustav/SharedDev) are preserved as-is — Corkscrew
+//!    never replaces an existing master set.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::bg3_lsx::{
-    self, write_modsettings, LsxVersion, ModEntry, ModSettings, MASTER_GUSTAV_DEV_UUID,
-    MASTER_GUSTAV_UUID, MASTER_SHARED_DEV_UUID,
+    self, is_master_entry, write_modsettings, LsxVersion, ModEntry, ModSettings,
+    MASTER_GUSTAV_X_UUID,
 };
 use crate::bg3_pak;
 use crate::bottles::Bottle;
@@ -97,25 +100,27 @@ pub fn resolve_modsettings_path(profile: &str) -> PathBuf {
 // Master-entry bootstrapping
 // ---------------------------------------------------------------------------
 
-/// Build the three mandatory Larian master mod entries.
+/// Build the single mandatory Patch 8+ master mod entry.
 ///
-/// These entries must always be present in `modsettings.lsx`, in order,
-/// before any community mod entries. The game will reset the load order
-/// file if they are absent.
+/// As of BG3 4.8.0.700, vanilla ships exactly one master:
+/// `GustavX` (UUID cb555efe-2d9e-131f-8195-a89329d218ea). This is the
+/// default Corkscrew writes when no `modsettings.lsx` exists yet.
+///
+/// Older installs (pre-Patch-8) may have GustavDev / Gustav / SharedDev
+/// instead — those are recognised as masters via
+/// [`crate::bg3_lsx::is_master_entry`] and PRESERVED when reading
+/// existing files. Corkscrew never replaces an existing master set with
+/// the modern default — only bootstraps when the file is absent or
+/// empty.
 fn bootstrap_master_entries() -> Vec<ModEntry> {
-    let mk = |folder: &str, uuid: &str, version64: &str| ModEntry {
-        folder: folder.into(),
+    vec![ModEntry {
+        folder: "GustavX".into(),
         md5: String::new(),
-        name: folder.into(),
+        name: "GustavX".into(),
         publish_handle: "0".into(),
-        uuid: uuid.into(),
-        version64: version64.into(),
-    };
-    vec![
-        mk("GustavDev", MASTER_GUSTAV_DEV_UUID, "36028797018963968"),
-        mk("Gustav", MASTER_GUSTAV_UUID, "36028797018963968"),
-        mk("SharedDev", MASTER_SHARED_DEV_UUID, "36028797018963968"),
-    ]
+        uuid: MASTER_GUSTAV_X_UUID.into(),
+        version64: "36028797018963968".into(),
+    }]
 }
 
 // ---------------------------------------------------------------------------
@@ -189,14 +194,18 @@ fn detect_from_candidates(
 /// Algorithm:
 /// 1. Verify `detected.runtime` is [`crate::runtime::GameRuntime::Native`].
 /// 2. Create `mods_dir` and the parent directory of `modsettings_path` if absent.
-/// 3. Load existing `modsettings.lsx` or bootstrap with master entries.
-/// 4. Ensure all three master entries are present (guard against damaged files).
+/// 3. Load existing `modsettings.lsx` or bootstrap with the modern
+///    Patch 8+ master (`GustavX`).
+/// 4. Defensive: if the loaded file has no recognised master at all (damaged
+///    or wiped), prepend the modern default. Existing master sets — modern
+///    or legacy — are preserved as-is.
 /// 5. Walk enabled mods; for each `.pak` in a mod's staging dir:
 ///    a. Validate the filename (no path traversal).
 ///    b. Read `meta.lsx` from the pak.
 ///    c. Copy (hardlink-first) the pak to `mods_dir`.
 ///    d. Upsert the resulting `ModEntry` (replace on UUID match, else append).
-/// 6. Defensive: verify masters are still present after the walk.
+/// 6. Defensive: verify at least one recognised master is still present
+///    after the walk.
 /// 7. Write the updated `modsettings.lsx`.
 pub fn deploy_native_inner(
     detected: &DetectedGame,
@@ -241,19 +250,20 @@ pub fn deploy_native_inner(
         }
     };
 
-    // 4. Ensure masters are present even if the existing file was damaged.
-    {
-        let existing_uuids: HashSet<String> = settings
-            .mods
-            .iter()
-            .map(|m| m.uuid.to_lowercase())
-            .collect();
-        for master in bootstrap_master_entries() {
-            if !existing_uuids.contains(&master.uuid.to_lowercase()) {
-                // Insert at the front to maintain the expected master ordering.
-                settings.mods.insert(0, master);
-            }
-        }
+    // 4. Defensive: if NO recognised master is present after loading, the
+    //    file is damaged or vanilla just got wiped. Bootstrap with the
+    //    modern Patch 8 default (GustavX) by prepending it. We intentionally
+    //    do NOT re-add the old pre-Patch-8 trio — those are legacy and the
+    //    game expects whichever set matches the installed version. If the
+    //    user is on pre-Patch-8 and the file already has
+    //    GustavDev/Gustav/SharedDev, those are preserved because
+    //    `is_master_entry` recognises them; we only intervene when ALL
+    //    masters are missing.
+    let has_any_master = settings.mods.iter().any(|m| is_master_entry(&m.uuid));
+    if !has_any_master {
+        let mut bootstrapped = bootstrap_master_entries();
+        bootstrapped.extend(settings.mods.drain(..));
+        settings.mods = bootstrapped;
     }
 
     // Canonicalise mods_dir once for the destination-escape check below.
@@ -415,25 +425,14 @@ pub fn deploy_native_inner(
         }
     }
 
-    // 6. Defensive: ensure no master entry was removed during the walk.
-    {
-        let final_uuids: HashSet<String> = settings
-            .mods
-            .iter()
-            .map(|m| m.uuid.to_lowercase())
-            .collect();
-        for master_uuid in [
-            MASTER_GUSTAV_DEV_UUID,
-            MASTER_GUSTAV_UUID,
-            MASTER_SHARED_DEV_UUID,
-        ] {
-            if !final_uuids.contains(&master_uuid.to_lowercase()) {
-                return Err(DeployerError::Other(format!(
-                    "master entry '{}' missing after deploy — refusing to write modsettings",
-                    master_uuid
-                )));
-            }
-        }
+    // 6. Defensive: ensure at least one recognised master is still present
+    //    after the walk. We accept any combination of legacy trio +/or modern
+    //    GustavX — both are valid depending on the installed game version.
+    if !settings.mods.iter().any(|m| is_master_entry(&m.uuid)) {
+        return Err(DeployerError::Other(
+            "no recognised master entry present after deploy — refusing to write modsettings"
+                .to_string(),
+        ));
     }
 
     // 7. Write the updated modsettings.lsx.
@@ -541,7 +540,10 @@ pub fn register() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bg3_lsx::{read_modsettings, MASTER_GUSTAV_DEV_UUID};
+    use crate::bg3_lsx::{
+        read_modsettings, MASTER_GUSTAV_DEV_UUID, MASTER_GUSTAV_UUID, MASTER_GUSTAV_X_UUID,
+        MASTER_SHARED_DEV_UUID,
+    };
     use crate::bg3_pak::{make_minimal_lspk, TEST_META_LSX_XML};
     use crate::games::{with_plugin, GamePlugin};
     use crate::runtime::{Architecture, GameRuntime, NativeContext, NativeSource};
@@ -968,8 +970,9 @@ mod tests {
         );
     }
 
-    /// When `modsettings.lsx` does not exist, it must be created with all three
-    /// master entries plus the deployed mod.
+    /// When `modsettings.lsx` does not exist, it must be created with the
+    /// modern Patch 8+ `GustavX` master plus the deployed mod (no legacy
+    /// trio).
     #[test]
     fn bg3_deploy_native_creates_modsettings_with_masters_if_missing() {
         let tmp = tempfile::tempdir().unwrap();
@@ -994,15 +997,21 @@ mod tests {
         let settings = read_modsettings(&modsettings_path).unwrap();
         let uuids: Vec<&str> = settings.mods.iter().map(|m| m.uuid.as_str()).collect();
 
-        for master in [
+        assert!(
+            uuids.contains(&MASTER_GUSTAV_X_UUID),
+            "GustavX master must be present; got {:?}",
+            uuids
+        );
+        // The legacy trio MUST NOT be injected on a fresh install.
+        for legacy in [
             MASTER_GUSTAV_DEV_UUID,
             MASTER_GUSTAV_UUID,
             MASTER_SHARED_DEV_UUID,
         ] {
             assert!(
-                uuids.contains(&master),
-                "master {} must be present; got {:?}",
-                master,
+                !uuids.contains(&legacy),
+                "legacy master {} must NOT be injected on fresh Patch 8 install; got {:?}",
+                legacy,
                 uuids
             );
         }
@@ -1011,7 +1020,7 @@ mod tests {
             "deployed mod must be present; got {:?}",
             uuids
         );
-        assert_eq!(settings.mods.len(), 4, "3 masters + 1 mod");
+        assert_eq!(settings.mods.len(), 2, "1 master (GustavX) + 1 mod");
     }
 
     /// Re-deploying the same mod twice must not duplicate its entry in
@@ -1227,5 +1236,275 @@ mod tests {
             !mods_dir.exists(),
             "mods_dir must not be created for sandboxed game"
         );
+    }
+
+    // ── Patch 8 master-handling tests ───────────────────────────────────────
+
+    /// `bootstrap_master_entries` should return a single Patch 8+ GustavX
+    /// entry (no legacy trio).
+    #[test]
+    fn bootstrap_master_entries_returns_gustav_x_only() {
+        let masters = bootstrap_master_entries();
+        assert_eq!(
+            masters.len(),
+            1,
+            "Patch 8+ default should be a single master entry; got {}",
+            masters.len()
+        );
+        assert_eq!(masters[0].folder, "GustavX");
+        assert_eq!(masters[0].uuid, MASTER_GUSTAV_X_UUID);
+        assert_eq!(masters[0].version64, "36028797018963968");
+        // None of the legacy UUIDs should appear.
+        for legacy in [
+            MASTER_GUSTAV_DEV_UUID,
+            MASTER_GUSTAV_UUID,
+            MASTER_SHARED_DEV_UUID,
+        ] {
+            assert!(
+                masters.iter().all(|m| m.uuid != legacy),
+                "legacy UUID {} must not appear in default bootstrap",
+                legacy
+            );
+        }
+    }
+
+    /// Pre-Patch-8 compat: a `modsettings.lsx` that already contains the
+    /// legacy trio must be preserved as-is. The modern GustavX default
+    /// must NOT be injected, and no legacy entry must be removed.
+    #[test]
+    fn deploy_native_preserves_existing_legacy_masters() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mods_dir = tmp.path().join("Mods");
+        let profile_dir = tmp.path().join("PlayerProfiles/Public");
+        std::fs::create_dir_all(&profile_dir).unwrap();
+        let modsettings_path = profile_dir.join("modsettings.lsx");
+
+        // Seed file with the legacy trio.
+        let existing = ModSettings {
+            version: LsxVersion { major: 4, minor: 0, revision: 9, build: 319 },
+            mods: vec![
+                ModEntry {
+                    folder: "GustavDev".into(),
+                    md5: String::new(),
+                    name: "GustavDev".into(),
+                    publish_handle: "0".into(),
+                    uuid: MASTER_GUSTAV_DEV_UUID.into(),
+                    version64: "36028797018963968".into(),
+                },
+                ModEntry {
+                    folder: "Gustav".into(),
+                    md5: String::new(),
+                    name: "Gustav".into(),
+                    publish_handle: "0".into(),
+                    uuid: MASTER_GUSTAV_UUID.into(),
+                    version64: "36028797018963968".into(),
+                },
+                ModEntry {
+                    folder: "SharedDev".into(),
+                    md5: String::new(),
+                    name: "SharedDev".into(),
+                    publish_handle: "0".into(),
+                    uuid: MASTER_SHARED_DEV_UUID.into(),
+                    version64: "36028797018963968".into(),
+                },
+            ],
+        };
+        write_modsettings(&modsettings_path, &existing).unwrap();
+
+        let db_path = tmp.path().join("test.db");
+        let db = Arc::new(crate::database::ModDatabase::new(&db_path).unwrap());
+        let pak_bytes = make_minimal_lspk("Mods/TestMod/meta.lsx", TEST_META_LSX_XML);
+        setup_mod_with_pak(
+            &db,
+            "baldurs_gate_3_native",
+            tmp.path(),
+            "TestMod.pak",
+            &pak_bytes,
+        );
+
+        let detected = fake_detected_native(tmp.path());
+        deploy_native_inner(&detected, &db, &mods_dir, &modsettings_path).unwrap();
+
+        let settings = read_modsettings(&modsettings_path).unwrap();
+        let uuids: Vec<&str> = settings.mods.iter().map(|m| m.uuid.as_str()).collect();
+
+        // All three legacy masters must be preserved.
+        assert!(uuids.contains(&MASTER_GUSTAV_DEV_UUID), "GustavDev preserved");
+        assert!(uuids.contains(&MASTER_GUSTAV_UUID), "Gustav preserved");
+        assert!(uuids.contains(&MASTER_SHARED_DEV_UUID), "SharedDev preserved");
+        // Modern GustavX must NOT have been added — we don't replace
+        // legacy with modern.
+        assert!(
+            !uuids.contains(&MASTER_GUSTAV_X_UUID),
+            "GustavX must not be injected when legacy trio already exists; got {:?}",
+            uuids
+        );
+        // The community mod must be appended.
+        assert!(uuids.contains(&"abcdef01-2345-6789-abcd-ef0123456789"));
+        assert_eq!(settings.mods.len(), 4, "3 legacy masters + 1 community mod");
+    }
+
+    /// Patch 8+: a `modsettings.lsx` that already contains just `GustavX`
+    /// (the empirical vanilla shape) must be preserved exactly — no
+    /// phantom legacy masters injected.
+    #[test]
+    fn deploy_native_preserves_existing_gustav_x() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mods_dir = tmp.path().join("Mods");
+        let profile_dir = tmp.path().join("PlayerProfiles/Public");
+        std::fs::create_dir_all(&profile_dir).unwrap();
+        let modsettings_path = profile_dir.join("modsettings.lsx");
+
+        // Seed file with empirical Patch 8 vanilla content (GustavX only).
+        let existing = ModSettings {
+            version: LsxVersion { major: 4, minor: 8, revision: 0, build: 700 },
+            mods: vec![ModEntry {
+                folder: "GustavX".into(),
+                md5: String::new(),
+                name: "GustavX".into(),
+                publish_handle: "0".into(),
+                uuid: MASTER_GUSTAV_X_UUID.into(),
+                version64: "36028797018963968".into(),
+            }],
+        };
+        write_modsettings(&modsettings_path, &existing).unwrap();
+
+        let db_path = tmp.path().join("test.db");
+        let db = Arc::new(crate::database::ModDatabase::new(&db_path).unwrap());
+        let pak_bytes = make_minimal_lspk("Mods/TestMod/meta.lsx", TEST_META_LSX_XML);
+        setup_mod_with_pak(
+            &db,
+            "baldurs_gate_3_native",
+            tmp.path(),
+            "TestMod.pak",
+            &pak_bytes,
+        );
+
+        let detected = fake_detected_native(tmp.path());
+        deploy_native_inner(&detected, &db, &mods_dir, &modsettings_path).unwrap();
+
+        let settings = read_modsettings(&modsettings_path).unwrap();
+        let uuids: Vec<&str> = settings.mods.iter().map(|m| m.uuid.as_str()).collect();
+
+        assert!(uuids.contains(&MASTER_GUSTAV_X_UUID), "GustavX preserved");
+        for legacy in [
+            MASTER_GUSTAV_DEV_UUID,
+            MASTER_GUSTAV_UUID,
+            MASTER_SHARED_DEV_UUID,
+        ] {
+            assert!(
+                !uuids.contains(&legacy),
+                "legacy master {} must NOT be injected into Patch 8 vanilla file; got {:?}",
+                legacy,
+                uuids
+            );
+        }
+        assert!(uuids.contains(&"abcdef01-2345-6789-abcd-ef0123456789"));
+        assert_eq!(settings.mods.len(), 2, "1 master (GustavX) + 1 community mod");
+    }
+
+    /// If a valid `modsettings.lsx` is present but has zero master entries
+    /// (damaged or wiped), deploy must prepend the modern Patch 8 GustavX
+    /// default as the bootstrap. The deployed mod follows.
+    #[test]
+    fn deploy_native_bootstraps_gustav_x_when_no_masters_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mods_dir = tmp.path().join("Mods");
+        let profile_dir = tmp.path().join("PlayerProfiles/Public");
+        std::fs::create_dir_all(&profile_dir).unwrap();
+        let modsettings_path = profile_dir.join("modsettings.lsx");
+
+        // Write a valid file with NO mod entries (no masters).
+        let empty = ModSettings {
+            version: LsxVersion { major: 4, minor: 8, revision: 0, build: 700 },
+            mods: vec![],
+        };
+        write_modsettings(&modsettings_path, &empty).unwrap();
+
+        let db_path = tmp.path().join("test.db");
+        let db = Arc::new(crate::database::ModDatabase::new(&db_path).unwrap());
+        let pak_bytes = make_minimal_lspk("Mods/TestMod/meta.lsx", TEST_META_LSX_XML);
+        setup_mod_with_pak(
+            &db,
+            "baldurs_gate_3_native",
+            tmp.path(),
+            "TestMod.pak",
+            &pak_bytes,
+        );
+
+        let detected = fake_detected_native(tmp.path());
+        deploy_native_inner(&detected, &db, &mods_dir, &modsettings_path).unwrap();
+
+        let settings = read_modsettings(&modsettings_path).unwrap();
+        assert_eq!(
+            settings.mods.len(),
+            2,
+            "bootstrap should yield 1 master (GustavX) + 1 community mod; got {:?}",
+            settings.mods.iter().map(|m| m.uuid.clone()).collect::<Vec<_>>()
+        );
+        // GustavX must come first (prepended).
+        assert_eq!(
+            settings.mods[0].uuid, MASTER_GUSTAV_X_UUID,
+            "GustavX must be prepended as the first entry"
+        );
+        // Community mod must follow.
+        assert_eq!(settings.mods[1].uuid, "abcdef01-2345-6789-abcd-ef0123456789");
+    }
+
+    /// Regression: starting with the empirical Patch 8 vanilla file
+    /// (GustavX-only), deploying a mod MUST NOT inject any of the
+    /// pre-Patch-8 legacy masters. Injecting them would corrupt the load
+    /// order on Patch 8+ installs.
+    #[test]
+    fn deploy_native_does_not_inject_legacy_trio() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mods_dir = tmp.path().join("Mods");
+        let profile_dir = tmp.path().join("PlayerProfiles/Public");
+        std::fs::create_dir_all(&profile_dir).unwrap();
+        let modsettings_path = profile_dir.join("modsettings.lsx");
+
+        let vanilla_patch8 = ModSettings {
+            version: LsxVersion { major: 4, minor: 8, revision: 0, build: 700 },
+            mods: vec![ModEntry {
+                folder: "GustavX".into(),
+                md5: String::new(),
+                name: "GustavX".into(),
+                publish_handle: "0".into(),
+                uuid: MASTER_GUSTAV_X_UUID.into(),
+                version64: "36028797018963968".into(),
+            }],
+        };
+        write_modsettings(&modsettings_path, &vanilla_patch8).unwrap();
+
+        let db_path = tmp.path().join("test.db");
+        let db = Arc::new(crate::database::ModDatabase::new(&db_path).unwrap());
+        let pak_bytes = make_minimal_lspk("Mods/TestMod/meta.lsx", TEST_META_LSX_XML);
+        setup_mod_with_pak(
+            &db,
+            "baldurs_gate_3_native",
+            tmp.path(),
+            "TestMod.pak",
+            &pak_bytes,
+        );
+
+        let detected = fake_detected_native(tmp.path());
+        deploy_native_inner(&detected, &db, &mods_dir, &modsettings_path).unwrap();
+
+        let settings = read_modsettings(&modsettings_path).unwrap();
+        let uuids: Vec<String> =
+            settings.mods.iter().map(|m| m.uuid.to_lowercase()).collect();
+
+        for legacy in [
+            MASTER_GUSTAV_DEV_UUID,
+            MASTER_GUSTAV_UUID,
+            MASTER_SHARED_DEV_UUID,
+        ] {
+            assert!(
+                !uuids.contains(&legacy.to_lowercase()),
+                "legacy master {} must NEVER be present in Patch 8 modsettings.lsx; got {:?}",
+                legacy,
+                uuids
+            );
+        }
     }
 }
