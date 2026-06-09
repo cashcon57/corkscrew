@@ -1,5 +1,6 @@
 <script lang="ts">
   import { getSessionHistory, getStabilitySummary } from "$lib/api";
+  import { relativeTime } from "$lib/relativeTime";
   import type { GameSession, StabilitySummary } from "$lib/types";
 
   interface Props {
@@ -21,9 +22,7 @@
   }
 
   function formatDate(iso: string): string {
-    return new Date(iso).toLocaleDateString(undefined, {
-      month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"
-    });
+    return relativeTime(iso) || "—";
   }
 
   async function load() {

@@ -73,6 +73,7 @@
     modStateVersion,
     nativeMode,
   } from "$lib/stores";
+  import { absoluteDate } from "$lib/relativeTime";
   import type { InstalledMod, DetectedGame, SkseStatus, DowngradeStatus, FileConflict, ModUpdateInfo, FomodInstaller } from "$lib/types";
   import { createModFilters } from "$lib/stores/modFilters.svelte";
   import GameIcon from "$lib/components/GameIcon.svelte";
@@ -1815,11 +1816,7 @@
   }
 
   function formatDate(iso: string): string {
-    return new Date(iso).toLocaleDateString(undefined, {
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-    });
+    return absoluteDate(iso) || "—";
   }
 
   function getModSourceUrl(mod: InstalledMod): string | null {
@@ -2489,7 +2486,7 @@
           {backendDeployInProgress}
           bind:deploying
           bind:deployHealth
-          onDeployComplete={async () => { if (activeGame) { await refreshHealth(activeGame); } }}
+          onDeployComplete={async () => { if (activeGame) { await Promise.all([loadMods(activeGame), refreshHealth(activeGame)]); } }}
         />
       {/if}
       <div class="tools-dropdown-wrap">

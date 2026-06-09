@@ -149,10 +149,9 @@ pub async fn resolve_all_conflicts_cmd(
             let (_bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
             deployer::redeploy_all(&db, &game_id, &bottle_name, &data_dir, &game.game_path)
                 .map_err(|e| e.to_string())?;
-            if game_id == "skyrimse" {
-                let bottle = resolve_bottle(&bottle_name)?;
-                let _ = crate::sync_plugins_for_game(&game, &bottle);
-            }
+            // Self-gated: sync_plugins_for_game no-ops for games without plugin load order
+            let bottle = resolve_bottle(&bottle_name)?;
+            let _ = crate::sync_plugins_for_game(&game, &bottle);
         }
 
         Ok(result)
@@ -231,9 +230,8 @@ pub async fn reorder_mods(
             .map_err(|e| e.to_string())?;
 
         // Sync plugins after redeploy
-        if game_id == "skyrimse" {
-            let _ = crate::sync_plugins_for_game(&game, &bottle);
-        }
+        // Self-gated: sync_plugins_for_game no-ops for games without plugin load order
+        let _ = crate::sync_plugins_for_game(&game, &bottle);
 
         Ok(())
     })
@@ -251,7 +249,7 @@ pub async fn redeploy_all_mods(
     check_game_lock(&state.game_locks, &game_id, &bottle_name)?;
     let db = state.db.clone();
     let app = app.clone();
-    let _guard = DeployGuard::new(state.deploy_in_progress.clone(), app.clone());
+    let _guard = DeployGuard::try_acquire(state.deploy_in_progress.clone(), app.clone())?;
     tokio::task::spawn_blocking(move || {
         let redeploy_start = Instant::now();
         let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
@@ -290,11 +288,10 @@ pub async fn redeploy_all_mods(
 
         let _ = deploy_journal::complete(&journal_id);
 
+        // Self-gated: sync_plugins_for_game no-ops for games without plugin load order
+        let _ = crate::sync_plugins_for_game(&game, &bottle);
         if game_id == "skyrimse" {
-            let _ = crate::sync_plugins_for_game(&game, &bottle);
-            let use_wine_ef = !config::get_config()
-                .map(|c| c.use_original_engine_fixes)
-                .unwrap_or(false);
+            let use_wine_ef = config::engine_fixes_wine_enabled();
             if use_wine_ef {
                 let ef = skse::fix_engine_fixes_for_wine(&data_dir, &db, &game_id, &bottle_name);
                 if ef > 0 {
@@ -359,9 +356,11 @@ pub fn is_deploy_in_progress(state: State<'_, AppState>) -> bool {
 pub async fn deploy_incremental_cmd(
     game_id: String,
     bottle_name: String,
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<deployer::IncrementalDeployResult, String> {
     check_game_lock(&state.game_locks, &game_id, &bottle_name)?;
+    let _guard = DeployGuard::try_acquire(state.deploy_in_progress.clone(), app.clone())?;
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
         let deploy_start = Instant::now();
@@ -377,11 +376,10 @@ pub async fn deploy_incremental_cmd(
             deploy_start.elapsed().as_secs_f64()
         );
 
+        // Self-gated: sync_plugins_for_game no-ops for games without plugin load order
+        let _ = crate::sync_plugins_for_game(&game, &bottle);
         if game_id == "skyrimse" {
-            let _ = crate::sync_plugins_for_game(&game, &bottle);
-            let use_wine_ef = !config::get_config()
-                .map(|c| c.use_original_engine_fixes)
-                .unwrap_or(false);
+            let use_wine_ef = config::engine_fixes_wine_enabled();
             if use_wine_ef {
                 let ef = skse::fix_engine_fixes_for_wine(&data_dir, &db, &game_id, &bottle_name);
                 if ef > 0 {
@@ -631,11 +629,14 @@ pub async fn set_verification_level(level: String) -> Result<(), String> {
 
 /// Legacy: Toggle whether to use the original SSE Engine Fixes instead of the Wine fork.
 /// Kept for backward compatibility — new code should use `set_use_wine_engine_fixes`.
+/// "Use original" is the inverse of "use the Wine fork", so this writes the
+/// canonical `use_wine_engine_fixes` flag (the only one gates read).
 #[tauri::command]
 pub async fn set_use_original_engine_fixes(enabled: bool) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         let mut cfg = config::get_config().map_err(|e| e.to_string())?;
         cfg.use_original_engine_fixes = enabled;
+        cfg.use_wine_engine_fixes = !enabled;
         config::save_config(&cfg).map_err(|e| e.to_string())?;
         Ok(())
     })
@@ -660,9 +661,11 @@ pub async fn set_use_wine_engine_fixes(enabled: bool) -> Result<(), String> {
 pub async fn purge_deployment_cmd(
     game_id: String,
     bottle_name: String,
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Vec<String>, String> {
     check_game_lock(&state.game_locks, &game_id, &bottle_name)?;
+    let _guard = DeployGuard::try_acquire(state.deploy_in_progress.clone(), app.clone())?;
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
         let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
@@ -679,9 +682,8 @@ pub async fn purge_deployment_cmd(
 
         let _ = deploy_journal::complete(&journal_id);
 
-        if game_id == "skyrimse" {
-            let _ = crate::sync_plugins_for_game(&game, &bottle);
-        }
+        // Self-gated: sync_plugins_for_game no-ops for games without plugin load order
+        let _ = crate::sync_plugins_for_game(&game, &bottle);
 
         Ok(removed)
     })

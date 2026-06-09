@@ -4,6 +4,7 @@
   import { cancelWabbajackInstall, cleanupWabbajackInstall } from "$lib/api";
   import { clearWjInstallStatus, stopWjInstallTracking } from "$lib/wjInstallService";
   import { SpeedTracker } from "$lib/speedTracker";
+  import { formatBytes } from "$lib/format";
   import { openUrl } from "@tauri-apps/plugin-opener";
 
   let status = $derived($wjInstallStatus);
@@ -57,13 +58,6 @@
     { id: "complete", label: "Done" },
   ] as const;
   const phaseOrder = ["preflight", "downloading", "extracting", "directives", "deploying", "complete", "failed", "cancelled"];
-
-  function formatBytes(bytes: number): string {
-    if (bytes >= 1_073_741_824) return (bytes / 1_073_741_824).toFixed(1) + " GB";
-    if (bytes >= 1_048_576) return (bytes / 1_048_576).toFixed(1) + " MB";
-    if (bytes >= 1024) return (bytes / 1024).toFixed(1) + " KB";
-    return bytes + " B";
-  }
 
   let showCancelConfirm = $state(false);
   let cancelInProgress = $state(false);

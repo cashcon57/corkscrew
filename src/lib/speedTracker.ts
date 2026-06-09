@@ -1,3 +1,5 @@
+import { formatBytes } from "./format";
+
 /**
  * Rolling-window speed calculator for tracking throughput.
  * Used by both collection and WJ install progress tracking.
@@ -48,10 +50,7 @@ export class SpeedTracker {
   }
 
   static formatBytes(bytes: number): string {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-    return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+    return formatBytes(bytes);
   }
 
   static formatElapsed(startTime: number): string {

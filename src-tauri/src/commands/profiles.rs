@@ -123,7 +123,7 @@ pub async fn activate_profile(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     check_game_lock(&state.game_locks, &game_id, &bottle_name)?;
-    let _guard = DeployGuard::new(state.deploy_in_progress.clone(), app.clone());
+    let _guard = DeployGuard::try_acquire(state.deploy_in_progress.clone(), app.clone())?;
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
         // Look up the game

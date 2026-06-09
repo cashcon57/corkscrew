@@ -1,5 +1,6 @@
 <script lang="ts">
   import { getIniSettings, setIniSetting, getIniPresets, applyIniPreset } from "$lib/api";
+  import { showError } from "$lib/stores";
   import type { IniFile, IniPreset } from "$lib/types";
 
   interface Props {
@@ -57,7 +58,9 @@
     try {
       iniFiles = await getIniSettings(gameId, bottleName);
       presets = await getIniPresets(gameId);
-    } catch {} finally { loading = false; }
+    } catch (err) {
+      console.error("loading INI settings failed:", err);
+    } finally { loading = false; }
   }
 
   $effect(() => { if (gameId && bottleName) load(); });
@@ -65,9 +68,12 @@
   async function handleApplyPreset(preset: IniPreset) {
     applying = true;
     try {
-      const count = await applyIniPreset(gameId, bottleName, preset.name);
+      await applyIniPreset(gameId, bottleName, preset.name);
       await load();
-    } catch {} finally { applying = false; }
+    } catch (err) {
+      console.error("applyIniPreset failed:", err);
+      showError(`Failed to apply preset "${preset.name}": ${err}`);
+    } finally { applying = false; }
   }
 
   async function handleSaveSetting() {
@@ -77,8 +83,12 @@
     try {
       await setIniSetting(file.path, editingKey.section, editingKey.key, editValue);
       await load();
-    } catch {}
-    editingKey = null;
+      editingKey = null;
+    } catch (err) {
+      // Keep the editor open so the user can see the save failed and retry.
+      console.error("setIniSetting failed:", err);
+      showError(`Failed to save setting: ${err}`);
+    }
   }
 
   function startEdit(fileName: string, section: string, key: string, currentValue: string) {

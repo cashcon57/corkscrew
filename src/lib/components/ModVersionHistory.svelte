@@ -1,6 +1,7 @@
 <script lang="ts">
   import { selectedGame, showError, showSuccess } from "$lib/stores";
   import { listModVersions, rollbackModVersion } from "$lib/api";
+  import { absoluteDate } from "$lib/relativeTime";
   import type { InstalledMod, ModVersion } from "$lib/types";
   import { wineCtx } from "$lib/types";
 
@@ -74,11 +75,7 @@
   }
 
   function formatDate(iso: string): string {
-    return new Date(iso).toLocaleDateString(undefined, {
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-    });
+    return absoluteDate(iso) || "—";
   }
 
   function formatDateTime(iso: string): string {

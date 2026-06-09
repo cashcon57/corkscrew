@@ -1,5 +1,6 @@
 <script lang="ts">
   import { runWineDiagnostics, fixWineAppdata } from "$lib/api";
+  import { showError } from "$lib/stores";
   import { revealItemInDir } from "@tauri-apps/plugin-opener";
   import type { DiagnosticResult, DiagnosticCheck, CheckStatus } from "$lib/types";
 
@@ -42,7 +43,10 @@
     loading = true;
     try {
       result = await runWineDiagnostics(gameId, bottleName);
-    } catch { result = null; }
+    } catch (err) {
+      console.error("runWineDiagnostics failed:", err);
+      result = null;
+    }
     finally { loading = false; }
   }
 
@@ -82,7 +86,10 @@
       try {
         await fixWineAppdata(bottleName);
         await runDiag();
-      } catch {} finally { fixing = false; }
+      } catch (err) {
+        console.error("fixWineAppdata failed:", err);
+        showError(`Failed to fix AppData Local: ${err}`);
+      } finally { fixing = false; }
     }
   }
 </script>

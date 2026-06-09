@@ -155,6 +155,13 @@ impl WjDownloader {
         self.cancel_token = Some(token);
     }
 
+    /// The directory this downloader writes archives into. Lets callers
+    /// distinguish this install's downloads from shared-cache paths resolved
+    /// via the download registry.
+    pub fn download_dir(&self) -> &Path {
+        &self.download_dir
+    }
+
     // -----------------------------------------------------------------------
     // Source-specific download handlers
     // -----------------------------------------------------------------------
@@ -736,7 +743,7 @@ impl WjDownloader {
             if checkpoint_file.exists() {
                 let dest = self.download_dir.join(sanitize_filename(&archive_name));
                 if dest.exists() {
-                    if verify_xxhash64(&dest, &archive.hash).is_ok() {
+                    if verify_xxhash64_async(dest.clone(), archive.hash.clone()).await.is_ok() {
                         let _ = app.emit(
                             "wabbajack-install-progress",
                             WjProgressEvent::DownloadSkipped {
@@ -770,7 +777,7 @@ impl WjDownloader {
             if let Ok(Some(cached_path)) = db.find_download_by_xxhash(&hash_str) {
                 let cached = PathBuf::from(&cached_path);
                 if cached.exists() {
-                    if verify_xxhash64(&cached, &archive.hash).is_ok() {
+                    if verify_xxhash64_async(cached.clone(), archive.hash.clone()).await.is_ok() {
                         let _ = app.emit(
                             "wabbajack-install-progress",
                             WjProgressEvent::DownloadSkipped {
@@ -848,7 +855,7 @@ impl WjDownloader {
                     .await
                 {
                     Ok(path) => {
-                        match verify_xxhash64(&path, &archive.hash) {
+                        match verify_xxhash64_async(path.clone(), archive.hash.clone()).await {
                             Ok(()) => {
                                 let _ = app.emit(
                                     "wabbajack-install-progress",
@@ -1000,7 +1007,7 @@ impl WjDownloader {
 
                     match downloader.download_archive(app, &archive, install_id, db).await {
                         Ok(path) => {
-                            match verify_xxhash64(&path, &archive.hash) {
+                            match verify_xxhash64_async(path.clone(), archive.hash.clone()).await {
                                 Ok(()) => {
                                     let _ = app.emit(
                                         "wabbajack-install-progress",
@@ -1481,6 +1488,19 @@ fn now_epoch() -> u64 {
 // Hash verification
 // ---------------------------------------------------------------------------
 
+/// Async wrapper for [`verify_xxhash64`]. Hashing a 10–40 GB archive is
+/// heavy blocking I/O; calling the sync version directly from async code
+/// pins a tokio worker for the whole read, and several concurrent hashes
+/// can starve the entire runtime (4 workers on a Steam Deck).
+pub async fn verify_xxhash64_async(
+    path: PathBuf,
+    expected: WjHash,
+) -> Result<(), WjDownloadError> {
+    tokio::task::spawn_blocking(move || verify_xxhash64(&path, &expected))
+        .await
+        .map_err(|e| WjDownloadError::Io(std::io::Error::other(e)))?
+}
+
 /// Verify that a downloaded file matches the expected xxHash64 (base64).
 /// Returns Ok(()) on match, Err(WjDownloadError::HashMismatch) otherwise.
 pub fn verify_xxhash64(path: &Path, expected: &WjHash) -> Result<(), WjDownloadError> {
@@ -1580,6 +1600,27 @@ fn sanitize_filename(name: &str) -> String {
 // CDN concurrent download
 // ---------------------------------------------------------------------------
 
+/// Write a buffer to the shared destination file at the given offset, on the
+/// blocking pool (seek+write under the file mutex must not block the runtime).
+async fn write_part_at(
+    file: &Arc<std::sync::Mutex<std::fs::File>>,
+    offset: u64,
+    buf: Vec<u8>,
+) -> Result<(), WjDownloadError> {
+    let file = file.clone();
+    tokio::task::spawn_blocking(move || {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut f = file
+            .lock()
+            .map_err(|e| WjDownloadError::Other(format!("File lock poisoned: {e}")))?;
+        f.seek(SeekFrom::Start(offset)).map_err(WjDownloadError::Io)?;
+        f.write_all(&buf).map_err(WjDownloadError::Io)?;
+        Ok::<(), WjDownloadError>(())
+    })
+    .await
+    .map_err(|e| WjDownloadError::Other(format!("Task join error: {}", e)))?
+}
+
 /// Download a file from WJ CDN using concurrent parts.
 async fn download_cdn_concurrent(
     client: &reqwest::Client,
@@ -1654,14 +1695,50 @@ async fn download_cdn_concurrent(
                     .send()
                     .await?;
 
-                // Stream response bytes to buffer, emitting progress as chunks arrive.
+                // The server MUST honor the Range request (206). A 200 means
+                // it ignored the header and is sending the FULL body — writing
+                // that at this part's offset would silently corrupt the file.
+                // (200 is acceptable only when this part IS the whole file.)
+                let status = response.status();
+                let part_is_whole_file = start == 0 && end == total_size - 1;
+                match status {
+                    reqwest::StatusCode::PARTIAL_CONTENT => {}
+                    reqwest::StatusCode::OK if part_is_whole_file => {}
+                    reqwest::StatusCode::OK => {
+                        return Err(WjDownloadError::Other(format!(
+                            "CDN ignored Range request for part {}-{} (got 200)",
+                            start, end
+                        )));
+                    }
+                    s => {
+                        return Err(WjDownloadError::Other(format!(
+                            "CDN part {}-{} failed: HTTP {}",
+                            start, end, s
+                        )));
+                    }
+                }
+
+                // Stream chunks to the file in bounded flushes instead of
+                // buffering the whole part: caps RAM at FLUSH_THRESHOLD per
+                // in-flight part instead of part-size (GBs on big archives).
+                const FLUSH_THRESHOLD: usize = 8 * 1024 * 1024;
+                let expected_len = end - start + 1;
                 let mut stream = response.bytes_stream();
-                let mut buf = Vec::with_capacity((end - start + 1) as usize);
+                let mut buf: Vec<u8> = Vec::with_capacity(FLUSH_THRESHOLD);
+                let mut offset = start;
+                let mut received: u64 = 0;
                 while let Some(chunk) = stream.next().await {
                     if cancel.load(Ordering::Relaxed) {
                         return Err(WjDownloadError::Cancelled);
                     }
                     let chunk = chunk?;
+                    received += chunk.len() as u64;
+                    if received > expected_len {
+                        return Err(WjDownloadError::Other(format!(
+                            "CDN part {}-{} returned more bytes than requested",
+                            start, end
+                        )));
+                    }
                     buf.extend_from_slice(&chunk);
 
                     // Update aggregate byte counter and emit throttled progress
@@ -1678,24 +1755,25 @@ async fn download_cdn_concurrent(
                             },
                         );
                     }
+
+                    if buf.len() >= FLUSH_THRESHOLD {
+                        let flush = std::mem::replace(&mut buf, Vec::with_capacity(FLUSH_THRESHOLD));
+                        let flush_len = flush.len() as u64;
+                        write_part_at(&shared_file, offset, flush).await?;
+                        offset += flush_len;
+                    }
                 }
 
-                // Write buffer to file at offset using shared file handle
-                // (prevents concurrent open/seek/write race conditions)
-                let offset = start;
-                let file_handle = shared_file.clone();
-                tokio::task::spawn_blocking(move || {
-                    use std::io::{Seek, SeekFrom, Write};
-                    let mut file = file_handle
-                        .lock()
-                        .map_err(|e| WjDownloadError::Other(format!("File lock poisoned: {e}")))?;
-                    file.seek(SeekFrom::Start(offset))
-                        .map_err(WjDownloadError::Io)?;
-                    file.write_all(&buf).map_err(WjDownloadError::Io)?;
-                    Ok::<(), WjDownloadError>(())
-                })
-                .await
-                .map_err(|e| WjDownloadError::Other(format!("Task join error: {}", e)))??;
+                if received != expected_len {
+                    return Err(WjDownloadError::Other(format!(
+                        "CDN part {}-{} truncated: got {} of {} bytes",
+                        start, end, received, expected_len
+                    )));
+                }
+
+                if !buf.is_empty() {
+                    write_part_at(&shared_file, offset, buf).await?;
+                }
 
                 Ok(())
             }

@@ -45,6 +45,14 @@ pub fn batch_check_exists(paths: &[PathBuf]) -> Vec<bool> {
 // Vanilla file protection
 // ---------------------------------------------------------------------------
 
+/// Normalize a relative path into a manifest/conflict map key: forward
+/// slashes + lowercase. Wine targets case-insensitive filesystems (NTFS
+/// semantics, APFS on macOS), so `Textures/a.dds` and `textures/a.dds`
+/// are the same game-visible file and must collide in conflict resolution.
+fn manifest_key(rel_path: &str) -> String {
+    rel_path.replace('\\', "/").to_lowercase()
+}
+
 /// Quick check for top-level game files that must never be deleted.
 /// This is a fast path that doesn't require a baseline lookup.
 fn is_protected_extension(rel_path: &str) -> bool {
@@ -307,9 +315,17 @@ fn deploy_mod_inner(
     let manifest = db
         .get_deployment_manifest(game_id, bottle_name)
         .map_err(|e| DeployerError::Database(e.to_string()))?;
-    let deployed_map: std::collections::HashMap<String, i64> = manifest
+    // Keyed case-insensitively (manifest_key) so conflicts are detected the
+    // way the game sees them on NTFS/APFS; values keep the original-cased
+    // path so the loser's on-disk file can be removed even when casing differs.
+    let deployed_map: std::collections::HashMap<String, (i64, &str)> = manifest
         .iter()
-        .map(|e| (e.relative_path.replace('\\', "/"), e.mod_id))
+        .map(|e| {
+            (
+                manifest_key(&e.relative_path),
+                (e.mod_id, e.relative_path.as_str()),
+            )
+        })
         .collect();
     let priorities = db
         .get_all_mod_priorities()
@@ -362,21 +378,10 @@ fn deploy_mod_inner(
                 return None;
             }
 
-            // Symlink check BEFORE any removal — prevents TOCTOU race where
-            // an attacker replaces a file with a symlink between remove and deploy.
-            if dst.exists() || dst.symlink_metadata().is_ok() {
-                if let Ok(meta) = fs::symlink_metadata(&dst) {
-                    if meta.file_type().is_symlink() {
-                        warn!("Skipping deployment to symlink target: {}", dst.display());
-                        skipped_count.fetch_add(1, Ordering::Relaxed);
-                        return None;
-                    }
-                }
-            }
-
-            // Conflict resolution via in-memory lookup
-            let normalized_key = rel_path.replace('\\', "/");
-            if let Some(&owner_mod_id) = deployed_map.get(normalized_key.as_str()) {
+            // Conflict resolution via in-memory lookup (case-insensitive key)
+            let normalized_key = manifest_key(rel_path);
+            let mut manifest_owned = false;
+            if let Some(&(owner_mod_id, owner_path)) = deployed_map.get(normalized_key.as_str()) {
                 if owner_mod_id == mod_id {
                     return None; // already deployed by us
                 }
@@ -385,87 +390,28 @@ fn deploy_mod_inner(
                     skipped_count.fetch_add(1, Ordering::Relaxed);
                     return None;
                 }
-                // We win — remove existing deployed file
-                if dst.exists() {
-                    let _ = fs::remove_file(&dst);
+                // We win. On a case-sensitive host filesystem the loser's file
+                // may live at a differently-cased path — remove it explicitly
+                // (deploy_single_file only clears the exact dst path).
+                if owner_path != rel_path {
+                    let _ = fs::remove_file(data_dir.join(owner_path));
                 }
-            } else if dst.exists() {
-                // File exists on disk but is NOT in the deployment manifest.
-                // This is likely a vanilla game file. Do NOT overwrite it —
-                // removing the existing file and deploying over it would make
-                // the vanilla file unrecoverable on undeploy/purge.
-                if is_protected_extension(rel_path) {
-                    warn!(
-                        "Deploy: skipping {} — would overwrite unmanaged vanilla file",
-                        rel_path
-                    );
-                    skipped_count.fetch_add(1, Ordering::Relaxed);
-                    return None;
-                }
-                // For non-protected files (textures, scripts, etc.), remove
-                // the existing file so the hardlink can succeed.
-                let _ = fs::remove_file(&dst);
+                manifest_owned = true;
             }
 
-            if let Some(parent) = dst.parent() {
-                let _ = fs::create_dir_all(parent); // idempotent, safe for parallel calls
-            }
-
-            // Symlink re-check immediately before file operation to minimize TOCTOU window
-            if let Ok(meta) = fs::symlink_metadata(&dst) {
-                if meta.file_type().is_symlink() {
-                    warn!("Pre-deploy symlink detected: {}", dst.display());
-                    skipped_count.fetch_add(1, Ordering::Relaxed);
-                    return None;
-                }
-            }
-
-            let method = if can_hardlink {
-                match fs::hard_link(&src, &dst) {
-                    Ok(_) => {
-                        // Post-deploy symlink check to tighten TOCTOU window
-                        if let Ok(meta) = fs::symlink_metadata(&dst) {
-                            if meta.file_type().is_symlink() {
-                                let _ = fs::remove_file(&dst);
-                                warn!("Post-deploy symlink detected, removed: {}", dst.display());
-                                return None;
-                            }
+            let method =
+                match deploy_single_file(rel_path, &src, &dst, manifest_owned, can_hardlink, copy_method) {
+                    Some(m) => {
+                        if m == "copy" {
+                            fallback_used.store(true, Ordering::Relaxed);
                         }
-                        "hardlink"
+                        m
                     }
-                    Err(e) => {
-                        warn!(
-                            "Hardlink failed for {} → {}: {} (falling back to copy)",
-                            src.display(),
-                            dst.display(),
-                            e
-                        );
-                        if let Err(copy_err) = platform::fast_copy(&src, &dst, copy_method) {
-                            warn!(
-                                "Copy also failed for {} → {}: {}",
-                                src.display(),
-                                dst.display(),
-                                copy_err
-                            );
-                            return None;
-                        }
-                        fallback_used.store(true, Ordering::Relaxed);
-                        "copy"
+                    None => {
+                        skipped_count.fetch_add(1, Ordering::Relaxed);
+                        return None;
                     }
-                }
-            } else {
-                if let Err(copy_err) = platform::fast_copy(&src, &dst, copy_method) {
-                    warn!(
-                        "Copy failed for {} → {}: {}",
-                        src.display(),
-                        dst.display(),
-                        copy_err
-                    );
-                    return None;
-                }
-                fallback_used.store(true, Ordering::Relaxed);
-                "copy"
-            };
+                };
 
             let done = deployed_count.fetch_add(1, Ordering::Relaxed) + 1;
             if let Some(cb) = &progress {
@@ -1146,9 +1092,11 @@ fn compute_desired_state(
         for rel_path in files {
             let sha256 = hash_map.get(&(m.id, rel_path.clone())).cloned();
 
-            // Last writer wins (highest priority, since sorted ascending)
+            // Last writer wins (highest priority, since sorted ascending).
+            // Keyed case-insensitively so differently-cased paths from two
+            // mods collide here instead of double-deploying.
             desired.insert(
-                rel_path.clone(),
+                manifest_key(&rel_path),
                 DesiredFile {
                     relative_path: rel_path,
                     mod_id: m.id,
@@ -1212,14 +1160,51 @@ fn compute_diff(
 
 /// Deploy a single file from staging to the game directory.
 ///
+/// This is the single source of truth for per-file deployment safety,
+/// shared by the full and incremental deploy paths:
+/// - symlink rejection via `symlink_metadata` (catches dangling symlinks,
+///   which `dst.exists()` would follow and miss) before AND after the
+///   file operation (TOCTOU hardening)
+/// - vanilla-file protection: an existing file not owned by the manifest
+///   (`manifest_owned == false`) is never overwritten if protected
+///
 /// Priority chain: hardlink → reflink/clonefile → copy.
-/// Returns the deploy method used ("hardlink" or "copy"), or None on failure.
+/// Returns the deploy method used ("hardlink" or "copy"), or None on skip/failure.
 fn deploy_single_file(
+    rel_path: &str,
     src: &Path,
     dst: &Path,
+    manifest_owned: bool,
     can_hardlink: bool,
     copy_method: platform::FsCopyMethod,
 ) -> Option<&'static str> {
+    // symlink_metadata (not exists()) so dangling symlinks are detected
+    // instead of followed — a dangling link would otherwise survive to the
+    // copy fallback, which writes THROUGH it to an arbitrary target.
+    match fs::symlink_metadata(dst) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            warn!("Skipping deployment to symlink target: {}", dst.display());
+            return None;
+        }
+        Ok(_) => {
+            if !manifest_owned && is_protected_extension(rel_path) {
+                // File exists on disk but is NOT in the deployment manifest:
+                // likely a vanilla game file. Overwriting it would make it
+                // unrecoverable on undeploy/purge.
+                warn!(
+                    "Deploy: skipping {} — would overwrite unmanaged vanilla file",
+                    rel_path
+                );
+                return None;
+            }
+            if let Err(e) = fs::remove_file(dst) {
+                warn!("Failed to remove existing file {}: {}", dst.display(), e);
+                return None;
+            }
+        }
+        Err(_) => {}
+    }
+
     if let Some(parent) = dst.parent() {
         if let Err(e) = fs::create_dir_all(parent) {
             warn!(
@@ -1231,23 +1216,18 @@ fn deploy_single_file(
         }
     }
 
-    // Remove existing file at destination if present
-    if dst.exists() {
-        if let Ok(meta) = fs::symlink_metadata(dst) {
-            if meta.file_type().is_symlink() {
-                warn!("Skipping deployment to symlink target: {}", dst.display());
-                return None;
-            }
-        }
-        if let Err(e) = fs::remove_file(dst) {
-            warn!("Failed to remove existing file {}: {}", dst.display(), e);
+    // Symlink re-check immediately before the file operation to minimize
+    // the TOCTOU window between removal and link/copy.
+    if let Ok(meta) = fs::symlink_metadata(dst) {
+        if meta.file_type().is_symlink() {
+            warn!("Pre-deploy symlink detected: {}", dst.display());
             return None;
         }
     }
 
-    if can_hardlink {
+    let method = if can_hardlink {
         match fs::hard_link(src, dst) {
-            Ok(_) => Some("hardlink"),
+            Ok(_) => "hardlink",
             Err(e) => {
                 warn!(
                     "Hardlink failed for {} → {}: {} (falling back to reflink/copy)",
@@ -1255,9 +1235,9 @@ fn deploy_single_file(
                     dst.display(),
                     e
                 );
-                // Use platform::fast_copy which tries reflink/clonefile before fs::copy
+                // platform::fast_copy tries reflink/clonefile before fs::copy
                 match platform::fast_copy(src, dst, copy_method) {
-                    Ok(_) => Some("copy"),
+                    Ok(_) => "copy",
                     Err(copy_err) => {
                         warn!(
                             "Copy also failed for {} → {}: {}",
@@ -1265,15 +1245,15 @@ fn deploy_single_file(
                             dst.display(),
                             copy_err
                         );
-                        None
+                        return None;
                     }
                 }
             }
         }
     } else {
-        // Cross-device: use platform::fast_copy (reflink/clonefile → fs::copy)
+        // Cross-device: reflink/clonefile → fs::copy
         match platform::fast_copy(src, dst, copy_method) {
-            Ok(_) => Some("copy"),
+            Ok(_) => "copy",
             Err(e) => {
                 warn!(
                     "Copy failed for {} → {}: {}",
@@ -1281,10 +1261,21 @@ fn deploy_single_file(
                     dst.display(),
                     e
                 );
-                None
+                return None;
             }
         }
+    };
+
+    // Post-deploy symlink check to tighten the TOCTOU window
+    if let Ok(meta) = fs::symlink_metadata(dst) {
+        if meta.file_type().is_symlink() {
+            let _ = fs::remove_file(dst);
+            warn!("Post-deploy symlink detected, removed: {}", dst.display());
+            return None;
+        }
     }
+
+    Some(method)
 }
 
 /// Perform an incremental deployment: compute the diff between current and
@@ -1311,10 +1302,14 @@ pub fn deploy_incremental(
     // Step 1: Compute desired state
     let desired = compute_desired_state(db, game_id, bottle_name)?;
 
-    // Step 2: Load current deployment manifest as a HashMap
-    let current = db
+    // Step 2: Load current deployment manifest, re-keyed case-insensitively
+    // to match compute_desired_state (Wine-visible path semantics).
+    let current: std::collections::HashMap<String, crate::database::DeploymentEntry> = db
         .get_deployment_manifest_map(game_id, bottle_name)
-        .map_err(|e| DeployerError::Database(e.to_string()))?;
+        .map_err(|e| DeployerError::Database(e.to_string()))?
+        .into_values()
+        .map(|e| (manifest_key(&e.relative_path), e))
+        .collect();
 
     // Step 3: Compute diff
     let diff = compute_diff(&desired, &current);
@@ -1417,7 +1412,7 @@ pub fn deploy_incremental(
     }
 
     // Step 5b: Update files where the owning mod changed
-    let update_owned: Vec<(i64, String, String, Option<String>, String)> = diff
+    let update_owned: Vec<(i64, String, String, Option<String>, String, &'static str)> = diff
         .to_update
         .par_iter()
         .filter_map(|(old_entry, new_desired)| {
@@ -1429,7 +1424,20 @@ pub fn deploy_incremental(
                 return None;
             }
 
-            match deploy_single_file(&src, &dst, can_hardlink, copy_method) {
+            // The old owner's file may live at a differently-cased path on a
+            // case-sensitive host filesystem — remove it explicitly.
+            if old_entry.relative_path != new_desired.relative_path {
+                let _ = fs::remove_file(data_dir.join(&old_entry.relative_path));
+            }
+
+            match deploy_single_file(
+                &new_desired.relative_path,
+                &src,
+                &dst,
+                true, // path is in the manifest (owned by old_entry's mod)
+                can_hardlink,
+                copy_method,
+            ) {
                 Some(method) => {
                     updated_count.fetch_add(1, Ordering::Relaxed);
                     if method == "copy" {
@@ -1441,6 +1449,7 @@ pub fn deploy_incremental(
                         new_desired.staging_path.to_string_lossy().to_string(),
                         new_desired.sha256.clone(),
                         new_desired.deploy_target.clone(),
+                        method,
                     ))
                 }
                 None => {
@@ -1456,14 +1465,14 @@ pub fn deploy_incremental(
 
     let update_entries: Vec<(&str, &str, i64, &str, &str, &str, Option<&str>, &str)> = update_owned
         .iter()
-        .map(|(mod_id, rel_path, staging_path, sha256, deploy_target)| {
+        .map(|(mod_id, rel_path, staging_path, sha256, deploy_target, method)| {
             (
                 game_id,
                 bottle_name,
                 *mod_id,
                 rel_path.as_str(),
                 staging_path.as_str(),
-                if can_hardlink { "hardlink" } else { "copy" },
+                *method,
                 sha256.as_deref(),
                 deploy_target.as_str(),
             )
@@ -1476,60 +1485,69 @@ pub fn deploy_incremental(
     }
 
     // Step 5c: Add new files
-    let add_results: Vec<Option<(i64, String, String, Option<String>, String)>> = diff
-        .to_add
-        .par_iter()
-        .map(|desired_file| {
-            let dst = data_dir.join(&desired_file.relative_path);
-            let src = desired_file.staging_path.join(&desired_file.relative_path);
+    let add_results: Vec<Option<(i64, String, String, Option<String>, String, &'static str)>> =
+        diff.to_add
+            .par_iter()
+            .map(|desired_file| {
+                let dst = data_dir.join(&desired_file.relative_path);
+                let src = desired_file.staging_path.join(&desired_file.relative_path);
 
-            if !src.exists() {
-                warn!("Incremental add: source not found: {}", src.display());
-                return None;
-            }
+                if !src.exists() {
+                    warn!("Incremental add: source not found: {}", src.display());
+                    return None;
+                }
 
-            match deploy_single_file(&src, &dst, can_hardlink, copy_method) {
-                Some(method) => {
-                    added_count.fetch_add(1, Ordering::Relaxed);
-                    if method == "copy" {
-                        any_fallback.store(true, Ordering::Relaxed);
+                match deploy_single_file(
+                    &desired_file.relative_path,
+                    &src,
+                    &dst,
+                    false, // not in manifest — vanilla protection applies
+                    can_hardlink,
+                    copy_method,
+                ) {
+                    Some(method) => {
+                        added_count.fetch_add(1, Ordering::Relaxed);
+                        if method == "copy" {
+                            any_fallback.store(true, Ordering::Relaxed);
+                        }
+                        Some((
+                            desired_file.mod_id,
+                            desired_file.relative_path.clone(),
+                            desired_file.staging_path.to_string_lossy().to_string(),
+                            desired_file.sha256.clone(),
+                            desired_file.deploy_target.clone(),
+                            method,
+                        ))
                     }
-                    Some((
-                        desired_file.mod_id,
-                        desired_file.relative_path.clone(),
-                        desired_file.staging_path.to_string_lossy().to_string(),
-                        desired_file.sha256.clone(),
-                        desired_file.deploy_target.clone(),
-                    ))
+                    None => {
+                        verification_failures
+                            .lock()
+                            .unwrap()
+                            .push(format!("add failed: {}", desired_file.relative_path));
+                        None
+                    }
                 }
-                None => {
-                    verification_failures
-                        .lock()
-                        .unwrap()
-                        .push(format!("add failed: {}", desired_file.relative_path));
-                    None
-                }
-            }
-        })
-        .collect();
+            })
+            .collect();
 
     // Batch-insert new manifest entries
     let add_entries: Vec<(&str, &str, i64, &str, &str, &str, Option<&str>, &str)> = add_results
         .iter()
         .filter_map(|opt| {
-            opt.as_ref()
-                .map(|(mod_id, rel_path, staging_path, sha256, deploy_target)| {
+            opt.as_ref().map(
+                |(mod_id, rel_path, staging_path, sha256, deploy_target, method)| {
                     (
                         game_id,
                         bottle_name,
                         *mod_id,
                         rel_path.as_str(),
                         staging_path.as_str(),
-                        if can_hardlink { "hardlink" } else { "copy" },
+                        *method,
                         sha256.as_deref(),
                         deploy_target.as_str(),
                     )
-                })
+                },
+            )
         })
         .collect();
 

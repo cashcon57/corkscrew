@@ -4,6 +4,7 @@
   import { collectionInstallStatus, selectedGame, showError, showSuccess } from "$lib/stores";
   import type { PendingFomod } from "$lib/stores";
   import { dismissInstall } from "$lib/installService";
+  import { formatBytes } from "$lib/format";
   import { cancelCollectionInstall, submitFomodChoices, deleteCollection, scanSksePlugins } from "$lib/api";
   import type { SksePluginScanResult } from "$lib/types";
   import { wineCtx } from "$lib/types";
@@ -251,13 +252,6 @@
     { id: "complete", label: "Done" },
   ] as const;
   const phaseOrder = ["downloading", "staging", "installing", "complete", "failed"];
-
-  function formatBytes(bytes: number): string {
-    if (bytes >= 1_073_741_824) return (bytes / 1_073_741_824).toFixed(1) + " GB";
-    if (bytes >= 1_048_576) return (bytes / 1_048_576).toFixed(1) + " MB";
-    if (bytes >= 1024) return (bytes / 1024).toFixed(1) + " KB";
-    return bytes + " B";
-  }
 
   function dlItemPercent(item: { downloaded: number; total: number }): number {
     if (item.total <= 0) return 0;

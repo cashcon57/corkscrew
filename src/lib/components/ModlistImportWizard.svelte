@@ -134,16 +134,6 @@
     }
   }
 
-  function formatDate(iso: string): string {
-    return new Date(iso).toLocaleDateString(undefined, {
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  }
-
   function statusLabel(status: ImportStatus): string {
     switch (status) {
       case "AlreadyInstalled": return "Installed";

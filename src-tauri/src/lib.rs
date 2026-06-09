@@ -28,6 +28,7 @@ pub mod esp_analyzer;
 pub mod executables;
 pub mod fomod;
 pub mod fomod_recipes;
+pub mod fs_ci;
 pub mod fromsoft_saves;
 pub mod game_lock;
 pub mod game_registry;
@@ -140,10 +141,19 @@ pub struct AppState {
 pub struct DeployGuard(Arc<AtomicBool>, AppHandle);
 
 impl DeployGuard {
-    pub(crate) fn new(flag: Arc<AtomicBool>, app_handle: AppHandle) -> Self {
-        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+    /// Atomically acquire the deploy flag. Fails if another deploy-class
+    /// operation is already in progress, making concurrent game-directory
+    /// mutations structurally impossible instead of relying on callers to
+    /// poll `is_deploy_in_progress` first.
+    pub(crate) fn try_acquire(flag: Arc<AtomicBool>, app_handle: AppHandle) -> Result<Self, String> {
+        use std::sync::atomic::Ordering;
+        flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| {
+                "Another deployment operation is in progress. Wait for it to finish and try again."
+                    .to_string()
+            })?;
         let _ = app_handle.emit("deploy-status-changed", true);
-        Self(flag, app_handle)
+        Ok(Self(flag, app_handle))
     }
 }
 
@@ -1288,7 +1298,6 @@ pub fn run() {
             wabbajack_installer::resume_wabbajack_install,
             wabbajack_installer::cleanup_wabbajack_install,
             wabbajack_installer::get_wabbajack_install_status,
-            wabbajack_installer::wabbajack_preflight_cmd,
             // Nexus SSO
             commands::nexus::start_nexus_sso,
             // OAuth

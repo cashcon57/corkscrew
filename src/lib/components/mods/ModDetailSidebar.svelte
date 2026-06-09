@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { absoluteDate } from "$lib/relativeTime";
   import type { InstalledMod, ModUpdateInfo } from "$lib/types";
 
   interface Props {
@@ -26,7 +27,7 @@
   $effect(() => { notesValue = editingNotesValue; });
 
   function formatDate(iso: string): string {
-    return new Date(iso).toLocaleDateString();
+    return absoluteDate(iso) || "—";
   }
 </script>
 

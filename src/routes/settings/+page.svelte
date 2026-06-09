@@ -7,6 +7,8 @@
   import { config, showError, showSuccess, selectedGame, skseStatus, currentPage, appVersion, updateReady, updateVersion, updateNotes, updateChecking, updateError, triggerUpdateCheck, controllerMode, nativeMode, nativeModeVisible } from "$lib/stores";
   import { setNativeMode, setNativeModeVisible } from "$lib/api";
   import { applyNativeTheme } from "$lib/native/theme";
+  import { formatBytes } from "$lib/format";
+  import { absoluteDate } from "$lib/relativeTime";
   import type { AppConfig, ModTool, PlatformInfo, ToolInstallProgress, ToolUpdateInfo, VortexExtensionSummary, VortexGameRegistration } from "$lib/types";
   import { listen } from "@tauri-apps/api/event";
   import ThemeToggle from "$lib/components/ThemeToggle.svelte";
@@ -392,18 +394,8 @@
       : layers.filter(l => l.platforms.includes("Linux"))
   );
 
-  function formatBytes(bytes: number): string {
-    if (bytes === 0) return "0 B";
-    const units = ["B", "KB", "MB", "GB"];
-    const i = Math.floor(Math.log(bytes) / Math.log(1024));
-    return `${(bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0)} ${units[i]}`;
-  }
-
   function formatDate(unixSecs: number): string {
-    if (!unixSecs) return "";
-    return new Date(unixSecs * 1000).toLocaleDateString(undefined, {
-      month: "short", day: "numeric", year: "numeric",
-    });
+    return unixSecs ? absoluteDate(unixSecs * 1000) : "";
   }
 
   let unlistenProgress: (() => void) | null = null;

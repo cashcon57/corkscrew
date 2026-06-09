@@ -1930,7 +1930,7 @@ pub async fn execute_shader_conversion_cmd(
     state: State<'_, super::AppState>,
 ) -> Result<ConversionResult, String> {
     let db = state.db.clone();
-    let _guard = super::DeployGuard::new(state.deploy_in_progress.clone(), app.clone());
+    let _guard = super::DeployGuard::try_acquire(state.deploy_in_progress.clone(), app.clone())?;
     let (bottle, game, data_dir) = super::resolve_game(&game_id, &bottle_name)?;
     let game_path = game.game_path.clone();
 
@@ -1958,7 +1958,7 @@ pub async fn revert_shader_conversion_cmd(
     state: State<'_, super::AppState>,
 ) -> Result<serde_json::Value, String> {
     let db = state.db.clone();
-    let _guard = super::DeployGuard::new(state.deploy_in_progress.clone(), app.clone());
+    let _guard = super::DeployGuard::try_acquire(state.deploy_in_progress.clone(), app.clone())?;
     let (_, game, data_dir) = super::resolve_game(&game_id, &bottle_name)?;
     let game_path = game.game_path.clone();
 

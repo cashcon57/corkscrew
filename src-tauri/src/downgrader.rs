@@ -11,12 +11,11 @@
 //! the SE and AE builds.
 
 use std::fs;
-use std::io::{self, Read};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 use walkdir::WalkDir;
 
@@ -221,23 +220,11 @@ fn find_skyrim_exe(game_path: &Path) -> Result<PathBuf> {
 
 /// Compute the SHA-256 hash of a file.
 ///
-/// Reads the file in chunks to handle large executables without loading
-/// the entire file into memory at once.
+/// Delegates to `platform::fast_hash`, which memory-maps files larger than
+/// 1 MiB (multi-GB game executables hash at full disk speed) and uses
+/// buffered reads for smaller ones.
 fn compute_sha256(path: &Path) -> Result<String> {
-    let mut file = fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 8192];
-
-    loop {
-        let bytes_read = file.read(&mut buffer)?;
-        if bytes_read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..bytes_read]);
-    }
-
-    let hash = hasher.finalize();
-    Ok(hash.iter().map(|b| format!("{:02x}", b)).collect())
+    Ok(crate::platform::fast_hash(path)?)
 }
 
 // ---------------------------------------------------------------------------

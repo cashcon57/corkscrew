@@ -884,29 +884,11 @@ fn find_prefs_case_insensitive(user_dir: &Path) -> Option<PathBuf> {
 }
 
 fn find_dir_ci(parent: &Path, name: &str) -> Option<PathBuf> {
-    let name_lower = name.to_lowercase();
-    if let Ok(entries) = fs::read_dir(parent) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.is_dir() && entry.file_name().to_string_lossy().to_lowercase() == name_lower {
-                return Some(p);
-            }
-        }
-    }
-    None
+    crate::fs_ci::find_dir_ci(parent, name)
 }
 
 fn find_file_ci(parent: &Path, name: &str) -> Option<PathBuf> {
-    let name_lower = name.to_lowercase();
-    if let Ok(entries) = fs::read_dir(parent) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.is_file() && entry.file_name().to_string_lossy().to_lowercase() == name_lower {
-                return Some(p);
-            }
-        }
-    }
-    None
+    crate::fs_ci::find_file_ci(parent, name)
 }
 
 // ---------------------------------------------------------------------------
