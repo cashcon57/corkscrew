@@ -38,30 +38,27 @@
 
   let nativeToggling = $state(false);
 
-  async function toggleNativeMode() {
+  function toggleNativeMode() {
     if (nativeToggling) return; // debounce rapid clicks
     nativeToggling = true;
     const newValue = !$nativeMode;
-    try {
-      // Persist the new value to the backend first so the config is
-      // consistent if the app restarts mid-navigation.
-      await setNativeMode(newValue);
-      nativeMode.set(newValue);
-      // Navigate BEFORE applying the theme so that Wine pages never briefly
-      // render with native theme tokens (the "in-between" state the user saw).
-      // applyNativeTheme is called after goto() returns to guarantee the
-      // destination route is already mounted.
-      if (newValue) {
-        await goto("/native").catch((err) => console.error("navigation to /native failed:", err));
-      } else {
-        await goto("/").catch((err) => console.error("navigation to / failed:", err));
-      }
-      await applyNativeTheme(newValue);
-    } catch (err) {
-      console.error("toggleNativeMode failed:", err);
-    } finally {
+    // Update store + theme SYNCHRONOUSLY for instant visual feedback.
+    // The slider thumb slides, body[data-theme] flips, glass ratchets — all
+    // before any await. Backend persistence + route change happen in the
+    // background so a slow Tauri command doesn't stall the UI.
+    nativeMode.set(newValue);
+    applyNativeTheme(newValue).catch((err) =>
+      console.warn("applyNativeTheme failed:", err)
+    );
+    Promise.allSettled([
+      setNativeMode(newValue),
+      goto(newValue ? "/native" : "/"),
+    ]).then((results) => {
+      results.forEach((r) => {
+        if (r.status === "rejected") console.error("toggleNativeMode background:", r.reason);
+      });
       nativeToggling = false;
-    }
+    });
   }
 </script>
 

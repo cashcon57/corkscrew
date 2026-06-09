@@ -786,11 +786,28 @@ impl NexusClient {
             request = request.header("Range", format!("bytes={}-", existing_len));
         }
 
-        let response = request.send().await?;
-        let status = response.status();
+        let mut response = request.send().await?;
+        let mut status = response.status();
+        let mut resumed = status == reqwest::StatusCode::PARTIAL_CONTENT;
+
+        // 416 Range Not Satisfiable: the partial file is at or beyond the
+        // server's current content length. Could happen if a previous attempt
+        // hit a redirect to a different mirror, the mod was re-uploaded with
+        // a smaller payload, or the partial file is corrupt. Drop the partial
+        // and retry from byte 0.
+        if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+            log::warn!(
+                "Server returned 416 for '{}' with Range bytes={}- — dropping partial file and retrying from start",
+                url_file_name,
+                existing_len
+            );
+            let _ = tokio::fs::remove_file(dest.join(&url_file_name)).await;
+            response = self.download_client.get(download_url).send().await?;
+            status = response.status();
+            resumed = false; // fresh download, no resume
+        }
 
         // 206 Partial Content = resume accepted, 200 OK = server doesn't support Range
-        let resumed = status == reqwest::StatusCode::PARTIAL_CONTENT;
         if !status.is_success() && !resumed {
             let message = response
                 .text()

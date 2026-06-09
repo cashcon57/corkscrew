@@ -296,11 +296,19 @@
     // false value set by the store initialiser).
     const nativeModeAtMountTime = get(nativeMode);
     getNativeMode()
-      .then((enabled: boolean) => {
+      .then(async (enabled: boolean) => {
         // Only hydrate on cold launch when the store still holds its default.
         // If toggleNativeMode already fired, skip — don't overwrite the user's choice.
         if (get(nativeMode) === nativeModeAtMountTime) {
           nativeMode.set(enabled);
+          // Apply the theme on cold-start too — otherwise the slider shows
+          // Native as active while the body stays on the Wine palette,
+          // forcing the user to toggle off-and-on to "kick" the theme over.
+          if (enabled) {
+            await applyNativeTheme(true).catch((err) =>
+              console.warn('applyNativeTheme(true) hydration failed:', err)
+            );
+          }
         }
       })
       .catch((err: unknown) => console.warn('getNativeMode hydration failed:', err));
