@@ -6,7 +6,7 @@ use crate::executables::{CustomExecutable};
 use crate::launcher::{LaunchResult};
 use crate::mod_tools;
 use crate::wabbajack;
-use crate::{AppState, resolve_game};
+use crate::{AppState, resolve_game, resolve_game_any_runtime};
 use std::path::Path;
 use tauri::{AppHandle, State};
 
@@ -18,7 +18,9 @@ pub async fn detect_mod_tools_cmd(
     bottle_name: String,
     _state: State<'_, AppState>,
 ) -> Result<Vec<mod_tools::ModTool>, String> {
-    let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
+    // Tool detection only needs the game's data_dir, which both Wine and
+    // native runtimes provide via `resolve_game_any_runtime`.
+    let (_, _, data_dir) = resolve_game_any_runtime(&game_id, &bottle_name)?;
     tokio::task::spawn_blocking(move || mod_tools::detect_tools_for_game(&data_dir, &game_id))
         .await
         .map_err(|e| format!("Tool detection task failed: {e}"))
@@ -31,7 +33,7 @@ pub async fn install_mod_tool(
     game_id: String,
     bottle_name: String,
 ) -> Result<String, String> {
-    let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
+    let (_, _, data_dir) = resolve_game_any_runtime(&game_id, &bottle_name)?;
     mod_tools::install_tool(&tool_id, &data_dir, &app)
         .await
         .map_err(|e| e.to_string())
@@ -45,7 +47,7 @@ pub async fn uninstall_mod_tool(
     detected_path: Option<String>,
 ) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
-        let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
+        let (_, _, data_dir) = resolve_game_any_runtime(&game_id, &bottle_name)?;
         mod_tools::uninstall_tool(&tool_id, &data_dir, detected_path.as_deref())
             .map_err(|e| e.to_string())
     })
@@ -62,7 +64,15 @@ pub async fn launch_mod_tool(
 ) -> Result<LaunchResult, String> {
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
-        let (bottle, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
+        // Tool launch requires Wine (we shell into the bottle's Wine binary).
+        // Use any-runtime resolution and reject the native case cleanly.
+        let (opt_bottle, _, data_dir) =
+            resolve_game_any_runtime(&game_id, &bottle_name)?;
+        let bottle = opt_bottle.ok_or_else(|| {
+            "Mod-tool launch is only available for Wine/CrossOver games — native macOS \
+             installs run tools directly via the OS."
+                .to_string()
+        })?;
         let tools = mod_tools::detect_tools_for_game(&data_dir, &game_id);
         let tool = tools
             .iter()

@@ -1453,6 +1453,16 @@ pub fn run() {
             commands::native_cmds::install_paralives_bepinex,
             commands::native_cmds::uninstall_paralives_bepinex,
             commands::native_cmds::apply_native_window_effect,
+            #[cfg(target_os = "macos")]
+            commands::native_cmds::install_stardew_smapi,
+            #[cfg(target_os = "macos")]
+            commands::native_cmds::uninstall_stardew_smapi,
+            #[cfg(target_os = "macos")]
+            commands::native_cmds::get_stardew_smapi_status,
+            #[cfg(target_os = "macos")]
+            commands::native_cmds::install_bg3se,
+            #[cfg(target_os = "macos")]
+            commands::native_cmds::uninstall_bg3se,
             commands::stardew_cmds::get_stardew_mod_status,
             // Download Queue
             commands::notifications::get_download_queue,

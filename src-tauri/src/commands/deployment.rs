@@ -742,7 +742,9 @@ pub async fn get_deployment_health(
         let conflict_count = conflicts.len();
 
         let deploy_method = if is_deployed {
-            match resolve_game(&game_id, &bottle_name) {
+            // Runtime-agnostic — native installs have no bottle but still have
+            // a data_dir we can probe for hardlink-vs-copy.
+            match crate::resolve_game_any_runtime(&game_id, &bottle_name) {
                 Ok((_, _, data_dir)) => {
                     let staging_root = staging::staging_base_dir(&game_id, &bottle_name);
                     if deployer::same_filesystem(&staging_root, &data_dir) {
@@ -790,7 +792,9 @@ pub async fn get_deployment_stats(
         let is_deployed = total_deployed > 0;
 
         let deploy_method = if is_deployed {
-            match resolve_game(&game_id, &bottle_name) {
+            // Runtime-agnostic — native installs have no bottle but still have
+            // a data_dir we can probe for hardlink-vs-copy.
+            match crate::resolve_game_any_runtime(&game_id, &bottle_name) {
                 Ok((_, _, data_dir)) => {
                     let staging_root = staging::staging_base_dir(&game_id, &bottle_name);
                     if deployer::same_filesystem(&staging_root, &data_dir) {
@@ -971,3 +975,108 @@ fn build_tree_from_flat(entries: Vec<FileTreeNode>) -> Vec<FileTreeNode> {
     root_children.into_values().collect()
 }
 
+
+#[cfg(all(test, target_os = "macos"))]
+mod runtime_propagation_tests {
+    //! Tests that exercise the runtime-agnostic paths reachable via
+    //! `resolve_game_any_runtime`. These don't go through the Tauri
+    //! command wrappers (which need an `AppState`) — they replicate the
+    //! inner business logic to verify it works for native installs.
+
+    use crate::conflict_resolver;
+    use crate::database::ModDatabase;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    fn make_db(tmp: &TempDir) -> Arc<ModDatabase> {
+        let db_path = tmp.path().join("runtime-prop-test.db");
+        Arc::new(ModDatabase::new(&db_path).unwrap())
+    }
+
+    /// `analyze_conflicts_cmd`'s inner pipeline operates purely on the DB —
+    /// no resolver call required. Verify it returns a clean empty result
+    /// for a native `(game_id, bottle_name="")` keyspace.
+    #[test]
+    fn analyze_conflicts_works_for_native_keyspace() {
+        let tmp = TempDir::new().unwrap();
+        let db = make_db(&tmp);
+
+        // Use a "native" key: real game_id, empty bottle_name.
+        let game_id = "stardew_valley_native";
+        let bottle_name = "";
+
+        let conflicts = db.find_all_conflicts(game_id, bottle_name).unwrap();
+        let mods = db.list_mods(game_id, bottle_name).unwrap();
+        let file_hashes = db.get_file_hashes_bulk(&[]).unwrap_or_default();
+
+        let (suggestions, _stats) =
+            conflict_resolver::analyze_conflicts(&conflicts, &mods, None, &file_hashes);
+
+        // No mods, no conflicts → empty suggestions.
+        assert!(
+            suggestions.is_empty(),
+            "expected no conflict suggestions for empty native keyspace"
+        );
+    }
+
+    /// `create_mod_snapshot` is a pure DB write — it should accept the
+    /// native key shape `(game_id, bottle_name="")` and produce a snapshot
+    /// row. This validates that `bottle_name=""` is a valid keyspace.
+    #[test]
+    fn create_mod_snapshot_works_for_native_keyspace() {
+        let tmp = TempDir::new().unwrap();
+        let db = make_db(&tmp);
+        crate::rollback::init_schema(&db).unwrap();
+
+        let id = crate::rollback::create_snapshot(
+            &db,
+            "stardew_valley_native",
+            "",
+            "test-native-snap",
+            Some("created from runtime-propagation test"),
+        )
+        .unwrap();
+        assert!(id > 0, "snapshot id must be positive");
+
+        let snaps = crate::rollback::list_snapshots(&db, "stardew_valley_native", "").unwrap();
+        assert!(
+            snaps.iter().any(|s| s.name == "test-native-snap"),
+            "snapshot should be listable under the native keyspace"
+        );
+    }
+
+    /// `get_deployment_stats` reports `is_deployed=false` cleanly for an
+    /// empty native keyspace (no mods, no manifest). Exercises the path
+    /// where `resolve_game_any_runtime` would normally be called for the
+    /// `deploy_method` probe — when there's nothing deployed, that probe
+    /// is skipped entirely.
+    #[test]
+    fn deployment_stats_clean_for_empty_native_keyspace() {
+        let tmp = TempDir::new().unwrap();
+        let db = make_db(&tmp);
+
+        let game_id = "stardew_valley_native";
+        let bottle_name = "";
+
+        let (total_mods, total_enabled) = db.get_mod_counts(game_id, bottle_name).unwrap();
+        let total_deployed = db.get_deployment_count(game_id, bottle_name).unwrap();
+
+        assert_eq!(total_mods, 0);
+        assert_eq!(total_enabled, 0);
+        assert_eq!(total_deployed, 0);
+    }
+
+    /// `run_wine_diagnostics` (and other Wine-only commands) MUST reject
+    /// native via the resolve_bottle error — empty bottle_name returns
+    /// "Bottle '' not found" cleanly.
+    #[test]
+    fn wine_only_command_rejects_native_keyspace() {
+        let result = crate::resolve_bottle("");
+        assert!(result.is_err(), "resolve_bottle with empty name must fail");
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("not found"),
+            "Wine-only commands surface 'not found' error for native, got: {msg}"
+        );
+    }
+}

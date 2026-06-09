@@ -1658,6 +1658,25 @@ pub fn deploy_game(
     }
 }
 
+/// Same as [`deploy_game`] but also flips a `deploy_in_progress` flag for the
+/// native dispatch (Wine is unchanged; its progress is tracked by the
+/// higher-level `DeployGuard` that wraps the Tauri command).
+///
+/// Use this from Tauri commands that already hold the `AppState` so the
+/// launch button can show "deploy in progress" during a native deploy.
+pub fn deploy_game_with_flag(
+    detected: &crate::games::DetectedGame,
+    db: &std::sync::Arc<ModDatabase>,
+    deploy_in_progress: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<DeployResult> {
+    match &detected.runtime {
+        crate::runtime::GameRuntime::Wine(_) => deploy_wine_game(detected, db),
+        crate::runtime::GameRuntime::Native(_) => {
+            deploy_native_game_with_flag(detected, db, deploy_in_progress)
+        }
+    }
+}
+
 /// Full redeploy for a Wine/CrossOver-hosted game. Extracts bottle context
 /// from `detected.runtime` and delegates to [`redeploy_all`].
 ///
@@ -1682,6 +1701,29 @@ pub fn deploy_wine_game(
     )
 }
 
+/// Panic-safe RAII guard that flips an `AtomicBool` to `true` on creation and
+/// back to `false` on drop. Used inside the deployer to mark
+/// `deploy_in_progress` during a native deploy dispatch without requiring an
+/// `AppHandle` (the high-level [`crate::DeployGuard`] needs Tauri context).
+///
+/// The flag is observed by the launch path and the deploy-status UI to block
+/// game launches while a native deploy is in flight.
+pub(crate) struct NativeDeployFlagGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl NativeDeployFlagGuard {
+    pub(crate) fn new(flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        Self(flag)
+    }
+}
+
+impl Drop for NativeDeployFlagGuard {
+    fn drop(&mut self) {
+        self.0
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Native macOS deployment dispatcher. Routes to the registered per-game
 /// plugin's [`crate::games::GamePlugin::deploy_native`] implementation.
 ///
@@ -1692,10 +1734,40 @@ pub fn deploy_wine_game(
 /// than silently corrupting state.
 ///
 /// Wine games are not routed here — see [`deploy_wine_game`].
+///
+/// Existing free-form callers (tests, ad-hoc CLI paths) keep the no-flag
+/// behaviour; production launch / deploy commands should call
+/// [`deploy_native_game_with_flag`] instead to keep `deploy_in_progress`
+/// accurate for the duration of dispatch.
 pub fn deploy_native_game(
     detected: &crate::games::DetectedGame,
     db: &std::sync::Arc<ModDatabase>,
 ) -> Result<DeployResult> {
+    deploy_native_game_inner(detected, db, None)
+}
+
+/// Same as [`deploy_native_game`] but flips a shared `deploy_in_progress`
+/// flag to `true` for the duration of dispatch. The flag is restored on
+/// drop, including the panic-unwinding case, so the UI never gets stuck
+/// in a "deploy in progress" state if the plugin panics.
+pub fn deploy_native_game_with_flag(
+    detected: &crate::games::DetectedGame,
+    db: &std::sync::Arc<ModDatabase>,
+    deploy_in_progress: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<DeployResult> {
+    deploy_native_game_inner(detected, db, Some(deploy_in_progress.clone()))
+}
+
+fn deploy_native_game_inner(
+    detected: &crate::games::DetectedGame,
+    db: &std::sync::Arc<ModDatabase>,
+    deploy_in_progress: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<DeployResult> {
+    // Hold the flag for the entire dispatch — both plugin lookup and the
+    // actual deploy_native call. The guard's Drop clears the flag even on
+    // panic-unwind so the UI never gets stuck.
+    let _flag_guard = deploy_in_progress.map(NativeDeployFlagGuard::new);
+
     // Clone the Arc out of the registry so the registry lock is dropped
     // before we call deploy_native. Deploying walks every staged file and
     // performs hardlink / copy operations, which can take hundreds of
@@ -2317,5 +2389,59 @@ mod tests {
         assert!(result.is_err(), "expected stub error for unimplemented native deploy");
         let err_msg = format!("{:?}", result.unwrap_err());
         assert!(err_msg.contains("fakegame"), "error should mention game_id");
+    }
+
+    /// `deploy_native_game_with_flag` MUST flip the supplied
+    /// `deploy_in_progress` flag to `true` during dispatch and back to
+    /// `false` once the function returns — even when the underlying
+    /// dispatch errors out (missing plugin). The drop-on-error path is
+    /// what protects the UI from getting stuck in "deploy in progress".
+    #[test]
+    fn deploy_native_sets_deploy_in_progress_during_dispatch() {
+        use crate::runtime::{Architecture, GameRuntime, NativeContext, NativeSource};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let detected = crate::games::DetectedGame {
+            game_id: "fakegame_with_guard".into(),
+            display_name: "Fake".into(),
+            nexus_slug: "fake".into(),
+            game_path: PathBuf::from("/Applications/Fake.app/Contents/MacOS"),
+            exe_path: None,
+            data_dir: PathBuf::from("/Applications/Fake.app/Contents/MacOS"),
+            runtime: GameRuntime::Native(NativeContext {
+                app_bundle_path: PathBuf::from("/Applications/Fake.app"),
+                game_data_root: PathBuf::from("/Applications/Fake.app/Contents/MacOS"),
+                architecture: Architecture::AppleSilicon,
+                sandboxed: false,
+                source: NativeSource::Manual,
+            }),
+            steam_app_id: None,
+        };
+
+        let (db, _tmp, _, _) = setup();
+        let db = Arc::new(db);
+        let flag = Arc::new(AtomicBool::new(false));
+
+        assert!(!flag.load(Ordering::Relaxed), "precondition: flag false");
+
+        // No plugin registered for `fakegame_with_guard` → dispatch errors.
+        let result = deploy_native_game_with_flag(&detected, &db, &flag);
+        assert!(result.is_err());
+
+        // Flag must be cleared on the error path.
+        assert!(
+            !flag.load(Ordering::Relaxed),
+            "deploy_in_progress must be cleared by NativeDeployFlagGuard::drop even when dispatch errors"
+        );
+
+        // Independent guard-only check: the guard sets the flag while alive
+        // and clears it on drop. This is the panic-safety guarantee that
+        // covers the case where a plugin panics mid-deploy.
+        {
+            let _guard = NativeDeployFlagGuard::new(flag.clone());
+            assert!(flag.load(Ordering::Relaxed), "guard must set the flag");
+        }
+        assert!(!flag.load(Ordering::Relaxed), "drop must clear the flag");
     }
 }

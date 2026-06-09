@@ -123,6 +123,76 @@ fn read_version(macos: &Path) -> Option<String> {
     None
 }
 
+// ---------------------------------------------------------------------------
+// Install / uninstall stubs (RESEARCH BLOCKER)
+// ---------------------------------------------------------------------------
+//
+// Norbyte's macOS BG3SE build has historically been distributed as a `.dylib`
+// dropped into the `.app` bundle's `Contents/MacOS/` directory. The exact
+// install layout for the current release — which subdirectory, which file
+// names, whether a sibling `ScriptExtender/` directory holds the runtime
+// config — has not been independently verified against an upstream macOS
+// release at the time of writing.
+//
+// Per the project's honesty-first rule, we surface this as a research
+// blocker rather than ship an install path that could corrupt the user's
+// bundle. The Tauri commands [`crate::commands::native_cmds::install_bg3se`]
+// / `uninstall_bg3se` wrap these stubs and return the same error to the UI.
+//
+// When the install layout is verified (see
+// `docs/superpowers/plans/2026-04-28-native-macos-game-support-smapi-install-spec.md`
+// for the analogous SMAPI spec — BG3SE needs an equivalent doc before the
+// stubs become real implementations), replace the bodies below with the
+// real Mach-O validation + dylib placement logic and remove the BLOCKER
+// guard.
+
+/// Error returned by [`install`] / [`uninstall`] while BG3SE install support
+/// is a research blocker. The message is intentionally explicit so the UI
+/// can surface it verbatim without surprising the user.
+#[cfg(target_os = "macos")]
+pub const BG3SE_INSTALL_BLOCKER: &str =
+    "BG3SE install path verification pending — manual install required";
+
+/// Install BG3SE into a Baldur's Gate 3 `.app` bundle.
+///
+/// **Currently a stub.** Returns [`BG3SE_INSTALL_BLOCKER`] because the
+/// upstream install layout has not been verified for the current macOS
+/// release. The Mach-O arm64 fetch + validation pipeline is intentionally
+/// not run so the failure happens before any HTTP traffic.
+///
+/// macOS-only. On non-macOS this function does not exist (Linux builds skip
+/// it via `#[cfg]`).
+#[cfg(target_os = "macos")]
+pub fn install(
+    _app_bundle: &std::path::Path,
+    _db: &std::sync::Arc<crate::database::ModDatabase>,
+) -> Result<(), String> {
+    // TODO: implement real install once the upstream macOS layout is verified.
+    //
+    // 1. Fetch latest BG3SE release from `Norbyte/bg3se` (macOS asset).
+    // 2. Validate the dylib is a Mach-O arm64 binary (reject FAT-only / x86).
+    // 3. Snapshot the bundle via `rollback::create_native_snapshot`.
+    // 4. Drop dylib into the verified install location (TBD — DO NOT GUESS).
+    // 5. Clear the `com.apple.quarantine` xattr on the bundle.
+    Err(BG3SE_INSTALL_BLOCKER.to_string())
+}
+
+/// Uninstall BG3SE from a Baldur's Gate 3 `.app` bundle.
+///
+/// **Currently a stub.** Returns [`BG3SE_INSTALL_BLOCKER`] for symmetry
+/// with [`install`] — until install is verified, we cannot guarantee that
+/// uninstall removes the right files. Safer to return blocker than to
+/// silently no-op or, worse, delete unrelated files.
+///
+/// macOS-only.
+#[cfg(target_os = "macos")]
+pub fn uninstall(
+    _app_bundle: &std::path::Path,
+    _db: &std::sync::Arc<crate::database::ModDatabase>,
+) -> Result<(), String> {
+    Err(BG3SE_INSTALL_BLOCKER.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

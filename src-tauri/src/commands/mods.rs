@@ -1685,6 +1685,74 @@ pub fn base64_encode(input: &[u8]) -> String {
     out
 }
 
+/// Look up a native macOS game process PID by executable name via `pgrep -f`.
+///
+/// Used after launching a native game with `open steam://...` (or `open <bundle>`)
+/// since `open` detaches and we can't capture the child PID directly. After a
+/// short settle delay we ask `pgrep` for any process whose full command-line
+/// matches `exe_name`.
+///
+/// Returns `Some(pid)` only for a unique match. Returns `None` on:
+/// - `pgrep` exits non-zero (no match) — game hasn't started yet or path differs
+/// - `pgrep` returns zero or multiple matches — multi-match is ambiguous and we
+///   prefer no lock to the wrong lock
+/// - `pgrep` itself fails to spawn (also logs to `log::warn`)
+///
+/// macOS-only — `pgrep -f` behaves slightly differently on Linux Wine launches,
+/// which have their own PID handling.
+#[cfg(target_os = "macos")]
+pub fn lookup_native_pid(exe_name: &str) -> Option<u32> {
+    if exe_name.is_empty() {
+        return None;
+    }
+    let output = match std::process::Command::new("pgrep")
+        .arg("-f")
+        .arg(exe_name)
+        .output()
+    {
+        Ok(o) => o,
+        Err(e) => {
+            log::warn!("lookup_native_pid: pgrep spawn failed for '{}': {}", exe_name, e);
+            return None;
+        }
+    };
+    if !output.status.success() {
+        // Exit 1 from pgrep means "no match" — common during the first 100s of
+        // ms after `open` while the game is still launching.
+        log::debug!(
+            "lookup_native_pid: pgrep -f '{}' returned no match (exit {})",
+            exe_name,
+            output.status
+        );
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let pids: Vec<u32> = stdout
+        .lines()
+        .filter_map(|l| l.trim().parse::<u32>().ok())
+        .collect();
+    match pids.as_slice() {
+        [pid] => Some(*pid),
+        many if many.len() > 1 => {
+            log::warn!(
+                "lookup_native_pid: pgrep -f '{}' matched {} processes ({:?}); refusing to guess",
+                exe_name,
+                many.len(),
+                many,
+            );
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Linux fallback for [`lookup_native_pid`]. Always returns `None` on non-macOS.
+/// Keeps the call site compile-clean without per-call `#[cfg]` noise.
+#[cfg(not(target_os = "macos"))]
+pub fn lookup_native_pid(_exe_name: &str) -> Option<u32> {
+    None
+}
+
 #[tauri::command]
 pub async fn launch_game_cmd(
     game_id: String,
@@ -1744,6 +1812,46 @@ pub async fn launch_game_cmd(
             .ok_or_else(|| "Native game has no native runtime".to_string())?;
         let bundle_path = native_ctx.app_bundle_path.clone();
 
+        // Native launch resolution order:
+        //   1. Custom default executable, if the user has set one for this
+        //      game (bottle_name="" is the native sentinel in the DB).
+        //   2. `steam://run/<app_id>` for Steam sources so Steamworks injects.
+        //   3. `open <bundle>` (Launch Services double-click).
+        //
+        // For (1) we spawn the binary directly via `Command::new` so we can
+        // capture the PID and feed it to the game-lock manager — that's the
+        // path the game-lock check actually needs.
+        let custom_exe =
+            executables::get_default_executable(&db, &game_id, "").unwrap_or(None);
+
+        if let Some(custom) = custom_exe {
+            let exe_path = PathBuf::from(&custom.exe_path);
+            let work_dir = custom.working_dir.clone().map(PathBuf::from);
+            log::info!(
+                "launch_game_cmd: native custom exe '{}' at {}",
+                custom.name,
+                exe_path.display()
+            );
+            let mut cmd = std::process::Command::new(&exe_path);
+            if let Some(w) = work_dir.as_deref() {
+                cmd.current_dir(w);
+            }
+            let child = cmd
+                .spawn()
+                .map_err(|e| format!("Failed to spawn '{}': {}", exe_path.display(), e))?;
+            let pid = child.id();
+            // Don't wait — game runs detached. Register with the lock so
+            // mid-play destructive operations are blocked.
+            game_locks.register(&game_id, "", pid);
+            return Ok(LaunchResult {
+                executable: exe_path.to_string_lossy().to_string(),
+                bottle_name: String::new(),
+                pid: Some(pid),
+                success: true,
+                warning: None,
+            });
+        }
+
         let (launch_arg, launch_kind): (String, &'static str) =
             if matches!(native_ctx.source, crate::runtime::NativeSource::Steam) {
                 if let Some(app_id) = game.steam_app_id.as_deref() {
@@ -1773,10 +1881,25 @@ pub async fn launch_game_cmd(
                 stderr.trim()
             ));
         }
+
+        // `open` detaches — give the game ~400ms to start, then use pgrep -f
+        // to recover the process id. Best-effort: a None here just means the
+        // game-lock won't fire mid-play; the launch itself still succeeded.
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        let exe_name = native_ctx
+            .app_bundle_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        let pid = lookup_native_pid(exe_name);
+        if let Some(p) = pid {
+            log::info!("launch_game_cmd: native pid resolved via pgrep: {}", p);
+            game_locks.register(&game_id, "", p);
+        }
         return Ok(LaunchResult {
             executable: launch_arg,
             bottle_name: String::new(),
-            pid: None, // `open` detaches — we don't get the child PID
+            pid,
             success: true,
             warning: None,
         });
@@ -2630,3 +2753,25 @@ pub async fn backfill_categories(
     .map_err(crate::format_join_error)?
 }
 
+
+#[cfg(all(test, target_os = "macos"))]
+mod native_pid_tests {
+    use super::lookup_native_pid;
+
+    /// `pgrep -f` returns no match for a deliberately-bogus exe name → None.
+    /// This validates the "no match" branch which is the most common runtime
+    /// outcome (game still warming up, or process never started).
+    #[test]
+    fn lookup_native_pid_returns_none_for_nonexistent_process() {
+        // A name long+random enough that no real macOS process matches.
+        let pid = lookup_native_pid("zzzz-corkscrew-test-no-such-binary-xyz-9b1f2");
+        assert_eq!(pid, None);
+    }
+
+    /// Empty exe name short-circuits without spawning pgrep at all.
+    #[test]
+    fn lookup_native_pid_returns_none_for_empty_name() {
+        let pid = lookup_native_pid("");
+        assert_eq!(pid, None);
+    }
+}

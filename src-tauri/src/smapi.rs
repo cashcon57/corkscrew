@@ -302,6 +302,111 @@ pub fn uninstall(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// SMAPI release fetch + high-level install (macOS-only)
+// ---------------------------------------------------------------------------
+
+/// SMAPI release URL — releases come from GitHub.
+#[cfg(target_os = "macos")]
+const SMAPI_RELEASES_URL: &str = "https://api.github.com/repos/Pathoschild/SMAPI/releases/latest";
+
+#[cfg(target_os = "macos")]
+#[derive(serde::Deserialize)]
+struct SmapiGitHubAsset {
+    name: String,
+    browser_download_url: String,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(serde::Deserialize)]
+struct SmapiGitHubRelease {
+    tag_name: String,
+    assets: Vec<SmapiGitHubAsset>,
+}
+
+/// Pick a SMAPI installer asset that matches the canonical naming pattern
+/// (`SMAPI-X.Y.Z-installer.zip`). Returns the first matching asset.
+///
+/// SMAPI releases historically ship a single installer zip that contains the
+/// macOS, Linux, and Windows installers as siblings, so we don't need to
+/// filter by platform.
+#[cfg(target_os = "macos")]
+fn pick_smapi_installer_asset(assets: &[SmapiGitHubAsset]) -> Option<&SmapiGitHubAsset> {
+    assets.iter().find(|a| {
+        let lower = a.name.to_lowercase();
+        lower.starts_with("smapi-") && lower.ends_with("-installer.zip")
+    })
+}
+
+/// Fetch the latest SMAPI installer release from GitHub and return
+/// `(zip_bytes, asset_name, tag_name)`.
+///
+/// macOS-only. Calls `GET /repos/Pathoschild/SMAPI/releases/latest`.
+#[cfg(target_os = "macos")]
+fn fetch_latest_smapi_installer() -> Result<(Vec<u8>, String, String), SmapiError> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("Corkscrew/1.0 (github.com/cashcon57/corkscrew)")
+        .build()
+        .map_err(|e| SmapiError::Other(format!("failed to build HTTP client: {}", e)))?;
+
+    let release: SmapiGitHubRelease = client
+        .get(SMAPI_RELEASES_URL)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .map_err(|e| SmapiError::Other(format!("GET SMAPI releases failed: {}", e)))?
+        .error_for_status()
+        .map_err(|e| SmapiError::Other(format!("GitHub API error: {}", e)))?
+        .json()
+        .map_err(|e| SmapiError::Other(format!("parse releases JSON: {}", e)))?;
+
+    log::info!(
+        "Found SMAPI release {} with {} assets",
+        release.tag_name,
+        release.assets.len()
+    );
+
+    let asset = pick_smapi_installer_asset(&release.assets).ok_or_else(|| {
+        SmapiError::Other(
+            "No SMAPI installer asset found on GitHub. Check https://github.com/Pathoschild/SMAPI/releases manually."
+                .into(),
+        )
+    })?;
+
+    log::info!("Downloading SMAPI installer asset: {}", asset.name);
+
+    let bytes = client
+        .get(&asset.browser_download_url)
+        .send()
+        .map_err(|e| SmapiError::Other(format!("download asset failed: {}", e)))?
+        .error_for_status()
+        .map_err(|e| SmapiError::Other(format!("download HTTP error: {}", e)))?
+        .bytes()
+        .map_err(|e| SmapiError::Other(format!("read asset bytes: {}", e)))?
+        .to_vec();
+
+    Ok((bytes, asset.name.clone(), release.tag_name.clone()))
+}
+
+/// High-level install: fetch the latest SMAPI installer from GitHub, write it
+/// to a temp file, and call [`install`].
+///
+/// Returns the resolved SMAPI tag name on success so the caller can display
+/// the installed version to the user.
+#[cfg(target_os = "macos")]
+pub fn fetch_and_install(
+    app_bundle: &Path,
+    db: &Arc<crate::database::ModDatabase>,
+) -> Result<String, SmapiError> {
+    let (bytes, asset_name, tag) = fetch_latest_smapi_installer()?;
+    let tmp = tempfile::tempdir().map_err(SmapiError::Io)?;
+    let archive_path = tmp.path().join(&asset_name);
+    fs::write(&archive_path, &bytes)?;
+    install(app_bundle, &archive_path, db)?;
+    // Clear quarantine so Gatekeeper does not block the SMAPI launcher.
+    let _ = clear_quarantine(app_bundle);
+    Ok(tag)
+}
+
 /// Clear macOS Gatekeeper's `com.apple.quarantine` extended attribute
 /// from a Stardew Valley `.app` bundle.
 ///

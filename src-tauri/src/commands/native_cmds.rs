@@ -271,6 +271,129 @@ pub async fn register_manual_native_game(
     Ok(detected)
 }
 
+// ---------------------------------------------------------------------------
+// SMAPI (Stardew Valley) install / uninstall / status
+// ---------------------------------------------------------------------------
+
+/// Wire-format status for SMAPI installed in a Stardew Valley `.app` bundle.
+///
+/// Surfaced by [`get_stardew_smapi_status`] for the frontend to render the
+/// "SMAPI installed / not installed / version" state.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct SmapiStatusDto {
+    /// True iff both SMAPI markers (renamed vanilla launcher + SMAPI
+    /// executable) are present in the bundle's `Contents/MacOS/`.
+    pub installed: bool,
+    /// Installed SMAPI version as read from its `.deps.json` files, when
+    /// available. `None` if either the file is absent or no version key
+    /// could be extracted.
+    pub version: Option<String>,
+    /// Absolute path to the `.app` bundle that was inspected. Useful for
+    /// the frontend to display in tooltips / error messages.
+    pub bundle_path: String,
+    /// True iff the bundle is sandboxed (Mac App Store or
+    /// `/System/Applications/`). SMAPI install is refused for sandboxed
+    /// bundles regardless of marker presence.
+    pub sandboxed: bool,
+}
+
+/// Resolve a native Stardew Valley game and return its `.app` bundle path.
+///
+/// Returns `Err` with a clean message when the game id does not resolve, has
+/// no native runtime, or the bundle is sandboxed.
+#[cfg(target_os = "macos")]
+fn resolve_stardew_native_bundle(game_id: &str) -> Result<std::path::PathBuf, String> {
+    let (_opt_bottle, game, _data_dir) = crate::resolve_game_any_runtime(game_id, "")?;
+    let native = game
+        .runtime
+        .native()
+        .ok_or_else(|| "SMAPI install requires a native macOS Stardew Valley install".to_string())?;
+    if native.sandboxed {
+        return Err(
+            "SMAPI cannot install into a sandboxed (Mac App Store / system) bundle".to_string(),
+        );
+    }
+    Ok(native.app_bundle_path.clone())
+}
+
+/// Install SMAPI into the user's native Stardew Valley `.app` bundle.
+///
+/// Downloads the latest SMAPI installer from GitHub
+/// (`Pathoschild/SMAPI/releases/latest`), unpacks it into a temp directory,
+/// and applies it via [`crate::smapi::install`]. Snapshots are created
+/// automatically as part of the lower-level install pipeline. The
+/// `com.apple.quarantine` xattr is cleared on success so Gatekeeper does
+/// not block the SMAPI launcher.
+///
+/// macOS-only. Returns the resolved SMAPI tag name on success (e.g.
+/// `"4.1.10"`) so the frontend can surface "SMAPI X.Y.Z installed".
+#[cfg(target_os = "macos")]
+#[tauri::command]
+pub async fn install_stardew_smapi(
+    game_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    let bundle = resolve_stardew_native_bundle(&game_id)?;
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::smapi::fetch_and_install(&bundle, &db).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("SMAPI install task failed: {e}"))?
+}
+
+/// Uninstall SMAPI from the user's native Stardew Valley `.app` bundle.
+///
+/// Reverses [`install_stardew_smapi`]: removes SMAPI markers, restores the
+/// vanilla launcher from `StardewValley-original`, and preserves the user's
+/// `Mods/` directory. Idempotent — calling on a vanilla bundle is a no-op.
+///
+/// macOS-only. Returns a short human-readable status string.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+pub async fn uninstall_stardew_smapi(
+    game_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    let bundle = resolve_stardew_native_bundle(&game_id)?;
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::smapi::uninstall(&bundle, &db).map_err(|e| e.to_string())?;
+        Ok::<String, String>("SMAPI uninstalled".to_string())
+    })
+    .await
+    .map_err(|e| format!("SMAPI uninstall task failed: {e}"))?
+}
+
+/// Report SMAPI install state for the user's native Stardew Valley install.
+///
+/// Read-only. Safe to call even when SMAPI is not installed — returns
+/// `installed: false` with `version: None`.
+///
+/// macOS-only.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+pub async fn get_stardew_smapi_status(
+    game_id: String,
+) -> Result<SmapiStatusDto, String> {
+    let (_opt_bottle, game, _data_dir) = crate::resolve_game_any_runtime(&game_id, "")?;
+    let native = game
+        .runtime
+        .native()
+        .ok_or_else(|| "SMAPI status requires a native macOS Stardew Valley install".to_string())?;
+    let bundle = native.app_bundle_path.clone();
+    let sandboxed = native.sandboxed;
+    let installed = crate::smapi::is_installed(&bundle);
+    let version = crate::smapi::installed_version(&bundle);
+    Ok(SmapiStatusDto {
+        installed,
+        version,
+        bundle_path: bundle.display().to_string(),
+        sandboxed,
+    })
+}
+
 /// Return the BG3 Script Extender detection status for the given `.app` bundle.
 ///
 /// Pass the absolute path to the `.app` bundle directory (e.g.
@@ -284,4 +407,175 @@ pub async fn register_manual_native_game(
 pub async fn get_bg3se_status(app_bundle: String) -> Result<crate::bg3se::Bg3seStatus, String> {
     let path = std::path::PathBuf::from(app_bundle);
     Ok(crate::bg3se::detect(&path))
+}
+
+// ---------------------------------------------------------------------------
+// BG3SE install / uninstall (research-blocker stubs — see bg3se.rs)
+// ---------------------------------------------------------------------------
+
+/// Install BG3SE into the given Baldur's Gate 3 `.app` bundle.
+///
+/// **Stub.** Returns the [`crate::bg3se::BG3SE_INSTALL_BLOCKER`] error
+/// because the upstream install layout has not been verified. The frontend
+/// should surface the message verbatim and direct the user to the manual
+/// install instructions.
+///
+/// macOS-only.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+pub async fn install_bg3se(
+    app_bundle: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let bundle = std::path::PathBuf::from(app_bundle);
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || crate::bg3se::install(&bundle, &db))
+        .await
+        .map_err(|e| format!("BG3SE install task failed: {e}"))?
+}
+
+/// Uninstall BG3SE from the given Baldur's Gate 3 `.app` bundle.
+///
+/// **Stub.** Returns the [`crate::bg3se::BG3SE_INSTALL_BLOCKER`] error.
+///
+/// macOS-only.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+pub async fn uninstall_bg3se(
+    app_bundle: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let bundle = std::path::PathBuf::from(app_bundle);
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || crate::bg3se::uninstall(&bundle, &db))
+        .await
+        .map_err(|e| format!("BG3SE uninstall task failed: {e}"))?
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(all(test, target_os = "macos"))]
+mod smapi_cmd_tests {
+    use std::path::Path;
+    use std::sync::Arc;
+
+    /// Construct an in-memory `ModDatabase` with the rollback schema initialised.
+    fn make_db(dir: &Path) -> Arc<crate::database::ModDatabase> {
+        let db_path = dir.join("native-cmds-test.db");
+        let db = Arc::new(crate::database::ModDatabase::new(&db_path).unwrap());
+        crate::rollback::init_schema(&db).unwrap();
+        db
+    }
+
+    /// `install_stardew_smapi` MUST refuse with a clean error when the supplied
+    /// `game_id` does not resolve to a native runtime (this is the runtime gate;
+    /// no HTTP traffic should occur).
+    ///
+    /// We exercise the underlying resolver helper directly because the
+    /// `#[tauri::command]` wrapper requires a Tauri State, which is awkward to
+    /// fabricate in unit tests. The resolver is the only path-checking step in
+    /// the command — if it errors, the install never runs.
+    #[test]
+    fn install_stardew_smapi_refuses_when_no_native_runtime() {
+        // A game_id that is guaranteed to not resolve to a native runtime.
+        let result = super::resolve_stardew_native_bundle("definitely_not_a_real_game_id");
+        assert!(result.is_err(), "must error when no native runtime resolves");
+        let msg = result.unwrap_err();
+        // Confirm the error is the resolver's friendly message rather than a
+        // panic / unwrap failure.
+        assert!(
+            msg.to_lowercase().contains("native")
+                || msg.to_lowercase().contains("not found"),
+            "error must reference the native-runtime requirement: {msg}"
+        );
+    }
+
+    /// `get_stardew_smapi_status` MUST report `installed = true` once SMAPI
+    /// markers are present in a fake bundle. We bypass the full `resolve` step
+    /// by calling the underlying `smapi::is_installed` + `installed_version`
+    /// helpers directly to test the wire shape.
+    #[test]
+    fn get_stardew_smapi_status_reports_installed_after_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = dir.path().join("Stardew Valley.app");
+        let macos = bundle.join("Contents/MacOS");
+        std::fs::create_dir_all(&macos).unwrap();
+
+        // Pre-state: no SMAPI markers → not installed.
+        assert!(!crate::smapi::is_installed(&bundle));
+
+        // Drop the two markers SMAPI install creates.
+        std::fs::write(macos.join("StardewValley-original"), b"vanilla").unwrap();
+        std::fs::write(macos.join("StardewModdingAPI"), b"smapi binary").unwrap();
+        // Add a deps.json so the version probe succeeds.
+        std::fs::write(
+            macos.join("StardewModdingAPI.deps.json"),
+            br#"{"libraries":{"StardewModdingAPI/4.1.10":{}}}"#,
+        )
+        .unwrap();
+
+        // Build the wire payload directly (same shape `get_stardew_smapi_status`
+        // would produce given a resolved bundle path).
+        let dto = super::SmapiStatusDto {
+            installed: crate::smapi::is_installed(&bundle),
+            version: crate::smapi::installed_version(&bundle),
+            bundle_path: bundle.display().to_string(),
+            sandboxed: crate::native_scanner::is_sandboxed(&bundle),
+        };
+
+        assert!(dto.installed, "installed must be true after marker writes");
+        assert_eq!(dto.version.as_deref(), Some("4.1.10"));
+        assert!(!dto.sandboxed);
+
+        // Smoke-test serialisation so the wire shape stays compatible with
+        // the frontend.
+        let json = serde_json::to_string(&dto).unwrap();
+        assert!(json.contains("\"installed\":true"));
+        assert!(json.contains("\"version\":\"4.1.10\""));
+
+        // Sanity: silence unused warnings on the DB helper if no further use.
+        let _ = make_db(dir.path());
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod bg3se_cmd_tests {
+    use std::path::Path;
+    use std::sync::Arc;
+
+    fn make_db(dir: &Path) -> Arc<crate::database::ModDatabase> {
+        let db_path = dir.join("bg3se-cmds-test.db");
+        let db = Arc::new(crate::database::ModDatabase::new(&db_path).unwrap());
+        crate::rollback::init_schema(&db).unwrap();
+        db
+    }
+
+    /// Install must return the documented blocker error string verbatim so the
+    /// UI can render a deterministic message until research lands.
+    #[test]
+    fn install_bg3se_returns_blocker_stub_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = make_db(dir.path());
+        let bundle = dir.path().join("Baldurs Gate 3.app");
+        std::fs::create_dir_all(bundle.join("Contents/MacOS")).unwrap();
+
+        let result = crate::bg3se::install(&bundle, &db);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), crate::bg3se::BG3SE_INSTALL_BLOCKER);
+    }
+
+    /// Uninstall is symmetrically blocked.
+    #[test]
+    fn uninstall_bg3se_returns_blocker_stub_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = make_db(dir.path());
+        let bundle = dir.path().join("Baldurs Gate 3.app");
+        std::fs::create_dir_all(bundle.join("Contents/MacOS")).unwrap();
+
+        let result = crate::bg3se::uninstall(&bundle, &db);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), crate::bg3se::BG3SE_INSTALL_BLOCKER);
+    }
 }

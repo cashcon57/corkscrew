@@ -888,8 +888,11 @@ pub async fn restore_mod_snapshot(
 ) -> Result<serde_json::Value, String> {
     check_game_lock(&state.game_locks, &game_id, &bottle_name)?;
     let db = state.db.clone();
+    let deploy_in_progress = state.deploy_in_progress.clone();
     tokio::task::spawn_blocking(move || {
-        let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
+        // Runtime-agnostic resolve so native installs can also restore.
+        let (opt_bottle, game, _data_dir) =
+            crate::resolve_game_any_runtime(&game_id, &bottle_name)?;
 
         let result = rollback::restore_snapshot(&db, snapshot_id, &game_id, &bottle_name)?;
 
@@ -898,7 +901,11 @@ pub async fn restore_mod_snapshot(
             "deploy-progress",
             serde_json::json!({ "kind": "redeployStarted" }),
         );
-        deployer::redeploy_all(&db, &game_id, &bottle_name, &data_dir, &game.game_path)
+        // Route through the runtime dispatcher so native games are deployed
+        // via their per-game plugin rather than the Wine `redeploy_all` path.
+        // The dispatcher flips `deploy_in_progress` for the native leg so the
+        // launch button reflects the in-flight redeploy.
+        deployer::deploy_game_with_flag(&game, &db, &deploy_in_progress)
             .map_err(|e| format!("Failed to redeploy after snapshot restore: {}", e))?;
         let _ = app.emit(
             "deploy-progress",
@@ -906,7 +913,9 @@ pub async fn restore_mod_snapshot(
         );
 
         if game_id == "skyrimse" {
-            let _ = crate::sync_plugins_for_game(&game, &bottle);
+            if let Some(ref bottle) = opt_bottle {
+                let _ = crate::sync_plugins_for_game(&game, bottle);
+            }
         }
 
         Ok(serde_json::json!({
