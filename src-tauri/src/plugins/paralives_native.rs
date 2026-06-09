@@ -135,9 +135,16 @@ fn detect_from_candidates(
         .into_iter()
         .filter(|c| !c.sandboxed)
         .filter(|c| {
-            // Case-insensitive — Info.plist authors are inconsistent about
-            // identifier casing (com.Paralives.Paralives vs com.paralives.paralives etc).
-            c.info.bundle_identifier.eq_ignore_ascii_case(PARALIVES_BUNDLE_IDENTIFIER)
+            // Match liberally: bundle_identifier OR bundle_executable contains
+            // "paralives" (case-insensitive). We don't know the exact casing
+            // Paralives Studio shipped in Info.plist, and substring matching
+            // catches naming variants like `com.paralivesofficial.paralives`
+            // or `Paralives Mac`. Risk of false positive is minimal — no
+            // other app uses "paralives" in its identifiers.
+            let id = c.info.bundle_identifier.to_ascii_lowercase();
+            let exe = c.info.bundle_executable.to_ascii_lowercase();
+            id.contains("paralives") || exe.contains("paralives")
+                || c.info.bundle_identifier.eq_ignore_ascii_case(PARALIVES_BUNDLE_IDENTIFIER)
                 || c.info.bundle_executable.eq_ignore_ascii_case(PARALIVES_BUNDLE_EXECUTABLE)
         })
         .map(|c| {
