@@ -393,6 +393,59 @@ export async function addNativeGameManually(appPath: string): Promise<NativeAppC
   return invoke<NativeAppCandidate>("add_native_game_manually", { appPath });
 }
 
+// --- Manual native game add (file-picker flow) ---
+
+/** A known native plugin that matched a manually-added candidate. */
+export interface KnownNativePluginMatch {
+  /** The plugin's game_id (e.g. "paralives_native"). */
+  game_id: string;
+  /** Human-readable plugin display name for the confirmation prompt. */
+  display_name: string;
+  /** Nexus slug for the plugin (e.g. "paralives"). */
+  nexus_slug: string;
+}
+
+/**
+ * Result of calling `add_manual_native_game`. The frontend uses
+ * `matched_plugin` to decide whether to show the plugin-confirmation
+ * modal or immediately register as a generic unsupported game.
+ */
+export interface ManualNativeAddResult {
+  candidate: NativeAppCandidate;
+  matched_plugin: KnownNativePluginMatch | null;
+}
+
+/**
+ * Validate a user-supplied `.app` path and check whether it matches one
+ * of Corkscrew's known native plugins.
+ *
+ * Returns `ManualNativeAddResult.matched_plugin !== null` when a plugin
+ * was recognized. In that case, show the confirmation prompt and call
+ * `registerManualNativeGame` with the confirmed `game_id`.
+ */
+export async function addManualNativeGame(appPath: string): Promise<ManualNativeAddResult> {
+  return invoke<ManualNativeAddResult>("add_manual_native_game", { appPath });
+}
+
+/**
+ * Persist a manually-added native game and return a `DetectedGame` for
+ * immediate use in the game selector.
+ *
+ * - `usePluginGameId = "paralives_native"` → registers under the plugin's
+ *   `game_id` so mods inherit plugin-specific deploy/manifest logic.
+ * - `usePluginGameId = null` → registers as a generic unsupported native
+ *   game; the `game_id` is derived from the bundle identifier.
+ */
+export async function registerManualNativeGame(
+  candidate: NativeAppCandidate,
+  usePluginGameId: string | null,
+): Promise<DetectedGame> {
+  return invoke<DetectedGame>("register_manual_native_game", {
+    candidate,
+    usePluginGameId,
+  });
+}
+
 // --- Paralives BepInEx (Layer 3) ---
 
 export interface ParalivesBepInExStatus {

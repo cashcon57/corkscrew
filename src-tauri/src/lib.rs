@@ -1406,6 +1406,8 @@ pub fn run() {
             commands::config_commands::get_native_mode_visible,
             commands::config_commands::set_native_mode_visible,
             commands::native_cmds::rescan_native_games,
+            commands::native_cmds::add_manual_native_game,
+            commands::native_cmds::register_manual_native_game,
             commands::native_cmds::get_bg3se_status,
             commands::native_cmds::get_paralives_bepinex_status,
             commands::native_cmds::install_paralives_bepinex,

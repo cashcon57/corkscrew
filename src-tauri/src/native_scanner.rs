@@ -22,7 +22,7 @@ use crate::runtime::{Architecture, NativeSource};
 /// locations. Fields that require deeper per-bundle inspection
 /// (`architecture`, `sandboxed`) are filled in by later tasks; for now
 /// they carry safe zero-value defaults.
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct NativeAppCandidate {
     /// Absolute path to the `.app` bundle directory.
     pub bundle_path: PathBuf,
@@ -621,6 +621,87 @@ pub fn validate_manual_native_app(app_path: &Path) -> Result<NativeAppCandidate,
         source: NativeSource::Manual,
         sandboxed,
     })
+}
+
+// ---------------------------------------------------------------------
+// Known native plugin matching
+// ---------------------------------------------------------------------
+
+/// Information about a known native plugin that matched a manually-added
+/// candidate. Returned to the frontend so the user can confirm "yes,
+/// this is Paralives, use that plugin" or "no, treat as unsupported".
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct KnownNativePluginMatch {
+    /// The plugin's game_id (e.g. "paralives_native"). Use this when
+    /// registering the manual game so it inherits the plugin's deploy
+    /// logic.
+    pub game_id: String,
+    /// Human-readable plugin display name for the confirmation prompt.
+    pub display_name: String,
+    /// Nexus slug for the plugin (e.g. "paralives"). Frontend may want
+    /// to display it on confirmation.
+    pub nexus_slug: String,
+}
+
+/// Match a `NativeAppCandidate` against the known native plugins by
+/// bundle_identifier (case-insensitive substring) or bundle_executable.
+/// Returns `Some(KnownNativePluginMatch)` on first hit, `None` if no
+/// plugin recognizes the bundle.
+///
+/// Order matters — earlier entries win. Currently we have 4 native
+/// plugins (Paralives, Stardew, BG3, Crimson Desert).
+pub fn match_known_native_plugin(candidate: &NativeAppCandidate) -> Option<KnownNativePluginMatch> {
+    let id_lower = candidate.info.bundle_identifier.to_ascii_lowercase();
+    let exe_lower = candidate.info.bundle_executable.to_ascii_lowercase();
+
+    // Paralives — check first (newest plugin, most active dev)
+    if id_lower.contains("paralives") || exe_lower.contains("paralives") {
+        return Some(KnownNativePluginMatch {
+            game_id: "paralives_native".into(),
+            display_name: "Paralives (Native)".into(),
+            nexus_slug: "paralives".into(),
+        });
+    }
+
+    // Stardew Valley
+    if id_lower == "com.chucklefish.stardewvalley"
+        || exe_lower == "stardewvalley"
+        || exe_lower == "stardew valley"
+    {
+        return Some(KnownNativePluginMatch {
+            game_id: "stardew_valley_native".into(),
+            display_name: "Stardew Valley (Native)".into(),
+            nexus_slug: "stardewvalley".into(),
+        });
+    }
+
+    // Baldur's Gate 3
+    if (id_lower.contains("larian") && id_lower.contains("bg3"))
+        || id_lower == "com.larian.bg3"
+        || exe_lower.contains("baldur")
+        || exe_lower == "bg3"
+        || exe_lower == "bg3_dx11"
+    {
+        return Some(KnownNativePluginMatch {
+            game_id: "baldurs_gate_3_native".into(),
+            display_name: "Baldur's Gate 3 (Native)".into(),
+            nexus_slug: "baldursgate3".into(),
+        });
+    }
+
+    // Crimson Desert
+    if id_lower == "com.pearlabyss.crimsondesert"
+        || exe_lower == "crimsondesert"
+        || exe_lower == "crimson desert"
+    {
+        return Some(KnownNativePluginMatch {
+            game_id: "crimson_desert_native".into(),
+            display_name: "Crimson Desert (Native)".into(),
+            nexus_slug: "crimsondesert".into(),
+        });
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -1223,6 +1304,69 @@ mod tests {
         assert!(
             msg.contains("sandboxed"),
             "error must mention 'sandboxed': {msg}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // match_known_native_plugin tests
+    // -----------------------------------------------------------------
+
+    /// Build a minimal NativeAppCandidate with only the fields used by
+    /// match_known_native_plugin (bundle_identifier, bundle_executable).
+    fn fake_candidate(bundle_identifier: &str, bundle_executable: &str) -> NativeAppCandidate {
+        NativeAppCandidate {
+            bundle_path: PathBuf::from("/fake/path.app"),
+            info: crate::plist::InfoPlist {
+                bundle_identifier: bundle_identifier.to_string(),
+                bundle_executable: bundle_executable.to_string(),
+                short_version: None,
+                category: None,
+            },
+            architecture: Architecture::Unknown,
+            source: NativeSource::Manual,
+            sandboxed: false,
+        }
+    }
+
+    #[test]
+    fn match_known_native_plugin_recognizes_paralives_by_bundle_id() {
+        let c = fake_candidate("com.Paralives.Paralives", "Paralives");
+        let m = match_known_native_plugin(&c).expect("should match Paralives");
+        assert_eq!(m.game_id, "paralives_native");
+        assert_eq!(m.nexus_slug, "paralives");
+    }
+
+    #[test]
+    fn match_known_native_plugin_recognizes_stardew_by_executable() {
+        // Use an executable match rather than bundle ID to confirm fallback.
+        let c = fake_candidate("com.unknown.game", "StardewValley");
+        let m = match_known_native_plugin(&c).expect("should match Stardew by executable");
+        assert_eq!(m.game_id, "stardew_valley_native");
+        assert_eq!(m.nexus_slug, "stardewvalley");
+    }
+
+    #[test]
+    fn match_known_native_plugin_recognizes_bg3_by_bundle_id() {
+        let c = fake_candidate("com.larian.bg3", "bg3");
+        let m = match_known_native_plugin(&c).expect("should match BG3");
+        assert_eq!(m.game_id, "baldurs_gate_3_native");
+        assert_eq!(m.nexus_slug, "baldursgate3");
+    }
+
+    #[test]
+    fn match_known_native_plugin_recognizes_crimson_desert_by_bundle_id() {
+        let c = fake_candidate("com.pearlabyss.CrimsonDesert", "CrimsonDesert");
+        let m = match_known_native_plugin(&c).expect("should match Crimson Desert");
+        assert_eq!(m.game_id, "crimson_desert_native");
+        assert_eq!(m.nexus_slug, "crimsondesert");
+    }
+
+    #[test]
+    fn match_known_native_plugin_returns_none_for_unknown_bundle() {
+        let c = fake_candidate("com.example.unknowngame", "UnknownGame");
+        assert!(
+            match_known_native_plugin(&c).is_none(),
+            "unknown bundle should return None"
         );
     }
 }

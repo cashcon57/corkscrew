@@ -3,8 +3,17 @@
   import GameIcon from "$lib/components/GameIcon.svelte";
   import GameSupportBadge from "$lib/components/GameSupportBadge.svelte";
   import type { DetectedGame, KnownUninstalledGame } from "$lib/types";
-  import { setConfigValue, listKnownUninstalledGames, getAllGames } from "$lib/api";
+  import {
+    setConfigValue,
+    listKnownUninstalledGames,
+    getAllGames,
+    addManualNativeGame,
+    registerManualNativeGame,
+    type KnownNativePluginMatch,
+    type ManualNativeAddResult,
+  } from "$lib/api";
   import { openUrl } from "@tauri-apps/plugin-opener";
+  import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
   import { wineCtx } from "$lib/types";
 
   interface Props {
@@ -55,6 +64,63 @@
       loadNativeGames();
     }
   });
+
+  // ── Manual native game add ───────────────────────────────────────────────
+  let manualConfirmPending = $state<ManualNativeAddResult | null>(null);
+
+  async function addNativeGameViaPicker() {
+    const selected = await openFileDialog({
+      multiple: false,
+      directory: false,
+      filters: [{ name: "App Bundle", extensions: ["app"] }],
+      title: "Choose the .app bundle for the game",
+    });
+    if (!selected || Array.isArray(selected)) return;
+    try {
+      const result = await addManualNativeGame(selected as string);
+      if (result.matched_plugin) {
+        // Show confirmation modal so user can decide whether to use the plugin.
+        manualConfirmPending = result;
+      } else {
+        // No plugin matched — register as generic unsupported immediately.
+        await finalizeManualAdd(result, null);
+      }
+    } catch (err) {
+      console.error("addNativeGameViaPicker: addManualNativeGame failed:", err);
+    }
+  }
+
+  async function finalizeManualAdd(
+    result: ManualNativeAddResult,
+    usePluginGameId: string | null,
+  ) {
+    try {
+      const game = await registerManualNativeGame(result.candidate, usePluginGameId);
+      // Reload native game list to include the newly registered game.
+      await loadNativeGames();
+      onPickGame(game);
+      onClose();
+    } catch (err) {
+      console.error("finalizeManualAdd: registerManualNativeGame failed:", err);
+    } finally {
+      manualConfirmPending = null;
+    }
+  }
+
+  function confirmUsePlugin() {
+    if (!manualConfirmPending?.matched_plugin) return;
+    finalizeManualAdd(manualConfirmPending, manualConfirmPending.matched_plugin.game_id);
+  }
+
+  function declineUsePlugin() {
+    if (!manualConfirmPending) return;
+    finalizeManualAdd(manualConfirmPending, null);
+  }
+
+  function cancelManualAdd() {
+    manualConfirmPending = null;
+  }
+  // ─────────────────────────────────────────────────────────────────────────
 
   function archBadgeFromGame(game: DetectedGame): string {
     if (game.runtime.runtime !== 'native') return '';
@@ -190,6 +256,14 @@
             {/if}
           {/each}
         {/if}
+        <div class="dropdown-footer native-footer">
+          <button class="dropdown-add-game" onclick={addNativeGameViaPicker}>
+            <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+              <line x1="8" y1="3" x2="8" y2="13" /><line x1="3" y1="8" x2="13" y2="8" />
+            </svg>
+            Add an unsupported game…
+          </button>
+        </div>
       {:else}
         <!-- Wine / bottle-scoped game list -->
         {#if detectedGames.length > 0}
@@ -249,6 +323,36 @@
           </button>
         </div>
       {/if}
+    </div>
+  {/if}
+
+  {#if manualConfirmPending?.matched_plugin}
+    {@const match = manualConfirmPending.matched_plugin}
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <div
+      class="manual-confirm-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Use {match.display_name} plugin?"
+      onkeydown={(e) => { if (e.key === 'Escape') cancelManualAdd(); }}
+    >
+      <div class="manual-confirm-modal">
+        <h3 class="modal-title">Use {match.display_name} plugin?</h3>
+        <p class="modal-body">
+          Corkscrew recognized this app as <strong>{match.display_name}</strong>.
+          Using the plugin enables game-specific mod handling — correct mod folder
+          paths, deploy logic, and manifest support.
+        </p>
+        <p class="modal-body subtle">
+          If you decline, the game will be registered as a generic unsupported
+          native game. Mods deployed to it will be best-effort and may not work.
+        </p>
+        <div class="modal-actions">
+          <button class="btn-secondary" onclick={cancelManualAdd}>Cancel</button>
+          <button class="btn-secondary" onclick={declineUsePlugin}>No, treat as unsupported</button>
+          <button class="btn-primary" onclick={confirmUsePlugin}>Yes, use {match.display_name}</button>
+        </div>
+      </div>
     </div>
   {/if}
 </div>
@@ -503,5 +607,118 @@
   .dropdown-item.disabled {
     opacity: 0.5;
     cursor: not-allowed;
+  }
+
+  /* ── Native footer + manual-add button ──────────────────────────────────── */
+  .native-footer {
+    border-top: 1px solid var(--separator);
+    margin-top: 4px;
+    padding-top: 4px;
+  }
+
+  .dropdown-add-game {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 7px 10px;
+    border-radius: calc(var(--radius) - 2px);
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 12px;
+    text-align: left;
+    transition: background 0.1s ease, color 0.1s ease;
+  }
+
+  .dropdown-add-game:hover {
+    background: var(--surface-hover);
+    color: var(--accent);
+  }
+
+  /* ── Plugin confirmation modal ───────────────────────────────────────────── */
+  .manual-confirm-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 9999;
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+  }
+
+  .manual-confirm-modal {
+    background: var(--bg-elevated);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius-lg);
+    padding: 24px;
+    max-width: 420px;
+    width: calc(100% - 48px);
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .modal-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0;
+  }
+
+  .modal-body {
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+    margin: 0;
+  }
+
+  .modal-body.subtle {
+    color: var(--text-tertiary);
+    font-size: 12px;
+  }
+
+  .modal-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    margin-top: 4px;
+    flex-wrap: wrap;
+  }
+
+  .btn-primary,
+  .btn-secondary {
+    padding: 7px 14px;
+    border-radius: var(--radius);
+    font-size: 13px;
+    cursor: pointer;
+    border: 1px solid transparent;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+    white-space: nowrap;
+  }
+
+  .btn-primary {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+  }
+
+  .btn-primary:hover {
+    background: var(--accent-hover, color-mix(in srgb, var(--accent) 85%, #000));
+  }
+
+  .btn-secondary {
+    background: none;
+    color: var(--text-secondary);
+    border-color: var(--separator);
+  }
+
+  .btn-secondary:hover {
+    background: var(--surface-hover);
+    color: var(--text-primary);
   }
 </style>
