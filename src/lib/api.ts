@@ -493,6 +493,96 @@ export async function uninstallParalivesBepInEx(gameInstallDir: string): Promise
   return invoke<void>("uninstall_paralives_bepinex", { gameInstallDir });
 }
 
+// --- SMAPI (Stardew Valley, native macOS) ---
+
+/**
+ * Wire-format status DTO matching `SmapiStatusDto` in
+ * `src-tauri/src/commands/native_cmds.rs`. Returned by
+ * {@link getStardewSmapiStatus}.
+ */
+export interface SmapiStatus {
+  installed: boolean;
+  version: string | null;
+  bundle_path: string;
+  sandboxed: boolean;
+}
+
+/**
+ * Get the SMAPI install state for a native Stardew Valley install.
+ * Read-only; safe to call before any install has been attempted.
+ */
+export async function getStardewSmapiStatus(gameId: string): Promise<SmapiStatus> {
+  return invoke<SmapiStatus>("get_stardew_smapi_status", { gameId });
+}
+
+/**
+ * Install SMAPI into the native Stardew Valley `.app` bundle.
+ *
+ * Trust-boundary mutation: SMAPI's launcher patch invalidates the bundle's
+ * Apple Developer ID signature. Caller MUST surface the four-warning consent
+ * dialog before invoking this command.
+ *
+ * Resolves to the installed SMAPI version tag (e.g. `"4.1.10"`).
+ */
+export async function installStardewSmapi(gameId: string): Promise<string> {
+  return invoke<string>("install_stardew_smapi", { gameId });
+}
+
+/**
+ * Uninstall SMAPI from the native Stardew Valley `.app` bundle.
+ *
+ * Restores the vanilla launcher from `StardewValley-original` and preserves
+ * the user's `Mods/` directory. Idempotent.
+ */
+export async function uninstallStardewSmapi(gameId: string): Promise<string> {
+  return invoke<string>("uninstall_stardew_smapi", { gameId });
+}
+
+// --- BG3SE (Baldur's Gate 3, native macOS) ---
+
+/**
+ * Wire-format status DTO matching `Bg3seStatus` in `src-tauri/src/bg3se.rs`.
+ *
+ * `mac_supported = false` indicates a Windows-only `DWrite.dll` was found —
+ * the loader cannot run on macOS, and the UI should warn the user.
+ */
+export interface Bg3seStatus {
+  installed: boolean;
+  loader_path: string | null;
+  version: string | null;
+  mac_supported: boolean;
+}
+
+/**
+ * Detect BG3SE in a Baldur's Gate 3 `.app` bundle. Read-only.
+ * Pass the absolute path to the `.app` bundle.
+ */
+export async function getBg3seStatus(appBundle: string): Promise<Bg3seStatus> {
+  return invoke<Bg3seStatus>("get_bg3se_status", { appBundle });
+}
+
+/**
+ * Install BG3SE into a Baldur's Gate 3 `.app` bundle.
+ *
+ * **Currently a research-blocker stub on the backend** — invoking returns
+ * the `BG3SE_INSTALL_BLOCKER` error string. The UI should fall back to
+ * directing the user to the manual install instructions when that error
+ * surfaces.
+ */
+export async function installBg3se(appBundle: string): Promise<void> {
+  return invoke<void>("install_bg3se", { appBundle });
+}
+
+/**
+ * Uninstall BG3SE from a Baldur's Gate 3 `.app` bundle.
+ *
+ * **Currently a research-blocker stub on the backend** — see
+ * {@link installBg3se}.
+ */
+export async function uninstallBg3se(appBundle: string): Promise<void> {
+  return invoke<void>("uninstall_bg3se", { appBundle });
+}
+
 export async function getGameLogo(
   gameId: string,
   steamAppId?: string,

@@ -1,4 +1,14 @@
 <script lang="ts">
+  /**
+   * NexusAccountSection — shared NexusMods OAuth/API-key sign-in widget.
+   *
+   * Used by both /settings (Wine) and /native/settings to avoid duplicating
+   * ~140 lines of identical OAuth logic. Self-contained: hits stores directly
+   * for success/error toasts and config refresh, so no props are required for
+   * the default layout. The `variant` prop lets callers opt into either the
+   * Wine-settings styling (`"settings"`, default) or the native-glass styling
+   * (`"native"`).
+   */
   import { onMount } from "svelte";
   import { config, showError, showSuccess } from "$lib/stores";
   import {
@@ -9,9 +19,17 @@
     startOAuthLogin,
   } from "$lib/api";
 
-  const NEXUS_API_KEY_URL = "https://www.nexusmods.com/users/myaccount?tab=api+access";
+  interface Props {
+    /** Visual treatment — matches the surrounding page's card style. */
+    variant?: "settings" | "native";
+    /** Optional custom section title — defaults to "Nexus Mods Account". */
+    title?: string;
+  }
 
-  // ---- State ----
+  let { variant = "settings", title = "Nexus Mods Account" }: Props = $props();
+
+  const NEXUS_API_KEY_URL =
+    "https://www.nexusmods.com/users/myaccount?tab=api+access";
 
   interface AccountStatus {
     connected: boolean;
@@ -35,7 +53,9 @@
   const isLoggedIn = $derived(account?.connected === true);
   const isPremium = $derived(account?.is_premium === true);
   const authLabel = $derived(
-    account?.auth_type === "oauth" ? "Connected via Nexus Mods SSO" : "Connected via API key"
+    account?.auth_type === "oauth"
+      ? "Connected via Nexus Mods SSO"
+      : "Connected via API key",
   );
 
   onMount(async () => {
@@ -58,18 +78,22 @@
     validationError = null;
     try {
       await startOAuthLogin();
-      // OAuth flow completed — tokens are saved, refresh account status
       const status = await getNexusAccountStatus();
       if (status.connected) {
         account = status;
         showSuccess(`Signed in as ${status.name}`);
       } else {
-        validationError = "Authorization completed but account status check failed. Please try again.";
+        validationError =
+          "Authorization completed but account status check failed. Please try again.";
       }
     } catch (e: unknown) {
-      const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
+      const msg =
+        typeof e === "string"
+          ? e
+          : e instanceof Error
+            ? e.message
+            : String(e);
       if (msg.includes("Cancelled") || msg.includes("timed out")) {
-        // User cancelled or it timed out — not an error worth showing
         validationError = null;
       } else {
         validationError = `Sign-in failed: ${msg}`;
@@ -104,8 +128,15 @@
         await setConfigValue("nexus_api_key", "");
         const cfg2 = await getConfig();
         config.set(cfg2);
-      } catch { /* ignore cleanup errors */ }
-      const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
+      } catch {
+        /* ignore cleanup errors */
+      }
+      const msg =
+        typeof e === "string"
+          ? e
+          : e instanceof Error
+            ? e.message
+            : String(e);
       validationError = `Connection failed: ${msg}`;
     } finally {
       apiKeyConnecting = false;
@@ -127,19 +158,24 @@
       signingOut = false;
     }
   }
+
+  function openApiKeyUrl() {
+    import("@tauri-apps/plugin-opener")
+      .then((m) => m.openUrl(NEXUS_API_KEY_URL))
+      .catch((err) => console.error("openUrl failed:", err));
+  }
 </script>
 
-<!-- Nexus Mods Account Section -->
-<div class="section">
-  <h2 class="section-title">Nexus Mods Account</h2>
+<div class="section" class:variant-native={variant === "native"}>
+  <h2 class="section-title">{title}</h2>
   <div class="section-card">
     {#if loadingAuth}
       <div class="card-row centered-row">
         <span class="spinner-sm"></span>
-        <span class="loading-label">Checking account status...</span>
+        <span class="loading-label">Checking account status…</span>
       </div>
     {:else if isLoggedIn && account}
-      <!-- Logged in state -->
+      <!-- Logged-in state -->
       <div class="card-row auth-row">
         <div class="user-info">
           {#if account.avatar}
@@ -173,7 +209,7 @@
             disabled={signingOut}
             type="button"
           >
-            {signingOut ? "Signing out..." : "Sign Out"}
+            {signingOut ? "Signing out…" : "Sign Out"}
           </button>
         </div>
       </div>
@@ -185,12 +221,11 @@
             Connect your Nexus Mods account to download mods and browse collections.
           </span>
 
-          <!-- Primary: OAuth Sign In -->
           {#if oauthConnecting}
             <div class="oauth-waiting">
               <span class="spinner-sm"></span>
               <div class="oauth-waiting-text">
-                <span class="oauth-waiting-title">Waiting for authorization...</span>
+                <span class="oauth-waiting-title">Waiting for authorization…</span>
                 <span class="oauth-waiting-subtitle">Complete sign-in in your browser, then return here.</span>
               </div>
               <button
@@ -202,11 +237,7 @@
               </button>
             </div>
           {:else}
-            <button
-              class="btn-nexus"
-              onclick={handleOAuthLogin}
-              type="button"
-            >
+            <button class="btn-nexus" onclick={handleOAuthLogin} type="button">
               <svg class="nexus-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
                 <polyline points="10 17 15 12 10 7" />
@@ -220,7 +251,6 @@
             <span class="validation-error">{validationError}</span>
           {/if}
 
-          <!-- Fallback: API Key -->
           <div class="divider-row">
             <span class="divider-line"></span>
             <button
@@ -237,7 +267,7 @@
             <div class="api-key-section">
               <span class="api-key-hint">
                 Paste a personal API key from your
-                <button class="link-btn" onclick={() => { import("@tauri-apps/plugin-opener").then(m => m.openUrl(NEXUS_API_KEY_URL)); }} type="button">
+                <button class="link-btn" onclick={openApiKeyUrl} type="button">
                   Nexus Mods account
                 </button>
               </span>
@@ -258,7 +288,7 @@
                 >
                   {#if apiKeyConnecting}
                     <span class="spinner-sm spinner-white"></span>
-                    Verifying...
+                    Verifying…
                   {:else}
                     Connect
                   {/if}
@@ -276,7 +306,7 @@
   /* ---- Sections ---- */
 
   .section {
-    margin-bottom: var(--space-6);
+    margin-bottom: var(--space-6, 24px);
   }
 
   .section-title {
@@ -285,19 +315,35 @@
     color: var(--text-secondary);
     text-transform: uppercase;
     letter-spacing: 0.02em;
-    padding: 0 var(--space-4);
-    margin-bottom: var(--space-2);
+    padding: 0 var(--space-4, 16px);
+    margin-bottom: var(--space-2, 8px);
   }
 
   .section-card {
     background: var(--bg-grouped-secondary);
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-lg, 12px);
     overflow: hidden;
     box-shadow: var(--glass-refraction), var(--glass-edge-shadow);
   }
 
+  /* Native-mode variant: use the glass card treatment so this section blends
+     in with the rest of /native/settings. */
+  .variant-native .section-title {
+    font-size: 12px;
+    letter-spacing: 0.06em;
+    padding: 0 4px;
+    margin-bottom: 8px;
+  }
+
+  .variant-native .section-card {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 12px;
+    box-shadow: none;
+  }
+
   .card-row {
-    padding: var(--space-3) var(--space-4);
+    padding: var(--space-3, 12px) var(--space-4, 16px);
   }
 
   /* ---- Centered Row (loading) ---- */
@@ -306,8 +352,8 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: var(--space-3);
-    padding: var(--space-5);
+    gap: var(--space-3, 12px);
+    padding: var(--space-5, 20px);
   }
 
   .loading-label {
@@ -319,8 +365,8 @@
     display: inline-block;
     width: 14px;
     height: 14px;
-    border: 2px solid var(--separator-opaque);
-    border-top-color: var(--system-accent);
+    border: 2px solid var(--separator-opaque, rgba(255, 255, 255, 0.12));
+    border-top-color: var(--system-accent, #007aff);
     border-radius: 50%;
     animation: spin 0.75s linear infinite;
     flex-shrink: 0;
@@ -341,13 +387,13 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: var(--space-4);
+    gap: var(--space-4, 16px);
   }
 
   .user-info {
     display: flex;
     align-items: center;
-    gap: var(--space-3);
+    gap: var(--space-3, 12px);
     min-width: 0;
   }
 
@@ -377,7 +423,7 @@
   .user-name-row {
     display: flex;
     align-items: center;
-    gap: var(--space-2);
+    gap: var(--space-2, 8px);
   }
 
   .user-name {
@@ -410,7 +456,7 @@
 
   .auth-actions {
     display: flex;
-    gap: var(--space-2);
+    gap: var(--space-2, 8px);
     flex-shrink: 0;
   }
 
@@ -419,7 +465,7 @@
   .connect-flow {
     display: flex;
     flex-direction: column;
-    gap: var(--space-3);
+    gap: var(--space-3, 12px);
   }
 
   .connect-description {
@@ -465,8 +511,8 @@
   .oauth-waiting {
     display: flex;
     align-items: center;
-    gap: var(--space-3);
-    padding: var(--space-3);
+    gap: var(--space-3, 12px);
+    padding: var(--space-3, 12px);
     background: var(--surface-hover);
     border-radius: var(--radius-md, 8px);
     animation: fade-in 0.2s ease;
@@ -501,13 +547,13 @@
   .divider-row {
     display: flex;
     align-items: center;
-    gap: var(--space-3);
+    gap: var(--space-3, 12px);
   }
 
   .divider-line {
     flex: 1;
     height: 1px;
-    background: var(--separator-opaque);
+    background: var(--separator-opaque, rgba(255, 255, 255, 0.08));
   }
 
   .divider-toggle {
@@ -530,7 +576,7 @@
   .api-key-section {
     display: flex;
     flex-direction: column;
-    gap: var(--space-2);
+    gap: var(--space-2, 8px);
     animation: fade-in 0.2s ease;
   }
 
@@ -543,7 +589,7 @@
   .link-btn {
     background: none;
     border: none;
-    color: var(--system-accent);
+    color: var(--system-accent, #007aff);
     font-size: inherit;
     cursor: pointer;
     padding: 0;
@@ -560,25 +606,25 @@
 
   .api-key-input-row {
     display: flex;
-    gap: var(--space-2);
+    gap: var(--space-2, 8px);
   }
 
   .settings-input {
     flex: 1;
     min-width: 0;
-    padding: var(--space-2) var(--space-3);
-    background: var(--bg-base);
-    border: 1px solid var(--separator-opaque);
-    border-radius: var(--radius-sm);
+    padding: var(--space-2, 8px) var(--space-3, 12px);
+    background: var(--bg-base, rgba(255, 255, 255, 0.06));
+    border: 1px solid var(--separator-opaque, rgba(255, 255, 255, 0.12));
+    border-radius: var(--radius-sm, 6px);
     color: var(--text-primary);
     font-size: 13px;
-    font-family: var(--font-sans);
+    font-family: var(--font-sans, inherit);
     outline: none;
-    transition: border-color var(--duration) var(--ease);
+    transition: border-color var(--duration, 0.15s) var(--ease, ease);
   }
 
   .settings-input:focus {
-    border-color: var(--system-accent);
+    border-color: var(--system-accent, #007aff);
     box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.15);
   }
 
@@ -588,30 +634,30 @@
 
   .validation-error {
     font-size: 12px;
-    color: var(--red);
+    color: var(--red, #ef5350);
     line-height: 1.4;
   }
 
   /* ---- Buttons ---- */
 
   .btn-primary {
-    padding: var(--space-1) var(--space-3);
-    background: var(--system-accent);
-    color: var(--system-accent-on);
+    padding: var(--space-1, 4px) var(--space-3, 12px);
+    background: var(--system-accent, #007aff);
+    color: var(--system-accent-on, #fff);
     font-size: 13px;
     font-weight: 500;
     border: none;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-sm, 6px);
     white-space: nowrap;
     display: inline-flex;
     align-items: center;
-    gap: var(--space-2);
+    gap: var(--space-2, 8px);
     cursor: pointer;
-    transition: background var(--duration-fast) var(--ease);
+    transition: background var(--duration-fast, 0.15s) var(--ease, ease);
   }
 
   .btn-primary:hover:not(:disabled) {
-    background: var(--system-accent-hover);
+    background: var(--system-accent-hover, #1a8dff);
   }
 
   .btn-primary:disabled {
@@ -620,19 +666,21 @@
   }
 
   .btn-ghost {
-    padding: var(--space-1) var(--space-3);
+    padding: var(--space-1, 4px) var(--space-3, 12px);
     background: transparent;
     color: var(--text-secondary);
     font-size: 13px;
     font-weight: 500;
-    border: 1px solid var(--separator-opaque);
-    border-radius: var(--radius-sm);
+    border: 1px solid var(--separator-opaque, rgba(255, 255, 255, 0.12));
+    border-radius: var(--radius-sm, 6px);
     white-space: nowrap;
     display: inline-flex;
     align-items: center;
-    gap: var(--space-2);
+    gap: var(--space-2, 8px);
     cursor: pointer;
-    transition: background var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease);
+    transition:
+      background var(--duration-fast, 0.15s) var(--ease, ease),
+      color var(--duration-fast, 0.15s) var(--ease, ease);
   }
 
   .btn-ghost:hover {

@@ -10,7 +10,7 @@
   import type { AppConfig, ModTool, PlatformInfo, ToolInstallProgress, ToolUpdateInfo, VortexExtensionSummary, VortexGameRegistration } from "$lib/types";
   import { listen } from "@tauri-apps/api/event";
   import ThemeToggle from "$lib/components/ThemeToggle.svelte";
-  import SettingsAuthSection from "./settings-auth-section.svelte";
+  import NexusAccountSection from "$lib/components/NexusAccountSection.svelte";
   import IniManagerPanel from "$lib/components/IniManagerPanel.svelte";
   import WineDiagnosticsPanel from "$lib/components/WineDiagnosticsPanel.svelte";
   import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
@@ -1274,7 +1274,7 @@
   </div>
 
   <!-- Nexus Mods Account -->
-  <SettingsAuthSection />
+  <NexusAccountSection />
 
   <!-- Performance -->
   <div class="section">

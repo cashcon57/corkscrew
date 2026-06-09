@@ -7,17 +7,21 @@
     installParalivesBepInEx,
     uninstallParalivesBepInEx,
     rescanNativeGames,
-    getConfig,
-    setConfigValue,
-    clearOAuthTokens,
-    getNexusAccountStatus,
-    startOAuthLogin,
+    getStardewSmapiStatus,
+    installStardewSmapi,
+    uninstallStardewSmapi,
+    getBg3seStatus,
+    installBg3se,
+    uninstallBg3se,
     type ParalivesBepInExStatus,
+    type SmapiStatus,
+    type Bg3seStatus,
   } from "$lib/api";
-  import { nativeMode, selectedGame, games, config, showSuccess, showError } from "$lib/stores";
-  import { revealItemInDir } from "@tauri-apps/plugin-opener";
+  import { nativeMode, selectedGame, games } from "$lib/stores";
+  import { revealItemInDir, openUrl } from "@tauri-apps/plugin-opener";
   import { appDataDir } from "@tauri-apps/api/path";
   import type { DetectedGame } from "$lib/types";
+  import NexusAccountSection from "$lib/components/NexusAccountSection.svelte";
 
   // ---------------------------------------------------------------------------
   // Native mode toggle
@@ -51,137 +55,6 @@
       rescanError = String(err);
     } finally {
       rescanning = false;
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // NexusMods account (copied from settings-auth-section.svelte)
-  // TODO: extract to src/lib/components/settings/NexusAccountSection.svelte for DRY
-  // ---------------------------------------------------------------------------
-
-  const NEXUS_API_KEY_URL = "https://www.nexusmods.com/users/myaccount?tab=api+access";
-
-  interface AccountStatus {
-    connected: boolean;
-    auth_type?: string;
-    name?: string;
-    email?: string | null;
-    avatar?: string | null;
-    is_premium?: boolean;
-    membership_roles?: string[];
-  }
-
-  let account = $state<AccountStatus | null>(null);
-  let loadingAuth = $state(true);
-  let signingOut = $state(false);
-  let oauthConnecting = $state(false);
-  let showApiKeyFallback = $state(false);
-  let apiKeyInput = $state("");
-  let apiKeyConnecting = $state(false);
-  let validationError = $state<string | null>(null);
-
-  const isLoggedIn = $derived(account?.connected === true);
-  const isPremium = $derived(account?.is_premium === true);
-  const authLabel = $derived(
-    account?.auth_type === "oauth"
-      ? "Connected via Nexus Mods SSO"
-      : "Connected via API key"
-  );
-
-  async function checkAuthStatus() {
-    loadingAuth = true;
-    try {
-      account = await getNexusAccountStatus();
-    } catch {
-      account = { connected: false };
-    } finally {
-      loadingAuth = false;
-    }
-  }
-
-  async function handleOAuthLogin() {
-    oauthConnecting = true;
-    validationError = null;
-    try {
-      await startOAuthLogin();
-      const status = await getNexusAccountStatus();
-      if (status.connected) {
-        account = status;
-        showSuccess(`Signed in as ${status.name}`);
-      } else {
-        validationError =
-          "Authorization completed but account status check failed. Please try again.";
-      }
-    } catch (e: unknown) {
-      const msg =
-        typeof e === "string"
-          ? e
-          : e instanceof Error
-            ? e.message
-            : String(e);
-      if (msg.includes("Cancelled") || msg.includes("timed out")) {
-        validationError = null;
-      } else {
-        validationError = `Sign-in failed: ${msg}`;
-      }
-    } finally {
-      oauthConnecting = false;
-    }
-  }
-
-  async function handleApiKeyConnect() {
-    if (!apiKeyInput.trim()) return;
-    apiKeyConnecting = true;
-    validationError = null;
-    try {
-      await setConfigValue("nexus_api_key", apiKeyInput.trim());
-      const cfg = await getConfig();
-      config.set(cfg);
-      const status = await getNexusAccountStatus();
-      if (status.connected) {
-        account = status;
-        apiKeyInput = "";
-        showApiKeyFallback = false;
-        showSuccess(`Connected as ${status.name}`);
-      } else {
-        await setConfigValue("nexus_api_key", "");
-        const cfg2 = await getConfig();
-        config.set(cfg2);
-        validationError = "Invalid API key. Please check and try again.";
-      }
-    } catch (e: unknown) {
-      try {
-        await setConfigValue("nexus_api_key", "");
-        const cfg2 = await getConfig();
-        config.set(cfg2);
-      } catch {
-        /* ignore cleanup errors */
-      }
-      const msg =
-        typeof e === "string"
-          ? e
-          : e instanceof Error
-            ? e.message
-            : String(e);
-      validationError = `Connection failed: ${msg}`;
-    } finally {
-      apiKeyConnecting = false;
-    }
-  }
-
-  async function handleSignOut() {
-    signingOut = true;
-    try {
-      await clearOAuthTokens();
-      await setConfigValue("nexus_api_key", "");
-      const cfg = await getConfig();
-      config.set(cfg);
-      account = { connected: false };
-      showSuccess("Signed out of Nexus Mods");
-    } catch (e: unknown) {
-      showError(`Sign-out failed: ${e}`);
-    } finally {
-      signingOut = false;
     }
   }
 
@@ -248,8 +121,9 @@
   }
 
   onMount(() => {
-    checkAuthStatus();
     loadBepInExStatus();
+    loadSmapiStatus();
+    loadBg3seStatus();
   });
 
   $effect(() => {
@@ -302,6 +176,222 @@
       bepinexError = String(err);
       bepinexState = "error";
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // SMAPI (Stardew Valley) state machine
+  // ---------------------------------------------------------------------------
+
+  type SmapiUiState =
+    | "loading"
+    | "idle"
+    | "consent"
+    | "installing"
+    | "uninstalling"
+    | "installed"
+    | "sandboxed"
+    | "error";
+
+  let smapiState = $state<SmapiUiState>("loading");
+  let smapiStatus = $state<SmapiStatus | null>(null);
+  let smapiError = $state<string | null>(null);
+  let smapiConsentChecked = $state(false);
+  let smapiShowUninstallConfirm = $state(false);
+
+  /** Active Stardew Valley native game id, or null if not selected. */
+  let stardewGameId = $derived.by(() => {
+    const g = $selectedGame;
+    if (!g || g.game_id !== "stardew_valley_native") return null;
+    if (g.runtime.runtime !== "native") return null;
+    return g.game_id;
+  });
+
+  async function loadSmapiStatus() {
+    if (!stardewGameId) {
+      smapiState = "idle";
+      return;
+    }
+    try {
+      smapiStatus = await getStardewSmapiStatus(stardewGameId);
+      if (smapiStatus.sandboxed) {
+        smapiState = "sandboxed";
+      } else if (smapiStatus.installed) {
+        smapiState = "installed";
+      } else {
+        smapiState = "idle";
+      }
+    } catch (err) {
+      console.error("getStardewSmapiStatus failed:", err);
+      smapiError = String(err);
+      smapiState = "error";
+    }
+  }
+
+  $effect(() => {
+    const _ = stardewGameId;
+    smapiState = "loading";
+    smapiStatus = null;
+    smapiError = null;
+    smapiConsentChecked = false;
+    smapiShowUninstallConfirm = false;
+    loadSmapiStatus();
+  });
+
+  function beginSmapiConsent() {
+    smapiConsentChecked = false;
+    smapiState = "consent";
+  }
+
+  function cancelSmapiConsent() {
+    smapiState = smapiStatus?.installed ? "installed" : "idle";
+  }
+
+  async function confirmSmapiInstall() {
+    if (!stardewGameId) return;
+    smapiState = "installing";
+    smapiError = null;
+    try {
+      await installStardewSmapi(stardewGameId);
+      await loadSmapiStatus();
+    } catch (err) {
+      console.error("installStardewSmapi failed:", err);
+      smapiError = String(err);
+      smapiState = "error";
+    }
+  }
+
+  async function confirmSmapiUninstall() {
+    if (!stardewGameId) return;
+    smapiShowUninstallConfirm = false;
+    smapiState = "uninstalling";
+    smapiError = null;
+    try {
+      await uninstallStardewSmapi(stardewGameId);
+      await loadSmapiStatus();
+    } catch (err) {
+      console.error("uninstallStardewSmapi failed:", err);
+      smapiError = String(err);
+      smapiState = "error";
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // BG3SE (Baldur's Gate 3) state machine
+  // ---------------------------------------------------------------------------
+
+  type Bg3seUiState =
+    | "loading"
+    | "idle"
+    | "installing"
+    | "uninstalling"
+    | "installed"
+    | "windows_dll"
+    | "manual_required"
+    | "error";
+
+  const BG3SE_MANUAL_URL = "https://github.com/Norbyte/bg3se";
+
+  let bg3seState = $state<Bg3seUiState>("loading");
+  let bg3seStatus = $state<Bg3seStatus | null>(null);
+  let bg3seError = $state<string | null>(null);
+  let bg3seShowUninstallConfirm = $state(false);
+
+  /** `.app` bundle path for the active BG3 native game, or null. */
+  let bg3AppBundle = $derived.by(() => {
+    const g = $selectedGame;
+    if (!g || g.game_id !== "baldurs_gate_3_native") return null;
+    if (g.runtime.runtime !== "native") return null;
+    return g.runtime.app_bundle_path ?? null;
+  });
+
+  async function loadBg3seStatus() {
+    if (!bg3AppBundle) {
+      bg3seState = "idle";
+      return;
+    }
+    try {
+      bg3seStatus = await getBg3seStatus(bg3AppBundle);
+      if (bg3seStatus.installed && bg3seStatus.mac_supported) {
+        bg3seState = "installed";
+      } else if (!bg3seStatus.mac_supported) {
+        bg3seState = "windows_dll";
+      } else {
+        bg3seState = "idle";
+      }
+    } catch (err) {
+      console.error("getBg3seStatus failed:", err);
+      bg3seError = String(err);
+      bg3seState = "error";
+    }
+  }
+
+  $effect(() => {
+    const _ = bg3AppBundle;
+    bg3seState = "loading";
+    bg3seStatus = null;
+    bg3seError = null;
+    bg3seShowUninstallConfirm = false;
+    loadBg3seStatus();
+  });
+
+  /**
+   * Returns true when the backend error string indicates the install
+   * pipeline is a research-blocker stub (BG3SE_INSTALL_BLOCKER in bg3se.rs).
+   * The string starts with "BG3SE install is not yet supported".
+   */
+  function isBg3seBlockerError(msg: string): boolean {
+    return (
+      msg.includes("not yet supported") ||
+      msg.toLowerCase().includes("verification pending") ||
+      msg.toLowerCase().includes("install layout")
+    );
+  }
+
+  async function installBg3seFlow() {
+    if (!bg3AppBundle) return;
+    bg3seState = "installing";
+    bg3seError = null;
+    try {
+      await installBg3se(bg3AppBundle);
+      await loadBg3seStatus();
+    } catch (err) {
+      const msg = String(err);
+      console.error("installBg3se failed:", err);
+      if (isBg3seBlockerError(msg)) {
+        // Backend is currently a stub — surface a manual-install prompt
+        // pointing at the upstream repo so the user can self-serve.
+        bg3seState = "manual_required";
+      } else {
+        bg3seError = msg;
+        bg3seState = "error";
+      }
+    }
+  }
+
+  async function confirmBg3seUninstall() {
+    if (!bg3AppBundle) return;
+    bg3seShowUninstallConfirm = false;
+    bg3seState = "uninstalling";
+    bg3seError = null;
+    try {
+      await uninstallBg3se(bg3AppBundle);
+      await loadBg3seStatus();
+    } catch (err) {
+      const msg = String(err);
+      console.error("uninstallBg3se failed:", err);
+      if (isBg3seBlockerError(msg)) {
+        bg3seState = "manual_required";
+      } else {
+        bg3seError = msg;
+        bg3seState = "error";
+      }
+    }
+  }
+
+  function openBg3seManual() {
+    openUrl(BG3SE_MANUAL_URL).catch((err) =>
+      console.error("openUrl(BG3SE_MANUAL_URL) failed:", err)
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -391,147 +481,7 @@
   </div>
 
   <!-- ── 2. Nexus Mods Account ── -->
-  <!--
-    TODO: extract this widget into src/lib/components/settings/NexusAccountSection.svelte
-    so it can be shared between /settings and /native/settings without duplication.
-  -->
-  <h2 class="section-title">Nexus Mods Account</h2>
-  <div class="native-glass-card section">
-    <div class="card-inner">
-
-      {#if loadingAuth}
-        <div class="card-row centered-row">
-          <span class="spinner"></span>
-          <span class="loading-label">Checking account status…</span>
-        </div>
-      {:else if isLoggedIn && account}
-        <!-- Logged-in state -->
-        <div class="card-row auth-row">
-          <div class="user-info">
-            {#if account.avatar}
-              <img class="user-avatar" src={account.avatar} alt={account.name} />
-            {:else}
-              <div class="user-avatar user-avatar-placeholder">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
-                  <circle cx="12" cy="7" r="4" />
-                </svg>
-              </div>
-            {/if}
-            <div class="user-details">
-              <div class="user-name-row">
-                <span class="user-name">{account.name}</span>
-                {#if isPremium}
-                  <span class="premium-badge">Premium</span>
-                {/if}
-              </div>
-              <span class="auth-method-label">{authLabel}</span>
-            </div>
-          </div>
-          <div class="auth-actions">
-            <button
-              class="btn btn-secondary"
-              onclick={handleSignOut}
-              disabled={signingOut}
-              type="button"
-            >
-              {signingOut ? "Signing out…" : "Sign Out"}
-            </button>
-          </div>
-        </div>
-      {:else}
-        <!-- Not logged in -->
-        <div class="card-row">
-          <div class="connect-flow">
-            <span class="connect-description">
-              Connect your Nexus Mods account to download mods and browse collections.
-            </span>
-
-            {#if oauthConnecting}
-              <div class="oauth-waiting">
-                <span class="spinner"></span>
-                <div class="oauth-waiting-text">
-                  <span class="oauth-waiting-title">Waiting for authorization…</span>
-                  <span class="oauth-waiting-subtitle">Complete sign-in in your browser, then return here.</span>
-                </div>
-                <button
-                  class="btn btn-secondary btn-sm"
-                  onclick={() => { oauthConnecting = false; }}
-                  type="button"
-                >
-                  Cancel
-                </button>
-              </div>
-            {:else}
-              <button class="btn-nexus" onclick={handleOAuthLogin} type="button">
-                <svg class="nexus-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
-                  <polyline points="10 17 15 12 10 7" />
-                  <line x1="15" y1="12" x2="3" y2="12" />
-                </svg>
-                Sign in with Nexus Mods
-              </button>
-            {/if}
-
-            {#if validationError}
-              <span class="validation-error">{validationError}</span>
-            {/if}
-
-            <div class="divider-row">
-              <span class="divider-line"></span>
-              <button
-                class="divider-toggle"
-                onclick={() => { showApiKeyFallback = !showApiKeyFallback; validationError = null; }}
-                type="button"
-              >
-                {showApiKeyFallback ? "Hide API key option" : "Use API key instead"}
-              </button>
-              <span class="divider-line"></span>
-            </div>
-
-            {#if showApiKeyFallback}
-              <div class="api-key-section">
-                <span class="api-key-hint">
-                  Paste a personal API key from your
-                  <button
-                    class="link-btn"
-                    onclick={() => { import("@tauri-apps/plugin-opener").then((m) => m.openUrl(NEXUS_API_KEY_URL)).catch((err) => console.error("openUrl failed:", err)); }}
-                    type="button"
-                  >
-                    Nexus Mods account
-                  </button>
-                </span>
-                <div class="api-key-input-row">
-                  <input
-                    type="password"
-                    class="settings-input"
-                    placeholder="Paste your API key here"
-                    bind:value={apiKeyInput}
-                    onkeydown={(e) => { if (e.key === "Enter") handleApiKeyConnect(); }}
-                    oninput={() => { validationError = null; }}
-                  />
-                  <button
-                    class="btn btn-primary"
-                    onclick={handleApiKeyConnect}
-                    disabled={apiKeyConnecting || !apiKeyInput.trim()}
-                    type="button"
-                  >
-                    {#if apiKeyConnecting}
-                      <span class="spinner spinner-white"></span>
-                      Verifying…
-                    {:else}
-                      Connect
-                    {/if}
-                  </button>
-                </div>
-              </div>
-            {/if}
-          </div>
-        </div>
-      {/if}
-
-    </div>
-  </div>
+  <NexusAccountSection variant="native" />
 
   <!-- ── 3. Storage Paths ── -->
   <h2 class="section-title">Storage Paths</h2>
@@ -714,6 +664,292 @@
 
     </div>
   </div>
+
+  <!-- ── 4b. SMAPI (Stardew Valley) — only when stardew_valley_native is selected ── -->
+  {#if $selectedGame?.game_id === "stardew_valley_native"}
+    <h2 class="section-title">SMAPI (Stardew Valley)</h2>
+    <div class="native-glass-card section">
+      <div class="card-inner">
+
+        <div class="section-header">
+          <h3>SMAPI script-mod runtime <span class="badge experimental">Trust boundary</span></h3>
+          <p class="section-desc">
+            SMAPI (Stardew Modding API) is the community runtime for Stardew Valley script mods.
+            Installing it renames <code>Contents/MacOS/StardewValley</code> to
+            <code>StardewValley-original</code> and installs a new launcher, which
+            invalidates the Apple Developer ID signature on <code>Stardew Valley.app</code>.
+          </p>
+        </div>
+
+        {#if !stardewGameId}
+          <div class="status-row notice">
+            <span class="status-icon">ℹ</span>
+            <span>Select <strong>Stardew Valley</strong> in the game picker to manage SMAPI.</span>
+          </div>
+
+        {:else if smapiState === "loading"}
+          <div class="status-row">
+            <span class="spinner"></span>
+            <span>Checking SMAPI status…</span>
+          </div>
+
+        {:else if smapiState === "sandboxed"}
+          <div class="status-row error">
+            <span class="status-icon">✗</span>
+            <span>
+              This <code>Stardew Valley.app</code> is sandboxed (Mac App Store / system path).
+              Corkscrew will not modify sandboxed bundles. Install the Steam or GOG build to use SMAPI.
+            </span>
+          </div>
+
+        {:else if smapiState === "idle"}
+          <div class="status-row notice">
+            <span class="status-icon">○</span>
+            <span>SMAPI is <strong>not installed</strong>.</span>
+          </div>
+          <button class="btn btn-primary" onclick={beginSmapiConsent} type="button">Install SMAPI</button>
+
+        {:else if smapiState === "consent"}
+          <div class="consent-card">
+            <h4>Before installing SMAPI for Stardew Valley, please understand:</h4>
+            <ol class="consent-list">
+              <li>
+                SMAPI is third-party software, not signed by Apple. It is MIT-licensed
+                and developed openly at
+                <button class="link-btn" onclick={() => { openUrl("https://github.com/Pathoschild/SMAPI").catch((err) => console.error("openUrl failed:", err)); }} type="button">github.com/Pathoschild/SMAPI</button>.
+              </li>
+              <li>
+                Installing SMAPI <strong>patches the Stardew Valley bundle</strong> — the
+                Apple Developer ID code signature is invalidated. macOS Gatekeeper may
+                prompt you the first time you launch the patched bundle.
+              </li>
+              <li>
+                SMAPI mods have <strong>full code execution</strong> on your Mac. Only install
+                mods from sources you trust (e.g. the SMAPI-curated mod database on Nexus Mods).
+              </li>
+              <li>
+                Corkscrew takes a <strong>snapshot of the bundle before patching</strong>. You can
+                restore it from the game's state / rollback UI if anything goes wrong.
+              </li>
+            </ol>
+
+            <label class="consent-checkbox">
+              <input type="checkbox" bind:checked={smapiConsentChecked} />
+              I understand SMAPI invalidates the Stardew Valley.app signature and runs third-party code.
+            </label>
+
+            <div class="consent-actions">
+              <button class="btn btn-secondary" onclick={cancelSmapiConsent} type="button">Cancel</button>
+              <button
+                class="btn btn-primary"
+                disabled={!smapiConsentChecked}
+                onclick={confirmSmapiInstall}
+                type="button"
+              >
+                Install SMAPI
+              </button>
+            </div>
+          </div>
+
+        {:else if smapiState === "installing"}
+          <div class="status-row">
+            <span class="spinner"></span>
+            <span>Installing SMAPI… (downloading the latest release from GitHub)</span>
+          </div>
+
+        {:else if smapiState === "uninstalling"}
+          <div class="status-row">
+            <span class="spinner"></span>
+            <span>Uninstalling SMAPI… (restoring the vanilla launcher)</span>
+          </div>
+
+        {:else if smapiState === "installed"}
+          <div class="status-row success">
+            <span class="status-icon">✓</span>
+            <div class="status-row-content">
+              <span>SMAPI is <strong>installed</strong>.</span>
+              {#if smapiStatus?.version}
+                <span class="version-badge">{smapiStatus.version}</span>
+              {/if}
+            </div>
+          </div>
+
+          {#if !smapiShowUninstallConfirm}
+            <button
+              class="btn btn-danger-outline"
+              onclick={() => (smapiShowUninstallConfirm = true)}
+              type="button"
+            >
+              Uninstall SMAPI
+            </button>
+          {:else}
+            <div class="uninstall-confirm">
+              <p>
+                Restore the vanilla Stardew Valley launcher and remove SMAPI? Your
+                <code>Mods/</code> directory is preserved — it will just stop being loaded.
+              </p>
+              <div class="consent-actions">
+                <button class="btn btn-secondary" onclick={() => (smapiShowUninstallConfirm = false)} type="button">
+                  Cancel
+                </button>
+                <button class="btn btn-danger" onclick={confirmSmapiUninstall} type="button">Remove SMAPI</button>
+              </div>
+            </div>
+          {/if}
+
+        {:else if smapiState === "error"}
+          <div class="status-row error">
+            <span class="status-icon">✗</span>
+            <span>{smapiError}</span>
+          </div>
+          <div class="error-actions">
+            <button class="btn btn-secondary" onclick={loadSmapiStatus} type="button">Retry</button>
+            <button
+              class="btn btn-secondary"
+              onclick={() => { smapiState = smapiStatus?.installed ? "installed" : "idle"; smapiError = null; }}
+              type="button"
+            >
+              Cancel
+            </button>
+          </div>
+        {/if}
+
+      </div>
+    </div>
+  {/if}
+
+  <!-- ── 4c. BG3SE (Baldur's Gate 3) — only when baldurs_gate_3_native is selected ── -->
+  {#if $selectedGame?.game_id === "baldurs_gate_3_native"}
+    <h2 class="section-title">BG3 Script Extender</h2>
+    <div class="native-glass-card section">
+      <div class="card-inner">
+
+        <div class="section-header">
+          <h3>BG3SE script-mod runtime <span class="badge experimental">Experimental</span></h3>
+          <p class="section-desc">
+            The BG3 Script Extender (BG3SE) is the community runtime for Baldur's Gate 3
+            script mods. The macOS install layout is still under upstream verification —
+            install is currently manual. The <code>.app</code> bundle is not modified by Corkscrew;
+            mods live in <code>~/Documents/Larian Studios/Baldur's Gate 3/</code>.
+          </p>
+        </div>
+
+        {#if !bg3AppBundle}
+          <div class="status-row notice">
+            <span class="status-icon">ℹ</span>
+            <span>Select <strong>Baldur's Gate 3</strong> in the game picker to manage BG3SE.</span>
+          </div>
+
+        {:else if bg3seState === "loading"}
+          <div class="status-row">
+            <span class="spinner"></span>
+            <span>Checking BG3SE status…</span>
+          </div>
+
+        {:else if bg3seState === "windows_dll"}
+          <div class="status-row warn">
+            <span class="status-icon">⚠</span>
+            <span>
+              A Windows-only <code>DWrite.dll</code> was found in the bundle. That loader
+              cannot run on macOS — remove it and use the macOS <code>.dylib</code> instead.
+              See the upstream repository for the macOS install steps.
+            </span>
+          </div>
+          <button class="btn btn-secondary" onclick={openBg3seManual} type="button">
+            Open Norbyte/bg3se on GitHub
+          </button>
+
+        {:else if bg3seState === "idle"}
+          <div class="status-row notice">
+            <span class="status-icon">○</span>
+            <span>BG3SE is <strong>not installed</strong>.</span>
+          </div>
+          <button class="btn btn-primary" onclick={installBg3seFlow} type="button">Install BG3SE</button>
+
+        {:else if bg3seState === "installing"}
+          <div class="status-row">
+            <span class="spinner"></span>
+            <span>Attempting BG3SE install…</span>
+          </div>
+
+        {:else if bg3seState === "uninstalling"}
+          <div class="status-row">
+            <span class="spinner"></span>
+            <span>Uninstalling BG3SE…</span>
+          </div>
+
+        {:else if bg3seState === "manual_required"}
+          <div class="status-row warn">
+            <span class="status-icon">⚠</span>
+            <span>
+              <strong>Manual install required.</strong>
+              BG3SE's macOS install layout is still being verified upstream. Automated
+              install is not enabled in this build. Follow the upstream README to install
+              the macOS <code>.dylib</code> into <code>Contents/MacOS/</code> of your
+              Baldur's Gate 3 bundle.
+            </span>
+          </div>
+          <div class="error-actions">
+            <button class="btn btn-primary" onclick={openBg3seManual} type="button">
+              Open Norbyte/bg3se on GitHub
+            </button>
+            <button class="btn btn-secondary" onclick={loadBg3seStatus} type="button">Re-check</button>
+          </div>
+
+        {:else if bg3seState === "installed"}
+          <div class="status-row success">
+            <span class="status-icon">✓</span>
+            <div class="status-row-content">
+              <span>BG3SE is <strong>installed</strong>.</span>
+              {#if bg3seStatus?.version}
+                <span class="version-badge">{bg3seStatus.version}</span>
+              {/if}
+            </div>
+          </div>
+
+          {#if !bg3seShowUninstallConfirm}
+            <button
+              class="btn btn-danger-outline"
+              onclick={() => (bg3seShowUninstallConfirm = true)}
+              type="button"
+            >
+              Uninstall BG3SE
+            </button>
+          {:else}
+            <div class="uninstall-confirm">
+              <p>
+                Remove the BG3SE loader from <code>Contents/MacOS/</code>? Your script-mod
+                files in <code>~/Documents/Larian Studios/</code> are not touched.
+              </p>
+              <div class="consent-actions">
+                <button class="btn btn-secondary" onclick={() => (bg3seShowUninstallConfirm = false)} type="button">
+                  Cancel
+                </button>
+                <button class="btn btn-danger" onclick={confirmBg3seUninstall} type="button">Remove BG3SE</button>
+              </div>
+            </div>
+          {/if}
+
+        {:else if bg3seState === "error"}
+          <div class="status-row error">
+            <span class="status-icon">✗</span>
+            <span>{bg3seError}</span>
+          </div>
+          <div class="error-actions">
+            <button class="btn btn-secondary" onclick={loadBg3seStatus} type="button">Retry</button>
+            <button
+              class="btn btn-secondary"
+              onclick={() => { bg3seState = bg3seStatus?.installed ? "installed" : "idle"; bg3seError = null; }}
+              type="button"
+            >
+              Cancel
+            </button>
+          </div>
+        {/if}
+
+      </div>
+    </div>
+  {/if}
 
   <!-- ── 5. Code Signing & Trust Boundaries ── -->
   <h2 class="section-title">Code Signing & Trust Boundaries</h2>
