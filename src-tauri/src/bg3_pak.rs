@@ -270,8 +270,7 @@ pub fn read_pak_meta(pak_path: &Path) -> Result<crate::bg3_lsx::ModuleInfo, PakE
 
     let bytes = read_data(&mut file, &entry)?;
 
-    crate::bg3_lsx::read_meta_lsx_from_bytes(&bytes)
-        .map_err(|e| PakError::LsxParse(e.to_string()))
+    crate::bg3_lsx::read_meta_lsx_from_bytes(&bytes).map_err(|e| PakError::LsxParse(e.to_string()))
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -329,80 +328,80 @@ pub(crate) const TEST_META_LSX_XML: &[u8] = br#"<?xml version="1.0" encoding="UT
 /// can build synthetic `.pak` fixtures without duplicating this infrastructure.
 #[cfg(test)]
 pub(crate) fn make_minimal_lspk(entry_name: &str, payload: &[u8]) -> Vec<u8> {
-        // --- 1. Build the file entry (288 bytes) --------------------------------
-        let mut file_entry = [0u8; FILE_ENTRY_SIZE];
+    // --- 1. Build the file entry (288 bytes) --------------------------------
+    let mut file_entry = [0u8; FILE_ENTRY_SIZE];
 
-        // name field: null-padded UTF-8, 256 bytes
-        let name_bytes = entry_name.as_bytes();
-        let name_len = name_bytes.len().min(255);
-        file_entry[..name_len].copy_from_slice(&name_bytes[..name_len]);
-        // archive_part (chunk[256..260]) = 0 (already zeroed)
-        // flags (chunk[260..264]) = 0 (no compression)
-        // offset (chunk[264..272]) will be set below
-        // size_on_disk (chunk[272..280]) = payload.len()
-        let payload_len = payload.len() as u64;
-        file_entry[272..280].copy_from_slice(&payload_len.to_le_bytes());
-        // uncompressed_size (chunk[280..288]) = payload.len()
-        file_entry[280..288].copy_from_slice(&payload_len.to_le_bytes());
+    // name field: null-padded UTF-8, 256 bytes
+    let name_bytes = entry_name.as_bytes();
+    let name_len = name_bytes.len().min(255);
+    file_entry[..name_len].copy_from_slice(&name_bytes[..name_len]);
+    // archive_part (chunk[256..260]) = 0 (already zeroed)
+    // flags (chunk[260..264]) = 0 (no compression)
+    // offset (chunk[264..272]) will be set below
+    // size_on_disk (chunk[272..280]) = payload.len()
+    let payload_len = payload.len() as u64;
+    file_entry[272..280].copy_from_slice(&payload_len.to_le_bytes());
+    // uncompressed_size (chunk[280..288]) = payload.len()
+    file_entry[280..288].copy_from_slice(&payload_len.to_le_bytes());
 
-        // --- 2. Compute header size so we know where the payload sits ----------
-        //
-        // V18 header layout:
-        //   4  magic
-        //   4  version
-        //   8  file_list_offset
-        //   4  file_list_size
-        //   1  flags
-        //   1  priority
-        //  16  md5
-        //   2  num_parts
-        // = 40 bytes total
-        let header_size: u64 = 40;
+    // --- 2. Compute header size so we know where the payload sits ----------
+    //
+    // V18 header layout:
+    //   4  magic
+    //   4  version
+    //   8  file_list_offset
+    //   4  file_list_size
+    //   1  flags
+    //   1  priority
+    //  16  md5
+    //   2  num_parts
+    // = 40 bytes total
+    let header_size: u64 = 40;
 
-        // payload lives immediately after the header
-        let payload_offset = header_size;
+    // payload lives immediately after the header
+    let payload_offset = header_size;
 
-        // patch offset into the file entry
-        file_entry[264..272].copy_from_slice(&payload_offset.to_le_bytes());
+    // patch offset into the file entry
+    file_entry[264..272].copy_from_slice(&payload_offset.to_le_bytes());
 
-        // --- 3. LZ4-compress the file entry array ------------------------------
-        // The pak format uses raw LZ4 block format (no prepended size header).
-        let compressed_entries = lz4_flex::block::compress(&file_entry);
+    // --- 3. LZ4-compress the file entry array ------------------------------
+    // The pak format uses raw LZ4 block format (no prepended size header).
+    let compressed_entries = lz4_flex::block::compress(&file_entry);
 
-        // --- 4. File table block -----------------------------------------------
-        let mut file_table: Vec<u8> = Vec::new();
-        // num_files: u32 LE
-        file_table.extend_from_slice(&1u32.to_le_bytes());
-        // compressed_size: u32 LE
-        file_table.extend_from_slice(&(compressed_entries.len() as u32).to_le_bytes());
-        // compressed data
-        file_table.extend_from_slice(&compressed_entries);
+    // --- 4. File table block -----------------------------------------------
+    let mut file_table: Vec<u8> = Vec::new();
+    // num_files: u32 LE
+    file_table.extend_from_slice(&1u32.to_le_bytes());
+    // compressed_size: u32 LE
+    file_table.extend_from_slice(&(compressed_entries.len() as u32).to_le_bytes());
+    // compressed data
+    file_table.extend_from_slice(&compressed_entries);
 
-        // File table sits immediately after [header + payload].
-        // payload_offset == header_size, so:  file_table_offset = header_size + payload_len
-        let file_table_offset: u64 = header_size + payload_len;
+    // File table sits immediately after [header + payload].
+    // payload_offset == header_size, so:  file_table_offset = header_size + payload_len
+    let file_table_offset: u64 = header_size + payload_len;
 
-        // --- 5. Assemble the full buffer ----------------------------------------
-        let mut buf: Vec<u8> = Vec::new();
+    // --- 5. Assemble the full buffer ----------------------------------------
+    let mut buf: Vec<u8> = Vec::new();
 
-        // Header
-        buf.extend_from_slice(LSPK_MAGIC);                                  // magic
-        buf.extend_from_slice(&18u32.to_le_bytes());                         // version
-        buf.extend_from_slice(&file_table_offset.to_le_bytes());             // file_list_offset
-        buf.extend_from_slice(&(file_table.len() as u32).to_le_bytes());     // file_list_size
-        buf.push(0u8);                                                        // flags
-        buf.push(0u8);                                                        // priority
-        buf.extend_from_slice(&[0u8; 16]);                                   // md5 (zeroed)
-        buf.extend_from_slice(&1u16.to_le_bytes());                          // num_parts
+    // Header
+    buf.extend_from_slice(LSPK_MAGIC); // magic
+    buf.extend_from_slice(&18u32.to_le_bytes()); // version
+    buf.extend_from_slice(&file_table_offset.to_le_bytes()); // file_list_offset
+    buf.extend_from_slice(&(file_table.len() as u32).to_le_bytes()); // file_list_size
+    buf.push(0u8); // flags
+    buf.push(0u8); // priority
+    buf.extend_from_slice(&[0u8; 16]); // md5 (zeroed)
+    buf.extend_from_slice(&1u16.to_le_bytes()); // num_parts
 
-        // Payload
-        buf.extend_from_slice(payload);
+    // Payload
+    buf.extend_from_slice(payload);
 
-        // File table
-        buf.extend_from_slice(&file_table);
+    // File table
+    buf.extend_from_slice(&file_table);
 
-        buf
-    }
+    buf
+}
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
@@ -496,7 +495,10 @@ mod tests {
 
     #[test]
     fn normalise_path_converts_backslash_to_forward_slash() {
-        assert_eq!(normalise_path("Mods\\MyMod\\meta.lsx"), "mods/mymod/meta.lsx");
+        assert_eq!(
+            normalise_path("Mods\\MyMod\\meta.lsx"),
+            "mods/mymod/meta.lsx"
+        );
     }
 
     #[test]

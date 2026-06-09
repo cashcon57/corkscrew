@@ -1,7 +1,7 @@
 //! Wabbajack modlist commands: parsing, installation, and progress tracking.
 
-use crate::wabbajack;
 use crate::config;
+use crate::wabbajack;
 use crate::wabbajack::{ModlistSummary, ParsedModlist};
 use tauri::Emitter;
 
@@ -40,7 +40,11 @@ pub async fn check_wabbajack_cache(filename: String) -> Result<String, String> {
                 .join("downloads")
         });
     let dest = download_dir.join(&safe_name);
-    if dest.exists() && std::fs::metadata(&dest).map(|m| m.len() > 0).unwrap_or(false) {
+    if dest.exists()
+        && std::fs::metadata(&dest)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false)
+    {
         Ok(dest.to_string_lossy().to_string())
     } else {
         Err(format!("Cached file not found: {}", filename))
@@ -48,7 +52,12 @@ pub async fn check_wabbajack_cache(filename: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub async fn download_wabbajack_file(app: tauri::AppHandle, url: String, filename: String, force: Option<bool>) -> Result<String, String> {
+pub async fn download_wabbajack_file(
+    app: tauri::AppHandle,
+    url: String,
+    filename: String,
+    force: Option<bool>,
+) -> Result<String, String> {
     // Validate URL scheme to prevent SSRF
     if !url.starts_with("https://") && !url.starts_with("http://") {
         return Err(format!("Blocked unsafe URL scheme: {url}"));
@@ -100,8 +109,8 @@ pub async fn download_wabbajack_file(app: tauri::AppHandle, url: String, filenam
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;
 
-    let is_wj_cdn = url.contains("authored-files.wabbajack.org")
-        || url.contains("wabbajack.b-cdn.net");
+    let is_wj_cdn =
+        url.contains("authored-files.wabbajack.org") || url.contains("wabbajack.b-cdn.net");
 
     if is_wj_cdn {
         // WJ CDN uses a chunked protocol: definition.json.gz + parts/{index}
@@ -193,10 +202,7 @@ pub async fn download_wj_cdn_chunked(
     let definition: serde_json::Value = serde_json::from_str(&json_str)
         .map_err(|e| format!("Failed to parse CDN definition: {e}"))?;
 
-    let total_size = definition
-        .get("Size")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
+    let total_size = definition.get("Size").and_then(|v| v.as_u64()).unwrap_or(0);
     let parts = definition
         .get("Parts")
         .and_then(|v| v.as_array())
@@ -208,13 +214,16 @@ pub async fn download_wj_cdn_chunked(
         total_size as f64 / 1_048_576.0
     );
 
-    let _ = app.emit("wj-file-download-progress", serde_json::json!({
-        "phase": "started",
-        "total_parts": parts.len(),
-        "total_bytes": total_size,
-        "current_part": 0,
-        "bytes_downloaded": 0u64,
-    }));
+    let _ = app.emit(
+        "wj-file-download-progress",
+        serde_json::json!({
+            "phase": "started",
+            "total_parts": parts.len(),
+            "total_bytes": total_size,
+            "current_part": 0,
+            "bytes_downloaded": 0u64,
+        }),
+    );
 
     // Write to a temp file, rename on success to avoid partial corruption
     let dest_tmp = dest.with_extension("wabbajack.part");
@@ -275,19 +284,27 @@ pub async fn download_wj_cdn_chunked(
 
             let bytes_so_far = offset + size;
             if index % 10 == 0 || index == parts.len() as u64 - 1 {
-                log::info!("CDN download progress: part {}/{} ({:.1}%)", index + 1, parts.len(),
-                    bytes_so_far as f64 / total_size.max(1) as f64 * 100.0);
+                log::info!(
+                    "CDN download progress: part {}/{} ({:.1}%)",
+                    index + 1,
+                    parts.len(),
+                    bytes_so_far as f64 / total_size.max(1) as f64 * 100.0
+                );
             }
-            let _ = app.emit("wj-file-download-progress", serde_json::json!({
-                "phase": "downloading",
-                "total_parts": parts.len(),
-                "total_bytes": total_size,
-                "current_part": index + 1,
-                "bytes_downloaded": bytes_so_far,
-            }));
+            let _ = app.emit(
+                "wj-file-download-progress",
+                serde_json::json!({
+                    "phase": "downloading",
+                    "total_parts": parts.len(),
+                    "total_bytes": total_size,
+                    "current_part": index + 1,
+                    "bytes_downloaded": bytes_so_far,
+                }),
+            );
         }
         Ok(())
-    }.await;
+    }
+    .await;
 
     // Close the file handle
     drop(file);
@@ -302,13 +319,16 @@ pub async fn download_wj_cdn_chunked(
     std::fs::rename(&dest_tmp, dest)
         .map_err(|e| format!("Failed to rename temp file to final destination: {e}"))?;
 
-    let _ = app.emit("wj-file-download-progress", serde_json::json!({
-        "phase": "completed",
-        "total_parts": parts.len(),
-        "total_bytes": total_size,
-        "current_part": parts.len(),
-        "bytes_downloaded": total_size,
-    }));
+    let _ = app.emit(
+        "wj-file-download-progress",
+        serde_json::json!({
+            "phase": "completed",
+            "total_parts": parts.len(),
+            "total_bytes": total_size,
+            "current_part": parts.len(),
+            "bytes_downloaded": total_size,
+        }),
+    );
 
     log::info!(
         "WJ CDN download complete: {} -> {}",
@@ -318,4 +338,3 @@ pub async fn download_wj_cdn_chunked(
 
     Ok(())
 }
-

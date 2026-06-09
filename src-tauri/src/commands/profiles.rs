@@ -1,13 +1,13 @@
 //! Mod profile management: create, switch, save snapshots, and manage saves.
 
-use crate::plugins;
-use crate::profiles;
 use crate::config;
 use crate::deployer;
 use crate::games;
-use crate::plugins::skyrim_plugins::{PluginEntry};
-use crate::profiles::{Profile};
-use crate::{AppState, DeployGuard, check_game_lock, resolve_game};
+use crate::plugins;
+use crate::plugins::skyrim_plugins::PluginEntry;
+use crate::profiles;
+use crate::profiles::Profile;
+use crate::{check_game_lock, resolve_game, AppState, DeployGuard};
 use std::path::Path;
 use tauri::{AppHandle, State};
 
@@ -291,4 +291,3 @@ pub async fn restore_profile_saves(
     .await
     .map_err(crate::format_join_error)?
 }
-

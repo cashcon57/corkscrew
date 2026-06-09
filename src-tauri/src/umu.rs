@@ -67,7 +67,11 @@ pub fn detect_umu() -> UmuStatus {
             .ok()
             .and_then(|o| {
                 let stdout = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                if stdout.is_empty() { None } else { Some(stdout) }
+                if stdout.is_empty() {
+                    None
+                } else {
+                    Some(stdout)
+                }
             })
     });
 
@@ -148,10 +152,7 @@ pub fn game_to_umu_id(game_id: &str, steam_app_id: Option<u32>) -> Option<UmuGam
 /// Build the environment variables needed to launch a game through umu-run.
 ///
 /// The returned vars should be set before calling `umu-run <exe_path>`.
-pub fn build_umu_env(
-    umu_game_id: &UmuGameId,
-    proton_path: Option<&str>,
-) -> Vec<(String, String)> {
+pub fn build_umu_env(umu_game_id: &UmuGameId, proton_path: Option<&str>) -> Vec<(String, String)> {
     let mut env = vec![
         ("GAMEID".into(), umu_game_id.umu_id.clone()),
         ("STORE".into(), umu_game_id.store.clone()),
@@ -219,7 +220,9 @@ mod tests {
             store: "steam".into(),
         };
         let env = build_umu_env(&game_id, Some("/path/to/proton"));
-        assert!(env.iter().any(|(k, v)| k == "PROTONPATH" && v == "/path/to/proton"));
+        assert!(env
+            .iter()
+            .any(|(k, v)| k == "PROTONPATH" && v == "/path/to/proton"));
     }
 
     #[test]

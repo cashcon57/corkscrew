@@ -57,6 +57,26 @@ fn is_protected_extension(rel_path: &str) -> bool {
     false
 }
 
+fn should_copy_instead_of_hardlink(rel_path: &str) -> bool {
+    let lower = rel_path.replace('\\', "/").to_lowercase();
+    let path = Path::new(&lower);
+    if matches!(
+        path.extension().and_then(|ext| ext.to_str()),
+        Some("ini" | "toml" | "json" | "yaml" | "yml" | "log" | "cfg" | "txt")
+    ) {
+        return true;
+    }
+
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    file_name.starts_with("enb")
+        || file_name.starts_with("reshade")
+        || file_name == "dxgi.ini"
+        || file_name == "d3d11.ini"
+}
+
 /// Build a set of known vanilla file paths for a game (lowercase, for O(1) lookup).
 /// Returns None if no baseline is available for the game.
 fn build_vanilla_set(game_id: &str) -> Option<std::collections::HashSet<String>> {
@@ -173,6 +193,12 @@ pub enum DeployerError {
     #[error("Staging directory not found: {0}")]
     StagingNotFound(PathBuf),
 
+    #[error("Deploy mod {mod_id} failed for {failed_files:?}")]
+    DeployFailed {
+        mod_id: i64,
+        failed_files: Vec<String>,
+    },
+
     #[error("{0}")]
     Other(String),
 }
@@ -191,6 +217,12 @@ pub struct DeployResult {
     pub skipped_count: usize,
     /// Whether any files fell back to copy (hardlinks not supported).
     pub fallback_used: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeployFileMapping {
+    pub source_relative_path: String,
+    pub relative_path: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -276,8 +308,6 @@ fn deploy_mod_inner(
     deploy_target: &str,
     progress: Option<&DeployProgressCb>,
 ) -> Result<DeployResult> {
-    use rayon::prelude::*;
-
     if !staging_path.exists() {
         return Err(DeployerError::StagingNotFound(staging_path.to_path_buf()));
     }
@@ -300,6 +330,16 @@ fn deploy_mod_inner(
         .get_mod(mod_id)
         .map_err(|e| DeployerError::Database(e.to_string()))?
         .ok_or_else(|| DeployerError::Database(format!("Mod {} not found", mod_id)))?;
+    // Persist durable mod-level deploy target before writing manifest rows so
+    // a later full redeploy can recover the original target after manifest purge.
+    let deploy_base = data_dir.to_string_lossy().to_string();
+    let deploy_base_path = if deploy_target == "custom" {
+        Some(deploy_base.as_str())
+    } else {
+        None
+    };
+    db.set_deploy_target_for_mod_with_base(mod_id, deploy_target, deploy_base_path)
+        .map_err(|e| DeployerError::Database(e.to_string()))?;
     let my_priority = mod_info.install_priority;
 
     // Batch-load existing deployment manifest + mod priorities into memory
@@ -307,51 +347,137 @@ fn deploy_mod_inner(
     let manifest = db
         .get_deployment_manifest(game_id, bottle_name)
         .map_err(|e| DeployerError::Database(e.to_string()))?;
-    let deployed_map: std::collections::HashMap<String, i64> = manifest
+    let deployed_map: std::collections::HashMap<(String, String), i64> = manifest
         .iter()
-        .map(|e| (e.relative_path.replace('\\', "/"), e.mod_id))
+        .map(|e| {
+            (
+                (e.relative_path.replace('\\', "/"), e.deploy_target.clone()),
+                e.mod_id,
+            )
+        })
         .collect();
     let priorities = db
         .get_all_mod_priorities()
         .map_err(|e| DeployerError::Database(e.to_string()))?;
 
+    let staging_str = staging_path.to_string_lossy().to_string();
+    let manifest_deploy_target = if deploy_target == "custom" {
+        format!("custom:{}", data_dir.to_string_lossy())
+    } else {
+        deploy_target.to_string()
+    };
+    let mappings: Vec<DeployFileMapping> = files
+        .iter()
+        .map(|rel_path| DeployFileMapping {
+            source_relative_path: rel_path.clone(),
+            relative_path: rel_path.clone(),
+        })
+        .collect();
+    deploy_mod_mapped_inner(
+        db,
+        game_id,
+        bottle_name,
+        mod_id,
+        staging_path,
+        data_dir,
+        &mappings,
+        &manifest_deploy_target,
+        progress,
+        can_hardlink,
+        copy_method,
+        my_priority,
+        deployed_map,
+        priorities,
+        staging_str,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn deploy_mod_mapped_inner(
+    db: &ModDatabase,
+    game_id: &str,
+    bottle_name: &str,
+    mod_id: i64,
+    staging_path: &Path,
+    data_dir: &Path,
+    mappings: &[DeployFileMapping],
+    manifest_deploy_target: &str,
+    progress: Option<&DeployProgressCb>,
+    can_hardlink: bool,
+    copy_method: platform::FsCopyMethod,
+    my_priority: i32,
+    deployed_map: std::collections::HashMap<(String, String), i64>,
+    priorities: std::collections::HashMap<i64, i64>,
+    staging_str: String,
+) -> Result<DeployResult> {
     let deployed_count = AtomicUsize::new(0);
     let skipped_count = AtomicUsize::new(0);
     let missing_count = AtomicUsize::new(0);
     let junk_count = AtomicUsize::new(0);
     let fallback_used = AtomicBool::new(false);
-    let staging_str = staging_path.to_string_lossy().to_string();
-
+    let failure_count = AtomicUsize::new(0);
+    let failure_messages = std::sync::Mutex::new(Vec::<String>::new());
+    let conflict_backups = std::sync::Mutex::new(Vec::<(PathBuf, PathBuf)>::new());
     // Phase 1: Parallel file I/O — resolve conflicts, then hardlink or copy.
     // Collect successful deployments for batch database insert.
-    let results: Vec<Option<(String, &str)>> = files
+    let results: Vec<Option<(String, &str, Option<String>)>> = mappings
         .par_iter()
-        .map(|rel_path| {
+        .map(|mapping| {
+            let source_rel_path = &mapping.source_relative_path;
+            let rel_path = &mapping.relative_path;
             // Defense-in-depth: reject path traversal (string-level check)
-            if !crate::staging::is_safe_relative_path(rel_path) {
-                warn!("Deploy: skipping unsafe relative path: {}", rel_path);
+            if !crate::staging::is_safe_relative_path(source_rel_path)
+                || !crate::staging::is_safe_relative_path(rel_path)
+            {
+                failure_count.fetch_add(1, Ordering::Relaxed);
+                if let Ok(mut failures) = failure_messages.lock() {
+                    if failures.len() < 10 {
+                        failures.push(format!(
+                            "unsafe mapping {} -> {}",
+                            source_rel_path, rel_path
+                        ));
+                    }
+                }
+                warn!(
+                    "Deploy: skipping unsafe mapping: {} -> {}",
+                    source_rel_path, rel_path
+                );
                 return None;
             }
 
             // Defense-in-depth: post-join canonicalization check
-            let src = staging_path.join(rel_path);
+            let src = staging_path.join(source_rel_path);
             if src.exists() && !crate::staging::validate_path_within_base(staging_path, &src) {
-                warn!("Deploy: path escaped staging after join: {}", rel_path);
+                failure_count.fetch_add(1, Ordering::Relaxed);
+                if let Ok(mut failures) = failure_messages.lock() {
+                    if failures.len() < 10 {
+                        failures.push(format!("staging escape {}", source_rel_path));
+                    }
+                }
+                warn!(
+                    "Deploy: path escaped staging after join: {}",
+                    source_rel_path
+                );
                 return None;
             }
 
             // Defense-in-depth: skip packaging junk (fomod/, meta.ini, etc.)
-            if crate::installer::is_deploy_junk(std::path::Path::new(rel_path)) {
-                debug!("Deploy: skipping junk file: {}", rel_path);
+            if crate::installer::is_deploy_junk(std::path::Path::new(source_rel_path)) {
+                debug!("Deploy: skipping junk file: {}", source_rel_path);
                 junk_count.fetch_add(1, Ordering::Relaxed);
                 return None;
             }
 
-            let src = staging_path.join(rel_path);
             let dst = data_dir.join(rel_path);
 
             if !src.exists() {
                 missing_count.fetch_add(1, Ordering::Relaxed);
+                failure_count.fetch_add(1, Ordering::Relaxed);
+                if let Ok(mut failures) = failure_messages.lock() {
+                    if failures.len() < 10 {
+                        failures.push(format!("missing source {}", source_rel_path));
+                    }
+                }
                 if missing_count.load(Ordering::Relaxed) <= 5 {
                     warn!(
                         "Deploy: source file not found in staging: {} (mod {})",
@@ -375,8 +501,11 @@ fn deploy_mod_inner(
             }
 
             // Conflict resolution via in-memory lookup
-            let normalized_key = rel_path.replace('\\', "/");
-            if let Some(&owner_mod_id) = deployed_map.get(normalized_key.as_str()) {
+            let normalized_key = (
+                rel_path.replace('\\', "/"),
+                manifest_deploy_target.to_string(),
+            );
+            if let Some(&owner_mod_id) = deployed_map.get(&normalized_key) {
                 if owner_mod_id == mod_id {
                     return None; // already deployed by us
                 }
@@ -385,26 +514,49 @@ fn deploy_mod_inner(
                     skipped_count.fetch_add(1, Ordering::Relaxed);
                     return None;
                 }
-                // We win — remove existing deployed file
+                // We win — remove existing deployed file, but first snapshot it
+                // so a later failure in this same deploy attempt can restore
+                // the lower-priority owner instead of leaving manifest/disk
+                // inconsistent.
                 if dst.exists() {
+                    let backup_path = std::env::temp_dir().join(format!(
+                        "corkscrew-deploy-rollback-{}-{}-{}-{}",
+                        mod_id,
+                        std::process::id(),
+                        std::thread::current().name().unwrap_or("worker"),
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_nanos())
+                            .unwrap_or_default()
+                    ));
+                    if let Err(e) = fs::copy(&dst, &backup_path) {
+                        failure_count.fetch_add(1, Ordering::Relaxed);
+                        if let Ok(mut failures) = failure_messages.lock() {
+                            if failures.len() < 10 {
+                                failures.push(format!(
+                                    "failed to snapshot displaced file {}: {}",
+                                    rel_path, e
+                                ));
+                            }
+                        }
+                        return None;
+                    }
+                    if let Ok(mut backups) = conflict_backups.lock() {
+                        backups.push((dst.clone(), backup_path));
+                    }
                     let _ = fs::remove_file(&dst);
                 }
             } else if dst.exists() {
                 // File exists on disk but is NOT in the deployment manifest.
-                // This is likely a vanilla game file. Do NOT overwrite it —
-                // removing the existing file and deploying over it would make
-                // the vanilla file unrecoverable on undeploy/purge.
-                if is_protected_extension(rel_path) {
-                    warn!(
-                        "Deploy: skipping {} — would overwrite unmanaged vanilla file",
-                        rel_path
-                    );
-                    skipped_count.fetch_add(1, Ordering::Relaxed);
-                    return None;
-                }
-                // For non-protected files (textures, scripts, etc.), remove
-                // the existing file so the hardlink can succeed.
-                let _ = fs::remove_file(&dst);
+                // This is likely vanilla/user-managed loose content. Do NOT
+                // remove or overwrite it; Corkscrew would have no manifest row
+                // to restore it on undeploy/purge.
+                warn!(
+                    "Deploy: skipping {} — would overwrite unmanaged loose file",
+                    rel_path
+                );
+                skipped_count.fetch_add(1, Ordering::Relaxed);
+                return None;
             }
 
             if let Some(parent) = dst.parent() {
@@ -414,19 +566,33 @@ fn deploy_mod_inner(
             // Symlink re-check immediately before file operation to minimize TOCTOU window
             if let Ok(meta) = fs::symlink_metadata(&dst) {
                 if meta.file_type().is_symlink() {
+                    failure_count.fetch_add(1, Ordering::Relaxed);
+                    if let Ok(mut failures) = failure_messages.lock() {
+                        if failures.len() < 10 {
+                            failures.push(format!("pre-deploy symlink target {}", rel_path));
+                        }
+                    }
                     warn!("Pre-deploy symlink detected: {}", dst.display());
-                    skipped_count.fetch_add(1, Ordering::Relaxed);
                     return None;
                 }
             }
 
-            let method = if can_hardlink {
+            let method = if can_hardlink && !should_copy_instead_of_hardlink(rel_path) {
                 match fs::hard_link(&src, &dst) {
                     Ok(_) => {
                         // Post-deploy symlink check to tighten TOCTOU window
                         if let Ok(meta) = fs::symlink_metadata(&dst) {
                             if meta.file_type().is_symlink() {
                                 let _ = fs::remove_file(&dst);
+                                failure_count.fetch_add(1, Ordering::Relaxed);
+                                if let Ok(mut failures) = failure_messages.lock() {
+                                    if failures.len() < 10 {
+                                        failures.push(format!(
+                                            "post-deploy symlink target {}",
+                                            rel_path
+                                        ));
+                                    }
+                                }
                                 warn!("Post-deploy symlink detected, removed: {}", dst.display());
                                 return None;
                             }
@@ -441,6 +607,15 @@ fn deploy_mod_inner(
                             e
                         );
                         if let Err(copy_err) = platform::fast_copy(&src, &dst, copy_method) {
+                            failure_count.fetch_add(1, Ordering::Relaxed);
+                            if let Ok(mut failures) = failure_messages.lock() {
+                                if failures.len() < 10 {
+                                    failures.push(format!(
+                                        "copy failed {} -> {}: {}",
+                                        source_rel_path, rel_path, copy_err
+                                    ));
+                                }
+                            }
                             warn!(
                                 "Copy also failed for {} → {}: {}",
                                 src.display(),
@@ -455,6 +630,15 @@ fn deploy_mod_inner(
                 }
             } else {
                 if let Err(copy_err) = platform::fast_copy(&src, &dst, copy_method) {
+                    failure_count.fetch_add(1, Ordering::Relaxed);
+                    if let Ok(mut failures) = failure_messages.lock() {
+                        if failures.len() < 10 {
+                            failures.push(format!(
+                                "copy failed {} -> {}: {}",
+                                source_rel_path, rel_path, copy_err
+                            ));
+                        }
+                    }
                     warn!(
                         "Copy failed for {} → {}: {}",
                         src.display(),
@@ -469,21 +653,54 @@ fn deploy_mod_inner(
 
             let done = deployed_count.fetch_add(1, Ordering::Relaxed) + 1;
             if let Some(cb) = &progress {
-                let total = files.len() as u64;
+                let total = mappings.len() as u64;
                 let interval = (total / 50).clamp(10, 100);
                 if (done as u64).is_multiple_of(interval) || done as u64 == total {
                     cb(done as u64, total);
                 }
             }
-            Some((rel_path.clone(), method))
+            let hash = crate::platform::fast_hash(&src).ok();
+            Some((rel_path.clone(), method, hash))
         })
         .collect();
 
+    let final_failures = failure_count.load(Ordering::Relaxed);
+    if final_failures > 0 {
+        let deployed_rel_paths: Vec<String> = results
+            .iter()
+            .filter_map(|opt| opt.as_ref().map(|(rel_path, _, _)| rel_path.clone()))
+            .collect();
+        for rel_path in &deployed_rel_paths {
+            let dst = data_dir.join(rel_path);
+            let _ = fs::remove_file(&dst);
+            prune_empty_dirs(&dst, data_dir);
+        }
+        if let Ok(backups) = conflict_backups.lock() {
+            for (dst, backup) in backups.iter() {
+                if let Some(parent) = dst.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                let _ = fs::copy(backup, dst);
+                let _ = fs::remove_file(backup);
+            }
+        }
+        let failed_files = failure_messages
+            .lock()
+            .ok()
+            .map(|failures| failures.clone())
+            .filter(|failures| !failures.is_empty())
+            .unwrap_or_else(|| vec!["unknown deployment failure".to_string()]);
+        return Err(DeployerError::DeployFailed {
+            mod_id,
+            failed_files,
+        });
+    }
+
     // Phase 2: Batch-insert all deployment entries in a single transaction.
-    let batch: Vec<(&str, &str, i64, &str, &str, &str, &str)> = results
+    let batch: Vec<(&str, &str, i64, &str, &str, &str, Option<&str>, &str)> = results
         .iter()
         .filter_map(|opt| {
-            opt.as_ref().map(|(rel_path, method)| {
+            opt.as_ref().map(|(rel_path, method, hash)| {
                 (
                     game_id,
                     bottle_name,
@@ -491,15 +708,31 @@ fn deploy_mod_inner(
                     rel_path.as_str(),
                     staging_str.as_str(),
                     *method,
-                    deploy_target,
+                    hash.as_deref(),
+                    manifest_deploy_target,
                 )
             })
         })
         .collect();
 
     if !batch.is_empty() {
-        db.batch_add_deployment_entries(&batch)
-            .map_err(|e| DeployerError::Database(e.to_string()))?;
+        if let Err(e) = db.batch_add_deployment_entries_with_hashes(&batch) {
+            for (rel_path, _, _) in results.iter().filter_map(|opt| opt.as_ref()) {
+                let dst = data_dir.join(rel_path);
+                let _ = fs::remove_file(&dst);
+                prune_empty_dirs(&dst, data_dir);
+            }
+            if let Ok(backups) = conflict_backups.lock() {
+                for (dst, backup) in backups.iter() {
+                    if let Some(parent) = dst.parent() {
+                        let _ = fs::create_dir_all(parent);
+                    }
+                    let _ = fs::copy(backup, dst);
+                    let _ = fs::remove_file(backup);
+                }
+            }
+            return Err(DeployerError::Database(e.to_string()));
+        }
     }
 
     let final_deployed = deployed_count.load(Ordering::Relaxed);
@@ -522,23 +755,29 @@ fn deploy_mod_inner(
 
     let final_junk = junk_count.load(Ordering::Relaxed);
 
-    // If we expected to deploy files but none succeeded, warn but don't error.
-    // This can happen legitimately: FOMOD reconfiguration, stale staging, or
-    // mods consisting entirely of metadata files (meta.ini, fomod/, etc.).
-    let deployable = files.len().saturating_sub(final_junk);
+    // If expected deployable files exist but none succeeded, fail closed. Pure
+    // metadata/junk-only mods still succeed as no-op because deployable == 0.
+    let deployable = mappings.len().saturating_sub(final_junk);
     if final_deployed == 0 && deployable > 0 {
-        warn!(
-            "Deploy mod {}: 0 of {} deployable files deployed (junk={}, missing={}) \
-             staging_path={}, data_dir={}, exists=({}, {})",
+        return Err(DeployerError::DeployFailed {
             mod_id,
-            deployable,
-            final_junk,
-            final_missing,
-            staging_path.display(),
-            data_dir.display(),
-            staging_path.exists(),
-            data_dir.exists(),
-        );
+            failed_files: vec![format!(
+                "0 of {} deployable files deployed (junk={}, missing={}) staging_path={} data_dir={} exists=({}, {})",
+                deployable,
+                final_junk,
+                final_missing,
+                staging_path.display(),
+                data_dir.display(),
+                staging_path.exists(),
+                data_dir.exists(),
+            )],
+        });
+    }
+
+    if let Ok(backups) = conflict_backups.lock() {
+        for (_, backup) in backups.iter() {
+            let _ = fs::remove_file(backup);
+        }
     }
 
     Ok(DeployResult {
@@ -546,6 +785,80 @@ fn deploy_mod_inner(
         skipped_count: final_skipped,
         fallback_used: final_fallback,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn deploy_mod_mapped_with_progress(
+    db: &ModDatabase,
+    game_id: &str,
+    bottle_name: &str,
+    mod_id: i64,
+    staging_path: &Path,
+    data_dir: &Path,
+    mappings: &[DeployFileMapping],
+    deploy_target: &str,
+    progress: &DeployProgressCb,
+) -> Result<DeployResult> {
+    if !staging_path.exists() {
+        return Err(DeployerError::StagingNotFound(staging_path.to_path_buf()));
+    }
+    let can_hardlink = same_filesystem(staging_path, data_dir);
+    let copy_method = platform::detect_copy_method(staging_path, data_dir);
+    if !can_hardlink {
+        let deploy_size = crate::disk_budget::dir_size(staging_path);
+        crate::disk_budget::check_space_guard(data_dir, deploy_size)
+            .map_err(DeployerError::Other)?;
+    }
+    let mod_info = db
+        .get_mod(mod_id)
+        .map_err(|e| DeployerError::Database(e.to_string()))?
+        .ok_or_else(|| DeployerError::Database(format!("Mod {} not found", mod_id)))?;
+    let deploy_base = data_dir.to_string_lossy().to_string();
+    let deploy_base_path = if deploy_target == "custom" {
+        Some(deploy_base.as_str())
+    } else {
+        None
+    };
+    db.set_deploy_target_for_mod_with_base(mod_id, deploy_target, deploy_base_path)
+        .map_err(|e| DeployerError::Database(e.to_string()))?;
+    let manifest = db
+        .get_deployment_manifest(game_id, bottle_name)
+        .map_err(|e| DeployerError::Database(e.to_string()))?;
+    let deployed_map: std::collections::HashMap<(String, String), i64> = manifest
+        .iter()
+        .map(|e| {
+            (
+                (e.relative_path.replace('\\', "/"), e.deploy_target.clone()),
+                e.mod_id,
+            )
+        })
+        .collect();
+    let priorities = db
+        .get_all_mod_priorities()
+        .map_err(|e| DeployerError::Database(e.to_string()))?;
+    let staging_str = staging_path.to_string_lossy().to_string();
+    let manifest_deploy_target = if deploy_target == "custom" {
+        format!("custom:{}", data_dir.to_string_lossy())
+    } else {
+        deploy_target.to_string()
+    };
+    deploy_mod_mapped_inner(
+        db,
+        game_id,
+        bottle_name,
+        mod_id,
+        staging_path,
+        data_dir,
+        mappings,
+        &manifest_deploy_target,
+        Some(progress),
+        can_hardlink,
+        copy_method,
+        mod_info.install_priority,
+        deployed_map,
+        priorities,
+        staging_str,
+    )
 }
 
 /// Deploy a mod atomically: if deployment fails partway through, roll back
@@ -563,23 +876,24 @@ pub fn deploy_mod_atomic(
     game_path: &Path,
     deploy_target: &str,
 ) -> Result<DeployResult> {
+    let deploy_base = match deploy_target {
+        "root" => game_path,
+        _ => data_dir,
+    };
+
     match deploy_mod(
         db,
         game_id,
         bottle_name,
         mod_id,
         staging_path,
-        data_dir,
+        deploy_base,
         files,
         deploy_target,
     ) {
         Ok(result) => Ok(result),
         Err(e) => {
-            warn!(
-                "deploy_mod failed for mod {}, rolling back partially deployed files: {}",
-                mod_id, e
-            );
-            let _ = undeploy_mod(db, game_id, bottle_name, mod_id, data_dir, game_path);
+            warn!("deploy_mod failed for mod {}: {}", mod_id, e);
             Err(e)
         }
     }
@@ -599,24 +913,60 @@ pub fn deploy_mod_atomic_with_progress(
     game_path: &Path,
     deploy_target: &str,
 ) -> Result<DeployResult> {
+    let deploy_base = match deploy_target {
+        "root" => game_path,
+        _ => data_dir,
+    };
+
     match deploy_mod_inner(
         db,
         game_id,
         bottle_name,
         mod_id,
         staging_path,
-        data_dir,
+        deploy_base,
         files,
         deploy_target,
         Some(progress),
     ) {
         Ok(result) => Ok(result),
         Err(e) => {
-            warn!(
-                "deploy_mod failed for mod {}, rolling back partially deployed files: {}",
-                mod_id, e
-            );
-            let _ = undeploy_mod(db, game_id, bottle_name, mod_id, data_dir, game_path);
+            warn!("deploy_mod failed for mod {}: {}", mod_id, e);
+            Err(e)
+        }
+    }
+}
+
+pub fn deploy_mod_atomic_mapped_with_progress(
+    db: &ModDatabase,
+    game_id: &str,
+    bottle_name: &str,
+    mod_id: i64,
+    staging_path: &Path,
+    data_dir: &Path,
+    mappings: &[DeployFileMapping],
+    progress: &DeployProgressCb,
+    game_path: &Path,
+    deploy_target: &str,
+) -> Result<DeployResult> {
+    let deploy_base = match deploy_target {
+        "root" => game_path,
+        _ => data_dir,
+    };
+    match deploy_mod_mapped_with_progress(
+        db,
+        game_id,
+        bottle_name,
+        mod_id,
+        staging_path,
+        deploy_base,
+        mappings,
+        deploy_target,
+        progress,
+    ) {
+        Ok(result) => Ok(result),
+        Err(e) => {
+            warn!("deploy_mod_mapped failed for mod {}: {}", mod_id, e);
             Err(e)
         }
     }
@@ -641,6 +991,21 @@ pub fn undeploy_mod(
         .get_deployment_paths_for_mod(mod_id)
         .map_err(|e| DeployerError::Database(e.to_string()))?;
 
+    for (_, deploy_target) in &manifest_paths {
+        if deploy_target != "data"
+            && deploy_target != "root"
+            && db
+                .get_deploy_base_path_for_mod(mod_id)
+                .map_err(|e| DeployerError::Database(e.to_string()))?
+                .is_none()
+        {
+            return Err(DeployerError::Other(format!(
+                "Cannot safely undeploy deploy_target '{}' without durable custom target path metadata",
+                deploy_target
+            )));
+        }
+    }
+
     let vanilla_set = build_vanilla_set(game_id);
     let mut actually_removed = Vec::new();
     let mut errors = Vec::new();
@@ -662,10 +1027,23 @@ pub fn undeploy_mod(
             continue;
         }
 
+        let custom_base;
         let base = if deploy_target == "root" {
             game_path
-        } else {
+        } else if deploy_target == "data" {
             data_dir
+        } else {
+            custom_base = PathBuf::from(
+                db.get_deploy_base_path_for_mod(mod_id)
+                    .map_err(|e| DeployerError::Database(e.to_string()))?
+                    .ok_or_else(|| {
+                        DeployerError::Other(format!(
+                            "Cannot safely undeploy deploy_target '{}' without durable custom target path metadata",
+                            deploy_target
+                        ))
+                    })?,
+            );
+            custom_base.as_path()
         };
         let file_path = base.join(rel_path);
 
@@ -698,7 +1076,9 @@ pub fn undeploy_mod(
         // Restore next-priority mod's version of this file if applicable.
         // This runs BEFORE manifest deletion so that on failure, the manifest
         // still tracks the file until cleanup completes.
-        if let Err(e) = restore_next_winner_with_mods(db, &all_mods, rel_path, base) {
+        let restore_result =
+            restore_next_winner_with_mods(db, &all_mods, rel_path, deploy_target, base);
+        if let Err(e) = restore_result {
             warn!("Failed to restore winner for {}: {}", rel_path, e);
             restore_failures.push(rel_path.clone());
         }
@@ -784,14 +1164,37 @@ where
             .map_err(DeployerError::Other)?;
     }
 
-    purge_deployment(db, game_id, bottle_name, data_dir, game_path)?;
-
     let mods = db
         .list_mods(game_id, bottle_name)
         .map_err(|e| DeployerError::Database(e.to_string()))?;
 
     let mut enabled_mods: Vec<_> = mods.into_iter().filter(|m| m.enabled).collect();
     enabled_mods.sort_by_key(|m| m.install_priority);
+
+    // Preflight deploy targets BEFORE purging. Until custom target paths are
+    // persisted durably, a full redeploy cannot reconstruct them safely after
+    // the manifest is removed. Fail closed instead of silently routing custom
+    // files into Data/ or deleting tracked manifest rows first.
+    for m in &enabled_mods {
+        let target = db
+            .get_deploy_target_for_mod(m.id)
+            .unwrap_or_else(|_| "data".to_string());
+        if target != "data"
+            && target != "root"
+            && target != "mixed"
+            && db
+                .get_deploy_base_path_for_mod(m.id)
+                .map_err(|e| DeployerError::Database(e.to_string()))?
+                .is_none()
+        {
+            return Err(DeployerError::Other(format!(
+                "Full redeploy cannot safely route deploy_target '{}' for mod '{}' without durable custom target path metadata",
+                target, m.name
+            )));
+        }
+    }
+
+    purge_deployment(db, game_id, bottle_name, data_dir, game_path)?;
 
     let total = enabled_mods.len();
     let mut total_deployed = 0;
@@ -813,8 +1216,13 @@ where
         }
 
         if let Some(ref staging_path_str) = m.staging_path {
-            if !crate::staging::is_safe_relative_path(staging_path_str) && !PathBuf::from(staging_path_str).is_absolute() {
-                warn!("Skipping mod with suspicious staging path: {}", staging_path_str);
+            if !crate::staging::is_safe_relative_path(staging_path_str)
+                && !PathBuf::from(staging_path_str).is_absolute()
+            {
+                warn!(
+                    "Skipping mod with suspicious staging path: {}",
+                    staging_path_str
+                );
                 continue;
             }
             let staging_path = PathBuf::from(staging_path_str);
@@ -826,23 +1234,143 @@ where
                 let mod_target = db
                     .get_deploy_target_for_mod(m.id)
                     .unwrap_or_else(|_| "data".to_string());
+
+                if mod_target == "mixed" {
+                    let file_targets = db
+                        .get_deploy_file_targets_for_mod(m.id)
+                        .map_err(|e| DeployerError::Database(e.to_string()))?;
+                    let mut batches: std::collections::BTreeMap<String, Vec<DeployFileMapping>> =
+                        std::collections::BTreeMap::new();
+                    for file in files {
+                        let target = file_targets.get(&file).cloned().unwrap_or(
+                            crate::database::DeployFileTarget {
+                                source_relative_path: file.clone(),
+                                relative_path: file.clone(),
+                                deploy_target: "data".to_string(),
+                            },
+                        );
+                        batches
+                            .entry(target.deploy_target.clone())
+                            .or_default()
+                            .push(DeployFileMapping {
+                                source_relative_path: target.source_relative_path,
+                                relative_path: target.relative_path,
+                            });
+                    }
+
+                    for (target, batch_files) in batches {
+                        let custom_base;
+                        let effective_dir = if target == "root" {
+                            game_path
+                        } else if target == "data" {
+                            data_dir
+                        } else if target == "custom" {
+                            custom_base = PathBuf::from(
+                                db.get_deploy_base_path_for_mod(m.id)
+                                    .map_err(|e| DeployerError::Database(e.to_string()))?
+                                    .ok_or_else(|| {
+                                        DeployerError::Other(format!(
+                                            "Full redeploy cannot safely route mixed custom deploy target for mod '{}' without durable custom target path metadata",
+                                            m.name
+                                        ))
+                                    })?,
+                            );
+                            custom_base.as_path()
+                        } else {
+                            return Err(DeployerError::Other(format!(
+                                "Full redeploy cannot safely route mixed deploy_target '{}' for mod '{}'",
+                                target, m.name
+                            )));
+                        };
+                        let progress = |_done: u64, _total: u64| {};
+                        let result = deploy_mod_mapped_with_progress(
+                            db,
+                            game_id,
+                            bottle_name,
+                            m.id,
+                            &staging_path,
+                            effective_dir,
+                            &batch_files,
+                            &target,
+                            &progress,
+                        )?;
+                        files_so_far += batch_files.len();
+                        total_deployed += result.deployed_count;
+                        total_skipped += result.skipped_count;
+                        any_fallback = any_fallback || result.fallback_used;
+                    }
+                    db.set_deploy_target_for_mod_with_base(
+                        m.id,
+                        "mixed",
+                        m.deploy_base_path.as_deref(),
+                    )
+                    .map_err(|e| DeployerError::Database(e.to_string()))?;
+                    continue;
+                }
+
+                let custom_base;
                 let effective_dir = if mod_target == "root" {
                     game_path
-                } else {
+                } else if mod_target == "data" {
                     data_dir
+                } else {
+                    custom_base = PathBuf::from(
+                        db.get_deploy_base_path_for_mod(m.id)
+                            .map_err(|e| DeployerError::Database(e.to_string()))?
+                            .ok_or_else(|| {
+                                DeployerError::Other(format!(
+                                    "Full redeploy cannot safely route deploy_target '{}' for mod '{}' without durable custom target path metadata",
+                                    mod_target, m.name
+                                ))
+                            })?,
+                    );
+                    custom_base.as_path()
                 };
 
+                let file_targets = db
+                    .get_deploy_file_targets_for_mod(m.id)
+                    .map_err(|e| DeployerError::Database(e.to_string()))?;
                 let file_count = files.len();
-                let result = deploy_mod(
-                    db,
-                    game_id,
-                    bottle_name,
-                    m.id,
-                    &staging_path,
-                    effective_dir,
-                    &files,
-                    &mod_target,
-                )?;
+                let result = if file_targets.is_empty() {
+                    deploy_mod(
+                        db,
+                        game_id,
+                        bottle_name,
+                        m.id,
+                        &staging_path,
+                        effective_dir,
+                        &files,
+                        &mod_target,
+                    )?
+                } else {
+                    let mappings: Vec<DeployFileMapping> = files
+                        .iter()
+                        .map(|file| {
+                            file_targets
+                                .get(file)
+                                .map(|target| DeployFileMapping {
+                                    source_relative_path: target.source_relative_path.clone(),
+                                    relative_path: target.relative_path.clone(),
+                                })
+                                .unwrap_or_else(|| DeployFileMapping {
+                                    source_relative_path: file.clone(),
+                                    relative_path: file.clone(),
+                                })
+                        })
+                        .collect();
+                    let progress = |_done: u64, _total: u64| {};
+                    deploy_mod_mapped_with_progress(
+                        db,
+                        game_id,
+                        bottle_name,
+                        m.id,
+                        &staging_path,
+                        effective_dir,
+                        &mappings,
+                        &mod_target,
+                        &progress,
+                    )?
+                };
 
                 files_so_far += file_count;
                 total_deployed += result.deployed_count;
@@ -878,6 +1406,22 @@ pub fn purge_deployment(
         .get_deployment_manifest(game_id, bottle_name)
         .map_err(|e| DeployerError::Database(e.to_string()))?;
 
+    for entry in &manifest {
+        if entry.deploy_method != "direct"
+            && entry.deploy_target != "data"
+            && entry.deploy_target != "root"
+            && db
+                .get_deploy_base_path_for_mod(entry.mod_id)
+                .map_err(|e| DeployerError::Database(e.to_string()))?
+                .is_none()
+        {
+            return Err(DeployerError::Other(format!(
+                "Cannot safely purge deploy_target '{}' without durable custom target path metadata",
+                entry.deploy_target
+            )));
+        }
+    }
+
     let vanilla_set = build_vanilla_set(game_id);
     let mut removed = Vec::new();
     let mut purged_mod_ids = std::collections::HashSet::new();
@@ -902,10 +1446,23 @@ pub fn purge_deployment(
             continue;
         }
 
+        let custom_base;
         let base = if entry.deploy_target == "root" {
             game_path
-        } else {
+        } else if entry.deploy_target == "data" {
             data_dir
+        } else {
+            custom_base = PathBuf::from(
+                db.get_deploy_base_path_for_mod(entry.mod_id)
+                    .map_err(|e| DeployerError::Database(e.to_string()))?
+                    .ok_or_else(|| {
+                        DeployerError::Other(format!(
+                            "Cannot safely purge deploy_target '{}' without durable custom target path metadata",
+                            entry.deploy_target
+                        ))
+                    })?,
+            );
+            custom_base.as_path()
         };
         let file_path = base.join(&entry.relative_path);
         if file_path.exists() {
@@ -988,7 +1545,7 @@ fn restore_next_winner(
     let mods = db
         .list_mods(game_id, bottle_name)
         .map_err(|e| DeployerError::Database(e.to_string()))?;
-    restore_next_winner_with_mods(db, &mods, rel_path, data_dir)
+    restore_next_winner_with_mods(db, &mods, rel_path, "data", data_dir)
 }
 
 /// Like `restore_next_winner`, but accepts a pre-fetched mod list to avoid
@@ -998,13 +1555,24 @@ fn restore_next_winner_with_mods(
     db: &ModDatabase,
     all_mods: &[crate::database::InstalledMod],
     rel_path: &str,
-    data_dir: &Path,
+    deploy_target: &str,
+    deploy_base: &Path,
 ) -> Result<()> {
     let mut candidates: Vec<_> = all_mods
         .iter()
         .filter(|m| {
+            let target_matches = if deploy_target.starts_with("custom:") {
+                m.deploy_target == "custom"
+                    && m.deploy_base_path
+                        .as_deref()
+                        .map(|base| Path::new(base) == deploy_base)
+                        .unwrap_or(false)
+            } else {
+                m.deploy_target == deploy_target
+            };
             m.enabled
                 && m.staging_path.is_some()
+                && target_matches
                 && m.installed_files.contains(&rel_path.to_string())
         })
         .collect();
@@ -1017,16 +1585,16 @@ fn restore_next_winner_with_mods(
         };
         let staging_path = PathBuf::from(staging_ref);
         let src = staging_path.join(rel_path);
-        let dst = data_dir.join(rel_path);
+        let dst = deploy_base.join(rel_path);
 
         if src.exists() {
             if let Some(parent) = dst.parent() {
                 fs::create_dir_all(parent)?;
             }
 
-            let can_hardlink = same_filesystem(&staging_path, data_dir);
-            let copy_method = platform::detect_copy_method(&staging_path, data_dir);
-            let method = if can_hardlink {
+            let can_hardlink = same_filesystem(&staging_path, deploy_base);
+            let copy_method = platform::detect_copy_method(&staging_path, deploy_base);
+            let method = if can_hardlink && !should_copy_instead_of_hardlink(rel_path) {
                 match fs::hard_link(&src, &dst) {
                     Ok(_) => "hardlink",
                     Err(e) => {
@@ -1040,15 +1608,16 @@ fn restore_next_winner_with_mods(
                 "copy"
             };
 
-            db.add_deployment_entry(
+            let staging_path_string = staging_path.to_string_lossy().to_string();
+            db.batch_add_deployment_entries(&[(
                 &winner.game_id,
                 &winner.bottle_name,
                 winner.id,
                 rel_path,
-                &staging_path.to_string_lossy(),
+                staging_path_string.as_str(),
                 method,
-                None,
-            )
+                deploy_target,
+            )])
             .map_err(|e| DeployerError::Database(e.to_string()))?;
 
             debug!(
@@ -1070,6 +1639,7 @@ fn restore_next_winner_with_mods(
 #[derive(Debug, Clone)]
 struct DesiredFile {
     relative_path: String,
+    source_relative_path: String,
     mod_id: i64,
     staging_path: PathBuf,
     sha256: Option<String>,
@@ -1085,6 +1655,39 @@ struct DeploymentDiff {
     to_remove: Vec<crate::database::DeploymentEntry>,
     to_update: Vec<(crate::database::DeploymentEntry, DesiredFile)>,
     unchanged: usize,
+}
+
+/// Resolve the physical deployment base for targets whose paths are durable in
+/// Task 1.1. Custom targets deliberately return an error until Task 1.2 stores
+/// their exact roots; treating them as `data_dir` would silently misdeploy and
+/// could delete the wrong manifest entry while leaving the real file behind.
+fn resolve_incremental_deploy_base(
+    deploy_target: &str,
+    data_dir: &Path,
+    game_path: &Path,
+) -> Result<PathBuf> {
+    match deploy_target {
+        "" | "data" => Ok(data_dir.to_path_buf()),
+        "root" => Ok(game_path.to_path_buf()),
+        custom if custom.starts_with("custom:") => Ok(PathBuf::from(&custom["custom:".len()..])),
+        other => Err(DeployerError::Other(format!(
+            "Incremental deployment cannot safely route deploy_target '{other}' without durable custom target path metadata; run a full redeploy after custom routing metadata is available"
+        ))),
+    }
+}
+
+fn custom_target_incremental_change(diff: &DeploymentDiff) -> Option<String> {
+    diff.to_add
+        .iter()
+        .map(|d| d.deploy_target.as_str())
+        .chain(diff.to_remove.iter().map(|e| e.deploy_target.as_str()))
+        .chain(
+            diff.to_update
+                .iter()
+                .flat_map(|(old, new)| [old.deploy_target.as_str(), new.deploy_target.as_str()]),
+        )
+        .find(|target| !matches!(*target, "" | "data" | "root") && !target.starts_with("custom:"))
+        .map(|target| target.to_string())
 }
 
 /// Result of an incremental deployment operation.
@@ -1105,7 +1708,7 @@ fn compute_desired_state(
     db: &ModDatabase,
     game_id: &str,
     bottle_name: &str,
-) -> Result<std::collections::HashMap<String, DesiredFile>> {
+) -> Result<std::collections::HashMap<crate::database::DeploymentKey, DesiredFile>> {
     let mods = db
         .list_mods(game_id, bottle_name)
         .map_err(|e| DeployerError::Database(e.to_string()))?;
@@ -1119,7 +1722,7 @@ fn compute_desired_state(
         .get_file_hashes_for_mods(&mod_ids)
         .map_err(|e| DeployerError::Database(e.to_string()))?;
 
-    let mut desired: std::collections::HashMap<String, DesiredFile> =
+    let mut desired: std::collections::HashMap<crate::database::DeploymentKey, DesiredFile> =
         std::collections::HashMap::new();
 
     for m in &enabled_mods {
@@ -1142,19 +1745,60 @@ fn compute_desired_state(
         let deploy_target = db
             .get_deploy_target_for_mod(m.id)
             .unwrap_or_else(|_| "data".to_string());
+        let deploy_file_targets = if deploy_target == "mixed" {
+            db.get_deploy_file_targets_for_mod(m.id)
+                .map_err(|e| DeployerError::Database(e.to_string()))?
+        } else {
+            std::collections::HashMap::new()
+        };
+
+        let manifest_deploy_target = if deploy_target == "custom" {
+            m.deploy_base_path
+                .as_ref()
+                .map(|base| format!("custom:{base}"))
+                .unwrap_or_else(|| deploy_target.clone())
+        } else {
+            deploy_target.clone()
+        };
 
         for rel_path in files {
-            let sha256 = hash_map.get(&(m.id, rel_path.clone())).cloned();
+            let (source_rel_path, file_deploy_target, target_rel_path) = if deploy_target == "mixed"
+            {
+                if let Some(target) = deploy_file_targets.get(&rel_path) {
+                    let target_name = if target.deploy_target == "custom" {
+                        m.deploy_base_path
+                            .as_ref()
+                            .map(|base| format!("custom:{base}"))
+                            .unwrap_or_else(|| target.deploy_target.clone())
+                    } else {
+                        target.deploy_target.clone()
+                    };
+                    (
+                        target.source_relative_path.clone(),
+                        target_name,
+                        target.relative_path.clone(),
+                    )
+                } else {
+                    (rel_path.clone(), "data".to_string(), rel_path.clone())
+                }
+            } else {
+                (
+                    rel_path.clone(),
+                    manifest_deploy_target.clone(),
+                    rel_path.clone(),
+                )
+            };
 
-            // Last writer wins (highest priority, since sorted ascending)
+            // Last writer wins for the same deployment identity (same target + path).
             desired.insert(
-                rel_path.clone(),
+                (target_rel_path.clone(), file_deploy_target.clone()),
                 DesiredFile {
-                    relative_path: rel_path,
+                    relative_path: target_rel_path,
+                    source_relative_path: source_rel_path.clone(),
                     mod_id: m.id,
                     staging_path: staging_path.clone(),
-                    sha256,
-                    deploy_target: deploy_target.clone(),
+                    sha256: hash_map.get(&(m.id, source_rel_path)).cloned(),
+                    deploy_target: file_deploy_target,
                 },
             );
         }
@@ -1163,11 +1807,63 @@ fn compute_desired_state(
     Ok(desired)
 }
 
+fn deployment_identity_matches(
+    current_entry: &crate::database::DeploymentEntry,
+    desired_file: &DesiredFile,
+) -> bool {
+    // Deployment target is part of DeploymentKey, but keep this explicit so
+    // callers cannot accidentally treat same-path/different-target entries as
+    // equivalent if the key shape changes later.
+    current_entry.deploy_target == desired_file.deploy_target
+        && current_entry.mod_id == desired_file.mod_id
+        && Path::new(&current_entry.staging_path) == desired_file.staging_path.as_path()
+}
+
+fn deployed_entry_matches_desired(
+    current_entry: &crate::database::DeploymentEntry,
+    desired_file: &DesiredFile,
+) -> bool {
+    if !deployment_identity_matches(current_entry, desired_file) {
+        return false;
+    }
+
+    if current_entry.deploy_method == "hardlink"
+        && should_copy_instead_of_hardlink(&desired_file.relative_path)
+    {
+        return false;
+    }
+
+    match (&current_entry.sha256, &desired_file.sha256) {
+        (Some(current_hash), Some(desired_hash)) => current_hash == desired_hash,
+        // Safe legacy-manifest fallback: if the desired state has a content
+        // hash and the current manifest does not, force an update so the
+        // deployed file and manifest are refreshed rather than assuming the
+        // old file is still correct.
+        (None, Some(_)) => false,
+        // If the desired hash is unavailable, compute_diff has no deployment
+        // base to verify the filesystem hash safely; leave unchanged when all
+        // durable identity fields above match.
+        (Some(_), None) | (None, None) => true,
+    }
+}
+
+fn is_hash_backfill_update(
+    current_entry: &crate::database::DeploymentEntry,
+    desired_file: &DesiredFile,
+) -> bool {
+    deployment_identity_matches(current_entry, desired_file)
+        && current_entry.sha256.is_none()
+        && desired_file.sha256.is_some()
+}
+
 /// Compare the desired state against the current deployment manifest to
 /// produce a diff of what needs to change.
 fn compute_diff(
-    desired: &std::collections::HashMap<String, DesiredFile>,
-    current: &std::collections::HashMap<String, crate::database::DeploymentEntry>,
+    desired: &std::collections::HashMap<crate::database::DeploymentKey, DesiredFile>,
+    current: &std::collections::HashMap<
+        crate::database::DeploymentKey,
+        crate::database::DeploymentEntry,
+    >,
 ) -> DeploymentDiff {
     let mut to_add = Vec::new();
     let mut to_remove = Vec::new();
@@ -1175,29 +1871,29 @@ fn compute_diff(
     let mut unchanged: usize = 0;
 
     // Files in desired but not in current → add
-    // Files in both but different mod_id → update
-    for (path, desired_file) in desired {
-        match current.get(path) {
+    // Files in both but changed identity/content → update
+    for (deployment_key, desired_file) in desired {
+        match current.get(deployment_key) {
             None => {
                 to_add.push(desired_file.clone());
             }
             Some(current_entry) => {
-                if current_entry.mod_id != desired_file.mod_id {
-                    to_update.push((current_entry.clone(), desired_file.clone()));
-                } else {
+                if deployed_entry_matches_desired(current_entry, desired_file) {
                     unchanged += 1;
+                } else {
+                    to_update.push((current_entry.clone(), desired_file.clone()));
                 }
             }
         }
     }
 
     // Files in current but not in desired → remove
-    for (path, entry) in current {
+    for (deployment_key, entry) in current {
         // Skip legacy direct-installed files
         if entry.deploy_method == "direct" {
             continue;
         }
-        if !desired.contains_key(path) {
+        if !desired.contains_key(deployment_key) {
             to_remove.push(entry.clone());
         }
     }
@@ -1215,6 +1911,7 @@ fn compute_diff(
 /// Priority chain: hardlink → reflink/clonefile → copy.
 /// Returns the deploy method used ("hardlink" or "copy"), or None on failure.
 fn deploy_single_file(
+    rel_path: &str,
     src: &Path,
     dst: &Path,
     can_hardlink: bool,
@@ -1245,7 +1942,7 @@ fn deploy_single_file(
         }
     }
 
-    if can_hardlink {
+    if can_hardlink && !should_copy_instead_of_hardlink(rel_path) {
         match fs::hard_link(src, dst) {
             Ok(_) => Some("hardlink"),
             Err(e) => {
@@ -1331,8 +2028,28 @@ pub fn deploy_incremental(
         total_files
     );
 
-    // Step 4: If changes exceed 80% of total, fall back to full redeploy
-    if total_files > 0 && total_changes * 100 / total_files.max(1) > 80 {
+    if let Some(target) = custom_target_incremental_change(&diff) {
+        return Err(DeployerError::Other(format!(
+            "Incremental deployment cannot safely apply changes for deploy_target '{target}' without durable custom target path metadata"
+        )));
+    }
+
+    let only_hash_backfill_updates = diff.to_add.is_empty()
+        && diff.to_remove.is_empty()
+        && !diff.to_update.is_empty()
+        && diff
+            .to_update
+            .iter()
+            .all(|(current, desired)| is_hash_backfill_update(current, desired));
+
+    // Step 4: If changes exceed 80% of total, fall back to full redeploy.
+    // Do not route pure legacy hash backfills through full redeploy: full
+    // redeploy entries may also lack hashes, causing repeated fallback loops
+    // instead of refreshing the manifest hashes once.
+    if total_files > 0
+        && total_changes * 100 / total_files.max(1) > 80
+        && !only_hash_backfill_updates
+    {
         info!(
             "Incremental diff covers {}% of files — falling back to full redeploy",
             total_changes * 100 / total_files.max(1)
@@ -1362,37 +2079,50 @@ pub fn deploy_incremental(
         });
     }
 
-    // Determine staging root for filesystem check
-    let staging_root = crate::staging::staging_base_dir(game_id, bottle_name);
-    let can_hardlink = same_filesystem(&staging_root, data_dir);
-    let copy_method = platform::detect_copy_method(&staging_root, data_dir);
-
-    if !can_hardlink {
-        // Estimate space needed for additions/updates only
-        let add_update_count = diff.to_add.len() + diff.to_update.len();
-        // Rough estimate: 1MB per file on average
-        let estimated_bytes = (add_update_count as u64) * 1_048_576;
-        if let Err(e) = crate::disk_budget::check_space_guard(data_dir, estimated_bytes) {
-            return Err(DeployerError::Other(e));
+    // Check copy-space needs against the physical base for each deploy target.
+    // Root-target files must be checked against game_path, not data_dir.
+    for desired_file in diff
+        .to_add
+        .iter()
+        .chain(diff.to_update.iter().map(|(_, desired)| desired))
+    {
+        let base =
+            resolve_incremental_deploy_base(&desired_file.deploy_target, data_dir, game_path)?;
+        if !same_filesystem(&desired_file.staging_path, &base) {
+            // Rough estimate: 1MB per file on average (keeps existing scoped behavior).
+            if let Err(e) = crate::disk_budget::check_space_guard(&base, 1_048_576) {
+                return Err(DeployerError::Other(e));
+            }
         }
     }
 
     let removed_count = AtomicUsize::new(0);
     let added_count = AtomicUsize::new(0);
     let updated_count = AtomicUsize::new(0);
-    let any_fallback = AtomicBool::new(!can_hardlink);
+    let any_fallback = AtomicBool::new(false);
     let verification_failures: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
     // Step 5a: Remove files that should no longer be deployed
-    let remove_paths: Vec<&str> = diff
+    let remove_entries: Vec<(&str, &str)> = diff
         .to_remove
         .par_iter()
         .filter_map(|entry| {
-            let file_path = data_dir.join(&entry.relative_path);
+            let base =
+                match resolve_incremental_deploy_base(&entry.deploy_target, data_dir, game_path) {
+                    Ok(base) => base,
+                    Err(e) => {
+                        verification_failures
+                            .lock()
+                            .unwrap()
+                            .push(format!("remove failed: {}: {}", entry.relative_path, e));
+                        return None;
+                    }
+                };
+            let file_path = base.join(&entry.relative_path);
             if file_path.exists() {
                 match fs::remove_file(&file_path) {
                     Ok(()) => {
-                        prune_empty_dirs(&file_path, data_dir);
+                        prune_empty_dirs(&file_path, &base);
                         removed_count.fetch_add(1, Ordering::Relaxed);
                     }
                     Err(e) => {
@@ -1406,30 +2136,55 @@ pub fn deploy_incremental(
             } else {
                 removed_count.fetch_add(1, Ordering::Relaxed);
             }
-            Some(entry.relative_path.as_str())
+            Some((entry.relative_path.as_str(), entry.deploy_target.as_str()))
         })
         .collect();
 
     // Remove stale manifest entries
-    if !remove_paths.is_empty() {
-        db.batch_remove_deployment_entries(game_id, bottle_name, &remove_paths)
+    if !remove_entries.is_empty() {
+        db.batch_remove_deployment_entries(game_id, bottle_name, &remove_entries)
             .map_err(|e| DeployerError::Database(e.to_string()))?;
     }
 
     // Step 5b: Update files where the owning mod changed
-    let update_owned: Vec<(i64, String, String, Option<String>, String)> = diff
+    let update_owned: Vec<(i64, String, String, Option<String>, String, String)> = diff
         .to_update
         .par_iter()
         .filter_map(|(old_entry, new_desired)| {
-            let dst = data_dir.join(&new_desired.relative_path);
-            let src = new_desired.staging_path.join(&new_desired.relative_path);
+            let base = match resolve_incremental_deploy_base(
+                &new_desired.deploy_target,
+                data_dir,
+                game_path,
+            ) {
+                Ok(base) => base,
+                Err(e) => {
+                    verification_failures.lock().unwrap().push(format!(
+                        "update failed: {}: {}",
+                        new_desired.relative_path, e
+                    ));
+                    return None;
+                }
+            };
+            let dst = base.join(&new_desired.relative_path);
+            let src = new_desired
+                .staging_path
+                .join(&new_desired.source_relative_path);
 
             if !src.exists() {
                 warn!("Incremental update: source not found: {}", src.display());
                 return None;
             }
 
-            match deploy_single_file(&src, &dst, can_hardlink, copy_method) {
+            let can_hardlink = same_filesystem(&new_desired.staging_path, &base);
+            let copy_method = platform::detect_copy_method(&new_desired.staging_path, &base);
+
+            match deploy_single_file(
+                &new_desired.relative_path,
+                &src,
+                &dst,
+                can_hardlink,
+                copy_method,
+            ) {
                 Some(method) => {
                     updated_count.fetch_add(1, Ordering::Relaxed);
                     if method == "copy" {
@@ -1441,6 +2196,7 @@ pub fn deploy_incremental(
                         new_desired.staging_path.to_string_lossy().to_string(),
                         new_desired.sha256.clone(),
                         new_desired.deploy_target.clone(),
+                        method.to_string(),
                     ))
                 }
                 None => {
@@ -1456,18 +2212,20 @@ pub fn deploy_incremental(
 
     let update_entries: Vec<(&str, &str, i64, &str, &str, &str, Option<&str>, &str)> = update_owned
         .iter()
-        .map(|(mod_id, rel_path, staging_path, sha256, deploy_target)| {
-            (
-                game_id,
-                bottle_name,
-                *mod_id,
-                rel_path.as_str(),
-                staging_path.as_str(),
-                if can_hardlink { "hardlink" } else { "copy" },
-                sha256.as_deref(),
-                deploy_target.as_str(),
-            )
-        })
+        .map(
+            |(mod_id, rel_path, staging_path, sha256, deploy_target, method)| {
+                (
+                    game_id,
+                    bottle_name,
+                    *mod_id,
+                    rel_path.as_str(),
+                    staging_path.as_str(),
+                    method.as_str(),
+                    sha256.as_deref(),
+                    deploy_target.as_str(),
+                )
+            },
+        )
         .collect();
 
     if !update_entries.is_empty() {
@@ -1476,19 +2234,44 @@ pub fn deploy_incremental(
     }
 
     // Step 5c: Add new files
-    let add_results: Vec<Option<(i64, String, String, Option<String>, String)>> = diff
+    let add_results: Vec<Option<(i64, String, String, Option<String>, String, String)>> = diff
         .to_add
         .par_iter()
         .map(|desired_file| {
-            let dst = data_dir.join(&desired_file.relative_path);
-            let src = desired_file.staging_path.join(&desired_file.relative_path);
+            let base = match resolve_incremental_deploy_base(
+                &desired_file.deploy_target,
+                data_dir,
+                game_path,
+            ) {
+                Ok(base) => base,
+                Err(e) => {
+                    verification_failures
+                        .lock()
+                        .unwrap()
+                        .push(format!("add failed: {}: {}", desired_file.relative_path, e));
+                    return None;
+                }
+            };
+            let dst = base.join(&desired_file.relative_path);
+            let src = desired_file
+                .staging_path
+                .join(&desired_file.source_relative_path);
 
             if !src.exists() {
                 warn!("Incremental add: source not found: {}", src.display());
                 return None;
             }
 
-            match deploy_single_file(&src, &dst, can_hardlink, copy_method) {
+            let can_hardlink = same_filesystem(&desired_file.staging_path, &base);
+            let copy_method = platform::detect_copy_method(&desired_file.staging_path, &base);
+
+            match deploy_single_file(
+                &desired_file.relative_path,
+                &src,
+                &dst,
+                can_hardlink,
+                copy_method,
+            ) {
                 Some(method) => {
                     added_count.fetch_add(1, Ordering::Relaxed);
                     if method == "copy" {
@@ -1500,6 +2283,7 @@ pub fn deploy_incremental(
                         desired_file.staging_path.to_string_lossy().to_string(),
                         desired_file.sha256.clone(),
                         desired_file.deploy_target.clone(),
+                        method.to_string(),
                     ))
                 }
                 None => {
@@ -1517,19 +2301,20 @@ pub fn deploy_incremental(
     let add_entries: Vec<(&str, &str, i64, &str, &str, &str, Option<&str>, &str)> = add_results
         .iter()
         .filter_map(|opt| {
-            opt.as_ref()
-                .map(|(mod_id, rel_path, staging_path, sha256, deploy_target)| {
+            opt.as_ref().map(
+                |(mod_id, rel_path, staging_path, sha256, deploy_target, method)| {
                     (
                         game_id,
                         bottle_name,
                         *mod_id,
                         rel_path.as_str(),
                         staging_path.as_str(),
-                        if can_hardlink { "hardlink" } else { "copy" },
+                        method.as_str(),
                         sha256.as_deref(),
                         deploy_target.as_str(),
                     )
-                })
+                },
+            )
         })
         .collect();
 
@@ -1687,9 +2472,9 @@ pub fn verify_deployment(
 ///
 /// Wine games are delegated to `deploy_wine_game`, which runs a full
 /// `redeploy_all` using bottle context extracted from `detected`.
-/// Native games are delegated to `deploy_native_game`, which is a stub in
-/// Phase 1 — per-game native plugins (Stardew in Task 3.7, BG3 in Task 4.4)
-/// replace that stub with real logic.
+/// Native games are delegated to `deploy_native_game`, which dispatches to
+/// the registered per-game native plugin. Unsupported native games fail loudly
+/// via the default `GamePlugin::deploy_native` "not implemented" error.
 pub fn deploy_game(
     detected: &crate::games::DetectedGame,
     db: &std::sync::Arc<ModDatabase>,
@@ -1744,11 +2529,12 @@ pub fn deploy_native_game(
     // milliseconds — holding the registry mutex that entire time would block
     // detect_all_games, detect_native_games, and any other thread that calls
     // with_plugin or register_plugin.
-    let plugin = crate::games::clone_plugin_for_dispatch(&detected.game_id)
-        .ok_or_else(|| DeployerError::Other(format!(
+    let plugin = crate::games::clone_plugin_for_dispatch(&detected.game_id).ok_or_else(|| {
+        DeployerError::Other(format!(
             "native deployment not implemented for {}; per-game plugin must provide it",
             detected.game_id
-        )))?;
+        ))
+    })?;
 
     // Registry lock is released here. deploy_native may take arbitrarily long.
     plugin.deploy_native(detected, db)
@@ -1789,6 +2575,95 @@ mod tests {
     }
 
     #[test]
+    fn redeploy_all_preserves_mixed_root_data_file_targets_after_manifest_purge() {
+        let (db, tmp, staging, data_dir) = setup();
+        let game_root = tmp.path().join("game_root");
+        fs::create_dir_all(&game_root).unwrap();
+
+        let mod_id = db
+            .add_mod(
+                "skyrimse",
+                "Gaming",
+                None,
+                "Mixed Root Data Mod",
+                "1.0",
+                "mixed.zip",
+                &[
+                    "skse64_loader.exe".to_string(),
+                    "Scripts/Foo.pex".to_string(),
+                    "SKSE/Plugins/Foo.dll".to_string(),
+                ],
+            )
+            .unwrap();
+        db.set_staging_path(mod_id, &staging.to_string_lossy())
+            .unwrap();
+
+        create_staging_file(&staging, "skse64_loader.exe", b"loader");
+        create_staging_file(&staging, "Scripts/Foo.pex", b"script");
+        create_staging_file(&staging, "SKSE/Plugins/Foo.dll", b"plugin");
+
+        deploy_mod(
+            &db,
+            "skyrimse",
+            "Gaming",
+            mod_id,
+            &staging,
+            &game_root,
+            &["skse64_loader.exe".to_string()],
+            "root",
+        )
+        .unwrap();
+        deploy_mod(
+            &db,
+            "skyrimse",
+            "Gaming",
+            mod_id,
+            &staging,
+            &data_dir,
+            &[
+                "Scripts/Foo.pex".to_string(),
+                "SKSE/Plugins/Foo.dll".to_string(),
+            ],
+            "data",
+        )
+        .unwrap();
+        db.set_deploy_target_for_mod(mod_id, "mixed").unwrap();
+        db.set_deploy_file_targets_for_mod(
+            mod_id,
+            &[
+                crate::database::DeployFileTarget {
+                    source_relative_path: "skse64_loader.exe".to_string(),
+                    relative_path: "skse64_loader.exe".to_string(),
+                    deploy_target: "root".to_string(),
+                },
+                crate::database::DeployFileTarget {
+                    source_relative_path: "Scripts/Foo.pex".to_string(),
+                    relative_path: "Scripts/Foo.pex".to_string(),
+                    deploy_target: "data".to_string(),
+                },
+                crate::database::DeployFileTarget {
+                    source_relative_path: "SKSE/Plugins/Foo.dll".to_string(),
+                    relative_path: "SKSE/Plugins/Foo.dll".to_string(),
+                    deploy_target: "data".to_string(),
+                },
+            ],
+        )
+        .unwrap();
+
+        purge_deployment(&db, "skyrimse", "Gaming", &data_dir, &game_root).unwrap();
+        assert!(!game_root.join("skse64_loader.exe").exists());
+        assert!(!data_dir.join("Scripts/Foo.pex").exists());
+
+        redeploy_all(&db, "skyrimse", "Gaming", &data_dir, &game_root).unwrap();
+
+        assert!(game_root.join("skse64_loader.exe").exists());
+        assert!(!data_dir.join("skse64_loader.exe").exists());
+        assert!(data_dir.join("Scripts/Foo.pex").exists());
+        assert!(data_dir.join("SKSE/Plugins/Foo.dll").exists());
+        assert!(!game_root.join("Scripts/Foo.pex").exists());
+    }
+
+    #[test]
     fn deploy_creates_files_in_data_dir() {
         let (db, _tmp, staging, data_dir) = setup();
 
@@ -1817,6 +2692,461 @@ mod tests {
         assert_eq!(result.skipped_count, 0);
         assert!(data_dir.join("meshes/test.nif").exists());
         assert!(data_dir.join("mod.esp").exists());
+    }
+
+    #[test]
+    fn deploy_mod_atomic_missing_expected_file_rolls_back_partial_deploy() {
+        let (db, _tmp, staging, data_dir) = setup();
+        let files = vec!["present.esp".to_string(), "missing.esp".to_string()];
+        let mod_id = db
+            .add_mod(
+                "skyrimse",
+                "Gaming",
+                None,
+                "PartialFail",
+                "1.0",
+                "partial.zip",
+                &files,
+            )
+            .unwrap();
+        create_staging_file(&staging, "present.esp", b"present");
+
+        let result = deploy_mod_atomic(
+            &db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &files, &data_dir, "data",
+        );
+
+        assert!(result.is_err());
+        assert!(!data_dir.join("present.esp").exists());
+        assert!(
+            db.get_deployment_manifest("skyrimse", "Gaming")
+                .unwrap()
+                .is_empty(),
+            "failed atomic deploy must not leave manifest rows"
+        );
+    }
+
+    #[test]
+    fn deploy_mod_atomic_failed_redeploy_preserves_existing_manifest_and_file() {
+        let (db, _tmp, staging, data_dir) = setup();
+        let files = vec!["stable.esp".to_string()];
+        let mod_id = db
+            .add_mod(
+                "skyrimse",
+                "Gaming",
+                None,
+                "Existing",
+                "1.0",
+                "existing.zip",
+                &files,
+            )
+            .unwrap();
+        create_staging_file(&staging, "stable.esp", b"stable");
+        deploy_mod_atomic(
+            &db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &files, &data_dir, "data",
+        )
+        .unwrap();
+        let retry_files = vec!["stable.esp".to_string(), "missing.esp".to_string()];
+
+        let result = deploy_mod_atomic(
+            &db,
+            "skyrimse",
+            "Gaming",
+            mod_id,
+            &staging,
+            &data_dir,
+            &retry_files,
+            &data_dir,
+            "data",
+        );
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(data_dir.join("stable.esp")).unwrap(), b"stable");
+        let manifest = db.get_deployment_manifest("skyrimse", "Gaming").unwrap();
+        assert_eq!(manifest.len(), 1);
+        assert_eq!(manifest[0].mod_id, mod_id);
+        assert_eq!(manifest[0].relative_path, "stable.esp");
+    }
+
+    #[test]
+    fn deploy_mod_atomic_conflict_failure_restores_displaced_owner_file() {
+        let (db, _tmp, staging_low, data_dir) = setup();
+        let staging_high = staging_low.parent().unwrap().join("staging-high");
+        fs::create_dir_all(&staging_high).unwrap();
+        let shared = vec!["shared.esp".to_string()];
+        let low_id = db
+            .add_mod("skyrimse", "Gaming", None, "Low", "1.0", "low.zip", &shared)
+            .unwrap();
+        db.set_mod_priority(low_id, 0).unwrap();
+        create_staging_file(&staging_low, "shared.esp", b"low");
+        deploy_mod_atomic(
+            &db,
+            "skyrimse",
+            "Gaming",
+            low_id,
+            &staging_low,
+            &data_dir,
+            &shared,
+            &data_dir,
+            "data",
+        )
+        .unwrap();
+
+        let high_files = vec!["shared.esp".to_string(), "missing.esp".to_string()];
+        let high_id = db
+            .add_mod(
+                "skyrimse",
+                "Gaming",
+                None,
+                "High",
+                "1.0",
+                "high.zip",
+                &high_files,
+            )
+            .unwrap();
+        db.set_mod_priority(high_id, 10).unwrap();
+        create_staging_file(&staging_high, "shared.esp", b"high");
+
+        let result = deploy_mod_atomic(
+            &db,
+            "skyrimse",
+            "Gaming",
+            high_id,
+            &staging_high,
+            &data_dir,
+            &high_files,
+            &data_dir,
+            "data",
+        );
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(data_dir.join("shared.esp")).unwrap(), b"low");
+        let manifest = db.get_deployment_manifest("skyrimse", "Gaming").unwrap();
+        assert_eq!(manifest.len(), 1);
+        assert_eq!(manifest[0].mod_id, low_id);
+    }
+
+    #[test]
+    fn deploy_mod_atomic_unsafe_mapping_fails_and_rolls_back_valid_file() {
+        let (db, _tmp, staging, data_dir) = setup();
+        let files = vec!["safe.esp".to_string(), "../evil.esp".to_string()];
+        let mod_id = db
+            .add_mod(
+                "skyrimse",
+                "Gaming",
+                None,
+                "UnsafeMapping",
+                "1.0",
+                "unsafe.zip",
+                &files,
+            )
+            .unwrap();
+        create_staging_file(&staging, "safe.esp", b"safe");
+        let progress = |_done: u64, _total: u64| {};
+        let mappings = vec![
+            DeployFileMapping {
+                source_relative_path: "safe.esp".to_string(),
+                relative_path: "safe.esp".to_string(),
+            },
+            DeployFileMapping {
+                source_relative_path: "../evil.esp".to_string(),
+                relative_path: "evil.esp".to_string(),
+            },
+        ];
+
+        let result = deploy_mod_atomic_mapped_with_progress(
+            &db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &mappings, &progress,
+            &data_dir, "data",
+        );
+
+        assert!(result.is_err());
+        assert!(!data_dir.join("safe.esp").exists());
+        assert!(db
+            .get_deployment_manifest("skyrimse", "Gaming")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn mutable_file_classes_use_copy_but_large_assets_can_hardlink() {
+        assert!(should_copy_instead_of_hardlink("SKSE/Plugins/Example.ini"));
+        assert!(should_copy_instead_of_hardlink(
+            "Data/SKSE/Plugins/Foo.toml"
+        ));
+        assert!(should_copy_instead_of_hardlink("enbseries.ini"));
+        assert!(should_copy_instead_of_hardlink("ReShadePreset.ini"));
+        assert!(!should_copy_instead_of_hardlink(
+            "textures/actors/dragon.dds"
+        ));
+        assert!(!should_copy_instead_of_hardlink("meshes/armor/foo.nif"));
+        assert!(!should_copy_instead_of_hardlink("Skyrim - Textures.bsa"));
+    }
+
+    #[test]
+    fn deploy_mod_atomic_ini_uses_copy_not_hardlink() {
+        let (db, _tmp, staging, data_dir) = setup();
+        let files = vec!["SKSE/Plugins/Example.ini".to_string()];
+        let mod_id = db
+            .add_mod(
+                "skyrimse",
+                "Gaming",
+                None,
+                "MutableConfig",
+                "1.0",
+                "mutable-config.zip",
+                &files,
+            )
+            .unwrap();
+        create_staging_file(&staging, "SKSE/Plugins/Example.ini", b"setting=staging");
+
+        deploy_mod_atomic(
+            &db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &files, &data_dir, "data",
+        )
+        .unwrap();
+
+        fs::write(
+            data_dir.join("SKSE/Plugins/Example.ini"),
+            b"setting=runtime",
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read(staging.join("SKSE/Plugins/Example.ini")).unwrap(),
+            b"setting=staging"
+        );
+        let manifest = db.get_deployment_manifest("skyrimse", "Gaming").unwrap();
+        assert_eq!(manifest[0].deploy_method, "copy");
+    }
+
+    #[test]
+    fn undeploy_restore_next_winner_ini_uses_copy_not_hardlink() {
+        let (db, _tmp, staging_low, data_dir) = setup();
+        let staging_high = staging_low.parent().unwrap().join("staging-high-config");
+        fs::create_dir_all(&staging_high).unwrap();
+        let files = vec!["SKSE/Plugins/Restore.ini".to_string()];
+
+        let low_id = db
+            .add_mod(
+                "skyrimse",
+                "Gaming",
+                None,
+                "LowConfig",
+                "1.0",
+                "low.zip",
+                &files,
+            )
+            .unwrap();
+        db.set_mod_priority(low_id, 0).unwrap();
+        db.set_staging_path(low_id, staging_low.to_str().unwrap())
+            .unwrap();
+        create_staging_file(&staging_low, "SKSE/Plugins/Restore.ini", b"low=staging");
+        deploy_mod_atomic(
+            &db,
+            "skyrimse",
+            "Gaming",
+            low_id,
+            &staging_low,
+            &data_dir,
+            &files,
+            &data_dir,
+            "data",
+        )
+        .unwrap();
+
+        let high_id = db
+            .add_mod(
+                "skyrimse",
+                "Gaming",
+                None,
+                "HighConfig",
+                "1.0",
+                "high.zip",
+                &files,
+            )
+            .unwrap();
+        db.set_mod_priority(high_id, 10).unwrap();
+        db.set_staging_path(high_id, staging_high.to_str().unwrap())
+            .unwrap();
+        create_staging_file(&staging_high, "SKSE/Plugins/Restore.ini", b"high=staging");
+        deploy_mod_atomic(
+            &db,
+            "skyrimse",
+            "Gaming",
+            high_id,
+            &staging_high,
+            &data_dir,
+            &files,
+            &data_dir,
+            "data",
+        )
+        .unwrap();
+
+        db.set_enabled(high_id, false).unwrap();
+        fs::remove_file(data_dir.join("SKSE/Plugins/Restore.ini")).unwrap();
+        let all_mods = db.list_mods("skyrimse", "Gaming").unwrap();
+        restore_next_winner_with_mods(
+            &db,
+            &all_mods,
+            "SKSE/Plugins/Restore.ini",
+            "data",
+            &data_dir,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(data_dir.join("SKSE/Plugins/Restore.ini")).unwrap(),
+            b"low=staging"
+        );
+        fs::write(data_dir.join("SKSE/Plugins/Restore.ini"), b"low=runtime").unwrap();
+
+        assert_eq!(
+            fs::read(staging_low.join("SKSE/Plugins/Restore.ini")).unwrap(),
+            b"low=staging"
+        );
+        let manifest = db.get_deployment_manifest("skyrimse", "Gaming").unwrap();
+        let restored = manifest
+            .iter()
+            .find(|entry| {
+                entry.mod_id == low_id && entry.relative_path == "SKSE/Plugins/Restore.ini"
+            })
+            .unwrap();
+        assert_eq!(restored.deploy_method, "copy");
+    }
+
+    #[test]
+    fn deploy_mod_atomic_unmanaged_loose_file_is_not_overwritten() {
+        let (db, _tmp, staging, data_dir) = setup();
+        let files = vec!["textures/foo.dds".to_string()];
+        let mod_id = db
+            .add_mod(
+                "skyrimse",
+                "Gaming",
+                None,
+                "UnmanagedConflict",
+                "1.0",
+                "unmanaged-conflict.zip",
+                &files,
+            )
+            .unwrap();
+        create_staging_file(&staging, "textures/foo.dds", b"mod texture");
+        let existing = data_dir.join("textures/foo.dds");
+        fs::create_dir_all(existing.parent().unwrap()).unwrap();
+        fs::write(&existing, b"unmanaged texture").unwrap();
+
+        let result = deploy_mod_atomic(
+            &db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &files, &data_dir, "data",
+        );
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(existing).unwrap(), b"unmanaged texture");
+        assert!(db
+            .get_deployment_manifest("skyrimse", "Gaming")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn deploy_mod_atomic_unmanaged_file_restored_when_later_file_fails() {
+        let (db, _tmp, staging, data_dir) = setup();
+        let files = vec!["textures/foo.dds".to_string(), "missing.esp".to_string()];
+        let mod_id = db
+            .add_mod(
+                "skyrimse",
+                "Gaming",
+                None,
+                "UnmanagedRestore",
+                "1.0",
+                "unmanaged.zip",
+                &files,
+            )
+            .unwrap();
+        create_staging_file(&staging, "textures/foo.dds", b"mod texture");
+        let existing = data_dir.join("textures/foo.dds");
+        fs::create_dir_all(existing.parent().unwrap()).unwrap();
+        fs::write(&existing, b"unmanaged texture").unwrap();
+
+        let result = deploy_mod_atomic(
+            &db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &files, &data_dir, "data",
+        );
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(existing).unwrap(), b"unmanaged texture");
+        assert!(db
+            .get_deployment_manifest("skyrimse", "Gaming")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn deploy_mod_atomic_source_symlink_escape_fails_and_rolls_back_valid_file() {
+        let (db, tmp, staging, data_dir) = setup();
+        let files = vec!["safe.esp".to_string(), "escape.esp".to_string()];
+        let mod_id = db
+            .add_mod(
+                "skyrimse",
+                "Gaming",
+                None,
+                "SymlinkEscape",
+                "1.0",
+                "escape.zip",
+                &files,
+            )
+            .unwrap();
+        create_staging_file(&staging, "safe.esp", b"safe");
+        let outside = tmp.path().join("outside.esp");
+        fs::write(&outside, b"outside").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, staging.join("escape.esp")).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&outside, staging.join("escape.esp")).unwrap();
+
+        let result = deploy_mod_atomic(
+            &db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &files, &data_dir, "data",
+        );
+
+        assert!(result.is_err());
+        assert!(!data_dir.join("safe.esp").exists());
+        assert!(db
+            .get_deployment_manifest("skyrimse", "Gaming")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn deploy_mod_atomic_zero_success_returns_error() {
+        let (db, _tmp, staging, data_dir) = setup();
+        let files = vec!["mod.esp".to_string()];
+        let mod_id = db
+            .add_mod(
+                "skyrimse",
+                "Gaming",
+                None,
+                "ZeroSuccess",
+                "1.0",
+                "zero.zip",
+                &files,
+            )
+            .unwrap();
+        create_staging_file(&staging, "mod.esp", b"esp data");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(staging.join("mod.esp"), data_dir.join("mod.esp")).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(staging.join("mod.esp"), data_dir.join("mod.esp"))
+            .unwrap();
+
+        let result = deploy_mod_atomic(
+            &db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &files, &data_dir, "data",
+        );
+
+        assert!(result.is_err());
+        assert!(fs::symlink_metadata(data_dir.join("mod.esp"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(
+            db.get_deployment_manifest("skyrimse", "Gaming")
+                .unwrap()
+                .is_empty(),
+            "zero-success deploy must not write manifest rows"
+        );
     }
 
     #[test]
@@ -1992,6 +3322,55 @@ mod tests {
     }
 
     #[test]
+    fn compute_diff_updates_same_mod_same_path_when_staging_hash_changes() {
+        let mut desired = std::collections::HashMap::new();
+        desired.insert(
+            ("textures/foo.dds".to_string(), "data".to_string()),
+            DesiredFile {
+                relative_path: "textures/foo.dds".to_string(),
+                source_relative_path: "textures/foo.dds".to_string(),
+                mod_id: 42,
+                staging_path: PathBuf::from("/tmp/corkscrew/staging/mod42"),
+                sha256: Some("new-hash".to_string()),
+                deploy_target: "data".to_string(),
+            },
+        );
+
+        let mut current = std::collections::HashMap::new();
+        current.insert(
+            ("textures/foo.dds".to_string(), "data".to_string()),
+            crate::database::DeploymentEntry {
+                id: 1,
+                game_id: "skyrimse".to_string(),
+                bottle_name: "Gaming".to_string(),
+                mod_id: 42,
+                relative_path: "textures/foo.dds".to_string(),
+                staging_path: "/tmp/corkscrew/staging/mod42".to_string(),
+                deploy_method: "copy".to_string(),
+                sha256: Some("old-hash".to_string()),
+                deployed_at: "2026-06-08T00:00:00Z".to_string(),
+                mod_name: "HashChanged".to_string(),
+                deploy_target: "data".to_string(),
+            },
+        );
+
+        let diff = compute_diff(&desired, &current);
+
+        assert_eq!(diff.to_update.len(), 1);
+        assert_eq!(diff.unchanged, 0);
+        assert_eq!(diff.to_add.len(), 0);
+        assert_eq!(diff.to_remove.len(), 0);
+
+        current
+            .get_mut(&("textures/foo.dds".to_string(), "data".to_string()))
+            .unwrap()
+            .sha256 = None;
+        let legacy_manifest_diff = compute_diff(&desired, &current);
+        assert_eq!(legacy_manifest_diff.to_update.len(), 1);
+        assert_eq!(legacy_manifest_diff.unchanged, 0);
+    }
+
+    #[test]
     fn incremental_deploy_from_empty_uses_fallback() {
         let (db, _tmp, _, data_dir) = setup();
         let staging_root = _tmp.path().join("staging_root");
@@ -2151,6 +3530,479 @@ mod tests {
         assert!(r2.files_unchanged >= 4);
         let content = fs::read_to_string(data_dir.join("shared.esp")).unwrap();
         assert_eq!(content, "content from A");
+    }
+
+    #[test]
+    fn incremental_deploy_adds_root_target_to_game_root() {
+        let (db, _tmp, _, data_dir) = setup();
+        let game_root = _tmp.path().join("game_root");
+        fs::create_dir_all(&game_root).unwrap();
+        let staging_root = _tmp.path().join("staging_root");
+        fs::create_dir_all(&staging_root).unwrap();
+
+        let (mod_id, staging) = add_test_mod(
+            &db,
+            &staging_root,
+            "RootMod",
+            0,
+            &[("skse64_loader.exe", b"loader v1")],
+        );
+        deploy_mod(
+            &db,
+            "skyrimse",
+            "Gaming",
+            mod_id,
+            &staging,
+            &game_root,
+            &["skse64_loader.exe".to_string()],
+            "root",
+        )
+        .unwrap();
+
+        create_staging_file(&staging, "root_added.dll", b"root dll");
+        let r = deploy_incremental(&db, "skyrimse", "Gaming", &data_dir, &game_root).unwrap();
+
+        assert_eq!(r.files_added, 1);
+        assert!(game_root.join("root_added.dll").exists());
+        assert!(!data_dir.join("root_added.dll").exists());
+        let entry = db
+            .get_deployed_file("skyrimse", "Gaming", "root_added.dll")
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.deploy_target, "root");
+    }
+
+    #[test]
+    fn incremental_deploy_updates_root_target_in_game_root() {
+        let (db, _tmp, _, data_dir) = setup();
+        let game_root = _tmp.path().join("game_root");
+        fs::create_dir_all(&game_root).unwrap();
+        let staging_root = _tmp.path().join("staging_root");
+        fs::create_dir_all(&staging_root).unwrap();
+
+        let (mod_a, staging_a) = add_test_mod(
+            &db,
+            &staging_root,
+            "RootA",
+            0,
+            &[
+                ("shared_root.dll", b"root from A"),
+                ("unique_a_root.txt", b"a"),
+            ],
+        );
+        let (mod_b, staging_b) = add_test_mod(
+            &db,
+            &staging_root,
+            "RootB",
+            10,
+            &[
+                ("shared_root.dll", b"root from B"),
+                ("unique_b_root.txt", b"b"),
+            ],
+        );
+
+        deploy_mod(
+            &db,
+            "skyrimse",
+            "Gaming",
+            mod_a,
+            &staging_a,
+            &game_root,
+            &[
+                "shared_root.dll".to_string(),
+                "unique_a_root.txt".to_string(),
+            ],
+            "root",
+        )
+        .unwrap();
+        deploy_mod(
+            &db,
+            "skyrimse",
+            "Gaming",
+            mod_b,
+            &staging_b,
+            &game_root,
+            &[
+                "shared_root.dll".to_string(),
+                "unique_b_root.txt".to_string(),
+            ],
+            "root",
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(game_root.join("shared_root.dll")).unwrap(),
+            "root from B"
+        );
+
+        db.set_mod_priority(mod_a, 20).unwrap();
+        let r = deploy_incremental(&db, "skyrimse", "Gaming", &data_dir, &game_root).unwrap();
+
+        assert_eq!(r.files_updated, 1);
+        assert_eq!(
+            fs::read_to_string(game_root.join("shared_root.dll")).unwrap(),
+            "root from A"
+        );
+        assert!(!data_dir.join("shared_root.dll").exists());
+    }
+
+    #[test]
+    fn incremental_deploy_same_relative_path_root_and_data_update_independently() {
+        let (db, _tmp, _, data_dir) = setup();
+        let game_root = _tmp.path().join("game_root");
+        fs::create_dir_all(&game_root).unwrap();
+        let staging_root = _tmp.path().join("staging_root");
+        fs::create_dir_all(&staging_root).unwrap();
+
+        let (data_mod, data_staging) = add_test_mod(
+            &db,
+            &staging_root,
+            "DataSamePath",
+            0,
+            &[("shared.ini", b"data v1"), ("data_anchor.txt", b"anchor")],
+        );
+        deploy_mod(
+            &db,
+            "skyrimse",
+            "Gaming",
+            data_mod,
+            &data_staging,
+            &data_dir,
+            &["shared.ini".to_string(), "data_anchor.txt".to_string()],
+            "data",
+        )
+        .unwrap();
+
+        let (root_mod, root_staging) = add_test_mod(
+            &db,
+            &staging_root,
+            "RootSamePath",
+            0,
+            &[("shared.ini", b"root v1"), ("root_anchor.txt", b"anchor")],
+        );
+        deploy_mod(
+            &db,
+            "skyrimse",
+            "Gaming",
+            root_mod,
+            &root_staging,
+            &game_root,
+            &["shared.ini".to_string(), "root_anchor.txt".to_string()],
+            "root",
+        )
+        .unwrap();
+
+        fs::write(data_staging.join("shared.ini"), b"data v2").unwrap();
+        let data_hash = crate::platform::fast_hash(&data_staging.join("shared.ini")).unwrap();
+        db.store_file_hashes(data_mod, &[("shared.ini".to_string(), data_hash, 7)])
+            .unwrap();
+
+        let r = deploy_incremental(&db, "skyrimse", "Gaming", &data_dir, &game_root).unwrap();
+
+        assert_eq!(r.files_updated, 1);
+        assert_eq!(
+            fs::read_to_string(data_dir.join("shared.ini")).unwrap(),
+            "data v2"
+        );
+        assert_eq!(
+            fs::read_to_string(game_root.join("shared.ini")).unwrap(),
+            "root v1"
+        );
+        assert!(data_dir.join("data_anchor.txt").exists());
+        assert!(game_root.join("root_anchor.txt").exists());
+        let manifest = db.get_deployment_manifest("skyrimse", "Gaming").unwrap();
+        assert!(manifest
+            .iter()
+            .any(|e| e.relative_path == "shared.ini" && e.deploy_target == "data"));
+        assert!(manifest
+            .iter()
+            .any(|e| e.relative_path == "shared.ini" && e.deploy_target == "root"));
+    }
+
+    #[test]
+    fn incremental_deploy_repairs_legacy_hardlinked_mutable_file() {
+        let (db, _tmp, _, data_dir) = setup();
+        let staging_root = _tmp.path().join("staging_root");
+        fs::create_dir_all(&staging_root).unwrap();
+        let (mod_id, staging) = add_test_mod(
+            &db,
+            &staging_root,
+            "LegacyHardlinkedConfig",
+            0,
+            &[
+                ("SKSE/Plugins/Legacy.ini", b"setting=staging"),
+                ("textures/a.dds", b"a"),
+                ("textures/b.dds", b"b"),
+                ("meshes/c.nif", b"c"),
+                ("meshes/d.nif", b"d"),
+                ("sound/e.wav", b"e"),
+            ],
+        );
+        db.set_deploy_target_for_mod(mod_id, "data").unwrap();
+        let rel_path = "SKSE/Plugins/Legacy.ini";
+        let src = staging.join(rel_path);
+        let dst = data_dir.join(rel_path);
+        let staging_str = staging.to_string_lossy().to_string();
+        for extra_rel_path in [
+            rel_path,
+            "textures/a.dds",
+            "textures/b.dds",
+            "meshes/c.nif",
+            "meshes/d.nif",
+            "sound/e.wav",
+        ] {
+            let extra_src = staging.join(extra_rel_path);
+            let extra_dst = data_dir.join(extra_rel_path);
+            fs::create_dir_all(extra_dst.parent().unwrap()).unwrap();
+            fs::hard_link(&extra_src, &extra_dst).unwrap();
+            let extra_hash = crate::platform::fast_hash(&extra_src).unwrap();
+            db.batch_add_deployment_entries_with_hashes(&[(
+                "skyrimse",
+                "Gaming",
+                mod_id,
+                extra_rel_path,
+                staging_str.as_str(),
+                "hardlink",
+                Some(extra_hash.as_str()),
+                "data",
+            )])
+            .unwrap();
+        }
+
+        let result = deploy_incremental(&db, "skyrimse", "Gaming", &data_dir, &data_dir).unwrap();
+        assert_eq!(result.files_updated, 1);
+        fs::write(&dst, b"setting=runtime").unwrap();
+
+        assert_eq!(fs::read(&src).unwrap(), b"setting=staging");
+        let manifest = db.get_deployment_manifest("skyrimse", "Gaming").unwrap();
+        let repaired = manifest
+            .iter()
+            .find(|entry| entry.mod_id == mod_id && entry.relative_path == rel_path)
+            .unwrap();
+        assert_eq!(repaired.deploy_method, "copy");
+    }
+
+    #[test]
+    fn incremental_deploy_removes_root_target_from_game_root() {
+        let (db, _tmp, _, data_dir) = setup();
+        let game_root = _tmp.path().join("game_root");
+        fs::create_dir_all(&game_root).unwrap();
+        let staging_root = _tmp.path().join("staging_root");
+        fs::create_dir_all(&staging_root).unwrap();
+
+        let (base_mod, base_staging) = add_test_mod(
+            &db,
+            &staging_root,
+            "RootBase",
+            0,
+            &[
+                ("base_root_1.txt", b"base1"),
+                ("base_root_2.txt", b"base2"),
+                ("base_root_3.txt", b"base3"),
+                ("base_root_4.txt", b"base4"),
+            ],
+        );
+        let (small_mod, small_staging) = add_test_mod(
+            &db,
+            &staging_root,
+            "RootSmall",
+            5,
+            &[("remove_me_root.dll", b"remove me")],
+        );
+        deploy_mod(
+            &db,
+            "skyrimse",
+            "Gaming",
+            base_mod,
+            &base_staging,
+            &game_root,
+            &[
+                "base_root_1.txt".to_string(),
+                "base_root_2.txt".to_string(),
+                "base_root_3.txt".to_string(),
+                "base_root_4.txt".to_string(),
+            ],
+            "root",
+        )
+        .unwrap();
+        deploy_mod(
+            &db,
+            "skyrimse",
+            "Gaming",
+            small_mod,
+            &small_staging,
+            &game_root,
+            &["remove_me_root.dll".to_string()],
+            "root",
+        )
+        .unwrap();
+        assert!(game_root.join("remove_me_root.dll").exists());
+
+        db.set_enabled(small_mod, false).unwrap();
+        let r = deploy_incremental(&db, "skyrimse", "Gaming", &data_dir, &game_root).unwrap();
+
+        assert_eq!(r.files_removed, 1);
+        assert!(!game_root.join("remove_me_root.dll").exists());
+        assert!(!data_dir.join("remove_me_root.dll").exists());
+        assert!(game_root.join("base_root_1.txt").exists());
+    }
+
+    #[test]
+    fn incremental_deploy_adds_custom_target_to_durable_base() {
+        let (db, _tmp, _, data_dir) = setup();
+        let game_root = _tmp.path().join("game_root");
+        let custom_root = _tmp.path().join("custom_root");
+        fs::create_dir_all(&game_root).unwrap();
+        fs::create_dir_all(&custom_root).unwrap();
+        let staging_root = _tmp.path().join("staging_root");
+        fs::create_dir_all(&staging_root).unwrap();
+
+        let (custom_mod, _custom_staging) = add_test_mod(
+            &db,
+            &staging_root,
+            "CustomMod",
+            0,
+            &[("custom_file.txt", b"custom")],
+        );
+        let custom_base = custom_root.to_string_lossy().to_string();
+        db.set_deploy_target_for_mod_with_base(custom_mod, "custom", Some(&custom_base))
+            .unwrap();
+
+        let result = deploy_incremental(&db, "skyrimse", "Gaming", &data_dir, &game_root)
+            .expect("custom incremental add should use durable base");
+
+        assert!(result.fallback_used);
+        assert!(custom_root.join("custom_file.txt").exists());
+        assert!(!data_dir.join("custom_file.txt").exists());
+        let entry = db
+            .get_deployed_file("skyrimse", "Gaming", "custom_file.txt")
+            .unwrap()
+            .expect("manifest entry should exist");
+        assert_eq!(entry.mod_id, custom_mod);
+        assert!(entry.deploy_target.starts_with("custom:"));
+    }
+
+    #[test]
+    fn incremental_deploy_custom_target_change_uses_durable_base_without_orphaning() {
+        let (db, _tmp, _, data_dir) = setup();
+        let game_root = _tmp.path().join("game_root");
+        let custom_root = _tmp.path().join("custom_root");
+        fs::create_dir_all(&game_root).unwrap();
+        fs::create_dir_all(&custom_root).unwrap();
+        let staging_root = _tmp.path().join("staging_root");
+        fs::create_dir_all(&staging_root).unwrap();
+
+        let (custom_mod, custom_staging) = add_test_mod(
+            &db,
+            &staging_root,
+            "CustomMod",
+            0,
+            &[("custom_file.txt", b"custom")],
+        );
+        deploy_mod(
+            &db,
+            "skyrimse",
+            "Gaming",
+            custom_mod,
+            &custom_staging,
+            &custom_root,
+            &["custom_file.txt".to_string()],
+            "custom",
+        )
+        .unwrap();
+        assert!(custom_root.join("custom_file.txt").exists());
+
+        db.set_enabled(custom_mod, false).unwrap();
+        let result = deploy_incremental(&db, "skyrimse", "Gaming", &data_dir, &game_root)
+            .expect("custom incremental change should use durable base safely");
+
+        assert!(result.fallback_used);
+        assert!(!custom_root.join("custom_file.txt").exists());
+        assert!(db
+            .get_deployed_file("skyrimse", "Gaming", "custom_file.txt")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn purge_custom_target_fails_before_deleting_or_cleaning_manifest() {
+        let (db, _tmp, _, data_dir) = setup();
+        let game_root = _tmp.path().join("game_root");
+        let custom_root = _tmp.path().join("custom_root");
+        fs::create_dir_all(&game_root).unwrap();
+        fs::create_dir_all(&custom_root).unwrap();
+
+        let mod_id = db
+            .add_mod(
+                "skyrimse",
+                "Gaming",
+                None,
+                "CustomMod",
+                "1.0",
+                "custom.zip",
+                &["custom_file.txt".to_string()],
+            )
+            .unwrap();
+        db.set_deploy_target_for_mod(mod_id, "custom").unwrap();
+        db.batch_add_deployment_entries(&[(
+            "skyrimse",
+            "Gaming",
+            mod_id,
+            "custom_file.txt",
+            custom_root.to_str().unwrap(),
+            "copy",
+            "custom",
+        )])
+        .unwrap();
+
+        fs::write(data_dir.join("custom_file.txt"), b"do not delete").unwrap();
+        fs::write(custom_root.join("custom_file.txt"), b"custom").unwrap();
+
+        let err = purge_deployment(&db, "skyrimse", "Gaming", &data_dir, &game_root)
+            .expect_err("custom target purge must fail before destructive work");
+        assert!(err.to_string().contains("deploy_target 'custom'"));
+        assert_eq!(
+            fs::read(data_dir.join("custom_file.txt")).unwrap(),
+            b"do not delete"
+        );
+        assert!(custom_root.join("custom_file.txt").exists());
+        assert_eq!(db.get_deployment_paths_for_mod(mod_id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn deploy_mod_atomic_routes_root_target_to_game_root() {
+        let (db, _tmp, staging, data_dir) = setup();
+        let game_root = _tmp.path().join("game_root");
+        fs::create_dir_all(&game_root).unwrap();
+
+        let mod_id = db
+            .add_mod(
+                "skyrimse",
+                "Gaming",
+                None,
+                "RootMod",
+                "1.0",
+                "root.zip",
+                &["root_loader.dll".to_string()],
+            )
+            .unwrap();
+        create_staging_file(&staging, "root_loader.dll", b"root dll");
+
+        deploy_mod_atomic(
+            &db,
+            "skyrimse",
+            "Gaming",
+            mod_id,
+            &staging,
+            &data_dir,
+            &["root_loader.dll".to_string()],
+            &game_root,
+            "root",
+        )
+        .unwrap();
+
+        assert!(game_root.join("root_loader.dll").exists());
+        assert!(!data_dir.join("root_loader.dll").exists());
+        assert_eq!(db.get_deploy_target_for_mod(mod_id).unwrap(), "root");
     }
 
     #[test]
@@ -2358,7 +4210,10 @@ mod tests {
         let db = Arc::new(db);
 
         let result = deploy_native_game(&detected, &db);
-        assert!(result.is_err(), "expected stub error for unimplemented native deploy");
+        assert!(
+            result.is_err(),
+            "expected stub error for unimplemented native deploy"
+        );
         let err_msg = format!("{:?}", result.unwrap_err());
         assert!(err_msg.contains("fakegame"), "error should mention game_id");
     }

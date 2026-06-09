@@ -83,9 +83,11 @@ pub async fn get_file_based_load_order(
 
     // Snapshot the FileBasedLoadOrder out of the registry — we cannot hold
     // the registry mutex across the file IO that follows.
-    let cfg = games::with_plugin(&game_id, |plugin| match plugin.load_order_kind(&game_path) {
-        LoadOrderKind::FileBased(c) => Some(c),
-        _ => None,
+    let cfg = games::with_plugin(&game_id, |plugin| {
+        match plugin.load_order_kind(&game_path) {
+            LoadOrderKind::FileBased(c) => Some(c),
+            _ => None,
+        }
     })
     .flatten()
     .ok_or_else(|| format!("Game '{}' does not use a file-based load order", game_id))?;
@@ -122,9 +124,11 @@ pub async fn set_file_based_load_order(
     let (_bottle, game, _data_dir) = resolve_game(&game_id, &bottle_name)?;
     let game_path = PathBuf::from(&game.game_path);
 
-    let cfg = games::with_plugin(&game_id, |plugin| match plugin.load_order_kind(&game_path) {
-        LoadOrderKind::FileBased(c) => Some(c),
-        _ => None,
+    let cfg = games::with_plugin(&game_id, |plugin| {
+        match plugin.load_order_kind(&game_path) {
+            LoadOrderKind::FileBased(c) => Some(c),
+            _ => None,
+        }
     })
     .flatten()
     .ok_or_else(|| format!("Game '{}' does not use a file-based load order", game_id))?;
@@ -146,7 +150,10 @@ pub async fn set_file_based_load_order(
             return Err("Load order entry has empty id".to_string());
         }
         if entry.id.contains('\0') {
-            return Err(format!("Load order entry '{}' contains a null byte", entry.id));
+            return Err(format!(
+                "Load order entry '{}' contains a null byte",
+                entry.id
+            ));
         }
         if cfg.format == LoadOrderFormat::Lines && entry.id.contains('\n') {
             return Err(format!(
@@ -338,7 +345,12 @@ fn write_bg3_load_order(path: &Path, order: &[LoadOrderEntry]) -> Result<(), Str
             },
         ];
         ModSettings {
-            version: LsxVersion { major: 4, minor: 0, revision: 9, build: 319 },
+            version: LsxVersion {
+                major: 4,
+                minor: 0,
+                revision: 9,
+                build: 319,
+            },
             mods: masters,
         }
     };
@@ -641,9 +653,12 @@ mod tests {
         fn describe(id: &str) -> String {
             format!("Mod: {}", id)
         }
-        let decoded =
-            decode_load_order(raw, LoadOrderFormat::Lines, Some(describe as fn(&str) -> String))
-                .unwrap();
+        let decoded = decode_load_order(
+            raw,
+            LoadOrderFormat::Lines,
+            Some(describe as fn(&str) -> String),
+        )
+        .unwrap();
         assert_eq!(decoded[0].display_name, "Mod: core");
         assert_eq!(decoded[1].display_name, "Mod: ui");
     }
@@ -662,7 +677,10 @@ mod tests {
     fn json_decodes_string_array_form() {
         let raw = r#"["one", "two", "three"]"#;
         let decoded = decode_load_order(raw, LoadOrderFormat::JsonArray, None).unwrap();
-        assert_eq!(decoded, entries(&[("one", true), ("two", true), ("three", true)]));
+        assert_eq!(
+            decoded,
+            entries(&[("one", true), ("two", true), ("three", true)])
+        );
     }
 
     #[test]
@@ -734,11 +752,7 @@ mod tests {
         let tmp_left = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
-            .any(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .ends_with(".corkscrew.tmp")
-            });
+            .any(|e| e.file_name().to_string_lossy().ends_with(".corkscrew.tmp"));
         assert!(!tmp_left, "temp file should have been cleaned up");
     }
 
@@ -809,7 +823,12 @@ mod tests {
         ];
         mods.extend(extras);
         ModSettings {
-            version: LsxVersion { major: 4, minor: 0, revision: 9, build: 319 },
+            version: LsxVersion {
+                major: 4,
+                minor: 0,
+                revision: 9,
+                build: 319,
+            },
             mods,
         }
     }
@@ -847,7 +866,12 @@ mod tests {
         let result = read_bg3_load_order(&path).unwrap();
 
         // Must return exactly the 2 community mods, no masters.
-        assert_eq!(result.len(), 2, "should return only community mods, got {:?}", result);
+        assert_eq!(
+            result.len(),
+            2,
+            "should return only community mods, got {:?}",
+            result
+        );
         assert!(
             result.iter().all(|e| {
                 e.id != MASTER_GUSTAV_DEV_UUID.to_lowercase()
@@ -917,9 +941,18 @@ mod tests {
 
         // Masters must all be present (in the first 3 slots).
         let uuids: Vec<&str> = updated.mods.iter().map(|m| m.uuid.as_str()).collect();
-        assert!(uuids.contains(&MASTER_GUSTAV_DEV_UUID), "GustavDev must be preserved");
-        assert!(uuids.contains(&MASTER_GUSTAV_UUID), "Gustav must be preserved");
-        assert!(uuids.contains(&MASTER_SHARED_DEV_UUID), "SharedDev must be preserved");
+        assert!(
+            uuids.contains(&MASTER_GUSTAV_DEV_UUID),
+            "GustavDev must be preserved"
+        );
+        assert!(
+            uuids.contains(&MASTER_GUSTAV_UUID),
+            "Gustav must be preserved"
+        );
+        assert!(
+            uuids.contains(&MASTER_SHARED_DEV_UUID),
+            "SharedDev must be preserved"
+        );
 
         // Community mods must be in the new order (after masters).
         let community: Vec<&str> = updated
@@ -930,7 +963,10 @@ mod tests {
             .collect();
         assert_eq!(
             community,
-            vec!["bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"],
+            vec![
+                "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+            ],
             "community mods must be reordered to [B, A]"
         );
 
@@ -961,8 +997,14 @@ mod tests {
         let updated = crate::bg3_lsx::read_modsettings(&path).unwrap();
         assert_eq!(updated.version.major, 4, "version.major must be preserved");
         assert_eq!(updated.version.minor, 0, "version.minor must be preserved");
-        assert_eq!(updated.version.revision, 9, "version.revision must be preserved");
-        assert_eq!(updated.version.build, 319, "version.build must be preserved");
+        assert_eq!(
+            updated.version.revision, 9,
+            "version.revision must be preserved"
+        );
+        assert_eq!(
+            updated.version.build, 319,
+            "version.build must be preserved"
+        );
     }
 
     #[test]

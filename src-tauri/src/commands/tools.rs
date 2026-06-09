@@ -2,11 +2,11 @@
 
 use crate::collections;
 use crate::executables;
-use crate::executables::{CustomExecutable};
-use crate::launcher::{LaunchResult};
+use crate::executables::CustomExecutable;
+use crate::launcher::LaunchResult;
 use crate::mod_tools;
 use crate::wabbajack;
-use crate::{AppState, resolve_game};
+use crate::{resolve_game, AppState};
 use std::path::Path;
 use tauri::{AppHandle, State};
 
@@ -88,7 +88,10 @@ pub async fn launch_mod_tool(
 }
 
 #[tauri::command]
-pub async fn get_prefix_dependencies(game_id: String, prefix_path: String) -> Result<Vec<crate::prefix_setup::WineDependency>, String> {
+pub async fn get_prefix_dependencies(
+    game_id: String,
+    prefix_path: String,
+) -> Result<Vec<crate::prefix_setup::WineDependency>, String> {
     let mut deps = crate::prefix_setup::get_game_dependencies(&game_id);
     crate::prefix_setup::check_installed_deps(std::path::Path::new(&prefix_path), &mut deps);
     Ok(deps)
@@ -152,7 +155,6 @@ pub async fn apply_tool_ini_edits_cmd(
     .map_err(crate::format_join_error)?
 }
 
-
 // --- Tool Requirement Detection ---
 
 #[tauri::command]
@@ -190,7 +192,6 @@ pub async fn detect_wabbajack_tools(
     .await
     .map_err(crate::format_join_error)?
 }
-
 
 // --- Custom Executables ---
 
@@ -255,4 +256,3 @@ pub async fn set_default_exe(
     .await
     .map_err(crate::format_join_error)?
 }
-

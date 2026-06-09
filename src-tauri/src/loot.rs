@@ -297,13 +297,8 @@ async fn download_file(url: &str, dest: &Path) -> Result<()> {
 
     std::fs::write(&tmp, &bytes)
         .with_context(|| format!("Failed to write temp file: {}", tmp.display()))?;
-    std::fs::rename(&tmp, dest).with_context(|| {
-        format!(
-            "Failed to rename {} -> {}",
-            tmp.display(),
-            dest.display()
-        )
-    })?;
+    std::fs::rename(&tmp, dest)
+        .with_context(|| format!("Failed to rename {} -> {}", tmp.display(), dest.display()))?;
 
     log::info!("Downloaded {} -> {}", url, dest.display());
     Ok(())
@@ -344,9 +339,7 @@ pub fn get_masterlist_status(game_id: &str) -> MasterlistStatus {
     let metadata = std::fs::metadata(&ml_path).ok();
     let modified = metadata.and_then(|m| m.modified().ok());
     let elapsed = modified.and_then(|m| SystemTime::now().duration_since(m).ok());
-    let fresh = elapsed
-        .map(|e| e < MASTERLIST_MAX_AGE)
-        .unwrap_or(false);
+    let fresh = elapsed.map(|e| e < MASTERLIST_MAX_AGE).unwrap_or(false);
 
     let updated_at = modified.map(|m| {
         let datetime: chrono::DateTime<chrono::Utc> = m.into();

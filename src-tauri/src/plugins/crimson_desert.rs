@@ -435,7 +435,10 @@ mod tests {
         assert_eq!(p.categorize_mod_file("x/mod.dll"), Some("asi".into()));
         assert_eq!(p.categorize_mod_file("x/sound.bnk"), Some("sound".into()));
         assert_eq!(p.categorize_mod_file("x/0.pathc"), Some("archive".into()));
-        assert_eq!(p.categorize_mod_file("x/patch.bsdiff"), Some("patch".into()));
+        assert_eq!(
+            p.categorize_mod_file("x/patch.bsdiff"),
+            Some("patch".into())
+        );
         assert_eq!(p.categorize_mod_file("x/data.json"), Some("data".into()));
         assert_eq!(p.categorize_mod_file("x/readme.md"), None);
     }
@@ -514,21 +517,21 @@ mod tests {
 
     #[test]
     fn detect_finds_game_in_program_files() {
-        let (_tmp, bottle_path) =
-            make_cd_bottle_with_game(&["Program Files", "Crimson Desert"]);
+        let (_tmp, bottle_path) = make_cd_bottle_with_game(&["Program Files", "Crimson Desert"]);
         let b = Bottle {
             name: "T".into(),
             path: bottle_path,
             source: "T".into(),
         };
-        let d = CrimsonDesertPlugin.detect_wine(&b).expect("non-Steam detect");
+        let d = CrimsonDesertPlugin
+            .detect_wine(&b)
+            .expect("non-Steam detect");
         assert_eq!(d.game_id, "crimsondesert");
     }
 
     #[test]
     fn detect_finds_game_in_games_dir() {
-        let (_tmp, bottle_path) =
-            make_cd_bottle_with_game(&["Games", "Crimson Desert"]);
+        let (_tmp, bottle_path) = make_cd_bottle_with_game(&["Games", "Crimson Desert"]);
         let b = Bottle {
             name: "T".into(),
             path: bottle_path,
@@ -568,7 +571,9 @@ mod tests {
             path: bottle_path,
             source: "T".into(),
         };
-        let d = CrimsonDesertPlugin.detect_wine(&b).expect("Xbox Game Pass detect");
+        let d = CrimsonDesertPlugin
+            .detect_wine(&b)
+            .expect("Xbox Game Pass detect");
         assert_eq!(d.game_id, "crimsondesert");
         assert!(d.game_path.ends_with("Content"));
     }

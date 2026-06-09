@@ -187,19 +187,14 @@ pub struct NxmUrl {
 #[serde(tag = "action")]
 pub enum CorkscrewAction {
     #[serde(rename = "install_nexus")]
-    InstallNexus {
-        game_domain: String,
-        mod_id: i64,
-    },
+    InstallNexus { game_domain: String, mod_id: i64 },
     #[serde(rename = "launch")]
     Launch {
         game_id: String,
         bottle_name: String,
     },
     #[serde(rename = "import_profile")]
-    ImportProfile {
-        code: String,
-    },
+    ImportProfile { code: String },
 }
 
 /// Parse a `corkscrew://` URL into an action.
@@ -225,7 +220,10 @@ pub fn parse_corkscrew_url(url: &str) -> Result<CorkscrewAction, String> {
             let mod_id: i64 = parts[3]
                 .parse()
                 .map_err(|_| format!("Invalid mod ID: {}", parts[3]))?;
-            Ok(CorkscrewAction::InstallNexus { game_domain, mod_id })
+            Ok(CorkscrewAction::InstallNexus {
+                game_domain,
+                mod_id,
+            })
         }
         "launch" => {
             // corkscrew://launch/{game_id}/{bottle}
@@ -235,7 +233,10 @@ pub fn parse_corkscrew_url(url: &str) -> Result<CorkscrewAction, String> {
             let game_id = parts[1].to_string();
             // Bottle name may contain URL-encoded spaces
             let bottle_name = urlencoding_decode(parts[2]);
-            Ok(CorkscrewAction::Launch { game_id, bottle_name })
+            Ok(CorkscrewAction::Launch {
+                game_id,
+                bottle_name,
+            })
         }
         "profile" => {
             // corkscrew://profile/{code}
@@ -284,7 +285,10 @@ pub enum NxmRoute {
     Recognized { game_id: String },
     /// The NXM `game_domain` did NOT match any registered game. Fall back
     /// to `active_game_id`. UI should show `warning` to the user.
-    Fallback { active_game_id: String, warning: String },
+    Fallback {
+        active_game_id: String,
+        warning: String,
+    },
     /// No active game profile is set, and the declared `game_domain` is
     /// unknown. Cannot proceed. UI should show `error` to the user.
     NoActiveGame { error: String },
@@ -311,13 +315,17 @@ pub fn route_nxm_game(
     // 1. Match by nexus_slug.
     for (gid, slug) in known_games {
         if slug.eq_ignore_ascii_case(&domain_lower) {
-            return NxmRoute::Recognized { game_id: gid.clone() };
+            return NxmRoute::Recognized {
+                game_id: gid.clone(),
+            };
         }
     }
     // 2. Match by game_id (some custom games use the slug as the id).
     for (gid, _slug) in known_games {
         if gid.eq_ignore_ascii_case(&domain_lower) {
-            return NxmRoute::Recognized { game_id: gid.clone() };
+            return NxmRoute::Recognized {
+                game_id: gid.clone(),
+            };
         }
     }
 
@@ -488,8 +496,7 @@ mod tests {
 
     #[test]
     fn test_parse_nxm_url_with_key() {
-        let url =
-            "nxm://skyrimspecialedition/mods/12345/files/67890?key=abc123&expires=1234567890";
+        let url = "nxm://skyrimspecialedition/mods/12345/files/67890?key=abc123&expires=1234567890";
         let parsed = parse_nxm_url(url).unwrap();
         assert_eq!(parsed.game_domain, "skyrimspecialedition");
         assert_eq!(parsed.mod_id, 12345);
@@ -506,9 +513,13 @@ mod tests {
 
     #[test]
     fn test_parse_corkscrew_url_install() {
-        let action = parse_corkscrew_url("corkscrew://install/nexus/skyrimspecialedition/12345").unwrap();
+        let action =
+            parse_corkscrew_url("corkscrew://install/nexus/skyrimspecialedition/12345").unwrap();
         match action {
-            CorkscrewAction::InstallNexus { game_domain, mod_id } => {
+            CorkscrewAction::InstallNexus {
+                game_domain,
+                mod_id,
+            } => {
                 assert_eq!(game_domain, "skyrimspecialedition");
                 assert_eq!(mod_id, 12345);
             }
@@ -520,7 +531,10 @@ mod tests {
     fn test_parse_corkscrew_url_launch() {
         let action = parse_corkscrew_url("corkscrew://launch/skyrimse/My%20Bottle").unwrap();
         match action {
-            CorkscrewAction::Launch { game_id, bottle_name } => {
+            CorkscrewAction::Launch {
+                game_id,
+                bottle_name,
+            } => {
                 assert_eq!(game_id, "skyrimse");
                 assert_eq!(bottle_name, "My Bottle");
             }

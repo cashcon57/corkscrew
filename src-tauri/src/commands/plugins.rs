@@ -1,13 +1,13 @@
 //! Plugin load order: LOOT sorting and custom ordering rules.
 
-use crate::loot;
-use crate::loot_rules;
-use crate::plugins;
 use crate::games;
+use crate::loot;
 use crate::loot::{MasterlistStatus, PluginWarning, SortResult};
-use crate::loot_rules::{PluginRule};
-use crate::plugins::skyrim_plugins::{PluginEntry};
-use crate::{AppState, resolve_game};
+use crate::loot_rules;
+use crate::loot_rules::PluginRule;
+use crate::plugins;
+use crate::plugins::skyrim_plugins::PluginEntry;
+use crate::{resolve_game, AppState};
 use std::path::{Path, PathBuf};
 use tauri::State;
 
@@ -203,7 +203,6 @@ pub async fn get_plugin_messages(
     .map_err(crate::format_join_error)?
 }
 
-
 #[tauri::command]
 pub async fn get_masterlist_status(game_id: String) -> Result<MasterlistStatus, String> {
     Ok(loot::get_masterlist_status(&game_id))
@@ -266,4 +265,3 @@ pub async fn clear_plugin_rules(
         .await
         .map_err(crate::format_join_error)?
 }
-

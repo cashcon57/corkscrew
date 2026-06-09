@@ -100,15 +100,22 @@ pub struct TextureFileResult {
 // ---------------------------------------------------------------------------
 
 /// Filename suffixes (before the `.dds` extension) that indicate a normal map.
-const NORMAL_MAP_SUFFIXES: &[&str] = &[
-    "_n", "_normal", "_nrm", "_msn", "_normals",
-];
+const NORMAL_MAP_SUFFIXES: &[&str] = &["_n", "_normal", "_nrm", "_msn", "_normals"];
 
 /// Filename suffixes that indicate a mask, specular, glow, or similar map that
 /// is best left at full resolution.
 const MASK_SUFFIXES: &[&str] = &[
-    "_m", "_s", "_g", "_p", "_em", "_sk", "_spec", "_mask", "_glow",
-    "_emissive", "_specular",
+    "_m",
+    "_s",
+    "_g",
+    "_p",
+    "_em",
+    "_sk",
+    "_spec",
+    "_mask",
+    "_glow",
+    "_emissive",
+    "_specular",
 ];
 
 /// Returns `true` if the filename (case-insensitive) looks like a normal map.
@@ -364,8 +371,8 @@ fn process_single_texture(
     config: &TextureOptConfig,
 ) -> Result<TextureFileResult, String> {
     // Read file
-    let data = std::fs::read(abs)
-        .map_err(|e| format!("Failed to read {}: {}", abs.display(), e))?;
+    let data =
+        std::fs::read(abs).map_err(|e| format!("Failed to read {}: {}", abs.display(), e))?;
     let original_size = data.len() as u64;
 
     let dds = Dds::read(&mut Cursor::new(&data))
@@ -450,7 +457,14 @@ fn process_single_texture(
         image_dds::Quality::Normal,
         image_dds::Mipmaps::GeneratedAutomatic,
     )
-    .map_err(|e| format!("Failed to encode DDS {} ({:?}): {}", abs.display(), format, e))?;
+    .map_err(|e| {
+        format!(
+            "Failed to encode DDS {} ({:?}): {}",
+            abs.display(),
+            format,
+            e
+        )
+    })?;
 
     // Write back to same path
     let mut file = std::fs::File::create(abs)
@@ -459,9 +473,7 @@ fn process_single_texture(
         .write(&mut file)
         .map_err(|e| format!("Failed to write DDS {}: {}", abs.display(), e))?;
 
-    let new_size = std::fs::metadata(abs)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let new_size = std::fs::metadata(abs).map(|m| m.len()).unwrap_or(0);
 
     debug!(
         "Optimized texture: {} {}x{} -> {}x{} ({} -> {} bytes, {:?})",

@@ -210,9 +210,9 @@ pub trait GamePlugin: Send + Sync {
     /// override this. Wine plugins leave it as the default and are never
     /// dispatched here (see [`crate::deployer::deploy_native_game`]).
     ///
-    /// Native plugins (Stardew Valley in Task 3.7, BG3 in Task 4.4) override
-    /// this to implement their per-game mod layout (SMAPI `<mods_dir>/<UniqueID>/`
-    /// for Stardew, etc.).
+    /// Native plugins override this to implement their per-game mod layout
+    /// (SMAPI `Contents/MacOS/Mods/<mod-name>/` for Stardew, BG3 `.pak` files
+    /// under `~/Documents/Larian Studios/Baldur's Gate 3/Mods/`, etc.).
     fn deploy_native(
         &self,
         _detected: &DetectedGame,
@@ -481,14 +481,9 @@ where
 ///     plugin.deploy_native(&detected, &db)?;
 /// }
 /// ```
-pub fn clone_plugin_for_dispatch(
-    game_id: &str,
-) -> Option<Arc<dyn GamePlugin + Send + Sync>> {
+pub fn clone_plugin_for_dispatch(game_id: &str) -> Option<Arc<dyn GamePlugin + Send + Sync>> {
     let plugins = registry().lock().unwrap_or_else(|e| e.into_inner());
-    plugins
-        .iter()
-        .find(|p| p.game_id() == game_id)
-        .cloned()
+    plugins.iter().find(|p| p.game_id() == game_id).cloned()
 }
 
 /// Metadata returned by [`identify_at_path`] for a single matching plugin.

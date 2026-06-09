@@ -19,7 +19,8 @@ pub async fn manual_self_update(url: String, expected_version: String) -> Result
         url
     );
 
-    let app_path = get_app_bundle_path().map_err(|e| format!("Failed to determine app path: {e}"))?;
+    let app_path =
+        get_app_bundle_path().map_err(|e| format!("Failed to determine app path: {e}"))?;
     log::info!("[self_update] App bundle path: {}", app_path.display());
 
     // Step 1: Download the tar.gz
@@ -27,10 +28,7 @@ pub async fn manual_self_update(url: String, expected_version: String) -> Result
     let bytes = download_update(&url)
         .await
         .map_err(|e| format!("Download failed: {e}"))?;
-    log::info!(
-        "[self_update] Downloaded {} bytes",
-        bytes.len()
-    );
+    log::info!("[self_update] Downloaded {} bytes", bytes.len());
 
     // Step 2: Extract to temp directory
     log::info!("[self_update] Step 2: Extracting archive...");
@@ -39,8 +37,7 @@ pub async fn manual_self_update(url: String, expected_version: String) -> Result
         .tempdir()
         .map_err(|e| format!("Failed to create temp dir: {e}"))?;
 
-    extract_tar_gz(&bytes, tmp_extract.path())
-        .map_err(|e| format!("Extraction failed: {e}"))?;
+    extract_tar_gz(&bytes, tmp_extract.path()).map_err(|e| format!("Extraction failed: {e}"))?;
 
     // Verify extraction produced a valid app structure
     let extracted_plist = tmp_extract.path().join("Contents/Info.plist");
@@ -56,7 +53,10 @@ pub async fn manual_self_update(url: String, expected_version: String) -> Result
     );
 
     // Step 3: Replace the app bundle
-    log::info!("[self_update] Step 3: Replacing app bundle at {}...", app_path.display());
+    log::info!(
+        "[self_update] Step 3: Replacing app bundle at {}...",
+        app_path.display()
+    );
     replace_app_bundle(&app_path, tmp_extract.path())
         .map_err(|e| format!("Failed to replace app bundle: {e}"))?;
 
@@ -80,8 +80,7 @@ pub async fn manual_self_update(url: String, expected_version: String) -> Result
 }
 
 fn get_app_bundle_path() -> Result<PathBuf, String> {
-    let exe = std::env::current_exe()
-        .map_err(|e| format!("current_exe failed: {e}"))?;
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe failed: {e}"))?;
 
     // On macOS: .app/Contents/MacOS/binary → navigate up to .app
     let exe_str = exe.display().to_string();
@@ -93,10 +92,7 @@ fn get_app_bundle_path() -> Result<PathBuf, String> {
             .ok_or("Failed to navigate to .app bundle")?;
         Ok(app_path.to_path_buf())
     } else {
-        Err(format!(
-            "Not running from a macOS .app bundle: {}",
-            exe_str
-        ))
+        Err(format!("Not running from a macOS .app bundle: {}", exe_str))
     }
 }
 
@@ -233,9 +229,7 @@ fn replace_app_bundle(
         .status();
 
     // Step D: Touch the app to update modification time
-    let _ = std::process::Command::new("touch")
-        .arg(app_path)
-        .status();
+    let _ = std::process::Command::new("touch").arg(app_path).status();
 
     log::info!("[self_update] App replacement complete");
     Ok(())

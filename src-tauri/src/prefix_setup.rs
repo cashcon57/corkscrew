@@ -78,10 +78,7 @@ fn dep(verb: &str, name: &str, required: bool) -> WineDependency {
 // ---------------------------------------------------------------------------
 
 /// Check which dependencies are already installed in a Wine prefix.
-pub fn check_installed_deps(
-    prefix_path: &Path,
-    deps: &mut [WineDependency],
-) {
+pub fn check_installed_deps(prefix_path: &Path, deps: &mut [WineDependency]) {
     // Check winetricks.log for installed verbs
     let log_path = prefix_path.join("winetricks.log");
     let installed_verbs: Vec<String> = if log_path.exists() {
@@ -170,9 +167,7 @@ pub fn install_dependencies(
 ) -> Vec<InstallResult> {
     let mut results = Vec::new();
 
-    let deps_to_install: Vec<&WineDependency> = deps.iter()
-        .filter(|d| !d.installed)
-        .collect();
+    let deps_to_install: Vec<&WineDependency> = deps.iter().filter(|d| !d.installed).collect();
 
     if deps_to_install.is_empty() {
         info!("All dependencies already installed");
@@ -189,12 +184,15 @@ pub fn install_dependencies(
     let use_protontricks = steam_app_id.is_some() && which_command("protontricks").is_some();
 
     for (i, dep) in deps_to_install.iter().enumerate() {
-        let _ = app.emit("prefix://setup-progress", serde_json::json!({
-            "current": i + 1,
-            "total": deps_to_install.len(),
-            "verb": &dep.verb,
-            "name": &dep.name,
-        }));
+        let _ = app.emit(
+            "prefix://setup-progress",
+            serde_json::json!({
+                "current": i + 1,
+                "total": deps_to_install.len(),
+                "verb": &dep.verb,
+                "name": &dep.name,
+            }),
+        );
 
         let result = if use_protontricks {
             install_via_protontricks(steam_app_id.unwrap(), &dep.verb)
@@ -255,10 +253,7 @@ fn should_disable_bwrap() -> bool {
 /// - the DMI board vendor reports `Valve` (Steam Deck), OR
 /// - the os-release file declares `ID=steamos` (case-insensitive, value
 ///   may be unquoted, single-quoted, or double-quoted per the spec).
-fn host_is_steam_deck_or_steamos(
-    board_vendor: Option<&str>,
-    os_release: Option<&str>,
-) -> bool {
+fn host_is_steam_deck_or_steamos(board_vendor: Option<&str>, os_release: Option<&str>) -> bool {
     if let Some(vendor) = board_vendor {
         if vendor.trim() == "Valve" {
             return true;
@@ -331,7 +326,11 @@ fn install_via_winetricks(
     let winetricks = which_command("winetricks")
         .ok_or_else(|| "winetricks not found — install it via your package manager".to_string())?;
 
-    info!("Running winetricks {} in prefix {}", verb, prefix_path.display());
+    info!(
+        "Running winetricks {} in prefix {}",
+        verb,
+        prefix_path.display()
+    );
 
     let mut cmd = Command::new(&winetricks);
     cmd.arg("--unattended")
@@ -348,7 +347,8 @@ fn install_via_winetricks(
         }
     }
 
-    let output = cmd.output()
+    let output = cmd
+        .output()
         .map_err(|e| format!("Failed to run winetricks: {}", e))?;
 
     if output.status.success() {
@@ -445,7 +445,12 @@ mod tests {
         std::fs::write(dir.path().join("winetricks.log"), "vcrun2022\n").unwrap();
         let mut deps = get_game_dependencies("skyrimse");
         check_installed_deps(dir.path(), &mut deps);
-        assert!(deps.iter().find(|d| d.verb == "vcrun2022").unwrap().installed);
+        assert!(
+            deps.iter()
+                .find(|d| d.verb == "vcrun2022")
+                .unwrap()
+                .installed
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -472,7 +477,10 @@ mod tests {
             Some("NAME=\"SteamOS\"\nID=steamos\nVERSION_ID=3.5\n")
         ));
         // Quoted variants per the os-release spec.
-        assert!(host_is_steam_deck_or_steamos(None, Some("ID=\"steamos\"\n")));
+        assert!(host_is_steam_deck_or_steamos(
+            None,
+            Some("ID=\"steamos\"\n")
+        ));
         assert!(host_is_steam_deck_or_steamos(None, Some("ID='steamos'\n")));
         // Case-insensitive key/value.
         assert!(host_is_steam_deck_or_steamos(None, Some("id=SteamOS\n")));
@@ -521,7 +529,10 @@ mod tests {
     fn no_bwrap_dmi_other_vendor_ignored() {
         // Some non-Valve hardware reporting a vendor that contains "valve"
         // should NOT match — exact equality only.
-        assert!(!host_is_steam_deck_or_steamos(Some("ValveSoftware\n"), None));
+        assert!(!host_is_steam_deck_or_steamos(
+            Some("ValveSoftware\n"),
+            None
+        ));
         assert!(!host_is_steam_deck_or_steamos(Some("Dell Inc.\n"), None));
     }
 

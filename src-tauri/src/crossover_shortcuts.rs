@@ -145,23 +145,22 @@ fn resolve_windows_path(bottle: &Bottle, win_path: &str) -> Option<PathBuf> {
         .unwrap_or(trimmed);
 
     // We require an absolute Windows path with a drive letter (A-Z / a-z).
-    let (drive_root, after_drive) =
-        if no_prefix.len() >= 2 && no_prefix.as_bytes()[1] == b':' {
-            let letter = no_prefix.as_bytes()[0].to_ascii_lowercase();
-            if !letter.is_ascii_alphabetic() {
-                return None;
-            }
-            // Map the drive letter to the host directory: drive_c, drive_d, …
-            let drive_dir_name = format!("drive_{}", letter as char);
-            let drive_root = bottle.path.join(&drive_dir_name);
-            if !drive_root.is_dir() {
-                return None;
-            }
-            // Strip "X:" — keep the rest, which may start with `\` or `/`.
-            (drive_root, &no_prefix[2..])
-        } else {
+    let (drive_root, after_drive) = if no_prefix.len() >= 2 && no_prefix.as_bytes()[1] == b':' {
+        let letter = no_prefix.as_bytes()[0].to_ascii_lowercase();
+        if !letter.is_ascii_alphabetic() {
             return None;
-        };
+        }
+        // Map the drive letter to the host directory: drive_c, drive_d, …
+        let drive_dir_name = format!("drive_{}", letter as char);
+        let drive_root = bottle.path.join(&drive_dir_name);
+        if !drive_root.is_dir() {
+            return None;
+        }
+        // Strip "X:" — keep the rest, which may start with `\` or `/`.
+        (drive_root, &no_prefix[2..])
+    } else {
+        return None;
+    };
 
     // Split into components, normalize to forward slashes, reject traversal.
     let mut walk = drive_root;
@@ -211,10 +210,9 @@ fn resolve_windows_path(bottle: &Bottle, win_path: &str) -> Option<PathBuf> {
     // can be canonicalized (i.e. they both exist on disk). If either path
     // doesn't exist yet (e.g. the exe hasn't been installed) we skip the check
     // and let the caller's `exists()` check fail naturally.
-    if let (Ok(bottle_canonical), Ok(walk_canonical)) = (
-        bottle.path.canonicalize(),
-        walk.canonicalize(),
-    ) {
+    if let (Ok(bottle_canonical), Ok(walk_canonical)) =
+        (bottle.path.canonicalize(), walk.canonicalize())
+    {
         if !walk_canonical.starts_with(&bottle_canonical) {
             log::warn!(
                 "resolve_windows_path: '{}' resolved outside bottle root — rejected",
@@ -257,10 +255,7 @@ pub fn scan_bottle_shortcuts(bottle: &Bottle) -> Vec<CrossoverShortcut> {
     // Public/shared desktop (single level).
     scan_flat(
         bottle,
-        &drive_c
-            .join("users")
-            .join("Public")
-            .join("Desktop"),
+        &drive_c.join("users").join("Public").join("Desktop"),
         &mut out,
     );
 
@@ -1025,7 +1020,10 @@ mod tests {
         let bottle = make_fake_bottle(tmp.path(), "b");
         fs::create_dir_all(bottle.drive_c().join("Games").join("Foo")).unwrap();
         let resolved = resolve_windows_path(&bottle, "C:\\Games\\Foo\\bar.exe").unwrap();
-        assert_eq!(resolved, bottle.drive_c().join("Games").join("Foo").join("bar.exe"));
+        assert_eq!(
+            resolved,
+            bottle.drive_c().join("Games").join("Foo").join("bar.exe")
+        );
     }
 
     #[test]
@@ -1035,7 +1033,10 @@ mod tests {
         fs::create_dir_all(bottle.drive_c().join("Games").join("Foo")).unwrap();
         // Lower-case input matches mixed-case directories.
         let resolved = resolve_windows_path(&bottle, "c:\\games\\foo\\bar.exe").unwrap();
-        assert_eq!(resolved, bottle.drive_c().join("Games").join("Foo").join("bar.exe"));
+        assert_eq!(
+            resolved,
+            bottle.drive_c().join("Games").join("Foo").join("bar.exe")
+        );
     }
 
     #[test]
@@ -1121,7 +1122,11 @@ mod tests {
     fn scan_bottle_returns_empty_when_no_lnks_present() {
         let tmp = tempfile::tempdir().unwrap();
         let bottle = make_fake_bottle(tmp.path(), "empty");
-        let users = bottle.users_dir().join("crossover").join("Start Menu").join("Programs");
+        let users = bottle
+            .users_dir()
+            .join("crossover")
+            .join("Start Menu")
+            .join("Programs");
         fs::create_dir_all(&users).unwrap();
         let result = scan_bottle_shortcuts(&bottle);
         assert!(result.is_empty());
@@ -1165,7 +1170,11 @@ mod tests {
         // Sentinel file — not a real .lnk, but the recursive walk must reach
         // it. We assert presence by writing a fake non-.lnk noise file and
         // confirming the scan returns clean (no panic, walked path exists).
-        fs::write(modern.join("Steam Support Center.url"), "[InternetShortcut]\n").unwrap();
+        fs::write(
+            modern.join("Steam Support Center.url"),
+            "[InternetShortcut]\n",
+        )
+        .unwrap();
 
         let result = scan_bottle_shortcuts(&bottle);
         // No real .lnk → still empty, but the path was walked without panic.
@@ -1288,7 +1297,10 @@ mod tests {
     fn me2_bat_rejects_sekiro() {
         // Sekiro was dropped from ME2 v2.x — must not produce a hint.
         let sc = bat_shortcut("launchmod_sekiro.bat");
-        assert!(match_shortcut(&sc).is_none(), "sekiro should not be matched by ME2 bat logic");
+        assert!(
+            match_shortcut(&sc).is_none(),
+            "sekiro should not be matched by ME2 bat logic"
+        );
     }
 
     #[test]
@@ -1406,7 +1418,12 @@ mod tests {
         let shortcuts = scan_bottle_shortcuts(&bottle);
 
         // Exactly one shortcut — the cxmenu-synthesized one.
-        assert_eq!(shortcuts.len(), 1, "expected 1 shortcut, got {:?}", shortcuts);
+        assert_eq!(
+            shortcuts.len(),
+            1,
+            "expected 1 shortcut, got {:?}",
+            shortcuts
+        );
         assert_eq!(shortcuts[0].host_target, exe);
         assert_eq!(shortcuts[0].bottle_name, "cx");
     }
@@ -1472,7 +1489,12 @@ mod tests {
         fs::write(bottle.path.join("cxmenu.conf"), cxmenu).unwrap();
 
         let shortcuts = scan_bottle_shortcuts(&bottle);
-        assert_eq!(shortcuts.len(), 1, "expected dedup to 1, got {:?}", shortcuts);
+        assert_eq!(
+            shortcuts.len(),
+            1,
+            "expected dedup to 1, got {:?}",
+            shortcuts
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1522,7 +1544,10 @@ mod tests {
             u.shortcut.host_target, bat,
             "host_target should be the bat file"
         );
-        let hint = u.match_hint.as_ref().expect("ME2 bat should produce a match hint");
+        let hint = u
+            .match_hint
+            .as_ref()
+            .expect("ME2 bat should produce a match hint");
         assert_eq!(hint.game_id, "eldenring");
         assert_eq!(hint.source, MatchSource::Plugin);
     }

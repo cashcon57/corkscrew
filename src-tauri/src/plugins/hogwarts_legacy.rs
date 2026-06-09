@@ -54,7 +54,12 @@ const NON_STEAM_PATHS: &[&[&str]] = &[
     // GOG (Hogwarts Legacy is available on GOG).
     &["GOG Games", "Hogwarts Legacy"],
     &["Program Files", "GOG Galaxy", "Games", "Hogwarts Legacy"],
-    &["Program Files (x86)", "GOG Galaxy", "Games", "Hogwarts Legacy"],
+    &[
+        "Program Files (x86)",
+        "GOG Galaxy",
+        "Games",
+        "Hogwarts Legacy",
+    ],
 ];
 
 /// Xbox Game Pass install path.
@@ -296,10 +301,16 @@ fn detect_hl_mod_type(files: &[String]) -> Option<String> {
         return None;
     }
 
-    let lower_files: Vec<String> = files.iter().map(|f| f.to_lowercase().replace('\\', "/")).collect();
+    let lower_files: Vec<String> = files
+        .iter()
+        .map(|f| f.to_lowercase().replace('\\', "/"))
+        .collect();
 
     // 1. Lua mod: contains Scripts/main.lua pattern
-    if lower_files.iter().any(|f| f.ends_with("/scripts/main.lua") || f == "scripts/main.lua") {
+    if lower_files
+        .iter()
+        .any(|f| f.ends_with("/scripts/main.lua") || f == "scripts/main.lua")
+    {
         return Some("hl-lua-mod".into());
     }
 
@@ -313,10 +324,7 @@ fn detect_hl_mod_type(files: &[String]) -> Option<String> {
     }
 
     // 3. Movie mod: all content files are .bk2
-    let content_files: Vec<&String> = lower_files
-        .iter()
-        .filter(|f| !f.ends_with('/'))
-        .collect();
+    let content_files: Vec<&String> = lower_files.iter().filter(|f| !f.ends_with('/')).collect();
     if !content_files.is_empty() && content_files.iter().all(|f| f.ends_with(".bk2")) {
         return Some("hogwarts-modtype-movies".into());
     }
@@ -461,8 +469,10 @@ pub fn sync_mods_txt(game_path: &Path) -> Result<(), String> {
 
     // 4. Atomic write via temp file + rename
     let tmp_path = mods_txt.with_extension("txt.tmp");
-    let mut file = fs::File::create(&tmp_path).map_err(|e| format!("Failed to write Mods.txt: {e}"))?;
-    file.write_all(output.as_bytes()).map_err(|e| format!("Failed to write Mods.txt: {e}"))?;
+    let mut file =
+        fs::File::create(&tmp_path).map_err(|e| format!("Failed to write Mods.txt: {e}"))?;
+    file.write_all(output.as_bytes())
+        .map_err(|e| format!("Failed to write Mods.txt: {e}"))?;
     file.sync_all().map_err(|e| format!("Sync failed: {e}"))?;
     fs::rename(&tmp_path, &mods_txt).map_err(|e| format!("Failed to rename Mods.txt: {e}"))?;
 
@@ -502,10 +512,7 @@ fn parse_mods_txt_line(line: &str) -> Option<(String, bool)> {
 /// Returns a map of `staged_relative_path -> correct_relative_deploy_path`
 /// (relative to `Phoenix/Content`). Files that don't match any game directory
 /// are mapped to `Movies/` as a fallback.
-pub fn match_bk2_files(
-    game_path: &Path,
-    staged_files: &[String],
-) -> Vec<(String, String)> {
+pub fn match_bk2_files(game_path: &Path, staged_files: &[String]) -> Vec<(String, String)> {
     let bk2_files: Vec<&String> = staged_files
         .iter()
         .filter(|f| f.to_lowercase().ends_with(".bk2"))
@@ -516,10 +523,7 @@ pub fn match_bk2_files(
     }
 
     // Build index of all .bk2 files in game's Movies directory tree
-    let movies_dir = resolve_case_insensitive_path(
-        game_path,
-        &["Phoenix", "Content", "Movies"],
-    );
+    let movies_dir = resolve_case_insensitive_path(game_path, &["Phoenix", "Content", "Movies"]);
 
     let mut game_bk2_index: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
@@ -541,7 +545,10 @@ pub fn match_bk2_files(
             mappings.push((staged_file.clone(), format!("Movies/{}", game_rel_path)));
         } else {
             // No match — deploy directly to Movies/
-            let filename = staged_file.rsplit(['/', '\\']).next().unwrap_or(staged_file);
+            let filename = staged_file
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(staged_file);
             mappings.push((staged_file.clone(), format!("Movies/{}", filename)));
         }
     }
@@ -551,11 +558,7 @@ pub fn match_bk2_files(
 
 /// Recursively index all `.bk2` files under a directory.
 /// Maps `lowercase_filename -> relative_path_from_root`.
-fn index_bk2_files(
-    dir: &Path,
-    root: &Path,
-    index: &mut std::collections::HashMap<String, String>,
-) {
+fn index_bk2_files(dir: &Path, root: &Path, index: &mut std::collections::HashMap<String, String>) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -847,8 +850,7 @@ pub struct PakChunkConflict {
 /// UE5 PAK files use naming like `pakchunk5-ModName_P.pak`. Two mods using
 /// the same chunk number will conflict and crash the game.
 pub fn scan_pakchunk_conflicts(mods_dir: &Path) -> Vec<PakChunkConflict> {
-    let mut chunks: std::collections::HashMap<u32, Vec<String>> =
-        std::collections::HashMap::new();
+    let mut chunks: std::collections::HashMap<u32, Vec<String>> = std::collections::HashMap::new();
 
     let entries = match fs::read_dir(mods_dir) {
         Ok(e) => e,
@@ -1229,7 +1231,10 @@ mod tests {
             source: "Test".into(),
         };
         let plugin = HogwartsLegacyPlugin;
-        assert!(plugin.detect_wine(&bottle).is_none(), "empty dir must not detect");
+        assert!(
+            plugin.detect_wine(&bottle).is_none(),
+            "empty dir must not detect"
+        );
     }
 
     #[test]
@@ -1279,10 +1284,7 @@ mod tests {
 
     #[test]
     fn detect_logic_mod_by_marker() {
-        let files = vec![
-            "MyBPMod.pak".to_string(),
-            ".ue4sslogicmod".to_string(),
-        ];
+        let files = vec!["MyBPMod.pak".to_string(), ".ue4sslogicmod".to_string()];
         assert_eq!(detect_hl_mod_type(&files), Some("hl-logic-mod".into()));
     }
 
@@ -1303,10 +1305,7 @@ mod tests {
 
     #[test]
     fn detect_movie_mod() {
-        let files = vec![
-            "intro_movie.bk2".to_string(),
-            "outro_movie.bk2".to_string(),
-        ];
+        let files = vec!["intro_movie.bk2".to_string(), "outro_movie.bk2".to_string()];
         assert_eq!(
             detect_hl_mod_type(&files),
             Some("hogwarts-modtype-movies".into())
@@ -1315,10 +1314,7 @@ mod tests {
 
     #[test]
     fn detect_engine_root_ue4ss() {
-        let files = vec![
-            "UE4SS.dll".to_string(),
-            "UE4SS-settings.ini".to_string(),
-        ];
+        let files = vec!["UE4SS.dll".to_string(), "UE4SS-settings.ini".to_string()];
         assert_eq!(detect_hl_mod_type(&files), Some("hl-engine-root".into()));
     }
 
@@ -1358,10 +1354,7 @@ mod tests {
     #[test]
     fn detect_mixed_bk2_and_pak_not_movie() {
         // Mixed archives with both .bk2 and .pak should NOT be classified as movie
-        let files = vec![
-            "intro.bk2".to_string(),
-            "textures.pak".to_string(),
-        ];
+        let files = vec!["intro.bk2".to_string(), "textures.pak".to_string()];
         // Should detect as PAK (bk2 are not ALL files)
         assert_eq!(
             detect_hl_mod_type(&files),

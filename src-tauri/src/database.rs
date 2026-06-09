@@ -58,6 +58,10 @@ pub struct InstalledMod {
     pub user_tags: Vec<String>,
     pub auto_category: Option<String>,
     pub collection_optional: bool,
+    /// Durable mod-level deploy target. Survives deployment_manifest purges.
+    pub deploy_target: String,
+    /// Durable physical base for custom deploy targets.
+    pub deploy_base_path: Option<String>,
 }
 
 /// Lightweight mod summary for list views — omits `installed_files` to avoid
@@ -84,6 +88,10 @@ pub struct ModSummary {
     pub user_tags: Vec<String>,
     pub auto_category: Option<String>,
     pub collection_optional: bool,
+    /// Durable mod-level deploy target. Survives deployment_manifest purges.
+    pub deploy_target: String,
+    /// Durable physical base for custom deploy targets.
+    pub deploy_base_path: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -103,6 +111,17 @@ pub struct DeploymentEntry {
     pub deployed_at: String,
     pub mod_name: String,
     /// "data" (default — game Data/ folder) or "root" (game root folder).
+    pub deploy_target: String,
+}
+
+/// Deployment manifest identity: the same relative path can legitimately be
+/// deployed under different targets (`data`, `root`, or future custom roots).
+pub type DeploymentKey = (String, String); // (relative_path, deploy_target)
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeployFileTarget {
+    pub source_relative_path: String,
+    pub relative_path: String,
     pub deploy_target: String,
 }
 
@@ -419,6 +438,10 @@ impl ModDatabase {
             user_tags,
             auto_category: row.get(17)?,
             collection_optional: row.get::<_, i32>(19).unwrap_or(0) != 0,
+            deploy_target: row
+                .get::<_, Option<String>>(20)?
+                .unwrap_or_else(|| "data".to_string()),
+            deploy_base_path: row.get(21)?,
         })
     }
 
@@ -467,6 +490,10 @@ impl ModDatabase {
             user_tags,
             auto_category: row.get(17)?,
             collection_optional: row.get::<_, i32>(19).unwrap_or(0) != 0,
+            deploy_target: row
+                .get::<_, Option<String>>(20)?
+                .unwrap_or_else(|| "data".to_string()),
+            deploy_base_path: row.get(21)?,
         })
     }
 
@@ -475,7 +502,7 @@ impl ModDatabase {
          archive_name, installed_files, installed_at, enabled, \
          nexus_file_id, source_url, staging_path, install_priority, \
          collection_name, user_notes, user_tags, auto_category, source_type, \
-         collection_optional";
+         collection_optional, deploy_target, deploy_base_path";
 
     // -- public API ---------------------------------------------------------
 
@@ -847,8 +874,8 @@ impl ModDatabase {
         let deployed_at = chrono::Utc::now().to_rfc3339();
         conn.execute(
             "INSERT OR REPLACE INTO deployment_manifest
-                (game_id, bottle_name, mod_id, relative_path, staging_path, deploy_method, sha256, deployed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                (game_id, bottle_name, mod_id, relative_path, staging_path, deploy_method, sha256, deployed_at, deploy_target)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'data')",
             params![game_id, bottle_name, mod_id, relative_path, staging_path, deploy_method, sha256, deployed_at],
         )?;
         Ok(conn.last_insert_rowid())
@@ -882,7 +909,9 @@ impl ModDatabase {
                     (game_id, bottle_name, mod_id, relative_path, staging_path, deploy_method, sha256, deployed_at, deploy_target)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8)",
             )?;
-            for (game_id, bottle_name, mod_id, rel_path, staging_path, method, deploy_target) in entries {
+            for (game_id, bottle_name, mod_id, rel_path, staging_path, method, deploy_target) in
+                entries
+            {
                 stmt.execute(params![
                     game_id,
                     bottle_name,
@@ -1003,28 +1032,118 @@ impl ModDatabase {
         Ok(paths)
     }
 
-    /// Set deploy_target for all deployment entries of a mod.
+    /// Set durable deploy_target metadata for a mod. The installed_mods value
+    /// is the source of truth after manifest purges; existing manifest rows are
+    /// not rewritten because deploy_target is part of each deployed file's
+    /// identity and mixed-target mods must not be collapsed.
     pub fn set_deploy_target_for_mod(&self, mod_id: i64, target: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        conn.execute(
-            "UPDATE deployment_manifest SET deploy_target = ?1 WHERE mod_id = ?2",
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE installed_mods SET deploy_target = ?1 WHERE id = ?2",
             params![target, mod_id],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
-    /// Get the deploy_target for a mod (from its deployment manifest entries).
-    /// Returns "data" if no entries exist.
+    /// Set durable deploy_target metadata plus optional physical base for custom targets.
+    pub fn set_deploy_target_for_mod_with_base(
+        &self,
+        mod_id: i64,
+        target: &str,
+        deploy_base_path: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE installed_mods SET deploy_target = ?1, deploy_base_path = ?2 WHERE id = ?3",
+            params![target, deploy_base_path, mod_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Get the durable deploy_target for a mod. Returns "data" when the mod
+    /// predates metadata or no row exists; deployment_manifest is intentionally
+    /// not consulted because it is purgeable during full redeploy.
     pub fn get_deploy_target_for_mod(&self, mod_id: i64) -> Result<String> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let result: Option<String> = conn
             .query_row(
-                "SELECT deploy_target FROM deployment_manifest WHERE mod_id = ?1 LIMIT 1",
+                "SELECT deploy_target FROM installed_mods WHERE id = ?1 LIMIT 1",
                 params![mod_id],
                 |row| row.get(0),
             )
             .ok();
         Ok(result.unwrap_or_else(|| "data".to_string()))
+    }
+
+    /// Get durable custom deploy base path for a mod, if recorded.
+    pub fn get_deploy_base_path_for_mod(&self, mod_id: i64) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let result: Option<Option<String>> = conn
+            .query_row(
+                "SELECT deploy_base_path FROM installed_mods WHERE id = ?1 LIMIT 1",
+                params![mod_id],
+                |row| row.get(0),
+            )
+            .ok();
+        Ok(result.flatten())
+    }
+
+    /// Persist durable per-file deploy targets for mixed root/data mods.
+    pub fn set_deploy_file_targets_for_mod(
+        &self,
+        mod_id: i64,
+        targets: &[DeployFileTarget],
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM mod_deploy_file_targets WHERE mod_id = ?1",
+            params![mod_id],
+        )?;
+        for target in targets {
+            tx.execute(
+                "INSERT INTO mod_deploy_file_targets (mod_id, source_relative_path, relative_path, deploy_target)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    mod_id,
+                    target.source_relative_path,
+                    target.relative_path,
+                    target.deploy_target
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Return durable per-file deploy targets for mixed root/data mods, keyed by
+    /// staging source path. The value carries the deployment identity (target
+    /// relative path + target root), which can differ for MO2 Root/* files.
+    pub fn get_deploy_file_targets_for_mod(
+        &self,
+        mod_id: i64,
+    ) -> Result<HashMap<String, DeployFileTarget>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT source_relative_path, relative_path, deploy_target FROM mod_deploy_file_targets WHERE mod_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![mod_id], |row| {
+            Ok(DeployFileTarget {
+                source_relative_path: row.get::<_, String>(0)?,
+                relative_path: row.get::<_, String>(1)?,
+                deploy_target: row.get::<_, String>(2)?,
+            })
+        })?;
+        let mut targets = HashMap::new();
+        for row in rows {
+            let target = row?;
+            targets.insert(target.source_relative_path.clone(), target);
+        }
+        Ok(targets)
     }
 
     /// Get deployment manifest for a game/bottle.
@@ -1153,17 +1272,19 @@ impl ModDatabase {
 
     // -- Incremental deployment helpers --------------------------------------
 
-    /// Return the deployment manifest as a HashMap keyed by relative_path
-    /// for efficient diff computation during incremental deployment.
+    /// Return the deployment manifest as a HashMap keyed by
+    /// `(relative_path, deploy_target)` for efficient diff computation during
+    /// incremental deployment. The target is part of the deployment identity;
+    /// path-only maps collapse valid root/data/custom siblings.
     pub fn get_deployment_manifest_map(
         &self,
         game_id: &str,
         bottle_name: &str,
-    ) -> Result<HashMap<String, DeploymentEntry>> {
+    ) -> Result<HashMap<DeploymentKey, DeploymentEntry>> {
         let entries = self.get_deployment_manifest(game_id, bottle_name)?;
         let map = entries
             .into_iter()
-            .map(|e| (e.relative_path.clone(), e))
+            .map(|e| ((e.relative_path.clone(), e.deploy_target.clone()), e))
             .collect();
         Ok(map)
     }
@@ -1200,7 +1321,17 @@ impl ModDatabase {
                     (game_id, bottle_name, mod_id, relative_path, staging_path, deploy_method, sha256, deployed_at, deploy_target)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )?;
-            for (game_id, bottle_name, mod_id, rel_path, staging_path, method, sha256, deploy_target) in entries {
+            for (
+                game_id,
+                bottle_name,
+                mod_id,
+                rel_path,
+                staging_path,
+                method,
+                sha256,
+                deploy_target,
+            ) in entries
+            {
                 stmt.execute(params![
                     game_id,
                     bottle_name,
@@ -1218,23 +1349,23 @@ impl ModDatabase {
         Ok(())
     }
 
-    /// Batch-remove deployment manifest entries by relative paths for a specific
-    /// game/bottle in a single transaction.
+    /// Batch-remove deployment manifest entries by `(relative_path, deploy_target)`
+    /// for a specific game/bottle in a single transaction.
     pub fn batch_remove_deployment_entries(
         &self,
         game_id: &str,
         bottle_name: &str,
-        paths: &[&str],
+        entries: &[(&str, &str)],
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let tx = conn.unchecked_transaction()?;
         {
             let mut stmt = tx.prepare_cached(
                 "DELETE FROM deployment_manifest
-                 WHERE game_id = ?1 AND bottle_name = ?2 AND relative_path = ?3",
+                 WHERE game_id = ?1 AND bottle_name = ?2 AND relative_path = ?3 AND deploy_target = ?4",
             )?;
-            for path in paths {
-                stmt.execute(params![game_id, bottle_name, path])?;
+            for (path, deploy_target) in entries {
+                stmt.execute(params![game_id, bottle_name, path, deploy_target])?;
             }
         }
         tx.commit()?;
@@ -1787,8 +1918,8 @@ impl ModDatabase {
     /// Get all distinct archive_name values from installed_mods.
     pub fn get_all_archive_names(&self) -> Result<HashSet<String>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let mut stmt =
-            conn.prepare("SELECT DISTINCT archive_name FROM installed_mods WHERE archive_name != ''")?;
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT archive_name FROM installed_mods WHERE archive_name != ''")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         let mut names = HashSet::new();
         for row in rows {
@@ -1827,8 +1958,7 @@ impl ModDatabase {
     /// Get all download IDs that have collection references.
     pub fn get_download_ids_with_refs(&self) -> Result<HashSet<i64>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let mut stmt =
-            conn.prepare("SELECT DISTINCT download_id FROM download_collection_refs")?;
+        let mut stmt = conn.prepare("SELECT DISTINCT download_id FROM download_collection_refs")?;
         let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
         let mut ids = HashSet::new();
         for row in rows {
@@ -2247,12 +2377,7 @@ pub struct ErrorEvent {
 impl ModDatabase {
     /// Record a diagnostic error event. If the same (module, error_type, message) was seen
     /// within the last hour and is unresolved, increment its count; otherwise insert a new row.
-    pub fn record_error_event(
-        &self,
-        module: &str,
-        error_type: &str,
-        message: &str,
-    ) -> Result<()> {
+    pub fn record_error_event(&self, module: &str, error_type: &str, message: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
         // Try to find an existing unresolved row within the last hour
@@ -3200,7 +3325,10 @@ impl ModDatabase {
             )
             .map_err(|e| e.to_string())?;
         let indices = stmt
-            .query_map(params![install_id], |row| Ok(row.get::<_, i64>(0)? as usize))
+            .query_map(
+                params![install_id],
+                |row| Ok(row.get::<_, i64>(0)? as usize),
+            )
             .map_err(|e| e.to_string())?
             .filter_map(|r| r.ok())
             .collect();
@@ -3208,10 +3336,7 @@ impl ModDatabase {
     }
 
     /// Clean up directive statuses for a completed/cancelled install.
-    pub fn cleanup_directive_statuses(
-        &self,
-        install_id: &str,
-    ) -> std::result::Result<(), String> {
+    pub fn cleanup_directive_statuses(&self, install_id: &str) -> std::result::Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
             "DELETE FROM wj_directive_status WHERE install_id = ?1",
@@ -3325,12 +3450,7 @@ impl ModDatabase {
 
 impl ModDatabase {
     /// Save modlist install configuration for future reinstalls.
-    pub fn save_modlist_config(
-        &self,
-        name: &str,
-        version: &str,
-        config_json: &str,
-    ) -> Result<()> {
+    pub fn save_modlist_config(&self, name: &str, version: &str, config_json: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "INSERT OR REPLACE INTO modlist_config (name, version, config_json)
@@ -3341,26 +3461,17 @@ impl ModDatabase {
     }
 
     /// Get a saved modlist configuration.
-    pub fn get_modlist_config(
-        &self,
-        name: &str,
-        version: &str,
-    ) -> Result<Option<String>> {
+    pub fn get_modlist_config(&self, name: &str, version: &str) -> Result<Option<String>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let result = conn
-            .prepare(
-                "SELECT config_json FROM modlist_config WHERE name = ?1 AND version = ?2",
-            )?
+            .prepare("SELECT config_json FROM modlist_config WHERE name = ?1 AND version = ?2")?
             .query_row(params![name, version], |row| row.get(0))
             .ok();
         Ok(result)
     }
 
     /// Get any saved config for a modlist (any version, newest first).
-    pub fn get_latest_modlist_config(
-        &self,
-        name: &str,
-    ) -> Result<Option<(String, String)>> {
+    pub fn get_latest_modlist_config(&self, name: &str) -> Result<Option<(String, String)>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let result = conn
             .prepare(
@@ -3455,8 +3566,7 @@ pub fn bsa_cache_clear_all(conn: &rusqlite::Connection) -> std::result::Result<(
     conn.execute("DELETE FROM bsa_cache", [])
         .map_err(|e| e.to_string())?;
     // Reclaim space
-    conn.execute("VACUUM", [])
-        .map_err(|e| e.to_string())?;
+    conn.execute("VACUUM", []).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -3530,12 +3640,8 @@ fn row_to_runtime(
                 _ => NativeSource::Manual, // safe fallback
             };
             Ok(GameRuntime::Native(NativeContext {
-                app_bundle_path: std::path::PathBuf::from(
-                    native_app_path.unwrap_or_default(),
-                ),
-                game_data_root: std::path::PathBuf::from(
-                    native_data_root.unwrap_or_default(),
-                ),
+                app_bundle_path: std::path::PathBuf::from(native_app_path.unwrap_or_default()),
+                game_data_root: std::path::PathBuf::from(native_data_root.unwrap_or_default()),
                 architecture: arch,
                 sandboxed: native_sandboxed != 0,
                 source,
@@ -3558,8 +3664,16 @@ impl ModDatabase {
         use crate::runtime::GameRuntime;
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
-        let (runtime_str, bottle_name, bottle_path, native_app_path, native_data_root,
-             native_architecture, native_sandboxed, native_source) = match &game.runtime {
+        let (
+            runtime_str,
+            bottle_name,
+            bottle_path,
+            native_app_path,
+            native_data_root,
+            native_architecture,
+            native_sandboxed,
+            native_source,
+        ) = match &game.runtime {
             GameRuntime::Wine(w) => (
                 "wine",
                 Some(w.bottle_name.clone()),
@@ -3638,8 +3752,17 @@ impl ModDatabase {
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         let mut games = Vec::with_capacity(rows.len());
-        for (game_id, runtime_str, bottle_name, bottle_path, native_app_path,
-             native_data_root, native_architecture, native_sandboxed, native_source) in rows
+        for (
+            game_id,
+            runtime_str,
+            bottle_name,
+            bottle_path,
+            native_app_path,
+            native_data_root,
+            native_architecture,
+            native_sandboxed,
+            native_source,
+        ) in rows
         {
             let runtime = row_to_runtime(
                 &runtime_str,
@@ -3679,8 +3802,17 @@ impl ModDatabase {
                 row.get::<_, Option<String>>(8)?,
             ))
         }) {
-            Ok((game_id, runtime_str, bottle_name, bottle_path, native_app_path,
-                native_data_root, native_architecture, native_sandboxed, native_source)) => {
+            Ok((
+                game_id,
+                runtime_str,
+                bottle_name,
+                bottle_path,
+                native_app_path,
+                native_data_root,
+                native_architecture,
+                native_sandboxed,
+                native_source,
+            )) => {
                 let runtime = row_to_runtime(
                     &runtime_str,
                     bottle_name,
@@ -3903,9 +4035,12 @@ mod tests {
             .get_deployment_manifest_map("skyrimse", "Gaming")
             .unwrap();
         assert_eq!(map.len(), 2);
-        assert!(map.contains_key("test.esp"));
-        assert!(map.contains_key("meshes/a.nif"));
-        assert_eq!(map["test.esp"].mod_id, mod_id);
+        assert!(map.contains_key(&("test.esp".to_string(), "data".to_string())));
+        assert!(map.contains_key(&("meshes/a.nif".to_string(), "data".to_string())));
+        assert_eq!(
+            map[&("test.esp".to_string(), "data".to_string())].mod_id,
+            mod_id
+        );
     }
 
     #[test]
@@ -3980,12 +4115,110 @@ mod tests {
         )
         .unwrap();
 
-        db.batch_remove_deployment_entries("skyrimse", "Gaming", &["a.esp", "c.esp"])
-            .unwrap();
+        db.batch_remove_deployment_entries(
+            "skyrimse",
+            "Gaming",
+            &[("a.esp", "data"), ("c.esp", "data")],
+        )
+        .unwrap();
 
         let manifest = db.get_deployment_manifest("skyrimse", "Gaming").unwrap();
         assert_eq!(manifest.len(), 1);
         assert_eq!(manifest[0].relative_path, "b.esp");
+    }
+
+    #[test]
+    fn test_manifest_map_and_removal_are_deploy_target_aware() {
+        let (db, _tmp) = test_db();
+        let mod_id = db
+            .add_mod(
+                "skyrimse",
+                "Gaming",
+                None,
+                "DualTarget",
+                "1.0",
+                "m.zip",
+                &[],
+            )
+            .unwrap();
+
+        db.batch_add_deployment_entries(&[
+            (
+                "skyrimse",
+                "Gaming",
+                mod_id,
+                "same/path.dll",
+                "/staging/data/same/path.dll",
+                "hardlink",
+                "data",
+            ),
+            (
+                "skyrimse",
+                "Gaming",
+                mod_id,
+                "same/path.dll",
+                "/staging/root/same/path.dll",
+                "hardlink",
+                "root",
+            ),
+        ])
+        .unwrap();
+
+        let map = db
+            .get_deployment_manifest_map("skyrimse", "Gaming")
+            .unwrap();
+        assert_eq!(map.len(), 2, "same relative path must not collapse targets");
+        assert!(map.contains_key(&("same/path.dll".to_string(), "data".to_string())));
+        assert!(map.contains_key(&("same/path.dll".to_string(), "root".to_string())));
+
+        db.batch_remove_deployment_entries("skyrimse", "Gaming", &[("same/path.dll", "root")])
+            .unwrap();
+
+        let remaining = db
+            .get_deployment_manifest_map("skyrimse", "Gaming")
+            .unwrap();
+        assert_eq!(
+            remaining.len(),
+            1,
+            "only the requested target should be removed"
+        );
+        assert!(remaining.contains_key(&("same/path.dll".to_string(), "data".to_string())));
+        assert!(!remaining.contains_key(&("same/path.dll".to_string(), "root".to_string())));
+    }
+
+    #[test]
+    fn test_deploy_target_metadata_survives_manifest_purge() {
+        let (db, _tmp) = test_db();
+        let mod_id = db
+            .add_mod(
+                "skyrimse",
+                "Gaming",
+                None,
+                "RootTarget",
+                "1.0",
+                "m.zip",
+                &[],
+            )
+            .unwrap();
+
+        db.set_deploy_target_for_mod(mod_id, "root").unwrap();
+        db.batch_add_deployment_entries(&[(
+            "skyrimse",
+            "Gaming",
+            mod_id,
+            "Data/SKSE/skse64_loader.exe",
+            "/staging/root/Data/SKSE/skse64_loader.exe",
+            "hardlink",
+            "root",
+        )])
+        .unwrap();
+        assert_eq!(db.get_deploy_target_for_mod(mod_id).unwrap(), "root");
+
+        // Simulate full redeploy's manifest purge: all manifest rows for the
+        // mod disappear, but durable mod metadata must still know the target.
+        db.remove_deployment_entries_for_mod(mod_id).unwrap();
+        assert!(db.get_deployment_paths_for_mod(mod_id).unwrap().is_empty());
+        assert_eq!(db.get_deploy_target_for_mod(mod_id).unwrap(), "root");
     }
 
     #[test]
@@ -4043,7 +4276,9 @@ mod tests {
         let (db, _tmp) = test_db();
         db.cache_patch_basis_hash("GTS", "textures/sky.dds", 12345, "abc123==", 4096)
             .unwrap();
-        let cached = db.get_cached_patch_basis("GTS", "textures/sky.dds").unwrap();
+        let cached = db
+            .get_cached_patch_basis("GTS", "textures/sky.dds")
+            .unwrap();
         assert!(cached.is_some());
         let (qh, fh, sz) = cached.unwrap();
         assert_eq!(qh, 12345);
@@ -4065,7 +4300,10 @@ mod tests {
             .unwrap();
         db.cache_patch_basis_hash("GTS", "test.esp", 222, "new_hash", 200)
             .unwrap();
-        let (qh, fh, sz) = db.get_cached_patch_basis("GTS", "test.esp").unwrap().unwrap();
+        let (qh, fh, sz) = db
+            .get_cached_patch_basis("GTS", "test.esp")
+            .unwrap()
+            .unwrap();
         assert_eq!(qh, 222);
         assert_eq!(fh, "new_hash");
         assert_eq!(sz, 200);
@@ -4098,8 +4336,12 @@ mod tests {
         bsa_cache_insert(&conn, "B.bsa", "file2.dds", b"data2").unwrap();
         bsa_cache_clear(&conn, "A.bsa").unwrap();
 
-        assert!(bsa_cache_get(&conn, "A.bsa", "file1.dds").unwrap().is_none());
-        assert!(bsa_cache_get(&conn, "B.bsa", "file2.dds").unwrap().is_some());
+        assert!(bsa_cache_get(&conn, "A.bsa", "file1.dds")
+            .unwrap()
+            .is_none());
+        assert!(bsa_cache_get(&conn, "B.bsa", "file2.dds")
+            .unwrap()
+            .is_some());
     }
 
     #[test]
@@ -4111,8 +4353,12 @@ mod tests {
         bsa_cache_insert(&conn, "B.bsa", "file2.dds", b"data2").unwrap();
         bsa_cache_clear_all(&conn).unwrap();
 
-        assert!(bsa_cache_get(&conn, "A.bsa", "file1.dds").unwrap().is_none());
-        assert!(bsa_cache_get(&conn, "B.bsa", "file2.dds").unwrap().is_none());
+        assert!(bsa_cache_get(&conn, "A.bsa", "file1.dds")
+            .unwrap()
+            .is_none());
+        assert!(bsa_cache_get(&conn, "B.bsa", "file2.dds")
+            .unwrap()
+            .is_none());
     }
 
     // -----------------------------------------------------------------------
@@ -4136,9 +4382,7 @@ mod tests {
         PersistedGame {
             game_id: game_id.to_string(),
             runtime: GameRuntime::Native(NativeContext {
-                app_bundle_path: std::path::PathBuf::from(
-                    "/Applications/Stardew Valley.app",
-                ),
+                app_bundle_path: std::path::PathBuf::from("/Applications/Stardew Valley.app"),
                 game_data_root: std::path::PathBuf::from(
                     "/Applications/Stardew Valley.app/Contents/MacOS",
                 ),
@@ -4160,7 +4404,10 @@ mod tests {
         assert_eq!(all[0].game_id, "skyrimse");
         let w = all[0].runtime.wine().expect("should be Wine runtime");
         assert_eq!(w.bottle_name, "GTS");
-        assert_eq!(w.bottle_path, std::path::PathBuf::from("/Users/x/Bottles/GTS"));
+        assert_eq!(
+            w.bottle_path,
+            std::path::PathBuf::from("/Users/x/Bottles/GTS")
+        );
     }
 
     #[test]
@@ -4233,7 +4480,8 @@ mod tests {
         conn.execute(
             "INSERT INTO games (game_id, runtime) VALUES ('weird', 'martian')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         drop(conn);
 
         let result = db.get_persisted_game("weird");

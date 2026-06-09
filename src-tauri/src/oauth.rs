@@ -857,7 +857,10 @@ pub fn parse_user_info(access_token: &str) -> Result<NexusUserInfo, OAuthError> 
     const VALID_ISSUERS: &[&str] = &["nexusmods.com", "nexus-user-service"];
     if let Some(iss) = claims.get("iss").and_then(|v| v.as_str()) {
         if !VALID_ISSUERS.iter().any(|valid| iss.contains(valid)) {
-            log::warn!("JWT issuer mismatch: expected nexusmods.com or nexus-user-service, got '{}'", iss);
+            log::warn!(
+                "JWT issuer mismatch: expected nexusmods.com or nexus-user-service, got '{}'",
+                iss
+            );
             return Err(OAuthError::InvalidToken(format!(
                 "JWT issuer mismatch: {}",
                 iss
@@ -877,7 +880,11 @@ pub fn parse_user_info(access_token: &str) -> Result<NexusUserInfo, OAuthError> 
     // 3. Validate audience matches our client if present
     if let Some(aud) = claims.get("aud").and_then(|v| v.as_str()) {
         if aud != CLIENT_ID && !aud.contains(CLIENT_ID) {
-            log::warn!("JWT audience mismatch: expected '{}', got '{}'", CLIENT_ID, aud);
+            log::warn!(
+                "JWT audience mismatch: expected '{}', got '{}'",
+                CLIENT_ID,
+                aud
+            );
             return Err(OAuthError::InvalidToken(format!(
                 "JWT audience mismatch: {}",
                 aud
@@ -997,7 +1004,9 @@ pub async fn get_auth_method_refreshed() -> AuthMethod {
                     }
                 }
             }
-            eprintln!("[oauth] token refresh failed after retries, clearing stale tokens: {last_err}");
+            eprintln!(
+                "[oauth] token refresh failed after retries, clearing stale tokens: {last_err}"
+            );
             // Clear stale tokens to force re-auth instead of silently
             // using an expired token that will 401 on every request.
             if let Err(clear_err) = clear_tokens() {
@@ -1201,7 +1210,8 @@ mod tests {
         let signature = base64url_encode(b"fake-signature");
         let fake_jwt = format!("{}.{}.{}", header, payload, signature);
 
-        let info = parse_user_info(&fake_jwt).expect("nexus-user-service issuer should be accepted");
+        let info =
+            parse_user_info(&fake_jwt).expect("nexus-user-service issuer should be accepted");
         assert_eq!(info.name, "SSOUser");
     }
 

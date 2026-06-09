@@ -264,7 +264,9 @@ fn is_file_or_symlink_to_file(entry: &walkdir::DirEntry) -> bool {
     if ft.is_symlink() {
         // fs::metadata follows symlinks. If the link is broken or its target
         // is a directory, treat it as not-a-file.
-        return fs::metadata(entry.path()).map(|m| m.is_file()).unwrap_or(false);
+        return fs::metadata(entry.path())
+            .map(|m| m.is_file())
+            .unwrap_or(false);
     }
     false
 }

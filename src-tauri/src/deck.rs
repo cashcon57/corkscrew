@@ -233,8 +233,7 @@ fn get_total_ram_mb() -> u64 {
 /// Check if running in Steam Gaming Mode (vs Desktop Mode).
 fn is_gaming_mode() -> bool {
     // In Gaming Mode, the session is managed by gamescope
-    std::env::var("GAMESCOPE_WAYLAND_DISPLAY").is_ok()
-        || std::env::var("SteamGamepadUI").is_ok()
+    std::env::var("GAMESCOPE_WAYLAND_DISPLAY").is_ok() || std::env::var("SteamGamepadUI").is_ok()
 }
 
 /// Check if a deployment would cross device boundaries.

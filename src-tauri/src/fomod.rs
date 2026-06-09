@@ -2936,12 +2936,12 @@ mod tests {
         // Wildcard in actual — preceding numeric components catch mismatches
         assert!(!version_gte("1.6.x", "2.0.0")); // 1 < 2 fails before "x"
         assert!(!version_gte("1.6.x", "1.7.0")); // 6 < 7 fails before "x"
-        // Wildcard in actual with equal preceding components — treated as satisfied
+                                                 // Wildcard in actual with equal preceding components — treated as satisfied
         assert!(version_gte("1.6.x", "1.6.0")); // 1==1, 6==6, "x" wildcard
         assert!(version_gte("1.6.x", "1.6.640")); // same — real FOMOD scenario
-        // Wildcard in actual with greater preceding components
+                                                  // Wildcard in actual with greater preceding components
         assert!(version_gte("2.0.x", "1.0.0")); // 2 > 1 returns true
-        // Wildcard in requirement should be treated as satisfied
+                                                // Wildcard in requirement should be treated as satisfied
         assert!(version_gte("1.6.5", "1.6.x"));
         // Normal cases still work
         assert!(version_gte("1.6.5", "1.6.0"));

@@ -1018,13 +1018,11 @@ pub fn parse_collection_bundle(bundle_path: &Path) -> Result<CollectionManifest,
     // survive until the collection install finishes.
     let temp_dir = std::env::temp_dir().join("corkscrew_collection_extract");
     let _ = std::fs::remove_dir_all(&temp_dir); // Clean any stale extraction
-    std::fs::create_dir_all(&temp_dir)
-        .map_err(|e| CollectionsError::Io(e))?;
+    std::fs::create_dir_all(&temp_dir).map_err(|e| CollectionsError::Io(e))?;
     let mut json_data: Option<Vec<u8>> = None;
     let mut ini_tweak_files: Vec<(String, Vec<u8>)> = Vec::new();
     let bundled_dir = temp_dir.join("bundled");
-    std::fs::create_dir_all(&bundled_dir)
-        .map_err(|e| CollectionsError::Io(e))?;
+    std::fs::create_dir_all(&bundled_dir).map_err(|e| CollectionsError::Io(e))?;
     let bundled_files_extracted = std::sync::Mutex::new(Vec::<(String, PathBuf)>::new());
 
     sevenz_rust2::decompress_with_extract_fn(
@@ -1058,19 +1056,20 @@ pub fn parse_collection_bundle(bundle_path: &Path) -> Result<CollectionManifest,
                 let mut data = Vec::new();
                 reader.read_to_end(&mut data)?;
                 // Use just the filename (strip any directory prefix)
-                let file_name = entry_name
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(entry_name);
+                let file_name = entry_name.rsplit('/').next().unwrap_or(entry_name);
                 let dest = bundled_dir.join(file_name);
                 if let Err(e) = std::fs::write(&dest, &data) {
                     log::warn!("Failed to extract bundled file '{}': {}", file_name, e);
                 } else {
-                    log::info!("Extracted bundled mod archive: {} ({} bytes)", file_name, data.len());
-                    bundled_files_extracted.lock().unwrap().push((
-                        file_name.to_string(),
-                        dest,
-                    ));
+                    log::info!(
+                        "Extracted bundled mod archive: {} ({} bytes)",
+                        file_name,
+                        data.len()
+                    );
+                    bundled_files_extracted
+                        .lock()
+                        .unwrap()
+                        .push((file_name.to_string(), dest));
                 }
                 return Ok(false);
             }
@@ -1156,7 +1155,12 @@ pub fn parse_collection_bundle(bundle_path: &Path) -> Result<CollectionManifest,
                 let matched = file_lookup.iter().find(|(fname, _)| {
                     // Match if the bundled filename contains the mod name or vice versa
                     fname.contains(&mod_name_lower)
-                        || mod_name_lower.contains(fname.trim_end_matches(".7z").trim_end_matches(".zip").trim_end_matches(".rar"))
+                        || mod_name_lower.contains(
+                            fname
+                                .trim_end_matches(".7z")
+                                .trim_end_matches(".zip")
+                                .trim_end_matches(".rar"),
+                        )
                 });
                 if let Some((_, path)) = matched {
                     manifest

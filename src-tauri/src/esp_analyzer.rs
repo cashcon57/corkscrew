@@ -81,10 +81,7 @@ pub fn analyze_plugin(
 ) -> Result<PluginRecordSummary> {
     let plugin_path = data_dir.join(plugin_name);
     if !plugin_path.is_file() {
-        bail!(
-            "Plugin file not found: {}",
-            plugin_path.display()
-        );
+        bail!("Plugin file not found: {}", plugin_path.display());
     }
 
     let mut plugin = Plugin::new(game_id, &plugin_path);
@@ -159,17 +156,11 @@ pub fn detect_record_conflicts(
     let mut conflicts = Vec::new();
     for i in 0..parsed.len() {
         for j in (i + 1)..parsed.len() {
-            let overlaps = parsed[i]
-                .1
-                .overlaps_with(&parsed[j].1)
-                .unwrap_or(false);
+            let overlaps = parsed[i].1.overlaps_with(&parsed[j].1).unwrap_or(false);
             if overlaps {
                 // Get the actual count of overlapping records.
                 let other_ref = &parsed[j].1;
-                let count = parsed[i]
-                    .1
-                    .overlap_size(&[other_ref])
-                    .unwrap_or(0);
+                let count = parsed[i].1.overlap_size(&[other_ref]).unwrap_or(0);
                 if count > 0 {
                     conflicts.push(RecordConflict {
                         plugin_a: parsed[i].0.clone(),
@@ -252,8 +243,7 @@ mod tests {
     #[test]
     fn test_detect_conflicts_empty_list() {
         let dir = empty_data_dir();
-        let result =
-            detect_record_conflicts(dir.path(), &[], GameId::SkyrimSE).unwrap();
+        let result = detect_record_conflicts(dir.path(), &[], GameId::SkyrimSE).unwrap();
         assert!(result.is_empty());
     }
 
@@ -261,8 +251,7 @@ mod tests {
     fn test_detect_conflicts_skips_missing() {
         let dir = empty_data_dir();
         let names = vec!["missing_a.esp".to_string(), "missing_b.esp".to_string()];
-        let result =
-            detect_record_conflicts(dir.path(), &names, GameId::SkyrimSE).unwrap();
+        let result = detect_record_conflicts(dir.path(), &names, GameId::SkyrimSE).unwrap();
         assert!(
             result.is_empty(),
             "Should return no conflicts for missing files"
@@ -273,12 +262,8 @@ mod tests {
     fn test_analyze_all_plugins_skips_missing() {
         let dir = empty_data_dir();
         let names = vec!["missing.esp".to_string()];
-        let result =
-            analyze_all_plugins(dir.path(), &names, GameId::SkyrimSE).unwrap();
-        assert!(
-            result.is_empty(),
-            "Should skip missing plugins gracefully"
-        );
+        let result = analyze_all_plugins(dir.path(), &names, GameId::SkyrimSE).unwrap();
+        assert!(result.is_empty(), "Should skip missing plugins gracefully");
     }
 
     /// Create a minimal valid Skyrim SE plugin (TES4 header only).
@@ -334,8 +319,7 @@ mod tests {
     fn test_analyze_minimal_plugin() {
         let dir = empty_data_dir();
         let _path = write_minimal_sse_plugin(dir.path(), "test.esp");
-        let summary =
-            analyze_plugin(dir.path(), "test.esp", GameId::SkyrimSE).unwrap();
+        let summary = analyze_plugin(dir.path(), "test.esp", GameId::SkyrimSE).unwrap();
         assert_eq!(summary.plugin_name, "test.esp");
         assert!(!summary.is_master);
         assert!(!summary.is_light);
@@ -354,9 +338,11 @@ mod tests {
         data[8..12].copy_from_slice(&new_flags.to_le_bytes());
         fs::write(&path, &data).unwrap();
 
-        let summary =
-            analyze_plugin(dir.path(), "test.esm", GameId::SkyrimSE).unwrap();
-        assert!(summary.is_master, "Plugin with ESM flag should report is_master=true");
+        let summary = analyze_plugin(dir.path(), "test.esm", GameId::SkyrimSE).unwrap();
+        assert!(
+            summary.is_master,
+            "Plugin with ESM flag should report is_master=true"
+        );
     }
 
     #[test]
@@ -366,8 +352,7 @@ mod tests {
         write_minimal_sse_plugin(dir.path(), "b.esp");
 
         let names = vec!["a.esp".to_string(), "b.esp".to_string()];
-        let conflicts =
-            detect_record_conflicts(dir.path(), &names, GameId::SkyrimSE).unwrap();
+        let conflicts = detect_record_conflicts(dir.path(), &names, GameId::SkyrimSE).unwrap();
         assert!(
             conflicts.is_empty(),
             "Empty plugins should have no record conflicts"
@@ -385,8 +370,7 @@ mod tests {
             "b.esp".to_string(),
             "missing.esp".to_string(),
         ];
-        let results =
-            analyze_all_plugins(dir.path(), &names, GameId::SkyrimSE).unwrap();
+        let results = analyze_all_plugins(dir.path(), &names, GameId::SkyrimSE).unwrap();
         assert_eq!(results.len(), 2, "Should have 2 valid summaries");
         assert!(results.contains_key("a.esp"));
         assert!(results.contains_key("b.esp"));

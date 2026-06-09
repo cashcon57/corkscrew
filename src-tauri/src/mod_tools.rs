@@ -981,7 +981,9 @@ fn hogwarts_legacy_tools() -> Vec<ModTool> {
         ModTool {
             id: "hl-mod-merger-native".into(),
             name: "PAK Database Merger (built-in)".into(),
-            description: "Automatically merges conflicting PhoenixShipData.sqlite — no external tool needed".into(),
+            description:
+                "Automatically merges conflicting PhoenixShipData.sqlite — no external tool needed"
+                    .into(),
             exe_names: vec![],
             detected_path: None,
             requires_wine: false,
@@ -1749,9 +1751,7 @@ fn pick_asset<'a>(tool_id: &str, assets: &'a [GitHubAsset]) -> Option<&'a GitHub
                 let linux_assets: Vec<&(usize, &String)> = archives
                     .iter()
                     .filter(|(_, n)| {
-                        n.contains("linux")
-                            && !n.contains("src")
-                            && !n.contains("source")
+                        n.contains("linux") && !n.contains("src") && !n.contains("source")
                     })
                     .collect();
                 if !linux_assets.is_empty() {
@@ -2188,11 +2188,7 @@ fn extract_7z(data: &[u8], target: &Path) -> Result<()> {
             let path = entry.path();
             if looks_executable(path) {
                 if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(0o755)) {
-                    log::warn!(
-                        "Failed to chmod 0o755 {}: {}",
-                        path.display(),
-                        e
-                    );
+                    log::warn!("Failed to chmod 0o755 {}: {}", path.display(), e);
                 }
             }
         }
@@ -2599,7 +2595,8 @@ pub fn launch_tool(
     exe_path: &Path,
     bottle: &crate::bottles::Bottle,
 ) -> std::result::Result<crate::launcher::LaunchResult, String> {
-    crate::launcher::launch_game(bottle, exe_path, exe_path.parent(), None, None).map_err(|e| e.to_string())
+    crate::launcher::launch_game(bottle, exe_path, exe_path.parent(), None, None)
+        .map_err(|e| e.to_string())
 }
 
 /// Launch a tool and log the result to the notification/crash log system.
@@ -2917,7 +2914,8 @@ mod tests {
     fn test_detect_collection_tools_by_mod_id() {
         let manifest =
             mock_collection_manifest(vec![("SKSE64", Some(30379)), ("SkyUI", Some(12604))]);
-        let tools = detect_required_tools_collection(&manifest, Path::new("/nonexistent"), "skyrimse");
+        let tools =
+            detect_required_tools_collection(&manifest, Path::new("/nonexistent"), "skyrimse");
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].tool_id, "skse");
     }
@@ -2928,7 +2926,8 @@ mod tests {
             ("Nemesis Unlimited Behavior Engine", None),
             ("SkyUI", None),
         ]);
-        let tools = detect_required_tools_collection(&manifest, Path::new("/nonexistent"), "skyrimse");
+        let tools =
+            detect_required_tools_collection(&manifest, Path::new("/nonexistent"), "skyrimse");
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].tool_id, "nemesis");
         assert_eq!(tools[0].recommended_alternative.as_deref(), Some("pandora"));
@@ -2938,7 +2937,8 @@ mod tests {
     fn test_detect_collection_tools_dedup() {
         // Same tool matched by both mod_id and name
         let manifest = mock_collection_manifest(vec![("SSEEdit xEdit", Some(164))]);
-        let tools = detect_required_tools_collection(&manifest, Path::new("/nonexistent"), "skyrimse");
+        let tools =
+            detect_required_tools_collection(&manifest, Path::new("/nonexistent"), "skyrimse");
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].tool_id, "sseedit");
     }
@@ -2966,7 +2966,8 @@ mod tests {
     #[test]
     fn test_detect_no_tools() {
         let manifest = mock_collection_manifest(vec![("SkyUI", Some(12604)), ("USSEP", Some(266))]);
-        let tools = detect_required_tools_collection(&manifest, Path::new("/nonexistent"), "skyrimse");
+        let tools =
+            detect_required_tools_collection(&manifest, Path::new("/nonexistent"), "skyrimse");
         assert!(tools.is_empty());
     }
 
@@ -2977,8 +2978,15 @@ mod tests {
             ("BodySlide and Outfit Studio", Some(201)),
             ("SSEEdit", Some(164)),
         ]);
-        let tools = detect_required_tools_collection(&manifest, Path::new("/nonexistent"), "hogwartslegacy");
-        assert!(tools.is_empty(), "Skyrim tools should not appear for hogwartslegacy");
+        let tools = detect_required_tools_collection(
+            &manifest,
+            Path::new("/nonexistent"),
+            "hogwartslegacy",
+        );
+        assert!(
+            tools.is_empty(),
+            "Skyrim tools should not appear for hogwartslegacy"
+        );
     }
 
     #[test]
@@ -2997,7 +3005,8 @@ mod tests {
     #[test]
     fn test_required_tool_enriches_from_builtin() {
         let manifest = mock_collection_manifest(vec![("SSEEdit", Some(164))]);
-        let tools = detect_required_tools_collection(&manifest, Path::new("/nonexistent"), "skyrimse");
+        let tools =
+            detect_required_tools_collection(&manifest, Path::new("/nonexistent"), "skyrimse");
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].tool_name, "SSEEdit (xEdit)");
         assert!(tools[0].can_auto_install);
@@ -3019,7 +3028,8 @@ mod tests {
             ("LOOT - Load Order Optimization Tool", None),
             ("SSEEdit", Some(164)),
         ]);
-        let tools = detect_required_tools_collection(&manifest, Path::new("/nonexistent"), "skyrimse");
+        let tools =
+            detect_required_tools_collection(&manifest, Path::new("/nonexistent"), "skyrimse");
         assert!(!tools.iter().any(|t| t.tool_id == "loot"));
         assert!(tools.iter().any(|t| t.tool_id == "sseedit"));
     }
@@ -3031,7 +3041,8 @@ mod tests {
             ("Nemesis Unlimited Behavior Engine", None),
             ("FNIS", None),
         ]);
-        let tools = detect_required_tools_collection(&manifest, Path::new("/nonexistent"), "skyrimse");
+        let tools =
+            detect_required_tools_collection(&manifest, Path::new("/nonexistent"), "skyrimse");
         assert!(tools.iter().any(|t| t.tool_id == "pandora"));
         assert!(!tools.iter().any(|t| t.tool_id == "nemesis"));
         assert!(!tools.iter().any(|t| t.tool_id == "fnis"));
@@ -3040,7 +3051,8 @@ mod tests {
     #[test]
     fn test_skse_detected_enriched_from_builtin() {
         let manifest = mock_collection_manifest(vec![("SKSE64", Some(30379))]);
-        let tools = detect_required_tools_collection(&manifest, Path::new("/nonexistent"), "skyrimse");
+        let tools =
+            detect_required_tools_collection(&manifest, Path::new("/nonexistent"), "skyrimse");
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].tool_id, "skse");
         assert!(tools[0].can_auto_install);
@@ -3069,8 +3081,16 @@ mod tests {
                 "FromSoft tool {} missing github_repo",
                 t.id
             );
-            assert!(!t.license.is_empty(), "FromSoft tool {} missing license", t.id);
-            assert!(t.requires_wine, "FromSoft tool {} should require wine", t.id);
+            assert!(
+                !t.license.is_empty(),
+                "FromSoft tool {} missing license",
+                t.id
+            );
+            assert!(
+                t.requires_wine,
+                "FromSoft tool {} should require wine",
+                t.id
+            );
         }
     }
 

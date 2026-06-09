@@ -150,8 +150,7 @@ pub fn replay_incomplete(
     );
 
     // Deduplicate by (game_id, bottle_name) — one redeploy per game is enough
-    let mut pairs: std::collections::HashSet<(String, String)> =
-        std::collections::HashSet::new();
+    let mut pairs: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
     for entry in &incomplete {
         pairs.insert((entry.game_id.clone(), entry.bottle_name.clone()));
     }

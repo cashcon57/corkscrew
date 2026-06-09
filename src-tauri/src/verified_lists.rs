@@ -138,11 +138,7 @@ fn write_disk_cache(manifest: &Manifest, fetched_at: u64) {
         // refreshes write to disjoint tmp paths and cannot truncate each other.
         // The rename-to-final is atomic per writer; last-rename-wins is fine
         // because both inputs are well-formed manifests.
-        let tmp = path.with_extension(format!(
-            "json.tmp.{}.{}",
-            std::process::id(),
-            unix_now()
-        ));
+        let tmp = path.with_extension(format!("json.tmp.{}.{}", std::process::id(), unix_now()));
         if std::fs::write(&tmp, &bytes).is_ok() {
             if std::fs::rename(&tmp, &path).is_err() {
                 // Best-effort cleanup if rename failed (e.g. cross-device).
@@ -156,7 +152,12 @@ fn write_disk_cache(manifest: &Manifest, fetched_at: u64) {
 }
 
 fn ensure_initialized() {
-    if CACHE.read().ok().and_then(|g| g.as_ref().map(|_| ())).is_some() {
+    if CACHE
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().map(|_| ()))
+        .is_some()
+    {
         return;
     }
     let (manifest, fetched_at) = match load_disk_cache() {
@@ -165,7 +166,10 @@ fn ensure_initialized() {
     };
     if let Ok(mut w) = CACHE.write() {
         if w.is_none() {
-            *w = Some(CacheState { manifest, fetched_at });
+            *w = Some(CacheState {
+                manifest,
+                fetched_at,
+            });
         }
     }
 }
@@ -212,8 +216,7 @@ pub async fn refresh_from_remote() -> Result<(), String> {
         return Err(format!("HTTP {}", resp.status()));
     }
     let text = resp.text().await.map_err(|e| e.to_string())?;
-    let manifest: Manifest =
-        serde_json::from_str(&text).map_err(|e| format!("parse: {e}"))?;
+    let manifest: Manifest = serde_json::from_str(&text).map_err(|e| format!("parse: {e}"))?;
     store(manifest, unix_now());
     Ok(())
 }
@@ -302,7 +305,8 @@ mod tests {
                 reporter: None,
             },
         );
-        m.collections.insert("skyrimspecialedition".to_string(), col);
+        m.collections
+            .insert("skyrimspecialedition".to_string(), col);
         let json = serde_json::to_string(&m).unwrap();
         let back: Manifest = serde_json::from_str(&json).unwrap();
         assert_eq!(

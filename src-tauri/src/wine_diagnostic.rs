@@ -680,17 +680,14 @@ pub fn check_prefix_health_linux(prefix_path: &Path, _game_id: &str) -> LinuxPre
     }
 
     // Check DLL overrides
-    let dll_overrides_present = prefix_path.join("user.reg").exists()
-        && {
-            fs::read_to_string(prefix_path.join("user.reg"))
-                .map(|c| c.contains("DllOverrides"))
-                .unwrap_or(false)
-        };
+    let dll_overrides_present = prefix_path.join("user.reg").exists() && {
+        fs::read_to_string(prefix_path.join("user.reg"))
+            .map(|c| c.contains("DllOverrides"))
+            .unwrap_or(false)
+    };
 
     // Check .NET
-    let dotnet_installed = prefix_path
-        .join("drive_c/windows/Microsoft.NET")
-        .exists()
+    let dotnet_installed = prefix_path.join("drive_c/windows/Microsoft.NET").exists()
         || prefix_path.join("drive_c/Program Files/dotnet").exists();
 
     // Check DXVK
@@ -784,9 +781,7 @@ fn detect_filesystem_type(path: &Path) -> Option<String> {
             .arg(path)
             .output()
             .ok()?;
-        let fs_type = String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .to_string();
+        let fs_type = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if !fs_type.is_empty() {
             Some(fs_type)
         } else {

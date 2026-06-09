@@ -144,10 +144,7 @@ pub fn is_installed() -> bool {
 /// probe there. Windows is not a build target.
 #[cfg(target_os = "linux")]
 async fn check_dotnet_runtime() -> Result<()> {
-    let output = Command::new("dotnet")
-        .arg("--list-runtimes")
-        .output()
-        .await;
+    let output = Command::new("dotnet").arg("--list-runtimes").output().await;
 
     let install_hint = "DepotDownloader requires .NET 8+. Install: \
         `sudo pacman -S dotnet-runtime` (Arch/CachyOS), \
@@ -198,7 +195,9 @@ async fn check_dotnet_runtime() -> Result<()> {
 /// Get the installed DD version (from .version file).
 pub fn installed_version() -> Option<String> {
     let version_file = dd_install_dir().join(".version");
-    std::fs::read_to_string(version_file).ok().map(|s| s.trim().to_string())
+    std::fs::read_to_string(version_file)
+        .ok()
+        .map(|s| s.trim().to_string())
 }
 
 /// Download and install DepotDownloader from GitHub releases.
@@ -208,7 +207,10 @@ pub async fn install() -> Result<String> {
         .build()?;
 
     // Get latest release info
-    let url = format!("https://api.github.com/repos/{}/releases/latest", DD_GITHUB_REPO);
+    let url = format!(
+        "https://api.github.com/repos/{}/releases/latest",
+        DD_GITHUB_REPO
+    );
     let release: serde_json::Value = client.get(&url).send().await?.json().await?;
 
     let tag = release["tag_name"]
@@ -291,7 +293,11 @@ pub async fn install() -> Result<String> {
     // Write version marker
     std::fs::write(install_dir.join(".version"), &tag)?;
 
-    info!("DepotDownloader {} installed to {}", tag, install_dir.display());
+    info!(
+        "DepotDownloader {} installed to {}",
+        tag,
+        install_dir.display()
+    );
     Ok(tag)
 }
 
@@ -363,19 +369,19 @@ pub async fn check_auth_state_live(username: &str) -> AuthState {
 
     let binary = dd_binary_path();
     let mut cmd = Command::new(&binary);
-    cmd.arg("-app").arg("10")
-        .arg("-depot").arg("11")
+    cmd.arg("-app")
+        .arg("10")
+        .arg("-depot")
+        .arg("11")
         .arg("-manifest-only")
-        .arg("-username").arg(username)
+        .arg("-username")
+        .arg(username)
         .arg("-remember-password");
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        cmd.output(),
-    ).await;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(15), cmd.output()).await;
 
     match result {
         Ok(Ok(output)) => {
@@ -413,8 +419,10 @@ pub async fn list_manifests(
 
     let binary = dd_binary_path();
     let mut cmd = Command::new(&binary);
-    cmd.arg("-app").arg(app_id.to_string())
-        .arg("-depot").arg(depot_id.to_string())
+    cmd.arg("-app")
+        .arg(app_id.to_string())
+        .arg("-depot")
+        .arg(depot_id.to_string())
         .arg("-manifest-only");
 
     // Only pass username — password is never passed as a CLI arg (visible in ps).
@@ -425,10 +433,12 @@ pub async fn list_manifests(
     // password parameter kept for API compatibility but intentionally unused
     let _ = password;
 
-    cmd.stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    debug!("Running DepotDownloader for app={}, depot={}", app_id, depot_id);
+    debug!(
+        "Running DepotDownloader for app={}, depot={}",
+        app_id, depot_id
+    );
 
     let output = cmd.output().await?;
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -443,8 +453,7 @@ pub async fn list_manifests(
         }
         return Err(DDError::Other(format!(
             "DD exited with {}: {}",
-            output.status,
-            stderr
+            output.status, stderr
         )));
     }
 
@@ -485,10 +494,14 @@ pub async fn download_depot(
 
     let binary = dd_binary_path();
     let mut cmd = Command::new(&binary);
-    cmd.arg("-app").arg(app_id.to_string())
-        .arg("-depot").arg(depot_id.to_string())
-        .arg("-manifest").arg(manifest_id)
-        .arg("-dir").arg(output_dir.to_string_lossy().to_string())
+    cmd.arg("-app")
+        .arg(app_id.to_string())
+        .arg("-depot")
+        .arg(depot_id.to_string())
+        .arg("-manifest")
+        .arg(manifest_id)
+        .arg("-dir")
+        .arg(output_dir.to_string_lossy().to_string())
         .arg("-validate"); // Resume interrupted downloads by skipping valid chunks
 
     if let Some(user) = username {
@@ -496,12 +509,14 @@ pub async fn download_depot(
     }
     let _ = password;
 
-    cmd.stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     info!(
         "Downloading depot: app={} depot={} manifest={} → {}",
-        app_id, depot_id, manifest_id, output_dir.display()
+        app_id,
+        depot_id,
+        manifest_id,
+        output_dir.display()
     );
 
     if let Some(cb) = progress_callback {
@@ -530,7 +545,10 @@ pub async fn download_depot(
                         detail: line.trim().to_string(),
                         percent: Some(pct),
                     });
-                } else if line.contains("Downloading") || line.contains("Validating") || line.contains("Total") {
+                } else if line.contains("Downloading")
+                    || line.contains("Validating")
+                    || line.contains("Total")
+                {
                     cb(DowngradeProgress {
                         phase: "downloading".into(),
                         detail: line.trim().to_string(),
@@ -597,9 +615,8 @@ pub fn logout() -> Result<()> {
     // and let it be re-downloaded fresh on next use.
     let dd_dir = dd_install_dir();
     if dd_dir.exists() {
-        std::fs::remove_dir_all(&dd_dir).map_err(|e| {
-            DDError::Other(format!("Failed to remove DD directory: {}", e))
-        })?;
+        std::fs::remove_dir_all(&dd_dir)
+            .map_err(|e| DDError::Other(format!("Failed to remove DD directory: {}", e)))?;
         info!("Removed DepotDownloader directory to clear session data");
     }
 
@@ -620,16 +637,18 @@ pub async fn authenticate(
     let mut cmd = Command::new(&binary);
     // Use a harmless operation (list manifests for Steam itself) to trigger auth.
     // Omit -password so credentials don't appear in process args — pipe via stdin.
-    cmd.arg("-app").arg("10") // Steam app ID (always accessible)
-        .arg("-depot").arg("11")
+    cmd.arg("-app")
+        .arg("10") // Steam app ID (always accessible)
+        .arg("-depot")
+        .arg("11")
         .arg("-manifest-only")
-        .arg("-username").arg(username)
+        .arg("-username")
+        .arg(username)
         .arg("-remember-password");
 
     // Always pipe stdin — DD prompts for password when -password is omitted
     cmd.stdin(Stdio::piped());
-    cmd.stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let mut child = cmd.spawn()?;
 
@@ -637,7 +656,9 @@ pub async fn authenticate(
     // without -password. Then pipe Steam Guard code if needed.
     if let Some(mut stdin) = child.stdin.take() {
         // Write password (DD prompts for it right away)
-        stdin.write_all(format!("{}\n", password).as_bytes()).await?;
+        stdin
+            .write_all(format!("{}\n", password).as_bytes())
+            .await?;
         stdin.flush().await?;
 
         // If we have a Steam Guard code, write it after a delay for DD to process
@@ -662,7 +683,12 @@ pub async fn authenticate(
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    info!("DD auth exit_code={}, stdout={}, stderr={}", output.status, &stdout[..stdout.len().min(500)], &stderr[..stderr.len().min(500)]);
+    info!(
+        "DD auth exit_code={}, stdout={}, stderr={}",
+        output.status,
+        &stdout[..stdout.len().min(500)],
+        &stderr[..stderr.len().min(500)]
+    );
 
     if stderr.contains("InvalidPassword") || stderr.contains("InvalidLoginAuthCode") {
         return Err(DDError::AuthFailed(
@@ -692,7 +718,10 @@ pub async fn authenticate(
     if stderr.contains("SteamGuard") || stdout.contains("Steam Guard") {
         if steam_guard_code.is_none() {
             let combined = format!("{} {}", stdout, stderr).to_lowercase();
-            if combined.contains("confirm") || combined.contains("mobile") || combined.contains("phone") {
+            if combined.contains("confirm")
+                || combined.contains("mobile")
+                || combined.contains("phone")
+            {
                 return Err(DDError::SteamGuardMobile);
             }
             return Err(DDError::SteamGuardRequired);

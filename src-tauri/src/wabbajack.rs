@@ -185,7 +185,11 @@ pub struct WabbajackModlist {
     pub description: String,
     #[serde(default)]
     pub version: String,
-    #[serde(default, rename = "GameType", deserialize_with = "deserialize_game_type")]
+    #[serde(
+        default,
+        rename = "GameType",
+        deserialize_with = "deserialize_game_type"
+    )]
     pub game_type: u32,
     #[serde(default)]
     pub archives: Vec<WjArchive>,
@@ -330,9 +334,8 @@ pub async fn fetch_modlist_gallery() -> Result<Vec<ModlistSummary>, String> {
         let slug = repo_slug.clone();
         let idx_first = indices[0];
         let rl = rate_limited.clone();
-        let handle = tokio::spawn(async move {
-            fetch_github_stars(&client, &slug, &rl).await.unwrap_or(0)
-        });
+        let handle =
+            tokio::spawn(async move { fetch_github_stars(&client, &slug, &rl).await.unwrap_or(0) });
         star_handles.push((idx_first, handle));
     }
 
@@ -378,7 +381,8 @@ fn extract_github_repo(url: &str) -> Option<String> {
     // Handles:
     // https://raw.githubusercontent.com/Owner/Repo/...
     // https://github.com/Owner/Repo/...
-    let url = url.strip_prefix("https://raw.githubusercontent.com/")
+    let url = url
+        .strip_prefix("https://raw.githubusercontent.com/")
         .or_else(|| url.strip_prefix("https://github.com/"))?;
 
     let parts: Vec<&str> = url.split('/').collect();

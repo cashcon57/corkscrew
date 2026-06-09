@@ -232,13 +232,7 @@ const CS_FOMOD_PATTERNS: &[&str] = &[
 ];
 
 /// Substring patterns for ENB-related FOMOD options.
-const ENB_FOMOD_PATTERNS: &[&str] = &[
-    "enb",
-    "enb version",
-    "enb light",
-    "enb patch",
-    "enbseries",
-];
+const ENB_FOMOD_PATTERNS: &[&str] = &["enb", "enb version", "enb light", "enb patch", "enbseries"];
 
 /// Substring patterns for mesh-split options (CS uses split meshes; ENB does
 /// not).
@@ -354,7 +348,9 @@ pub fn scan_for_cs_mods(
             let has_essential_plugin = m.installed_files.iter().any(|f| {
                 let lower = f.to_lowercase().replace('\\', "/");
                 let filename = lower.rsplit('/').next().unwrap_or(&lower);
-                ESSENTIAL_SKSE_PLUGINS.iter().any(|&essential| filename == essential)
+                ESSENTIAL_SKSE_PLUGINS
+                    .iter()
+                    .any(|&essential| filename == essential)
             });
 
             if has_essential_plugin {
@@ -382,22 +378,16 @@ pub fn scan_for_cs_mods(
             let only_harmless = reasons.iter().all(|r| {
                 matches!(
                     r,
-                    CsDetectionReason::CsConfigFiles
-                        | CsDetectionReason::LightPlacerConfigs
+                    CsDetectionReason::CsConfigFiles | CsDetectionReason::LightPlacerConfigs
                 )
             });
 
-            let has_fomod_recipe = fomod_recipes::get_recipe(db, m.id)
-                .ok()
-                .flatten()
-                .is_some();
+            let has_fomod_recipe = fomod_recipes::get_recipe(db, m.id).ok().flatten().is_some();
 
             let action = if only_harmless {
                 // Config files are inert without CS DLL — safe to keep
                 CsModAction::Keep
-            } else if has_fomod_recipe
-                && reasons.contains(&CsDetectionReason::FomodCsSelection)
-            {
+            } else if has_fomod_recipe && reasons.contains(&CsDetectionReason::FomodCsSelection) {
                 CsModAction::RerunFomod {
                     suggested_selections: HashMap::new(),
                 }
@@ -467,7 +457,9 @@ fn check_file_patterns(installed_files: &[String], reasons: &mut Vec<CsDetection
         }
 
         // CS config directory
-        if lower.contains("communityshaders/") && (lower.ends_with(".ini") || lower.ends_with(".json")) {
+        if lower.contains("communityshaders/")
+            && (lower.ends_with(".ini") || lower.ends_with(".json"))
+        {
             if !reasons.contains(&CsDetectionReason::CsConfigFiles) {
                 reasons.push(CsDetectionReason::CsConfigFiles);
             }
@@ -641,25 +633,20 @@ pub async fn install_enb_binary(game_path: &Path) -> Result<String, String> {
         .map_err(|e| format!("Failed to read ENB download body: {}", e))?;
 
     // Extract to temp directory
-    let temp_dir = tempfile::tempdir()
-        .map_err(|e| format!("Failed to create temp dir: {}", e))?;
+    let temp_dir = tempfile::tempdir().map_err(|e| format!("Failed to create temp dir: {}", e))?;
     let zip_path = temp_dir.path().join("enb.zip");
-    fs::write(&zip_path, &bytes)
-        .map_err(|e| format!("Failed to write ENB zip: {}", e))?;
+    fs::write(&zip_path, &bytes).map_err(|e| format!("Failed to write ENB zip: {}", e))?;
 
     let extract_dir = temp_dir.path().join("enb_extracted");
-    fs::create_dir_all(&extract_dir)
-        .map_err(|e| format!("Failed to create extract dir: {}", e))?;
+    fs::create_dir_all(&extract_dir).map_err(|e| format!("Failed to create extract dir: {}", e))?;
 
     // Use the zip crate to extract
     let zip_path_clone = zip_path.clone();
     let extract_dir_clone = extract_dir.clone();
-    tokio::task::spawn_blocking(move || {
-        extract_enb_zip(&zip_path_clone, &extract_dir_clone)
-    })
-    .await
-    .map_err(|e| format!("ENB extraction task failed: {}", e))?
-    .map_err(|e| format!("ENB extraction failed: {}", e))?;
+    tokio::task::spawn_blocking(move || extract_enb_zip(&zip_path_clone, &extract_dir_clone))
+        .await
+        .map_err(|e| format!("ENB extraction task failed: {}", e))?
+        .map_err(|e| format!("ENB extraction failed: {}", e))?;
 
     // Find the WrapperVersion directory inside the extracted archive
     // ENB zips typically contain WrapperVersion/ and InjectorVersion/
@@ -722,7 +709,10 @@ fn parse_enb_version_from_html(html: &str) -> Option<String> {
                 if ver.chars().all(|c| c.is_ascii_digit()) && !ver.is_empty() {
                     // Keep the highest version found
                     match &best_version {
-                        Some(existing) if ver.parse::<u32>().unwrap_or(0) > existing.parse::<u32>().unwrap_or(0) => {
+                        Some(existing)
+                            if ver.parse::<u32>().unwrap_or(0)
+                                > existing.parse::<u32>().unwrap_or(0) =>
+                        {
                             best_version = Some(ver.to_string());
                         }
                         None => {
@@ -743,10 +733,9 @@ fn parse_enb_version_from_html(html: &str) -> Option<String> {
 
 /// Extract an ENB zip archive using the `zip` crate.
 fn extract_enb_zip(zip_path: &Path, dest: &Path) -> Result<(), String> {
-    let file = fs::File::open(zip_path)
-        .map_err(|e| format!("Failed to open ENB zip: {}", e))?;
-    let mut archive = zip::ZipArchive::new(file)
-        .map_err(|e| format!("Failed to parse ENB zip: {}", e))?;
+    let file = fs::File::open(zip_path).map_err(|e| format!("Failed to open ENB zip: {}", e))?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|e| format!("Failed to parse ENB zip: {}", e))?;
 
     for i in 0..archive.len() {
         let mut entry = archive
@@ -856,8 +845,8 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
     fs::create_dir_all(dst)
         .map_err(|e| format!("Failed to create dir {}: {}", dst.display(), e))?;
 
-    let entries = fs::read_dir(src)
-        .map_err(|e| format!("Failed to read dir {}: {}", src.display(), e))?;
+    let entries =
+        fs::read_dir(src).map_err(|e| format!("Failed to read dir {}: {}", src.display(), e))?;
 
     for entry in entries {
         let entry = entry.map_err(|e| format!("Failed to read dir entry: {}", e))?;
@@ -889,16 +878,14 @@ pub fn patch_enb_local_ini(game_path: &Path) -> Result<(), String> {
     let ini_path = game_path.join("enblocal.ini");
 
     let content = if ini_path.exists() {
-        fs::read_to_string(&ini_path)
-            .map_err(|e| format!("Failed to read enblocal.ini: {}", e))?
+        fs::read_to_string(&ini_path).map_err(|e| format!("Failed to read enblocal.ini: {}", e))?
     } else {
         String::new()
     };
 
     let patched = ensure_enb_linux_version(&content);
 
-    fs::write(&ini_path, &patched)
-        .map_err(|e| format!("Failed to write enblocal.ini: {}", e))?;
+    fs::write(&ini_path, &patched).map_err(|e| format!("Failed to write enblocal.ini: {}", e))?;
 
     info!("Patched enblocal.ini with LinuxVersion=true");
     Ok(())
@@ -1048,12 +1035,10 @@ pub async fn swap_mod_to_enb_variant(
     // Check premium status
     let client = crate::nexus_client().await?;
     if !client.is_premium().await {
-        return Err(
-            "Mod swapping requires NexusMods Premium. \
+        return Err("Mod swapping requires NexusMods Premium. \
              Please download the ENB variant manually from the mod page \
              and install it through the normal mod installation flow."
-                .to_string(),
-        );
+            .to_string());
     }
 
     // Get the mod record to find the NexusMods mod ID
@@ -1090,10 +1075,7 @@ pub async fn swap_mod_to_enb_variant(
         .map_err(|e| format!("Download failed: {}", e))?;
 
     if !response.status().is_success() {
-        return Err(format!(
-            "Download failed with status {}",
-            response.status()
-        ));
+        return Err(format!("Download failed with status {}", response.status()));
     }
 
     let bytes = response
@@ -1105,12 +1087,10 @@ pub async fn swap_mod_to_enb_variant(
     let _ = deployer::undeploy_mod(db, game_id, bottle_name, mod_id, data_dir, game_path);
 
     // Write the new archive to a temp file and extract to staging
-    let temp_dir = tempfile::tempdir()
-        .map_err(|e| format!("Failed to create temp dir: {}", e))?;
+    let temp_dir = tempfile::tempdir().map_err(|e| format!("Failed to create temp dir: {}", e))?;
     let archive_name = format!("enb_variant_{}.zip", enb_file_id);
     let archive_path = temp_dir.path().join(&archive_name);
-    fs::write(&archive_path, &bytes)
-        .map_err(|e| format!("Failed to write archive: {}", e))?;
+    fs::write(&archive_path, &bytes).map_err(|e| format!("Failed to write archive: {}", e))?;
 
     // Get the staging path from the mod record
     let staging_path = m
@@ -1121,11 +1101,9 @@ pub async fn swap_mod_to_enb_variant(
 
     // Clear and re-extract staging
     if staging_dir.exists() {
-        fs::remove_dir_all(&staging_dir)
-            .map_err(|e| format!("Failed to clear staging: {}", e))?;
+        fs::remove_dir_all(&staging_dir).map_err(|e| format!("Failed to clear staging: {}", e))?;
     }
-    fs::create_dir_all(&staging_dir)
-        .map_err(|e| format!("Failed to create staging dir: {}", e))?;
+    fs::create_dir_all(&staging_dir).map_err(|e| format!("Failed to create staging dir: {}", e))?;
 
     crate::installer::extract_archive(&archive_path, &staging_dir)
         .map_err(|e| format!("Failed to extract ENB variant: {}", e))?;
@@ -1453,10 +1431,7 @@ pub async fn execute_conversion(
             // just record them as needing attention. The frontend will
             // present the FOMOD wizard with pre-selected ENB options.
             fomods_rerun += 1;
-            info!(
-                "FOMOD rerun queued for '{}' (mod_id {})",
-                mod_name, mod_id
-            );
+            info!("FOMOD rerun queued for '{}' (mod_id {})", mod_name, mod_id);
         }
     }
 
@@ -1468,8 +1443,10 @@ pub async fn execute_conversion(
                 mod_name: "ENB Helper SE".to_string(),
             },
         );
-        info!("ENB ecosystem install requested — ENB Helper SE (NM {}) and ENB Light (NM {})",
-            ENB_HELPER_SE_MOD_ID, ENB_LIGHT_MOD_ID);
+        info!(
+            "ENB ecosystem install requested — ENB Helper SE (NM {}) and ENB Light (NM {})",
+            ENB_HELPER_SE_MOD_ID, ENB_LIGHT_MOD_ID
+        );
         // Ecosystem mod installation requires NexusMods Premium for API
         // downloads. The actual install is deferred to the frontend which
         // can present download prompts for free users.
@@ -1478,13 +1455,17 @@ pub async fn execute_conversion(
     // 8. Redeploy only if mods were swapped/installed (not for disable-only)
     //    undeploy_mod() already removes files and restores winners, so
     //    a full redeploy of ALL mods is only needed when new files are introduced.
-    let needs_full_redeploy = mods_swapped > 0 || fomods_rerun > 0 || enb_installed || dxvk_switched;
+    let needs_full_redeploy =
+        mods_swapped > 0 || fomods_rerun > 0 || enb_installed || dxvk_switched;
     if needs_full_redeploy {
-        emit_progress(app, ConversionProgress::Redeploying {
-            current: 0,
-            total: 0,
-            mod_name: "Preparing...".to_string(),
-        });
+        emit_progress(
+            app,
+            ConversionProgress::Redeploying {
+                current: 0,
+                total: 0,
+                mod_name: "Preparing...".to_string(),
+            },
+        );
         let app_redeploy = app.clone();
         match deployer::redeploy_all_with_progress(
             db,
@@ -1492,16 +1473,22 @@ pub async fn execute_conversion(
             bottle_name,
             data_dir,
             game_path,
-            Some(|current_idx: usize, total_mods: usize, name: &str, _files: usize, _total_files: usize| {
-                emit_progress(
-                    &app_redeploy,
-                    ConversionProgress::Redeploying {
-                        current: current_idx + 1,
-                        total: total_mods,
-                        mod_name: name.to_string(),
-                    },
-                );
-            }),
+            Some(
+                |current_idx: usize,
+                 total_mods: usize,
+                 name: &str,
+                 _files: usize,
+                 _total_files: usize| {
+                    emit_progress(
+                        &app_redeploy,
+                        ConversionProgress::Redeploying {
+                            current: current_idx + 1,
+                            total: total_mods,
+                            mod_name: name.to_string(),
+                        },
+                    );
+                },
+            ),
         ) {
             Ok(result) => {
                 info!(
@@ -1526,7 +1513,10 @@ pub async fn execute_conversion(
         bottle_name,
         snapshot_id,
         &disable_ids,
-        &swap_actions.iter().map(|(id, _, _)| *id).collect::<Vec<_>>(),
+        &swap_actions
+            .iter()
+            .map(|(id, _, _)| *id)
+            .collect::<Vec<_>>(),
         enb_installed,
     )?;
 
@@ -1550,12 +1540,7 @@ pub async fn execute_conversion(
 
     info!(
         "Conversion {} complete: {} disabled, {} swapped, {} FOMOD reruns, ENB: {}, DXVK: {}",
-        conversion_id,
-        mods_disabled,
-        mods_swapped,
-        fomods_rerun,
-        enb_installed,
-        dxvk_switched
+        conversion_id, mods_disabled, mods_swapped, fomods_rerun, enb_installed, dxvk_switched
     );
 
     Ok(result)
@@ -1691,10 +1676,8 @@ pub fn get_conversion_history(
             let swapped_json: String = row.get(6)?;
             let enb_int: i64 = row.get(7)?;
 
-            let disabled_mods: Vec<i64> =
-                serde_json::from_str(&disabled_json).unwrap_or_default();
-            let swapped_mods: Vec<i64> =
-                serde_json::from_str(&swapped_json).unwrap_or_default();
+            let disabled_mods: Vec<i64> = serde_json::from_str(&disabled_json).unwrap_or_default();
+            let swapped_mods: Vec<i64> = serde_json::from_str(&swapped_json).unwrap_or_default();
 
             Ok(ConversionHistoryEntry {
                 id: row.get(0)?,
@@ -1737,10 +1720,8 @@ fn get_conversion_record(
             let swapped_json: String = row.get(6)?;
             let enb_int: i64 = row.get(7)?;
 
-            let disabled_mods: Vec<i64> =
-                serde_json::from_str(&disabled_json).unwrap_or_default();
-            let swapped_mods: Vec<i64> =
-                serde_json::from_str(&swapped_json).unwrap_or_default();
+            let disabled_mods: Vec<i64> = serde_json::from_str(&disabled_json).unwrap_or_default();
+            let swapped_mods: Vec<i64> = serde_json::from_str(&swapped_json).unwrap_or_default();
 
             Ok(ConversionHistoryEntry {
                 id: row.get(0)?,
@@ -1783,8 +1764,7 @@ pub fn revert_conversion(
     }
 
     // Restore snapshot
-    let restore_result =
-        rollback::restore_snapshot(db, record.snapshot_id, game_id, bottle_name)?;
+    let restore_result = rollback::restore_snapshot(db, record.snapshot_id, game_id, bottle_name)?;
 
     // Remove ENB files from game root
     if record.enb_installed {
@@ -1827,10 +1807,7 @@ fn remove_enb_files(game_path: &Path) {
     let enbseries_dir = game_path.join("enbseries");
     if enbseries_dir.is_dir() {
         if let Err(e) = fs::remove_dir_all(&enbseries_dir) {
-            warn!(
-                "Failed to remove enbseries directory: {}",
-                e
-            );
+            warn!("Failed to remove enbseries directory: {}", e);
         } else {
             debug!("Removed enbseries/ directory");
         }
@@ -1859,11 +1836,9 @@ pub async fn scan_shader_compatibility(
     let (_, game, _data_dir) = super::resolve_game(&game_id, &bottle_name)?;
     let game_path = game.game_path.clone();
 
-    tokio::task::spawn_blocking(move || {
-        scan_for_cs_mods(&db, &game_id, &bottle_name, &game_path)
-    })
-    .await
-    .map_err(|e| format!("Scan task failed: {}", e))?
+    tokio::task::spawn_blocking(move || scan_for_cs_mods(&db, &game_id, &bottle_name, &game_path))
+        .await
+        .map_err(|e| format!("Scan task failed: {}", e))?
 }
 
 /// Quick check: are any enabled mods CS-related? Returns count.
@@ -1966,8 +1941,12 @@ pub async fn revert_shader_conversion_cmd(
         let restore = revert_conversion(&db, conversion_id, &game_id, &bottle_name, &game_path)?;
 
         let journal_id = deploy_journal::begin(
-            &game_id, &bottle_name, deploy_journal::JournalOp::RedeployAll, &[],
-        ).unwrap_or_default();
+            &game_id,
+            &bottle_name,
+            deploy_journal::JournalOp::RedeployAll,
+            &[],
+        )
+        .unwrap_or_default();
 
         // Redeploy after revert to apply restored mod states
         let app_clone = app.clone();
@@ -2194,10 +2173,7 @@ mod tests {
     #[test]
     fn test_partial_name_match() {
         let mut reasons = Vec::new();
-        check_name_patterns(
-            "My Custom Textures - Community Shaders Patch",
-            &mut reasons,
-        );
+        check_name_patterns("My Custom Textures - Community Shaders Patch", &mut reasons);
         assert!(reasons.contains(&CsDetectionReason::KnownCsEcosystemMod));
     }
 
@@ -2256,10 +2232,7 @@ mod tests {
         let mod_id = insert_test_mod(&db, "Test Mod", &[]);
 
         let mut selections = HashMap::new();
-        selections.insert(
-            "Compatibility".to_string(),
-            vec!["CS Version".to_string()],
-        );
+        selections.insert("Compatibility".to_string(), vec!["CS Version".to_string()]);
         fomod_recipes::save_recipe(&db, mod_id, "Test Mod", None, &selections).unwrap();
 
         let mut reasons = Vec::new();
@@ -2382,10 +2355,7 @@ mod tests {
         };
 
         let mut current = HashMap::new();
-        current.insert(
-            "Mesh Options".to_string(),
-            vec!["Split Meshes".to_string()],
-        );
+        current.insert("Mesh Options".to_string(), vec!["Split Meshes".to_string()]);
 
         let result = compute_enb_fomod_selections(&current, &installer);
         let sel = result.get("Mesh Options").unwrap();
@@ -2434,7 +2404,10 @@ mod tests {
         current.insert("Quality".to_string(), vec!["High".to_string()]);
 
         let result = compute_enb_fomod_selections(&current, &installer);
-        assert_eq!(result, current, "Selections should be unchanged when no CS options");
+        assert_eq!(
+            result, current,
+            "Selections should be unchanged when no CS options"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2559,9 +2532,15 @@ mod tests {
         let id2 = insert_test_mod(&db, "CS Mod 2", &[]);
         let id3 = insert_test_mod(&db, "Normal Mod", &[]);
 
-        let disabled =
-            batch_disable_cs_mods(&db, "skyrimse", "Gaming", &[id1, id2], &data_dir, &game_path)
-                .unwrap();
+        let disabled = batch_disable_cs_mods(
+            &db,
+            "skyrimse",
+            "Gaming",
+            &[id1, id2],
+            &data_dir,
+            &game_path,
+        )
+        .unwrap();
         assert_eq!(disabled, 2);
 
         // Verify mods are disabled in DB
@@ -2743,16 +2722,9 @@ mod tests {
     fn test_conversion_record_save_load() {
         let (db, _tmp) = test_db();
 
-        let id = save_conversion_record(
-            &db,
-            "skyrimse",
-            "Gaming",
-            1,
-            &[10, 20, 30],
-            &[40, 50],
-            true,
-        )
-        .unwrap();
+        let id =
+            save_conversion_record(&db, "skyrimse", "Gaming", 1, &[10, 20, 30], &[40, 50], true)
+                .unwrap();
 
         assert!(id > 0);
 
@@ -2813,16 +2785,26 @@ mod tests {
             rollback::create_snapshot(&db, "skyrimse", "Gaming", "test", None).unwrap();
 
         // Save conversion record
-        let conv_id =
-            save_conversion_record(&db, "skyrimse", "Gaming", snapshot_id, &[mod_id], &[], false)
-                .unwrap();
+        let conv_id = save_conversion_record(
+            &db,
+            "skyrimse",
+            "Gaming",
+            snapshot_id,
+            &[mod_id],
+            &[],
+            false,
+        )
+        .unwrap();
 
         // Revert
-        let result =
-            revert_conversion(&db, conv_id, "skyrimse", "Gaming", &game_path).unwrap();
+        let result = revert_conversion(&db, conv_id, "skyrimse", "Gaming", &game_path).unwrap();
         // Snapshot was restored — at least some action was taken
-        assert!(result.mods_enabled > 0 || result.mods_disabled > 0 || result.mods_not_found > 0
-            || (result.mods_enabled == 0 && result.mods_disabled == 0));
+        assert!(
+            result.mods_enabled > 0
+                || result.mods_disabled > 0
+                || result.mods_not_found > 0
+                || (result.mods_enabled == 0 && result.mods_disabled == 0)
+        );
 
         // Verify status is reverted
         let record = get_conversion_record(&db, conv_id).unwrap();
@@ -2903,7 +2885,11 @@ mod tests {
             CsDetectionReason::CsOnlyFiles,
         ];
 
-        assert_eq!(reasons.len(), 7, "All 7 detection reason types should exist");
+        assert_eq!(
+            reasons.len(),
+            7,
+            "All 7 detection reason types should exist"
+        );
 
         // Verify PartialEq works
         assert_eq!(CsDetectionReason::CoreDll, CsDetectionReason::CoreDll);
@@ -2986,7 +2972,10 @@ mod tests {
         assert!(dst.join("file1.txt").exists());
         assert!(dst.join("sub1/file2.txt").exists());
         assert!(dst.join("sub1/sub2/file3.txt").exists());
-        assert_eq!(fs::read_to_string(dst.join("file1.txt")).unwrap(), "content1");
+        assert_eq!(
+            fs::read_to_string(dst.join("file1.txt")).unwrap(),
+            "content1"
+        );
         assert_eq!(
             fs::read_to_string(dst.join("sub1/sub2/file3.txt")).unwrap(),
             "content3"
@@ -3031,10 +3020,7 @@ mod tests {
 
         // Save a FOMOD recipe with CS selection
         let mut selections = HashMap::new();
-        selections.insert(
-            "Shader".to_string(),
-            vec!["Community Shaders".to_string()],
-        );
+        selections.insert("Shader".to_string(), vec!["Community Shaders".to_string()]);
         fomod_recipes::save_recipe(&db, mod_id, "Texture Pack", None, &selections).unwrap();
 
         let result = scan_for_cs_mods(&db, "skyrimse", "Gaming", &game_path).unwrap();
@@ -3079,7 +3065,10 @@ mod tests {
 
     #[test]
     fn test_known_cs_nexus_ids_contains_water_parallax() {
-        assert!(KNOWN_CS_NEXUS_IDS.contains(&108949), "Water Parallax CS mod ID should be in known list");
+        assert!(
+            KNOWN_CS_NEXUS_IDS.contains(&108949),
+            "Water Parallax CS mod ID should be in known list"
+        );
     }
 
     // -----------------------------------------------------------------------

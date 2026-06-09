@@ -268,8 +268,10 @@ impl EncodeBatch {
         let entries: Vec<_> = self.entries.drain(..).collect();
         self.current_bytes = 0;
 
-        let results: Vec<Result<(), String>> =
-            entries.par_iter().map(|entry| encode_texture_cpu(entry)).collect();
+        let results: Vec<Result<(), String>> = entries
+            .par_iter()
+            .map(|entry| encode_texture_cpu(entry))
+            .collect();
 
         let mut successes = 0;
         let mut failures = Vec::new();

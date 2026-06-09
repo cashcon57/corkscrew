@@ -1,37 +1,38 @@
 //! Mod management commands: CRUD, archive management, notes, tags, and categories.
 
-use crate::database;
-use crate::bottles;
-use crate::config;
-use crate::downgrader;
-use crate::games;
-use crate::launcher;
-use crate::plugins;
-use crate::skse;
 use crate::bottle_config;
-use crate::bottles::{Bottle};
-use crate::config::{AppConfig};
-use crate::database::{InstalledMod};
+use crate::bottles;
+use crate::bottles::Bottle;
+use crate::config;
+use crate::config::AppConfig;
+use crate::database;
+use crate::database::InstalledMod;
 use crate::deploy_journal;
 use crate::deployer;
 use crate::display_fix;
-use crate::downgrader::{DowngradeStatus};
+use crate::downgrader;
+use crate::downgrader::DowngradeStatus;
 use crate::executables;
 use crate::game_registry;
-use crate::games::{DetectedGame};
+use crate::games;
+use crate::games::DetectedGame;
 use crate::installer;
-use crate::launcher::{LaunchResult};
+use crate::launcher;
+use crate::launcher::LaunchResult;
 use crate::mod_types;
 use crate::nexus;
 use crate::nxm_handler;
 use crate::oauth;
-use crate::plugins::skyrim_plugins::{PluginEntry};
+use crate::plugins;
+use crate::plugins::skyrim_plugins::PluginEntry;
 use crate::progress;
 use crate::rollback;
-use crate::skse::{SkseStatus};
+use crate::skse;
+use crate::skse::SkseStatus;
 use crate::staging;
-use crate::{AppState, check_game_lock, nexus_client, resolve_bottle, resolve_game};
-use serde::{Serialize};
+use crate::{check_game_lock, nexus_client, resolve_bottle, resolve_game, AppState};
+use serde::Serialize;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tauri::Emitter;
@@ -63,8 +64,7 @@ fn resolve_effective_deploy_dir(
     })
     .flatten();
 
-    let use_legacy = games::with_plugin(game_id, |p| p.use_legacy_data_dir())
-        .unwrap_or(false);
+    let use_legacy = games::with_plugin(game_id, |p| p.use_legacy_data_dir()).unwrap_or(false);
 
     if let Some(ref mod_type_id) = detected_mod_type {
         let target = games::with_plugin(game_id, |plugin| {
@@ -264,10 +264,7 @@ pub async fn get_depot_history_cmd(
 }
 
 #[tauri::command]
-pub async fn sync_lua_mods(
-    game_id: String,
-    bottle_name: String,
-) -> Result<(), String> {
+pub async fn sync_lua_mods(game_id: String, bottle_name: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         let (_bottle, game, _data_dir) = resolve_game(&game_id, &bottle_name)?;
         if game_id == "hogwartslegacy" {
@@ -281,7 +278,9 @@ pub async fn sync_lua_mods(
 }
 
 #[tauri::command]
-pub async fn get_bottle_settings(bottle_name: String) -> Result<bottle_config::BottleSettings, String> {
+pub async fn get_bottle_settings(
+    bottle_name: String,
+) -> Result<bottle_config::BottleSettings, String> {
     tokio::task::spawn_blocking(move || {
         let bottle = resolve_bottle(&bottle_name)?;
         bottle_config::get_bottle_settings(&bottle).map_err(|e| e.to_string())
@@ -304,7 +303,11 @@ pub async fn get_bottle_setting_defs(
 }
 
 #[tauri::command]
-pub async fn set_bottle_setting(bottle_name: String, key: String, value: String) -> Result<(), String> {
+pub async fn set_bottle_setting(
+    bottle_name: String,
+    key: String,
+    value: String,
+) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         let bottle = resolve_bottle(&bottle_name)?;
         bottle_config::set_bottle_setting(&bottle, &key, &value).map_err(|e| e.to_string())
@@ -345,7 +348,10 @@ pub async fn get_installed_mods_summary(
 
 /// Fetch a single mod's full details (including installed_files) for the detail panel.
 #[tauri::command]
-pub async fn get_mod_detail(mod_id: i64, state: State<'_, AppState>) -> Result<InstalledMod, String> {
+pub async fn get_mod_detail(
+    mod_id: i64,
+    state: State<'_, AppState>,
+) -> Result<InstalledMod, String> {
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
         db.get_mod(mod_id)
@@ -504,11 +510,11 @@ pub async fn install_mod_cmd(
             plugin.detect_mod_type_from_files(&staging_result.files)
         })
         .flatten();
+        let mut resolved_mod_type_id = detected_mod_type.clone();
 
         // Layer 2: only consult the mod_types registry if the plugin
         // explicitly opts out OR there is no plugin for this game.
-        let use_legacy = games::with_plugin(&game_id, |p| p.use_legacy_data_dir())
-            .unwrap_or(false);
+        let use_legacy = games::with_plugin(&game_id, |p| p.use_legacy_data_dir()).unwrap_or(false);
 
         let effective_dir = if let Some(ref mod_type_id) = detected_mod_type {
             // Look up the target path from registered vortex mod types
@@ -521,7 +527,11 @@ pub async fn install_mod_cmd(
             })
             .flatten();
             if let Some(rel_path) = target {
-                let resolved = game.game_path.join(rel_path);
+                let resolved = if game_id == "paralives" && mod_type_id == "Paralives_DataMod" {
+                    data_dir.clone()
+                } else {
+                    game.game_path.join(rel_path)
+                };
                 log::debug!(
                     "Auto-detected mod type '{}' → deploying to {}",
                     mod_type_id,
@@ -534,21 +544,52 @@ pub async fn install_mod_cmd(
         } else if !use_legacy {
             // No Vortex hit, plugin opts out (or is missing). Use the
             // archive-shape registry.
-            let target = mod_types::resolve_install_target(
-                &game.game_path,
-                &name,
-                &staging_result.files,
-            );
+            let target =
+                mod_types::resolve_install_target(&game.game_path, &name, &staging_result.files);
             log::info!(
                 "Mod-type registry: '{}' → {} (per_mod_subfolder={})",
                 target.type_id,
                 target.target_dir.display(),
                 target.per_mod_subfolder
             );
+            resolved_mod_type_id = Some(target.type_id.to_string());
             target.target_dir
         } else {
             data_dir.clone()
         };
+
+        // Step 4: Deploy from staging to game dir
+        if game_id == "paralives" {
+            if let Some(ref type_id) = resolved_mod_type_id {
+                if type_id == "Paralives_BepInEx" || type_id == "BepInEx" {
+                    match crate::bepinex::ensure_bepinex_mono_x64(&game.game_path) {
+                        Ok(crate::bepinex::BepInExInstallResult::AlreadyInstalled) => {
+                            log::info!("Paralives BepInEx bootstrap already installed");
+                        }
+                        Ok(crate::bepinex::BepInExInstallResult::Installed { asset_name }) => {
+                            log::info!("Installed Paralives BepInEx bootstrap from {asset_name}");
+                        }
+                        Err(e) => {
+                            let _ = staging::remove_staging(&staging_result.staging_path);
+                            let _ = db.remove_mod(mod_id);
+                            let msg = format!(
+                                "BepInEx setup failed for Paralives script mod '{}': {}",
+                                name, e
+                            );
+                            let _ = app.emit(
+                                INSTALL_PROGRESS_EVENT,
+                                InstallProgress::ModFailed {
+                                    mod_index: 0,
+                                    mod_name: name.clone(),
+                                    error: msg.clone(),
+                                },
+                            );
+                            return Err(msg);
+                        }
+                    }
+                }
+            }
+        }
 
         // Step 4: Deploy from staging to game dir
         let _ = app.emit(
@@ -562,7 +603,11 @@ pub async fn install_mod_cmd(
 
         // Decide deploy_target up front (used by both the deployer and the
         // per-mod row update below).
-        let deploy_target_str = if effective_dir != data_dir { "custom" } else { "data" };
+        let deploy_target_str = if effective_dir != data_dir {
+            "custom"
+        } else {
+            "data"
+        };
 
         if let Err(e) = deployer::deploy_mod(
             &db,
@@ -722,10 +767,9 @@ pub async fn toggle_mod(
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("Mod with ID {} not found", mod_id))?;
 
-        // Update DB flag
-        db.set_enabled(mod_id, enabled).map_err(|e| e.to_string())?;
-
-        // For staged mods, actually deploy/undeploy files
+        // For staged mods, actually deploy/undeploy files. Keep the DB enabled
+        // flag consistent with physical state: disabling only flips the flag
+        // after undeploy succeeds; enabling rolls the flag back if deploy fails.
         if let Some(ref staging_path_str) = installed_mod.staging_path {
             let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
             let staging_path = PathBuf::from(staging_path_str);
@@ -735,8 +779,8 @@ pub async fn toggle_mod(
             } else {
                 deploy_journal::JournalOp::Undeploy
             };
-            let journal_id = deploy_journal::begin(&game_id, &bottle_name, op, &[mod_id])
-                .unwrap_or_default();
+            let journal_id =
+                deploy_journal::begin(&game_id, &bottle_name, op, &[mod_id]).unwrap_or_default();
 
             if enabled {
                 // Re-deploy from staging using the mod's ORIGINAL deploy
@@ -748,33 +792,155 @@ pub async fn toggle_mod(
                 let mod_target = db
                     .get_deploy_target_for_mod(mod_id)
                     .unwrap_or_else(|_| "data".to_string());
-                let effective_dir = match mod_target.as_str() {
-                    "root" => game.game_path.clone(),
-                    "custom" => {
-                        // Recompute from staged file shape — we don't store
-                        // the custom path itself, only the kind.
-                        let (dir, _) = resolve_effective_deploy_dir(
-                            &game_id,
-                            &game,
-                            &data_dir,
-                            "",
-                            &files,
+                db.set_enabled(mod_id, true).map_err(|e| e.to_string())?;
+                if mod_target == "mixed" {
+                    let file_targets = db
+                        .get_deploy_file_targets_for_mod(mod_id)
+                        .map_err(|e| e.to_string())?;
+                    let mut batches: std::collections::BTreeMap<
+                        String,
+                        Vec<deployer::DeployFileMapping>,
+                    > = std::collections::BTreeMap::new();
+                    for file in files {
+                        let target = file_targets.get(&file).cloned().unwrap_or(
+                            crate::database::DeployFileTarget {
+                                source_relative_path: file.clone(),
+                                relative_path: file.clone(),
+                                deploy_target: "data".to_string(),
+                            },
                         );
-                        dir
+                        batches
+                            .entry(target.deploy_target.clone())
+                            .or_default()
+                            .push(deployer::DeployFileMapping {
+                                source_relative_path: target.source_relative_path,
+                                relative_path: target.relative_path,
+                            });
                     }
-                    _ => data_dir.clone(),
-                };
-                deployer::deploy_mod(
-                    &db,
-                    &game_id,
-                    &bottle_name,
-                    mod_id,
-                    &staging_path,
-                    &effective_dir,
-                    &files,
-                    &mod_target,
-                )
-                .map_err(|e| e.to_string())?;
+                    for (target, batch_files) in batches {
+                        let target_dir = match target.as_str() {
+                            "root" => game.game_path.clone(),
+                            "custom" => db
+                                .get_deploy_base_path_for_mod(mod_id)
+                                .map_err(|e| e.to_string())?
+                                .map(PathBuf::from)
+                                .ok_or_else(|| {
+                                    "Mixed custom deploy target missing durable base path"
+                                        .to_string()
+                                })?,
+                            _ => data_dir.clone(),
+                        };
+                        let progress = |_done: u64, _total: u64| {};
+                        deployer::deploy_mod_mapped_with_progress(
+                            &db,
+                            &game_id,
+                            &bottle_name,
+                            mod_id,
+                            &staging_path,
+                            &target_dir,
+                            &batch_files,
+                            &target,
+                            &progress,
+                        )
+                        .map_err(|e| {
+                            let _ = deployer::undeploy_mod(
+                                &db,
+                                &game_id,
+                                &bottle_name,
+                                mod_id,
+                                &data_dir,
+                                &game.game_path,
+                            );
+                            let _ = db.set_enabled(mod_id, false);
+                            e.to_string()
+                        })?;
+                    }
+                    db.set_deploy_target_for_mod_with_base(
+                        mod_id,
+                        "mixed",
+                        installed_mod.deploy_base_path.as_deref(),
+                    )
+                    .map_err(|e| e.to_string())?;
+                } else {
+                    let effective_dir = match mod_target.as_str() {
+                        "root" => game.game_path.clone(),
+                        "custom" => {
+                            if let Some(base) = db
+                                .get_deploy_base_path_for_mod(mod_id)
+                                .map_err(|e| e.to_string())?
+                            {
+                                PathBuf::from(base)
+                            } else {
+                                // Recompute from staged file shape only for legacy custom mods
+                                // installed before deploy_base_path existed.
+                                let (dir, _) = resolve_effective_deploy_dir(
+                                    &game_id, &game, &data_dir, "", &files,
+                                );
+                                dir
+                            }
+                        }
+                        _ => data_dir.clone(),
+                    };
+                    let file_targets = db
+                        .get_deploy_file_targets_for_mod(mod_id)
+                        .map_err(|e| e.to_string())?;
+                    if file_targets.is_empty() {
+                        deployer::deploy_mod(
+                            &db,
+                            &game_id,
+                            &bottle_name,
+                            mod_id,
+                            &staging_path,
+                            &effective_dir,
+                            &files,
+                            &mod_target,
+                        )
+                        .map_err(|e| {
+                            let _ = db.set_enabled(mod_id, false);
+                            e.to_string()
+                        })?;
+                    } else {
+                        let mappings: Vec<deployer::DeployFileMapping> = files
+                            .iter()
+                            .map(|file| {
+                                file_targets
+                                    .get(file)
+                                    .map(|target| deployer::DeployFileMapping {
+                                        source_relative_path: target.source_relative_path.clone(),
+                                        relative_path: target.relative_path.clone(),
+                                    })
+                                    .unwrap_or_else(|| deployer::DeployFileMapping {
+                                        source_relative_path: file.clone(),
+                                        relative_path: file.clone(),
+                                    })
+                            })
+                            .collect();
+                        let progress = |_done: u64, _total: u64| {};
+                        deployer::deploy_mod_mapped_with_progress(
+                            &db,
+                            &game_id,
+                            &bottle_name,
+                            mod_id,
+                            &staging_path,
+                            &effective_dir,
+                            &mappings,
+                            &mod_target,
+                            &progress,
+                        )
+                        .map_err(|e| {
+                            let _ = deployer::undeploy_mod(
+                                &db,
+                                &game_id,
+                                &bottle_name,
+                                mod_id,
+                                &data_dir,
+                                &game.game_path,
+                            );
+                            let _ = db.set_enabled(mod_id, false);
+                            e.to_string()
+                        })?;
+                    }
+                }
             } else {
                 // Undeploy (remove from game dir, keep staging intact)
                 deployer::undeploy_mod(
@@ -786,6 +952,7 @@ pub async fn toggle_mod(
                     &game.game_path,
                 )
                 .map_err(|e| e.to_string())?;
+                db.set_enabled(mod_id, false).map_err(|e| e.to_string())?;
             }
 
             let _ = deploy_journal::complete(&journal_id);
@@ -794,6 +961,8 @@ pub async fn toggle_mod(
             if game_id == "skyrimse" {
                 let _ = crate::sync_plugins_for_game(&game, &bottle);
             }
+        } else {
+            db.set_enabled(mod_id, enabled).map_err(|e| e.to_string())?;
         }
         // Legacy mods (no staging_path): only the DB flag changes
 
@@ -946,28 +1115,138 @@ pub async fn batch_toggle_mods(
                                 let mod_target = db
                                     .get_deploy_target_for_mod(*mod_id)
                                     .unwrap_or_else(|_| "data".to_string());
-                                let effective_dir = match mod_target.as_str() {
-                                    "root" => game.game_path.clone(),
-                                    "custom" => {
-                                        let (dir, _) = resolve_effective_deploy_dir(
-                                            &game_id, &game, &data_dir, "", &files,
+                                if mod_target == "mixed" {
+                                    let file_targets = db
+                                        .get_deploy_file_targets_for_mod(*mod_id)
+                                        .map_err(|e| e.to_string())?;
+                                    let mut batches: std::collections::BTreeMap<
+                                        String,
+                                        Vec<deployer::DeployFileMapping>,
+                                    > = std::collections::BTreeMap::new();
+                                    for file in files {
+                                        let target = file_targets.get(&file).cloned().unwrap_or(
+                                            crate::database::DeployFileTarget {
+                                                source_relative_path: file.clone(),
+                                                relative_path: file.clone(),
+                                                deploy_target: "data".to_string(),
+                                            },
                                         );
-                                        dir
+                                        batches
+                                            .entry(target.deploy_target.clone())
+                                            .or_default()
+                                            .push(deployer::DeployFileMapping {
+                                                source_relative_path: target.source_relative_path,
+                                                relative_path: target.relative_path,
+                                            });
                                     }
-                                    _ => data_dir.clone(),
-                                };
-                                deployer::deploy_mod(
-                                    &db,
-                                    &game_id,
-                                    &bottle_name,
-                                    *mod_id,
-                                    &staging_path,
-                                    &effective_dir,
-                                    &files,
-                                    &mod_target,
-                                )
-                                .map(|_| ())
-                                .map_err(|e| e.to_string())
+                                    for (target, batch_files) in batches {
+                                        let target_dir = match target.as_str() {
+                                            "root" => game.game_path.clone(),
+                                            "custom" => db
+                                                .get_deploy_base_path_for_mod(*mod_id)
+                                                .map_err(|e| e.to_string())?
+                                                .map(PathBuf::from)
+                                                .ok_or_else(|| {
+                                                    "Mixed custom deploy target missing durable base path".to_string()
+                                                })?,
+                                            _ => data_dir.clone(),
+                                        };
+                                        let progress = |_done: u64, _total: u64| {};
+                                        deployer::deploy_mod_mapped_with_progress(
+                                            &db,
+                                            &game_id,
+                                            &bottle_name,
+                                            *mod_id,
+                                            &staging_path,
+                                            &target_dir,
+                                            &batch_files,
+                                            &target,
+                                            &progress,
+                                        )
+                                        .map_err(|e| {
+                                            let _ = deployer::undeploy_mod(
+                                                &db,
+                                                &game_id,
+                                                &bottle_name,
+                                                *mod_id,
+                                                &data_dir,
+                                                &game.game_path,
+                                            );
+                                            e.to_string()
+                                        })?;
+                                    }
+                                    db.set_deploy_target_for_mod_with_base(
+                                        *mod_id,
+                                        "mixed",
+                                        installed_mod.deploy_base_path.as_deref(),
+                                    )
+                                    .map_err(|e| e.to_string())?;
+                                    Ok(())
+                                } else {
+                                    let effective_dir = match mod_target.as_str() {
+                                        "root" => game.game_path.clone(),
+                                        "custom" => db
+                                            .get_deploy_base_path_for_mod(*mod_id)
+                                            .map_err(|e| e.to_string())?
+                                            .map(PathBuf::from)
+                                            .unwrap_or_else(|| {
+                                                let (dir, _) = resolve_effective_deploy_dir(
+                                                    &game_id, &game, &data_dir, "", &files,
+                                                );
+                                                dir
+                                            }),
+                                        _ => data_dir.clone(),
+                                    };
+                                    let file_targets = db
+                                        .get_deploy_file_targets_for_mod(*mod_id)
+                                        .map_err(|e| e.to_string())?;
+                                    if file_targets.is_empty() {
+                                        deployer::deploy_mod(
+                                            &db,
+                                            &game_id,
+                                            &bottle_name,
+                                            *mod_id,
+                                            &staging_path,
+                                            &effective_dir,
+                                            &files,
+                                            &mod_target,
+                                        )
+                                        .map(|_| ())
+                                        .map_err(|e| e.to_string())
+                                    } else {
+                                        let mappings: Vec<deployer::DeployFileMapping> = files
+                                            .iter()
+                                            .map(|file| {
+                                                file_targets
+                                                    .get(file)
+                                                    .map(|target| deployer::DeployFileMapping {
+                                                        source_relative_path: target
+                                                            .source_relative_path
+                                                            .clone(),
+                                                        relative_path: target.relative_path.clone(),
+                                                    })
+                                                    .unwrap_or_else(|| deployer::DeployFileMapping {
+                                                        source_relative_path: file.clone(),
+                                                        relative_path: file.clone(),
+                                                    })
+                                            })
+                                            .collect();
+                                        let progress = |_done: u64, _total: u64| {};
+                                        deployer::deploy_mod_mapped_with_progress(
+                                            &db,
+                                            &game_id,
+                                            &bottle_name,
+                                            *mod_id,
+                                            &staging_path,
+                                            &effective_dir,
+                                            &mappings,
+                                            &mod_target,
+                                            &progress,
+                                        )
+                                        .map(|_| ())
+                                        .map_err(|e| e.to_string())
+                                    }
+                                }
                             })
                     } else {
                         deployer::undeploy_mod(
@@ -1077,7 +1356,11 @@ pub async fn download_from_nexus(
             .await
             .unwrap_or_default()
         };
-        let active = if game_id.is_empty() { None } else { Some(game_id.as_str()) };
+        let active = if game_id.is_empty() {
+            None
+        } else {
+            Some(game_id.as_str())
+        };
         match nxm_handler::route_nxm_game(&nxm.game_slug, &known, active) {
             nxm_handler::NxmRoute::Recognized { game_id: matched } => {
                 if !matched.eq_ignore_ascii_case(&game_id) {
@@ -1085,11 +1368,16 @@ pub async fn download_from_nexus(
                         "NXM link declares game '{}' (matches '{}') but caller \
                          requested install into '{}'. Proceeding with caller's \
                          game per active selection.",
-                        nxm.game_slug, matched, game_id
+                        nxm.game_slug,
+                        matched,
+                        game_id
                     );
                 }
             }
-            nxm_handler::NxmRoute::Fallback { active_game_id, warning } => {
+            nxm_handler::NxmRoute::Fallback {
+                active_game_id,
+                warning,
+            } => {
                 log::warn!("{}", warning);
                 debug_assert_eq!(active_game_id, game_id);
             }
@@ -1180,7 +1468,11 @@ pub async fn download_from_nexus(
         );
 
         // 5. Deploy
-        let deploy_target_str = if effective_dir != data_dir { "custom" } else { "data" };
+        let deploy_target_str = if effective_dir != data_dir {
+            "custom"
+        } else {
+            "data"
+        };
         if let Err(e) = deployer::deploy_mod(
             db,
             &game_id,
@@ -1259,7 +1551,6 @@ pub async fn set_config_value(key: String, value: String) -> Result<(), String> 
     .await
     .map_err(crate::format_join_error)?
 }
-
 
 // --- Download Archive Management ---
 
@@ -1502,9 +1793,9 @@ pub async fn find_orphaned_downloads(
                 continue;
             }
             // Check if it's in the registry with collection refs
-            let has_live_ref = registry_records.iter().any(|r| {
-                r.archive_name == *filename && ids_with_refs.contains(&r.id)
-            });
+            let has_live_ref = registry_records
+                .iter()
+                .any(|r| r.archive_name == *filename && ids_with_refs.contains(&r.id));
             if has_live_ref {
                 continue;
             }
@@ -1641,9 +1932,7 @@ pub async fn get_game_logo(
     // 3. Fall back to Steam CDN header capsule (square-ish, 460x215)
     //    Skip the wide logo.png (640x360) — it looks wrong in icon slots.
     if let Some(app_id) = steam_app_id {
-        let url = format!(
-            "https://cdn.cloudflare.steamstatic.com/steam/apps/{app_id}/header.jpg"
-        );
+        let url = format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{app_id}/header.jpg");
         if let Ok(response) = client.get(&url).send().await {
             if response.status().is_success() {
                 if let Ok(bytes) = response.bytes().await {
@@ -1672,7 +1961,10 @@ pub async fn get_game_logo(
 /// 1. Look up the SteamGridDB game ID from the Steam App ID
 /// 2. Fetch icons sorted by score, filtered to PNG only
 /// 3. Download the top-scoring icon image
-pub async fn fetch_steamgriddb_icon(client: &reqwest::Client, steam_app_id: u32) -> Option<Vec<u8>> {
+pub async fn fetch_steamgriddb_icon(
+    client: &reqwest::Client,
+    steam_app_id: u32,
+) -> Option<Vec<u8>> {
     let api_key = config::get_config()
         .ok()
         .and_then(|c| {
@@ -1686,9 +1978,7 @@ pub async fn fetch_steamgriddb_icon(client: &reqwest::Client, steam_app_id: u32)
     }
 
     // Step 1: Get SteamGridDB game ID from Steam App ID
-    let game_url = format!(
-        "https://www.steamgriddb.com/api/v2/games/steam/{steam_app_id}"
-    );
+    let game_url = format!("https://www.steamgriddb.com/api/v2/games/steam/{steam_app_id}");
     let game_resp = client
         .get(&game_url)
         .header("Authorization", format!("Bearer {api_key}"))
@@ -1795,7 +2085,10 @@ pub async fn launch_game_cmd(
 ) -> Result<LaunchResult, String> {
     let db = state.db.clone();
     let game_locks = state.game_locks.clone();
-    if state.deploy_in_progress.load(std::sync::atomic::Ordering::Relaxed) {
+    if state
+        .deploy_in_progress
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
         return Err("Cannot launch game while deployment is in progress. Please wait for the deployment to finish.".to_string());
     }
     tokio::task::spawn_blocking(move || {
@@ -2033,6 +2326,46 @@ pub async fn launch_game_cmd(
         }
     }
 
+    // Ensure Paralives BepInEx bootstrap exists before launching script mods.
+    if game_id == "paralives" {
+        let plugins_dir = game_path.join("BepInEx").join("plugins");
+        let has_script_mods = plugins_dir
+            .read_dir()
+            .map(|entries| {
+                entries.flatten().any(|entry| {
+                    let p = entry.path();
+                    p.extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| e.eq_ignore_ascii_case("dll"))
+                        .unwrap_or(false)
+                        || p.is_dir()
+                            && fs::read_dir(&p)
+                                .map(|sub| {
+                                    sub.flatten().any(|f| {
+                                        f.path()
+                                            .extension()
+                                            .and_then(|e| e.to_str())
+                                            .map(|e| e.eq_ignore_ascii_case("dll"))
+                                            .unwrap_or(false)
+                                    })
+                                })
+                                .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false);
+        if has_script_mods {
+            match crate::bepinex::ensure_bepinex_mono_x64(&game_path) {
+                Ok(crate::bepinex::BepInExInstallResult::AlreadyInstalled) => {
+                    log::info!("Pre-launch: Paralives BepInEx bootstrap present");
+                }
+                Ok(crate::bepinex::BepInExInstallResult::Installed { asset_name }) => {
+                    log::info!("Pre-launch: installed Paralives BepInEx bootstrap from {asset_name}");
+                }
+                Err(e) => log::warn!("Pre-launch: Paralives BepInEx auto-install failed: {e}"),
+            }
+        }
+    }
+
     // Deploy DXVK config on Linux (game-specific overrides for modded games)
     #[cfg(target_os = "linux")]
     {
@@ -2211,7 +2544,10 @@ pub async fn install_skse_from_archive_cmd(
 }
 
 #[tauri::command]
-pub async fn uninstall_skse_cmd(game_id: String, bottle_name: String) -> Result<SkseStatus, String> {
+pub async fn uninstall_skse_cmd(
+    game_id: String,
+    bottle_name: String,
+) -> Result<SkseStatus, String> {
     tokio::task::spawn_blocking(move || {
         if game_id != "skyrimse" {
             return Err("SKSE is only available for Skyrim Special Edition".to_string());
@@ -2313,7 +2649,10 @@ pub async fn get_skse_builds(
 }
 
 #[tauri::command]
-pub async fn install_skse_auto_cmd(game_id: String, bottle_name: String) -> Result<SkseStatus, String> {
+pub async fn install_skse_auto_cmd(
+    game_id: String,
+    bottle_name: String,
+) -> Result<SkseStatus, String> {
     if game_id != "skyrimse" {
         return Err("SKSE is only available for Skyrim Special Edition".into());
     }
@@ -2415,7 +2754,9 @@ pub async fn reenable_wine_plugin_cmd(
 }
 
 #[tauri::command]
-pub async fn fix_skyrim_display(bottle_name: String) -> Result<display_fix::DisplayFixResult, String> {
+pub async fn fix_skyrim_display(
+    bottle_name: String,
+) -> Result<display_fix::DisplayFixResult, String> {
     tokio::task::spawn_blocking(move || {
         let bottle = resolve_bottle(&bottle_name)?;
         display_fix::auto_fix_display(&bottle)
@@ -2483,7 +2824,10 @@ pub async fn start_depot_download(game_id: String) -> Result<bool, String> {
 }
 
 #[tauri::command]
-pub async fn check_depot_ready(game_id: String, bottle_name: String) -> Result<Option<String>, String> {
+pub async fn check_depot_ready(
+    game_id: String,
+    bottle_name: String,
+) -> Result<Option<String>, String> {
     tokio::task::spawn_blocking(move || {
         let (bottle, _, _) = resolve_game(&game_id, &bottle_name)?;
         let steam_dir = downgrader::find_steam_dir(&bottle.path)
@@ -2597,7 +2941,6 @@ pub fn set_vibrancy(window: tauri::Window, material: String) -> Result<(), Strin
     Ok(())
 }
 
-
 // --- Notes & Tags ---
 
 #[tauri::command]
@@ -2658,7 +3001,6 @@ pub async fn get_all_tags(
     .map_err(crate::format_join_error)?
 }
 
-
 // --- Auto-category ---
 
 #[tauri::command]
@@ -2677,4 +3019,3 @@ pub async fn backfill_categories(
     .await
     .map_err(crate::format_join_error)?
 }
-

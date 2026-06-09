@@ -89,8 +89,6 @@ fn supports_reflink(dir: &Path) -> bool {
         Ok(p) => p,
         Err(_) => return false,
     };
-    let dir_str = canonical.to_string_lossy();
-
     let mounts = match fs::File::open("/proc/mounts") {
         Ok(f) => f,
         Err(_) => return false,
@@ -108,17 +106,52 @@ fn supports_reflink(dir: &Path) -> bool {
         if parts.len() < 3 {
             continue;
         }
-        let mount_point = parts[1];
+        let mount_point = decode_proc_mount_escapes(parts[1]);
         let fs_type = parts[2];
 
-        // Find the longest mount point that is a prefix of our path.
-        if dir_str.starts_with(mount_point) && mount_point.len() > best_mount.len() {
-            best_mount = mount_point.to_string();
+        // Find the longest mount point that contains our path. This is
+        // path-component aware: `/mnt/games2` is not under `/mnt/games`.
+        if path_is_on_mount(&canonical, Path::new(&mount_point))
+            && mount_point.len() > best_mount.len()
+        {
+            best_mount = mount_point;
             best_fs = fs_type.to_string();
         }
     }
 
     matches!(best_fs.as_str(), "btrfs" | "xfs")
+}
+
+#[cfg(target_os = "linux")]
+fn path_is_on_mount(path: &Path, mount_point: &Path) -> bool {
+    path == mount_point || path.starts_with(mount_point)
+}
+
+#[cfg(target_os = "linux")]
+fn decode_proc_mount_escapes(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if bytes[i] == b'\\'
+            && i + 3 < bytes.len()
+            && bytes[i + 1].is_ascii_digit()
+            && bytes[i + 2].is_ascii_digit()
+            && bytes[i + 3].is_ascii_digit()
+        {
+            let octal = &input[i + 1..i + 4];
+            if let Ok(value) = u8::from_str_radix(octal, 8) {
+                out.push(value);
+                i += 4;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -211,7 +244,11 @@ fn hash_mmap(path: &Path) -> io::Result<String> {
     let mmap = unsafe { memmap2::Mmap::map(&file)? };
     let mut hasher = Sha256::new();
     hasher.update(&mmap[..]);
-    Ok(hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect())
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect())
 }
 
 /// Buffered 128 KiB read hashing — used for small files where mmap overhead
@@ -227,7 +264,11 @@ fn hash_buffered(path: &Path) -> io::Result<String> {
         }
         hasher.update(&buffer[..n]);
     }
-    Ok(hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect())
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -285,7 +326,11 @@ fn copy_and_hash_buffered(src: &Path, dst: &Path) -> io::Result<(String, u64)> {
         total += n as u64;
     }
 
-    let hash: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+    let hash: String = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
     Ok((hash, total))
 }
 
@@ -464,6 +509,28 @@ mod tests {
             method,
             FsCopyMethod::Clonefile | FsCopyMethod::Reflink | FsCopyMethod::StandardCopy
         ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn mount_matching_is_component_aware() {
+        assert!(path_is_on_mount(
+            Path::new("/mnt/games/foo"),
+            Path::new("/mnt/games")
+        ));
+        assert!(!path_is_on_mount(
+            Path::new("/mnt/games2/foo"),
+            Path::new("/mnt/games")
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proc_mount_octal_escapes_are_decoded() {
+        assert_eq!(
+            decode_proc_mount_escapes("/mnt/Steam\\040Library/Mods\\011Data"),
+            "/mnt/Steam Library/Mods\tData"
+        );
     }
 
     #[cfg(target_os = "macos")]

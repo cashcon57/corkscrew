@@ -148,6 +148,18 @@ pub fn builtin_fixes() -> Vec<LaunchFix> {
             enabled: true,
         },
 
+        // --- Paralives: BepInEx script mods under Wine/Proton ---
+        LaunchFix {
+            game_id: "paralives".into(),
+            modlist_name: None,
+            fix_type: FixType::DllOverride,
+            key: "winhttp".into(),
+            value: "n,b".into(),
+            reason: "BepInEx 5 uses UnityDoorstop's winhttp.dll proxy. Wine/Proton must prefer the game-local native winhttp.dll for script mods to load.".into(),
+            source: FixSource::Builtin,
+            enabled: true,
+        },
+
         // --- Oblivion fixes ---
         LaunchFix {
             game_id: "oblivion".into(),
@@ -270,10 +282,15 @@ mod tests {
     fn builtin_fixes_cover_skyrimse() {
         let fixes = builtin_fixes();
         let skyrim_fixes: Vec<_> = fixes.iter().filter(|f| f.game_id == "skyrimse").collect();
-        assert!(skyrim_fixes.len() >= 3, "Expected at least 3 Skyrim SE fixes");
+        assert!(
+            skyrim_fixes.len() >= 3,
+            "Expected at least 3 Skyrim SE fixes"
+        );
 
         // Check WINE_LARGE_ADDRESS_AWARE exists
-        assert!(skyrim_fixes.iter().any(|f| f.key == "WINE_LARGE_ADDRESS_AWARE"));
+        assert!(skyrim_fixes
+            .iter()
+            .any(|f| f.key == "WINE_LARGE_ADDRESS_AWARE"));
         assert!(skyrim_fixes.iter().any(|f| f.key == "DXVK_ASYNC"));
         assert!(skyrim_fixes.iter().any(|f| f.key == "d3d11"));
     }

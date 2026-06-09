@@ -495,14 +495,15 @@ mod tests {
 
     #[test]
     fn detect_finds_game_in_program_files_x86() {
-        let (_tmp, bottle_path) =
-            make_fo4_bottle_with_game(&["Program Files (x86)", "Fallout 4"]);
+        let (_tmp, bottle_path) = make_fo4_bottle_with_game(&["Program Files (x86)", "Fallout 4"]);
         let bottle = Bottle {
             name: "TestBottle".into(),
             path: bottle_path,
             source: "Test".into(),
         };
-        let detected = Fallout4Plugin.detect_wine(&bottle).expect("non-Steam detect");
+        let detected = Fallout4Plugin
+            .detect_wine(&bottle)
+            .expect("non-Steam detect");
         assert_eq!(detected.game_id, "fallout4");
     }
 
@@ -548,7 +549,9 @@ mod tests {
             path: bottle_path,
             source: "Test".into(),
         };
-        let detected = Fallout4Plugin.detect_wine(&bottle).expect("Game Pass detect");
+        let detected = Fallout4Plugin
+            .detect_wine(&bottle)
+            .expect("Game Pass detect");
         assert_eq!(detected.game_id, "fallout4");
         assert!(detected.game_path.ends_with("Content"));
     }

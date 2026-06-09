@@ -62,7 +62,11 @@ const STEAM_GAME_DIR: &str = "Grand Theft Auto V";
 /// Rockstar Games Launcher install paths (relative to `drive_c`).
 const ROCKSTAR_PATHS: &[&[&str]] = &[
     &["Program Files", "Rockstar Games", "Grand Theft Auto V"],
-    &["Program Files (x86)", "Rockstar Games", "Grand Theft Auto V"],
+    &[
+        "Program Files (x86)",
+        "Rockstar Games",
+        "Grand Theft Auto V",
+    ],
 ];
 
 /// Epic Games Store install paths (relative to `drive_c`). Epic uses the
@@ -356,11 +360,7 @@ fn check_user_documents_paths(bottle: &Bottle) -> Option<PathBuf> {
         return None;
     };
     // All GTA V directory names we scan for (Steam + Enhanced naming).
-    const GAME_DIRS: &[&str] = &[
-        "Grand Theft Auto V Enhanced",
-        "Grand Theft Auto V",
-        "GTAV",
-    ];
+    const GAME_DIRS: &[&str] = &["Grand Theft Auto V Enhanced", "Grand Theft Auto V", "GTAV"];
     for user_entry in entries.flatten() {
         let user_dir = user_entry.path();
         if !user_dir.is_dir() {
@@ -516,7 +516,10 @@ mod tests {
         assert_eq!(plugin.game_id(), "gtav");
         assert_eq!(plugin.display_name(), "Grand Theft Auto V");
         assert_eq!(plugin.nexus_slug(), "grandtheftautov");
-        assert_eq!(plugin.executables(), &["GTA5.exe", "PlayGTAV.exe", "gtav.exe"]);
+        assert_eq!(
+            plugin.executables(),
+            &["GTA5.exe", "PlayGTAV.exe", "gtav.exe"]
+        );
         assert_eq!(plugin.steam_launch_id(), Some("271590"));
         assert!(!plugin.use_legacy_data_dir());
     }
@@ -567,21 +570,36 @@ mod tests {
     #[test]
     fn categorize_mod_files() {
         let plugin = GtaVPlugin;
-        assert_eq!(plugin.categorize_mod_file("MyMod.asi").as_deref(), Some("asi"));
         assert_eq!(
-            plugin.categorize_mod_file("ScriptHookVDotNet.dll").as_deref(),
+            plugin.categorize_mod_file("MyMod.asi").as_deref(),
+            Some("asi")
+        );
+        assert_eq!(
+            plugin
+                .categorize_mod_file("ScriptHookVDotNet.dll")
+                .as_deref(),
             Some("library")
         );
         assert_eq!(
-            plugin.categorize_mod_file("scripts/addins/menyoo.lua").as_deref(),
+            plugin
+                .categorize_mod_file("scripts/addins/menyoo.lua")
+                .as_deref(),
             Some("script")
         );
         assert_eq!(
-            plugin.categorize_mod_file("dlcpacks/foo/dlc.rpf").as_deref(),
+            plugin
+                .categorize_mod_file("dlcpacks/foo/dlc.rpf")
+                .as_deref(),
             Some("archive")
         );
-        assert_eq!(plugin.categorize_mod_file("pack.oiv").as_deref(), Some("archive"));
-        assert_eq!(plugin.categorize_mod_file("config.ini").as_deref(), Some("config"));
+        assert_eq!(
+            plugin.categorize_mod_file("pack.oiv").as_deref(),
+            Some("archive")
+        );
+        assert_eq!(
+            plugin.categorize_mod_file("config.ini").as_deref(),
+            Some("config")
+        );
         assert!(plugin.categorize_mod_file("readme.txt").is_none());
     }
 
@@ -629,7 +647,9 @@ mod tests {
             source: "Test".into(),
         };
         let plugin = GtaVPlugin;
-        let detected = plugin.detect_wine(&bottle).expect("Steam install should detect");
+        let detected = plugin
+            .detect_wine(&bottle)
+            .expect("Steam install should detect");
         assert_eq!(detected.game_id, "gtav");
         assert_eq!(detected.display_name, "Grand Theft Auto V");
         assert_eq!(detected.nexus_slug, "grandtheftautov");
@@ -653,7 +673,9 @@ mod tests {
             source: "Test".into(),
         };
         let plugin = GtaVPlugin;
-        let detected = plugin.detect_wine(&bottle).expect("Rockstar install should detect");
+        let detected = plugin
+            .detect_wine(&bottle)
+            .expect("Rockstar install should detect");
         assert_eq!(detected.game_id, "gtav");
     }
 
@@ -674,7 +696,9 @@ mod tests {
             source: "Test".into(),
         };
         let plugin = GtaVPlugin;
-        let detected = plugin.detect_wine(&bottle).expect("Epic install should detect");
+        let detected = plugin
+            .detect_wine(&bottle)
+            .expect("Epic install should detect");
         assert_eq!(detected.game_id, "gtav");
     }
 
@@ -689,7 +713,11 @@ mod tests {
         let plugin = GtaVPlugin;
         let launched = plugin.launch_executable(&game_dir).unwrap();
         assert_eq!(
-            launched.file_name().unwrap().to_string_lossy().to_lowercase(),
+            launched
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_lowercase(),
             "playgtav.exe"
         );
     }
@@ -704,7 +732,11 @@ mod tests {
         let plugin = GtaVPlugin;
         let launched = plugin.launch_executable(&game_dir).unwrap();
         assert_eq!(
-            launched.file_name().unwrap().to_string_lossy().to_lowercase(),
+            launched
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_lowercase(),
             "gta5.exe"
         );
     }
@@ -803,7 +835,9 @@ mod tests {
             path: bottle_path,
             source: "Test".into(),
         };
-        let detected = GtaVPlugin.detect_wine(&bottle).expect("Enhanced edition detect");
+        let detected = GtaVPlugin
+            .detect_wine(&bottle)
+            .expect("Enhanced edition detect");
         assert_eq!(detected.game_id, "gtav");
         assert_eq!(detected.game_path, game_dir);
     }
@@ -831,7 +865,10 @@ mod tests {
             path: bottle_path,
             source: "Test".into(),
         };
-        assert!(GtaVPlugin.detect_wine(&bottle).is_some(), "top-level drag-drop");
+        assert!(
+            GtaVPlugin.detect_wine(&bottle).is_some(),
+            "top-level drag-drop"
+        );
     }
 
     #[test]
@@ -851,7 +888,9 @@ mod tests {
             path: bottle_path,
             source: "Test".into(),
         };
-        let detected = GtaVPlugin.detect_wine(&bottle).expect("Xbox Game Pass detect");
+        let detected = GtaVPlugin
+            .detect_wine(&bottle)
+            .expect("Xbox Game Pass detect");
         assert_eq!(detected.game_id, "gtav");
         assert!(detected.game_path.ends_with("Content"));
     }

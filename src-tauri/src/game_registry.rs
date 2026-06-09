@@ -628,7 +628,8 @@ pub fn detect_unregistered_steam_games(
             // Skip if already detected by a registered plugin.
             let manifest_dir_lower = manifest.install_dir.to_lowercase();
             if already_detected.iter().any(|g| {
-                g.game_path.file_name()
+                g.game_path
+                    .file_name()
                     .and_then(|n| n.to_str())
                     .map(|n| n.to_lowercase() == manifest_dir_lower)
                     .unwrap_or(false)
@@ -733,10 +734,7 @@ pub fn collect_extension_suggestions(
     use crate::bottles::detect_bottles;
     use std::collections::HashSet;
 
-    let registered: HashSet<&str> = already_registered_ids
-        .iter()
-        .map(|s| s.as_str())
-        .collect();
+    let registered: HashSet<&str> = already_registered_ids.iter().map(|s| s.as_str()).collect();
 
     let mut out: Vec<VortexExtensionSuggestion> = Vec::new();
     let mut seen_pairs: HashSet<(String, String)> = HashSet::new();
@@ -1017,8 +1015,16 @@ pub fn capture_depot_manifests(
 ) {
     // Find steamapps directory
     let steamapps_paths = [
-        bottle.drive_c().join("Program Files (x86)").join("Steam").join("steamapps"),
-        bottle.drive_c().join("Program Files").join("Steam").join("steamapps"),
+        bottle
+            .drive_c()
+            .join("Program Files (x86)")
+            .join("Steam")
+            .join("steamapps"),
+        bottle
+            .drive_c()
+            .join("Program Files")
+            .join("Steam")
+            .join("steamapps"),
     ];
 
     let steamapps = match steamapps_paths.iter().find(|p| p.exists()) {
@@ -1441,14 +1447,7 @@ mod tests {
     #[test]
     fn update_custom_game_paths_errors_on_unknown_row() {
         let (db, _tmp) = make_tempdb();
-        let result = update_custom_game_paths(
-            &db,
-            "nonexistent",
-            "Steam",
-            "/x",
-            "/x/y.exe",
-            "/x",
-        );
+        let result = update_custom_game_paths(&db, "nonexistent", "Steam", "/x", "/x/y.exe", "/x");
         assert!(result.is_err());
     }
 
@@ -1555,11 +1554,7 @@ mod tests {
              \t\"StateFlags\"\t\"4\"\n\
              }}\n"
         );
-        fs::write(
-            dir.join(format!("appmanifest_{}.acf", app_id)),
-            content,
-        )
-        .unwrap();
+        fs::write(dir.join(format!("appmanifest_{}.acf", app_id)), content).unwrap();
     }
 
     /// Create a minimal Bottle pointing at a temp directory.
@@ -1611,7 +1606,12 @@ mod tests {
             "Expected game-on-d, got: {:?}",
             ids
         );
-        assert_eq!(results.len(), 2, "Should detect exactly 2 games, got: {:?}", ids);
+        assert_eq!(
+            results.len(),
+            2,
+            "Should detect exactly 2 games, got: {:?}",
+            ids
+        );
     }
 
     #[test]

@@ -349,10 +349,7 @@ fn mtime_nanos(mtime: std::time::SystemTime) -> Option<u128> {
 /// existing crashes are considered "seen" — we write the current max marker
 /// without reporting anything, so users don't get a wall of stale crash
 /// alerts.
-pub fn check_new_crashes(
-    bottle_path: &Path,
-    game_id: &str,
-) -> NewCrashInfo {
+pub fn check_new_crashes(bottle_path: &Path, game_id: &str) -> NewCrashInfo {
     let marker_dir = crate::config::data_dir().join("crash_check");
     let marker_path = marker_dir.join(format!("crash_check_{}.txt", game_id));
     check_new_crashes_with_marker(bottle_path, game_id, &marker_path)
@@ -376,7 +373,10 @@ fn check_new_crashes_with_marker(
 
     let log_dir = script_extender_log_dir(bottle_path, game_id);
     if !log_dir.is_dir() {
-        return NewCrashInfo { count: 0, entries: vec![] };
+        return NewCrashInfo {
+            count: 0,
+            entries: vec![],
+        };
     }
 
     // Collect crash log files with their nanosecond-precision mtimes.
@@ -414,7 +414,10 @@ fn check_new_crashes_with_marker(
         if let Some(m) = new_marker.as_ref() {
             let _ = fs::write(marker_path, m.serialize());
         }
-        return NewCrashInfo { count: 0, entries: vec![] };
+        return NewCrashInfo {
+            count: 0,
+            entries: vec![],
+        };
     }
 
     let threshold = last_seen.unwrap();
@@ -2343,7 +2346,8 @@ Nothing to see here.
 
     #[test]
     fn marker_parse_new_format() {
-        let m = CrashSeenMarker::parse("1700000000000000000:crash-2024-01-01-12-00-00.log").unwrap();
+        let m =
+            CrashSeenMarker::parse("1700000000000000000:crash-2024-01-01-12-00-00.log").unwrap();
         assert_eq!(m.nanos, 1_700_000_000_000_000_000u128);
         assert_eq!(m.filename, "crash-2024-01-01-12-00-00.log");
     }
@@ -2502,7 +2506,11 @@ Nothing to see here.
         // Crash from AFTER the legacy marker — must be reported.
         let fresh = log_dir.join("crash-fresh.log");
         std::fs::write(&fresh, SAMPLE_HDT_CRASH).unwrap();
-        set_file_mtime(&fresh, FileTime::from_unix_time(legacy_secs + 100, 500_000_000)).unwrap();
+        set_file_mtime(
+            &fresh,
+            FileTime::from_unix_time(legacy_secs + 100, 500_000_000),
+        )
+        .unwrap();
 
         let result = check_new_crashes_with_marker(&bottle, "skyrimse", &marker);
         assert_eq!(result.count, 1, "only the post-marker crash should be new");

@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::wine_dll_overrides::{DllOverride, get_tool_overrides};
+use crate::wine_dll_overrides::{get_tool_overrides, DllOverride};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -99,10 +99,10 @@ pub struct TaskResult {
 /// Default timeout for each task type.
 fn default_timeout(task: &AutomatableTask) -> Duration {
     match task {
-        AutomatableTask::XEditQuickAutoClean { .. } => Duration::from_secs(300),  // 5 min
-        AutomatableTask::BodySlideBatchBuild => Duration::from_secs(600),         // 10 min
-        AutomatableTask::SynthesisRunPatcher { .. } => Duration::from_secs(900),  // 15 min
-        AutomatableTask::WryeBashBuildPatch => Duration::from_secs(600),          // 10 min
+        AutomatableTask::XEditQuickAutoClean { .. } => Duration::from_secs(300), // 5 min
+        AutomatableTask::BodySlideBatchBuild => Duration::from_secs(600),        // 10 min
+        AutomatableTask::SynthesisRunPatcher { .. } => Duration::from_secs(900), // 15 min
+        AutomatableTask::WryeBashBuildPatch => Duration::from_secs(600),         // 10 min
     }
 }
 
@@ -110,10 +110,7 @@ fn default_timeout(task: &AutomatableTask) -> Duration {
 fn build_args(task: &AutomatableTask, game_data_dir: &Path, game_id: &str) -> Vec<String> {
     match task {
         AutomatableTask::XEditQuickAutoClean { plugin_name } => {
-            let mut args = vec![
-                "-quickautoclean".to_string(),
-                plugin_name.clone(),
-            ];
+            let mut args = vec!["-quickautoclean".to_string(), plugin_name.clone()];
             // xEdit needs to know the data directory
             args.push("-D:".to_string() + &game_data_dir.to_string_lossy());
             // Pass the game mode based on game_id
@@ -135,16 +132,11 @@ fn build_args(task: &AutomatableTask, game_data_dir: &Path, game_id: &str) -> Ve
             ]
         }
         AutomatableTask::WryeBashBuildPatch => {
-            let mut args = vec![
-                "--no-gui".to_string(),
-                "--build-patch".to_string(),
-            ];
+            let mut args = vec!["--no-gui".to_string(), "--build-patch".to_string()];
             // Tell Wrye Bash where game data lives
             args.push("--gamePath".to_string());
             // Wrye Bash expects the game root (parent of Data/)
-            let game_root = game_data_dir
-                .parent()
-                .unwrap_or(game_data_dir);
+            let game_root = game_data_dir.parent().unwrap_or(game_data_dir);
             args.push(game_root.to_string_lossy().into_owned());
             args
         }
@@ -212,14 +204,21 @@ pub struct DetectedTask {
 
 /// Keywords that indicate BodySlide output is needed.
 const BODYSLIDE_KEYWORDS: &[&str] = &[
-    "body", "outfit", "armor", "cbbe", "bodyslide", "bhunp", "himbo",
-    "3ba", "3bbb", "unp", "physics",
+    "body",
+    "outfit",
+    "armor",
+    "cbbe",
+    "bodyslide",
+    "bhunp",
+    "himbo",
+    "3ba",
+    "3bbb",
+    "unp",
+    "physics",
 ];
 
 /// Keywords that indicate a Synthesis patcher is needed.
-const SYNTHESIS_KEYWORDS: &[&str] = &[
-    "synthesis", "patcher", "synthpatch",
-];
+const SYNTHESIS_KEYWORDS: &[&str] = &["synthesis", "patcher", "synthpatch"];
 
 /// Plugins known to have dirty records that benefit from xEdit cleaning.
 /// This is a subset from the LOOT masterlist — the most commonly dirty
@@ -248,10 +247,7 @@ const KNOWN_DIRTY_PLUGINS: &[&str] = &[
 ///
 /// * `installed_mods` — Names of installed mods (from the mod database).
 /// * `game_id` — Corkscrew game identifier.
-pub fn detect_required_tasks(
-    installed_mods: &[String],
-    game_id: &str,
-) -> Vec<DetectedTask> {
+pub fn detect_required_tasks(installed_mods: &[String], game_id: &str) -> Vec<DetectedTask> {
     let mut tasks = Vec::new();
 
     // --- BodySlide detection ---
@@ -301,8 +297,14 @@ pub fn detect_required_tasks(
     // --- xEdit dirty plugin detection ---
     // Only applicable to Bethesda games
     let bethesda_games = [
-        "skyrimse", "skyrimspecialedition", "skyrim", "fallout4",
-        "falloutnv", "falloutnewvegas", "fallout3", "oblivion",
+        "skyrimse",
+        "skyrimspecialedition",
+        "skyrim",
+        "fallout4",
+        "falloutnv",
+        "falloutnewvegas",
+        "fallout3",
+        "oblivion",
     ];
     if bethesda_games.contains(&game_id) {
         for dirty_plugin in KNOWN_DIRTY_PLUGINS {
@@ -347,14 +349,23 @@ mod tests {
     #[test]
     fn test_task_display_names() {
         let tasks = [
-            (AutomatableTask::XEditQuickAutoClean { plugin_name: "Update.esm".into() },
-             "xEdit QuickAutoClean"),
-            (AutomatableTask::BodySlideBatchBuild,
-             "BodySlide Batch Build"),
-            (AutomatableTask::SynthesisRunPatcher { profile_name: "Default".into() },
-             "Synthesis Run Patcher"),
-            (AutomatableTask::WryeBashBuildPatch,
-             "Wrye Bash Build Patch"),
+            (
+                AutomatableTask::XEditQuickAutoClean {
+                    plugin_name: "Update.esm".into(),
+                },
+                "xEdit QuickAutoClean",
+            ),
+            (
+                AutomatableTask::BodySlideBatchBuild,
+                "BodySlide Batch Build",
+            ),
+            (
+                AutomatableTask::SynthesisRunPatcher {
+                    profile_name: "Default".into(),
+                },
+                "Synthesis Run Patcher",
+            ),
+            (AutomatableTask::WryeBashBuildPatch, "Wrye Bash Build Patch"),
         ];
         for (task, expected) in &tasks {
             assert_eq!(task.display_name(), *expected);
@@ -364,12 +375,18 @@ mod tests {
     #[test]
     fn test_task_tool_ids() {
         assert_eq!(
-            AutomatableTask::XEditQuickAutoClean { plugin_name: "x".into() }.tool_id(),
+            AutomatableTask::XEditQuickAutoClean {
+                plugin_name: "x".into()
+            }
+            .tool_id(),
             "sseedit"
         );
         assert_eq!(AutomatableTask::BodySlideBatchBuild.tool_id(), "bodyslide");
         assert_eq!(
-            AutomatableTask::SynthesisRunPatcher { profile_name: "x".into() }.tool_id(),
+            AutomatableTask::SynthesisRunPatcher {
+                profile_name: "x".into()
+            }
+            .tool_id(),
             "synthesis"
         );
         assert_eq!(AutomatableTask::WryeBashBuildPatch.tool_id(), "wryebash");
@@ -507,8 +524,13 @@ mod tests {
         ];
 
         let tasks = detect_required_tasks(&mods, "skyrimse");
-        let bodyslide = tasks.iter().find(|t| t.task == AutomatableTask::BodySlideBatchBuild);
-        assert!(bodyslide.is_some(), "Should detect BodySlide need from CBBE mod");
+        let bodyslide = tasks
+            .iter()
+            .find(|t| t.task == AutomatableTask::BodySlideBatchBuild);
+        assert!(
+            bodyslide.is_some(),
+            "Should detect BodySlide need from CBBE mod"
+        );
         let bs = bodyslide.unwrap();
         assert!(bs.triggering_mods.iter().any(|m| m.contains("CBBE")));
     }
@@ -523,7 +545,9 @@ mod tests {
         ];
 
         let tasks = detect_required_tasks(&mods, "skyrimse");
-        let bodyslide = tasks.iter().find(|t| t.task == AutomatableTask::BodySlideBatchBuild);
+        let bodyslide = tasks
+            .iter()
+            .find(|t| t.task == AutomatableTask::BodySlideBatchBuild);
         assert!(bodyslide.is_some());
         // All four should trigger (cbbe, himbo, armor, bodyslide)
         assert!(bodyslide.unwrap().triggering_mods.len() >= 3);
@@ -538,10 +562,9 @@ mod tests {
         ];
 
         let tasks = detect_required_tasks(&mods, "skyrimse");
-        let synthesis = tasks.iter().find(|t| matches!(
-            &t.task,
-            AutomatableTask::SynthesisRunPatcher { .. }
-        ));
+        let synthesis = tasks
+            .iter()
+            .find(|t| matches!(&t.task, AutomatableTask::SynthesisRunPatcher { .. }));
         assert!(synthesis.is_some(), "Should detect Synthesis need");
     }
 
@@ -558,21 +581,25 @@ mod tests {
             .iter()
             .filter(|t| matches!(&t.task, AutomatableTask::XEditQuickAutoClean { .. }))
             .collect();
-        assert!(xedit_tasks.len() >= 2, "Should detect Update.esm and Dawnguard.esm as dirty");
+        assert!(
+            xedit_tasks.len() >= 2,
+            "Should detect Update.esm and Dawnguard.esm as dirty"
+        );
     }
 
     #[test]
     fn test_detect_no_xedit_for_non_bethesda() {
-        let mods = vec![
-            "Update.esm".to_string(),
-        ];
+        let mods = vec!["Update.esm".to_string()];
 
         let tasks = detect_required_tasks(&mods, "hogwartslegacy");
         let xedit_tasks: Vec<_> = tasks
             .iter()
             .filter(|t| matches!(&t.task, AutomatableTask::XEditQuickAutoClean { .. }))
             .collect();
-        assert!(xedit_tasks.is_empty(), "Should NOT suggest xEdit for non-Bethesda games");
+        assert!(
+            xedit_tasks.is_empty(),
+            "Should NOT suggest xEdit for non-Bethesda games"
+        );
     }
 
     #[test]
@@ -585,11 +612,12 @@ mod tests {
 
         let tasks = detect_required_tasks(&mods, "skyrimse");
         // SkyUI and USSEP shouldn't trigger BodySlide or Synthesis
-        let bodyslide = tasks.iter().find(|t| t.task == AutomatableTask::BodySlideBatchBuild);
-        let synthesis = tasks.iter().find(|t| matches!(
-            &t.task,
-            AutomatableTask::SynthesisRunPatcher { .. }
-        ));
+        let bodyslide = tasks
+            .iter()
+            .find(|t| t.task == AutomatableTask::BodySlideBatchBuild);
+        let synthesis = tasks
+            .iter()
+            .find(|t| matches!(&t.task, AutomatableTask::SynthesisRunPatcher { .. }));
         assert!(bodyslide.is_none());
         assert!(synthesis.is_none());
     }
@@ -598,7 +626,9 @@ mod tests {
     fn test_detect_case_insensitive() {
         let mods = vec!["cbbe body".to_string()];
         let tasks = detect_required_tasks(&mods, "skyrimse");
-        let bodyslide = tasks.iter().find(|t| t.task == AutomatableTask::BodySlideBatchBuild);
+        let bodyslide = tasks
+            .iter()
+            .find(|t| t.task == AutomatableTask::BodySlideBatchBuild);
         assert!(bodyslide.is_some(), "Detection should be case-insensitive");
     }
 

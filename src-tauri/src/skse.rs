@@ -1378,7 +1378,9 @@ pub fn fix_skse_plugin_conflicts(
             SksePluginCompat::VersionIndependent if is_ae => {
                 let deployed_size = fs::metadata(dll_path).map(|m| m.len()).unwrap_or(0);
                 let rel_skse = format!("SKSE/Plugins/{}", dll_name);
-                let current_owner_id = manifest_map.get(&rel_skse).map(|e| e.mod_id);
+                let current_owner_id = manifest_map
+                    .get(&(rel_skse.clone(), "data".to_string()))
+                    .map(|e| e.mod_id);
 
                 // If current owner mod already has an AE-indicating name, don't swap
                 let current_mod_name = current_owner_id
@@ -1441,7 +1443,9 @@ pub fn fix_skse_plugin_conflicts(
         );
 
         let rel_skse = format!("SKSE/Plugins/{}", dll_name);
-        let current_owner_id = manifest_map.get(&rel_skse).map(|e| e.mod_id);
+        let current_owner_id = manifest_map
+            .get(&(rel_skse.clone(), "data".to_string()))
+            .map(|e| e.mod_id);
         let deployed_size = fs::metadata(dll_path).map(|m| m.len()).unwrap_or(0);
 
         // Search all mods' staging directories for an alternative

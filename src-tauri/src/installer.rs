@@ -17,14 +17,13 @@ pub type ExtractProgressCb = dyn Fn(u64, u64) + Send + Sync;
 /// CP437 (DOS/OEM) high-byte to Unicode translation table.
 /// Maps bytes 0x80..0xFF to their Unicode equivalents.
 const CP437_HIGH: [char; 128] = [
-    'Ç', 'ü', 'é', 'â', 'ä', 'à', 'å', 'ç', 'ê', 'ë', 'è', 'ï', 'î', 'ì', 'Ä', 'Å',
-    'É', 'æ', 'Æ', 'ô', 'ö', 'ò', 'û', 'ù', 'ÿ', 'Ö', 'Ü', '¢', '£', '¥', '₧', 'ƒ',
-    'á', 'í', 'ó', 'ú', 'ñ', 'Ñ', 'ª', 'º', '¿', '⌐', '¬', '½', '¼', '¡', '«', '»',
-    '░', '▒', '▓', '│', '┤', '╡', '╢', '╖', '╕', '╣', '║', '╗', '╝', '╜', '╛', '┐',
-    '└', '┴', '┬', '├', '─', '┼', '╞', '╟', '╚', '╔', '╩', '╦', '╠', '═', '╬', '╧',
-    '╨', '╤', '╥', '╙', '╘', '╒', '╓', '╫', '╪', '┘', '┌', '█', '▄', '▌', '▐', '▀',
-    'α', 'ß', 'Γ', 'π', 'Σ', 'σ', 'µ', 'τ', 'Φ', 'Θ', 'Ω', 'δ', '∞', 'φ', 'ε', '∩',
-    '≡', '±', '≥', '≤', '⌠', '⌡', '÷', '≈', '°', '∙', '·', '√', 'ⁿ', '²', '■', ' ',
+    'Ç', 'ü', 'é', 'â', 'ä', 'à', 'å', 'ç', 'ê', 'ë', 'è', 'ï', 'î', 'ì', 'Ä', 'Å', 'É', 'æ', 'Æ',
+    'ô', 'ö', 'ò', 'û', 'ù', 'ÿ', 'Ö', 'Ü', '¢', '£', '¥', '₧', 'ƒ', 'á', 'í', 'ó', 'ú', 'ñ', 'Ñ',
+    'ª', 'º', '¿', '⌐', '¬', '½', '¼', '¡', '«', '»', '░', '▒', '▓', '│', '┤', '╡', '╢', '╖', '╕',
+    '╣', '║', '╗', '╝', '╜', '╛', '┐', '└', '┴', '┬', '├', '─', '┼', '╞', '╟', '╚', '╔', '╩', '╦',
+    '╠', '═', '╬', '╧', '╨', '╤', '╥', '╙', '╘', '╒', '╓', '╫', '╪', '┘', '┌', '█', '▄', '▌', '▐',
+    '▀', 'α', 'ß', 'Γ', 'π', 'Σ', 'σ', 'µ', 'τ', 'Φ', 'Θ', 'Ω', 'δ', '∞', 'φ', 'ε', '∩', '≡', '±',
+    '≥', '≤', '⌠', '⌡', '÷', '≈', '°', '∙', '·', '√', 'ⁿ', '²', '■', ' ',
 ];
 
 /// Convert a CP437-encoded byte slice to a UTF-8 string.
@@ -456,10 +455,7 @@ fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
                 .unix_mode()
                 .map_or(false, |m| m & 0o170000 == 0o120000)
         {
-            warn!(
-                "Skipping symlink entry in ZIP archive: {}",
-                entry.name()
-            );
+            warn!("Skipping symlink entry in ZIP archive: {}", entry.name());
             continue;
         }
 
@@ -484,15 +480,14 @@ fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
         };
 
         let relative = PathBuf::from(&decoded_name);
-        if relative
-            .components()
-            .any(|c| matches!(
+        if relative.components().any(|c| {
+            matches!(
                 c,
                 std::path::Component::ParentDir
                     | std::path::Component::RootDir
                     | std::path::Component::Prefix(_)
-            ))
-        {
+            )
+        }) {
             warn!(
                 "Skipping ZIP path traversal attempt: {}",
                 relative.display()
@@ -611,10 +606,7 @@ fn extract_zip_with_progress(
                 .unix_mode()
                 .map_or(false, |m| m & 0o170000 == 0o120000)
         {
-            warn!(
-                "Skipping symlink entry in ZIP archive: {}",
-                entry.name()
-            );
+            warn!("Skipping symlink entry in ZIP archive: {}", entry.name());
             continue;
         }
 
@@ -639,15 +631,14 @@ fn extract_zip_with_progress(
         };
 
         let relative = PathBuf::from(&decoded_name);
-        if relative
-            .components()
-            .any(|c| matches!(
+        if relative.components().any(|c| {
+            matches!(
                 c,
                 std::path::Component::ParentDir
                     | std::path::Component::RootDir
                     | std::path::Component::Prefix(_)
-            ))
-        {
+            )
+        }) {
             warn!(
                 "Skipping ZIP path traversal attempt: {}",
                 relative.display()
@@ -928,16 +919,14 @@ fn extract_rar(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
         let entry = header.entry();
 
         // Reject entries with ".." components (path traversal)
-        if entry
-            .filename
-            .components()
-            .any(|c| matches!(
+        if entry.filename.components().any(|c| {
+            matches!(
                 c,
                 std::path::Component::ParentDir
                     | std::path::Component::RootDir
                     | std::path::Component::Prefix(_)
-            ))
-        {
+            )
+        }) {
             warn!(
                 "Skipping RAR entry with path traversal: {}",
                 entry.filename.display()
@@ -1060,15 +1049,14 @@ fn extract_tar<R: io::Read>(
         // Component-level traversal check. The previous `starts_with(dest_dir)`
         // check was lexical only — `Data/../../outside` would pass it because
         // the string prefix matches before path normalization.
-        if rel_path
-            .components()
-            .any(|c| matches!(
+        if rel_path.components().any(|c| {
+            matches!(
                 c,
                 std::path::Component::ParentDir
                     | std::path::Component::RootDir
                     | std::path::Component::Prefix(_)
-            ))
-        {
+            )
+        }) {
             warn!(
                 "Skipping tar path traversal attempt: {}",
                 rel_path.display()
@@ -1819,7 +1807,8 @@ mod tests {
             let link_opts: SimpleFileOptions = SimpleFileOptions::default()
                 .compression_method(zip::CompressionMethod::Stored)
                 .unix_permissions(0o777);
-            w.add_symlink("evil_link", "/etc/passwd", link_opts).unwrap();
+            w.add_symlink("evil_link", "/etc/passwd", link_opts)
+                .unwrap();
 
             w.finish().unwrap();
         }

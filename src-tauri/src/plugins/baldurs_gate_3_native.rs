@@ -258,23 +258,15 @@ pub fn deploy_native_inner(
             // -- Path safety checks -----------------------------------------
 
             // Extract the bare filename (no directory components).
-            let filename = path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .ok_or_else(|| {
-                    DeployerError::Other(format!(
-                        "pak at '{}' has no valid filename",
-                        path.display()
-                    ))
-                })?;
+            let filename = path.file_name().and_then(|s| s.to_str()).ok_or_else(|| {
+                DeployerError::Other(format!("pak at '{}' has no valid filename", path.display()))
+            })?;
 
             // The filename must not contain path-traversal sequences or
             // directory separators. `is_safe_relative_path` rejects `..`,
             // null bytes, drive letters, and a few other hazards; the extra
             // checks below catch embedded slashes that would escape mods_dir.
-            if !is_safe_relative_path(filename)
-                || filename.contains('/')
-                || filename.contains('\\')
+            if !is_safe_relative_path(filename) || filename.contains('/') || filename.contains('\\')
             {
                 return Err(DeployerError::Other(format!(
                     "unsafe pak filename '{}' in mod '{}'",
@@ -404,10 +396,12 @@ impl GamePlugin for BaldursGate3NativePlugin {
         EXECUTABLES
     }
 
-    /// Detection is a stub for this scaffold task.
+    /// Detection is still a scaffold: BG3 deploy/load-order logic exists, but
+    /// the native game cannot yet be auto-discovered by this plugin.
     ///
-    /// Real detection (bundle identifier lookup, Steam appmanifest scan)
-    /// arrives in Task 4.2. Returns empty until then.
+    /// Follow-up work should filter `native_scanner::scan_all_native()` by the
+    /// confirmed macOS bundle identifier/executable names and Steam app id.
+    /// Returns empty until that is implemented.
     fn detect_native(&self) -> Vec<DetectedGame> {
         Vec::new()
     }
@@ -820,12 +814,12 @@ mod tests {
 
         // Count occurrences of the mod's UUID.
         let mod_uuid = "abcdef01-2345-6789-abcd-ef0123456789";
-        let count = settings
-            .mods
-            .iter()
-            .filter(|m| m.uuid == mod_uuid)
-            .count();
-        assert_eq!(count, 1, "re-deploy must not duplicate the entry; got {}", count);
+        let count = settings.mods.iter().filter(|m| m.uuid == mod_uuid).count();
+        assert_eq!(
+            count, 1,
+            "re-deploy must not duplicate the entry; got {}",
+            count
+        );
     }
 
     /// A staged `.pak` whose filename contains `..` or `/` must be rejected
@@ -946,8 +940,7 @@ mod tests {
         let detected = fake_detected_native(tmp.path());
         deploy_native_inner(&detected, &db, &mods_dir, &modsettings_path).unwrap();
 
-        let snapshots =
-            crate::rollback::list_snapshots(&db, "baldurs_gate_3_native", "").unwrap();
+        let snapshots = crate::rollback::list_snapshots(&db, "baldurs_gate_3_native", "").unwrap();
         assert!(
             !snapshots.is_empty(),
             "deploy_native_inner should have created at least one snapshot"
@@ -993,7 +986,10 @@ mod tests {
 
         let result = deploy_native_inner(&detected, &db, &mods_dir, &modsettings_path);
 
-        assert!(result.is_err(), "deploy_native_inner must refuse sandboxed game");
+        assert!(
+            result.is_err(),
+            "deploy_native_inner must refuse sandboxed game"
+        );
         let msg = format!("{}", result.unwrap_err());
         assert!(
             msg.contains("sandboxed"),

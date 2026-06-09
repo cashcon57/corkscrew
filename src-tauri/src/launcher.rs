@@ -366,7 +366,10 @@ pub fn maybe_flatpak_spawn(cmd: &str, args: &[&str]) -> (String, Vec<String>) {
         all_args.extend(args.iter().map(|a| a.to_string()));
         ("flatpak-spawn".to_string(), all_args)
     } else {
-        (cmd.to_string(), args.iter().map(|a| a.to_string()).collect())
+        (
+            cmd.to_string(),
+            args.iter().map(|a| a.to_string()).collect(),
+        )
     }
 }
 
@@ -431,7 +434,10 @@ pub fn launch_game(
         let applied = crate::launch_fixes::apply_fixes(&fixes);
 
         if applied.total_applied > 0 {
-            info!("Applying {} pre-launch fixes for '{}'", applied.total_applied, gid);
+            info!(
+                "Applying {} pre-launch fixes for '{}'",
+                applied.total_applied, gid
+            );
         }
 
         // Inject env vars
@@ -441,13 +447,13 @@ pub fn launch_game(
 
         // Merge DLL overrides into WINEDLLOVERRIDES env var
         if !applied.dll_overrides.is_empty() {
-            let existing = wine_cmd.env_vars.iter()
+            let existing = wine_cmd
+                .env_vars
+                .iter()
                 .find(|(k, _)| k == "WINEDLLOVERRIDES")
                 .map(|(_, v)| v.as_str());
-            let merged = crate::launch_fixes::build_dll_override_env(
-                &applied.dll_overrides,
-                existing,
-            );
+            let merged =
+                crate::launch_fixes::build_dll_override_env(&applied.dll_overrides, existing);
             // Remove existing WINEDLLOVERRIDES if present, then add merged
             wine_cmd.env_vars.retain(|(k, _)| k != "WINEDLLOVERRIDES");
             wine_cmd.env_vars.push(("WINEDLLOVERRIDES".into(), merged));
@@ -481,8 +487,18 @@ pub fn launch_game(
         }
     }
 
-    // Build and spawn the command.
-    let mut cmd = Command::new(&wine_cmd.binary);
+    // Build and spawn the command. If Corkscrew itself runs inside Flatpak,
+    // launch Wine on the host so the game can see the user's real Steam/Wine
+    // paths instead of the sandbox view.
+    let running_in_flatpak = crate::bottles::detect_container_environment()
+        == Some(crate::bottles::ContainerEnvironment::Flatpak);
+    let mut cmd = if running_in_flatpak {
+        let mut wrapped = Command::new("flatpak-spawn");
+        wrapped.arg("--host").arg(&wine_cmd.binary);
+        wrapped
+    } else {
+        Command::new(&wine_cmd.binary)
+    };
     // Add prefix args (e.g. CrossOver --bottle <name>) before the exe
     for arg in &wine_cmd.prefix_args {
         cmd.arg(arg);
@@ -589,15 +605,10 @@ pub fn sync_saves_from_prefix(
 ) -> Result<usize> {
     // Determine save location in prefix based on game
     let save_dir_in_prefix = match game_id {
-        "skyrimse" | "skyrimspecialedition" => prefix_path.join(
-            "drive_c/users/steamuser/Documents/My Games/Skyrim Special Edition/Saves",
-        ),
-        "fallout4" => {
-            prefix_path.join("drive_c/users/steamuser/Documents/My Games/Fallout4/Saves")
-        }
-        "skyrim" => {
-            prefix_path.join("drive_c/users/steamuser/Documents/My Games/Skyrim/Saves")
-        }
+        "skyrimse" | "skyrimspecialedition" => prefix_path
+            .join("drive_c/users/steamuser/Documents/My Games/Skyrim Special Edition/Saves"),
+        "fallout4" => prefix_path.join("drive_c/users/steamuser/Documents/My Games/Fallout4/Saves"),
+        "skyrim" => prefix_path.join("drive_c/users/steamuser/Documents/My Games/Skyrim/Saves"),
         _ => return Ok(0), // Unknown game, skip
     };
 
@@ -753,7 +764,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let bottle = create_fake_bottle(tmp.path(), "TestBottle", "Wine");
 
-        let result = launch_game(&bottle, Path::new("/tmp/corkscrew_no_such_game.exe"), None, None, None);
+        let result = launch_game(
+            &bottle,
+            Path::new("/tmp/corkscrew_no_such_game.exe"),
+            None,
+            None,
+            None,
+        );
         assert!(result.is_err());
     }
 

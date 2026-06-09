@@ -567,7 +567,11 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     copy_dir_recursive_inner(src, dst, copy_method)
 }
 
-fn copy_dir_recursive_inner(src: &Path, dst: &Path, copy_method: platform::FsCopyMethod) -> Result<()> {
+fn copy_dir_recursive_inner(
+    src: &Path,
+    dst: &Path,
+    copy_method: platform::FsCopyMethod,
+) -> Result<()> {
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;

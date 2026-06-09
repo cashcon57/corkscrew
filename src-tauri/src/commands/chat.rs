@@ -1,18 +1,17 @@
 //! LLM chat commands: model management, message handling, tool execution, and streaming.
 
-use crate::database;
-use crate::commands::platform::get_system_memory;
-use crate::commands::mods::get_plugin_order;
-use crate::commands::collections::search_nexus_mods_cmd;
-use crate::commands::collections::get_nexus_mod_detail;
-use crate::commands::nexus::get_nexus_mod_files;
-use crate::commands::plugins::sort_plugins_loot;
-use crate::commands::diagnostics::find_crash_logs_cmd;
-use crate::commands::diagnostics::analyze_crash_log_cmd;
-use crate::commands::platform::KNOWN_FRAMEWORKS;
-use crate::crashlog;
-use crate::profiles;
 use crate::cleaner;
+use crate::commands::collections::get_nexus_mod_detail;
+use crate::commands::collections::search_nexus_mods_cmd;
+use crate::commands::diagnostics::analyze_crash_log_cmd;
+use crate::commands::diagnostics::find_crash_logs_cmd;
+use crate::commands::mods::get_plugin_order;
+use crate::commands::nexus::get_nexus_mod_files;
+use crate::commands::platform::get_system_memory;
+use crate::commands::platform::KNOWN_FRAMEWORKS;
+use crate::commands::plugins::sort_plugins_loot;
+use crate::crashlog;
+use crate::database;
 use crate::deployer;
 use crate::google_oauth;
 use crate::instruction_types;
@@ -21,8 +20,9 @@ use crate::llm_parser;
 use crate::mod_dependencies;
 use crate::mod_recommendations;
 use crate::preflight;
+use crate::profiles;
 use crate::wine_compat;
-use crate::{AppState, resolve_bottle, resolve_game};
+use crate::{resolve_bottle, resolve_game, AppState};
 use std::path::PathBuf;
 use tauri::Emitter;
 use tauri::State;
@@ -678,10 +678,7 @@ pub async fn chat_get_history(
 
 /// Validate a cloud API key by making a minimal request.
 #[tauri::command]
-pub async fn chat_validate_cloud_key(
-    provider: String,
-    api_key: String,
-) -> Result<String, String> {
+pub async fn chat_validate_cloud_key(provider: String, api_key: String) -> Result<String, String> {
     llm_chat::validate_cloud_key(&provider, &api_key).await
 }
 
@@ -714,16 +711,12 @@ pub async fn chat_get_starters(
     // Check for new crash logs (fast filesystem stat).
     let crash_gid = game_id.clone();
     let crash_bn = bottle_name.clone();
-    let crash_info = tokio::task::spawn_blocking(move || {
-        match resolve_bottle(&crash_bn) {
-            Ok(bottle) => {
-                crashlog::check_new_crashes(&PathBuf::from(&bottle.path), &crash_gid)
-            }
-            Err(_) => crashlog::NewCrashInfo {
-                count: 0,
-                entries: vec![],
-            },
-        }
+    let crash_info = tokio::task::spawn_blocking(move || match resolve_bottle(&crash_bn) {
+        Ok(bottle) => crashlog::check_new_crashes(&PathBuf::from(&bottle.path), &crash_gid),
+        Err(_) => crashlog::NewCrashInfo {
+            count: 0,
+            entries: vec![],
+        },
     })
     .await
     .unwrap_or(crashlog::NewCrashInfo {
@@ -760,7 +753,12 @@ pub async fn chat_get_starters(
         let warnings = wine_compat::check_all_mods_wine_compat(&compat_input);
         warnings
             .iter()
-            .filter(|(_, w)| matches!(w.severity, wine_compat::Severity::Crash | wine_compat::Severity::Broken))
+            .filter(|(_, w)| {
+                matches!(
+                    w.severity,
+                    wine_compat::Severity::Crash | wine_compat::Severity::Broken
+                )
+            })
             .count()
     })
     .await
@@ -1024,9 +1022,23 @@ pub fn tool_display_name(tool_name: &str, args: &serde_json::Value) -> String {
         "run_full_diagnostic" => "Running full diagnostic...".into(),
         "get_mod_requirements" => "Checking mod requirements...".into(),
         "batch_mod_operation" => {
-            let action = args.get("action").and_then(|a| a.as_str()).unwrap_or("toggle");
-            let filter = args.get("filter_value").and_then(|f| f.as_str()).unwrap_or("mods");
-            format!("{}ing {} mods...", if action == "enable" { "Enabl" } else { "Disabl" }, filter)
+            let action = args
+                .get("action")
+                .and_then(|a| a.as_str())
+                .unwrap_or("toggle");
+            let filter = args
+                .get("filter_value")
+                .and_then(|f| f.as_str())
+                .unwrap_or("mods");
+            format!(
+                "{}ing {} mods...",
+                if action == "enable" {
+                    "Enabl"
+                } else {
+                    "Disabl"
+                },
+                filter
+            )
         }
         "get_mod_health" => "Calculating mod health score...".into(),
         other => format!("Running {}...", other),
@@ -1263,7 +1275,8 @@ pub async fn execute_tool(
                 let compat_input = wine_compat::build_compat_input(&mods);
                 let warnings = wine_compat::check_all_mods_wine_compat(&compat_input);
                 if warnings.is_empty() {
-                    "No Wine compatibility issues detected. All enabled mods appear compatible.".to_string()
+                    "No Wine compatibility issues detected. All enabled mods appear compatible."
+                        .to_string()
                 } else {
                     wine_compat::format_warnings_report(&warnings)
                 }
@@ -2064,31 +2077,55 @@ pub async fn execute_tool(
         }
 
         "batch_mod_operation" => {
-            let action = args.get("action").and_then(|a| a.as_str()).unwrap_or("disable").to_string();
-            let filter_type = args.get("filter_type").and_then(|f| f.as_str()).unwrap_or("").to_string();
-            let filter_value = args.get("filter_value").and_then(|f| f.as_str()).unwrap_or("").to_string();
+            let action = args
+                .get("action")
+                .and_then(|a| a.as_str())
+                .unwrap_or("disable")
+                .to_string();
+            let filter_type = args
+                .get("filter_type")
+                .and_then(|f| f.as_str())
+                .unwrap_or("")
+                .to_string();
+            let filter_value = args
+                .get("filter_value")
+                .and_then(|f| f.as_str())
+                .unwrap_or("")
+                .to_string();
             let enable = action == "enable";
             let r = tokio::task::spawn_blocking(move || {
                 let mods = db.list_mods_summary(&gid, &bn).unwrap_or_default();
                 let filter_lower = filter_value.to_lowercase();
 
                 // Apply filter
-                let filtered: Vec<&database::ModSummary> = mods.iter().filter(|m| {
-                    let type_match = match filter_type.as_str() {
-                        "category" => m.auto_category.as_deref().unwrap_or("").to_lowercase().contains(&filter_lower),
-                        "collection" => m.collection_name.as_deref().unwrap_or("").to_lowercase() == filter_lower,
-                        "name_contains" => m.name.to_lowercase().contains(&filter_lower),
-                        "optional" => m.collection_optional,
-                        "all_disabled" => !m.enabled,
-                        "all_enabled" => m.enabled,
-                        _ => false,
-                    };
-                    // Only include mods that would actually change state
-                    type_match && (m.enabled != enable)
-                }).collect();
+                let filtered: Vec<&database::ModSummary> = mods
+                    .iter()
+                    .filter(|m| {
+                        let type_match = match filter_type.as_str() {
+                            "category" => m
+                                .auto_category
+                                .as_deref()
+                                .unwrap_or("")
+                                .to_lowercase()
+                                .contains(&filter_lower),
+                            "collection" => {
+                                m.collection_name.as_deref().unwrap_or("").to_lowercase()
+                                    == filter_lower
+                            }
+                            "name_contains" => m.name.to_lowercase().contains(&filter_lower),
+                            "optional" => m.collection_optional,
+                            "all_disabled" => !m.enabled,
+                            "all_enabled" => m.enabled,
+                            _ => false,
+                        };
+                        // Only include mods that would actually change state
+                        type_match && (m.enabled != enable)
+                    })
+                    .collect();
 
                 if filtered.is_empty() {
-                    return "No mods match that filter (or they are already in the desired state).".to_string();
+                    return "No mods match that filter (or they are already in the desired state)."
+                        .to_string();
                 }
 
                 // Execute batch operation
@@ -2118,7 +2155,10 @@ pub async fn execute_tool(
                     out.push_str(&format!("- {}\n", name));
                 }
                 if changed.len() > show_count {
-                    out.push_str(&format!("- ... (and {} more)\n", changed.len() - show_count));
+                    out.push_str(&format!(
+                        "- ... (and {} more)\n",
+                        changed.len() - show_count
+                    ));
                 }
                 if !errors.is_empty() {
                     out.push_str(&format!("\n{} errors:\n", errors.len()));
@@ -2127,7 +2167,10 @@ pub async fn execute_tool(
                     }
                 }
                 let reverse_action = if enable { "disable" } else { "enable" };
-                out.push_str(&format!("\nTo undo, ask me to \"{}\" these mods.", reverse_action));
+                out.push_str(&format!(
+                    "\nTo undo, ask me to \"{}\" these mods.",
+                    reverse_action
+                ));
                 // Trigger redeploy notification
                 out.push_str("\n\nNote: Run redeploy_mods to apply changes to the game directory.");
                 out
@@ -2137,7 +2180,6 @@ pub async fn execute_tool(
             (r, true)
         }
 
-
         "run_full_diagnostic" => {
             // Run all diagnostic checks in parallel
             let db_pf = state.db.clone();
@@ -2145,8 +2187,7 @@ pub async fn execute_tool(
             let bn_pf = bn.clone();
             let preflight_fut = tokio::task::spawn_blocking(move || {
                 let (bottle, _, data_dir) = resolve_game(&gid_pf, &bn_pf)?;
-                let result =
-                    preflight::run_preflight(&db_pf, &bottle, &gid_pf, &bn_pf, &data_dir);
+                let result = preflight::run_preflight(&db_pf, &bottle, &gid_pf, &bn_pf, &data_dir);
                 let status = if result.failed > 0 {
                     "FAIL"
                 } else if result.warnings > 0 {
@@ -2175,11 +2216,10 @@ pub async fn execute_tool(
             let gid_wc = gid.clone();
             let bn_wc = bn.clone();
             let wine_and_summary_fut = tokio::task::spawn_blocking(move || {
-                let mods = db_wc
-                    .list_mods_summary(&gid_wc, &bn_wc)
-                    .unwrap_or_default();
+                let mods = db_wc.list_mods_summary(&gid_wc, &bn_wc).unwrap_or_default();
                 let enabled = mods.iter().filter(|m| m.enabled).count();
-                let mod_summary = format!("MOD SUMMARY: {} enabled / {} total", enabled, mods.len());
+                let mod_summary =
+                    format!("MOD SUMMARY: {} enabled / {} total", enabled, mods.len());
 
                 let compat_input = wine_compat::build_compat_input(&mods);
                 let warnings = wine_compat::check_all_mods_wine_compat(&compat_input);
@@ -2197,27 +2237,30 @@ pub async fn execute_tool(
             let db_dep = state.db.clone();
             let gid_dep = gid.clone();
             let bn_dep = bn.clone();
-            let dep_fut = tokio::task::spawn_blocking(move || {
-                match mod_dependencies::check_dependency_issues(&db_dep, &gid_dep, &bn_dep) {
-                    Ok(issues) => {
-                        if issues.is_empty() {
-                            "DEPENDENCIES: [OK]\n- No issues found".into()
-                        } else {
-                            let lines: Vec<String> = issues
-                                .iter()
-                                .take(15)
-                                .map(|i| format!("- {}: {}", i.mod_name, i.message))
-                                .collect();
-                            format!(
-                                "DEPENDENCIES: [ISSUES] ({} found)\n{}",
-                                issues.len(),
-                                lines.join("\n")
-                            )
+            let dep_fut =
+                tokio::task::spawn_blocking(
+                    move || match mod_dependencies::check_dependency_issues(
+                        &db_dep, &gid_dep, &bn_dep,
+                    ) {
+                        Ok(issues) => {
+                            if issues.is_empty() {
+                                "DEPENDENCIES: [OK]\n- No issues found".into()
+                            } else {
+                                let lines: Vec<String> = issues
+                                    .iter()
+                                    .take(15)
+                                    .map(|i| format!("- {}: {}", i.mod_name, i.message))
+                                    .collect();
+                                format!(
+                                    "DEPENDENCIES: [ISSUES] ({} found)\n{}",
+                                    issues.len(),
+                                    lines.join("\n")
+                                )
+                            }
                         }
-                    }
-                    Err(e) => format!("DEPENDENCIES: [ERROR]\n- {e}"),
-                }
-            });
+                        Err(e) => format!("DEPENDENCIES: [ERROR]\n- {e}"),
+                    },
+                );
 
             let db_cf = state.db.clone();
             let gid_cf = gid.clone();
@@ -2232,8 +2275,10 @@ pub async fn execute_tool(
                             "CONFLICTS: 0 total".into()
                         } else {
                             // Group by mod pair for consistency with get_conflicts output
-                            let mut pair_counts: std::collections::HashMap<(String, String), usize> =
-                                std::collections::HashMap::new();
+                            let mut pair_counts: std::collections::HashMap<
+                                (String, String),
+                                usize,
+                            > = std::collections::HashMap::new();
                             for c in &conflicts {
                                 for i in 0..c.mods.len() {
                                     for j in (i + 1)..c.mods.len() {
@@ -2251,7 +2296,9 @@ pub async fn execute_tool(
                             let lines: Vec<String> = pairs
                                 .iter()
                                 .take(10)
-                                .map(|((a, b), count)| format!("- {} vs {} ({} files)", a, b, count))
+                                .map(|((a, b), count)| {
+                                    format!("- {} vs {} ({} files)", a, b, count)
+                                })
                                 .collect();
                             format!(
                                 "CONFLICTS: {} total, {} mod pairs\n{}",
@@ -2272,12 +2319,15 @@ pub async fn execute_tool(
             let preflight_result = preflight_r
                 .unwrap_or_else(|e| Ok(format!("PREFLIGHT: [ERROR]\n- {e}")))
                 .unwrap_or_else(|e| format!("PREFLIGHT: [ERROR]\n- {e}"));
-            let (wine_result, mod_summary) = wine_summary_r
-                .unwrap_or_else(|_| ("WINE COMPATIBILITY: [ERROR]".into(), "MOD SUMMARY: [ERROR]".into()));
-            let dep_result = dep_r
-                .unwrap_or_else(|e| format!("DEPENDENCIES: [ERROR]\n- {e}"));
-            let conflict_result = conflict_r
-                .unwrap_or_else(|e| format!("CONFLICTS: [ERROR]\n- {e}"));
+            let (wine_result, mod_summary) = wine_summary_r.unwrap_or_else(|_| {
+                (
+                    "WINE COMPATIBILITY: [ERROR]".into(),
+                    "MOD SUMMARY: [ERROR]".into(),
+                )
+            });
+            let dep_result = dep_r.unwrap_or_else(|e| format!("DEPENDENCIES: [ERROR]\n- {e}"));
+            let conflict_result =
+                conflict_r.unwrap_or_else(|e| format!("CONFLICTS: [ERROR]\n- {e}"));
 
             // Determine highest severity area for focus recommendation
             let focus = if preflight_result.contains("[FAIL]") {
@@ -2466,4 +2516,3 @@ pub fn get_mod_recommendations_sync(
 ) -> Result<Vec<(String, i64, usize)>, String> {
     mod_recommendations::get_popular_mods(db, game_id, bottle_name)
 }
-

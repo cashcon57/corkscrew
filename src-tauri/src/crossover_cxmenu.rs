@@ -119,7 +119,13 @@ pub fn parse_cxmenu_str(content: &str) -> Vec<CxmenuEntry> {
         if trimmed.starts_with('[') && trimmed.ends_with(']') {
             // New section header — flush any in-progress entry first.
             if entries.len() < MAX_ENTRIES {
-                flush!(entries, current_section, shortcut_name, startup_wm_class, mode);
+                flush!(
+                    entries,
+                    current_section,
+                    shortcut_name,
+                    startup_wm_class,
+                    mode
+                );
             } else {
                 // Already at cap — clear state so we don't leak partial data.
                 current_section = None;
@@ -149,7 +155,13 @@ pub fn parse_cxmenu_str(content: &str) -> Vec<CxmenuEntry> {
 
     // Flush the last in-progress section.
     if entries.len() < MAX_ENTRIES {
-        flush!(entries, current_section, shortcut_name, startup_wm_class, mode);
+        flush!(
+            entries,
+            current_section,
+            shortcut_name,
+            startup_wm_class,
+            mode
+        );
     }
 
     entries
@@ -311,8 +323,7 @@ mod tests {
 
     #[test]
     fn decode_full_start_menu_path() {
-        let encoded =
-            "C^3A_ProgramData_Microsoft_Windows_Start+Menu/Programs/Steam/Steam.lnk";
+        let encoded = "C^3A_ProgramData_Microsoft_Windows_Start+Menu/Programs/Steam/Steam.lnk";
         let expected = r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Steam\Steam.lnk";
         assert_eq!(decode_cxmenu_path(encoded), expected);
     }
@@ -414,10 +425,7 @@ mod tests {
         assert_eq!(e.shortcut_name.as_deref(), Some("steam"));
         assert_eq!(e.startup_wm_class.as_deref(), Some("steam.exe"));
         assert_eq!(e.mode.as_deref(), Some("install"));
-        assert_eq!(
-            e.raw_section,
-            "Desktop.C^3A_users_Public_Desktop/Steam.lnk"
-        );
+        assert_eq!(e.raw_section, "Desktop.C^3A_users_Public_Desktop/Steam.lnk");
     }
 
     #[test]
@@ -576,12 +584,18 @@ mod tests {
             );
         }
 
-        assert!(!entries.is_empty(), "Expected at least one entry from Steam cxmenu.conf");
+        assert!(
+            !entries.is_empty(),
+            "Expected at least one entry from Steam cxmenu.conf"
+        );
 
         // The Steam bottle must have at least one entry with steam.exe.
         let has_steam = entries
             .iter()
             .any(|e| e.startup_wm_class.as_deref() == Some("steam.exe"));
-        assert!(has_steam, "Expected steam.exe entry in Steam bottle cxmenu.conf");
+        assert!(
+            has_steam,
+            "Expected steam.exe entry in Steam bottle cxmenu.conf"
+        );
     }
 }

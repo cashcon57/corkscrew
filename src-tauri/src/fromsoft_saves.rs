@@ -89,10 +89,7 @@ pub fn find_fromsoft_saves_dir(bottle: &Bottle, game_id: &str) -> Option<PathBuf
         if !user.is_dir() {
             continue;
         }
-        let candidate = user
-            .join("AppData")
-            .join("Roaming")
-            .join(appdata_name);
+        let candidate = user.join("AppData").join("Roaming").join(appdata_name);
         if candidate.is_dir() {
             return Some(candidate);
         }
@@ -125,7 +122,9 @@ fn list_saves_in_dir(saves_dir: &Path) -> Vec<SaveFile> {
             continue;
         }
 
-        let Ok(inner) = fs::read_dir(&p) else { continue };
+        let Ok(inner) = fs::read_dir(&p) else {
+            continue;
+        };
         for sub in inner.flatten() {
             let sp = sub.path();
             if !sp.is_file() {
@@ -282,15 +281,9 @@ mod tests {
     fn setup_bottle_with_saves(game_id: &str) -> (Bottle, PathBuf, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
         let bottle_path = tmp.path().join("Bottle");
-        let user = bottle_path
-            .join("drive_c")
-            .join("users")
-            .join("crossover");
+        let user = bottle_path.join("drive_c").join("users").join("crossover");
         let appdata_name = appdata_dirname_for(game_id).unwrap();
-        let saves = user
-            .join("AppData")
-            .join("Roaming")
-            .join(appdata_name);
+        let saves = user.join("AppData").join("Roaming").join(appdata_name);
         fs::create_dir_all(&saves).unwrap();
         (make_bottle(bottle_path), saves, tmp)
     }
@@ -298,7 +291,11 @@ mod tests {
     #[test]
     fn appdata_mapping_covers_supported_games() {
         for id in ["sekiro", "eldenring", "darksouls3", "armoredcore6"] {
-            assert!(appdata_dirname_for(id).is_some(), "missing mapping for {}", id);
+            assert!(
+                appdata_dirname_for(id).is_some(),
+                "missing mapping for {}",
+                id
+            );
         }
         // DS:R saves under Documents/NBGI, not AppData/Roaming — until that
         // separate path is wired, we deliberately return None.

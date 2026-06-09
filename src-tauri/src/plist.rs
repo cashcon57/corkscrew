@@ -55,8 +55,7 @@ mod tests {
     use super::*;
 
     fn fixture_path() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/Info.xml.plist")
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/Info.xml.plist")
     }
 
     #[test]

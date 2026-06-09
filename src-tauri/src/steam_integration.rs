@@ -44,7 +44,10 @@ pub fn detect_steam_installation() -> Option<SteamInfo> {
 
     // Log container environment once during detection
     if let Some(ref env) = crate::bottles::detect_container_environment() {
-        log::info!("Steam detection running in container environment: {:?}", env);
+        log::info!(
+            "Steam detection running in container environment: {:?}",
+            env
+        );
     }
 
     let mut candidates = vec![
@@ -951,13 +954,10 @@ pub fn get_launch_options_status(steam_info: &SteamInfo) -> Vec<LaunchOptionsSta
     let mut results = Vec::new();
 
     // Read localconfig.vdf from the first available userdata dir
-    let config_content = steam_info
-        .userdata_dirs
-        .iter()
-        .find_map(|dir| {
-            let path = dir.join("config").join("localconfig.vdf");
-            std::fs::read_to_string(&path).ok()
-        });
+    let config_content = steam_info.userdata_dirs.iter().find_map(|dir| {
+        let path = dir.join("config").join("localconfig.vdf");
+        std::fs::read_to_string(&path).ok()
+    });
 
     for ext in &extenders {
         let current = config_content
@@ -986,10 +986,7 @@ pub fn get_launch_options_status(steam_info: &SteamInfo) -> Vec<LaunchOptionsSta
 /// For Proton/Wine on Linux, this uses the standard `%command%` substitution:
 /// e.g., `skse64_loader.exe %command%` makes Steam launch SKSE instead of the
 /// default game executable.
-pub fn patch_launch_options(
-    steam_info: &SteamInfo,
-    game_id: &str,
-) -> Result<()> {
+pub fn patch_launch_options(steam_info: &SteamInfo, game_id: &str) -> Result<()> {
     let extender = known_script_extenders()
         .into_iter()
         .find(|e| e.game_id == game_id)
@@ -1003,18 +1000,17 @@ pub fn patch_launch_options(
 
         // Backup
         let backup = config_path.with_extension("vdf.bak");
-        std::fs::copy(&config_path, &backup)
-            .context("Failed to back up localconfig.vdf")?;
+        std::fs::copy(&config_path, &backup).context("Failed to back up localconfig.vdf")?;
 
-        let content = std::fs::read_to_string(&config_path)
-            .context("Failed to read localconfig.vdf")?;
+        let content =
+            std::fs::read_to_string(&config_path).context("Failed to read localconfig.vdf")?;
 
         // Set launch options to use the script extender
         let launch_opt = format!("{} %command%", extender.exe_name);
-        let updated = set_text_vdf_launch_options(&content, extender.steam_app_id, Some(&launch_opt))?;
+        let updated =
+            set_text_vdf_launch_options(&content, extender.steam_app_id, Some(&launch_opt))?;
 
-        std::fs::write(&config_path, &updated)
-            .context("Failed to write localconfig.vdf")?;
+        std::fs::write(&config_path, &updated).context("Failed to write localconfig.vdf")?;
 
         log::info!(
             "Patched Steam launch options for {} (app {}): {}",
@@ -1028,10 +1024,7 @@ pub fn patch_launch_options(
 }
 
 /// Remove script extender from Steam launch options (restore to default).
-pub fn unpatch_launch_options(
-    steam_info: &SteamInfo,
-    game_id: &str,
-) -> Result<()> {
+pub fn unpatch_launch_options(steam_info: &SteamInfo, game_id: &str) -> Result<()> {
     let extender = known_script_extenders()
         .into_iter()
         .find(|e| e.game_id == game_id)
@@ -1043,8 +1036,8 @@ pub fn unpatch_launch_options(
             continue;
         }
 
-        let content = std::fs::read_to_string(&config_path)
-            .context("Failed to read localconfig.vdf")?;
+        let content =
+            std::fs::read_to_string(&config_path).context("Failed to read localconfig.vdf")?;
 
         // Check if the current options contain our script extender
         let current = parse_text_vdf_launch_options(&content, extender.steam_app_id);
@@ -1058,14 +1051,12 @@ pub fn unpatch_launch_options(
 
         // Backup
         let backup = config_path.with_extension("vdf.bak");
-        std::fs::copy(&config_path, &backup)
-            .context("Failed to back up localconfig.vdf")?;
+        std::fs::copy(&config_path, &backup).context("Failed to back up localconfig.vdf")?;
 
         // Remove our launch options (set to None to clear the key)
         let updated = set_text_vdf_launch_options(&content, extender.steam_app_id, None)?;
 
-        std::fs::write(&config_path, &updated)
-            .context("Failed to write localconfig.vdf")?;
+        std::fs::write(&config_path, &updated).context("Failed to write localconfig.vdf")?;
 
         log::info!(
             "Unpatched Steam launch options for {} (app {})",
@@ -1198,9 +1189,8 @@ mod tests {
         }
     }
 }"#;
-        let updated =
-            set_text_vdf_launch_options(vdf, 489830, Some("skse64_loader.exe %command%"))
-                .expect("Failed to set launch options");
+        let updated = set_text_vdf_launch_options(vdf, 489830, Some("skse64_loader.exe %command%"))
+            .expect("Failed to set launch options");
         let opts = parse_text_vdf_launch_options(&updated, 489830);
         assert_eq!(opts, Some("skse64_loader.exe %command%".to_string()));
     }
@@ -1226,9 +1216,8 @@ mod tests {
         }
     }
 }"#;
-        let updated =
-            set_text_vdf_launch_options(vdf, 489830, Some("skse64_loader.exe %command%"))
-                .expect("Failed to insert launch options");
+        let updated = set_text_vdf_launch_options(vdf, 489830, Some("skse64_loader.exe %command%"))
+            .expect("Failed to insert launch options");
         let opts = parse_text_vdf_launch_options(&updated, 489830);
         assert_eq!(opts, Some("skse64_loader.exe %command%".to_string()));
     }

@@ -1,8 +1,10 @@
 pub mod archive_preview;
 pub mod background_hash;
 pub mod baselines;
+pub mod bepinex;
 pub mod bg3_lsx;
 pub mod bg3_pak;
+pub mod bg3se;
 pub mod bottle_config;
 pub mod bottles;
 pub mod cleaner;
@@ -32,9 +34,9 @@ pub mod fromsoft_saves;
 pub mod game_lock;
 pub mod game_registry;
 pub mod games;
-pub mod graphics_backend;
 pub mod google_oauth;
 pub mod gpu_encoder;
+pub mod graphics_backend;
 pub mod ini_manager;
 pub mod installer;
 pub mod instruction_parser;
@@ -54,18 +56,21 @@ pub mod mod_tools;
 pub mod mod_types;
 pub mod modengine2_config;
 pub mod modlist_io;
+pub mod native_scanner;
 pub mod nexus;
 pub mod nexus_games_index;
 pub mod nexus_sso;
-pub mod bg3se;
-pub mod native_scanner;
 pub mod nxm_handler;
 pub mod oauth;
+pub mod paralives_bepinex;
 pub mod platform;
 pub mod plist;
 pub mod plugins;
-pub mod preflight;
+
+pub mod app_updates;
+pub mod commands;
 pub mod prefix_setup;
+pub mod preflight;
 pub mod profile_sharing;
 pub mod profiles;
 pub mod progress;
@@ -73,12 +78,18 @@ pub mod proton;
 pub mod regulation_conflicts;
 pub mod rollback;
 pub mod runtime;
+pub mod self_update;
 pub mod session_tracker;
+pub mod shader_conversion;
 pub mod skse;
 pub mod smapi;
 pub mod staging;
 pub mod steam_integration;
+pub mod texture_optimizer;
+pub mod thunderstore;
+pub mod tool_automation;
 pub mod umu;
+pub mod verified_lists;
 pub mod vortex_fetcher;
 pub mod vortex_index;
 pub mod vortex_plugin;
@@ -91,16 +102,8 @@ pub mod wabbajack_downloader;
 pub mod wabbajack_installer;
 pub mod wabbajack_types;
 pub mod wine_compat;
-pub mod wine_dll_overrides;
-pub mod tool_automation;
-pub mod app_updates;
-pub mod self_update;
-pub mod shader_conversion;
-pub mod texture_optimizer;
-pub mod thunderstore;
-pub mod verified_lists;
 pub mod wine_diagnostic;
-pub mod commands;
+pub mod wine_dll_overrides;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -291,7 +294,6 @@ pub(crate) async fn nexus_api_key_or_token() -> Result<(String, bool), String> {
     }
 }
 
-
 // --- Helpers ---
 
 pub(crate) fn get_current_plugins(game_id: &str, bottle_name: &str) -> Vec<PluginEntry> {
@@ -355,10 +357,7 @@ fn kill_mlx_server() {
 
 /// Run startup health checks after self-healing.
 /// Logs results and emits an event if issues are found.
-fn run_startup_health_check(
-    db: &Arc<database::ModDatabase>,
-    app_handle: &tauri::AppHandle,
-) {
+fn run_startup_health_check(db: &Arc<database::ModDatabase>, app_handle: &tauri::AppHandle) {
     let start = std::time::Instant::now();
     let mut issues: Vec<String> = Vec::new();
 
@@ -458,8 +457,10 @@ pub fn run() {
     plugins::sims4::register();
     plugins::gtav::register();
     plugins::genshin::register();
+    plugins::paralives::register();
     plugins::stardew_valley_native::register();
     plugins::baldurs_gate_3_native::register();
+    plugins::paralives_native::register();
     plugins::thunderstore_games::register_all();
     plugins::fromsoft::register_all();
     game_registry::register_all();
@@ -541,9 +542,11 @@ pub fn run() {
     // Initialize Sentry if user has opted in to telemetry
     const SENTRY_DSN: &str = "https://de71b88287dbb157e219aff7e1ba2d9c@o4511134300045312.ingest.us.sentry.io/4511134367940608";
     let _sentry_guard = {
-        let consent = config::get_config()
-            .ok()
-            .and_then(|c| c.extra.get("telemetry_consent").and_then(|v| v.as_str().map(String::from)));
+        let consent = config::get_config().ok().and_then(|c| {
+            c.extra
+                .get("telemetry_consent")
+                .and_then(|v| v.as_str().map(String::from))
+        });
         if consent.as_deref() == Some("granted") {
             log::info!("Telemetry enabled — initializing Sentry");
             Some(sentry::init((
@@ -654,7 +657,13 @@ pub fn run() {
             }
             let inactive_only = args.iter().any(|a| a == "--inactive-only");
             let deployed_inactive = args.iter().any(|a| a == "--deployed-inactive");
-            commands::cli::cli_check_plugins(game_id, bottle_name, inactive_only, deployed_inactive, &db);
+            commands::cli::cli_check_plugins(
+                game_id,
+                bottle_name,
+                inactive_only,
+                deployed_inactive,
+                &db,
+            );
             return;
         }
 
@@ -849,7 +858,10 @@ pub fn run() {
             // First try the summary parse (lenient)
             match wabbajack::parse_wabbajack_file(path) {
                 Ok(parsed) => {
-                    eprintln!("Summary parse OK: {} archives, {} directives", parsed.archive_count, parsed.directive_count);
+                    eprintln!(
+                        "Summary parse OK: {} archives, {} directives",
+                        parsed.archive_count, parsed.directive_count
+                    );
                 }
                 Err(e) => {
                     eprintln!("Summary parse error: {}", e);
@@ -859,12 +871,15 @@ pub fn run() {
             // Now try the full typed parse (strict — this is what the installer uses)
             match wabbajack_installer::parse_wabbajack_file_typed_cli(path) {
                 Ok(typed) => {
-                    println!("{}", serde_json::json!({
-                        "name": typed.name,
-                        "archives": typed.archives.len(),
-                        "directives": typed.directives.len(),
-                        "status": "OK"
-                    }));
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "name": typed.name,
+                            "archives": typed.archives.len(),
+                            "directives": typed.directives.len(),
+                            "status": "OK"
+                        })
+                    );
                 }
                 Err(e) => {
                     eprintln!("Typed parse error: {}", e);
@@ -872,17 +887,26 @@ pub fn run() {
                     if let Ok(file) = std::fs::File::open(path) {
                         if let Ok(mut archive) = zip::ZipArchive::new(file) {
                             if let Ok(entry) = archive.by_name("modlist") {
-                                let raw: Result<serde_json::Value, _> = serde_json::from_reader(entry);
+                                let raw: Result<serde_json::Value, _> =
+                                    serde_json::from_reader(entry);
                                 if let Ok(val) = raw {
                                     // Check archives for problematic states
-                                    if let Some(archives) = val.get("Archives").and_then(|v| v.as_array()) {
+                                    if let Some(archives) =
+                                        val.get("Archives").and_then(|v| v.as_array())
+                                    {
                                         eprintln!("\nArchives: {} total", archives.len());
                                         // Find archives with string fields where i64 expected
                                         for (i, a) in archives.iter().enumerate() {
                                             if let Some(state) = a.get("State") {
-                                                let t = state.get("$type").and_then(|v| v.as_str()).unwrap_or("");
+                                                let t = state
+                                                    .get("$type")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or("");
                                                 // Check for string IDs that should be i64
-                                                for key in ["ModID", "FileID", "modID", "fileID", "IPS4Mod", "IPS4File"] {
+                                                for key in [
+                                                    "ModID", "FileID", "modID", "fileID",
+                                                    "IPS4Mod", "IPS4File",
+                                                ] {
                                                     if let Some(val) = state.get(key) {
                                                         if val.is_string() {
                                                             eprintln!("  FOUND STRING-AS-NUMBER: archive[{}] $type={} {key}={}", i, t, val);
@@ -893,13 +917,21 @@ pub fn run() {
                                         }
                                     }
                                     // Check directives for problematic fields
-                                    if let Some(directives) = val.get("Directives").and_then(|v| v.as_array()) {
+                                    if let Some(directives) =
+                                        val.get("Directives").and_then(|v| v.as_array())
+                                    {
                                         eprintln!("Directives: {} total", directives.len());
                                         for (i, d) in directives.iter().enumerate() {
                                             if let Some(ahp) = d.get("ArchiveHashPath") {
                                                 if ahp.is_string() {
                                                     eprintln!("  FOUND STRING ArchiveHashPath: directive[{}] = {}", i, ahp);
-                                                    if i < 3 { eprintln!("    full: {}", serde_json::to_string(d).unwrap_or_default()); }
+                                                    if i < 3 {
+                                                        eprintln!(
+                                                            "    full: {}",
+                                                            serde_json::to_string(d)
+                                                                .unwrap_or_default()
+                                                        );
+                                                    }
                                                 }
                                             }
                                         }
@@ -988,53 +1020,48 @@ pub fn run() {
         builder = builder.plugin(tauri_plugin_webdriver::init());
     }
 
-    let mut builder = builder
-        .setup(move |app| {
-            // Register updater plugin in setup per Tauri docs (advanced pattern)
-            app.handle()
-                .plugin(tauri_plugin_updater::Builder::new().build())?;
-            app.manage(app_updates::PendingUpdate(std::sync::Mutex::new(None)));
+    let mut builder = builder.setup(move |app| {
+        // Register updater plugin in setup per Tauri docs (advanced pattern)
+        app.handle()
+            .plugin(tauri_plugin_updater::Builder::new().build())?;
+        app.manage(app_updates::PendingUpdate(std::sync::Mutex::new(None)));
 
-            // Run startup health check in background
-            let health_db = db_for_setup.clone();
-            let health_handle = app.handle().clone();
-            std::thread::spawn(move || {
-                run_startup_health_check(&health_db, &health_handle);
+        // Run startup health check in background
+        let health_db = db_for_setup.clone();
+        let health_handle = app.handle().clone();
+        std::thread::spawn(move || {
+            run_startup_health_check(&health_db, &health_handle);
+        });
+
+        // Periodic error reporter — every 30 min, report high-frequency errors to Sentry
+        let report_db = db_for_setup;
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(30 * 60));
+            let consent = config::get_config().ok().and_then(|c| {
+                c.extra
+                    .get("telemetry_consent")
+                    .and_then(|v| v.as_str().map(String::from))
             });
-
-            // Periodic error reporter — every 30 min, report high-frequency errors to Sentry
-            let report_db = db_for_setup;
-            std::thread::spawn(move || {
-                loop {
-                    std::thread::sleep(std::time::Duration::from_secs(30 * 60));
-                    let consent = config::get_config()
-                        .ok()
-                        .and_then(|c| {
-                            c.extra
-                                .get("telemetry_consent")
-                                .and_then(|v| v.as_str().map(String::from))
-                        });
-                    if consent.as_deref() != Some("granted") {
-                        continue;
-                    }
-                    if let Ok(errors) = report_db.get_error_summary(10) {
-                        for err in &errors {
-                            if err.count > 5 {
-                                sentry::capture_message(
-                                    &format!(
-                                        "[{}] {}: {} (count: {})",
-                                        err.module, err.error_type, err.message, err.count
-                                    ),
-                                    sentry::Level::Warning,
-                                );
-                            }
-                        }
+            if consent.as_deref() != Some("granted") {
+                continue;
+            }
+            if let Ok(errors) = report_db.get_error_summary(10) {
+                for err in &errors {
+                    if err.count > 5 {
+                        sentry::capture_message(
+                            &format!(
+                                "[{}] {}: {} (count: {})",
+                                err.module, err.error_type, err.message, err.count
+                            ),
+                            sentry::Level::Warning,
+                        );
                     }
                 }
-            });
-
-            Ok(())
+            }
         });
+
+        Ok(())
+    });
 
     #[cfg(debug_assertions)]
     {
@@ -1277,6 +1304,11 @@ pub fn run() {
             commands::game_state::clean_game_directory,
             // Native Game Manual Add
             commands::game_state::add_native_game_manually,
+            // Paralives native BepInEx
+            commands::paralives_cmds::get_paralives_bepinex_status,
+            commands::paralives_cmds::install_paralives_bepinex_latest,
+            commands::paralives_cmds::install_paralives_bepinex_from_archive,
+            commands::paralives_cmds::uninstall_paralives_bepinex,
             // Wabbajack Modlists
             commands::wabbajack::get_wabbajack_modlists,
             commands::wabbajack::parse_wabbajack_file,

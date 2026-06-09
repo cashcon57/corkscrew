@@ -64,21 +64,23 @@ const FORMAT_VERSION: u32 = 1;
 /// Pipeline: JSON → zstd compress → base64url → chunked with dashes.
 pub fn encode_profile(profile: &SharedProfile) -> Result<String, String> {
     // Serialize to JSON (compact, no pretty-printing)
-    let json = serde_json::to_vec(profile)
-        .map_err(|e| format!("JSON serialization failed: {}", e))?;
+    let json =
+        serde_json::to_vec(profile).map_err(|e| format!("JSON serialization failed: {}", e))?;
 
     // Compress with zstd (level 3 = good balance of speed vs ratio)
-    let compressed = zstd::encode_all(json.as_slice(), 3)
-        .map_err(|e| format!("Compression failed: {}", e))?;
+    let compressed =
+        zstd::encode_all(json.as_slice(), 3).map_err(|e| format!("Compression failed: {}", e))?;
 
     // Encode as STANDARD base64 (uses +/ instead of -_ so we can use - as separator)
     let b64 = base64::engine::general_purpose::STANDARD_NO_PAD.encode(&compressed);
 
     // Chunk into 5-char groups with dashes, prefixed with CRKS
     // STANDARD base64 uses A-Z a-z 0-9 + / (no dashes), so dashes are safe separators
-    let chunks: Vec<&str> = b64.as_bytes().chunks(5).map(|c| {
-        std::str::from_utf8(c).unwrap_or("")
-    }).collect();
+    let chunks: Vec<&str> = b64
+        .as_bytes()
+        .chunks(5)
+        .map(|c| std::str::from_utf8(c).unwrap_or(""))
+        .collect();
 
     Ok(format!("{}-{}", CODE_PREFIX, chunks.join("-")))
 }
@@ -88,15 +90,19 @@ pub fn encode_profile(profile: &SharedProfile) -> Result<String, String> {
 /// Pipeline: strip prefix + dashes → base64url decode → zstd decompress → JSON parse.
 pub fn decode_profile(code: &str) -> Result<SharedProfile, String> {
     // Strip prefix
-    let stripped = code.strip_prefix(&format!("{}-", CODE_PREFIX))
+    let stripped = code
+        .strip_prefix(&format!("{}-", CODE_PREFIX))
         .ok_or_else(|| format!("Invalid code: must start with '{}-'", CODE_PREFIX))?;
 
     // Remove dashes and whitespace to reconstruct base64
     // STANDARD base64 uses +/ (not -_), so dashes are safe to strip
-    let b64: String = stripped.chars().filter(|c| !matches!(*c, '-' | ' ' | '\n' | '\r')).collect();
+    let b64: String = stripped
+        .chars()
+        .filter(|c| !matches!(*c, '-' | ' ' | '\n' | '\r'))
+        .collect();
 
     // Decode STANDARD base64 with lenient padding
-    use base64::engine::{GeneralPurpose, GeneralPurposeConfig, DecodePaddingMode};
+    use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
     let decoder = GeneralPurpose::new(
         &base64::alphabet::STANDARD,
         GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent),
@@ -110,8 +116,8 @@ pub fn decode_profile(code: &str) -> Result<SharedProfile, String> {
         .map_err(|e| format!("Decompression failed: {}", e))?;
 
     // Parse JSON
-    let profile: SharedProfile = serde_json::from_slice(&json)
-        .map_err(|e| format!("JSON parse failed: {}", e))?;
+    let profile: SharedProfile =
+        serde_json::from_slice(&json).map_err(|e| format!("JSON parse failed: {}", e))?;
 
     // Validate format version
     if profile.version > FORMAT_VERSION {
@@ -179,9 +185,13 @@ mod tests {
         let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&compressed);
         // base64 no-pad output should be len % 4 in {0, 2, 3}, never 1
         let rem = b64.len() % 4;
-        assert_ne!(rem, 1, "base64 NO_PAD should never produce len%4==1, got len={}", b64.len());
+        assert_ne!(
+            rem,
+            1,
+            "base64 NO_PAD should never produce len%4==1, got len={}",
+            b64.len()
+        );
     }
-
 
     fn sample_profile() -> SharedProfile {
         SharedProfile {
@@ -207,8 +217,14 @@ mod tests {
                 },
             ],
             plugins: vec![
-                SharedPlugin { filename: "Skyrim.esm".into(), enabled: true },
-                SharedPlugin { filename: "SkyUI_SE.esp".into(), enabled: true },
+                SharedPlugin {
+                    filename: "Skyrim.esm".into(),
+                    enabled: true,
+                },
+                SharedPlugin {
+                    filename: "SkyUI_SE.esp".into(),
+                    enabled: true,
+                },
             ],
         }
     }
@@ -244,11 +260,7 @@ mod tests {
         let profile = sample_profile();
         let code = encode_profile(&profile).unwrap();
         // A 2-mod profile should compress well below 500 chars
-        assert!(
-            code.len() < 500,
-            "Code too long: {} chars",
-            code.len()
-        );
+        assert!(code.len() < 500, "Code too long: {} chars", code.len());
     }
 
     #[test]

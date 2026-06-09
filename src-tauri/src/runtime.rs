@@ -5,8 +5,8 @@
 //! split so the rest of the codebase can branch on runtime in one place
 //! rather than carrying optional bottle fields.
 
-use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// Discriminates between a Wine/CrossOver-hosted game and a natively-running
 /// macOS game. Serialises as `{"runtime": "wine", ...}` or
@@ -133,8 +133,14 @@ mod tests {
         let n = back.native().unwrap();
         assert_eq!(n.architecture, Architecture::AppleSilicon);
         assert_eq!(n.source, NativeSource::Steam);
-        assert_eq!(n.app_bundle_path, PathBuf::from("/Applications/Stardew Valley.app"));
-        assert_eq!(n.game_data_root, PathBuf::from("/Applications/Stardew Valley.app/Contents/MacOS"));
+        assert_eq!(
+            n.app_bundle_path,
+            PathBuf::from("/Applications/Stardew Valley.app")
+        );
+        assert_eq!(
+            n.game_data_root,
+            PathBuf::from("/Applications/Stardew Valley.app/Contents/MacOS")
+        );
         assert!(!n.sandboxed);
     }
 
