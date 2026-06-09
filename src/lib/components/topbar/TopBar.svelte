@@ -36,20 +36,25 @@
     openDropdown = null;
   }
 
+  let nativeToggling = $state(false);
+
   async function toggleNativeMode() {
+    if (nativeToggling) return; // debounce rapid clicks
+    nativeToggling = true;
     const newValue = !$nativeMode;
     try {
       await setNativeMode(newValue);
+      nativeMode.set(newValue);
+      await applyNativeTheme(newValue);
+      if (newValue) {
+        await goto("/native").catch((err) => console.error("navigation to /native failed:", err));
+      } else {
+        await goto("/").catch((err) => console.error("navigation to / failed:", err));
+      }
     } catch (err) {
-      console.error("setNativeMode failed:", err);
-      return;
-    }
-    nativeMode.set(newValue);
-    await applyNativeTheme(newValue);
-    if (newValue) {
-      goto("/native").catch((err) => console.error("navigation to /native failed:", err));
-    } else {
-      goto("/").catch((err) => console.error("navigation to / failed:", err));
+      console.error("toggleNativeMode failed:", err);
+    } finally {
+      nativeToggling = false;
     }
   }
 </script>
@@ -104,6 +109,7 @@
         class="topbar-mode-toggle"
         class:native-active={$nativeMode}
         onclick={toggleNativeMode}
+        disabled={nativeToggling}
         aria-label={$nativeMode ? "Switch to Wine Mode" : "Switch to Native Mode"}
         title={$nativeMode ? "Switch to Wine Mode" : "Switch to Native Mode"}
       >
