@@ -6,22 +6,36 @@
 //! at `~/Library/Application Support/com.Paralives.Paralives/Mods/`,
 //! which is OUTSIDE the `.app` bundle — bundle code signing is preserved.
 //!
-//! Supported mod formats (all data-only, cross-platform):
+//! ## Supported mod formats
+//!
+//! **Data mods** (all cross-platform, data-only):
 //! `.fbx`, `.obj`, `.png`, `.jpg`, `.jpeg`, `.catalog`, `.ogg`, `.wav`,
-//! `.json`, `.ttf`.
+//! `.json`, `.ttf` — deployed to the Unity persistent data Mods/ path.
 //!
-//! UNSUPPORTED (refused at deploy time):
-//! - `.exe`, `.dll`, `winhttp.dll`, `BepInEx/` payloads — these are
-//!   Windows-only loaders OR require `codesign --remove-signature` on
-//!   the .app bundle (BepInEx-mac). Both are deal-breakers we do NOT
-//!   ship by default; Phase 1 Corkscrew supports official data mods only.
+//! **BepInEx plugin mods** (macOS ARM64 IL2CPP, community runtime):
+//! `.dll` files located under a `BepInEx/plugins/` path in the archive, or
+//! at the staging root (early/simple BepInEx mod archives). Deployed to
+//! `<game_install>/BepInEx/plugins/<mod_db_id>/`. Requires BepInEx 6.x
+//! IL2CPP macOS ARM64 to be installed first (Layer 1 detection; Layer 3
+//! install).
 //!
-//! BepInEx-style script mods are out of scope for the default deploy path.
-//! The macOS BepInEx build requires `codesign --remove-signature` on the
-//! .app bundle, which invalidates Apple Developer ID signing — an operation
-//! Corkscrew does NOT automate. Users who want BepInEx script mods should
-//! install BepInEx manually with explicit understanding of the signing
-//! trade-off.
+//! ## BepInEx deploy guard
+//!
+//! If a staged mod contains BepInEx plugin files but
+//! `paralives_bepinex::detect()` reports `installed: false`, deploy returns
+//! a typed error directing the user to Settings → Native. If BepInEx is
+//! present but `mac_supported: false` (x86_64 / BepInEx 5.x), deploy also
+//! refuses with a message naming the ARM64 6.x requirement.
+//!
+//! ## Rejected artifacts
+//!
+//! - `.exe` — Windows executables
+//! - `winhttp.dll` — Windows-flavor BepInEx Doorstop hook
+//! - `doorstop_config.ini` — BepInEx Doorstop config (ships with the BepInEx
+//!   install itself, not individual mods)
+//!
+//! Note: plain `.dll` files are no longer unconditionally refused. They are
+//! classified as BepInEx plugin candidates and routed accordingly.
 //!
 //! Apple Silicon only (ARM64 native). Steam App ID 1118520.
 //! CFBundleIdentifier best guess: `com.Paralives.Paralives` — TODO verify
@@ -65,9 +79,9 @@ const PARALIVES_NATIVE_BOTTLE_SENTINEL: &str = "";
 
 /// Game plugin for Paralives (native macOS).
 ///
-/// Deploys official data mods (feature mods, asset mods) to the Unity
-/// persistent data path at `~/Library/Application Support/com.Paralives.Paralives/Mods/`.
-/// The .app bundle is never touched; code signing is preserved.
+/// Deploys data mods to the Unity persistent data path and BepInEx plugin
+/// mods to `<game_install>/BepInEx/plugins/<mod_db_id>/`. The .app bundle
+/// is never touched; code signing is preserved.
 pub struct ParalivesNativePlugin;
 
 // ---------------------------------------------------------------------------
@@ -86,6 +100,19 @@ pub struct ParalivesNativePlugin;
 pub fn resolve_mods_dir() -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
     home.join("Library/Application Support/com.Paralives.Paralives/Mods")
+}
+
+/// Returns the game install directory (parent of the `.app` bundle) from a
+/// `DetectedGame` with a native runtime.
+///
+/// For a Steam install this is typically
+/// `Steam/steamapps/common/Paralives/`. Returns `None` if the runtime is not
+/// native or the bundle path has no parent.
+pub fn resolve_game_install_dir(detected: &DetectedGame) -> Option<PathBuf> {
+    detected
+        .runtime
+        .native()
+        .and_then(|n| n.app_bundle_path.parent().map(|p| p.to_path_buf()))
 }
 
 // ---------------------------------------------------------------------------
@@ -141,29 +168,156 @@ fn detect_from_candidates(
 }
 
 // ---------------------------------------------------------------------------
+// File classification
+// ---------------------------------------------------------------------------
+
+/// Outcome of classifying all staged files for a single mod.
+struct ClassifiedFiles {
+    /// Files that should be deployed into the BepInEx plugins directory.
+    /// Each entry is `(absolute_path, relative_path_from_staging_root)`.
+    bepinex_plugin_files: Vec<(PathBuf, String)>,
+    /// Files that should be deployed into the Paralives data Mods/ directory.
+    data_mod_files: Vec<(PathBuf, String)>,
+}
+
+/// Classify every `(absolute_path, relative_path)` tuple in `staged` into
+/// either a BepInEx plugin file or a data mod file.
+///
+/// ## BepInEx plugin classification rules (in priority order)
+///
+/// 1. Relative path contains a `bepinex/plugins/` segment (case-insensitive,
+///    `/`-normalised) — archive author structured the mod correctly.
+/// 2. Relative path starts with `bepinex/plugins/` (top-level variant of 1).
+/// 3. No path separator and extension is `.dll` — top-level `.dll`, the
+///    "early BepInEx mod" pattern where the author just shipped the assembly
+///    without nesting it in the BepInEx layout.
+///
+/// All other files (`.dll` under non-plugins subdirs, data formats, etc.) go
+/// to the data bucket. The `rejects_paralives_artifact` predicate is applied
+/// to data files at deploy time.
+fn classify_files(staged: &[(PathBuf, String)]) -> ClassifiedFiles {
+    let mut out = ClassifiedFiles {
+        bepinex_plugin_files: Vec::new(),
+        data_mod_files: Vec::new(),
+    };
+    for entry in staged {
+        let rel_lower = entry.1.replace('\\', "/").to_lowercase();
+        let is_bepinex = rel_lower.contains("/bepinex/plugins/")
+            || rel_lower.starts_with("bepinex/plugins/")
+            || (!rel_lower.contains('/') && rel_lower.ends_with(".dll"));
+        if is_bepinex {
+            out.bepinex_plugin_files.push(entry.clone());
+        } else {
+            out.data_mod_files.push(entry.clone());
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Artifact rejection predicate
+// ---------------------------------------------------------------------------
+
+/// Returns `true` if the relative file path is a Windows-only loader or other
+/// artifact that the deploy pipeline cannot handle.
+///
+/// Rejected patterns:
+/// - `.exe` — Windows executables
+/// - `winhttp.dll` — the BepInEx Doorstop hook DLL (Windows-specific loader)
+/// - `doorstop_config.ini` — BepInEx Doorstop configuration (belongs to the
+///   BepInEx install itself, not individual mods)
+///
+/// Note: plain `.dll` is NOT rejected here. DLLs are BepInEx plugin
+/// candidates and are classified by [`classify_files`] before reaching this
+/// predicate. Only the two Windows-loader specific names are special-cased.
+pub fn rejects_paralives_artifact(rel_path: &str) -> bool {
+    let lower = rel_path.replace('\\', "/").to_lowercase();
+    let name = lower.rsplit('/').next().unwrap_or(&lower);
+
+    // Windows executables — always rejected.
+    if name.ends_with(".exe") {
+        return true;
+    }
+    // Windows-flavor BepInEx Doorstop hook — wrong OS.
+    if name == "winhttp.dll" {
+        return true;
+    }
+    // BepInEx Doorstop config — belongs to the BepInEx install, not the mod.
+    if name == "doorstop_config.ini" {
+        return true;
+    }
+
+    false
+}
+
+// ---------------------------------------------------------------------------
+// Single-file deploy helper
+// ---------------------------------------------------------------------------
+
+/// Copy or hardlink a single file from `abs` to `dest_root/rel`.
+///
+/// Creates parent directories as needed. Performs a post-join canonicalization
+/// check to confirm the destination stays inside `canonical_dest_root`.
+/// Removes any existing file at the destination so that `hard_link` does not
+/// fail with EEXIST.
+fn deploy_one_file(
+    abs: &Path,
+    rel: &str,
+    dest_root: &Path,
+    canonical_dest_root: &Path,
+) -> Result<(), DeployerError> {
+    let dest = dest_root.join(rel);
+    let dest_parent = dest.parent().unwrap_or(dest_root);
+    std::fs::create_dir_all(dest_parent)
+        .map_err(|e| DeployerError::Other(format!("create dest parent: {}", e)))?;
+    let canonical_parent = dest_parent
+        .canonicalize()
+        .unwrap_or_else(|_| dest_parent.to_path_buf());
+    if !canonical_parent.starts_with(canonical_dest_root) {
+        return Err(DeployerError::Other(format!(
+            "destination escapes deploy root: {}",
+            dest.display()
+        )));
+    }
+    if dest.exists() {
+        let _ = std::fs::remove_file(&dest);
+    }
+    if std::fs::hard_link(abs, &dest).is_err() {
+        std::fs::copy(abs, &dest)
+            .map_err(|e| DeployerError::Other(format!("copy mod file: {}", e)))?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Inner (testable) deploy function
 // ---------------------------------------------------------------------------
 
 /// Core deployment logic for Paralives native mods.
 ///
-/// Takes an explicit `mods_dir` argument rather than resolving from HOME
-/// so that unit tests can redirect to tempdirs.
+/// Takes explicit `mods_dir` and `game_install_dir` arguments (rather than
+/// resolving from HOME / `detected`) so that unit tests can redirect to
+/// tempdirs.
 ///
-/// Algorithm:
+/// ## Algorithm
+///
 /// 1. Verify `detected.runtime` is [`crate::runtime::GameRuntime::Native`]
 ///    and the game is not sandboxed.
 /// 2. Create `mods_dir` if absent.
 /// 3. Snapshot the current state (best-effort).
-/// 4. Walk enabled mods; for each file in a mod's staging dir:
-///    a. Reject Windows-only / BepInEx artifacts (`.exe`, `.dll`,
-///       `winhttp.dll`, `doorstop_config.ini`, `BepInEx/` paths).
-///    b. Validate the relative path (no traversal, no null bytes).
-///    c. Copy (hardlink-first) the file to `mods_dir/<relative_path>`.
+/// 4. Walk enabled mods; for each mod collect all staged files and classify
+///    them with [`classify_files`]:
+///    - **BepInEx plugin files**: verify BepInEx is installed and
+///      `mac_supported`, then hardlink/copy into
+///      `<game_install_dir>/BepInEx/plugins/<mod_db_id>/`.
+///    - **Data mod files**: apply [`rejects_paralives_artifact`], then
+///      hardlink/copy into `mods_dir/<relative_path>`.
 /// 5. Return [`DeployResult`] with the deployed file count.
 pub fn deploy_native_inner(
     detected: &DetectedGame,
     db: &Arc<ModDatabase>,
     mods_dir: &Path,
+    game_install_dir: Option<&Path>,
 ) -> Result<DeployResult, DeployerError> {
     // 1. Reject non-native and sandboxed games.
     let native = detected
@@ -177,7 +331,7 @@ pub fn deploy_native_inner(
         )));
     }
 
-    // 2. Create the mods directory.
+    // 2. Create the data mods directory.
     std::fs::create_dir_all(mods_dir)
         .map_err(|e| DeployerError::Other(format!("create mods_dir: {}", e)))?;
 
@@ -196,13 +350,12 @@ pub fn deploy_native_inner(
         .list_mods(&detected.game_id, PARALIVES_NATIVE_BOTTLE_SENTINEL)
         .map_err(|e| DeployerError::Database(e.to_string()))?;
 
-    // Canonicalise mods_dir once for destination-escape checks.
+    // Canonicalise mods_dir once for destination-escape checks (data side).
     let canonical_mods_dir = mods_dir
         .canonicalize()
         .unwrap_or_else(|_| mods_dir.to_path_buf());
 
     let mut deployed_count = 0usize;
-    let mut fallback_used = false;
 
     for installed_mod in enabled_mods.iter().filter(|m| m.enabled) {
         let staging_dir = match &installed_mod.staging_path {
@@ -225,62 +378,100 @@ pub fn deploy_native_inner(
             continue;
         }
 
-        for entry in walkdir::WalkDir::new(&staging_dir)
+        // Collect all files (absolute_path, relative_path) for this mod.
+        let staged: Vec<(PathBuf, String)> = walkdir::WalkDir::new(&staging_dir)
             .into_iter()
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().is_file())
-        {
-            let path = entry.path();
-            let rel = match path.strip_prefix(&staging_dir) {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-            let rel_str = rel.to_string_lossy();
+            .filter_map(|e| {
+                let abs = e.into_path();
+                let rel = abs
+                    .strip_prefix(&staging_dir)
+                    .ok()?
+                    .to_string_lossy()
+                    .to_string();
+                Some((abs, rel))
+            })
+            .collect();
 
-            // a. Reject Windows-only / BepInEx-style artifacts.
-            if rejects_paralives_artifact(&rel_str) {
+        let classified = classify_files(&staged);
+
+        // ── BepInEx plugin files ─────────────────────────────────────────────
+        if !classified.bepinex_plugin_files.is_empty() {
+            let install_dir = game_install_dir.ok_or_else(|| {
+                DeployerError::Other(
+                    "BepInEx plugin staged but game install directory could not be resolved"
+                        .into(),
+                )
+            })?;
+
+            let bepinex_status = crate::paralives_bepinex::detect(install_dir);
+
+            if !bepinex_status.installed {
                 return Err(DeployerError::Other(format!(
-                    "unsupported Paralives artifact (Windows-only or BepInEx loader) \
-                     in mod '{}': {}",
-                    installed_mod.name, rel_str
+                    "BepInEx is required to use the mod '{}' but is not installed. \
+                     Install BepInEx via Settings \u{2192} Native or manually before deploying.",
+                    installed_mod.name
+                )));
+            }
+            if !bepinex_status.mac_supported {
+                return Err(DeployerError::Other(format!(
+                    "BepInEx is installed but the wrong architecture for Apple Silicon \
+                     (likely BepInEx 5.x). Install BepInEx 6.x IL2CPP macOS ARM64 to use '{}'.",
+                    installed_mod.name
                 )));
             }
 
-            // b. Validate relative path safety (no traversal, null bytes, drive letters).
-            if !is_safe_relative_path(&rel_str) {
+            // Deploy into <install_dir>/BepInEx/plugins/<mod_db_id>/.
+            // Use the numeric DB id as the subdirectory name — it is unique,
+            // filesystem-safe, and stable across renames.
+            let plugin_root = install_dir
+                .join("BepInEx")
+                .join("plugins")
+                .join(installed_mod.id.to_string());
+            std::fs::create_dir_all(&plugin_root)
+                .map_err(|e| DeployerError::Other(format!("create plugin_root: {}", e)))?;
+            let canonical_plugin_root = plugin_root
+                .canonicalize()
+                .unwrap_or_else(|_| plugin_root.clone());
+
+            for (abs, rel) in &classified.bepinex_plugin_files {
+                // Path safety: the relative paths come from walkdir over our
+                // own staging dir, but validate anyway.
+                if !is_safe_relative_path(rel) {
+                    return Err(DeployerError::Other(format!(
+                        "unsafe BepInEx plugin path in mod '{}': {}",
+                        installed_mod.name, rel
+                    )));
+                }
+                // Strip any leading BepInEx/plugins/ prefix so files land
+                // directly inside plugin_root rather than being double-nested.
+                let dest_rel = strip_bepinex_plugins_prefix(rel);
+                deploy_one_file(abs, dest_rel, &plugin_root, &canonical_plugin_root)?;
+                deployed_count += 1;
+            }
+        }
+
+        // ── Data mod files ───────────────────────────────────────────────────
+        for (abs, rel) in &classified.data_mod_files {
+            // Reject Windows-only loaders and other invalid artifacts.
+            if rejects_paralives_artifact(rel) {
+                return Err(DeployerError::Other(format!(
+                    "unsupported Paralives artifact (Windows-only or invalid) \
+                     in mod '{}': {}",
+                    installed_mod.name, rel
+                )));
+            }
+
+            // Validate relative path safety (no traversal, null bytes, drive letters).
+            if !is_safe_relative_path(rel) {
                 return Err(DeployerError::Other(format!(
                     "unsafe mod path in mod '{}': {}",
-                    installed_mod.name, rel_str
+                    installed_mod.name, rel
                 )));
             }
 
-            let dest = mods_dir.join(rel);
-
-            // c. Post-join canonicalization: verify dest stays inside mods_dir.
-            let dest_parent = dest.parent().unwrap_or(mods_dir);
-            std::fs::create_dir_all(dest_parent)
-                .map_err(|e| DeployerError::Other(format!("create dest parent: {}", e)))?;
-            let canonical_parent = dest_parent
-                .canonicalize()
-                .unwrap_or_else(|_| dest_parent.to_path_buf());
-            if !canonical_parent.starts_with(&canonical_mods_dir) {
-                return Err(DeployerError::Other(format!(
-                    "destination escapes mods_dir: {}",
-                    dest.display()
-                )));
-            }
-
-            // Remove existing file so hardlink does not fail with EEXIST.
-            if dest.exists() {
-                let _ = std::fs::remove_file(&dest);
-            }
-
-            if std::fs::hard_link(path, &dest).is_err() {
-                std::fs::copy(path, &dest)
-                    .map_err(|e| DeployerError::Other(format!("copy mod file: {}", e)))?;
-                fallback_used = true;
-            }
-
+            deploy_one_file(abs, rel, mods_dir, &canonical_mods_dir)?;
             deployed_count += 1;
         }
     }
@@ -288,47 +479,31 @@ pub fn deploy_native_inner(
     Ok(DeployResult {
         deployed_count,
         skipped_count: 0,
-        fallback_used,
+        fallback_used: false,
     })
 }
 
-// ---------------------------------------------------------------------------
-// Artifact rejection predicate
-// ---------------------------------------------------------------------------
-
-/// Returns `true` if the relative file path is a Windows-only loader,
-/// BepInEx payload, or other artifact that Paralives' macOS data-mod
-/// runtime cannot use.
+/// Strip a leading `BepInEx/plugins/` (case-insensitive, normalised)
+/// prefix from a relative path so that plugin DLLs land directly inside
+/// `plugin_root` rather than being double-nested under `BepInEx/plugins/`.
 ///
-/// Rejected patterns:
-/// - `.exe` — Windows executables
-/// - `.dll` — Windows DLLs (BepInEx plugin assemblies, loaders)
-/// - `winhttp.dll` — the BepInEx Doorstop hook DLL (Windows-specific)
-/// - `doorstop_config.ini` — BepInEx Doorstop configuration (Windows)
-/// - Any path containing `BepInEx/` — BepInEx plugin layout
-///
-/// Note: `.dll` is rejected broadly because Paralives' official macOS
-/// mod runtime loads only data-only formats (see module doc). When/if
-/// Corkscrew adds a dedicated BepInEx-mac plugin, it will handle `.dll`
-/// through its own specialised pipeline.
-pub fn rejects_paralives_artifact(rel_path: &str) -> bool {
-    let lower = rel_path.replace('\\', "/").to_lowercase();
-    let name = lower.rsplit('/').next().unwrap_or(&lower);
-
-    // Windows binaries
-    if name.ends_with(".exe") || name.ends_with(".dll") {
-        return true;
+/// For top-level DLLs (no separator) the path is returned unchanged.
+fn strip_bepinex_plugins_prefix(rel: &str) -> &str {
+    let norm = rel.replace('\\', "/");
+    // Lowercase comparison only — the original rel is what we return sliced.
+    let lower = norm.to_lowercase();
+    for prefix in &["bepinex/plugins/"] {
+        if lower.starts_with(prefix) {
+            // Return the part after the prefix, referencing the original bytes.
+            return &rel[prefix.len()..];
+        }
+        // Also handle an interior segment (e.g. "SubDir/BepInEx/plugins/Mod.dll")
+        // by finding the first occurrence.
+        if let Some(pos) = lower.find(&format!("/{}", prefix)) {
+            return &rel[pos + 1 + prefix.len()..];
+        }
     }
-    // BepInEx loader markers
-    if name == "winhttp.dll" || name == "doorstop_config.ini" {
-        return true;
-    }
-    // BepInEx directory layout
-    if lower.contains("/bepinex/") || lower.starts_with("bepinex/") {
-        return true;
-    }
-
-    false
+    rel
 }
 
 // ---------------------------------------------------------------------------
@@ -384,17 +559,19 @@ impl GamePlugin for ParalivesNativePlugin {
         LoadOrderKind::None
     }
 
-    /// Deploy all staged Paralives mods into the Unity persistent data mods dir.
+    /// Deploy all staged Paralives mods.
     ///
-    /// Thin wrapper that resolves the canonical macOS path via
-    /// [`resolve_mods_dir`] and delegates all work to the testable
-    /// [`deploy_native_inner`].
+    /// Data mods go to the Unity persistent data Mods/ path. BepInEx plugin
+    /// mods go to `<game_install>/BepInEx/plugins/<mod_db_id>/` (requires
+    /// BepInEx 6.x IL2CPP ARM64 to be installed).
     fn deploy_native(
         &self,
         detected: &DetectedGame,
         db: &Arc<ModDatabase>,
     ) -> std::result::Result<DeployResult, DeployerError> {
-        deploy_native_inner(detected, db, &resolve_mods_dir())
+        let mods_dir = resolve_mods_dir();
+        let install_dir = resolve_game_install_dir(detected);
+        deploy_native_inner(detected, db, &mods_dir, install_dir.as_deref())
     }
 }
 
@@ -463,6 +640,51 @@ mod tests {
                 source: NativeSource::Steam,
             }),
             steam_app_id: Some(PARALIVES_STEAM_APP_ID.to_string()),
+        }
+    }
+
+    /// Write a minimal arm64 single-arch Mach-O header to `path`.
+    /// 32 bytes: magic (LE 0xFEEDFACF) + cputype (LE arm64 = 0x0100000C) + padding.
+    fn write_arm64_macho(path: &Path) {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0xFEED_FACFu32.to_le_bytes()); // MH_MAGIC_64
+        bytes.extend_from_slice(&0x0100_000Cu32.to_le_bytes()); // cputype = arm64
+        bytes.extend(std::iter::repeat(0u8).take(28));
+        std::fs::write(path, &bytes).expect("write arm64 macho");
+    }
+
+    /// Write a minimal x86_64 single-arch Mach-O header to `path`.
+    fn write_x86_64_macho(path: &Path) {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0xFEED_FACFu32.to_le_bytes()); // MH_MAGIC_64
+        bytes.extend_from_slice(&0x0100_0007u32.to_le_bytes()); // cputype = x86_64
+        bytes.extend(std::iter::repeat(0u8).take(28));
+        std::fs::write(path, &bytes).expect("write x86_64 macho");
+    }
+
+    /// Synthesize a full BepInEx install layout under `dir`:
+    /// - `BepInEx/core/BepInEx.Core.dll`
+    /// - `libdoorstop.dylib` (arm64 when `arm64 == true`, else x86_64)
+    /// - `changelog.txt` (optional)
+    fn make_bepinex_layout(dir: &Path, arm64: bool, with_changelog: bool) {
+        let core_dir = dir.join("BepInEx").join("core");
+        std::fs::create_dir_all(&core_dir).expect("create core dir");
+        std::fs::write(core_dir.join("BepInEx.Core.dll"), b"fake dll")
+            .expect("write core dll");
+
+        let dylib_path = dir.join("libdoorstop.dylib");
+        if arm64 {
+            write_arm64_macho(&dylib_path);
+        } else {
+            write_x86_64_macho(&dylib_path);
+        }
+
+        if with_changelog {
+            std::fs::write(
+                dir.join("changelog.txt"),
+                "# 6.0.0-pre.2\nSome changelog text\n",
+            )
+            .expect("write changelog");
         }
     }
 
@@ -637,17 +859,41 @@ mod tests {
         );
     }
 
-    // ── 9. Artifact rejection: .dll ─────────────────────────────────────────
+    // ── 9. Artifact rejection: winhttp.dll and doorstop_config.ini ─────────
+    // NOTE: plain .dll is now a BepInEx plugin candidate, NOT rejected here.
 
     #[test]
-    fn rejects_paralives_artifact_rejects_dll() {
+    fn rejects_paralives_artifact_still_refuses_exe_and_winhttp() {
+        // .exe: always refused.
         assert!(
-            rejects_paralives_artifact("CheatMod.dll"),
-            ".dll must be rejected"
+            rejects_paralives_artifact("Launcher.exe"),
+            ".exe must still be rejected"
         );
         assert!(
-            rejects_paralives_artifact("BepInEx/plugins/CheatMod.dll"),
-            ".dll in BepInEx layout must be rejected"
+            rejects_paralives_artifact("subdir/tool.exe"),
+            ".exe in subdir must still be rejected"
+        );
+
+        // winhttp.dll: Windows-flavor BepInEx Doorstop — refused.
+        assert!(
+            rejects_paralives_artifact("winhttp.dll"),
+            "winhttp.dll must be rejected"
+        );
+        assert!(
+            rejects_paralives_artifact("WINHTTP.DLL"),
+            "winhttp.dll (uppercase) must be rejected"
+        );
+
+        // doorstop_config.ini: belongs to BepInEx install, not a mod.
+        assert!(
+            rejects_paralives_artifact("doorstop_config.ini"),
+            "doorstop_config.ini must be rejected"
+        );
+
+        // Regression: plain .dll is now legal (routes to BepInEx bucket).
+        assert!(
+            !rejects_paralives_artifact("SomeMod.dll"),
+            ".dll must NOT be rejected by rejects_paralives_artifact (it's a BepInEx candidate)"
         );
     }
 
@@ -669,26 +915,7 @@ mod tests {
         );
     }
 
-    // ── 11. Artifact rejection: BepInEx path ────────────────────────────────
-
-    #[test]
-    fn rejects_paralives_artifact_rejects_bepinex_path() {
-        assert!(
-            rejects_paralives_artifact("BepInEx/plugins/SomeMod.dll"),
-            "BepInEx/ path must be rejected"
-        );
-        assert!(
-            rejects_paralives_artifact("BEPINEX/core/BepInEx.dll"),
-            "BepInEx/ path (uppercase) must be rejected"
-        );
-        // Windows path separator normalised to /
-        assert!(
-            rejects_paralives_artifact("BepInEx\\plugins\\mod.dll"),
-            "BepInEx\\ (Windows separator) must be rejected"
-        );
-    }
-
-    // ── 12. Artifact acceptance: official data-mod formats ──────────────────
+    // ── 11. Artifact acceptance: official data-mod formats ──────────────────
 
     #[test]
     fn rejects_paralives_artifact_accepts_png_fbx_json_etc() {
@@ -711,6 +938,112 @@ mod tests {
                 path
             );
         }
+    }
+
+    // ── 12. classify_files: top-level .dll → BepInEx ───────────────────────
+
+    #[test]
+    fn classify_files_routes_top_level_dll_to_bepinex() {
+        let staged = vec![
+            (PathBuf::from("/staging/MyPlugin.dll"), "MyPlugin.dll".to_string()),
+            (PathBuf::from("/staging/config.json"), "config.json".to_string()),
+        ];
+        let classified = classify_files(&staged);
+        assert_eq!(
+            classified.bepinex_plugin_files.len(),
+            1,
+            "top-level .dll must go to BepInEx bucket"
+        );
+        assert_eq!(
+            classified.bepinex_plugin_files[0].1,
+            "MyPlugin.dll"
+        );
+        assert_eq!(
+            classified.data_mod_files.len(),
+            1,
+            "config.json must go to data bucket"
+        );
+    }
+
+    // ── 13. classify_files: BepInEx/plugins/ path → BepInEx ────────────────
+
+    #[test]
+    fn classify_files_routes_bepinex_plugins_path_to_bepinex() {
+        let staged = vec![
+            (
+                PathBuf::from("/staging/BepInEx/plugins/MyMod.dll"),
+                "BepInEx/plugins/MyMod.dll".to_string(),
+            ),
+            (
+                PathBuf::from("/staging/BepInEx/plugins/SubDir/Helper.dll"),
+                "BepInEx/plugins/SubDir/Helper.dll".to_string(),
+            ),
+        ];
+        let classified = classify_files(&staged);
+        assert_eq!(
+            classified.bepinex_plugin_files.len(),
+            2,
+            "both BepInEx/plugins/ paths must be in the BepInEx bucket"
+        );
+        assert!(
+            classified.data_mod_files.is_empty(),
+            "data bucket must be empty"
+        );
+    }
+
+    // ── 14. classify_files: data formats → data bucket ──────────────────────
+
+    #[test]
+    fn classify_files_routes_data_formats_to_data() {
+        let staged = vec![
+            (PathBuf::from("/staging/model.fbx"), "model.fbx".to_string()),
+            (PathBuf::from("/staging/tex/skin.png"), "tex/skin.png".to_string()),
+            (PathBuf::from("/staging/sfx/click.ogg"), "sfx/click.ogg".to_string()),
+            (PathBuf::from("/staging/meta.json"), "meta.json".to_string()),
+        ];
+        let classified = classify_files(&staged);
+        assert!(
+            classified.bepinex_plugin_files.is_empty(),
+            "no BepInEx files in a pure data-mod archive"
+        );
+        assert_eq!(classified.data_mod_files.len(), 4);
+    }
+
+    // ── 15. classify_files: mixed archive ───────────────────────────────────
+
+    #[test]
+    fn classify_files_handles_mixed_archive() {
+        let staged = vec![
+            (
+                PathBuf::from("/staging/BepInEx/plugins/CoreMod.dll"),
+                "BepInEx/plugins/CoreMod.dll".to_string(),
+            ),
+            (
+                PathBuf::from("/staging/assets/icon.png"),
+                "assets/icon.png".to_string(),
+            ),
+            (
+                PathBuf::from("/staging/Standalone.dll"),
+                "Standalone.dll".to_string(),
+            ),
+            (
+                PathBuf::from("/staging/config/settings.json"),
+                "config/settings.json".to_string(),
+            ),
+        ];
+        let classified = classify_files(&staged);
+        // CoreMod.dll (BepInEx path) + Standalone.dll (top-level) → BepInEx bucket
+        assert_eq!(
+            classified.bepinex_plugin_files.len(),
+            2,
+            "BepInEx path DLL + top-level DLL must both be in BepInEx bucket"
+        );
+        // icon.png + settings.json → data bucket
+        assert_eq!(
+            classified.data_mod_files.len(),
+            2,
+            "data assets must be in data bucket"
+        );
     }
 
     // ── deploy_native_inner: sandbox refusal ────────────────────────────────
@@ -740,7 +1073,7 @@ mod tests {
             steam_app_id: Some(PARALIVES_STEAM_APP_ID.to_string()),
         };
 
-        let result = deploy_native_inner(&detected, &db, &mods_dir);
+        let result = deploy_native_inner(&detected, &db, &mods_dir, None);
         assert!(result.is_err(), "must refuse sandboxed game");
         let msg = format!("{}", result.unwrap_err());
         assert!(
@@ -784,7 +1117,7 @@ mod tests {
             .unwrap();
 
         let detected = fake_detected_native(tmp.path());
-        deploy_native_inner(&detected, &db, &mods_dir).unwrap();
+        deploy_native_inner(&detected, &db, &mods_dir, None).unwrap();
 
         let snapshots =
             crate::rollback::list_snapshots(&db, "paralives_native", "").unwrap();
@@ -798,7 +1131,7 @@ mod tests {
         );
     }
 
-    // ── deploy_native_inner: happy path ─────────────────────────────────────
+    // ── deploy_native_inner: happy path (data mods) ─────────────────────────
 
     #[test]
     fn paralives_deploy_native_copies_files_to_mods_dir() {
@@ -828,19 +1161,200 @@ mod tests {
             .unwrap();
 
         let detected = fake_detected_native(tmp.path());
-        let result = deploy_native_inner(&detected, &db, &mods_dir).unwrap();
+        let result = deploy_native_inner(&detected, &db, &mods_dir, None).unwrap();
 
         assert_eq!(result.deployed_count, 2, "config.json + textures/skin.png");
         assert!(mods_dir.join("config.json").exists());
         assert!(mods_dir.join("textures/skin.png").exists());
     }
 
-    // ── deploy_native_inner: reject BepInEx artifact ────────────────────────
+    // ── deploy_native_inner: BepInEx not installed ──────────────────────────
 
     #[test]
-    fn paralives_deploy_native_refuses_bepinex_dll() {
+    fn deploy_native_refuses_bepinex_plugin_when_bepinex_not_installed() {
         let tmp = tempfile::tempdir().unwrap();
         let mods_dir = tmp.path().join("Mods");
+        // game_install_dir is a vanilla dir (no BepInEx).
+        let install_dir = tmp.path().join("GameInstall");
+        std::fs::create_dir_all(&install_dir).unwrap();
+
+        let db_path = tmp.path().join("test.db");
+        let db = Arc::new(crate::database::ModDatabase::new(&db_path).unwrap());
+
+        // Stage a mod with a BepInEx plugin DLL under BepInEx/plugins/.
+        let staging_dir = tmp.path().join("staging");
+        std::fs::create_dir_all(staging_dir.join("BepInEx/plugins")).unwrap();
+        std::fs::write(
+            staging_dir.join("BepInEx/plugins/MyMod.dll"),
+            b"MZ fake dll",
+        )
+        .unwrap();
+
+        let mod_id = db
+            .add_mod(
+                "paralives_native",
+                "",
+                None,
+                "Script Mod",
+                "1.0.0",
+                "script_mod.zip",
+                &[],
+            )
+            .unwrap();
+        db.set_staging_path(mod_id, &staging_dir.to_string_lossy())
+            .unwrap();
+
+        // Build a bundle path whose parent is install_dir.
+        let bundle_path = install_dir.join("Paralives.app");
+        std::fs::create_dir_all(&bundle_path).unwrap();
+        let detected = fake_detected_native(&bundle_path);
+
+        let result =
+            deploy_native_inner(&detected, &db, &mods_dir, Some(install_dir.as_path()));
+        assert!(result.is_err(), "must refuse when BepInEx is not installed");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("BepInEx is required"),
+            "error must say 'BepInEx is required': {msg}"
+        );
+    }
+
+    // ── deploy_native_inner: BepInEx installed but wrong arch ───────────────
+
+    #[test]
+    fn deploy_native_refuses_bepinex_plugin_when_mac_unsupported() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mods_dir = tmp.path().join("Mods");
+        let install_dir = tmp.path().join("GameInstall");
+        std::fs::create_dir_all(&install_dir).unwrap();
+
+        // Install BepInEx with an x86_64-only dylib (BepInEx 5.x style).
+        make_bepinex_layout(&install_dir, false /* x86_64 */, false);
+
+        let db_path = tmp.path().join("test.db");
+        let db = Arc::new(crate::database::ModDatabase::new(&db_path).unwrap());
+
+        let staging_dir = tmp.path().join("staging");
+        std::fs::create_dir_all(staging_dir.join("BepInEx/plugins")).unwrap();
+        std::fs::write(
+            staging_dir.join("BepInEx/plugins/MyMod.dll"),
+            b"MZ fake dll",
+        )
+        .unwrap();
+
+        let mod_id = db
+            .add_mod(
+                "paralives_native",
+                "",
+                None,
+                "Script Mod",
+                "1.0.0",
+                "script_mod.zip",
+                &[],
+            )
+            .unwrap();
+        db.set_staging_path(mod_id, &staging_dir.to_string_lossy())
+            .unwrap();
+
+        let bundle_path = install_dir.join("Paralives.app");
+        std::fs::create_dir_all(&bundle_path).unwrap();
+        let detected = fake_detected_native(&bundle_path);
+
+        let result =
+            deploy_native_inner(&detected, &db, &mods_dir, Some(install_dir.as_path()));
+        assert!(result.is_err(), "must refuse x86_64-only BepInEx");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("wrong architecture"),
+            "error must mention 'wrong architecture': {msg}"
+        );
+    }
+
+    // ── deploy_native_inner: BepInEx installed arm64, plugin deployed ────────
+
+    #[test]
+    fn deploy_native_copies_bepinex_plugin_to_plugins_dir_when_installed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mods_dir = tmp.path().join("Mods");
+        let install_dir = tmp.path().join("GameInstall");
+        std::fs::create_dir_all(&install_dir).unwrap();
+
+        // Install BepInEx with an arm64 dylib (BepInEx 6.x style).
+        make_bepinex_layout(&install_dir, true /* arm64 */, true);
+
+        let db_path = tmp.path().join("test.db");
+        let db = Arc::new(crate::database::ModDatabase::new(&db_path).unwrap());
+
+        let staging_dir = tmp.path().join("staging");
+        std::fs::create_dir_all(staging_dir.join("BepInEx/plugins")).unwrap();
+        std::fs::write(
+            staging_dir.join("BepInEx/plugins/MyMod.dll"),
+            b"MZ fake dll",
+        )
+        .unwrap();
+
+        let mod_db_id = db
+            .add_mod(
+                "paralives_native",
+                "",
+                None,
+                "Script Mod",
+                "1.0.0",
+                "script_mod.zip",
+                &[],
+            )
+            .unwrap();
+        db.set_staging_path(mod_db_id, &staging_dir.to_string_lossy())
+            .unwrap();
+
+        let bundle_path = install_dir.join("Paralives.app");
+        std::fs::create_dir_all(&bundle_path).unwrap();
+        let detected = fake_detected_native(&bundle_path);
+
+        let result =
+            deploy_native_inner(&detected, &db, &mods_dir, Some(install_dir.as_path()))
+                .expect("deploy must succeed with arm64 BepInEx");
+
+        assert_eq!(result.deployed_count, 1, "one plugin file deployed");
+
+        // Plugin must be in <install_dir>/BepInEx/plugins/<mod_db_id>/MyMod.dll
+        let expected_path = install_dir
+            .join("BepInEx")
+            .join("plugins")
+            .join(mod_db_id.to_string())
+            .join("MyMod.dll");
+        assert!(
+            expected_path.exists(),
+            "plugin must be deployed at {}: file not found",
+            expected_path.display()
+        );
+
+        // Data mods dir must not contain the DLL.
+        assert!(
+            !mods_dir.join("BepInEx/plugins/MyMod.dll").exists(),
+            "DLL must not appear in the data Mods/ dir"
+        );
+    }
+
+    // ── deploy_native_inner: legacy test renamed/updated ────────────────────
+    // The old `paralives_deploy_native_refuses_bepinex_dll` tested that a
+    // BepInEx/plugins/ DLL caused a hard rejection. Now DLLs under BepInEx/
+    // are routed to the BepInEx bucket. The test is superseded by:
+    //   - deploy_native_refuses_bepinex_plugin_when_bepinex_not_installed
+    //   - deploy_native_copies_bepinex_plugin_to_plugins_dir_when_installed
+    // We keep a renamed version that validates the new routing (no longer
+    // returns an error when BepInEx is absent is checked elsewhere, but here
+    // we confirm the file is NOT sent to data Mods/).
+
+    #[test]
+    fn paralives_deploy_native_bepinex_dll_routes_to_bepinex_bucket_not_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mods_dir = tmp.path().join("Mods");
+        let install_dir = tmp.path().join("GameInstall");
+        std::fs::create_dir_all(&install_dir).unwrap();
+
+        // BepInEx arm64 installed.
+        make_bepinex_layout(&install_dir, true, false);
 
         let db_path = tmp.path().join("test.db");
         let db = Arc::new(crate::database::ModDatabase::new(&db_path).unwrap());
@@ -867,14 +1381,29 @@ mod tests {
         db.set_staging_path(mod_id, &staging_dir.to_string_lossy())
             .unwrap();
 
-        let detected = fake_detected_native(tmp.path());
-        let result = deploy_native_inner(&detected, &db, &mods_dir);
-        assert!(result.is_err(), "BepInEx dll must be rejected");
-        let msg = format!("{}", result.unwrap_err());
+        let bundle_path = install_dir.join("Paralives.app");
+        std::fs::create_dir_all(&bundle_path).unwrap();
+        let detected = fake_detected_native(&bundle_path);
+
+        let result =
+            deploy_native_inner(&detected, &db, &mods_dir, Some(install_dir.as_path()))
+                .expect("deploy must succeed");
+
+        // DLL must NOT appear in the data Mods/ directory.
         assert!(
-            msg.contains("unsupported Paralives artifact"),
-            "error must mention unsupported artifact: {msg}"
+            !mods_dir.exists() || !mods_dir.join("BepInEx").exists(),
+            "DLL must not be deployed to data Mods/ dir"
         );
+        // Must be in the BepInEx plugins dir.
+        let plugin_dir = install_dir
+            .join("BepInEx")
+            .join("plugins")
+            .join(mod_id.to_string());
+        assert!(
+            plugin_dir.join("ScriptMod.dll").exists(),
+            "DLL must be in BepInEx plugins dir"
+        );
+        assert_eq!(result.deployed_count, 1);
     }
 
     // ── Plugin registration ─────────────────────────────────────────────────
