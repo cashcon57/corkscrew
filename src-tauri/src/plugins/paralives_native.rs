@@ -269,6 +269,40 @@ pub fn rejects_paralives_artifact(rel_path: &str) -> bool {
 /// check to confirm the destination stays inside `canonical_dest_root`.
 /// Removes any existing file at the destination so that `hard_link` does not
 /// fail with EEXIST.
+/// Build a Paralives-mod-loader-compatible container name from an arbitrary
+/// mod display name. Paralives recognises directories ending in `.mod` as
+/// loadable mod packages — see how the game writes Local.mod, MyOptions.mod,
+/// MyPremadeHouseholds.mod into the persistent data Mods/ directory at first
+/// run. Loose files dropped at the root of Mods/ are ignored by the loader.
+///
+/// Strategy:
+/// - Replace any character that is not ASCII alphanumeric or `-` with `_`.
+/// - Collapse multiple `_` in a row to one.
+/// - Append the mod's database id so two mods with the same display name don't
+///   collide (e.g. duplicate uploads, re-installs that kept the old record).
+/// - Suffix with `.mod`.
+fn sanitize_paralives_mod_container(name: &str, db_id: i64) -> String {
+    let mut out = String::new();
+    let mut last_was_underscore = false;
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() || c == '-' {
+            out.push(c);
+            last_was_underscore = false;
+        } else if !last_was_underscore && !out.is_empty() {
+            out.push('_');
+            last_was_underscore = true;
+        }
+    }
+    while out.ends_with('_') {
+        out.pop();
+    }
+    if out.is_empty() {
+        format!("mod_{}.mod", db_id)
+    } else {
+        format!("{}_{}.mod", out, db_id)
+    }
+}
+
 fn deploy_one_file(
     abs: &Path,
     rel: &str,
@@ -358,11 +392,6 @@ pub fn deploy_native_inner(
     let enabled_mods = db
         .list_mods(&detected.game_id, PARALIVES_NATIVE_BOTTLE_SENTINEL)
         .map_err(|e| DeployerError::Database(e.to_string()))?;
-
-    // Canonicalise mods_dir once for destination-escape checks (data side).
-    let canonical_mods_dir = mods_dir
-        .canonicalize()
-        .unwrap_or_else(|_| mods_dir.to_path_buf());
 
     let mut deployed_count = 0usize;
 
@@ -462,26 +491,46 @@ pub fn deploy_native_inner(
         }
 
         // ── Data mod files ───────────────────────────────────────────────────
-        for (abs, rel) in &classified.data_mod_files {
-            // Reject Windows-only loaders and other invalid artifacts.
-            if rejects_paralives_artifact(rel) {
-                return Err(DeployerError::Other(format!(
-                    "unsupported Paralives artifact (Windows-only or invalid) \
-                     in mod '{}': {}",
-                    installed_mod.name, rel
-                )));
-            }
+        //
+        // Paralives' mod loader recognises directories ending in `.mod` as
+        // loadable mod packages — see how the game writes Local.mod,
+        // MyOptions.mod, MyPremadeHouseholds.mod into the persistent data
+        // Mods/ directory at first run. Loose files at the root of Mods/ are
+        // ignored. We give each mod its own `<sanitized>_<db_id>.mod/`
+        // container so the loader sees one package per mod and mods don't
+        // stomp each other's assets at deploy time.
+        if !classified.data_mod_files.is_empty() {
+            let container =
+                sanitize_paralives_mod_container(&installed_mod.name, installed_mod.id);
+            let mod_container_dir = mods_dir.join(&container);
+            std::fs::create_dir_all(&mod_container_dir).map_err(|e| {
+                DeployerError::Other(format!("create mod container: {}", e))
+            })?;
+            let canonical_container_dir = mod_container_dir
+                .canonicalize()
+                .unwrap_or_else(|_| mod_container_dir.clone());
 
-            // Validate relative path safety (no traversal, null bytes, drive letters).
-            if !is_safe_relative_path(rel) {
-                return Err(DeployerError::Other(format!(
-                    "unsafe mod path in mod '{}': {}",
-                    installed_mod.name, rel
-                )));
-            }
+            for (abs, rel) in &classified.data_mod_files {
+                // Reject Windows-only loaders and other invalid artifacts.
+                if rejects_paralives_artifact(rel) {
+                    return Err(DeployerError::Other(format!(
+                        "unsupported Paralives artifact (Windows-only or invalid) \
+                         in mod '{}': {}",
+                        installed_mod.name, rel
+                    )));
+                }
 
-            deploy_one_file(abs, rel, mods_dir, &canonical_mods_dir)?;
-            deployed_count += 1;
+                // Validate relative path safety (no traversal, null bytes, drive letters).
+                if !is_safe_relative_path(rel) {
+                    return Err(DeployerError::Other(format!(
+                        "unsafe mod path in mod '{}': {}",
+                        installed_mod.name, rel
+                    )));
+                }
+
+                deploy_one_file(abs, rel, &mod_container_dir, &canonical_container_dir)?;
+                deployed_count += 1;
+            }
         }
     }
 
@@ -1173,8 +1222,18 @@ mod tests {
         let result = deploy_native_inner(&detected, &db, &mods_dir, None).unwrap();
 
         assert_eq!(result.deployed_count, 2, "config.json + textures/skin.png");
-        assert!(mods_dir.join("config.json").exists());
-        assert!(mods_dir.join("textures/skin.png").exists());
+        let container = sanitize_paralives_mod_container("Asset Mod", mod_id);
+        let container_dir = mods_dir.join(&container);
+        assert!(
+            container_dir.exists(),
+            "per-mod `.mod` container must be created: {}",
+            container_dir.display()
+        );
+        assert!(container_dir.join("config.json").exists());
+        assert!(container_dir.join("textures/skin.png").exists());
+        // Loose files must NOT be at the root of Mods/.
+        assert!(!mods_dir.join("config.json").exists());
+        assert!(!mods_dir.join("textures/skin.png").exists());
     }
 
     // ── deploy_native_inner: BepInEx not installed ──────────────────────────
@@ -1413,6 +1472,25 @@ mod tests {
             "DLL must be in BepInEx plugins dir"
         );
         assert_eq!(result.deployed_count, 1);
+    }
+
+    // ── sanitize_paralives_mod_container ───────────────────────────────────
+
+    #[test]
+    fn sanitize_paralives_mod_container_basic() {
+        assert_eq!(
+            sanitize_paralives_mod_container("R&R Re-Skin", 42),
+            "R_R_Re-Skin_42.mod"
+        );
+        assert_eq!(
+            sanitize_paralives_mod_container("ParaPussy", 7),
+            "ParaPussy_7.mod"
+        );
+        assert_eq!(
+            sanitize_paralives_mod_container("!!! special !!!", 9),
+            "special_9.mod"
+        );
+        assert_eq!(sanitize_paralives_mod_container("", 12), "mod_12.mod");
     }
 
     // ── Plugin registration ─────────────────────────────────────────────────

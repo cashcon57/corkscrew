@@ -1730,31 +1730,51 @@ pub async fn launch_game_cmd(
         }
     }
 
-    // Native games: launch the .app bundle via macOS `open`. This goes
-    // through Launch Services exactly like double-clicking the .app in
-    // Finder — Gatekeeper, document defaults, etc. all apply.
+    // Native games: launch via macOS `open`. For Steam-distributed native
+    // games we MUST go through the steam:// protocol so Steamworks gets
+    // injected — otherwise the game's run.sh launcher (or the binary itself)
+    // detects no Steam parent process and shuts down with messages like
+    // "Game not launched through Steam with Steamworks enabled, shutting
+    // down...". For non-Steam sources, fall back to `open <bundle>` which
+    // routes through Launch Services exactly like double-clicking the .app.
     if opt_bottle.is_none() {
-        let bundle_path = game
+        let native_ctx = game
             .runtime
             .native()
-            .map(|n| n.app_bundle_path.clone())
-            .ok_or_else(|| "Native game has no app_bundle_path".to_string())?;
-        log::info!("launch_game_cmd: native launch `open {}`", bundle_path.display());
+            .ok_or_else(|| "Native game has no native runtime".to_string())?;
+        let bundle_path = native_ctx.app_bundle_path.clone();
+
+        let (launch_arg, launch_kind): (String, &'static str) =
+            if matches!(native_ctx.source, crate::runtime::NativeSource::Steam) {
+                if let Some(app_id) = game.steam_app_id.as_deref() {
+                    (format!("steam://run/{}", app_id), "steam url")
+                } else {
+                    (bundle_path.to_string_lossy().to_string(), "bundle path")
+                }
+            } else {
+                (bundle_path.to_string_lossy().to_string(), "bundle path")
+            };
+
+        log::info!(
+            "launch_game_cmd: native launch `open {}` ({})",
+            launch_arg,
+            launch_kind
+        );
         let output = std::process::Command::new("open")
-            .arg(&bundle_path)
+            .arg(&launch_arg)
             .output()
             .map_err(|e| format!("Failed to spawn `open`: {}", e))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(format!(
                 "`open {}` exited {}: {}",
-                bundle_path.display(),
+                launch_arg,
                 output.status,
                 stderr.trim()
             ));
         }
         return Ok(LaunchResult {
-            executable: bundle_path.to_string_lossy().to_string(),
+            executable: launch_arg,
             bottle_name: String::new(),
             pid: None, // `open` detaches — we don't get the child PID
             success: true,
