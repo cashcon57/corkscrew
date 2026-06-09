@@ -4,7 +4,7 @@
   import { openUrl } from "@tauri-apps/plugin-opener";
   import DOMPurify from "dompurify";
   import { bbcodeToHtml } from "$lib/bbcode";
-  import { getNexusModDetail, getModFiles } from "$lib/api";
+  import { getNexusModDetail, getModFiles, getModRequirements, type ModRequirements, type ModRef } from "$lib/api";
   import { relativeTime, absoluteDate } from "$lib/relativeTime";
 
   interface Props {
@@ -24,6 +24,8 @@
   let modFiles = $state<NexusModFile[]>([]);
   let loading = $state(false);
   let renderedDescription = $state("");
+  let requirements = $state<ModRequirements | null>(null);
+  let requirementsLoading = $state(false);
 
   function formatDownloads(n: number): string {
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -75,11 +77,15 @@
     modDetail = null;
     modFiles = [];
     renderedDescription = "";
+    requirements = null;
     loading = true;
     try {
       const [detail, files] = await Promise.all([
         getNexusModDetail(slug, m.mod_id),
-        getModFiles(slug, m.mod_id).catch(() => [] as NexusModFile[]),
+        getModFiles(slug, m.mod_id).catch((err) => {
+          console.error("getModFiles failed:", err);
+          return [] as NexusModFile[];
+        }),
       ]);
       modDetail = detail;
       const categoryOrder: Record<string, number> = { main: 0, update: 1, optional: 2, miscellaneous: 3, old_version: 4 };
@@ -89,12 +95,30 @@
       if (detail.description) {
         renderedDescription = DOMPurify.sanitize(bbcodeToHtml(detail.description));
       }
+      // Kick off requirements fetch separately — non-blocking + gracefully hidden on failure
+      loadRequirements(slug, m.mod_id);
     } catch (e) {
       showError(`Failed to load mod details: ${e}`);
       onback();
     } finally {
       loading = false;
     }
+  }
+
+  async function loadRequirements(slug: string, modId: number) {
+    requirementsLoading = true;
+    try {
+      requirements = await getModRequirements(slug, modId);
+    } catch (err) {
+      console.error("getModRequirements failed (hiding section):", err);
+      requirements = null;
+    } finally {
+      requirementsLoading = false;
+    }
+  }
+
+  function openModRef(ref: ModRef) {
+    if (ref.url) safeOpenUrl(ref.url);
   }
 </script>
 
@@ -188,6 +212,74 @@
           <h3 class="detail-section-title">Description</h3>
           <div class="rendered-markdown" onclick={handleRenderedLinkClick}>
             {@html renderedDescription}
+          </div>
+        </div>
+      {/if}
+
+      <!-- Required mods (forward dependencies) -->
+      {#if requirementsLoading}
+        <div class="detail-section">
+          <h3 class="detail-section-title">Required mods</h3>
+          <div class="req-skeleton">
+            <div class="req-skel-row"></div>
+            <div class="req-skel-row"></div>
+          </div>
+        </div>
+      {:else if requirements && requirements.requires.length > 0}
+        <div class="detail-section">
+          <h3 class="detail-section-title">
+            Required mods
+            <span class="title-count">{requirements.requires.length}</span>
+          </h3>
+          <div class="req-list">
+            {#each requirements.requires as ref (ref.mod_id)}
+              <button
+                type="button"
+                class="req-card"
+                onclick={() => openModRef(ref)}
+                title="Open on NexusMods: {ref.name}"
+              >
+                <span class="req-name">{ref.name}</span>
+                {#if ref.author}
+                  <span class="req-author">by {ref.author}</span>
+                {/if}
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="req-icon">
+                  <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                  <polyline points="15 3 21 3 21 9" />
+                  <line x1="10" y1="14" x2="21" y2="3" />
+                </svg>
+              </button>
+            {/each}
+          </div>
+        </div>
+      {/if}
+
+      <!-- Mods that require this -->
+      {#if !requirementsLoading && requirements && requirements.required_by.length > 0}
+        <div class="detail-section">
+          <h3 class="detail-section-title">
+            Mods that require this
+            <span class="title-count">{requirements.required_by.length}</span>
+          </h3>
+          <div class="req-list">
+            {#each requirements.required_by as ref (ref.mod_id)}
+              <button
+                type="button"
+                class="req-card"
+                onclick={() => openModRef(ref)}
+                title="Open on NexusMods: {ref.name}"
+              >
+                <span class="req-name">{ref.name}</span>
+                {#if ref.author}
+                  <span class="req-author">by {ref.author}</span>
+                {/if}
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="req-icon">
+                  <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                  <polyline points="15 3 21 3 21 9" />
+                  <line x1="10" y1="14" x2="21" y2="3" />
+                </svg>
+              </button>
+            {/each}
           </div>
         </div>
       {/if}
@@ -489,5 +581,72 @@
     font-size: 12px;
     color: var(--text-tertiary);
     margin: 0;
+  }
+
+  /* --- Requirements (forward + reverse) --- */
+
+  .req-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: var(--space-2);
+  }
+
+  .req-card {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--surface);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius);
+    text-align: left;
+    cursor: pointer;
+    transition: border-color var(--duration-fast) var(--ease),
+                background var(--duration-fast) var(--ease);
+    font-family: inherit;
+  }
+
+  .req-card:hover {
+    border-color: var(--accent);
+    background: var(--surface-hover);
+  }
+
+  .req-name {
+    flex: 1;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .req-author {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    flex-shrink: 0;
+  }
+
+  .req-icon {
+    flex-shrink: 0;
+    color: var(--text-tertiary);
+  }
+
+  .req-skeleton {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .req-skel-row {
+    height: 36px;
+    background: var(--surface);
+    border-radius: var(--radius);
+    animation: skel-pulse 1.2s ease-in-out infinite;
+  }
+
+  @keyframes skel-pulse {
+    0%, 100% { opacity: 0.6; }
+    50% { opacity: 1; }
   }
 </style>

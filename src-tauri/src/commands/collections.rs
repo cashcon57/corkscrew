@@ -1134,6 +1134,24 @@ pub async fn get_nexus_mod_detail(
         .map_err(|e| e.to_string())
 }
 
+/// Fetch the requirements (forward + reverse dependencies) for a mod.
+///
+/// Currently returns an empty `ModRequirements` — the underlying nexus client
+/// method is a stub pending NM GraphQL schema confirmation. The command is
+/// wired so the UI can ship the section scaffold without churn when the
+/// real API path is added. See `nexus::NexusClient::fetch_mod_requirements`.
+#[tauri::command]
+pub async fn get_mod_requirements(
+    game_slug: String,
+    mod_id: i64,
+) -> Result<nexus::ModRequirements, String> {
+    let client = nexus_client().await?;
+    client
+        .fetch_mod_requirements(&game_slug, mod_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 
 // --- Collection Install Resume ---
 

@@ -1172,6 +1172,7 @@ pub fn run() {
             commands::collections::fetch_url_text,
             commands::collections::browse_nexus_mods_cmd,
             commands::collections::get_nexus_mod_detail,
+            commands::collections::get_mod_requirements,
             commands::collections::search_nexus_mods_cmd,
             commands::collections::get_game_categories_cmd,
             commands::collections::browse_collections_cmd,

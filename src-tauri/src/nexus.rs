@@ -1195,6 +1195,57 @@ pub struct UserEndorsement {
 }
 
 // ---------------------------------------------------------------------------
+// Mod requirements (forward + reverse dependencies)
+// ---------------------------------------------------------------------------
+
+/// A reference to another mod, used in requirement lists.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ModRef {
+    pub mod_id: i64,
+    pub name: String,
+    pub url: String,
+    /// Optional author for display.
+    #[serde(default)]
+    pub author: Option<String>,
+}
+
+/// Forward + reverse dependency info for a single mod.
+///
+/// `requires` is the list of mods this one depends on.
+/// `required_by` is the list of mods that depend on this one.
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
+pub struct ModRequirements {
+    pub requires: Vec<ModRef>,
+    pub required_by: Vec<ModRef>,
+}
+
+impl NexusClient {
+    /// Fetch the requirements (forward + reverse deps) for a mod.
+    ///
+    /// **STATUS: STUB.** NexusMods does not expose this info via the v1 REST
+    /// API. The v2 GraphQL schema for `Mod.requirements` / `Mod.requiredBy`
+    /// is not stable / not publicly documented at time of writing
+    /// (see CLAUDE.md note re: NM removed `totalDownloads` sort etc.).
+    ///
+    /// Returns empty `ModRequirements` for now. Wired so the UI can ship
+    /// the section scaffold; live data is a follow-up once we confirm the
+    /// GraphQL field names against the live introspection.
+    ///
+    /// TODO: Wire to real API. Options:
+    ///   1. NM GraphQL v2 introspection — confirm `Mod.requirements` /
+    ///      `Mod.requiredBy` fields exist, then build a query.
+    ///   2. HTML scrape `nexusmods.com/{game}/mods/{id}` "Requirements"
+    ///      section as a fallback (last resort — fragile).
+    pub async fn fetch_mod_requirements(
+        &self,
+        _game_slug: &str,
+        _mod_id: i64,
+    ) -> Result<ModRequirements> {
+        Ok(ModRequirements::default())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Game categories (v1 REST API)
 // ---------------------------------------------------------------------------
 
@@ -1670,5 +1721,34 @@ mod tests {
     fn parse_nxm_link_bad_path() {
         let result = NXMLink::parse("nxm://skyrim/wrong/12345/path/67890");
         assert!(result.is_err());
+    }
+
+    // -------------------------------------------------------------------
+    // Mod requirements (stub) — confirms the stub returns empty.
+    // When wired to a real API, replace with a httpmock-backed assertion
+    // that the parser produces the expected ModRefs.
+    // -------------------------------------------------------------------
+    #[tokio::test]
+    async fn fetch_mod_requirements_returns_empty_stub() {
+        let client = NexusClient::new("test-key".to_string());
+        let result = client
+            .fetch_mod_requirements("skyrimspecialedition", 12345)
+            .await
+            .expect("stub must succeed");
+        assert!(
+            result.requires.is_empty(),
+            "stub must return empty requires list"
+        );
+        assert!(
+            result.required_by.is_empty(),
+            "stub must return empty required_by list"
+        );
+    }
+
+    #[test]
+    fn mod_requirements_default_is_empty() {
+        let req = ModRequirements::default();
+        assert!(req.requires.is_empty());
+        assert!(req.required_by.is_empty());
     }
 }

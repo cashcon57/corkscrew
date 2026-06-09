@@ -1344,6 +1344,30 @@ export async function getNexusModDetail(
   return invoke("get_nexus_mod_detail", { gameSlug, modId });
 }
 
+export interface ModRef {
+  mod_id: number;
+  name: string;
+  url: string;
+  author?: string | null;
+}
+
+export interface ModRequirements {
+  requires: ModRef[];
+  required_by: ModRef[];
+}
+
+/**
+ * Fetch the requirements (forward + reverse deps) for a mod.
+ * Backend is currently a stub returning empty arrays — UI hides sections
+ * gracefully when empty.
+ */
+export async function getModRequirements(
+  gameSlug: string,
+  modId: number,
+): Promise<ModRequirements> {
+  return invoke("get_mod_requirements", { gameSlug, modId });
+}
+
 // NexusMods Endorsements
 export async function endorseMod(
   gameSlug: string,

@@ -2,8 +2,18 @@
  * Simple BBCode to HTML converter for NexusMods descriptions.
  *
  * Handles the BBCode tags commonly used on NexusMods:
- * [b], [i], [u], [s], [url], [img], [color], [size], [center],
- * [quote], [code], [list], [*], [spoiler], [line], [font]
+ * [b], [i], [u], [s], [url], [img], [center], [left], [right],
+ * [quote], [code], [list], [*], [spoiler], [line], [hr],
+ * [heading], [h1], [h2], [h3], [youtube]
+ *
+ * Deliberately STRIPPED (tag removed, content kept):
+ * - [color]  — dark-themed app picks its own text color; verbatim hex
+ *              colors from authors caused dark-on-dark invisible text
+ * - [size]   — large size tags from NM authors can break layout
+ * - [font]   — custom font families don't render well cross-platform
+ *
+ * Unknown tags are stripped (open + close) at the end so author-specific
+ * BBCode (e.g. [acronym], [b1], etc.) doesn't bleed through raw.
  */
 export function bbcodeToHtml(input: string): string {
   if (!input) return "";
@@ -61,32 +71,31 @@ export function bbcodeToHtml(input: string): string {
     },
   );
 
-  // [color=...]...[/color]
+  // [color=...]...[/color] — STRIP entirely (keep content).
+  // Author-specified colors (esp. #000000) caused dark-on-dark invisible text
+  // in our dark theme. Let the app's CSS pick the text color.
   html = html.replace(
-    /\[color=([^\]]+)\]([\s\S]*?)\[\/color\]/gi,
-    (_m, color: string, text: string) => {
-      const safeColor = color.replace(/[^a-zA-Z0-9#,() .%-]/g, "");
-      return `<span style="color:${safeColor}">${text}</span>`;
-    },
+    /\[color=[^\]]*\]([\s\S]*?)\[\/color\]/gi,
+    "$1",
   );
 
-  // [size=...]...[/size] — NexusMods uses numeric sizes (1-7)
+  // [size=...]...[/size] — STRIP entirely (keep content).
+  // Large author-specified sizes broke layout.
   html = html.replace(
-    /\[size=([^\]]+)\]([\s\S]*?)\[\/size\]/gi,
-    (_m, size: string, text: string) => {
-      const sizeMap: Record<string, string> = {
-        "1": "0.7em", "2": "0.85em", "3": "1em", "4": "1.2em",
-        "5": "1.5em", "6": "2em", "7": "2.5em",
-      };
-      const css = sizeMap[size.trim()] || `${size.trim()}px`;
-      return `<span style="font-size:${css}">${text}</span>`;
-    },
+    /\[size=[^\]]*\]([\s\S]*?)\[\/size\]/gi,
+    "$1",
   );
 
-  // [font=...]...[/font]
+  // [font=...]...[/font] — strip, keep content (cross-platform font families)
   html = html.replace(
-    /\[font=([^\]]+)\]([\s\S]*?)\[\/font\]/gi,
-    (_m, _font: string, text: string) => text, // Strip font tags — don't apply custom fonts
+    /\[font=[^\]]*\]([\s\S]*?)\[\/font\]/gi,
+    "$1",
+  );
+
+  // [left]...[/left]
+  html = html.replace(
+    /\[left\]([\s\S]*?)\[\/left\]/gi,
+    '<div style="text-align:left">$1</div>',
   );
 
   // [center]...[/center]
@@ -155,6 +164,23 @@ export function bbcodeToHtml(input: string): string {
     '<h3 style="margin:12px 0 4px">$1</h3>',
   );
 
+  // [h1]/[h2]/[h3]...[/hN]
+  html = html.replace(
+    /\[h1\]([\s\S]*?)\[\/h1\]/gi,
+    '<h1 style="margin:14px 0 6px;font-size:1.4em">$1</h1>',
+  );
+  html = html.replace(
+    /\[h2\]([\s\S]*?)\[\/h2\]/gi,
+    '<h2 style="margin:12px 0 5px;font-size:1.25em">$1</h2>',
+  );
+  html = html.replace(
+    /\[h3\]([\s\S]*?)\[\/h3\]/gi,
+    '<h3 style="margin:12px 0 4px;font-size:1.1em">$1</h3>',
+  );
+
+  // Stray [*] outside of [list] — convert to a bullet
+  html = html.replace(/\[\*\]/g, "• ");
+
   // [youtube]...[/youtube]
   html = html.replace(
     /\[youtube\]([\s\S]*?)\[\/youtube\]/gi,
@@ -163,6 +189,14 @@ export function bbcodeToHtml(input: string): string {
       return `<iframe width="560" height="315" src="https://www.youtube-nocookie.com/embed/${safeId}" frameborder="0" allowfullscreen style="max-width:100%"></iframe>`;
     },
   );
+
+  // Catch-all: strip any remaining unknown BBCode tags so they don't render raw.
+  // Runs LAST so all specific tags above have already been processed.
+  // Matches:
+  //   [tag]           — opening tags
+  //   [tag=anything]  — opening tags with args
+  //   [/tag]          — closing tags
+  html = html.replace(/\[\/?[a-zA-Z][a-zA-Z0-9]*(?:=[^\]]*)?\]/g, "");
 
   // Convert remaining newlines to <br>
   html = html.replace(/\n/g, "<br>");
