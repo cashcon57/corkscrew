@@ -218,6 +218,27 @@ fn is_game_category(info: &InfoPlist) -> bool {
         .unwrap_or(false)
 }
 
+/// Known native game CFBundleIdentifiers that bypass the category filter.
+///
+/// Some game authors don't set `LSApplicationCategoryType` in `Info.plist` —
+/// those games would otherwise be silently dropped from `/Applications`
+/// discovery. The allow-list mirrors the bundle IDs in our native game
+/// plugins (paralives_native, stardew_valley_native, etc.).
+///
+/// When adding a new native game plugin, add its bundle identifier here.
+pub const KNOWN_NATIVE_BUNDLE_IDS: &[&str] = &[
+    "com.chucklefish.stardewvalley", // Stardew Valley
+    "com.larian.bg3",                // Baldur's Gate 3 — verify with real install
+    "com.Paralives.Paralives",       // Paralives
+    "com.pearlabyss.CrimsonDesert",  // Crimson Desert
+];
+
+fn is_known_native_game(info: &InfoPlist) -> bool {
+    KNOWN_NATIVE_BUNDLE_IDS
+        .iter()
+        .any(|id| *id == info.bundle_identifier.as_str())
+}
+
 /// Walk `dir` (non-recursively) for `.app` bundles.
 ///
 /// Only includes bundles whose `Info.plist` `LSApplicationCategoryType`
@@ -250,10 +271,12 @@ pub(crate) fn scan_dir(dir: &Path) -> Vec<NativeAppCandidate> {
         let Ok(info) = read_info_plist(&info_path) else {
             continue;
         };
-        // Only include bundles with a game-category LSApplicationCategoryType.
-        // VS Code, Chrome, Slack, Claude.app, etc. all lack the games category
-        // and would otherwise pollute the discovery list.
-        if !is_game_category(&info) {
+        // Only include bundles with a game-category LSApplicationCategoryType
+        // OR whose bundle identifier is in the known-native-game allow-list.
+        // VS Code, Chrome, Slack, Claude.app, etc. all lack both, so they are
+        // still filtered out. The allow-list covers legitimate games whose
+        // authors didn't set LSApplicationCategoryType (e.g. Paralives).
+        if !is_game_category(&info) && !is_known_native_game(&info) {
             continue;
         }
         let architecture = detect_bundle_architecture(&p, &info);
@@ -1090,6 +1113,87 @@ mod tests {
         // Steam source wins (it was first in priority order).
         assert_eq!(results[0].source, NativeSource::Steam);
         assert_eq!(results[0].info.bundle_identifier, "com.example.shared");
+    }
+
+    // -----------------------------------------------------------------
+    // validate_manual_native_app sandbox refusal tests (Task 6.2)
+    // -----------------------------------------------------------------
+
+    // -----------------------------------------------------------------
+    // KNOWN_NATIVE_BUNDLE_IDS allow-list tests (Fix 1)
+    // -----------------------------------------------------------------
+
+    /// scan_dir must include a Paralives bundle even when Info.plist has NO
+    /// LSApplicationCategoryType key (the author didn't set it).
+    #[test]
+    fn scan_dir_includes_paralives_even_without_game_category() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        make_non_game_app(dir.path(), "Paralives", "com.Paralives.Paralives");
+
+        let candidates = scan_dir(dir.path());
+        assert_eq!(
+            candidates.len(),
+            1,
+            "Paralives must pass via the bundle-id allow-list even without a game category"
+        );
+        assert_eq!(
+            candidates[0].info.bundle_identifier,
+            "com.Paralives.Paralives"
+        );
+        assert_eq!(candidates[0].source, NativeSource::SystemApplications);
+    }
+
+    /// scan_dir must include a Stardew Valley bundle even when Info.plist has
+    /// NO LSApplicationCategoryType key.
+    #[test]
+    fn scan_dir_includes_stardew_even_without_game_category() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        make_non_game_app(
+            dir.path(),
+            "Stardew Valley",
+            "com.chucklefish.stardewvalley",
+        );
+
+        let candidates = scan_dir(dir.path());
+        assert_eq!(
+            candidates.len(),
+            1,
+            "Stardew Valley must pass via the bundle-id allow-list even without a game category"
+        );
+        assert_eq!(
+            candidates[0].info.bundle_identifier,
+            "com.chucklefish.stardewvalley"
+        );
+    }
+
+    /// All identifiers in KNOWN_NATIVE_BUNDLE_IDS must be recognised by
+    /// is_known_native_game; a random non-game identifier must return false.
+    #[test]
+    fn is_known_native_game_recognizes_all_listed_identifiers() {
+        // A minimal InfoPlist — only bundle_identifier matters for this test.
+        fn make_info(id: &str) -> crate::plist::InfoPlist {
+            crate::plist::InfoPlist {
+                bundle_identifier: id.to_string(),
+                bundle_executable: "dummy".to_string(),
+                short_version: None,
+                category: None,
+            }
+        }
+
+        for id in KNOWN_NATIVE_BUNDLE_IDS {
+            let info = make_info(id);
+            assert!(
+                is_known_native_game(&info),
+                "KNOWN_NATIVE_BUNDLE_IDS entry '{id}' must return true from is_known_native_game"
+            );
+        }
+
+        // A non-game identifier must not pass.
+        let non_game = make_info("com.microsoft.vscode");
+        assert!(
+            !is_known_native_game(&non_game),
+            "com.microsoft.vscode must NOT be recognised as a known native game"
+        );
     }
 
     // -----------------------------------------------------------------

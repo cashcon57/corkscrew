@@ -8,7 +8,8 @@
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
   import { getVersion } from "@tauri-apps/api/app";
-  import { downloadFromNexus, installMod, getAllGames, getDownloadQueue, retryDownload, cancelDownload, clearFinishedDownloads, onDownloadQueueUpdate, listProfiles, listInstalledCollections, getConfig, setConfigValue, launchGame, getAllInterruptedInstalls, resumeCollectionInstall, abandonCollectionInstall, getCheckpointModNames, getPendingWabbajackInstalls, dismissWabbajackInstall, checkSkyrimVersion, getPinnedGameVersion, pinGameVersion, checkSteamStatus, addToSteam, fetchUpdate, installUpdate, chatCheckNewCrashes, listKnownUninstalledGames, getNativeMode, getNativeModeVisible } from "$lib/api";
+  import { downloadFromNexus, installMod, getAllGames, getDownloadQueue, retryDownload, cancelDownload, clearFinishedDownloads, onDownloadQueueUpdate, listProfiles, listInstalledCollections, getConfig, setConfigValue, launchGame, getAllInterruptedInstalls, resumeCollectionInstall, abandonCollectionInstall, getCheckpointModNames, getPendingWabbajackInstalls, dismissWabbajackInstall, checkSkyrimVersion, getPinnedGameVersion, pinGameVersion, checkSteamStatus, addToSteam, fetchUpdate, installUpdate, chatCheckNewCrashes, listKnownUninstalledGames, getNativeMode, getNativeModeVisible, setNativeMode } from "$lib/api";
+  import { applyNativeTheme } from "$lib/native/theme";
   import { resumeInstallTracking } from "$lib/installService";
   import { initHashingListener, destroyHashingListener, dismissHashingBanner } from "$lib/hashingService";
   import { hashingProgress } from "$lib/stores";
@@ -644,7 +645,19 @@
     }
   }
 
+  // Pending game for the native-mode switch confirmation modal.
+  let nativeSwitchPending = $state<DetectedGame | null>(null);
+
   function pickGame(game: DetectedGame) {
+    // Auto-prompt: native game selected while native mode is off.
+    if (game.runtime.runtime === 'native' && !$nativeMode) {
+      nativeSwitchPending = game;
+      return;
+    }
+    applyGameSelection(game);
+  }
+
+  function applyGameSelection(game: DetectedGame) {
     selectedGame.set(game);
     selectedBottle.set((wineCtx(game)?.bottle_name ?? ""));
     // Remember the selected game so it persists across restarts
@@ -654,6 +667,26 @@
     loadProfilesForGame(game);
     loadCollectionsForGame(game);
     checkGameVersion(game);
+  }
+
+  async function confirmNativeSwitch() {
+    const game = nativeSwitchPending;
+    nativeSwitchPending = null;
+    if (!game) return;
+    try {
+      await setNativeMode(true);
+      nativeMode.set(true);
+      await applyNativeTheme(true);
+      applyGameSelection(game);
+      goto("/native");
+    } catch (err) {
+      console.error('confirmNativeSwitch failed:', err);
+      showError(`Failed to switch to Native Mode: ${err}`);
+    }
+  }
+
+  function cancelNativeSwitch() {
+    nativeSwitchPending = null;
   }
 
   async function checkGameVersion(game: DetectedGame) {
@@ -1795,6 +1828,37 @@
   {/if}
 
   <NotificationLog />
+
+  <!-- Native Mode switch confirmation modal -->
+  {#if nativeSwitchPending}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="native-switch-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="native-switch-title"
+      onkeydown={(e) => { if (e.key === 'Escape') cancelNativeSwitch(); }}
+    >
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="native-switch-modal" onclick={(e) => e.stopPropagation()}>
+        <h2 id="native-switch-title">Switch to Native Mode?</h2>
+        <p>
+          <strong>{nativeSwitchPending.display_name}</strong> is a native macOS game.
+          To mod it, Corkscrew needs to switch to Native Mode.
+        </p>
+        <div class="native-switch-warning">
+          ⚠️ <strong>Native Mode is EXPERIMENTAL</strong> and in active development.
+          It is not recommended for anyone other than developers and testers.
+          Modding may not work, may corrupt save data, or may invalidate your game's code signature.
+        </div>
+        <p class="native-switch-subtle">You can disable Native Mode at any time from Settings → About.</p>
+        <div class="native-switch-actions">
+          <button class="native-switch-btn-secondary" onclick={cancelNativeSwitch}>Cancel</button>
+          <button class="native-switch-btn-warning" onclick={confirmNativeSwitch}>Switch to Native Mode</button>
+        </div>
+      </div>
+    </div>
+  {/if}
 </div>
 
 {#if showFirstRunWizard}
@@ -3403,5 +3467,91 @@
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
     border-color: var(--separator);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Native Mode switch confirmation modal                               */
+  /* ------------------------------------------------------------------ */
+  .native-switch-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 9999;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+  }
+  .native-switch-modal {
+    background: var(--bg-grouped, #1a1a1a);
+    border: 1px solid var(--separator, #333);
+    border-radius: 12px;
+    padding: 24px;
+    max-width: 480px;
+    width: calc(100vw - 48px);
+    color: var(--text-primary, white);
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+  }
+  .native-switch-modal h2 {
+    margin: 0 0 12px;
+    font-size: 17px;
+    font-weight: 600;
+  }
+  .native-switch-modal p {
+    margin: 0 0 12px;
+    line-height: 1.5;
+    font-size: 14px;
+    color: var(--text-secondary, #ccc);
+  }
+  .native-switch-modal p strong {
+    color: var(--text-primary, white);
+  }
+  .native-switch-warning {
+    background: rgba(255, 196, 0, 0.08);
+    border: 1px solid rgba(255, 196, 0, 0.35);
+    color: rgb(255, 196, 0);
+    padding: 12px;
+    border-radius: 8px;
+    margin: 12px 0;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .native-switch-subtle {
+    color: var(--text-tertiary, #888) !important;
+    font-size: 12px !important;
+  }
+  .native-switch-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    margin-top: 16px;
+  }
+  .native-switch-btn-secondary {
+    padding: 7px 16px;
+    border-radius: 6px;
+    border: 1px solid var(--separator, #333);
+    background: transparent;
+    color: var(--text-primary, white);
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+  }
+  .native-switch-btn-secondary:hover {
+    background: var(--bg-hover, rgba(255, 255, 255, 0.06));
+  }
+  .native-switch-btn-warning {
+    padding: 7px 16px;
+    border-radius: 6px;
+    border: 1px solid rgb(255, 196, 0);
+    background: rgb(255, 196, 0);
+    color: #000;
+    font-weight: 600;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .native-switch-btn-warning:hover {
+    background: rgb(255, 210, 40);
+    border-color: rgb(255, 210, 40);
   }
 </style>
