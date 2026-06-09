@@ -230,8 +230,9 @@ fn detect_from_candidates(
         .into_iter()
         .filter(|c| !c.sandboxed)
         .filter(|c| {
-            c.info.bundle_identifier == STARDEW_BUNDLE_IDENTIFIER
-                || c.info.bundle_executable == STARDEW_BUNDLE_EXECUTABLE
+            // Case-insensitive — Info.plist authors are inconsistent about casing.
+            c.info.bundle_identifier.eq_ignore_ascii_case(STARDEW_BUNDLE_IDENTIFIER)
+                || c.info.bundle_executable.eq_ignore_ascii_case(STARDEW_BUNDLE_EXECUTABLE)
         })
         .map(|c| {
             let game_path = c.bundle_path.join("Contents").join("MacOS");

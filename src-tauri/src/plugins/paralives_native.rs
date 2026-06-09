@@ -135,8 +135,10 @@ fn detect_from_candidates(
         .into_iter()
         .filter(|c| !c.sandboxed)
         .filter(|c| {
-            c.info.bundle_identifier == PARALIVES_BUNDLE_IDENTIFIER
-                || c.info.bundle_executable == PARALIVES_BUNDLE_EXECUTABLE
+            // Case-insensitive — Info.plist authors are inconsistent about
+            // identifier casing (com.Paralives.Paralives vs com.paralives.paralives etc).
+            c.info.bundle_identifier.eq_ignore_ascii_case(PARALIVES_BUNDLE_IDENTIFIER)
+                || c.info.bundle_executable.eq_ignore_ascii_case(PARALIVES_BUNDLE_EXECUTABLE)
         })
         .map(|c| {
             let game_path = c.bundle_path.join("Contents").join("MacOS");

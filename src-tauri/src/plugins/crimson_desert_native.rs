@@ -81,11 +81,11 @@ fn detect_from_candidates(
         // DetectedGame that would fail at deploy time.
         .filter(|c| c.architecture != crate::runtime::Architecture::IntelOnly)
         .filter(|c| {
-            c.info.bundle_identifier == CD_BUNDLE_IDENTIFIER
-                || c.info.bundle_executable == CD_BUNDLE_EXECUTABLE
-                // Case-insensitive fallback: some community tools reference
-                // "CrimsonDesert" (no space) as the bundle executable name.
-                || c.info.bundle_executable.to_lowercase() == "crimsondesert"
+            // Case-insensitive — Info.plist authors are inconsistent about casing.
+            c.info.bundle_identifier.eq_ignore_ascii_case(CD_BUNDLE_IDENTIFIER)
+                || c.info.bundle_executable.eq_ignore_ascii_case(CD_BUNDLE_EXECUTABLE)
+                // Also accept the no-space community variant.
+                || c.info.bundle_executable.eq_ignore_ascii_case("CrimsonDesert")
         })
         .map(|c| {
             // Game install root: for Steam, the .app lives inside the Steam
