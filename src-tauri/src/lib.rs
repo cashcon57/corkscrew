@@ -161,6 +161,10 @@ pub(crate) fn resolve_bottle(bottle_name: &str) -> Result<Bottle, String> {
 }
 
 /// Resolve a bottle + game pair, returning both plus the data directory.
+///
+/// Wine games only — callers that support both runtimes should use
+/// [`resolve_game_any_runtime`] instead, which handles native games without
+/// requiring a bottle.
 pub(crate) fn resolve_game(
     game_id: &str,
     bottle_name: &str,
@@ -173,6 +177,42 @@ pub(crate) fn resolve_game(
         .ok_or_else(|| format!("Game '{}' not found in bottle '{}'", game_id, bottle_name))?;
     let data_dir = PathBuf::from(&game.data_dir);
     Ok((bottle, game, data_dir))
+}
+
+/// Resolve a game for either Wine or Native runtime.
+///
+/// When `bottle_name` is non-empty the call delegates to [`resolve_game`] and
+/// returns `(Some(bottle), game, data_dir)`. When `bottle_name` is empty (the
+/// native sentinel) the full game list is scanned for a native game whose
+/// `game_id` matches; bottle is returned as `None`.
+///
+/// Returns `Err` if the game cannot be found in either path.
+pub(crate) fn resolve_game_any_runtime(
+    game_id: &str,
+    bottle_name: &str,
+) -> Result<(Option<Bottle>, DetectedGame, PathBuf), String> {
+    if !bottle_name.is_empty() {
+        // Wine path — preserve existing behaviour exactly.
+        let (bottle, game, data_dir) = resolve_game(game_id, bottle_name)?;
+        return Ok((Some(bottle), game, data_dir));
+    }
+
+    // Native path — scan all detected games (bottles + native) for a match.
+    // We do not call detect_all_games_with_custom here because that takes a
+    // DB reference; detect_all_games() covers every registered native plugin
+    // and is sufficient for install routing.
+    let all_games = games::detect_all_games();
+    let game = all_games
+        .into_iter()
+        .find(|g| g.game_id == game_id && g.runtime.is_native())
+        .ok_or_else(|| {
+            format!(
+                "Native game '{}' not found. Make sure the game is detected in Native Mode.",
+                game_id
+            )
+        })?;
+    let data_dir = PathBuf::from(&game.data_dir);
+    Ok((None, game, data_dir))
 }
 
 /// Format a `tokio::task::JoinError` with panic details when available.

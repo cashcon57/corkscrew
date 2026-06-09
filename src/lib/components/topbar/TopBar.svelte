@@ -43,14 +43,20 @@
     nativeToggling = true;
     const newValue = !$nativeMode;
     try {
+      // Persist the new value to the backend first so the config is
+      // consistent if the app restarts mid-navigation.
       await setNativeMode(newValue);
       nativeMode.set(newValue);
-      await applyNativeTheme(newValue);
+      // Navigate BEFORE applying the theme so that Wine pages never briefly
+      // render with native theme tokens (the "in-between" state the user saw).
+      // applyNativeTheme is called after goto() returns to guarantee the
+      // destination route is already mounted.
       if (newValue) {
         await goto("/native").catch((err) => console.error("navigation to /native failed:", err));
       } else {
         await goto("/").catch((err) => console.error("navigation to / failed:", err));
       }
+      await applyNativeTheme(newValue);
     } catch (err) {
       console.error("toggleNativeMode failed:", err);
     } finally {
@@ -105,28 +111,42 @@
     {#if $nativeModeVisible}
       <span class="topbar-separator topbar-separator-spacer"></span>
 
-      <button
-        class="topbar-mode-toggle"
-        class:native-active={$nativeMode}
-        onclick={toggleNativeMode}
-        disabled={nativeToggling}
-        aria-label={$nativeMode ? "Switch to Wine Mode" : "Switch to Native Mode"}
-        title={$nativeMode ? "Switch to Wine Mode" : "Switch to Native Mode"}
+      <!-- Two-position slider: both labels always visible, thumb slides under active side -->
+      <div
+        class="topbar-mode-slider"
+        role="radiogroup"
+        aria-label="Mod runtime mode"
       >
-        {#if $nativeMode}
-          <!-- Sparkle — native mode active -->
-          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <button
+          class="slider-option"
+          class:active={!$nativeMode}
+          role="radio"
+          aria-checked={!$nativeMode}
+          onclick={() => { if ($nativeMode) toggleNativeMode(); }}
+          disabled={nativeToggling}
+          title="Wine / CrossOver"
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+            <path d="M8 22h8M12 22v-7M5 2h14l-1 6a6 6 0 1 1-12 0L5 2z"/>
+          </svg>
+          Wine
+        </button>
+        <button
+          class="slider-option"
+          class:active={$nativeMode}
+          role="radio"
+          aria-checked={$nativeMode}
+          onclick={() => { if (!$nativeMode) toggleNativeMode(); }}
+          disabled={nativeToggling}
+          title="Native macOS"
+        >
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
             <path d="M8 1.5v3M8 11.5v3M1.5 8h3M11.5 8h3M3.5 3.5l2 2M10.5 10.5l2 2M3.5 12.5l2-2M10.5 5.5l2-2"/>
           </svg>
-          <span>Wine</span>
-        {:else}
-          <!-- Sparkle — click to enter native mode -->
-          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M8 1.5v3M8 11.5v3M1.5 8h3M11.5 8h3M3.5 3.5l2 2M10.5 10.5l2 2M3.5 12.5l2-2M10.5 5.5l2-2"/>
-          </svg>
-          <span>Native</span>
-        {/if}
-      </button>
+          Native
+        </button>
+        <div class="slider-thumb" class:right={$nativeMode}></div>
+      </div>
     {/if}
   </div>
 </div>
@@ -232,7 +252,7 @@
     opacity: 0.5;
   }
 
-  /* Push the mode toggle to the far right of the pill */
+  /* Push the mode slider to the far right of the pill */
   .topbar-separator-spacer {
     flex: 1;
     min-width: 8px;
@@ -241,41 +261,76 @@
     pointer-events: none;
   }
 
-  .topbar-mode-toggle {
+  /* Two-position slider */
+  .topbar-mode-slider {
+    position: relative;
+    display: inline-flex;
+    background: var(--bg-grouped, rgba(255, 255, 255, 0.06));
+    border: 1px solid var(--separator, rgba(255, 255, 255, 0.1));
+    border-radius: 100px;
+    padding: 2px;
+    gap: 0;
+    isolation: isolate;
+    -webkit-app-region: no-drag;
+  }
+
+  .slider-option {
     display: inline-flex;
     align-items: center;
     gap: 5px;
     padding: 5px 10px;
     background: transparent;
-    border: 1px solid var(--separator);
-    border-radius: 100px;
+    border: none;
     color: var(--text-secondary);
     cursor: pointer;
     font-size: 11px;
     font-weight: 500;
     letter-spacing: 0.01em;
     white-space: nowrap;
-    transition:
-      background var(--duration-fast, 120ms) var(--ease, ease),
-      color var(--duration-fast, 120ms) var(--ease, ease),
-      border-color var(--duration-fast, 120ms) var(--ease, ease);
+    border-radius: 100px;
+    position: relative;
+    z-index: 1;
+    transition: color 200ms var(--ease, ease);
     -webkit-app-region: no-drag;
   }
 
-  .topbar-mode-toggle:hover {
-    background: var(--surface-hover);
+  .slider-option.active {
     color: var(--text-primary);
-    border-color: var(--separator);
   }
 
-  .topbar-mode-toggle.native-active {
-    background: var(--accent-subtle);
-    color: var(--accent);
-    border-color: var(--accent-muted);
+  .slider-option:not(.active):hover {
+    color: var(--text-primary);
   }
 
-  .topbar-mode-toggle.native-active:hover {
-    background: var(--accent-muted);
-    color: var(--accent-hover, var(--accent));
+  .slider-option:disabled {
+    cursor: wait;
+    opacity: 0.6;
+  }
+
+  /* Sliding highlight thumb — translates to the right half when native is active */
+  .slider-thumb {
+    position: absolute;
+    top: 2px;
+    bottom: 2px;
+    left: 2px;
+    width: calc(50% - 2px);
+    background: var(--accent-subtle, rgba(91, 115, 255, 0.16));
+    border-radius: 100px;
+    transition: transform 220ms cubic-bezier(0.4, 0, 0.2, 1);
+    z-index: 0;
+    pointer-events: none;
+  }
+
+  .slider-thumb.right {
+    transform: translateX(100%);
+  }
+
+  /* Native-side accent when native mode is active */
+  :global([data-theme="native"]) .slider-thumb.right {
+    background: linear-gradient(
+      135deg,
+      rgba(78, 203, 255, 0.25),
+      rgba(168, 85, 247, 0.25)
+    );
   }
 </style>

@@ -286,10 +286,23 @@
 
     loadDetectedGames();
 
-    // Hydrate nativeMode store from persisted config so the topbar
-    // toggle reflects the user's last-set state on cold launch.
+    // Hydrate nativeMode store from persisted config so the topbar toggle
+    // reflects the user's last-set state on cold launch.
+    //
+    // Guard: if the user clicks the toggle before this async call resolves the
+    // promise must NOT clobber their choice. We snapshot the store value at the
+    // moment the callback runs and only apply the backend result if the store
+    // has not been written to in the meantime (i.e., still has the default
+    // false value set by the store initialiser).
+    const nativeModeAtMountTime = get(nativeMode);
     getNativeMode()
-      .then((enabled: boolean) => nativeMode.set(enabled))
+      .then((enabled: boolean) => {
+        // Only hydrate on cold launch when the store still holds its default.
+        // If toggleNativeMode already fired, skip — don't overwrite the user's choice.
+        if (get(nativeMode) === nativeModeAtMountTime) {
+          nativeMode.set(enabled);
+        }
+      })
       .catch((err: unknown) => console.warn('getNativeMode hydration failed:', err));
 
     // Hydrate nativeModeVisible — controls whether the topbar toggle and
@@ -818,10 +831,13 @@
       }
     }
 
-    if (!game || !bottle) {
+    // For native games the bottle sentinel is "" (falsy) — only block when no
+    // game is selected at all. Normalise null → "" so the type is plain string.
+    if (!game) {
       showError("Select a game first before installing from NexusMods links.");
       return;
     }
+    const bottleStr: string = bottle ?? "";
 
     // Navigate to mods page
     currentPage.set("mods");
@@ -829,7 +845,7 @@
 
     try {
       // Download only — don't auto-install
-      const result = await downloadFromNexus(nxmUrl, game.game_id, bottle, false);
+      const result = await downloadFromNexus(nxmUrl, game.game_id, bottleStr, false);
       const downloadInfo = result as unknown as { downloaded: string; mod_name: string; mod_version: string };
 
       // Show confirmation toast — user must click Install or Cancel
@@ -838,7 +854,7 @@
         modName: downloadInfo.mod_name,
         modVersion: downloadInfo.mod_version,
         gameId: game.game_id,
-        bottleName: bottle,
+        bottleName: bottleStr,
         nexusModId,
         nxmUrl,
       });

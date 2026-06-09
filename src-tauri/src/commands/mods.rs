@@ -30,7 +30,7 @@ use crate::progress;
 use crate::rollback;
 use crate::skse::{SkseStatus};
 use crate::staging;
-use crate::{AppState, check_game_lock, nexus_client, resolve_bottle, resolve_game};
+use crate::{AppState, check_game_lock, nexus_client, resolve_bottle, resolve_game, resolve_game_any_runtime};
 use serde::{Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -330,7 +330,10 @@ pub async fn install_mod_cmd(
             return Err(format!("Archive not found: {}", archive_path));
         }
 
-        let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
+        // Resolve game for either Wine (bottle_name non-empty) or native
+        // (bottle_name is the empty-string sentinel). Native games skip bottle
+        // resolution entirely so they no longer fail with "Bottle '' not found".
+        let (opt_bottle, game, data_dir) = resolve_game_any_runtime(&game_id, &bottle_name)?;
         let name = mod_name.unwrap_or_else(|| {
             archive
                 .file_stem()
@@ -544,17 +547,19 @@ pub async fn install_mod_cmd(
             });
         }
 
-        // Step 5: Sync plugins
+        // Step 5: Sync plugins (Wine only — Skyrim SE is always Wine)
         if game_id == "skyrimse" {
-            let _ = app.emit(
-                INSTALL_PROGRESS_EVENT,
-                InstallProgress::StepChanged {
-                    mod_index: 0,
-                    step: "syncing-plugins".to_string(),
-                    detail: Some("Syncing plugin load order...".to_string()),
-                },
-            );
-            let _ = crate::sync_plugins_for_game(&game, &bottle);
+            if let Some(ref bottle) = opt_bottle {
+                let _ = app.emit(
+                    INSTALL_PROGRESS_EVENT,
+                    InstallProgress::StepChanged {
+                        mod_index: 0,
+                        step: "syncing-plugins".to_string(),
+                        detail: Some("Syncing plugin load order...".to_string()),
+                    },
+                );
+                let _ = crate::sync_plugins_for_game(&game, bottle);
+            }
         }
 
         // Set source type if provided
@@ -1033,7 +1038,8 @@ pub async fn download_from_nexus(
         .map_err(|e| e.to_string())?;
 
     if auto_install {
-        let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
+        // Support both Wine and native games — native sentinel is empty bottle_name.
+        let (opt_bottle, game, data_dir) = resolve_game_any_runtime(&game_id, &bottle_name)?;
         let db = &state.db;
 
         // 1. Add mod to DB with Nexus ID
@@ -1087,8 +1093,11 @@ pub async fn download_from_nexus(
             return Err(format!("Deploy failed: {}", e));
         }
 
+        // Plugin sync is Wine-only (Skyrim SE is always Wine)
         if game_id == "skyrimse" {
-            let _ = crate::sync_plugins_for_game(&game, &bottle);
+            if let Some(ref bottle) = opt_bottle {
+                let _ = crate::sync_plugins_for_game(&game, bottle);
+            }
         }
 
         // Auto-delete archive if setting is enabled
