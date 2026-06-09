@@ -58,6 +58,7 @@ pub mod nexus_games_index;
 pub mod nexus_sso;
 pub mod bg3se;
 pub mod native_scanner;
+pub mod paralives_bepinex;
 pub mod nxm_handler;
 pub mod oauth;
 pub mod platform;
@@ -1406,6 +1407,7 @@ pub fn run() {
             commands::config_commands::set_native_mode_visible,
             commands::native_cmds::rescan_native_games,
             commands::native_cmds::get_bg3se_status,
+            commands::native_cmds::get_paralives_bepinex_status,
             commands::native_cmds::apply_native_window_effect,
             commands::stardew_cmds::get_stardew_mod_status,
             // Download Queue

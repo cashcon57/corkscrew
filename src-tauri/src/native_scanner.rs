@@ -46,7 +46,7 @@ pub struct NativeAppCandidate {
 ///
 /// Returns [`Architecture::Unknown`] for unreadable files, unrecognized
 /// magic, or CPU types we don't classify.
-fn detect_architecture(executable_path: &Path) -> Architecture {
+pub fn detect_architecture(executable_path: &Path) -> Architecture {
     const MH_MAGIC_64: u32 = 0xFEED_FACF;
     const MH_CIGAM_64: u32 = 0xCFFA_EDFE; // byte-swapped (LE → BE encoded)
     const FAT_MAGIC: u32 = 0xCAFE_BABE;

@@ -95,6 +95,21 @@ pub async fn apply_native_window_effect(
     Ok(())
 }
 
+/// Get BepInEx (Paralives script-mod runtime) status for a given game
+/// install directory. Read-only — no mutation. Install/uninstall live
+/// in Layer 3 of the Paralives BepInEx integration.
+///
+/// Pass the absolute path to the game's Steam install directory (the directory
+/// that CONTAINS `Paralives.app`, not the bundle itself), e.g.
+/// `/Users/user/Library/Application Support/Steam/steamapps/common/Paralives`.
+#[tauri::command]
+pub async fn get_paralives_bepinex_status(
+    game_install_dir: String,
+) -> Result<crate::paralives_bepinex::ParalivesBepInExStatus, String> {
+    let path = std::path::PathBuf::from(game_install_dir);
+    Ok(crate::paralives_bepinex::detect(&path))
+}
+
 /// Return the BG3 Script Extender detection status for the given `.app` bundle.
 ///
 /// Pass the absolute path to the `.app` bundle directory (e.g.
