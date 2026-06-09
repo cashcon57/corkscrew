@@ -155,7 +155,9 @@ pub async fn get_game_version(
     bottle_name: String,
 ) -> Result<Option<String>, String> {
     tokio::task::spawn_blocking(move || {
-        let (_bottle, game, _data_dir) = resolve_game(&game_id, &bottle_name)?;
+        // Universal: detect_game_version is purely a file inspection.
+        // Works for both Wine and native (empty bottle_name) games.
+        let (_opt_bottle, game, _data_dir) = resolve_game_any_runtime(&game_id, &bottle_name)?;
         let version = games::with_plugin(&game_id, |plugin| {
             plugin.detect_game_version(&game.game_path)
         })
@@ -218,6 +220,12 @@ pub async fn sync_lua_mods(
     bottle_name: String,
 ) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
+        // Lua mod sync is Hogwarts Legacy-specific (Wine-only).
+        if bottle_name.is_empty() {
+            return Err(
+                "Lua mod sync is only available for Hogwarts Legacy under Wine — not for native games.".into(),
+            );
+        }
         let (_bottle, game, _data_dir) = resolve_game(&game_id, &bottle_name)?;
         if game_id == "hogwartslegacy" {
             crate::plugins::hogwarts_legacy::sync_mods_txt(&game.game_path)
@@ -602,7 +610,8 @@ pub async fn uninstall_mod(
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("Mod with ID {} not found", mod_id))?;
 
-        let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
+        // Universal: uninstall works for both Wine and native (empty bottle_name).
+        let (opt_bottle, game, data_dir) = resolve_game_any_runtime(&game_id, &bottle_name)?;
 
         // Disable the mod first so restore_next_winner won't re-deploy its files
         // during undeploy (it checks m.enabled when finding candidates).
@@ -637,9 +646,11 @@ pub async fn uninstall_mod(
         // Remove from database (cascades to deployment_manifest, file_hashes; cleans profile_mods)
         db.remove_mod(mod_id).map_err(|e| e.to_string())?;
 
-        // Sync Skyrim plugins if applicable
+        // Sync Skyrim plugins if applicable (Wine-only — Skyrim SE is always Wine)
         if game_id == "skyrimse" {
-            let _ = crate::sync_plugins_for_game(&game, &bottle);
+            if let Some(ref bottle) = opt_bottle {
+                let _ = crate::sync_plugins_for_game(&game, bottle);
+            }
         }
 
         // Post-undeploy hook (e.g. sync Mods.txt for HL Lua mods)
@@ -674,7 +685,8 @@ pub async fn toggle_mod(
 
         // For staged mods, actually deploy/undeploy files
         if let Some(ref staging_path_str) = installed_mod.staging_path {
-            let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
+            // Universal: toggle works for both Wine and native (empty bottle_name).
+            let (opt_bottle, game, data_dir) = resolve_game_any_runtime(&game_id, &bottle_name)?;
             let staging_path = PathBuf::from(staging_path_str);
 
             let op = if enabled {
@@ -714,9 +726,11 @@ pub async fn toggle_mod(
 
             let _ = deploy_journal::complete(&journal_id);
 
-            // Sync Skyrim plugins if applicable
+            // Sync Skyrim plugins if applicable (Wine-only — Skyrim SE is always Wine)
             if game_id == "skyrimse" {
-                let _ = crate::sync_plugins_for_game(&game, &bottle);
+                if let Some(ref bottle) = opt_bottle {
+                    let _ = crate::sync_plugins_for_game(&game, bottle);
+                }
             }
         }
         // Legacy mods (no staging_path): only the DB flag changes
@@ -742,7 +756,8 @@ pub async fn batch_toggle_mods(
     check_game_lock(&state.game_locks, &game_id, &bottle_name)?;
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
-        let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
+        // Universal: batch toggle works for both Wine and native (empty bottle_name).
+        let (opt_bottle, game, data_dir) = resolve_game_any_runtime(&game_id, &bottle_name)?;
 
         let total = mod_ids.len();
         let action = if enabled { "Enabling" } else { "Disabling" };
@@ -809,16 +824,18 @@ pub async fn batch_toggle_mods(
             }
 
             if game_id == "skyrimse" {
-                let _ = app.emit(
-                    "bulk-operation-progress",
-                    serde_json::json!({
-                        "phase": "plugins",
-                        "current": 0,
-                        "total": 1,
-                        "message": "Syncing plugins.txt...",
-                    }),
-                );
-                let _ = crate::sync_plugins_for_game(&game, &bottle);
+                if let Some(ref bottle) = opt_bottle {
+                    let _ = app.emit(
+                        "bulk-operation-progress",
+                        serde_json::json!({
+                            "phase": "plugins",
+                            "current": 0,
+                            "total": 1,
+                            "message": "Syncing plugins.txt...",
+                        }),
+                    );
+                    let _ = crate::sync_plugins_for_game(&game, bottle);
+                }
             }
 
             let count = toggled.len();
@@ -901,7 +918,9 @@ pub async fn batch_toggle_mods(
             }
 
             if game_id == "skyrimse" {
-                let _ = crate::sync_plugins_for_game(&game, &bottle);
+                if let Some(ref bottle) = opt_bottle {
+                    let _ = crate::sync_plugins_for_game(&game, bottle);
+                }
             }
 
             if errors.is_empty() {
@@ -928,6 +947,12 @@ pub async fn get_plugin_order(
     tokio::task::spawn_blocking(move || {
         if !plugins::skyrim_plugins::supports_plugin_order(&game_id) {
             return Ok(vec![]);
+        }
+        // Plugin order is Bethesda-Wine only (no native Bethesda games yet).
+        if bottle_name.is_empty() {
+            return Err(
+                "Plugin load order is only available for Wine-hosted Bethesda games.".into(),
+            );
         }
 
         let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
@@ -2230,7 +2255,8 @@ pub async fn launch_game_cmd(
 #[tauri::command]
 pub async fn check_skse(game_id: String, bottle_name: String) -> Result<SkseStatus, String> {
     tokio::task::spawn_blocking(move || {
-        if game_id != "skyrimse" {
+        if game_id != "skyrimse" || bottle_name.is_empty() {
+            // SKSE is Wine-only — Skyrim SE has no native runtime on macOS.
             return Ok(SkseStatus {
                 installed: false,
                 loader_path: None,
@@ -2265,6 +2291,9 @@ pub async fn install_skse_from_archive_cmd(
         if game_id != "skyrimse" {
             return Err("SKSE is only available for Skyrim Special Edition".to_string());
         }
+        if bottle_name.is_empty() {
+            return Err("SKSE is Wine-only — not available for native games.".to_string());
+        }
 
         let (_, game, _) = resolve_game(&game_id, &bottle_name)?;
         let game_path = PathBuf::from(&game.game_path);
@@ -2290,6 +2319,9 @@ pub async fn uninstall_skse_cmd(game_id: String, bottle_name: String) -> Result<
     tokio::task::spawn_blocking(move || {
         if game_id != "skyrimse" {
             return Err("SKSE is only available for Skyrim Special Edition".to_string());
+        }
+        if bottle_name.is_empty() {
+            return Err("SKSE is Wine-only — not available for native games.".to_string());
         }
 
         let (_, game, _) = resolve_game(&game_id, &bottle_name)?;
@@ -2331,6 +2363,9 @@ pub async fn check_skyrim_version(
         if game_id != "skyrimse" {
             return Err("Version check is only available for Skyrim SE".to_string());
         }
+        if bottle_name.is_empty() {
+            return Err("Skyrim version check is Wine-only — not available for native games.".to_string());
+        }
 
         let (_, game, _) = resolve_game(&game_id, &bottle_name)?;
         downgrader::detect_skyrim_version(Path::new(&game.game_path)).map_err(|e| e.to_string())
@@ -2347,6 +2382,9 @@ pub async fn check_skse_compatibility_cmd(
     tokio::task::spawn_blocking(move || {
         if game_id != "skyrimse" {
             return Err("SKSE compatibility check is only for Skyrim SE".into());
+        }
+        if bottle_name.is_empty() {
+            return Err("SKSE compatibility check is Wine-only — not available for native games.".into());
         }
 
         let (_, game, _) = resolve_game(&game_id, &bottle_name)?;
@@ -2373,6 +2411,9 @@ pub async fn get_skse_builds(
         if game_id != "skyrimse" {
             return Err("SKSE is only available for Skyrim Special Edition".into());
         }
+        if bottle_name.is_empty() {
+            return Err("SKSE builds are Wine-only — not available for native games.".into());
+        }
 
         let (_, game, _) = resolve_game(&game_id, &bottle_name)?;
         let game_path = PathBuf::from(&game.game_path);
@@ -2391,6 +2432,9 @@ pub async fn get_skse_builds(
 pub async fn install_skse_auto_cmd(game_id: String, bottle_name: String) -> Result<SkseStatus, String> {
     if game_id != "skyrimse" {
         return Err("SKSE is only available for Skyrim Special Edition".into());
+    }
+    if bottle_name.is_empty() {
+        return Err("SKSE auto-install is Wine-only — not available for native games.".into());
     }
 
     let (_, game, _) = resolve_game(&game_id, &bottle_name)?;
@@ -2419,6 +2463,9 @@ pub async fn scan_skse_plugins_cmd(
         if game_id != "skyrimse" {
             return Err("SKSE plugin scan is only available for Skyrim SE".into());
         }
+        if bottle_name.is_empty() {
+            return Err("SKSE plugin scan is Wine-only — not available for native games.".into());
+        }
 
         let (_, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
         let game_path = PathBuf::from(&game.game_path);
@@ -2440,6 +2487,9 @@ pub async fn fix_skse_plugins_cmd(
 ) -> Result<usize, String> {
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
+        if bottle_name.is_empty() {
+            return Err("SKSE plugin fix is Wine-only — not available for native games.".into());
+        }
         let (_, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
         let game_path = PathBuf::from(&game.game_path);
         Ok(skse::fix_skse_plugin_conflicts(
@@ -2461,7 +2511,8 @@ pub async fn list_disabled_wine_plugins_cmd(
     bottle_name: String,
 ) -> Result<Vec<(String, String)>, String> {
     tokio::task::spawn_blocking(move || {
-        if game_id != "skyrimse" {
+        if game_id != "skyrimse" || bottle_name.is_empty() {
+            // Wine-disabled plugins only exist under Wine — native games skip cleanly.
             return Ok(vec![]);
         }
         let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
@@ -2479,7 +2530,8 @@ pub async fn reenable_wine_plugin_cmd(
     dll_name: String,
 ) -> Result<bool, String> {
     tokio::task::spawn_blocking(move || {
-        if game_id != "skyrimse" {
+        if game_id != "skyrimse" || bottle_name.is_empty() {
+            // Wine-disabled plugins only exist under Wine — native games skip cleanly.
             return Ok(false);
         }
         let (_, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
@@ -2507,6 +2559,9 @@ pub async fn downgrade_skyrim(
 ) -> Result<DowngradeStatus, String> {
     if game_id != "skyrimse" {
         return Err("Downgrade is only available for Skyrim SE".to_string());
+    }
+    if bottle_name.is_empty() {
+        return Err("Skyrim downgrade is Wine-only — not available for native games.".to_string());
     }
 
     let (_, game, _) = resolve_game(&game_id, &bottle_name)?;
@@ -2538,6 +2593,9 @@ pub async fn get_depot_download_command(
     bottle_name: String,
 ) -> Result<downgrader::DepotDownloadInfo, String> {
     tokio::task::spawn_blocking(move || {
+        if bottle_name.is_empty() {
+            return Err("Depot download command is Wine-only — not available for native games.".to_string());
+        }
         let (bottle, _, _) = resolve_game(&game_id, &bottle_name)?;
         downgrader::get_depot_download_info(&game_id, &bottle.path).map_err(|e| e.to_string())
     })
@@ -2560,6 +2618,9 @@ pub async fn start_depot_download(game_id: String) -> Result<bool, String> {
 #[tauri::command]
 pub async fn check_depot_ready(game_id: String, bottle_name: String) -> Result<Option<String>, String> {
     tokio::task::spawn_blocking(move || {
+        if bottle_name.is_empty() {
+            return Err("Depot readiness check is Wine-only — not available for native games.".to_string());
+        }
         let (bottle, _, _) = resolve_game(&game_id, &bottle_name)?;
         let steam_dir = downgrader::find_steam_dir(&bottle.path)
             .ok_or_else(|| "Steam directory not found in bottle".to_string())?;
@@ -2581,6 +2642,9 @@ pub async fn apply_downgrade_cmd(
     bottle_name: String,
 ) -> Result<DowngradeStatus, String> {
     tokio::task::spawn_blocking(move || {
+        if bottle_name.is_empty() {
+            return Err("Apply downgrade is Wine-only — not available for native games.".to_string());
+        }
         let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
         let game_path = PathBuf::from(&game.game_path);
         let steam_dir = downgrader::find_steam_dir(&bottle.path)
@@ -2615,6 +2679,9 @@ pub async fn swap_game_version(
     bottle_name: String,
     target_version: String,
 ) -> Result<DowngradeStatus, String> {
+    if bottle_name.is_empty() {
+        return Err("Game version swap is Wine-only — not available for native games.".to_string());
+    }
     let (_, game, _) = resolve_game(&game_id, &bottle_name)?;
     let game_path = PathBuf::from(&game.game_path);
 
@@ -2753,6 +2820,151 @@ pub async fn backfill_categories(
     .map_err(crate::format_join_error)?
 }
 
+
+/// Test-only helper: report whether a command that is Wine-only should
+/// reject an empty `bottle_name` (the native sentinel) with a clear
+/// "Wine-only" error instead of falling into `resolve_game` and emitting
+/// the confusing generic "bottle '' not found".
+///
+/// Mirrors the early-return guards we added before every remaining
+/// `resolve_game(...)` call site for Wine-only operations (SKSE,
+/// downgrader, Bethesda load order, etc).
+#[cfg(test)]
+pub(crate) fn wine_only_rejection_message(bottle_name: &str, op: &str) -> Option<String> {
+    if bottle_name.is_empty() {
+        Some(format!(
+            "{} is Wine-only — not available for native games.",
+            op
+        ))
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod native_runtime_tests {
+    use super::*;
+    use crate::resolve_game_any_runtime;
+
+    /// resolve_game_any_runtime with empty bottle_name and an unknown
+    /// game_id must NOT emit the generic "Bottle '' not found" error;
+    /// it must emit the native-specific not-found error so users hitting
+    /// the bug get an actionable message instead of "bottle '' not found".
+    #[test]
+    fn native_resolver_emits_native_specific_error_not_bottle_error() {
+        let result = resolve_game_any_runtime(
+            "definitely_not_a_real_game_xyz_12345",
+            "", // empty = native sentinel
+        );
+
+        let err = result.expect_err("unknown native game should error");
+        assert!(
+            err.contains("Native game"),
+            "error must reference 'Native game', got: {}",
+            err
+        );
+        assert!(
+            !err.contains("Bottle ''") && !err.contains("bottle ''"),
+            "must NOT emit the confusing empty-bottle error, got: {}",
+            err
+        );
+    }
+
+    /// resolve_game_any_runtime with a non-empty bottle_name that
+    /// doesn't exist still produces the bottle-not-found message
+    /// (preserves existing Wine error semantics).
+    #[test]
+    fn wine_resolver_preserves_bottle_not_found_error() {
+        let result = resolve_game_any_runtime(
+            "skyrimse",
+            "definitely-not-a-real-bottle-xyz-12345",
+        );
+        let err = result.expect_err("nonexistent bottle should error");
+        assert!(
+            err.to_lowercase().contains("bottle"),
+            "Wine path should mention 'bottle', got: {}",
+            err
+        );
+    }
+
+    /// SKSE commands (and all other Wine-only commands) must early-reject
+    /// empty bottle_name with a clear "Wine-only" message instead of
+    /// passing through to resolve_game and emitting "bottle '' not found".
+    /// This guards the regression where uninstall_mod / SKSE commands
+    /// errored with a confusing generic message for native games.
+    #[test]
+    fn skse_command_rejects_native_with_clear_error() {
+        let msg = wine_only_rejection_message("", "SKSE")
+            .expect("empty bottle must trigger rejection");
+        assert!(
+            msg.contains("Wine"),
+            "rejection must mention Wine, got: {}",
+            msg
+        );
+        assert!(
+            !msg.contains("bottle ''") && !msg.contains("Bottle ''"),
+            "must NOT mention the empty-bottle string, got: {}",
+            msg
+        );
+    }
+
+    /// Conversely, with a real (non-empty) bottle name, the Wine-only
+    /// helper returns None — meaning the command falls through to
+    /// resolve_game and runs as a Wine command would.
+    #[test]
+    fn wine_only_helper_passes_through_non_empty_bottle() {
+        assert_eq!(
+            wine_only_rejection_message("Skyrim", "SKSE"),
+            None,
+            "non-empty bottle must NOT be rejected by the Wine-only guard"
+        );
+    }
+
+    /// Direct DB simulation: a mod whose `bottle_name` is the empty
+    /// native-mode sentinel can be inserted, retrieved, toggled, and
+    /// removed end-to-end without touching the bottle resolver at all.
+    /// This is the core invariant uninstall_mod / toggle_mod now rely on
+    /// after the resolve_game_any_runtime migration.
+    #[test]
+    fn native_mod_lifecycle_in_db_uses_empty_bottle_sentinel() {
+        use crate::database::ModDatabase;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let db = ModDatabase::new(&tmp.path().join("test.db")).unwrap();
+
+        // Native paralives mod: bottle_name = "" sentinel.
+        let mod_id = db
+            .add_mod(
+                "paralives_native",
+                "", // native sentinel
+                None,
+                "Test Native Mod",
+                "1.0",
+                "/tmp/fake-archive.zip",
+                &["mods/fake.dll".to_string()],
+            )
+            .expect("insert native mod");
+
+        // Toggle should work (just a DB flag change for legacy mods).
+        db.set_enabled(mod_id, false).expect("disable native mod");
+        let m = db.get_mod(mod_id).unwrap().unwrap();
+        assert!(!m.enabled, "mod should be disabled");
+
+        db.set_enabled(mod_id, true).expect("re-enable native mod");
+        let m = db.get_mod(mod_id).unwrap().unwrap();
+        assert!(m.enabled, "mod should be re-enabled");
+
+        // Uninstall: db.remove_mod is the last step in uninstall_mod
+        // after the file removal phase. Verify it succeeds and the row
+        // is gone — this is the path the user just hit a bug in.
+        db.remove_mod(mod_id).expect("uninstall native mod");
+        assert!(
+            db.get_mod(mod_id).unwrap().is_none(),
+            "mod row must be gone after uninstall"
+        );
+    }
+}
 
 #[cfg(all(test, target_os = "macos"))]
 mod native_pid_tests {
