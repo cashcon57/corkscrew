@@ -78,8 +78,8 @@ fn decode_ini_bytes(bytes: &[u8]) -> std::result::Result<(String, IniEncoding), 
         for chunk in payload.chunks_exact(2) {
             units.push(u16::from_le_bytes([chunk[0], chunk[1]]));
         }
-        let s = String::from_utf16(&units)
-            .map_err(|e| format!("UTF-16 LE decode failed: {}", e))?;
+        let s =
+            String::from_utf16(&units).map_err(|e| format!("UTF-16 LE decode failed: {}", e))?;
         return Ok((s, IniEncoding::Utf16Le));
     }
     // UTF-16 BE BOM: FE FF
@@ -89,8 +89,8 @@ fn decode_ini_bytes(bytes: &[u8]) -> std::result::Result<(String, IniEncoding), 
         for chunk in payload.chunks_exact(2) {
             units.push(u16::from_be_bytes([chunk[0], chunk[1]]));
         }
-        let s = String::from_utf16(&units)
-            .map_err(|e| format!("UTF-16 BE decode failed: {}", e))?;
+        let s =
+            String::from_utf16(&units).map_err(|e| format!("UTF-16 BE decode failed: {}", e))?;
         return Ok((s, IniEncoding::Utf16Be));
     }
 

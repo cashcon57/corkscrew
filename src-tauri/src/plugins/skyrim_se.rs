@@ -520,15 +520,17 @@ mod tests {
 
     #[test]
     fn detect_finds_game_at_drive_c_root() {
-        let (_tmp, bottle_path) =
-            make_skyrimse_bottle_with_game(&["Skyrim Special Edition"]);
+        let (_tmp, bottle_path) = make_skyrimse_bottle_with_game(&["Skyrim Special Edition"]);
         let bottle = Bottle {
             name: "TestBottle".into(),
             path: bottle_path,
             source: "Test".into(),
         };
         let plugin = SkyrimSEPlugin;
-        assert!(plugin.detect_wine(&bottle).is_some(), "top-level drag-drop install");
+        assert!(
+            plugin.detect_wine(&bottle).is_some(),
+            "top-level drag-drop install"
+        );
     }
 
     #[test]
@@ -571,7 +573,10 @@ mod tests {
             source: "Test".into(),
         };
         let plugin = SkyrimSEPlugin;
-        assert!(plugin.detect_wine(&bottle).is_none(), "empty dir must not detect");
+        assert!(
+            plugin.detect_wine(&bottle).is_none(),
+            "empty dir must not detect"
+        );
     }
 
     #[test]

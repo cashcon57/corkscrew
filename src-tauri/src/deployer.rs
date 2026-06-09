@@ -2472,9 +2472,9 @@ pub fn verify_deployment(
 ///
 /// Wine games are delegated to `deploy_wine_game`, which runs a full
 /// `redeploy_all` using bottle context extracted from `detected`.
-/// Native games are delegated to `deploy_native_game`, which is a stub in
-/// Phase 1 — per-game native plugins (Stardew in Task 3.7, BG3 in Task 4.4)
-/// replace that stub with real logic.
+/// Native games are delegated to `deploy_native_game`, which dispatches to
+/// the registered per-game native plugin. Unsupported native games fail loudly
+/// via the default `GamePlugin::deploy_native` "not implemented" error.
 pub fn deploy_game(
     detected: &crate::games::DetectedGame,
     db: &std::sync::Arc<ModDatabase>,

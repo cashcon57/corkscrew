@@ -560,11 +560,7 @@ pub fn apply_depot_downgrade(
 /// Copies all files from `depot_dir` (downloaded by DepotDownloader) over the
 /// game installation at `game_path`. Backs up the current game files first.
 /// Works for ANY game, not just Skyrim SE.
-pub fn apply_depot_to_game(
-    game_path: &Path,
-    depot_dir: &Path,
-    game_id: &str,
-) -> Result<u64> {
+pub fn apply_depot_to_game(game_path: &Path, depot_dir: &Path, game_id: &str) -> Result<u64> {
     use walkdir::WalkDir;
 
     if !depot_dir.exists() || !depot_dir.is_dir() {

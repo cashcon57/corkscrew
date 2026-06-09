@@ -717,7 +717,10 @@ mod tests {
         ensure_resource_cfg(&mods_dir).unwrap();
 
         let content = fs::read_to_string(mods_dir.join("Resource.cfg")).unwrap();
-        assert_eq!(content, user_cfg, "Existing Resource.cfg must not be overwritten");
+        assert_eq!(
+            content, user_cfg,
+            "Existing Resource.cfg must not be overwritten"
+        );
     }
 
     #[test]
@@ -788,7 +791,10 @@ mod tests {
         let saves = plugin
             .get_saves_dir(Path::new("/fake/game"), &bottle)
             .expect("saves dir");
-        let expected = docs.join("Electronic Arts").join("The Sims 4").join("saves");
+        let expected = docs
+            .join("Electronic Arts")
+            .join("The Sims 4")
+            .join("saves");
         assert_eq!(saves, expected);
     }
 
@@ -835,7 +841,10 @@ mod tests {
         create_user_documents(&bottle_path);
 
         let bottle = make_bottle(bottle_path);
-        assert!(Sims4Plugin.detect_wine(&bottle).is_some(), "top-level drag-drop");
+        assert!(
+            Sims4Plugin.detect_wine(&bottle).is_some(),
+            "top-level drag-drop"
+        );
     }
 
     #[test]
@@ -854,7 +863,9 @@ mod tests {
         create_user_documents(&bottle_path);
 
         let bottle = make_bottle(bottle_path);
-        let detected = Sims4Plugin.detect_wine(&bottle).expect("Xbox Game Pass detect");
+        let detected = Sims4Plugin
+            .detect_wine(&bottle)
+            .expect("Xbox Game Pass detect");
         assert_eq!(detected.game_id, "sims4");
         assert_eq!(detected.game_path, game_dir);
     }

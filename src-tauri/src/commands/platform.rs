@@ -4,8 +4,8 @@ use crate::deck;
 use crate::instruction_types;
 use crate::llm_chat;
 use crate::proton;
+use crate::resolve_game;
 use crate::steam_integration;
-use crate::{resolve_game};
 use serde::{Deserialize, Serialize};
 
 // --- System Info ---
@@ -187,7 +187,6 @@ pub fn get_recommended_model() -> Result<String, String> {
     Ok(instruction_types::recommended_model_for_memory(mem))
 }
 
-
 // --- Platform Detection ---
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -336,7 +335,6 @@ pub fn get_optimal_download_threads() -> usize {
     }
 }
 
-
 // --- Steam Integration ---
 
 #[tauri::command]
@@ -385,7 +383,6 @@ pub async fn steam_deck_warnings() -> Result<Vec<String>, String> {
         .await
         .map_err(crate::format_join_error)
 }
-
 
 // --- Steam Launch Options (Script Extenders) ---
 
@@ -439,7 +436,6 @@ pub async fn get_recommended_proton() -> Result<Option<proton::ProtonVersion>, S
         .map_err(crate::format_join_error)?
 }
 
-
 // --- Steam Deck Profile ---
 
 #[tauri::command]
@@ -451,7 +447,6 @@ pub async fn get_deck_profile() -> Result<deck::DeckProfile, String> {
 pub async fn get_deck_defaults() -> Result<deck::DeckDefaults, String> {
     Ok(deck::get_defaults())
 }
-
 
 // --- DLC Detection ---
 
@@ -585,5 +580,3 @@ pub async fn check_dlc_status(game_id: String, bottle_name: String) -> Result<Dl
     .await
     .map_err(crate::format_join_error)?
 }
-
-

@@ -594,7 +594,11 @@ mod tests {
     #[test]
     fn every_spec_has_valid_fields() {
         for s in SPECS {
-            assert!(!s.game_id.is_empty(), "game_id empty in {:?}", s.display_name);
+            assert!(
+                !s.game_id.is_empty(),
+                "game_id empty in {:?}",
+                s.display_name
+            );
             assert!(!s.display_name.is_empty(), "display_name empty");
             assert!(!s.nexus_slug.is_empty(), "nexus_slug empty");
             assert!(!s.steam_app_id.is_empty(), "steam id empty");
@@ -646,7 +650,11 @@ mod tests {
             assert_eq!(p.executables(), spec.executables);
             assert_eq!(p.steam_launch_id(), Some(spec.steam_app_id));
             assert_eq!(p.verified(), spec.verified);
-            assert!(!p.use_legacy_data_dir(), "{} must opt out of legacy data dir", spec.game_id);
+            assert!(
+                !p.use_legacy_data_dir(),
+                "{} must opt out of legacy data dir",
+                spec.game_id
+            );
         }
     }
 
@@ -691,7 +699,11 @@ mod tests {
         for spec in SPECS {
             let p = FromSoftPlugin::new(spec);
             let crit = p.critical_files();
-            assert!(crit.contains(&"regulation.bin"), "{} missing regulation.bin", spec.game_id);
+            assert!(
+                crit.contains(&"regulation.bin"),
+                "{} missing regulation.bin",
+                spec.game_id
+            );
             for exe in spec.executables {
                 assert!(
                     crit.contains(exe),
@@ -708,8 +720,14 @@ mod tests {
         let p = FromSoftPlugin::new(spec_for("eldenring"));
         assert_eq!(p.categorize_mod_file("parts/foo.bnd"), Some("data".into()));
         assert_eq!(p.categorize_mod_file("chr/c0000.dcx"), Some("data".into()));
-        assert_eq!(p.categorize_mod_file("modengine2.dll"), Some("library".into()));
-        assert_eq!(p.categorize_mod_file("config\\engine.ini"), Some("config".into()));
+        assert_eq!(
+            p.categorize_mod_file("modengine2.dll"),
+            Some("library".into())
+        );
+        assert_eq!(
+            p.categorize_mod_file("config\\engine.ini"),
+            Some("config".into())
+        );
         assert_eq!(p.categorize_mod_file("readme.md"), None);
     }
 
@@ -737,7 +755,10 @@ mod tests {
         let got = find_or_create_modengine_mod_dir(&game);
         assert_eq!(got, mod_dir);
         assert!(got.is_dir());
-        assert!(mod_dir.join("sentinel").exists(), "existing dir was clobbered");
+        assert!(
+            mod_dir.join("sentinel").exists(),
+            "existing dir was clobbered"
+        );
     }
 
     fn make_steam_game(bottle_path: &Path, steam_dir: &str, exe: &str) -> PathBuf {
@@ -875,8 +896,11 @@ mod tests {
     fn detect_eldenring_in_program_files_x86() {
         let tmp = tempfile::tempdir().unwrap();
         let bottle_path = tmp.path().join("Bottle");
-        let game_dir =
-            make_game_at(&bottle_path, &["Program Files (x86)", "ELDEN RING"], "eldenring.exe");
+        let game_dir = make_game_at(
+            &bottle_path,
+            &["Program Files (x86)", "ELDEN RING"],
+            "eldenring.exe",
+        );
 
         let b = make_bottle(bottle_path);
         let p = FromSoftPlugin::new(spec_for("eldenring"));
@@ -909,7 +933,9 @@ mod tests {
 
         let b = make_bottle(bottle_path);
         let p = FromSoftPlugin::new(spec_for("darksouls3"));
-        let d = p.detect_wine(&b).expect("should detect top-level drag-drop install");
+        let d = p
+            .detect_wine(&b)
+            .expect("should detect top-level drag-drop install");
         assert_eq!(d.game_path, game_dir);
     }
 
@@ -926,7 +952,9 @@ mod tests {
 
         let b = make_bottle(bottle_path);
         let p = FromSoftPlugin::new(spec_for("eldenring"));
-        let d = p.detect_wine(&b).expect("should detect Xbox Game Pass install");
+        let d = p
+            .detect_wine(&b)
+            .expect("should detect Xbox Game Pass install");
         assert_eq!(d.game_path, content_dir);
     }
 
@@ -966,7 +994,9 @@ mod tests {
 
         let b = make_bottle(bottle_path);
         let p = FromSoftPlugin::new(spec_for("eldenring"));
-        let d = p.detect_wine(&b).expect("should detect Documents/Games install");
+        let d = p
+            .detect_wine(&b)
+            .expect("should detect Documents/Games install");
         assert_eq!(d.game_id, "eldenring");
         assert_eq!(d.game_path, game_dir);
     }

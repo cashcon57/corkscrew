@@ -67,16 +67,30 @@ const STEAM_INNER_DIR: &str = "Genshin Impact game";
 /// installs under `<launcher>/games/`.
 const HOYOPLAY_PATHS: &[&[&str]] = &[
     &["Program Files", "HoYoPlay", "games", "Genshin Impact game"],
-    &["Program Files (x86)", "HoYoPlay", "games", "Genshin Impact game"],
+    &[
+        "Program Files (x86)",
+        "HoYoPlay",
+        "games",
+        "Genshin Impact game",
+    ],
 ];
 
 /// Standalone (legacy) install paths to check.
 const STANDALONE_PATHS: &[&[&str]] = &[
     &["Program Files", "Genshin Impact", "Genshin Impact Game"],
-    &["Program Files (x86)", "Genshin Impact", "Genshin Impact Game"],
+    &[
+        "Program Files (x86)",
+        "Genshin Impact",
+        "Genshin Impact Game",
+    ],
     // Some users install the CN client via miHoYo's launcher to a `YuanShen`
     // root; the inner game folder is "YuanShen Game".
-    &["Program Files", "miHoYo", "Genshin Impact", "Genshin Impact Game"],
+    &[
+        "Program Files",
+        "miHoYo",
+        "Genshin Impact",
+        "Genshin Impact Game",
+    ],
     &[
         "Program Files (x86)",
         "miHoYo",
@@ -180,11 +194,7 @@ impl GamePlugin for GenshinPlugin {
     }
 
     fn critical_files(&self) -> Vec<&str> {
-        vec![
-            "GenshinImpact.exe",
-            "YuanShen.exe",
-            "UnityPlayer.dll",
-        ]
+        vec!["GenshinImpact.exe", "YuanShen.exe", "UnityPlayer.dll"]
     }
 
     fn protected_root_extensions(&self) -> Vec<&str> {
@@ -600,12 +610,24 @@ mod tests {
     #[test]
     fn categorize_mod_file_extensions() {
         let plugin = GenshinPlugin;
-        assert_eq!(plugin.categorize_mod_file("merged.ini"), Some("config".into()));
-        assert_eq!(plugin.categorize_mod_file("char.dds"), Some("texture".into()));
-        assert_eq!(plugin.categorize_mod_file("preview.png"), Some("texture".into()));
+        assert_eq!(
+            plugin.categorize_mod_file("merged.ini"),
+            Some("config".into())
+        );
+        assert_eq!(
+            plugin.categorize_mod_file("char.dds"),
+            Some("texture".into())
+        );
+        assert_eq!(
+            plugin.categorize_mod_file("preview.png"),
+            Some("texture".into())
+        );
         assert_eq!(plugin.categorize_mod_file("vb.buf"), Some("buffer".into()));
         assert_eq!(plugin.categorize_mod_file("ib.IB"), Some("buffer".into()));
-        assert_eq!(plugin.categorize_mod_file("loader.dll"), Some("library".into()));
+        assert_eq!(
+            plugin.categorize_mod_file("loader.dll"),
+            Some("library".into())
+        );
         assert_eq!(plugin.categorize_mod_file("readme.txt"), None);
     }
 
@@ -669,7 +691,9 @@ mod tests {
         };
 
         let plugin = GenshinPlugin;
-        let detected = plugin.detect_wine(&bottle).expect("should detect Steam install");
+        let detected = plugin
+            .detect_wine(&bottle)
+            .expect("should detect Steam install");
         assert_eq!(detected.game_id, "genshin");
         assert_eq!(detected.game_path, inner_dir);
         assert!(detected.exe_path.unwrap().ends_with("GenshinImpact.exe"));
@@ -751,14 +775,12 @@ mod tests {
             .detect_wine(&bottle)
             .expect("should detect CN client via YuanShen.exe");
         assert_eq!(detected.game_id, "genshin");
-        assert!(
-            detected
-                .exe_path
-                .unwrap()
-                .to_string_lossy()
-                .to_lowercase()
-                .ends_with("yuanshen.exe")
-        );
+        assert!(detected
+            .exe_path
+            .unwrap()
+            .to_string_lossy()
+            .to_lowercase()
+            .ends_with("yuanshen.exe"));
     }
 
     #[test]
@@ -883,13 +905,18 @@ mod tests {
     fn detect_finds_game_in_program_files_x86_direct() {
         let tmp = tempfile::tempdir().unwrap();
         let bottle_path = tmp.path().join("TestBottle");
-        let game_dir = make_genshin_at(&bottle_path, &["Program Files (x86)", "Genshin Impact game"]);
+        let game_dir = make_genshin_at(
+            &bottle_path,
+            &["Program Files (x86)", "Genshin Impact game"],
+        );
         let bottle = Bottle {
             name: "TestBottle".into(),
             path: bottle_path,
             source: "Test".into(),
         };
-        let detected = GenshinPlugin.detect_wine(&bottle).expect("non-Steam detect");
+        let detected = GenshinPlugin
+            .detect_wine(&bottle)
+            .expect("non-Steam detect");
         assert_eq!(detected.game_id, "genshin");
         assert_eq!(detected.game_path, game_dir);
     }
@@ -917,7 +944,10 @@ mod tests {
             path: bottle_path,
             source: "Test".into(),
         };
-        assert!(GenshinPlugin.detect_wine(&bottle).is_some(), "top-level drag-drop");
+        assert!(
+            GenshinPlugin.detect_wine(&bottle).is_some(),
+            "top-level drag-drop"
+        );
     }
 
     #[test]
@@ -938,7 +968,9 @@ mod tests {
             path: bottle_path,
             source: "Test".into(),
         };
-        let detected = GenshinPlugin.detect_wine(&bottle).expect("Xbox Game Pass detect");
+        let detected = GenshinPlugin
+            .detect_wine(&bottle)
+            .expect("Xbox Game Pass detect");
         assert_eq!(detected.game_id, "genshin");
         assert!(detected.game_path.ends_with("Content"));
     }

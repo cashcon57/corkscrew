@@ -142,7 +142,9 @@ pub fn find_config_path(game_path: &Path, game_id: &str) -> Option<PathBuf> {
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| {
-            p.extension().and_then(|ext| ext.to_str()).map(|s| s.eq_ignore_ascii_case("toml"))
+            p.extension()
+                .and_then(|ext| ext.to_str())
+                .map(|s| s.eq_ignore_ascii_case("toml"))
                 == Some(true)
         })
         .collect();
@@ -173,11 +175,7 @@ pub fn load_config(game_path: &Path, game_id: &str) -> Result<ModEngine2Config, 
 /// Resolves the target path the same way [`load_config`] does, but if
 /// `cfg.source_path` is set we honor that to support round-trip edits of
 /// hand-renamed files.
-pub fn save_config(
-    game_path: &Path,
-    game_id: &str,
-    cfg: &ModEngine2Config,
-) -> Result<(), String> {
+pub fn save_config(game_path: &Path, game_id: &str, cfg: &ModEngine2Config) -> Result<(), String> {
     // Pin the bottle scope: any caller-supplied source_path must canonicalize
     // to within the game's modengine2 directory. Prevents a malicious or
     // stale `source_path` from redirecting writes outside the bottle.
@@ -190,7 +188,10 @@ pub fn save_config(
         // Canonicalize the candidate's parent — file may not exist yet for
         // first-time writes, so we resolve the directory it lives in.
         let parent = candidate.parent().ok_or_else(|| {
-            format!("source_path {} has no parent directory", candidate.display())
+            format!(
+                "source_path {} has no parent directory",
+                candidate.display()
+            )
         })?;
         let parent_canon = parent
             .canonicalize()
@@ -220,7 +221,10 @@ pub fn save_config(
 
     let serialized = serialize_toml(cfg)?;
     let parent = target.parent().ok_or_else(|| {
-        format!("ME2 config target {} has no parent directory", target.display())
+        format!(
+            "ME2 config target {} has no parent directory",
+            target.display()
+        )
     })?;
     fs::create_dir_all(parent)
         .map_err(|e| format!("Failed to create {}: {}", parent.display(), e))?;
@@ -236,8 +240,14 @@ pub fn save_config(
         f.sync_all()
             .map_err(|e| format!("Failed to fsync {}: {}", tmp.display(), e))?;
     }
-    fs::rename(&tmp, &target)
-        .map_err(|e| format!("Failed to rename {} -> {}: {}", tmp.display(), target.display(), e))?;
+    fs::rename(&tmp, &target).map_err(|e| {
+        format!(
+            "Failed to rename {} -> {}: {}",
+            tmp.display(),
+            target.display(),
+            e
+        )
+    })?;
 
     Ok(())
 }
@@ -447,14 +457,19 @@ log_level = "info"
         let serialized = serialize_toml(&cfg).expect("serialize");
         let cfg2 = parse_toml(&serialized).expect("reparse");
         // The nested [extension.scylla_hide.advanced] table must survive.
-        let scylla = cfg2.extra_extensions.get("scylla_hide").expect("scylla_hide");
+        let scylla = cfg2
+            .extra_extensions
+            .get("scylla_hide")
+            .expect("scylla_hide");
         let scylla_table = scylla.as_table().expect("table");
         let advanced = scylla_table
             .get("advanced")
             .and_then(|v| v.as_table())
             .expect("nested advanced table preserved");
         assert_eq!(
-            advanced.get("hide_kernel_modules").and_then(|v| v.as_bool()),
+            advanced
+                .get("hide_kernel_modules")
+                .and_then(|v| v.as_bool()),
             Some(true)
         );
         assert_eq!(
@@ -506,7 +521,12 @@ log_level = "info"
         add_mod(&mut cfg, "Reshade", "mod/Reshade2");
         // No duplicate, path updated, enabled flipped on.
         assert_eq!(cfg.mod_loader.mods.len(), 2);
-        let r = cfg.mod_loader.mods.iter().find(|m| m.name == "Reshade").unwrap();
+        let r = cfg
+            .mod_loader
+            .mods
+            .iter()
+            .find(|m| m.name == "Reshade")
+            .unwrap();
         assert_eq!(r.path, "mod/Reshade2");
         assert!(r.enabled);
     }
@@ -617,7 +637,13 @@ log_level = "info"
         // If the save succeeded, the new mod is present. If it failed, the
         // original's mod set is preserved. Either way, we never have a
         // partially-written / corrupt TOML.
-        assert!(reloaded.mod_loader.mods.iter().any(|m| m.name == "GTS")
-            || reloaded.mod_loader.mods.iter().any(|m| m.name == "Should Not Land"));
+        assert!(
+            reloaded.mod_loader.mods.iter().any(|m| m.name == "GTS")
+                || reloaded
+                    .mod_loader
+                    .mods
+                    .iter()
+                    .any(|m| m.name == "Should Not Land")
+        );
     }
 }

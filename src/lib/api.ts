@@ -95,6 +95,7 @@ import type {
   LoadOrderKindResponse,
   KnownUninstalledGame,
   NativeAppCandidate,
+  ParalivesBepInExStatus,
 } from "./types";
 
 // Bottles
@@ -391,6 +392,33 @@ export async function rescanNativeGames(): Promise<NativeAppCandidate[]> {
  */
 export async function addNativeGameManually(appPath: string): Promise<NativeAppCandidate> {
   return invoke<NativeAppCandidate>("add_native_game_manually", { appPath });
+}
+
+export async function getParalivesBepInExStatus(gameInstallDir: string): Promise<ParalivesBepInExStatus> {
+  return invoke<ParalivesBepInExStatus>("get_paralives_bepinex_status", { gameInstallDir });
+}
+
+export async function installParalivesBepInExLatest(
+  gameInstallDir: string,
+  appBundlePath: string,
+): Promise<ParalivesBepInExStatus> {
+  return invoke<ParalivesBepInExStatus>("install_paralives_bepinex_latest", { gameInstallDir, appBundlePath });
+}
+
+export async function installParalivesBepInExFromArchive(
+  gameInstallDir: string,
+  appBundlePath: string,
+  archivePath: string,
+): Promise<ParalivesBepInExStatus> {
+  return invoke<ParalivesBepInExStatus>("install_paralives_bepinex_from_archive", {
+    gameInstallDir,
+    appBundlePath,
+    archivePath,
+  });
+}
+
+export async function uninstallParalivesBepInEx(gameInstallDir: string, appBundlePath: string): Promise<void> {
+  return invoke("uninstall_paralives_bepinex", { gameInstallDir, appBundlePath });
 }
 
 export async function getGameLogo(

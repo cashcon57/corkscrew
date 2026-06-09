@@ -411,7 +411,11 @@ mod tests {
     #[test]
     fn every_spec_has_valid_fields() {
         for s in SPECS {
-            assert!(!s.game_id.is_empty(), "game_id empty in {:?}", s.display_name);
+            assert!(
+                !s.game_id.is_empty(),
+                "game_id empty in {:?}",
+                s.display_name
+            );
             assert!(!s.thunderstore_community.is_empty(), "community empty");
             assert!(!s.steam_app_id.is_empty(), "steam id empty");
             assert!(!s.steam_dirs.is_empty(), "steam_dirs empty");
@@ -508,10 +512,7 @@ mod tests {
         let p = ThunderstorePlugin::new(silksong_spec());
         let d = p.detect_wine(&b).expect("detection");
         assert_eq!(d.game_id, "silksong");
-        assert_eq!(
-            d.data_dir,
-            game_dir.join("BepInEx").join("plugins")
-        );
+        assert_eq!(d.data_dir, game_dir.join("BepInEx").join("plugins"));
     }
 
     #[test]
@@ -519,7 +520,10 @@ mod tests {
         let p = ThunderstorePlugin::new(silksong_spec());
         assert_eq!(p.categorize_mod_file("x/MyMod.dll"), Some("plugin".into()));
         assert_eq!(p.categorize_mod_file("x/data.cfg"), Some("config".into()));
-        assert_eq!(p.categorize_mod_file("x/textures/foo.png"), Some("texture".into()));
+        assert_eq!(
+            p.categorize_mod_file("x/textures/foo.png"),
+            Some("texture".into())
+        );
         assert_eq!(p.categorize_mod_file("x/readme.md"), None);
     }
 }

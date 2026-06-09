@@ -179,7 +179,8 @@ pub fn clear_google_tokens() -> Result<(), GoogleOAuthError> {
 /// 6. Fetch user info.
 /// 7. Return the tokens.
 pub async fn start_google_oauth_flow() -> Result<GoogleTokens, GoogleOAuthError> {
-    let pkce = oauth::generate_pkce().map_err(|e| GoogleOAuthError::TokenExchange(e.to_string()))?;
+    let pkce =
+        oauth::generate_pkce().map_err(|e| GoogleOAuthError::TokenExchange(e.to_string()))?;
     let state =
         oauth::generate_state().map_err(|e| GoogleOAuthError::TokenExchange(e.to_string()))?;
 
@@ -198,7 +199,8 @@ pub async fn start_google_oauth_flow() -> Result<GoogleTokens, GoogleOAuthError>
         oauth::urlencoding::encode(&pkce.challenge),
     );
 
-    oauth::open_browser(&auth_url).map_err(|e| GoogleOAuthError::Io(std::io::Error::other(e.to_string())))?;
+    oauth::open_browser(&auth_url)
+        .map_err(|e| GoogleOAuthError::Io(std::io::Error::other(e.to_string())))?;
 
     // Wait for callback
     let callback = tokio::task::spawn_blocking({

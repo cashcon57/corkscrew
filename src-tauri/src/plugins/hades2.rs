@@ -135,12 +135,7 @@ impl GamePlugin for Hades2Plugin {
             }
         }
         // Fallback: CrossOver convention.
-        Some(
-            users
-                .join("crossover")
-                .join("Saved Games")
-                .join("Hades II"),
-        )
+        Some(users.join("crossover").join("Saved Games").join("Hades II"))
     }
 
     fn steam_launch_id(&self) -> Option<&str> {
@@ -447,7 +442,9 @@ mod tests {
             path: PathBuf::from("/tmp"),
             source: "Test".into(),
         };
-        assert!(p.get_plugins_file(&PathBuf::from("/fake"), &bottle).is_none());
+        assert!(p
+            .get_plugins_file(&PathBuf::from("/fake"), &bottle)
+            .is_none());
     }
 
     #[test]
@@ -495,10 +492,22 @@ mod tests {
     #[test]
     fn categorize_file_by_extension() {
         let p = Hades2Plugin;
-        assert_eq!(p.categorize_mod_file("MyMod/modfile.lua"), Some("script".into()));
-        assert_eq!(p.categorize_mod_file("MyMod/data.sjson"), Some("data".into()));
-        assert_eq!(p.categorize_mod_file("MyMod/textures/foo.png"), Some("texture".into()));
-        assert_eq!(p.categorize_mod_file("MyMod/audio/boom.ogg"), Some("sound".into()));
+        assert_eq!(
+            p.categorize_mod_file("MyMod/modfile.lua"),
+            Some("script".into())
+        );
+        assert_eq!(
+            p.categorize_mod_file("MyMod/data.sjson"),
+            Some("data".into())
+        );
+        assert_eq!(
+            p.categorize_mod_file("MyMod/textures/foo.png"),
+            Some("texture".into())
+        );
+        assert_eq!(
+            p.categorize_mod_file("MyMod/audio/boom.ogg"),
+            Some("sound".into())
+        );
         assert_eq!(p.categorize_mod_file("MyMod/README.md"), None);
     }
 
@@ -550,7 +559,10 @@ mod tests {
             path: bottle_path,
             source: "T".into(),
         };
-        assert!(Hades2Plugin.detect_wine(&bottle).is_some(), "top-level drag-drop");
+        assert!(
+            Hades2Plugin.detect_wine(&bottle).is_some(),
+            "top-level drag-drop"
+        );
     }
 
     #[test]
@@ -570,7 +582,9 @@ mod tests {
             path: bottle_path,
             source: "T".into(),
         };
-        let detected = Hades2Plugin.detect_wine(&bottle).expect("Xbox Game Pass detect");
+        let detected = Hades2Plugin
+            .detect_wine(&bottle)
+            .expect("Xbox Game Pass detect");
         assert_eq!(detected.game_id, "hades2");
         assert!(detected.game_path.ends_with("Content"));
     }

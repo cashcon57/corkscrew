@@ -278,7 +278,12 @@ mod tests {
     #[test]
     fn test_deploy_config() {
         let dir = tempfile::tempdir().unwrap();
-        let result = deploy_config(dir.path(), "skyrimse", &DxvkPreset::Default, &HashMap::new());
+        let result = deploy_config(
+            dir.path(),
+            "skyrimse",
+            &DxvkPreset::Default,
+            &HashMap::new(),
+        );
         assert!(result.is_ok());
         let path = result.unwrap();
         assert!(path.exists());
@@ -289,15 +294,25 @@ mod tests {
     #[test]
     fn test_deploy_config_idempotent() {
         let dir = tempfile::tempdir().unwrap();
-        let path1 =
-            deploy_config(dir.path(), "skyrimse", &DxvkPreset::Default, &HashMap::new()).unwrap();
+        let path1 = deploy_config(
+            dir.path(),
+            "skyrimse",
+            &DxvkPreset::Default,
+            &HashMap::new(),
+        )
+        .unwrap();
         let mtime1 = std::fs::metadata(&path1).unwrap().modified().unwrap();
 
         // Small sleep to ensure mtime would differ if file were rewritten
         std::thread::sleep(std::time::Duration::from_millis(50));
 
-        let path2 =
-            deploy_config(dir.path(), "skyrimse", &DxvkPreset::Default, &HashMap::new()).unwrap();
+        let path2 = deploy_config(
+            dir.path(),
+            "skyrimse",
+            &DxvkPreset::Default,
+            &HashMap::new(),
+        )
+        .unwrap();
         let mtime2 = std::fs::metadata(&path2).unwrap().modified().unwrap();
 
         // File should NOT have been rewritten (same content)

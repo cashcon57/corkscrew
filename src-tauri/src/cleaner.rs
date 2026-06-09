@@ -152,7 +152,10 @@ fn is_critical_file(game_id: &str, rel_path: &str) -> bool {
     let (critical, protected_ext): (Vec<String>, Vec<String>) =
         crate::games::with_plugin(game_id, |p| {
             (
-                p.critical_files().into_iter().map(|s| s.to_string()).collect(),
+                p.critical_files()
+                    .into_iter()
+                    .map(|s| s.to_string())
+                    .collect(),
                 p.protected_root_extensions()
                     .into_iter()
                     .map(|s| s.to_string())
@@ -652,9 +655,7 @@ fn is_save_file_with_patterns(rel_path: &str, patterns: &[String]) -> bool {
     let lower = rel_path.to_lowercase();
     for pattern in patterns {
         if pattern.ends_with('/') {
-            if lower.starts_with(pattern.as_str())
-                || lower.contains(&format!("/{}", pattern))
-            {
+            if lower.starts_with(pattern.as_str()) || lower.contains(&format!("/{}", pattern)) {
                 return true;
             }
         } else if lower.ends_with(pattern.as_str()) {
@@ -1057,27 +1058,18 @@ mod tests {
         // Register the Hogwarts Legacy plugin for this test
         crate::plugins::hogwarts_legacy::register();
 
-        assert_eq!(
-            categorize_file("hogwartslegacy", "MyMod_P.pak"),
-            "pak"
-        );
+        assert_eq!(categorize_file("hogwartslegacy", "MyMod_P.pak"), "pak");
         assert_eq!(
             categorize_file("hogwartslegacy", "Scripts/main.lua"),
             "script"
         );
-        assert_eq!(
-            categorize_file("hogwartslegacy", "intro.bk2"),
-            "movie"
-        );
+        assert_eq!(categorize_file("hogwartslegacy", "intro.bk2"), "movie");
         assert_eq!(
             categorize_file("hogwartslegacy", "ue4ss.dll"),
             // ENB check runs first and d3d11.dll matches, but ue4ss.dll doesn't
             "framework"
         );
-        assert_eq!(
-            categorize_file("hogwartslegacy", "settings.ini"),
-            "config"
-        );
+        assert_eq!(categorize_file("hogwartslegacy", "settings.ini"), "config");
     }
 
     #[test]
@@ -1097,8 +1089,7 @@ mod tests {
         fs::write(data_dir.join("CoolMod_P.pak"), b"pak mod").unwrap();
         fs::write(data_dir.join("config.ini"), b"settings").unwrap();
 
-        let report =
-            scan_game_directory(&db, "hogwartslegacy", "Gaming", &data_dir).unwrap();
+        let report = scan_game_directory(&db, "hogwartslegacy", "Gaming", &data_dir).unwrap();
 
         assert_eq!(report.non_stock_files.len(), 2);
         let cats: Vec<&str> = report
@@ -1106,7 +1097,10 @@ mod tests {
             .iter()
             .map(|f| f.category.as_str())
             .collect();
-        assert!(cats.contains(&"pak"), "PAK files should be categorized as pak");
+        assert!(
+            cats.contains(&"pak"),
+            "PAK files should be categorized as pak"
+        );
         assert!(
             cats.contains(&"config"),
             "INI files should be categorized as config"
@@ -1136,9 +1130,16 @@ mod tests {
         // Symlinked mod.esp should be flagged as orphaned/non-stock,
         // not silently skipped.
         assert!(
-            report.non_stock_files.iter().any(|f| f.relative_path == "mod.esp"),
+            report
+                .non_stock_files
+                .iter()
+                .any(|f| f.relative_path == "mod.esp"),
             "symlinked file should be detected as non-stock; got {:?}",
-            report.non_stock_files.iter().map(|f| &f.relative_path).collect::<Vec<_>>()
+            report
+                .non_stock_files
+                .iter()
+                .map(|f| &f.relative_path)
+                .collect::<Vec<_>>()
         );
     }
 

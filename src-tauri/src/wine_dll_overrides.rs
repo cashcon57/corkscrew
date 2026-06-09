@@ -42,8 +42,12 @@ pub fn get_tool_overrides(tool_name: &str) -> HashMap<String, DllOverride> {
     let lower = tool_name.to_lowercase();
     let mut overrides = HashMap::new();
 
-    if lower.contains("xedit") || lower.contains("sseedit") || lower.contains("fo4edit")
-        || lower.contains("tes5edit") || lower.contains("fnvedit") || lower.contains("fo3edit")
+    if lower.contains("xedit")
+        || lower.contains("sseedit")
+        || lower.contains("fo4edit")
+        || lower.contains("tes5edit")
+        || lower.contains("fnvedit")
+        || lower.contains("fo3edit")
     {
         // xEdit variants: need native file browser for open/save dialogs
         overrides.insert("comdlg32".to_string(), DllOverride::Native);
@@ -102,10 +106,7 @@ pub fn apply_overrides(
 
     let user_reg = prefix_path.join("user.reg");
     if !user_reg.exists() {
-        return Err(format!(
-            "Wine user.reg not found at {}",
-            user_reg.display()
-        ));
+        return Err(format!("Wine user.reg not found at {}", user_reg.display()));
     }
 
     let content = std::fs::read_to_string(&user_reg)
@@ -177,10 +178,7 @@ pub fn apply_overrides(
 }
 
 /// Remove DLL overrides from a Wine prefix registry.
-pub fn remove_overrides(
-    prefix_path: &Path,
-    dll_names: &[&str],
-) -> Result<(), String> {
+pub fn remove_overrides(prefix_path: &Path, dll_names: &[&str]) -> Result<(), String> {
     let user_reg = prefix_path.join("user.reg");
     if !user_reg.exists() {
         return Ok(()); // Nothing to remove
@@ -200,7 +198,10 @@ pub fn remove_overrides(
             .map(|p| p + section_start + 1)
             .unwrap_or(lines.len());
 
-        let keys: Vec<String> = dll_names.iter().map(|dll| format!("\"*{}\"", dll)).collect();
+        let keys: Vec<String> = dll_names
+            .iter()
+            .map(|dll| format!("\"*{}\"", dll))
+            .collect();
         // Remove matching lines within section bounds only (iterate in reverse to keep indices stable)
         for i in (section_start + 1..section_end).rev() {
             if keys.iter().any(|k| lines[i].starts_with(k)) {
@@ -210,8 +211,7 @@ pub fn remove_overrides(
     }
 
     let output = lines.join("\n");
-    std::fs::write(&user_reg, output)
-        .map_err(|e| format!("Failed to write user.reg: {}", e))?;
+    std::fs::write(&user_reg, output).map_err(|e| format!("Failed to write user.reg: {}", e))?;
 
     Ok(())
 }

@@ -100,10 +100,7 @@ fn list_bsa_contents(archive_path: &Path) -> Result<ArchiveContents> {
             // Mis-labeled .bsa that is actually a BA2 — handle gracefully
             list_ba2_contents(archive_path)
         }
-        None => bail!(
-            "Unrecognized BSA format in {}",
-            archive_path.display()
-        ),
+        None => bail!("Unrecognized BSA format in {}", archive_path.display()),
     }
 }
 
@@ -111,8 +108,8 @@ fn list_bsa_tes3(archive_path: &Path) -> Result<ArchiveContents> {
     use ba2::prelude::*;
     use ba2::tes3::Archive;
 
-    let archive: Archive<'static> = Archive::read(archive_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read TES3 BSA: {e}"))?;
+    let archive: Archive<'static> =
+        Archive::read(archive_path).map_err(|e| anyhow::anyhow!("Failed to read TES3 BSA: {e}"))?;
 
     let mut entries = Vec::with_capacity(archive.len());
     let mut total_size: u64 = 0;
@@ -145,8 +142,8 @@ fn list_bsa_tes4(archive_path: &Path) -> Result<ArchiveContents> {
     use ba2::prelude::*;
     use ba2::tes4::Archive;
 
-    let (archive, _meta): (Archive<'static>, _) = Archive::read(archive_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read TES4 BSA: {e}"))?;
+    let (archive, _meta): (Archive<'static>, _) =
+        Archive::read(archive_path).map_err(|e| anyhow::anyhow!("Failed to read TES4 BSA: {e}"))?;
 
     let mut entries = Vec::new();
     let mut total_size: u64 = 0;
@@ -194,8 +191,8 @@ fn list_ba2_contents(archive_path: &Path) -> Result<ArchiveContents> {
     use ba2::fo4::Archive;
     use ba2::prelude::*;
 
-    let (archive, _meta): (Archive<'static>, _) = Archive::read(archive_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read BA2: {e}"))?;
+    let (archive, _meta): (Archive<'static>, _) =
+        Archive::read(archive_path).map_err(|e| anyhow::anyhow!("Failed to read BA2: {e}"))?;
 
     let mut entries = Vec::with_capacity(archive.len());
     let mut total_size: u64 = 0;
@@ -211,9 +208,7 @@ fn list_ba2_contents(archive_path: &Path) -> Result<ArchiveContents> {
         let mut file_size: u64 = 0;
         let mut compressed_size: u64 = 0;
         for chunk in file.iter() {
-            let decompressed = chunk
-                .decompressed_len()
-                .unwrap_or(chunk.len());
+            let decompressed = chunk.decompressed_len().unwrap_or(chunk.len());
             file_size += decompressed as u64;
             compressed_size += chunk.len() as u64;
         }
@@ -302,31 +297,27 @@ fn list_7z_contents(archive_path: &Path) -> Result<ArchiveContents> {
     let file = std::fs::File::open(archive_path)
         .with_context(|| format!("Failed to open 7z: {}", archive_path.display()))?;
 
-    sevenz_rust2::decompress_with_extract_fn(
-        file,
-        ".",
-        |entry, _reader: &mut dyn Read, _dest| {
-            let raw_path = entry.name().to_string();
-            let is_dir = entry.is_directory();
-            let normalized = normalize_archive_path(&raw_path);
-            let name = leaf_name(&normalized);
-            let file_size = entry.size();
+    sevenz_rust2::decompress_with_extract_fn(file, ".", |entry, _reader: &mut dyn Read, _dest| {
+        let raw_path = entry.name().to_string();
+        let is_dir = entry.is_directory();
+        let normalized = normalize_archive_path(&raw_path);
+        let name = leaf_name(&normalized);
+        let file_size = entry.size();
 
-            if !is_dir {
-                total_size += file_size;
-            }
+        if !is_dir {
+            total_size += file_size;
+        }
 
-            entries.push(ArchiveEntry {
-                name,
-                path: normalized,
-                is_dir,
-                file_size: if is_dir { 0 } else { file_size },
-                compressed_size: 0, // 7z crate doesn't expose per-file compressed size
-            });
+        entries.push(ArchiveEntry {
+            name,
+            path: normalized,
+            is_dir,
+            file_size: if is_dir { 0 } else { file_size },
+            compressed_size: 0, // 7z crate doesn't expose per-file compressed size
+        });
 
-            Ok(true) // continue iteration, don't actually extract
-        },
-    )
+        Ok(true) // continue iteration, don't actually extract
+    })
     .map_err(|e| anyhow::anyhow!("Failed to read 7z {}: {e}", archive_path.display()))?;
 
     let total_files = entries.iter().filter(|e| !e.is_dir).count();
@@ -371,11 +362,10 @@ pub fn extract_thumbnail(
 
 /// Convert raw DDS bytes into a resized base64-encoded PNG string.
 fn dds_bytes_to_base64_png(dds_bytes: &[u8], max_size: u32) -> Result<String> {
-    let dds = ddsfile::Dds::read(&mut Cursor::new(dds_bytes))
-        .context("Failed to parse DDS data")?;
+    let dds =
+        ddsfile::Dds::read(&mut Cursor::new(dds_bytes)).context("Failed to parse DDS data")?;
 
-    let rgba = image_dds::image_from_dds(&dds, 0)
-        .context("Failed to decode DDS to RGBA")?;
+    let rgba = image_dds::image_from_dds(&dds, 0).context("Failed to decode DDS to RGBA")?;
 
     let (w, h) = (rgba.width(), rgba.height());
     let longest = w.max(h);
@@ -419,8 +409,8 @@ fn extract_from_bsa_tes3(archive_path: &Path, internal_path: &str) -> Result<Vec
     use ba2::prelude::*;
     use ba2::tes3::{Archive, ArchiveKey};
 
-    let archive: Archive<'static> = Archive::read(archive_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read TES3 BSA: {e}"))?;
+    let archive: Archive<'static> =
+        Archive::read(archive_path).map_err(|e| anyhow::anyhow!("Failed to read TES3 BSA: {e}"))?;
 
     let normalized = normalize_archive_path(internal_path);
 
@@ -449,8 +439,8 @@ fn extract_from_bsa_tes4(archive_path: &Path, internal_path: &str) -> Result<Vec
     use ba2::prelude::*;
     use ba2::tes4::Archive;
 
-    let (archive, meta): (Archive<'static>, _) = Archive::read(archive_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read TES4 BSA: {e}"))?;
+    let (archive, meta): (Archive<'static>, _) =
+        Archive::read(archive_path).map_err(|e| anyhow::anyhow!("Failed to read TES4 BSA: {e}"))?;
 
     let normalized = normalize_archive_path(internal_path);
     let lower = normalized.to_lowercase();
@@ -483,8 +473,8 @@ fn extract_file_from_ba2(archive_path: &Path, internal_path: &str) -> Result<Vec
     use ba2::fo4::Archive;
     use ba2::prelude::*;
 
-    let (archive, meta): (Archive<'static>, _) = Archive::read(archive_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read BA2: {e}"))?;
+    let (archive, meta): (Archive<'static>, _) =
+        Archive::read(archive_path).map_err(|e| anyhow::anyhow!("Failed to read BA2: {e}"))?;
 
     let normalized = normalize_archive_path(internal_path);
     let lower = normalized.to_lowercase();
@@ -539,22 +529,18 @@ fn extract_file_from_7z(archive_path: &Path, internal_path: &str) -> Result<Vec<
     let file = std::fs::File::open(archive_path)
         .with_context(|| format!("Failed to open 7z: {}", archive_path.display()))?;
 
-    sevenz_rust2::decompress_with_extract_fn(
-        file,
-        ".",
-        |entry, reader: &mut dyn Read, _dest| {
-            if result.is_some() {
-                return Ok(true);
-            }
-            let entry_path = normalize_archive_path(&entry.name().to_string());
-            if entry_path.to_lowercase() == lower {
-                let mut buf = Vec::new();
-                reader.read_to_end(&mut buf)?;
-                result = Some(buf);
-            }
-            Ok(true)
-        },
-    )
+    sevenz_rust2::decompress_with_extract_fn(file, ".", |entry, reader: &mut dyn Read, _dest| {
+        if result.is_some() {
+            return Ok(true);
+        }
+        let entry_path = normalize_archive_path(&entry.name().to_string());
+        if entry_path.to_lowercase() == lower {
+            let mut buf = Vec::new();
+            reader.read_to_end(&mut buf)?;
+            result = Some(buf);
+        }
+        Ok(true)
+    })
     .map_err(|e| anyhow::anyhow!("Failed to read 7z {}: {e}", archive_path.display()))?;
 
     result.ok_or_else(|| anyhow::anyhow!("File not found in 7z: {internal_path}"))
@@ -663,11 +649,9 @@ fn insert_into_tree(
 fn sort_tree(nodes: &mut [FileTreeNode]) {
     nodes.sort_by(|a, b| {
         // Directories before files
-        b.is_dir.cmp(&a.is_dir).then_with(|| {
-            a.name
-                .to_lowercase()
-                .cmp(&b.name.to_lowercase())
-        })
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
 }
 
@@ -702,10 +686,7 @@ fn normalize_archive_path(raw: &str) -> String {
 
 /// Extract the leaf file/dir name from a normalized path.
 fn leaf_name(path: &str) -> String {
-    path.rsplit('/')
-        .next()
-        .unwrap_or(path)
-        .to_string()
+    path.rsplit('/').next().unwrap_or(path).to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -752,10 +733,7 @@ mod tests {
 
     #[test]
     fn test_normalize_archive_path_trailing_slash() {
-        assert_eq!(
-            normalize_archive_path("textures/sky/"),
-            "textures/sky"
-        );
+        assert_eq!(normalize_archive_path("textures/sky/"), "textures/sky");
     }
 
     #[test]

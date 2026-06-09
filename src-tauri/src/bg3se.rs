@@ -114,7 +114,11 @@ fn read_version(macos: &Path) -> Option<String> {
     ];
     for p in &candidates {
         if let Ok(s) = fs::read_to_string(p) {
-            let trimmed = s.lines().next().map(|l| l.trim().to_string()).filter(|s| !s.is_empty());
+            let trimmed = s
+                .lines()
+                .next()
+                .map(|l| l.trim().to_string())
+                .filter(|s| !s.is_empty());
             if trimmed.is_some() {
                 return trimmed;
             }

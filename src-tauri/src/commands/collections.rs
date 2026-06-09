@@ -1,18 +1,24 @@
 //! Collection management: browse, install, resume, endorsements, and NexusMods search.
 
-use crate::database;
-use crate::collections;
-use crate::nexus;
 use crate::cleaner;
 use crate::collection_installer;
-use crate::collections::{CollectionDiff, CollectionInfo, CollectionManifest, CollectionRevision, CollectionSearchResult, RevisionModsResult};
-use crate::database::{CollectionSummary};
+use crate::collections;
+use crate::collections::{
+    CollectionDiff, CollectionInfo, CollectionManifest, CollectionRevision, CollectionSearchResult,
+    RevisionModsResult,
+};
+use crate::database;
+use crate::database::CollectionSummary;
 use crate::deploy_journal;
 use crate::deployer;
 use crate::loot_rules;
+use crate::nexus;
 use crate::nexus::{NexusCategory, NexusSearchResult};
 use crate::rollback;
-use crate::{AppState, DeployGuard, auto_snapshot_before_destructive, check_game_lock, nexus_api_key_or_token, nexus_client, resolve_game};
+use crate::{
+    auto_snapshot_before_destructive, check_game_lock, nexus_api_key_or_token, nexus_client,
+    resolve_game, AppState, DeployGuard,
+};
 use std::path::{Path, PathBuf};
 use tauri::Emitter;
 use tauri::{AppHandle, State};
@@ -95,8 +101,12 @@ pub async fn switch_collection_cmd(
         let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
 
         let journal_id = deploy_journal::begin(
-            &game_id, &bottle_name, deploy_journal::JournalOp::RedeployAll, &[],
-        ).unwrap_or_default();
+            &game_id,
+            &bottle_name,
+            deploy_journal::JournalOp::RedeployAll,
+            &[],
+        )
+        .unwrap_or_default();
 
         // 1. Purge current deployment
         deployer::purge_deployment(&db, &game_id, &bottle_name, &data_dir, &game.game_path)
@@ -509,8 +519,19 @@ pub async fn delete_collection_cmd(
                 })
             });
             if !has_lua_or_logic {
-                let win64 = game.game_path.join("Phoenix").join("Binaries").join("Win64");
-                let ue4ss_files = ["dwmapi.dll", "UE4SS.dll", "UE4SS-settings.ini", "Changelog.md", "README.md", ".version"];
+                let win64 = game
+                    .game_path
+                    .join("Phoenix")
+                    .join("Binaries")
+                    .join("Win64");
+                let ue4ss_files = [
+                    "dwmapi.dll",
+                    "UE4SS.dll",
+                    "UE4SS-settings.ini",
+                    "Changelog.md",
+                    "README.md",
+                    ".version",
+                ];
                 let mut removed = 0;
                 for fname in &ue4ss_files {
                     let f = win64.join(fname);
@@ -527,7 +548,12 @@ pub async fn delete_collection_cmd(
                     removed += 1;
                 }
                 // Remove Tools/ue4ss/
-                let tools_dir = game.game_path.join("Phoenix").join("Binaries").join("Tools").join("ue4ss");
+                let tools_dir = game
+                    .game_path
+                    .join("Phoenix")
+                    .join("Binaries")
+                    .join("Tools")
+                    .join("ue4ss");
                 if tools_dir.exists() {
                     let _ = std::fs::remove_dir_all(&tools_dir);
                     removed += 1;
@@ -549,7 +575,11 @@ pub async fn delete_collection_cmd(
                     log::info!("HL cleanup: removed toxic Tools/ directory under Paks/");
                 }
             }
-            let binaries_tools = game.game_path.join("Phoenix").join("Binaries").join("Tools");
+            let binaries_tools = game
+                .game_path
+                .join("Phoenix")
+                .join("Binaries")
+                .join("Tools");
             if binaries_tools.exists() {
                 let _ = std::fs::remove_dir_all(&binaries_tools);
                 log::info!("HL cleanup: removed Binaries/Tools/");
@@ -793,8 +823,19 @@ pub async fn uninstall_wabbajack_modlist(
                 })
             });
             if !has_lua_or_logic {
-                let win64 = game.game_path.join("Phoenix").join("Binaries").join("Win64");
-                let ue4ss_files = ["dwmapi.dll", "UE4SS.dll", "UE4SS-settings.ini", "Changelog.md", "README.md", ".version"];
+                let win64 = game
+                    .game_path
+                    .join("Phoenix")
+                    .join("Binaries")
+                    .join("Win64");
+                let ue4ss_files = [
+                    "dwmapi.dll",
+                    "UE4SS.dll",
+                    "UE4SS-settings.ini",
+                    "Changelog.md",
+                    "README.md",
+                    ".version",
+                ];
                 let mut removed = 0;
                 for fname in &ue4ss_files {
                     let f = win64.join(fname);
@@ -809,7 +850,12 @@ pub async fn uninstall_wabbajack_modlist(
                     let _ = std::fs::remove_dir_all(&mods_dir);
                     removed += 1;
                 }
-                let tools_dir = game.game_path.join("Phoenix").join("Binaries").join("Tools").join("ue4ss");
+                let tools_dir = game
+                    .game_path
+                    .join("Phoenix")
+                    .join("Binaries")
+                    .join("Tools")
+                    .join("ue4ss");
                 if tools_dir.exists() {
                     let _ = std::fs::remove_dir_all(&tools_dir);
                     removed += 1;
@@ -831,7 +877,11 @@ pub async fn uninstall_wabbajack_modlist(
                     log::info!("HL cleanup: removed toxic Tools/ directory under Paks/");
                 }
             }
-            let binaries_tools = game.game_path.join("Phoenix").join("Binaries").join("Tools");
+            let binaries_tools = game
+                .game_path
+                .join("Phoenix")
+                .join("Binaries")
+                .join("Tools");
             if binaries_tools.exists() {
                 let _ = std::fs::remove_dir_all(&binaries_tools);
                 log::info!("HL cleanup: removed Binaries/Tools/");
@@ -1041,7 +1091,6 @@ pub async fn get_collection_diff_cmd(
     ))
 }
 
-
 // --- Collections ---
 
 #[tauri::command]
@@ -1124,7 +1173,6 @@ pub async fn get_nexus_mod_detail(
         .await
         .map_err(|e| e.to_string())
 }
-
 
 // --- Collection Install Resume ---
 
@@ -1253,7 +1301,6 @@ pub async fn dismiss_wabbajack_install(
         .map_err(|e| format!("Failed to dismiss WJ install: {}", e))
 }
 
-
 // --- Endorsements ---
 
 #[tauri::command]
@@ -1371,7 +1418,10 @@ pub async fn browse_collections_cmd(
 }
 
 #[tauri::command]
-pub async fn get_collection_cmd(slug: String, game_domain: String) -> Result<CollectionInfo, String> {
+pub async fn get_collection_cmd(
+    slug: String,
+    game_domain: String,
+) -> Result<CollectionInfo, String> {
     let token = nexus_api_key_or_token().await.ok().map(|(t, _)| t);
 
     collections::get_collection(token.as_deref(), &slug, &game_domain)
@@ -1389,7 +1439,10 @@ pub async fn get_collection_revisions(slug: String) -> Result<Vec<CollectionRevi
 }
 
 #[tauri::command]
-pub async fn get_collection_mods(slug: String, revision: u32) -> Result<RevisionModsResult, String> {
+pub async fn get_collection_mods(
+    slug: String,
+    revision: u32,
+) -> Result<RevisionModsResult, String> {
     let token = nexus_api_key_or_token().await.ok().map(|(t, _)| t);
 
     collections::get_revision_mods(token.as_deref(), &slug, revision)
@@ -1398,7 +1451,9 @@ pub async fn get_collection_mods(slug: String, revision: u32) -> Result<Revision
 }
 
 #[tauri::command]
-pub async fn parse_collection_bundle_cmd(bundle_path: String) -> Result<CollectionManifest, String> {
+pub async fn parse_collection_bundle_cmd(
+    bundle_path: String,
+) -> Result<CollectionManifest, String> {
     tokio::task::spawn_blocking(move || {
         collections::parse_collection_bundle(Path::new(&bundle_path)).map_err(|e| e.to_string())
     })
@@ -1452,7 +1507,6 @@ pub async fn submit_fomod_choices(
     .map_err(crate::format_join_error)?
 }
 
-
 // --- Download Cache Check ---
 
 #[tauri::command]
@@ -1468,7 +1522,6 @@ pub async fn check_cached_files(
     .await
     .map_err(crate::format_join_error)?
 }
-
 
 /// Re-sync plugin load order, enabling all deployed plugins.
 ///

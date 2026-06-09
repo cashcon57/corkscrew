@@ -5,7 +5,7 @@ use crate::config;
 use crate::deployer;
 use crate::disk_budget;
 use crate::fomod;
-use crate::fomod::{FomodInstaller};
+use crate::fomod::FomodInstaller;
 use crate::fomod_recipes;
 use crate::ini_manager;
 use crate::instruction_parser;
@@ -18,7 +18,7 @@ use crate::staging;
 use crate::vortex_fetcher;
 use crate::vortex_registry;
 use crate::vortex_types;
-use crate::{AppState, resolve_bottle, resolve_game};
+use crate::{resolve_bottle, resolve_game, AppState};
 use std::path::{Path, PathBuf};
 use tauri::State;
 
@@ -66,7 +66,6 @@ pub async fn get_available_disk_space_cmd(path: String) -> Result<u64, String> {
     .await
     .map_err(crate::format_join_error)?
 }
-
 
 // --- Staging Info Commands ---
 
@@ -126,7 +125,6 @@ pub async fn set_staging_directory(path: Option<String>) -> Result<(), String> {
     .await
     .map_err(crate::format_join_error)?
 }
-
 
 // --- INI Manager Commands ---
 
@@ -234,7 +232,6 @@ pub async fn write_mod_file(
     .map_err(crate::format_join_error)?
 }
 
-
 // --- FOMOD ---
 
 #[tauri::command]
@@ -287,7 +284,6 @@ pub async fn get_fomod_files(
     .await
     .map_err(crate::format_join_error)?
 }
-
 
 // --- FOMOD Recipe Commands ---
 
@@ -357,7 +353,6 @@ pub async fn has_compatible_fomod_recipe(
     .await
     .map_err(crate::format_join_error)?
 }
-
 
 // --- Instruction Parsing (Collection Author Instructions) ---
 
@@ -491,7 +486,6 @@ pub async fn unload_ollama_model_cmd(model_name: String) -> Result<(), String> {
     llm_parser::unload_ollama_model(&model_name).await
 }
 
-
 // --- Modlist Export/Import ---
 
 #[tauri::command]
@@ -586,7 +580,6 @@ pub async fn execute_modlist_import(
     .map_err(crate::format_join_error)?
 }
 
-
 // --- Vortex Extension Commands ---
 
 #[tauri::command]
@@ -668,12 +661,13 @@ pub async fn get_vortex_extension_suggestions(
         for ext in crate::vortex_registry::list_cached(&db) {
             covered.push(ext.game_id);
         }
-        Ok(crate::game_registry::collect_extension_suggestions(&covered))
+        Ok(crate::game_registry::collect_extension_suggestions(
+            &covered,
+        ))
     })
     .await
     .map_err(crate::format_join_error)?
 }
-
 
 // --- Native Mode (Experimental) ---
 

@@ -189,9 +189,7 @@ pub enum ContainerEnvironment {
 #[allow(dead_code)]
 pub fn detect_container_environment() -> Option<ContainerEnvironment> {
     // Flatpak
-    if std::path::Path::new("/.flatpak-info").exists()
-        || std::env::var("FLATPAK_ID").is_ok()
-    {
+    if std::path::Path::new("/.flatpak-info").exists() || std::env::var("FLATPAK_ID").is_ok() {
         return Some(ContainerEnvironment::Flatpak);
     }
 
@@ -376,6 +374,18 @@ fn platform_search_locations(home: &Path) -> Vec<SearchLocation> {
                 .join(".var")
                 .join("app")
                 .join("com.valvesoftware.Steam")
+                .join("data")
+                .join("Steam")
+                .join("steamapps")
+                .join("compatdata"),
+        },
+        // Flatpak Steam legacy layout
+        SearchLocation {
+            source: "Proton",
+            path: home
+                .join(".var")
+                .join("app")
+                .join("com.valvesoftware.Steam")
                 .join(".local")
                 .join("share")
                 .join("Steam")
@@ -388,6 +398,8 @@ fn platform_search_locations(home: &Path) -> Vec<SearchLocation> {
     let steam_dirs = [
         home.join(".local/share/Steam"),
         home.join(".steam/steam"),
+        home.join(".var/app/com.valvesoftware.Steam/data/Steam"),
+        home.join(".var/app/com.valvesoftware.Steam/.local/share/Steam"),
     ];
     for steam_dir in &steam_dirs {
         for vdf_name in &["steamapps/libraryfolders.vdf", "config/libraryfolders.vdf"] {
@@ -398,10 +410,9 @@ fn platform_search_locations(home: &Path) -> Vec<SearchLocation> {
                     if let Some(rest) = trimmed.strip_prefix("\"path\"") {
                         let rest = rest.trim().trim_matches('"');
                         if !rest.is_empty() {
-                            let lib_path =
-                                PathBuf::from(rest.replace('\\', "/"))
-                                    .join("steamapps")
-                                    .join("compatdata");
+                            let lib_path = PathBuf::from(rest.replace('\\', "/"))
+                                .join("steamapps")
+                                .join("compatdata");
                             // Avoid duplicates
                             if !locations.iter().any(|l| l.path == lib_path) && lib_path.is_dir() {
                                 log::info!(
@@ -855,7 +866,10 @@ pub fn detect_heroic_games() -> Vec<HeroicGameInfo> {
         all_games.len(),
         all_games.iter().filter(|g| g.platform == "gog").count(),
         all_games.iter().filter(|g| g.platform == "epic").count(),
-        all_games.iter().filter(|g| g.platform == "sideload").count(),
+        all_games
+            .iter()
+            .filter(|g| g.platform == "sideload")
+            .count(),
     );
 
     all_games
@@ -867,9 +881,7 @@ pub fn detect_heroic_games() -> Vec<HeroicGameInfo> {
 /// `sideload_apps/library.json`. Wine prefix lives in GamesConfig as
 /// usual.
 fn parse_heroic_sideloaded_games(heroic_config_dir: &Path) -> Vec<HeroicGameInfo> {
-    let library_path = heroic_config_dir
-        .join("sideload_apps")
-        .join("library.json");
+    let library_path = heroic_config_dir.join("sideload_apps").join("library.json");
     let mut games = Vec::new();
 
     let content = match fs::read_to_string(&library_path) {
@@ -1006,10 +1018,13 @@ pub fn detect_bottles() -> Vec<Bottle> {
             // Match by wine prefix path (the bottle path itself)
             if let Some(game) = prefix_map.get(&bottle.path) {
                 bottle.name = game.title.clone();
-                bottle.source = format!(
-                    "Heroic ({})",
-                    if game.platform == "gog" { "GOG" } else { "Epic" }
-                );
+                let platform_label = match game.platform.as_str() {
+                    "gog" => "GOG",
+                    "epic" => "Epic",
+                    "sideload" => "Sideload",
+                    other => other,
+                };
+                bottle.source = format!("Heroic ({platform_label})");
             }
         }
     }
@@ -1326,8 +1341,16 @@ mod tests {
         let path_b = create_fake_bottle(tmp.path(), "Beta");
 
         let bottles = vec![
-            Bottle { name: "Alpha".into(), path: path_a.clone(), source: "CrossOver".into() },
-            Bottle { name: "Beta".into(), path: path_b.clone(), source: "CrossOver".into() },
+            Bottle {
+                name: "Alpha".into(),
+                path: path_a.clone(),
+                source: "CrossOver".into(),
+            },
+            Bottle {
+                name: "Beta".into(),
+                path: path_b.clone(),
+                source: "CrossOver".into(),
+            },
         ];
 
         let deduped = deduplicate_bottles_by_name(bottles);
@@ -1345,8 +1368,16 @@ mod tests {
         let path_b = create_fake_bottle(tmp.path(), "MySkyrim_b");
 
         let bottles = vec![
-            Bottle { name: "MySkyrim".into(), path: path_a.clone(), source: "CrossOver".into() },
-            Bottle { name: "MySkyrim".into(), path: path_b.clone(), source: "CrossOver".into() },
+            Bottle {
+                name: "MySkyrim".into(),
+                path: path_a.clone(),
+                source: "CrossOver".into(),
+            },
+            Bottle {
+                name: "MySkyrim".into(),
+                path: path_b.clone(),
+                source: "CrossOver".into(),
+            },
         ];
 
         let deduped = deduplicate_bottles_by_name(bottles);
@@ -1379,8 +1410,16 @@ mod tests {
         filetime::set_file_mtime(&new_toml, new_time).unwrap();
 
         let bottles = vec![
-            Bottle { name: "MySkyrim".into(), path: path_old.clone(), source: "CrossOver".into() },
-            Bottle { name: "MySkyrim".into(), path: path_new.clone(), source: "CrossOver".into() },
+            Bottle {
+                name: "MySkyrim".into(),
+                path: path_old.clone(),
+                source: "CrossOver".into(),
+            },
+            Bottle {
+                name: "MySkyrim".into(),
+                path: path_new.clone(),
+                source: "CrossOver".into(),
+            },
         ];
 
         let deduped = deduplicate_bottles_by_name(bottles);
@@ -1397,11 +1436,23 @@ mod tests {
         let path_b = create_fake_bottle(tmp.path(), "SkyrimB");
 
         let bottles = vec![
-            Bottle { name: "Skyrim".into(), path: path_a.clone(), source: "CrossOver".into() },
-            Bottle { name: "SKYRIM".into(), path: path_b.clone(), source: "CrossOver".into() },
+            Bottle {
+                name: "Skyrim".into(),
+                path: path_a.clone(),
+                source: "CrossOver".into(),
+            },
+            Bottle {
+                name: "SKYRIM".into(),
+                path: path_b.clone(),
+                source: "CrossOver".into(),
+            },
         ];
 
         let deduped = deduplicate_bottles_by_name(bottles);
-        assert_eq!(deduped.len(), 1, "case-insensitive duplicate should be collapsed to one entry");
+        assert_eq!(
+            deduped.len(),
+            1,
+            "case-insensitive duplicate should be collapsed to one entry"
+        );
     }
 }

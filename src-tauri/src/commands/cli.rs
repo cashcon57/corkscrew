@@ -1,17 +1,17 @@
 //! CLI commands: diagnostic tools, e2e test support, shader scans, and headless launch.
 
-use crate::database;
 use crate::config;
-use crate::database::{ModDatabase};
+use crate::database;
+use crate::database::ModDatabase;
 use crate::display_fix;
 use crate::games;
 use crate::launcher;
 use crate::plugins;
+use crate::resolve_game;
 use crate::shader_conversion;
 use crate::skse;
 use crate::vortex_fetcher;
 use crate::vortex_runtime;
-use crate::{resolve_game};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -470,7 +470,6 @@ pub fn cli_mod_files(search: &str, game_id: &str, bottle_name: &str, db: &Arc<Mo
     }
 }
 
-
 // --- CLI e2e test support commands ---
 
 /// List detected bottles as JSON.
@@ -625,7 +624,10 @@ pub fn cli_scan_bottle(bottle_name: &str) {
             .join("steamapps")
             .join("libraryfolders.vdf");
         if vdf_path.is_file() {
-            steam_library_paths.push(format!("{} (libraryfolders.vdf present)", vdf_path.display()));
+            steam_library_paths.push(format!(
+                "{} (libraryfolders.vdf present)",
+                vdf_path.display()
+            ));
             // Parse declared library paths from the VDF
             if let Ok(content) = std::fs::read_to_string(&vdf_path) {
                 for line in content.lines() {
@@ -633,10 +635,8 @@ pub fn cli_scan_bottle(bottle_name: &str) {
                     if let Some(rest) = trimmed.strip_prefix("\"path\"") {
                         let rest = rest.trim().trim_matches('"');
                         if !rest.is_empty() {
-                            steam_library_paths.push(format!(
-                                "  declared: {}",
-                                rest.replace('\\', "/")
-                            ));
+                            steam_library_paths
+                                .push(format!("  declared: {}", rest.replace('\\', "/")));
                         }
                     }
                 }
@@ -650,7 +650,10 @@ pub fn cli_scan_bottle(bottle_name: &str) {
             .join("steamapps")
             .join("libraryfolders.vdf");
         if vdf_path2.is_file() && vdf_path2 != vdf_path {
-            steam_library_paths.push(format!("{} (libraryfolders.vdf present)", vdf_path2.display()));
+            steam_library_paths.push(format!(
+                "{} (libraryfolders.vdf present)",
+                vdf_path2.display()
+            ));
         }
     }
 
@@ -700,7 +703,8 @@ pub fn cli_scan_bottle(bottle_name: &str) {
 
         // Common (all users) paths
         scan_paths.push(
-            bottle.path
+            bottle
+                .path
                 .join("drive_c")
                 .join("ProgramData")
                 .join("Microsoft")
@@ -726,11 +730,7 @@ pub fn cli_scan_bottle(bottle_name: &str) {
                             .unwrap_or(false)
                 })
                 .count();
-            println!(
-                "  {} .lnk files  ->  {}",
-                lnk_count,
-                scan_path.display()
-            );
+            println!("  {} .lnk files  ->  {}", lnk_count, scan_path.display());
             any_found = true;
         }
         if !any_found {
@@ -788,7 +788,10 @@ pub fn cli_scan_bottle(bottle_name: &str) {
     // --- Unregistered games (shortcut found but no registered game) ---
     let unreg =
         crate::crossover_shortcuts::list_unregistered_games(std::slice::from_ref(&bottle), &games);
-    println!("=== Unregistered games (would surface a registration banner) ({}) ===", unreg.len());
+    println!(
+        "=== Unregistered games (would surface a registration banner) ({}) ===",
+        unreg.len()
+    );
     if unreg.is_empty() {
         println!("(none)");
     }
@@ -828,7 +831,9 @@ pub fn cli_list_games(db: &Arc<ModDatabase>) {
     let custom = crate::game_registry::load_custom_games(db);
     for game in &custom {
         if !all_games.iter().any(|g| g["id"] == game.game_id) {
-            let bottle_name = game.runtime.wine()
+            let bottle_name = game
+                .runtime
+                .wine()
                 .map(|w| w.bottle_name.as_str())
                 .unwrap_or("");
             all_games.push(serde_json::json!({
@@ -1214,7 +1219,6 @@ pub fn cli_vortex_test(game_id: &str) {
     println!("{}", serde_json::to_string_pretty(&result).unwrap());
 }
 
-
 // --- CLI shader scan test ---
 
 /// Scan installed mods for Community Shaders dependencies and print results as JSON.
@@ -1243,7 +1247,10 @@ pub fn cli_test_shader_scan(game_id: &str, bottle_name: &str, db: &Arc<ModDataba
             println!("  Swappable (ENB variant): {}", result.swappable_count);
             println!("  FOMOD re-run needed:     {}", result.fomod_rerun_count);
             println!("  Disable-only:            {}", result.disable_only_count);
-            println!("  ENB already installed:   {}", result.enb_already_installed);
+            println!(
+                "  ENB already installed:   {}",
+                result.enb_already_installed
+            );
             println!();
             println!("{}", serde_json::to_string_pretty(&result).unwrap());
         }
@@ -1253,7 +1260,6 @@ pub fn cli_test_shader_scan(game_id: &str, bottle_name: &str, db: &Arc<ModDataba
         }
     }
 }
-
 
 // --- CLI headless launch ---
 
@@ -1382,7 +1388,6 @@ pub fn cli_launch(game_id: &str, bottle_name: &str, use_skse: bool, db: &Arc<Mod
     }
 }
 
-
 // --- Startup Cleanup ---
 
 /// Mark orphaned Wabbajack installs (left in active state from a crash) as failed
@@ -1440,4 +1445,3 @@ pub fn cleanup_orphaned_temp_dirs() {
         Err(e) => log::warn!("Failed to scan temp dir for orphans: {}", e),
     }
 }
-

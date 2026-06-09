@@ -203,9 +203,15 @@ impl DirectiveProcessor {
             let mut needed: HashSet<String> = HashSet::new();
             for d in directives {
                 match d {
-                    WjDirective::FromArchive { archive_hash_path, .. }
-                    | WjDirective::PatchedFromArchive { archive_hash_path, .. }
-                    | WjDirective::TransformedTexture { archive_hash_path, .. } => {
+                    WjDirective::FromArchive {
+                        archive_hash_path, ..
+                    }
+                    | WjDirective::PatchedFromArchive {
+                        archive_hash_path, ..
+                    }
+                    | WjDirective::TransformedTexture {
+                        archive_hash_path, ..
+                    } => {
                         needed.insert(archive_hash_path.base_hash.0.clone());
                     }
                     _ => {}
@@ -220,16 +226,23 @@ impl DirectiveProcessor {
                     "{} archive(s) not available — {} directive(s) will be skipped. \
                      Missing hashes: {:?}",
                     missing.len(),
-                    directives.iter().filter(|d| {
-                        match d {
-                            WjDirective::FromArchive { archive_hash_path, .. }
-                            | WjDirective::PatchedFromArchive { archive_hash_path, .. }
-                            | WjDirective::TransformedTexture { archive_hash_path, .. } => {
-                                missing.contains(&archive_hash_path.base_hash.0)
+                    directives
+                        .iter()
+                        .filter(|d| {
+                            match d {
+                                WjDirective::FromArchive {
+                                    archive_hash_path, ..
+                                }
+                                | WjDirective::PatchedFromArchive {
+                                    archive_hash_path, ..
+                                }
+                                | WjDirective::TransformedTexture {
+                                    archive_hash_path, ..
+                                } => missing.contains(&archive_hash_path.base_hash.0),
+                                _ => false,
                             }
-                            _ => false,
-                        }
-                    }).count(),
+                        })
+                        .count(),
                     missing
                 );
             }
@@ -309,10 +322,8 @@ impl DirectiveProcessor {
             phase1.par_iter().for_each(|&(orig_idx, d)| {
                 // Skip already-completed directives (resume path)
                 if completed_set.contains(&orig_idx) {
-                    bytes_processed
-                        .fetch_add(d.size().max(0) as u64, Ordering::Relaxed);
-                    let count =
-                        processed_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                    bytes_processed.fetch_add(d.size().max(0) as u64, Ordering::Relaxed);
+                    let count = processed_counter.fetch_add(1, Ordering::Relaxed) + 1;
                     if count.is_multiple_of(5) || count == total {
                         progress_callback(
                             count,
@@ -329,18 +340,20 @@ impl DirectiveProcessor {
                 // Skip directives whose archive is known to be missing
                 // (already reported as a summary warning above)
                 let has_missing_archive = match d {
-                    WjDirective::FromArchive { archive_hash_path, .. }
-                    | WjDirective::PatchedFromArchive { archive_hash_path, .. }
-                    | WjDirective::TransformedTexture { archive_hash_path, .. } => {
-                        missing_hashes.contains(&archive_hash_path.base_hash.0)
+                    WjDirective::FromArchive {
+                        archive_hash_path, ..
                     }
+                    | WjDirective::PatchedFromArchive {
+                        archive_hash_path, ..
+                    }
+                    | WjDirective::TransformedTexture {
+                        archive_hash_path, ..
+                    } => missing_hashes.contains(&archive_hash_path.base_hash.0),
                     _ => false,
                 };
                 if has_missing_archive {
-                    bytes_processed
-                        .fetch_add(d.size().max(0) as u64, Ordering::Relaxed);
-                    let count =
-                        processed_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                    bytes_processed.fetch_add(d.size().max(0) as u64, Ordering::Relaxed);
+                    let count = processed_counter.fetch_add(1, Ordering::Relaxed) + 1;
                     if count.is_multiple_of(5) || count == total {
                         progress_callback(
                             count,
@@ -355,9 +368,7 @@ impl DirectiveProcessor {
                 }
 
                 // Mark as processing
-                if let (Some(db), Some(install_id)) =
-                    (&self.db, &self.install_id)
-                {
+                if let (Some(db), Some(install_id)) = (&self.db, &self.install_id) {
                     let _ = db.mark_directive_processing(install_id, orig_idx);
                 }
 
@@ -365,31 +376,23 @@ impl DirectiveProcessor {
 
                 match &result {
                     Ok(()) => {
-                        if let (Some(db), Some(install_id)) =
-                            (&self.db, &self.install_id)
-                        {
+                        if let (Some(db), Some(install_id)) = (&self.db, &self.install_id) {
                             let _ = db.mark_directive_completed(install_id, orig_idx);
                         }
                     }
                     Err(e) => {
-                        let msg =
-                            format!("{} -> {}: {}", d.kind_name(), d.to_path(), e);
+                        let msg = format!("{} -> {}: {}", d.kind_name(), d.to_path(), e);
                         if matches!(e, WjDirectiveError::HashMismatch { .. }) {
                             warn!("Directive warning: {}", msg);
                             phase1_warnings.lock().unwrap().push(msg);
                             // Still mark as completed — file was written
-                            if let (Some(db), Some(install_id)) =
-                                (&self.db, &self.install_id)
-                            {
-                                let _ =
-                                    db.mark_directive_completed(install_id, orig_idx);
+                            if let (Some(db), Some(install_id)) = (&self.db, &self.install_id) {
+                                let _ = db.mark_directive_completed(install_id, orig_idx);
                             }
                         } else {
                             warn!("Directive error: {}", msg);
                             phase1_errors.lock().unwrap().push(msg);
-                            if let (Some(db), Some(install_id)) =
-                                (&self.db, &self.install_id)
-                            {
+                            if let (Some(db), Some(install_id)) = (&self.db, &self.install_id) {
                                 let _ = db.mark_directive_failed(install_id, orig_idx);
                             }
                         }
@@ -527,22 +530,31 @@ impl DirectiveProcessor {
         // Add summary warning for missing archives (instead of per-file errors)
         let mut all_warnings = warnings.into_inner().unwrap();
         if !missing_hashes.is_empty() {
-            let missing_directive_count = directives.iter().filter(|d| {
-                match d {
-                    WjDirective::FromArchive { archive_hash_path, .. }
-                    | WjDirective::PatchedFromArchive { archive_hash_path, .. }
-                    | WjDirective::TransformedTexture { archive_hash_path, .. } => {
-                        missing_hashes.contains(&archive_hash_path.base_hash.0)
+            let missing_directive_count = directives
+                .iter()
+                .filter(|d| match d {
+                    WjDirective::FromArchive {
+                        archive_hash_path, ..
                     }
+                    | WjDirective::PatchedFromArchive {
+                        archive_hash_path, ..
+                    }
+                    | WjDirective::TransformedTexture {
+                        archive_hash_path, ..
+                    } => missing_hashes.contains(&archive_hash_path.base_hash.0),
                     _ => false,
-                }
-            }).count();
+                })
+                .count();
             all_warnings.push(format!(
                 "{} archive(s) were not downloaded — {} directive(s) skipped. \
                  These files will be missing from the install. Missing hashes: {}",
                 missing_hashes.len(),
                 missing_directive_count,
-                missing_hashes.iter().cloned().collect::<Vec<_>>().join(", ")
+                missing_hashes
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
 
@@ -618,9 +630,7 @@ impl DirectiveProcessor {
             Ok(p) => p,
             Err(e) => {
                 // Check for OctoDiff format (starts with "OCTODELTA")
-                let header_hint = if patch_data.len() >= 9
-                    && &patch_data[..9] == b"OCTODELTA"
-                {
+                let header_hint = if patch_data.len() >= 9 && &patch_data[..9] == b"OCTODELTA" {
                     " (patch appears to be OctoDiff format, not BSDiff4 — this WJ version may not be supported)"
                 } else if patch_data.is_empty() {
                     " (patch data is empty — the patch entry may be missing from the .wabbajack file)"
@@ -628,7 +638,8 @@ impl DirectiveProcessor {
                     ""
                 };
                 return Err(WjDirectiveError::PatchFailed(format!(
-                    "Invalid patch data: {}{}", e, header_hint
+                    "Invalid patch data: {}{}",
+                    e, header_hint
                 )));
             }
         };
@@ -1388,8 +1399,7 @@ impl DirectiveProcessor {
             .unwrap_or_default();
 
         if !expected_filename.is_empty() {
-            if let Some(found) =
-                find_file_fallback(archive_dir, &expected_filename, expected_size)
+            if let Some(found) = find_file_fallback(archive_dir, &expected_filename, expected_size)
             {
                 return Ok(found);
             }
@@ -1779,10 +1789,7 @@ fn find_file_fallback(
     let mut size_and_name_matches: Vec<PathBuf> = Vec::new();
     let mut size_only_matches: Vec<PathBuf> = Vec::new();
 
-    for entry in WalkDir::new(archive_dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in WalkDir::new(archive_dir).into_iter().filter_map(|e| e.ok()) {
         if !entry.file_type().is_file() {
             continue;
         }
@@ -1874,7 +1881,9 @@ mod tests {
             PathBuf::from("/tmp/game"),
         );
 
-        let result = processor.resolve_output_path(r"mods\SkyUI\SkyUI.esp").unwrap();
+        let result = processor
+            .resolve_output_path(r"mods\SkyUI\SkyUI.esp")
+            .unwrap();
         assert_eq!(result, PathBuf::from("/tmp/output/mods/SkyUI/SkyUI.esp"));
     }
 
@@ -1887,7 +1896,9 @@ mod tests {
             PathBuf::from("/tmp/game"),
         );
 
-        let result = processor.resolve_output_path("mods/SkyUI/SkyUI.esp").unwrap();
+        let result = processor
+            .resolve_output_path("mods/SkyUI/SkyUI.esp")
+            .unwrap();
         assert_eq!(result, PathBuf::from("/tmp/output/mods/SkyUI/SkyUI.esp"));
     }
 

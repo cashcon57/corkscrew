@@ -110,9 +110,11 @@ fn sanitize_dir_name(name: &str) -> String {
 /// cross-platform dance for `\` separators in archive paths.
 fn any_entry_starts_with(entries: &[String], prefix: &str) -> bool {
     let prefix_lower = prefix.to_lowercase();
-    entries
-        .iter()
-        .any(|e| e.replace('\\', "/").to_lowercase().starts_with(&prefix_lower))
+    entries.iter().any(|e| {
+        e.replace('\\', "/")
+            .to_lowercase()
+            .starts_with(&prefix_lower)
+    })
 }
 
 fn any_entry_ext_eq(entries: &[String], ext: &str) -> bool {
@@ -149,7 +151,11 @@ fn any_entry_ends_with(entries: &[String], suffix: &str) -> bool {
 /// counting the final filename. `"manifest.json"` has depth 0;
 /// `"sub/manifest.json"` has depth 1.
 fn entry_depth(path: &str) -> usize {
-    path.replace('\\', "/").trim_matches('/').split('/').count().saturating_sub(1)
+    path.replace('\\', "/")
+        .trim_matches('/')
+        .split('/')
+        .count()
+        .saturating_sub(1)
 }
 
 // ---------------------------------------------------------------------------
@@ -219,9 +225,9 @@ fn detect_ue4ss(entries: &[String]) -> bool {
 /// RimWorld mod — every RimWorld mod has `About/About.xml`.
 fn detect_rimworld(entries: &[String]) -> bool {
     any_entry_ends_with(entries, "/About/About.xml")
-        || entries.iter().any(|e| {
-            e.replace('\\', "/").eq_ignore_ascii_case("About/About.xml")
-        })
+        || entries
+            .iter()
+            .any(|e| e.replace('\\', "/").eq_ignore_ascii_case("About/About.xml"))
 }
 
 /// The Sims 4 `.package` archive (custom content / gameplay tuning).
@@ -808,7 +814,11 @@ mod tests {
 
     #[test]
     fn detect_ue4ss_positive_bootstrap() {
-        let e = entries(&["dwmapi.dll", "UE4SS-settings.ini", "Mods/shared/enabled.txt"]);
+        let e = entries(&[
+            "dwmapi.dll",
+            "UE4SS-settings.ini",
+            "Mods/shared/enabled.txt",
+        ]);
         assert!(detect_ue4ss(&e));
     }
 
@@ -892,7 +902,10 @@ mod tests {
 
     #[test]
     fn detect_sims4_package_nested() {
-        let e = entries(&["Author/CoolMod/awesome.package", "Author/CoolMod/readme.txt"]);
+        let e = entries(&[
+            "Author/CoolMod/awesome.package",
+            "Author/CoolMod/readme.txt",
+        ]);
         assert!(detect_sims4_package(&e));
     }
 
@@ -1186,10 +1199,7 @@ mod tests {
     fn priority_dlcpack_beats_asi_when_both_present() {
         // Hybrid release — some packs ship both dlcpacks/ and an ASI
         // helper. dlcpack (78) should win over ASIScript (72).
-        let e = entries(&[
-            "dlcpacks/myPack/dlc.rpf",
-            "MyHelper.asi",
-        ]);
+        let e = entries(&["dlcpacks/myPack/dlc.rpf", "MyHelper.asi"]);
         let mt = detect_mod_type(&e).unwrap();
         assert_eq!(mt.id, "GTAV_DlcPack");
     }
@@ -1247,10 +1257,7 @@ mod tests {
     fn detect_modengine2_two_asset_dirs() {
         // Weapon/armor model swap shipping multiple FromSoft asset dirs is
         // a confident ME2 signature even without regulation.bin.
-        let e = entries(&[
-            "MyMod/parts/wp_a_0001.bnd",
-            "MyMod/chr/c0001.bnd",
-        ]);
+        let e = entries(&["MyMod/parts/wp_a_0001.bnd", "MyMod/chr/c0001.bnd"]);
         assert!(detect_modengine2(&e));
     }
 

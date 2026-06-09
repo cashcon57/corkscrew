@@ -439,14 +439,20 @@ pub fn snapshot_current_state(
 pub fn write_case_variants(dir: &Path, filename: &str, content: &[u8]) -> Result<()> {
     // Write lowercase version
     let lower_path = dir.join(filename.to_lowercase());
-    std::fs::write(&lower_path, content)
-        .map_err(|e| ProfileError::Other(format!("Failed to write {}: {}", lower_path.display(), e)))?;
+    std::fs::write(&lower_path, content).map_err(|e| {
+        ProfileError::Other(format!("Failed to write {}: {}", lower_path.display(), e))
+    })?;
 
     // Write original case version (if different)
     let original_path = dir.join(filename);
     if original_path != lower_path {
-        std::fs::write(&original_path, content)
-            .map_err(|e| ProfileError::Other(format!("Failed to write {}: {}", original_path.display(), e)))?;
+        std::fs::write(&original_path, content).map_err(|e| {
+            ProfileError::Other(format!(
+                "Failed to write {}: {}",
+                original_path.display(),
+                e
+            ))
+        })?;
     }
 
     Ok(())
@@ -617,9 +623,7 @@ pub fn import_mo2_profiles(
     }
 
     // Get all installed mods for name matching
-    let installed_mods = db
-        .list_mods(game_id, bottle_name)
-        .unwrap_or_default();
+    let installed_mods = db.list_mods(game_id, bottle_name).unwrap_or_default();
 
     let mut imported = Vec::new();
 
@@ -665,7 +669,9 @@ pub fn import_mo2_profiles(
                 }) {
                     log::debug!(
                         "MO2 mod '{}' matched to installed mod '{}' (id={})",
-                        mod_name, installed.name, installed.id
+                        mod_name,
+                        installed.name,
+                        installed.id
                     );
                     mod_states.push(ProfileModState {
                         mod_id: installed.id,
@@ -704,11 +710,7 @@ pub fn import_mo2_profiles(
 
             if !plugin_states.is_empty() {
                 if let Err(e) = save_plugin_states(db, profile_id, &plugin_states) {
-                    log::warn!(
-                        "Failed to save plugin states for '{}': {}",
-                        profile_name,
-                        e
-                    );
+                    log::warn!("Failed to save plugin states for '{}': {}", profile_name, e);
                 } else {
                     log::info!(
                         "Imported {} plugin states for profile '{}'",
@@ -1259,12 +1261,10 @@ mod tests {
         let backup_b = backup_dir.join("Save2_PlayerA.ess");
         assert!(backup_a.exists() && backup_b.exists());
 
-        let backup_mtime_a = FileTime::from_system_time(
-            backup_a.metadata().unwrap().modified().unwrap(),
-        );
-        let backup_mtime_b = FileTime::from_system_time(
-            backup_b.metadata().unwrap().modified().unwrap(),
-        );
+        let backup_mtime_a =
+            FileTime::from_system_time(backup_a.metadata().unwrap().modified().unwrap());
+        let backup_mtime_b =
+            FileTime::from_system_time(backup_b.metadata().unwrap().modified().unwrap());
         assert_eq!(backup_mtime_a, t_a, "backup A mtime should match source");
         assert_eq!(backup_mtime_b, t_b, "backup B mtime should match source");
 
@@ -1286,14 +1286,18 @@ mod tests {
         let restored_b = saves_dir.join("Save2_PlayerA.ess");
         assert!(restored_a.exists() && restored_b.exists());
 
-        let restored_mtime_a = FileTime::from_system_time(
-            restored_a.metadata().unwrap().modified().unwrap(),
+        let restored_mtime_a =
+            FileTime::from_system_time(restored_a.metadata().unwrap().modified().unwrap());
+        let restored_mtime_b =
+            FileTime::from_system_time(restored_b.metadata().unwrap().modified().unwrap());
+        assert_eq!(
+            restored_mtime_a, t_a,
+            "restored A mtime should match original"
         );
-        let restored_mtime_b = FileTime::from_system_time(
-            restored_b.metadata().unwrap().modified().unwrap(),
+        assert_eq!(
+            restored_mtime_b, t_b,
+            "restored B mtime should match original"
         );
-        assert_eq!(restored_mtime_a, t_a, "restored A mtime should match original");
-        assert_eq!(restored_mtime_b, t_b, "restored B mtime should match original");
 
         // Sanity: restored mtime is NOT the wall-clock copy time.
         let now_ft = FileTime::from_system_time(now_mtime);

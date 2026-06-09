@@ -32,6 +32,7 @@ use crate::skse::SkseStatus;
 use crate::staging;
 use crate::{check_game_lock, nexus_client, resolve_bottle, resolve_game, AppState};
 use serde::Serialize;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tauri::Emitter;
@@ -509,6 +510,7 @@ pub async fn install_mod_cmd(
             plugin.detect_mod_type_from_files(&staging_result.files)
         })
         .flatten();
+        let mut resolved_mod_type_id = detected_mod_type.clone();
 
         // Layer 2: only consult the mod_types registry if the plugin
         // explicitly opts out OR there is no plugin for this game.
@@ -525,7 +527,11 @@ pub async fn install_mod_cmd(
             })
             .flatten();
             if let Some(rel_path) = target {
-                let resolved = game.game_path.join(rel_path);
+                let resolved = if game_id == "paralives" && mod_type_id == "Paralives_DataMod" {
+                    data_dir.clone()
+                } else {
+                    game.game_path.join(rel_path)
+                };
                 log::debug!(
                     "Auto-detected mod type '{}' → deploying to {}",
                     mod_type_id,
@@ -546,10 +552,44 @@ pub async fn install_mod_cmd(
                 target.target_dir.display(),
                 target.per_mod_subfolder
             );
+            resolved_mod_type_id = Some(target.type_id.to_string());
             target.target_dir
         } else {
             data_dir.clone()
         };
+
+        // Step 4: Deploy from staging to game dir
+        if game_id == "paralives" {
+            if let Some(ref type_id) = resolved_mod_type_id {
+                if type_id == "Paralives_BepInEx" || type_id == "BepInEx" {
+                    match crate::bepinex::ensure_bepinex_mono_x64(&game.game_path) {
+                        Ok(crate::bepinex::BepInExInstallResult::AlreadyInstalled) => {
+                            log::info!("Paralives BepInEx bootstrap already installed");
+                        }
+                        Ok(crate::bepinex::BepInExInstallResult::Installed { asset_name }) => {
+                            log::info!("Installed Paralives BepInEx bootstrap from {asset_name}");
+                        }
+                        Err(e) => {
+                            let _ = staging::remove_staging(&staging_result.staging_path);
+                            let _ = db.remove_mod(mod_id);
+                            let msg = format!(
+                                "BepInEx setup failed for Paralives script mod '{}': {}",
+                                name, e
+                            );
+                            let _ = app.emit(
+                                INSTALL_PROGRESS_EVENT,
+                                InstallProgress::ModFailed {
+                                    mod_index: 0,
+                                    mod_name: name.clone(),
+                                    error: msg.clone(),
+                                },
+                            );
+                            return Err(msg);
+                        }
+                    }
+                }
+            }
+        }
 
         // Step 4: Deploy from staging to game dir
         let _ = app.emit(
@@ -2282,6 +2322,46 @@ pub async fn launch_game_cmd(
             }
             Err(e) => {
                 log::warn!("Could not auto-fix display settings: {}", e);
+            }
+        }
+    }
+
+    // Ensure Paralives BepInEx bootstrap exists before launching script mods.
+    if game_id == "paralives" {
+        let plugins_dir = game_path.join("BepInEx").join("plugins");
+        let has_script_mods = plugins_dir
+            .read_dir()
+            .map(|entries| {
+                entries.flatten().any(|entry| {
+                    let p = entry.path();
+                    p.extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| e.eq_ignore_ascii_case("dll"))
+                        .unwrap_or(false)
+                        || p.is_dir()
+                            && fs::read_dir(&p)
+                                .map(|sub| {
+                                    sub.flatten().any(|f| {
+                                        f.path()
+                                            .extension()
+                                            .and_then(|e| e.to_str())
+                                            .map(|e| e.eq_ignore_ascii_case("dll"))
+                                            .unwrap_or(false)
+                                    })
+                                })
+                                .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false);
+        if has_script_mods {
+            match crate::bepinex::ensure_bepinex_mono_x64(&game_path) {
+                Ok(crate::bepinex::BepInExInstallResult::AlreadyInstalled) => {
+                    log::info!("Pre-launch: Paralives BepInEx bootstrap present");
+                }
+                Ok(crate::bepinex::BepInExInstallResult::Installed { asset_name }) => {
+                    log::info!("Pre-launch: installed Paralives BepInEx bootstrap from {asset_name}");
+                }
+                Err(e) => log::warn!("Pre-launch: Paralives BepInEx auto-install failed: {e}"),
             }
         }
     }

@@ -130,7 +130,9 @@ fn cache_dir() -> Option<PathBuf> {
 }
 
 fn packages_cache_dir(community: &str) -> Option<PathBuf> {
-    let dir = cache_dir()?.join("packages").join(sanitize_segment(community));
+    let dir = cache_dir()?
+        .join("packages")
+        .join(sanitize_segment(community));
     let _ = std::fs::create_dir_all(&dir);
     Some(dir)
 }
@@ -173,7 +175,11 @@ fn hashed_fallback(s: &str) -> String {
 }
 
 fn ensure_mem() {
-    let read_hit = CACHE.read().ok().and_then(|g| g.as_ref().map(|_| ())).is_some();
+    let read_hit = CACHE
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().map(|_| ()))
+        .is_some();
     if !read_hit {
         if let Ok(mut w) = CACHE.write() {
             if w.is_none() {
@@ -492,10 +498,7 @@ pub async fn download_version(
             version.full_name
         ));
     }
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| format!("read body: {e}"))?;
+    let bytes = resp.bytes().await.map_err(|e| format!("read body: {e}"))?;
 
     let tmp = path.with_extension("zip.tmp");
     std::fs::write(&tmp, &bytes).map_err(|e| e.to_string())?;
@@ -521,10 +524,8 @@ pub fn install_version(
     // data_dir, flattening the archive root. We wrap it with the per-mod
     // subdir so each Thunderstore package stays self-contained.
     let installed_files = crate::installer::install_mod(
-        zip_path,
-        &mod_dir,
-        full_name,
-        "",    // version string not needed — embedded in full_name
+        zip_path, &mod_dir, full_name,
+        "",   // version string not needed — embedded in full_name
         None, // no Nexus ID
     )
     .map_err(|e| format!("install_mod: {e}"))?;
@@ -637,7 +638,9 @@ mod tests {
         ];
         // Our fake_package only stores one version. Patch the first to hold both.
         let mut pkgs = pkgs;
-        pkgs[0].versions.push(fake_version("author-ModA-2.0.0", &[]));
+        pkgs[0]
+            .versions
+            .push(fake_version("author-ModA-2.0.0", &[]));
 
         let v = find_version(&pkgs, "author-ModA-2.0.0");
         assert!(v.is_some());

@@ -92,9 +92,9 @@ fn pak_contains_sqlite(pak_path: &Path) -> bool {
         Err(_) => return false,
     };
 
-    pak.files()
-        .iter()
-        .any(|f| f.to_lowercase().contains("phoenixshipdata") || f.to_lowercase().ends_with(".sqlite"))
+    pak.files().iter().any(|f| {
+        f.to_lowercase().contains("phoenixshipdata") || f.to_lowercase().ends_with(".sqlite")
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -110,10 +110,7 @@ fn pak_contains_sqlite(pak_path: &Path) -> bool {
 /// 4. Collect `INSERT OR REPLACE` statements for new/changed rows
 /// 5. Apply all collected changes to a copy of the base database
 /// 6. Pack the merged database into `zMergedMods_P.pak`
-pub fn merge_databases(
-    mod_paks: &[PathBuf],
-    output_dir: &Path,
-) -> Result<MergeResult> {
+pub fn merge_databases(mod_paks: &[PathBuf], output_dir: &Path) -> Result<MergeResult> {
     if mod_paks.len() < 2 {
         return Err(MergerError::Other("Need at least 2 PAKs to merge".into()));
     }
@@ -205,10 +202,7 @@ pub fn merge_databases(
     let output_pak = output_dir.join("zMergedMods_P.pak");
     pack_sqlite_into_pak(&merged_db_path, &sqlite_internal_path, &output_pak)?;
 
-    log::info!(
-        "HL Merger: wrote merged PAK to {}",
-        output_pak.display()
-    );
+    log::info!("HL Merger: wrote merged PAK to {}", output_pak.display());
 
     Ok(MergeResult {
         merged_paks: mod_paks.len(),
@@ -222,9 +216,9 @@ pub fn merge_databases(
 fn extract_sqlite_from_pak(pak_path: &Path, output_path: &Path) -> Result<()> {
     let file = fs::File::open(pak_path)?;
     let mut reader = BufReader::new(file);
-    let pak = repak::PakBuilder::new()
-        .reader(&mut reader)
-        .map_err(|e| MergerError::Pak(format!("Failed to read PAK {}: {}", pak_path.display(), e)))?;
+    let pak = repak::PakBuilder::new().reader(&mut reader).map_err(|e| {
+        MergerError::Pak(format!("Failed to read PAK {}: {}", pak_path.display(), e))
+    })?;
 
     let sqlite_entry = pak
         .files()
@@ -233,9 +227,7 @@ fn extract_sqlite_from_pak(pak_path: &Path, output_path: &Path) -> Result<()> {
             let fl = f.to_lowercase();
             fl.contains("phoenixshipdata") || fl.ends_with(".sqlite")
         })
-        .ok_or_else(|| {
-            MergerError::Pak(format!("No SQLite found in {}", pak_path.display()))
-        })?;
+        .ok_or_else(|| MergerError::Pak(format!("No SQLite found in {}", pak_path.display())))?;
 
     let data = pak
         .get(&sqlite_entry, &mut reader)
@@ -263,11 +255,7 @@ fn get_sqlite_internal_path(pak_path: &Path) -> Result<String> {
 }
 
 /// Pack a SQLite database file into a new PAK.
-fn pack_sqlite_into_pak(
-    db_path: &Path,
-    internal_path: &str,
-    output_path: &Path,
-) -> Result<()> {
+fn pack_sqlite_into_pak(db_path: &Path, internal_path: &str, output_path: &Path) -> Result<()> {
     let data = fs::read(db_path)?;
     let output_file = fs::File::create(output_path)?;
 
@@ -297,10 +285,7 @@ fn pack_sqlite_into_pak(
 ///
 /// For each table in the mod database, compares rows against the base.
 /// Returns `INSERT OR REPLACE` statements for rows that differ or are new.
-fn diff_databases(
-    base_path: &Path,
-    mod_path: &Path,
-) -> Result<Vec<(String, String)>> {
+fn diff_databases(base_path: &Path, mod_path: &Path) -> Result<Vec<(String, String)>> {
     let base_conn = Connection::open(base_path)?;
     let mod_conn = Connection::open(mod_path)?;
 
@@ -342,8 +327,9 @@ fn diff_databases(
 
 /// Get all user table names from a database.
 fn get_table_names(conn: &Connection) -> Result<Vec<String>> {
-    let mut stmt =
-        conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")?;
+    let mut stmt = conn.prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+    )?;
     let names: Vec<String> = stmt
         .query_map([], |row| row.get(0))?
         .filter_map(|r| r.ok())
@@ -363,11 +349,7 @@ fn get_column_names(conn: &Connection, table: &str) -> Result<Vec<String>> {
 }
 
 /// Get all rows from a table as vectors of string-encoded values.
-fn get_all_rows(
-    conn: &Connection,
-    table: &str,
-    columns: &[String],
-) -> Result<Vec<Vec<String>>> {
+fn get_all_rows(conn: &Connection, table: &str, columns: &[String]) -> Result<Vec<Vec<String>>> {
     let col_list = columns
         .iter()
         .map(|c| format!("\"{}\"", c))
@@ -525,10 +507,7 @@ mod tests {
 
     #[test]
     fn test_value_to_sql_literal() {
-        assert_eq!(
-            value_to_sql_literal(&rusqlite::types::Value::Null),
-            "NULL"
-        );
+        assert_eq!(value_to_sql_literal(&rusqlite::types::Value::Null), "NULL");
         assert_eq!(
             value_to_sql_literal(&rusqlite::types::Value::Integer(42)),
             "42"

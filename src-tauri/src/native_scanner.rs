@@ -5,11 +5,13 @@
 //! native plugins (Stardew, BG3, etc.) consume this and filter for their
 //! bundle identifier.
 //!
-//! Additional locations (Steam mac libraries, GOG mac, Mac App Store) will
-//! be added by later tasks in the native-mode work stream.
+//! Steam mac libraries are scanned as well; GOG-specific discovery remains
+//! future work. Mac App Store bundles are identified via their receipt and
+//! marked sandboxed/refused rather than treated as a supported mod target.
 //!
 //! Module is read-only — it does NOT mutate any files. The native deploy
-//! logic that DOES mutate bundles lives in per-game plugins (Task 3.7+).
+//! logic that DOES mutate files lives in per-game plugins. Stardew's SMAPI
+//! path can mutate `Contents/MacOS`; BG3 deploys outside the bundle.
 
 use std::fs;
 use std::io::Read;
@@ -19,9 +21,8 @@ use crate::plist::{read_info_plist, InfoPlist};
 use crate::runtime::{Architecture, NativeSource};
 
 /// A `.app` bundle discovered during a scan of the application install
-/// locations. Fields that require deeper per-bundle inspection
-/// (`architecture`, `sandboxed`) are filled in by later tasks; for now
-/// they carry safe zero-value defaults.
+/// locations. Architecture and sandbox status are populated during scanning
+/// from the bundle executable and sandbox indicators.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct NativeAppCandidate {
     /// Absolute path to the `.app` bundle directory.
@@ -581,8 +582,8 @@ pub fn validate_manual_native_app(app_path: &Path) -> Result<NativeAppCandidate,
         ));
     }
     let info_path = app_path.join("Contents").join("Info.plist");
-    let info = read_info_plist(&info_path)
-        .map_err(|e| format!("could not read Info.plist: {}", e))?;
+    let info =
+        read_info_plist(&info_path).map_err(|e| format!("could not read Info.plist: {}", e))?;
     let architecture = detect_bundle_architecture(app_path, &info);
     let sandboxed = is_sandboxed(app_path);
     if sandboxed {
@@ -622,9 +623,9 @@ mod tests {
         category: Option<&str>,
     ) {
         let category_xml = match category {
-            Some(cat) => format!(
-                "    <key>LSApplicationCategoryType</key>\n    <string>{cat}</string>\n"
-            ),
+            Some(cat) => {
+                format!("    <key>LSApplicationCategoryType</key>\n    <string>{cat}</string>\n")
+            }
             None => String::new(),
         };
         let xml = format!(
@@ -739,7 +740,11 @@ mod tests {
         );
 
         let candidates = scan_dir(dir.path());
-        assert_eq!(candidates.len(), 1, "only the game-category bundle should survive");
+        assert_eq!(
+            candidates.len(),
+            1,
+            "only the game-category bundle should survive"
+        );
         assert_eq!(candidates[0].info.bundle_identifier, "ludeon.rimworld");
     }
 
@@ -751,7 +756,10 @@ mod tests {
 
         let candidates = scan_dir(dir.path());
         assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].info.bundle_identifier, "com.localthunk.balatro");
+        assert_eq!(
+            candidates[0].info.bundle_identifier,
+            "com.localthunk.balatro"
+        );
         assert_eq!(candidates[0].source, NativeSource::SystemApplications);
     }
 
@@ -947,7 +955,7 @@ mod tests {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&0xCAFE_BABEu32.to_be_bytes()); // FAT_MAGIC (BE)
         bytes.extend_from_slice(&2u32.to_be_bytes()); // nfat_arch = 2
-        // First fat_arch entry (20 bytes): cputype = arm64 (BE)
+                                                      // First fat_arch entry (20 bytes): cputype = arm64 (BE)
         bytes.extend_from_slice(&0x0100_000Cu32.to_be_bytes());
         bytes.extend(std::iter::repeat(0u8).take(16));
         // Second fat_arch entry (20 bytes): cputype = x86_64 (BE)
@@ -985,7 +993,11 @@ mod tests {
         let game2_contents = dir.path().join("Other Game/Other Game.app/Contents");
         fs::create_dir_all(&game1_contents).unwrap();
         fs::create_dir_all(&game2_contents).unwrap();
-        write_valid_info_plist(&game1_contents.join("Info.plist"), "com.gog.awesome", "Awesome");
+        write_valid_info_plist(
+            &game1_contents.join("Info.plist"),
+            "com.gog.awesome",
+            "Awesome",
+        );
         write_valid_info_plist(&game2_contents.join("Info.plist"), "com.gog.other", "Other");
 
         let candidates = scan_gog_mac_at(dir.path());

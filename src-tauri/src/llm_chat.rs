@@ -23,10 +23,7 @@ use crate::instruction_types::{ModelCapabilityTier, OllamaModel};
 pub enum LlmBackend {
     Ollama,
     Mlx,
-    Cloud {
-        provider: String,
-        api_key: String,
-    },
+    Cloud { provider: String, api_key: String },
     GeminiOAuth,
 }
 
@@ -1248,8 +1245,10 @@ where
 {
     match provider {
         "groq" | "cerebras" => {
-            chat_send_openai_cloud_streaming(provider, api_key, messages, tools, max_tokens, on_token)
-                .await
+            chat_send_openai_cloud_streaming(
+                provider, api_key, messages, tools, max_tokens, on_token,
+            )
+            .await
         }
         "gemini" => {
             chat_send_gemini_streaming(api_key, messages, tools, max_tokens, on_token).await
@@ -1375,8 +1374,7 @@ where
                     if let Ok(obj) = serde_json::from_str::<serde_json::Value>(json_str) {
                         if let Some(choice) = obj.get("choices").and_then(|c| c.get(0)) {
                             if let Some(delta) = choice.get("delta") {
-                                if let Some(content) =
-                                    delta.get("content").and_then(|c| c.as_str())
+                                if let Some(content) = delta.get("content").and_then(|c| c.as_str())
                                 {
                                     if !content.is_empty() {
                                         on_token(content, StreamPhase::Content);
@@ -1387,11 +1385,9 @@ where
                                     delta.get("tool_calls").and_then(|t| t.as_array())
                                 {
                                     for tc in tc_arr {
-                                        let idx = tc
-                                            .get("index")
-                                            .and_then(|i| i.as_u64())
-                                            .unwrap_or(0)
-                                            as usize;
+                                        let idx =
+                                            tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0)
+                                                as usize;
                                         let entry = tool_calls_map
                                             .entry(idx)
                                             .or_insert_with(|| (String::new(), String::new()));
@@ -1540,10 +1536,8 @@ where
                                         .and_then(|n| n.as_str())
                                         .unwrap_or("")
                                         .to_string();
-                                    let arguments = fc
-                                        .get("args")
-                                        .cloned()
-                                        .unwrap_or(serde_json::json!({}));
+                                    let arguments =
+                                        fc.get("args").cloned().unwrap_or(serde_json::json!({}));
                                     if !name.is_empty() {
                                         tool_calls.push(ToolCallResponse {
                                             function: ToolCallFunction { name, arguments },
@@ -1661,8 +1655,14 @@ where
                     if let Ok(obj) = serde_json::from_str::<serde_json::Value>(json_str) {
                         // Log first few chunks for debugging
                         if full_content.len() < 100 && tool_calls.is_empty() {
-                            log::info!("[CHAT] Gemini OAuth SSE chunk: {}",
-                                serde_json::to_string(&obj).unwrap_or_default().chars().take(500).collect::<String>());
+                            log::info!(
+                                "[CHAT] Gemini OAuth SSE chunk: {}",
+                                serde_json::to_string(&obj)
+                                    .unwrap_or_default()
+                                    .chars()
+                                    .take(500)
+                                    .collect::<String>()
+                            );
                         }
                         if let Some(parts) = obj
                             .pointer("/candidates/0/content/parts")
@@ -1670,7 +1670,10 @@ where
                         {
                             for part in parts {
                                 // Handle thinking tokens (Gemini 2.5 Flash)
-                                let is_thought = part.get("thought").and_then(|t| t.as_bool()).unwrap_or(false);
+                                let is_thought = part
+                                    .get("thought")
+                                    .and_then(|t| t.as_bool())
+                                    .unwrap_or(false);
                                 if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
                                     if !text.is_empty() && !is_thought {
                                         on_token(text, StreamPhase::Content);
@@ -1683,10 +1686,8 @@ where
                                         .and_then(|n| n.as_str())
                                         .unwrap_or("")
                                         .to_string();
-                                    let arguments = fc
-                                        .get("args")
-                                        .cloned()
-                                        .unwrap_or(serde_json::json!({}));
+                                    let arguments =
+                                        fc.get("args").cloned().unwrap_or(serde_json::json!({}));
                                     if !name.is_empty() {
                                         tool_calls.push(ToolCallResponse {
                                             function: ToolCallFunction { name, arguments },
@@ -1696,8 +1697,10 @@ where
                             }
                         }
                     } else {
-                        log::warn!("[CHAT] Gemini OAuth: failed to parse SSE JSON: {}",
-                            json_str.chars().take(200).collect::<String>());
+                        log::warn!(
+                            "[CHAT] Gemini OAuth: failed to parse SSE JSON: {}",
+                            json_str.chars().take(200).collect::<String>()
+                        );
                     }
                 }
             }
@@ -1718,8 +1721,15 @@ where
             .join("corkscrew")
             .join("gemini_sse_dump.txt");
         let _ = std::fs::write(&dump_path, &raw_dump);
-        log::warn!("[CHAT] Gemini empty response! Raw SSE dumped to {:?} ({} bytes)", dump_path, raw_dump.len());
-        return Err(format!("Gemini returned empty response ({} bytes raw SSE). Debug dump saved.", raw_dump.len()));
+        log::warn!(
+            "[CHAT] Gemini empty response! Raw SSE dumped to {:?} ({} bytes)",
+            dump_path,
+            raw_dump.len()
+        );
+        return Err(format!(
+            "Gemini returned empty response ({} bytes raw SSE). Debug dump saved.",
+            raw_dump.len()
+        ));
     }
 
     Ok(ChatMessage {

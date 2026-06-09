@@ -37,13 +37,13 @@ use tokio::sync::Semaphore;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum FailureKind {
-    NotFound,         // 404 / removed from Nexus
-    Unauthorized,     // 401/403 / premium required / auth missing
-    RateLimited,      // 429 / rate limit
-    Network,          // timeout / DNS / connection reset
-    HashMismatch,     // xxHash64 mismatch after download
-    DiskFull,         // no space left
-    ServerError,      // 5xx
+    NotFound,     // 404 / removed from Nexus
+    Unauthorized, // 401/403 / premium required / auth missing
+    RateLimited,  // 429 / rate limit
+    Network,      // timeout / DNS / connection reset
+    HashMismatch, // xxHash64 mismatch after download
+    DiskFull,     // no space left
+    ServerError,  // 5xx
     Unknown,
 }
 
@@ -66,8 +66,11 @@ fn classify_failure(msg: &str) -> FailureKind {
     let m = msg.to_ascii_lowercase();
     if m.contains("404") || m.contains("not found") || m.contains("no such file") {
         FailureKind::NotFound
-    } else if m.contains("401") || m.contains("403") || m.contains("unauthorized")
-        || m.contains("forbidden") || m.contains("premium")
+    } else if m.contains("401")
+        || m.contains("403")
+        || m.contains("unauthorized")
+        || m.contains("forbidden")
+        || m.contains("premium")
     {
         FailureKind::Unauthorized
     } else if m.contains("429") || m.contains("rate limit") {
@@ -76,12 +79,20 @@ fn classify_failure(msg: &str) -> FailureKind {
         FailureKind::HashMismatch
     } else if m.contains("no space") || m.contains("disk full") || m.contains("enospc") {
         FailureKind::DiskFull
-    } else if m.contains("500") || m.contains("502") || m.contains("503")
-        || m.contains("504") || m.contains("bad gateway") || m.contains("service unavailable")
+    } else if m.contains("500")
+        || m.contains("502")
+        || m.contains("503")
+        || m.contains("504")
+        || m.contains("bad gateway")
+        || m.contains("service unavailable")
     {
         FailureKind::ServerError
-    } else if m.contains("timeout") || m.contains("timed out") || m.contains("dns")
-        || m.contains("connection") || m.contains("reset") || m.contains("network")
+    } else if m.contains("timeout")
+        || m.contains("timed out")
+        || m.contains("dns")
+        || m.contains("connection")
+        || m.contains("reset")
+        || m.contains("network")
     {
         FailureKind::Network
     } else {
@@ -609,7 +620,8 @@ fn versions_match_normalized(required: &str, detected: &str) -> bool {
     let req_nums = extract_version_nums(required);
     let det_nums = extract_version_nums(detected);
     // If detected is "1.6.x" (unknown AE build), accept any required 1.6.x version
-    if det_nums.len() >= 2 && det_nums[0] == req_nums.get(0).copied().unwrap_or(0)
+    if det_nums.len() >= 2
+        && det_nums[0] == req_nums.get(0).copied().unwrap_or(0)
         && det_nums[1] == req_nums.get(1).copied().unwrap_or(0)
         && detected.contains("1.6.x")
     {
@@ -691,11 +703,16 @@ fn get_rss_bytes() -> u64 {
         }
 
         let mut info: MachTaskBasicInfo = unsafe { mem::zeroed() };
-        let mut count =
-            (mem::size_of::<MachTaskBasicInfo>() / mem::size_of::<u32>()) as u32;
+        let mut count = (mem::size_of::<MachTaskBasicInfo>() / mem::size_of::<u32>()) as u32;
 
-        let result =
-            unsafe { task_info(mach_task_self(), MACH_TASK_BASIC_INFO, &mut info, &mut count) };
+        let result = unsafe {
+            task_info(
+                mach_task_self(),
+                MACH_TASK_BASIC_INFO,
+                &mut info,
+                &mut count,
+            )
+        };
 
         if result == 0 {
             return info.resident_size;
@@ -784,7 +801,9 @@ pub async fn install_wabbajack_modlist(
 
     log::info!(
         "Parallelism: {} cores detected → {} download, {} extraction threads",
-        cpu_cores, download_concurrency, extract_concurrency
+        cpu_cores,
+        download_concurrency,
+        extract_concurrency
     );
 
     // -----------------------------------------------------------------------
@@ -905,8 +924,12 @@ pub async fn install_wabbajack_modlist(
         oauth::AuthMethod::None => (None, None, false),
     };
 
-    let downloader =
-        WjDownloader::new(nexus_api_key, nexus_oauth_token, is_premium, download_dir.to_path_buf());
+    let downloader = WjDownloader::new(
+        nexus_api_key,
+        nexus_oauth_token,
+        is_premium,
+        download_dir.to_path_buf(),
+    );
 
     // Dual semaphores: download permits released before extraction starts
     let download_sem = Arc::new(Semaphore::new(download_concurrency));
@@ -973,7 +996,13 @@ pub async fn install_wabbajack_modlist(
     // Inline helper: sanitize a string for use as a filename
     fn sanitize_for_filename(s: &str) -> String {
         s.chars()
-            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect()
     }
 
@@ -1017,8 +1046,14 @@ pub async fn install_wabbajack_modlist(
                         Some(&dest.to_string_lossy()),
                         None,
                     );
-                    archive_download_paths.lock().unwrap().insert(hash_str.clone(), dest);
-                    extracted_dirs.lock().unwrap().insert(hash_str, extract_dest);
+                    archive_download_paths
+                        .lock()
+                        .unwrap()
+                        .insert(hash_str.clone(), dest);
+                    extracted_dirs
+                        .lock()
+                        .unwrap()
+                        .insert(hash_str, extract_dest);
                     download_skipped_count.fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
@@ -1058,8 +1093,14 @@ pub async fn install_wabbajack_modlist(
                         .unwrap_or_default()
                         .as_secs();
                     let _ = std::fs::write(&checkpoint_file, format!("{now_secs}"));
-                    archive_download_paths.lock().unwrap().insert(hash_str.clone(), cached);
-                    extracted_dirs.lock().unwrap().insert(hash_str, extract_dest);
+                    archive_download_paths
+                        .lock()
+                        .unwrap()
+                        .insert(hash_str.clone(), cached);
+                    extracted_dirs
+                        .lock()
+                        .unwrap()
+                        .insert(hash_str, extract_dest);
                     download_skipped_count.fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
@@ -1121,8 +1162,8 @@ pub async fn install_wabbajack_modlist(
             }
 
             // Check if download already exists (cached but needs extraction)
-            let checkpoint_file = checkpoint_dir_c
-                .join(format!("{}.done", sanitize_for_filename(&hash_str)));
+            let checkpoint_file =
+                checkpoint_dir_c.join(format!("{}.done", sanitize_for_filename(&hash_str)));
             let cached_download = db_c
                 .find_download_by_xxhash(&hash_str)
                 .ok()
@@ -1190,8 +1231,7 @@ pub async fn install_wabbajack_modlist(
                                 Some(path)
                             }
                             Err(e) => {
-                                let err_msg =
-                                    format!("{}: hash mismatch — {}", archive_name, e);
+                                let err_msg = format!("{}: hash mismatch — {}", archive_name, e);
                                 log::error!("{}", err_msg);
                                 let _ = tokio::fs::remove_file(&path).await;
                                 emit_progress(
@@ -1241,12 +1281,13 @@ pub async fn install_wabbajack_modlist(
                     .unwrap_or_default()
                     .to_string_lossy()
                     .to_string();
-                let file_size =
-                    std::fs::metadata(&download_path).map(|m| m.len() as i64).unwrap_or(0);
+                let file_size = std::fs::metadata(&download_path)
+                    .map(|m| m.len() as i64)
+                    .unwrap_or(0);
                 let (nexus_mod_id, nexus_file_id) = match &archive.state {
-                    WjArchiveState::Nexus { mod_id, file_id, .. } => {
-                        (Some(*mod_id), Some(*file_id))
-                    }
+                    WjArchiveState::Nexus {
+                        mod_id, file_id, ..
+                    } => (Some(*mod_id), Some(*file_id)),
                     _ => (None, None),
                 };
                 if let Ok(download_id) = db_c.register_download(
@@ -1304,10 +1345,9 @@ pub async fn install_wabbajack_modlist(
                     .to_string_lossy()
                     .to_lowercase();
                 let single_exts = [
-                    ".dll", ".exe", ".esm", ".esp", ".esl", ".bsa", ".ba2",
-                    ".bik", ".bk2", ".ccc", ".ini", ".cfg", ".txt", ".pdf",
-                    ".bat", ".py", ".json", ".xml", ".css", ".toml", ".hkx",
-                    ".nif", ".dds", ".pex", ".psc", ".wav", ".xwm", ".fuz",
+                    ".dll", ".exe", ".esm", ".esp", ".esl", ".bsa", ".ba2", ".bik", ".bk2", ".ccc",
+                    ".ini", ".cfg", ".txt", ".pdf", ".bat", ".py", ".json", ".xml", ".css",
+                    ".toml", ".hkx", ".nif", ".dds", ".pex", ".psc", ".wav", ".xwm", ".fuz",
                     ".swf", ".tlx", ".clx",
                 ];
                 single_exts.iter().any(|ext| name_lower.ends_with(ext))
@@ -1346,7 +1386,8 @@ pub async fn install_wabbajack_modlist(
                 // For GameFileSource, use the game_file path so directives can find it.
                 // For other single files, use the archive name.
                 let inner_name = if let crate::wabbajack_types::WjArchiveState::GameFileSource {
-                    game_file, ..
+                    game_file,
+                    ..
                 } = &archive.state
                 {
                     game_file.replace('\\', "/")
@@ -1386,65 +1427,80 @@ pub async fn install_wabbajack_modlist(
                     }
                 }
             } else {
-            // Archive extraction with retry
-            for attempt in 0..=max_extract_retries {
-                let dest_c = extract_dest.clone();
-                let archive_for_blocking = download_path.clone();
-                let result = tokio::task::spawn_blocking(move || {
-                    crate::installer::extract_archive(&archive_for_blocking, &dest_c)
-                })
-                .await;
+                // Archive extraction with retry
+                for attempt in 0..=max_extract_retries {
+                    let dest_c = extract_dest.clone();
+                    let archive_for_blocking = download_path.clone();
+                    let result = tokio::task::spawn_blocking(move || {
+                        crate::installer::extract_archive(&archive_for_blocking, &dest_c)
+                    })
+                    .await;
 
-                match result {
-                    Ok(Ok(_files)) => {
-                        extract_ok = true;
-                        break;
-                    }
-                    Ok(Err(e)) => {
-                        log::error!(
-                            "Extraction attempt {}/{} failed for '{}': {}",
-                            attempt + 1,
-                            max_extract_retries + 1,
-                            archive_name,
-                            e
-                        );
-                        if attempt < max_extract_retries {
-                            // Clean up failed extraction dir and archive, then retry
-                            let _ = tokio::fs::remove_dir_all(&extract_dest).await;
-                            let _ = tokio::fs::remove_file(&download_path).await;
-                            // Re-download
-                            log::info!(
-                                "Re-downloading '{}' after extraction failure (attempt {})",
+                    match result {
+                        Ok(Ok(_files)) => {
+                            extract_ok = true;
+                            break;
+                        }
+                        Ok(Err(e)) => {
+                            log::error!(
+                                "Extraction attempt {}/{} failed for '{}': {}",
+                                attempt + 1,
+                                max_extract_retries + 1,
                                 archive_name,
-                                attempt + 2
+                                e
                             );
-                            // Note: we don't hold the download semaphore here, but
-                            // re-downloads after extraction failure are rare and brief
-                            match task_downloader
-                                .download_archive(&app_c, &archive, install_id, &db_c)
-                                .await
-                            {
-                                Ok(_new_path) => continue, // retry extraction
-                                Err(dl_err) => {
-                                    let err_msg = format!(
-                                        "Re-download failed for '{}': {}",
-                                        archive_name, dl_err
-                                    );
-                                    log::error!("{}", err_msg);
-                                    failures_c.lock().unwrap().push(err_msg.clone());
-                                    emit_progress(
-                                        &app_c,
-                                        &WjInstallProgressEvent::ExtractionArchiveFailed {
-                                            name: archive_name.clone(),
-                                            error: err_msg,
-                                        },
-                                    );
-                                    return;
+                            if attempt < max_extract_retries {
+                                // Clean up failed extraction dir and archive, then retry
+                                let _ = tokio::fs::remove_dir_all(&extract_dest).await;
+                                let _ = tokio::fs::remove_file(&download_path).await;
+                                // Re-download
+                                log::info!(
+                                    "Re-downloading '{}' after extraction failure (attempt {})",
+                                    archive_name,
+                                    attempt + 2
+                                );
+                                // Note: we don't hold the download semaphore here, but
+                                // re-downloads after extraction failure are rare and brief
+                                match task_downloader
+                                    .download_archive(&app_c, &archive, install_id, &db_c)
+                                    .await
+                                {
+                                    Ok(_new_path) => continue, // retry extraction
+                                    Err(dl_err) => {
+                                        let err_msg = format!(
+                                            "Re-download failed for '{}': {}",
+                                            archive_name, dl_err
+                                        );
+                                        log::error!("{}", err_msg);
+                                        failures_c.lock().unwrap().push(err_msg.clone());
+                                        emit_progress(
+                                            &app_c,
+                                            &WjInstallProgressEvent::ExtractionArchiveFailed {
+                                                name: archive_name.clone(),
+                                                error: err_msg,
+                                            },
+                                        );
+                                        return;
+                                    }
                                 }
+                            } else {
+                                let err_msg =
+                                    format!("Failed to extract '{}': {}", archive_name, e);
+                                failures_c.lock().unwrap().push(err_msg.clone());
+                                emit_progress(
+                                    &app_c,
+                                    &WjInstallProgressEvent::ExtractionArchiveFailed {
+                                        name: archive_name.clone(),
+                                        error: err_msg,
+                                    },
+                                );
+                                return;
                             }
-                        } else {
+                        }
+                        Err(e) => {
                             let err_msg =
-                                format!("Failed to extract '{}': {}", archive_name, e);
+                                format!("Extraction task panicked for '{}': {}", archive_name, e);
+                            log::error!("{}", err_msg);
                             failures_c.lock().unwrap().push(err_msg.clone());
                             emit_progress(
                                 &app_c,
@@ -1456,24 +1512,7 @@ pub async fn install_wabbajack_modlist(
                             return;
                         }
                     }
-                    Err(e) => {
-                        let err_msg = format!(
-                            "Extraction task panicked for '{}': {}",
-                            archive_name, e
-                        );
-                        log::error!("{}", err_msg);
-                        failures_c.lock().unwrap().push(err_msg.clone());
-                        emit_progress(
-                            &app_c,
-                            &WjInstallProgressEvent::ExtractionArchiveFailed {
-                                name: archive_name.clone(),
-                                error: err_msg,
-                            },
-                        );
-                        return;
-                    }
                 }
-            }
             } // end else (archive extraction)
 
             if extract_ok {
@@ -1548,10 +1587,7 @@ pub async fn install_wabbajack_modlist(
             skipped: download_skipped,
             failures: if failure_list.len() > 20 {
                 let mut truncated = failure_list[..20].to_vec();
-                truncated.push(format!(
-                    "... and {} more failures",
-                    failure_list.len() - 20
-                ));
+                truncated.push(format!("... and {} more failures", failure_list.len() - 20));
                 truncated
             } else {
                 failure_list.clone()
@@ -1660,8 +1696,10 @@ pub async fn install_wabbajack_modlist(
         let bottle = bottles.iter().find(|b| b.name == bottle_name);
         bottle
             .and_then(|b| {
-                crate::games::with_plugin(game_id, |plugin| plugin.detect_wine(b).map(|g| g.data_dir))
-                    .flatten()
+                crate::games::with_plugin(game_id, |plugin| {
+                    plugin.detect_wine(b).map(|g| g.data_dir)
+                })
+                .flatten()
             })
             .unwrap_or_else(|| install_dir.join("Data"))
     };
@@ -1690,10 +1728,8 @@ pub async fn install_wabbajack_modlist(
         .process_all(
             &modlist.directives,
             &|current, total, phase, bytes_processed, total_bytes, current_file| {
-                let should_emit = current == 1
-                    || current == total
-                    || current % progress_interval == 0
-                    || {
+                let should_emit =
+                    current == 1 || current == total || current % progress_interval == 0 || {
                         // Time-based fallback: emit at least every 2 seconds
                         let mut last = last_emit_time.lock().unwrap();
                         if last.elapsed() >= std::time::Duration::from_secs(2) {
@@ -1798,7 +1834,11 @@ pub async fn install_wabbajack_modlist(
         // to prevent duplicates showing up in the mod list.
         if let Ok(existing_ids) = db.find_mods_by_name(game_id, bottle_name, &modlist.name) {
             for old_id in existing_ids {
-                log::info!("Removing stale mod record id={} for '{}' (prior interrupted install)", old_id, modlist.name);
+                log::info!(
+                    "Removing stale mod record id={} for '{}' (prior interrupted install)",
+                    old_id,
+                    modlist.name
+                );
                 let _ = db.remove_mod(old_id);
             }
         }
@@ -1878,13 +1918,8 @@ pub async fn install_wabbajack_modlist(
     // -----------------------------------------------------------------------
     // Step 7b: Import MO2 profiles (if present in the modlist)
     // -----------------------------------------------------------------------
-    let imported_profiles = crate::profiles::import_mo2_profiles(
-        db,
-        install_dir,
-        game_id,
-        bottle_name,
-        &modlist.name,
-    );
+    let imported_profiles =
+        crate::profiles::import_mo2_profiles(db, install_dir, game_id, bottle_name, &modlist.name);
     if !imported_profiles.is_empty() {
         log::info!(
             "Imported {} MO2 profile(s): {}",
@@ -2276,15 +2311,42 @@ mod tests {
 
     #[test]
     fn classify_failure_buckets() {
-        assert_eq!(classify_failure("HTTP 404 Not Found"), FailureKind::NotFound);
-        assert_eq!(classify_failure("HTTP 403 Forbidden"), FailureKind::Unauthorized);
-        assert_eq!(classify_failure("premium required for this file"), FailureKind::Unauthorized);
-        assert_eq!(classify_failure("HTTP 429 Too Many Requests"), FailureKind::RateLimited);
-        assert_eq!(classify_failure("xxhash mismatch after download"), FailureKind::HashMismatch);
-        assert_eq!(classify_failure("ENOSPC: no space left on device"), FailureKind::DiskFull);
-        assert_eq!(classify_failure("HTTP 502 Bad Gateway"), FailureKind::ServerError);
-        assert_eq!(classify_failure("connection timed out"), FailureKind::Network);
-        assert_eq!(classify_failure("something entirely weird"), FailureKind::Unknown);
+        assert_eq!(
+            classify_failure("HTTP 404 Not Found"),
+            FailureKind::NotFound
+        );
+        assert_eq!(
+            classify_failure("HTTP 403 Forbidden"),
+            FailureKind::Unauthorized
+        );
+        assert_eq!(
+            classify_failure("premium required for this file"),
+            FailureKind::Unauthorized
+        );
+        assert_eq!(
+            classify_failure("HTTP 429 Too Many Requests"),
+            FailureKind::RateLimited
+        );
+        assert_eq!(
+            classify_failure("xxhash mismatch after download"),
+            FailureKind::HashMismatch
+        );
+        assert_eq!(
+            classify_failure("ENOSPC: no space left on device"),
+            FailureKind::DiskFull
+        );
+        assert_eq!(
+            classify_failure("HTTP 502 Bad Gateway"),
+            FailureKind::ServerError
+        );
+        assert_eq!(
+            classify_failure("connection timed out"),
+            FailureKind::Network
+        );
+        assert_eq!(
+            classify_failure("something entirely weird"),
+            FailureKind::Unknown
+        );
     }
 
     #[test]

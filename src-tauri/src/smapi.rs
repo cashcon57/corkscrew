@@ -50,6 +50,14 @@ const VANILLA_LAUNCHER_RENAMED: &str = "StardewValley-original";
 /// Marker file: SMAPI's main executable, present only when SMAPI is installed.
 const SMAPI_EXECUTABLE: &str = "StardewModdingAPI";
 
+/// Stardew Valley's macOS bundle identifier. SMAPI mutates the app bundle, so
+/// Corkscrew refuses to run it against look-alike or user-selected non-Stardew
+/// `.app` bundles.
+const STARDEW_BUNDLE_IDENTIFIER: &str = "com.chucklefish.stardewvalley";
+
+/// Vanilla macOS launcher name inside `Contents/MacOS`.
+const STARDEW_LAUNCHER: &str = "StardewValley";
+
 /// Detect whether SMAPI is installed in a Stardew Valley `.app` bundle.
 ///
 /// Returns true iff BOTH the renamed vanilla launcher (`StardewValley-original`)
@@ -136,6 +144,7 @@ pub fn install(
             installer_archive.display()
         )));
     }
+    validate_stardew_bundle(app_bundle)?;
 
     // Pre-install snapshot (best-effort — failure must not abort install).
     if let Err(e) = crate::rollback::create_native_snapshot(
@@ -160,17 +169,26 @@ pub fn install(
     let payload_temp = tempfile::tempdir().map_err(SmapiError::Io)?;
     extract_zip_into(&install_dat, payload_temp.path())?;
 
-    // 4. Recursive copy payload into <bundle>/Contents/MacOS/, excluding mcs and Mods.
     let macos = app_bundle.join("Contents/MacOS");
     fs::create_dir_all(&macos)?;
-    copy_dir_excluding(payload_temp.path(), &macos, &["mcs", "Mods"])?;
 
-    // 5. Rename StardewValley -> StardewValley-original (idempotent).
-    let launcher = macos.join("StardewValley");
-    let launcher_original = macos.join("StardewValley-original");
+    // 4. Rename StardewValley -> StardewValley-original BEFORE payload copy.
+    // The SMAPI payload includes replacement launch assets. Preserving vanilla
+    // after payload copy can accidentally save a SMAPI file instead of the
+    // original game launcher.
+    let launcher = macos.join(STARDEW_LAUNCHER);
+    let launcher_original = macos.join(VANILLA_LAUNCHER_RENAMED);
     if !launcher_original.exists() && launcher.exists() {
         fs::rename(&launcher, &launcher_original)?;
+    } else if !launcher_original.exists() {
+        return Err(SmapiError::Other(format!(
+            "missing Stardew launcher before SMAPI install: {}",
+            launcher.display()
+        )));
     }
+
+    // 5. Recursive copy payload into <bundle>/Contents/MacOS/, excluding mcs and Mods.
+    copy_dir_excluding(payload_temp.path(), &macos, &["mcs", "Mods"])?;
 
     // 6. Move unix-launcher.sh -> StardewValley.
     //    If StardewValley-original already existed on entry (second install),
@@ -238,10 +256,11 @@ pub fn uninstall(
     }
     if crate::native_scanner::is_sandboxed(app_bundle) {
         return Err(SmapiError::Other(format!(
-            "SMAPI cannot install in sandboxed bundle: {}",
+            "SMAPI cannot uninstall from sandboxed bundle: {}",
             app_bundle.display()
         )));
     }
+    validate_stardew_bundle(app_bundle)?;
 
     let macos = app_bundle.join("Contents/MacOS");
     if !macos.is_dir() {
@@ -266,17 +285,34 @@ pub fn uninstall(
         log::warn!("snapshot before SMAPI uninstall failed: {}", e);
     }
 
-    let smapi_launcher = macos.join("StardewValley");
-    let vanilla_renamed = macos.join("StardewValley-original");
+    let smapi_launcher = macos.join(STARDEW_LAUNCHER);
+    let vanilla_renamed = macos.join(VANILLA_LAUNCHER_RENAMED);
 
-    // 1. Delete the SMAPI launcher (we'll restore vanilla in step 2).
-    if smapi_launcher.exists() {
-        fs::remove_file(&smapi_launcher)?;
+    if !vanilla_renamed.is_file() {
+        return Err(SmapiError::Other(format!(
+            "cannot uninstall SMAPI safely: missing vanilla launcher backup at {}",
+            vanilla_renamed.display()
+        )));
     }
 
-    // 2. Restore vanilla launcher.
-    if vanilla_renamed.exists() {
-        fs::rename(&vanilla_renamed, &smapi_launcher)?;
+    // 1-2. Restore vanilla launcher before deleting other SMAPI files. Keep the
+    // current SMAPI launcher as a temporary rollback source until restore
+    // succeeds, so an IO failure cannot leave the bundle without a launcher.
+    let smapi_launcher_backup = macos.join("StardewValley-smapi-removing");
+    if smapi_launcher_backup.exists() {
+        fs::remove_file(&smapi_launcher_backup)?;
+    }
+    if smapi_launcher.exists() {
+        fs::rename(&smapi_launcher, &smapi_launcher_backup)?;
+    }
+    if let Err(e) = fs::rename(&vanilla_renamed, &smapi_launcher) {
+        if smapi_launcher_backup.exists() && !smapi_launcher.exists() {
+            let _ = fs::rename(&smapi_launcher_backup, &smapi_launcher);
+        }
+        return Err(SmapiError::Io(e));
+    }
+    if smapi_launcher_backup.exists() {
+        fs::remove_file(&smapi_launcher_backup)?;
     }
 
     // 3-5. Delete SMAPI files (best-effort — missing files are fine).
@@ -404,7 +440,11 @@ fn locate_install_dat(root: &Path) -> Option<PathBuf> {
 /// (as an OS string) matches one of the names in `exclude_top_level`.
 /// Sub-directories not excluded at the top level are copied fully
 /// (i.e. exclusion only applies to the immediate children of `src`).
-fn copy_dir_excluding(src: &Path, dst: &Path, exclude_top_level: &[&str]) -> Result<(), SmapiError> {
+fn copy_dir_excluding(
+    src: &Path,
+    dst: &Path,
+    exclude_top_level: &[&str],
+) -> Result<(), SmapiError> {
     for entry in fs::read_dir(src)? {
         let entry = entry?;
         let name = entry.file_name();
@@ -436,6 +476,33 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), SmapiError> {
         } else {
             fs::copy(&src_path, &dst_path)?;
         }
+    }
+    Ok(())
+}
+
+/// Validate that a user-selected `.app` bundle is Stardew Valley and that its
+/// declared executable matches the launcher Corkscrew/SMAPI will mutate.
+fn validate_stardew_bundle(app_bundle: &Path) -> Result<(), SmapiError> {
+    let info_path = app_bundle.join("Contents/Info.plist");
+    let info = crate::plist::read_info_plist(&info_path).map_err(|e| {
+        SmapiError::Other(format!(
+            "cannot validate Stardew Valley app bundle at {}: {}",
+            app_bundle.display(),
+            e
+        ))
+    })?;
+    if info.bundle_identifier != STARDEW_BUNDLE_IDENTIFIER {
+        return Err(SmapiError::Other(format!(
+            "refusing to install SMAPI into non-Stardew bundle {} (bundle id: {})",
+            app_bundle.display(),
+            info.bundle_identifier
+        )));
+    }
+    if info.bundle_executable != STARDEW_LAUNCHER {
+        return Err(SmapiError::Other(format!(
+            "refusing to install SMAPI into Stardew bundle with unexpected executable '{}' (expected '{}')",
+            info.bundle_executable, STARDEW_LAUNCHER
+        )));
     }
     Ok(())
 }
@@ -495,7 +562,6 @@ mod tests {
         db
     }
 
-
     fn make_macos_dir(dir: &Path) -> std::path::PathBuf {
         let macos = dir.join("Stardew Valley.app/Contents/MacOS");
         fs::create_dir_all(&macos).expect("mkdir");
@@ -506,8 +572,24 @@ mod tests {
     /// launcher script. Returns the `.app` path.
     fn vanilla_bundle(dir: &Path) -> PathBuf {
         let bundle = dir.join("Stardew Valley.app");
-        let macos = bundle.join("Contents/MacOS");
+        let contents = bundle.join("Contents");
+        let macos = contents.join("MacOS");
         fs::create_dir_all(&macos).unwrap();
+        fs::write(
+            contents.join("Info.plist"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.chucklefish.stardewvalley</string>
+    <key>CFBundleExecutable</key>
+    <string>StardewValley</string>
+</dict>
+</plist>
+"#,
+        )
+        .unwrap();
         fs::write(
             macos.join("StardewValley"),
             b"#!/bin/bash\n# vanilla launcher\nexec ./StardewValley.bin\n",
@@ -533,6 +615,15 @@ mod tests {
 
             zw.start_file("StardewModdingAPI.dll", opts)?;
             zw.write_all(b"fake smapi dll")?;
+
+            zw.start_file("StardewModdingAPI.runtimeconfig.json", opts)?;
+            zw.write_all(br#"{"runtimeOptions":{}}"#)?;
+
+            zw.start_file("StardewModdingAPI.xml", opts)?;
+            zw.write_all(b"<doc />")?;
+
+            zw.start_file("steam_appid.txt", opts)?;
+            zw.write_all(b"413150\n")?;
 
             zw.start_file("Stardew Valley.deps.json", opts)?;
             zw.write_all(br#"{"libraries":{"StardewModdingAPI/4.1.10":{}}}"#)?;
@@ -648,7 +739,11 @@ mod tests {
     fn installed_version_returns_none_for_malformed_deps_json() {
         let dir = tempfile::tempdir().unwrap();
         let macos = make_macos_dir(dir.path());
-        fs::write(macos.join("StardewModdingAPI.deps.json"), b"not valid json {").unwrap();
+        fs::write(
+            macos.join("StardewModdingAPI.deps.json"),
+            b"not valid json {",
+        )
+        .unwrap();
         let bundle = dir.path().join("Stardew Valley.app");
         assert_eq!(installed_version(&bundle), None);
     }
@@ -692,7 +787,10 @@ mod tests {
         install(&bundle, &archive_path, &db).expect("first install should succeed");
         install(&bundle, &archive_path, &db).expect("second install should succeed");
 
-        assert!(is_installed(&bundle), "is_installed should remain true after second install");
+        assert!(
+            is_installed(&bundle),
+            "is_installed should remain true after second install"
+        );
     }
 
     /// The first install must preserve the original vanilla launcher content
@@ -704,8 +802,7 @@ mod tests {
         let db = make_db(dir.path());
 
         // Record vanilla launcher content before any install.
-        let vanilla_content =
-            fs::read(bundle.join("Contents/MacOS/StardewValley")).unwrap();
+        let vanilla_content = fs::read(bundle.join("Contents/MacOS/StardewValley")).unwrap();
 
         let archive_path = dir.path().join("smapi-installer.zip");
         build_synthetic_installer_archive(&archive_path).unwrap();
@@ -761,6 +858,40 @@ mod tests {
         );
     }
 
+    /// Non-excluded top-level payload sidecars are copied into Contents/MacOS.
+    /// This pins the current trust-boundary surface documented in
+    /// docs/native-trust-boundaries.md.
+    #[test]
+    fn install_copies_non_excluded_payload_sidecars() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = vanilla_bundle(dir.path());
+        let db = make_db(dir.path());
+
+        let archive_path = dir.path().join("smapi-installer.zip");
+        build_synthetic_installer_archive(&archive_path).unwrap();
+
+        install(&bundle, &archive_path, &db).expect("install should succeed");
+
+        let macos = bundle.join("Contents/MacOS");
+        for f in [
+            "Stardew Valley.deps.json",
+            "StardewModdingAPI.runtimeconfig.json",
+            "StardewModdingAPI.xml",
+            "steam_appid.txt",
+            "smapi-internal/config.json",
+        ] {
+            assert!(
+                macos.join(f).exists(),
+                "{f} should be copied from install.dat"
+            );
+        }
+
+        assert!(
+            !macos.join("unix-launcher.sh").exists(),
+            "unix-launcher.sh should be moved to StardewValley, not left as a sidecar"
+        );
+    }
+
     /// install() creates Contents/MacOS/Mods/ if it does not exist.
     #[test]
     fn install_creates_mods_directory_if_missing() {
@@ -770,7 +901,10 @@ mod tests {
 
         // Confirm Mods/ is not present before install.
         let mods_dir = bundle.join("Contents/MacOS/Mods");
-        assert!(!mods_dir.exists(), "precondition: Mods/ must not exist before install");
+        assert!(
+            !mods_dir.exists(),
+            "precondition: Mods/ must not exist before install"
+        );
 
         let archive_path = dir.path().join("smapi-installer.zip");
         build_synthetic_installer_archive(&archive_path).unwrap();
@@ -823,8 +957,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bundle = vanilla_bundle(dir.path());
         let db = make_db(dir.path());
-        let vanilla_content =
-            fs::read(bundle.join("Contents/MacOS/StardewValley")).unwrap();
+        let vanilla_content = fs::read(bundle.join("Contents/MacOS/StardewValley")).unwrap();
 
         let archive = dir.path().join("smapi.zip");
         build_synthetic_installer_archive(&archive).unwrap();
@@ -859,8 +992,14 @@ mod tests {
         ] {
             assert!(!macos.join(f).exists(), "{f} should have been deleted");
         }
-        assert!(!macos.join("smapi-internal").exists(), "smapi-internal/ should have been deleted");
-        assert!(!macos.join("StardewValley-original").exists(), "StardewValley-original should have been renamed back");
+        assert!(
+            !macos.join("smapi-internal").exists(),
+            "smapi-internal/ should have been deleted"
+        );
+        assert!(
+            !macos.join("StardewValley-original").exists(),
+            "StardewValley-original should have been renamed back"
+        );
     }
 
     /// Contents/MacOS/Mods/ and everything inside it survive uninstall.
@@ -911,7 +1050,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = make_db(dir.path());
         let result = uninstall(Path::new("/nonexistent/Foo.app"), &db);
-        assert!(result.is_err(), "uninstall should return Err for a nonexistent bundle");
+        assert!(
+            result.is_err(),
+            "uninstall should return Err for a nonexistent bundle"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -945,7 +1087,10 @@ mod tests {
         // xattr should exist on macOS; calling clear_quarantine should not panic.
         // It will return Ok even though there's no quarantine attribute present.
         let result = clear_quarantine(&bundle);
-        assert!(result.is_ok(), "clear_quarantine should not panic on real macOS");
+        assert!(
+            result.is_ok(),
+            "clear_quarantine should not panic on real macOS"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -964,8 +1109,7 @@ mod tests {
 
         install(&bundle, &archive_path, &db).expect("install should succeed");
 
-        let snapshots =
-            crate::rollback::list_snapshots(&db, "stardew_valley_native", "").unwrap();
+        let snapshots = crate::rollback::list_snapshots(&db, "stardew_valley_native", "").unwrap();
         assert!(
             !snapshots.is_empty(),
             "install should have created at least one snapshot"
@@ -999,11 +1143,8 @@ mod tests {
 
         // There should be at least one "smapi-uninstall" snapshot (install
         // creates "smapi-install" first, then uninstall creates "smapi-uninstall").
-        let snapshots =
-            crate::rollback::list_snapshots(&db, "stardew_valley_native", "").unwrap();
-        let uninstall_snap = snapshots
-            .iter()
-            .find(|s| s.name == "smapi-uninstall");
+        let snapshots = crate::rollback::list_snapshots(&db, "stardew_valley_native", "").unwrap();
+        let uninstall_snap = snapshots.iter().find(|s| s.name == "smapi-uninstall");
         assert!(
             uninstall_snap.is_some(),
             "uninstall should have created a 'smapi-uninstall' snapshot; got: {:?}",

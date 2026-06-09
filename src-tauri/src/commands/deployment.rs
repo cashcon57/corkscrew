@@ -8,7 +8,10 @@ use crate::deploy_journal;
 use crate::deployer;
 use crate::skse;
 use crate::staging;
-use crate::{AppState, DeployGuard, auto_snapshot_before_destructive, check_game_lock, resolve_bottle, resolve_game};
+use crate::{
+    auto_snapshot_before_destructive, check_game_lock, resolve_bottle, resolve_game, AppState,
+    DeployGuard,
+};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
@@ -257,8 +260,12 @@ pub async fn redeploy_all_mods(
         let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
 
         let journal_id = deploy_journal::begin(
-            &game_id, &bottle_name, deploy_journal::JournalOp::RedeployAll, &[],
-        ).unwrap_or_default();
+            &game_id,
+            &bottle_name,
+            deploy_journal::JournalOp::RedeployAll,
+            &[],
+        )
+        .unwrap_or_default();
 
         let app_clone = app.clone();
         let result = deployer::redeploy_all_with_progress(
@@ -332,7 +339,8 @@ pub async fn redeploy_all_mods(
         let elapsed = redeploy_start.elapsed();
         log::info!(
             "Redeploy complete: {} deployed, {} skipped, {:.1}s",
-            result.deployed_count, result.skipped_count,
+            result.deployed_count,
+            result.skipped_count,
             elapsed.as_secs_f64()
         );
 
@@ -350,7 +358,9 @@ pub async fn redeploy_all_mods(
 /// Check whether a deployment operation is currently in progress.
 #[tauri::command]
 pub fn is_deploy_in_progress(state: State<'_, AppState>) -> bool {
-    state.deploy_in_progress.load(std::sync::atomic::Ordering::Relaxed)
+    state
+        .deploy_in_progress
+        .load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Incremental deployment: compute diff and apply only changes.
@@ -373,7 +383,10 @@ pub async fn deploy_incremental_cmd(
 
         log::info!(
             "Incremental deploy: {} added, {} removed, {} updated, {} unchanged, {:.1}s",
-            result.files_added, result.files_removed, result.files_updated, result.files_unchanged,
+            result.files_added,
+            result.files_removed,
+            result.files_updated,
+            result.files_unchanged,
             deploy_start.elapsed().as_secs_f64()
         );
 
@@ -417,7 +430,10 @@ pub async fn deploy_incremental_cmd(
             }
         }
 
-        log::info!("Incremental deploy total (with post-deploy fixes): {:.1}s", deploy_start.elapsed().as_secs_f64());
+        log::info!(
+            "Incremental deploy total (with post-deploy fixes): {:.1}s",
+            deploy_start.elapsed().as_secs_f64()
+        );
 
         Ok(result)
     })
@@ -454,12 +470,15 @@ pub async fn check_deployment_health(
             .get_deployment_manifest(&game_id, &bottle_name)
             .map_err(|e| e.to_string())?;
 
-        let _ = app.emit("health-check-progress", serde_json::json!({
-            "step": "staging",
-            "message": format!("Checking staging for {} mods...", mods.len()),
-            "current": 0,
-            "total": mods.len(),
-        }));
+        let _ = app.emit(
+            "health-check-progress",
+            serde_json::json!({
+                "step": "staging",
+                "message": format!("Checking staging for {} mods...", mods.len()),
+                "current": 0,
+                "total": mods.len(),
+            }),
+        );
 
         let mut enabled_count = 0usize;
         let mut staging_ok = 0usize;
@@ -514,12 +533,15 @@ pub async fn check_deployment_health(
             }
         }
 
-        let _ = app.emit("health-check-progress", serde_json::json!({
-            "step": "deployment",
-            "message": format!("Verifying {} deployed files...", manifest.len()),
-            "current": 0,
-            "total": manifest.len(),
-        }));
+        let _ = app.emit(
+            "health-check-progress",
+            serde_json::json!({
+                "step": "deployment",
+                "message": format!("Verifying {} deployed files...", manifest.len()),
+                "current": 0,
+                "total": manifest.len(),
+            }),
+        );
 
         // Check deployment manifest vs data dir (existence check — all modes)
         let mut deployed_ok = 0usize;
@@ -532,12 +554,15 @@ pub async fn check_deployment_health(
                 deployed_missing += 1;
             }
             if idx % 5000 == 0 {
-                let _ = app.emit("health-check-progress", serde_json::json!({
-                    "step": "deployment",
-                    "message": format!("Checking file {}/{}...", idx + 1, manifest.len()),
-                    "current": idx + 1,
-                    "total": manifest.len(),
-                }));
+                let _ = app.emit(
+                    "health-check-progress",
+                    serde_json::json!({
+                        "step": "deployment",
+                        "message": format!("Checking file {}/{}...", idx + 1, manifest.len()),
+                        "current": idx + 1,
+                        "total": manifest.len(),
+                    }),
+                );
             }
         }
 
@@ -547,12 +572,15 @@ pub async fn check_deployment_health(
             config::VerificationLevel::Paranoid => "Paranoid",
         };
 
-        let _ = app.emit("health-check-progress", serde_json::json!({
-            "step": "verification",
-            "message": format!("Running {} hash verification...", level_str),
-            "current": 0,
-            "total": 0,
-        }));
+        let _ = app.emit(
+            "health-check-progress",
+            serde_json::json!({
+                "step": "verification",
+                "message": format!("Running {} hash verification...", level_str),
+                "current": 0,
+                "total": 0,
+            }),
+        );
 
         // Hash verification (Balanced/Paranoid modes only)
         let verification = deployer::verify_deployment(
@@ -571,12 +599,15 @@ pub async fn check_deployment_health(
             && verification.hash_mismatches == 0
             && !manifest.is_empty();
 
-        let _ = app.emit("health-check-progress", serde_json::json!({
-            "step": "complete",
-            "message": "Health check complete",
-            "current": 1,
-            "total": 1,
-        }));
+        let _ = app.emit(
+            "health-check-progress",
+            serde_json::json!({
+                "step": "complete",
+                "message": "Health check complete",
+                "current": 1,
+                "total": 1,
+            }),
+        );
 
         Ok(serde_json::json!({
             "healthy": healthy,
@@ -670,8 +701,12 @@ pub async fn purge_deployment_cmd(
         auto_snapshot_before_destructive(&db, &game_id, &bottle_name, "Before purge deployment");
 
         let journal_id = deploy_journal::begin(
-            &game_id, &bottle_name, deploy_journal::JournalOp::Purge, &[],
-        ).unwrap_or_default();
+            &game_id,
+            &bottle_name,
+            deploy_journal::JournalOp::Purge,
+            &[],
+        )
+        .unwrap_or_default();
 
         let removed =
             deployer::purge_deployment(&db, &game_id, &bottle_name, &data_dir, &game.game_path)
@@ -713,7 +748,6 @@ pub async fn verify_mod_integrity(
     .await
     .map_err(crate::format_join_error)?
 }
-
 
 // --- Deployment Health ---
 
@@ -817,7 +851,6 @@ pub async fn get_deployment_stats(
     .map_err(|e| format!("Stats task failed: {e}"))?
 }
 
-
 // --- Background Hashing ---
 
 #[tauri::command]
@@ -876,16 +909,22 @@ pub async fn get_merged_file_tree(
 ) -> Result<Vec<FileTreeNode>, String> {
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
-        let manifest = db.get_deployment_manifest(&game_id, &bottle_name)
+        let manifest = db
+            .get_deployment_manifest(&game_id, &bottle_name)
             .map_err(|e| e.to_string())?;
-        let conflicts = db.find_all_conflicts(&game_id, &bottle_name)
+        let conflicts = db
+            .find_all_conflicts(&game_id, &bottle_name)
             .map_err(|e| e.to_string())?;
 
         // Build conflict lookup: relative_path → list of (mod_id, mod_name)
         let mut conflict_map: std::collections::HashMap<String, Vec<(i64, String)>> =
             std::collections::HashMap::new();
         for c in &conflicts {
-            let mods: Vec<(i64, String)> = c.mods.iter().map(|m| (m.mod_id, m.mod_name.clone())).collect();
+            let mods: Vec<(i64, String)> = c
+                .mods
+                .iter()
+                .map(|m| (m.mod_id, m.mod_name.clone()))
+                .collect();
             conflict_map.insert(c.relative_path.clone(), mods);
         }
 
@@ -904,19 +943,25 @@ pub async fn get_merged_file_tree(
                 })
                 .unwrap_or_default();
 
-            tree_map.insert(entry.relative_path.clone(), FileTreeNode {
-                name: entry.relative_path.rsplit('/').next()
-                    .or_else(|| entry.relative_path.rsplit('\\').next())
-                    .unwrap_or(&entry.relative_path)
-                    .to_string(),
-                path: entry.relative_path.clone(),
-                is_dir: false,
-                children: vec![],
-                source_mod_id: Some(entry.mod_id),
-                source_mod_name: Some(entry.mod_name.clone()),
-                conflict_mod_names: conflict_mods,
-                file_size: None,
-            });
+            tree_map.insert(
+                entry.relative_path.clone(),
+                FileTreeNode {
+                    name: entry
+                        .relative_path
+                        .rsplit('/')
+                        .next()
+                        .or_else(|| entry.relative_path.rsplit('\\').next())
+                        .unwrap_or(&entry.relative_path)
+                        .to_string(),
+                    path: entry.relative_path.clone(),
+                    is_dir: false,
+                    children: vec![],
+                    source_mod_id: Some(entry.mod_id),
+                    source_mod_name: Some(entry.mod_name.clone()),
+                    conflict_mod_names: conflict_mods,
+                    file_size: None,
+                },
+            );
         }
 
         // Build tree structure from flat paths
@@ -942,16 +987,18 @@ fn build_tree_from_flat(entries: Vec<FileTreeNode>) -> Vec<FileTreeNode> {
             let dir_name = parts[0].to_string();
             let _sub_path = parts[1..].join("/");
 
-            let dir = root_children.entry(dir_name.clone()).or_insert_with(|| FileTreeNode {
-                name: dir_name.clone(),
-                path: dir_name.clone(),
-                is_dir: true,
-                children: vec![],
-                source_mod_id: None,
-                source_mod_name: None,
-                conflict_mod_names: vec![],
-                file_size: None,
-            });
+            let dir = root_children
+                .entry(dir_name.clone())
+                .or_insert_with(|| FileTreeNode {
+                    name: dir_name.clone(),
+                    path: dir_name.clone(),
+                    is_dir: true,
+                    children: vec![],
+                    source_mod_id: None,
+                    source_mod_name: None,
+                    conflict_mod_names: vec![],
+                    file_size: None,
+                });
 
             // For simplicity, flatten to one level of nesting in this first pass
             // Deep nesting can be added later with recursive insertion
@@ -970,4 +1017,3 @@ fn build_tree_from_flat(entries: Vec<FileTreeNode>) -> Vec<FileTreeNode> {
 
     root_children.into_values().collect()
 }
-

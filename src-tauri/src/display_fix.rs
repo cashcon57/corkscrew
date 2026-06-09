@@ -1329,10 +1329,18 @@ pub fn fix_gpu_ini_entries(game_dir: &Path) -> Result<usize, String> {
 
     // Known Bethesda INI basenames (lowercase for matching)
     let known_inis: std::collections::HashSet<&str> = [
-        "skyrimprefs.ini", "skyrim.ini",
-        "fallout4prefs.ini", "fallout4.ini", "fallout.ini", "falloutprefs.ini",
-        "oblivion.ini", "starfieldprefs.ini", "starfieldcustom.ini",
-    ].into_iter().collect();
+        "skyrimprefs.ini",
+        "skyrim.ini",
+        "fallout4prefs.ini",
+        "fallout4.ini",
+        "fallout.ini",
+        "falloutprefs.ini",
+        "oblivion.ini",
+        "starfieldprefs.ini",
+        "starfieldcustom.ini",
+    ]
+    .into_iter()
+    .collect();
 
     let mut fixed_count = 0;
 
@@ -1359,13 +1367,17 @@ pub fn fix_gpu_ini_entries(game_dir: &Path) -> Result<usize, String> {
 
 /// Fix sD3DDevice= entry in a single INI file, preserving line endings.
 fn fix_gpu_in_ini(ini_path: &Path, gpu_name: &str) -> Result<bool, String> {
-    let content = fs::read(ini_path)
-        .map_err(|e| format!("Failed to read {}: {}", ini_path.display(), e))?;
+    let content =
+        fs::read(ini_path).map_err(|e| format!("Failed to read {}: {}", ini_path.display(), e))?;
 
     let content_str = String::from_utf8_lossy(&content);
 
     // Detect line ending style (CRLF vs LF)
-    let line_ending = if content_str.contains("\r\n") { "\r\n" } else { "\n" };
+    let line_ending = if content_str.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
 
     let mut modified = false;
     let mut output_lines = Vec::new();
@@ -1400,7 +1412,10 @@ fn detect_gpu_name() -> String {
         if let Ok(output) = Command::new("lspci").output() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             for line in stdout.lines() {
-                if line.contains("VGA") || line.contains("3D controller") || line.contains("Display controller") {
+                if line.contains("VGA")
+                    || line.contains("3D controller")
+                    || line.contains("Display controller")
+                {
                     // Extract the device name after the last colon
                     if let Some(name) = line.split(':').last() {
                         let name = name.trim();
@@ -1660,11 +1675,7 @@ fMusicVolume=0.5
     fn fix_gpu_in_ini_skips_correct_name() {
         let tmp = tempfile::tempdir().unwrap();
         let ini_path = tmp.path().join("SkyrimPrefs.ini");
-        std::fs::write(
-            &ini_path,
-            "[Display]\nsD3DDevice=My GPU\niSize W=1920\n",
-        )
-        .unwrap();
+        std::fs::write(&ini_path, "[Display]\nsD3DDevice=My GPU\niSize W=1920\n").unwrap();
 
         let result = fix_gpu_in_ini(&ini_path, "My GPU");
         assert!(result.is_ok());
@@ -1692,11 +1703,7 @@ fMusicVolume=0.5
             "[Display]\nsD3DDevice=llvmpipe\n",
         )
         .unwrap();
-        std::fs::write(
-            dir.join("Skyrim.ini"),
-            "[Display]\nsD3DDevice=wrong gpu\n",
-        )
-        .unwrap();
+        std::fs::write(dir.join("Skyrim.ini"), "[Display]\nsD3DDevice=wrong gpu\n").unwrap();
 
         // This test only validates the file-scanning logic; detect_gpu_name()
         // may return empty on CI, so we call fix_gpu_in_ini directly per file.
@@ -1914,7 +1921,9 @@ Geometry: 0,0 2560x1600
     fn has_priority_one_token_basic() {
         assert!(has_priority_one_token("priority 1"));
         assert!(has_priority_one_token("priority: 1"));
-        assert!(has_priority_one_token("Output: 1 eDP-1 enabled connected priority 1 modes:"));
+        assert!(has_priority_one_token(
+            "Output: 1 eDP-1 enabled connected priority 1 modes:"
+        ));
         assert!(!has_priority_one_token("priority 10"));
         assert!(!has_priority_one_token("priority: 11"));
         assert!(!has_priority_one_token("priority 100"));
@@ -1932,10 +1941,7 @@ Geometry: 0,0 2560x1600
 [('eDP-1-2560x1600@60.001', int32 2560, int32 1600, 60.000999450683594, 1.0, [1.0, 1.25, 1.5], \
 {'is-current': <true>, 'is-preferred': <true>})], {'display-name': <'Built-in display'>})], \
 {'is-presentation': <false>}, {'layout-mode': <uint32 1>})\n";
-        assert_eq!(
-            parse_mutter_get_current_state(sample),
-            Some((2560, 1600))
-        );
+        assert_eq!(parse_mutter_get_current_state(sample), Some((2560, 1600)));
     }
 
     #[test]
@@ -1945,10 +1951,7 @@ Geometry: 0,0 2560x1600
 [('id-1', int32 1280, int32 720, 60.0, 1.0, [1.0], {'is-preferred': <false>}), \
 ('id-2', int32 1920, int32 1080, 60.0, 1.0, [1.0], {'is-current': <true>, 'is-preferred': <true>}), \
 ('id-3', int32 2560, int32 1440, 60.0, 1.0, [1.0], {})]\n";
-        assert_eq!(
-            parse_mutter_get_current_state(sample),
-            Some((1920, 1080))
-        );
+        assert_eq!(parse_mutter_get_current_state(sample), Some((1920, 1080)));
     }
 
     #[test]
@@ -1988,10 +1991,7 @@ Geometry: 0,0 2560x1600
 {'is-current': <true>, 'is-preferred': <true>})], \
 {'display-name': <'Built-in display'>, 'is-primary': <true>})], \
 {})\n";
-        assert_eq!(
-            parse_mutter_get_current_state(sample),
-            Some((2560, 1600))
-        );
+        assert_eq!(parse_mutter_get_current_state(sample), Some((2560, 1600)));
     }
 
     #[test]
@@ -2007,10 +2007,7 @@ Geometry: 0,0 2560x1600
 [('id-2', int32 3840, int32 2160, 60.0, 1.0, [1.0], {'is-current': <true>})], \
 {'display-name': <'HDMI-A-1'>})], \
 {})\n";
-        assert_eq!(
-            parse_mutter_get_current_state(sample),
-            Some((1920, 1080))
-        );
+        assert_eq!(parse_mutter_get_current_state(sample), Some((1920, 1080)));
     }
 
     #[test]

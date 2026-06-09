@@ -1,9 +1,9 @@
 //! Tauri commands for DepotDownloader integration.
 
 use crate::depot_downloader;
-use serde::Serialize;
-use tauri::{State, Emitter};
 use crate::AppState;
+use serde::Serialize;
+use tauri::{Emitter, State};
 
 #[derive(Serialize)]
 pub struct DDStatus {
@@ -17,7 +17,9 @@ pub struct DDStatus {
 #[tauri::command]
 pub async fn dd_status(username: Option<String>) -> Result<DDStatus, String> {
     let user = username.or_else(|| {
-        crate::config::get_config_value("steam_username").ok().flatten()
+        crate::config::get_config_value("steam_username")
+            .ok()
+            .flatten()
     });
 
     let auth_state = if let Some(ref u) = user {
@@ -58,18 +60,14 @@ pub async fn dd_authenticate(
     password: String,
     steam_guard_code: Option<String>,
 ) -> Result<(), String> {
-    depot_downloader::authenticate(
-        &username,
-        &password,
-        steam_guard_code.as_deref(),
-    )
-    .await
-    .map_err(|e| match e {
-        depot_downloader::DDError::SteamGuardRequired => "STEAM_GUARD_REQUIRED".into(),
-        depot_downloader::DDError::SteamGuardMobile => "STEAM_GUARD_MOBILE".into(),
-        depot_downloader::DDError::AuthFailed(msg) => format!("AUTH_FAILED: {}", msg),
-        other => other.to_string(),
-    })
+    depot_downloader::authenticate(&username, &password, steam_guard_code.as_deref())
+        .await
+        .map_err(|e| match e {
+            depot_downloader::DDError::SteamGuardRequired => "STEAM_GUARD_REQUIRED".into(),
+            depot_downloader::DDError::SteamGuardMobile => "STEAM_GUARD_MOBILE".into(),
+            depot_downloader::DDError::AuthFailed(msg) => format!("AUTH_FAILED: {}", msg),
+            other => other.to_string(),
+        })
 }
 
 /// Clear saved Steam credentials for DepotDownloader.
@@ -127,10 +125,7 @@ pub async fn dd_check_partial_download(
 
 /// Delete a partial depot download.
 #[tauri::command]
-pub async fn dd_delete_partial_download(
-    app_id: u32,
-    depot_id: u32,
-) -> Result<(), String> {
+pub async fn dd_delete_partial_download(app_id: u32, depot_id: u32) -> Result<(), String> {
     let download_dir = crate::config::cache_dir()
         .join("depot_downloads")
         .join(format!("{}_{}", app_id, depot_id));
@@ -178,7 +173,10 @@ pub async fn dd_download_depot(
     if app_id == 0 || depot_id == 0 {
         return Err("app_id and depot_id must be non-zero".into());
     }
-    if manifest_id.is_empty() || manifest_id.len() > 30 || !manifest_id.chars().all(|c| c.is_ascii_digit()) {
+    if manifest_id.is_empty()
+        || manifest_id.len() > 30
+        || !manifest_id.chars().all(|c| c.is_ascii_digit())
+    {
         return Err("manifest_id must be a non-empty numeric string".into());
     }
     let download_dir = crate::config::cache_dir()
@@ -218,23 +216,27 @@ pub async fn dd_get_depot_versions(
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
         let conn = db.conn().map_err(|e| e.to_string())?;
-        let mut stmt = conn.prepare(
-            "SELECT game_version, app_id, depot_id, manifest_id, build_id
+        let mut stmt = conn
+            .prepare(
+                "SELECT game_version, app_id, depot_id, manifest_id, build_id
              FROM steam_depot_history
              WHERE game_id = ?1 AND game_version IS NOT NULL
              GROUP BY game_version
-             ORDER BY captured_at DESC"
-        ).map_err(|e| e.to_string())?;
+             ORDER BY captured_at DESC",
+            )
+            .map_err(|e| e.to_string())?;
 
-        let rows = stmt.query_map(rusqlite::params![&game_id], |row| {
-            Ok(DepotVersion {
-                game_version: row.get(0)?,
-                app_id: row.get::<_, String>(1)?.parse().unwrap_or(0),
-                depot_id: row.get::<_, String>(2)?.parse().unwrap_or(0),
-                manifest_id: row.get(3)?,
-                build_id: row.get(4)?,
+        let rows = stmt
+            .query_map(rusqlite::params![&game_id], |row| {
+                Ok(DepotVersion {
+                    game_version: row.get(0)?,
+                    app_id: row.get::<_, String>(1)?.parse().unwrap_or(0),
+                    depot_id: row.get::<_, String>(2)?.parse().unwrap_or(0),
+                    manifest_id: row.get(3)?,
+                    build_id: row.get(4)?,
+                })
             })
-        }).map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?;
 
         Ok(rows.filter_map(|r| r.ok()).collect())
     })

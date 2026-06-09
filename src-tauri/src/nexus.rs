@@ -580,15 +580,11 @@ impl NexusClient {
     /// the "show uninstalled games" feature to give users the full picture
     /// of supported titles, not just the ~85 covered by the bundled
     /// Vortex extension index.
-    pub async fn fetch_games_list(
-        &self,
-    ) -> Result<Vec<crate::nexus_games_index::NexusGame>> {
+    pub async fn fetch_games_list(&self) -> Result<Vec<crate::nexus_games_index::NexusGame>> {
         let url = format!("{NEXUS_API_BASE}/games.json");
         let json: serde_json::Value = self.get_json(&url).await?;
-        let games: Vec<crate::nexus_games_index::NexusGame> =
-            serde_json::from_value(json).map_err(|e| {
-                NexusError::ParseError(format!("Failed to parse games list: {e}"))
-            })?;
+        let games: Vec<crate::nexus_games_index::NexusGame> = serde_json::from_value(json)
+            .map_err(|e| NexusError::ParseError(format!("Failed to parse games list: {e}")))?;
         Ok(games)
     }
 

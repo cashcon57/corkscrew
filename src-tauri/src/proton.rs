@@ -216,8 +216,7 @@ pub fn invalidate_wine_fork_cache() {
 /// `scan_wine_forks_in_roots` helper, but called only by the cached entry
 /// point above in production code.
 fn detect_system_wine_forks_uncached() -> Vec<WineFork> {
-    let mut roots: Vec<PathBuf> =
-        vec![PathBuf::from("/opt"), PathBuf::from("/usr/local")];
+    let mut roots: Vec<PathBuf> = vec![PathBuf::from("/opt"), PathBuf::from("/usr/local")];
     if let Some(home) = dirs::home_dir() {
         roots.push(home.join(".local/opt"));
     }
@@ -341,9 +340,8 @@ fn scan_wine_forks_in_roots(roots: &[PathBuf], usr_local_bin: Option<&Path>) -> 
 
             // Match "wine-*" subdirectories (and bare "wine"). Skip plain files.
             let lower = dir_name.to_lowercase();
-            let looks_wine_dir = lower == "wine"
-                || lower.starts_with("wine-")
-                || lower.starts_with("wine_");
+            let looks_wine_dir =
+                lower == "wine" || lower.starts_with("wine-") || lower.starts_with("wine_");
             if !looks_wine_dir {
                 continue;
             }
@@ -375,7 +373,11 @@ fn scan_wine_forks_in_roots(roots: &[PathBuf], usr_local_bin: Option<&Path>) -> 
                 }
             }
         }
-        debug!("scanned {}, found {} wine fork dir entries", root.display(), count);
+        debug!(
+            "scanned {}, found {} wine fork dir entries",
+            root.display(),
+            count
+        );
     }
 
     // Also scan a *bin* directory (typically /usr/local/bin) for loose
@@ -499,7 +501,7 @@ pub fn derive_wine_variant(raw: &str) -> String {
 
 fn variant_priority(v: &ProtonVariant) -> u32 {
     match v {
-        ProtonVariant::GE => 0,       // Preferred for modding (more patches)
+        ProtonVariant::GE => 0, // Preferred for modding (more patches)
         ProtonVariant::Official => 1,
         ProtonVariant::CachyOS => 2,
         ProtonVariant::EM => 3,
@@ -581,15 +583,15 @@ fn find_compat_tools_dirs() -> Vec<PathBuf> {
         }
 
         // Flatpak Steam: ~/.var/app/com.valvesoftware.Steam/data/Steam/compatibilitytools.d
-        let flatpak_data = home
-            .join(".var/app/com.valvesoftware.Steam/data/Steam/compatibilitytools.d");
+        let flatpak_data =
+            home.join(".var/app/com.valvesoftware.Steam/data/Steam/compatibilitytools.d");
         if flatpak_data.is_dir() && !dirs.iter().any(|d| same_dir(d, &flatpak_data)) {
             dirs.push(flatpak_data);
         }
 
         // Flatpak Steam (legacy layout): .../.local/share/Steam/compatibilitytools.d
-        let flatpak_legacy = home
-            .join(".var/app/com.valvesoftware.Steam/.local/share/Steam/compatibilitytools.d");
+        let flatpak_legacy =
+            home.join(".var/app/com.valvesoftware.Steam/.local/share/Steam/compatibilitytools.d");
         if flatpak_legacy.is_dir() && !dirs.iter().any(|d| same_dir(d, &flatpak_legacy)) {
             dirs.push(flatpak_legacy);
         }

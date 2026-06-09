@@ -69,8 +69,8 @@ fn entries() -> &'static [ExtensionEntry] {
     static ENTRIES: OnceLock<Vec<ExtensionEntry>> = OnceLock::new();
     ENTRIES
         .get_or_init(|| {
-            let doc: IndexDocument = serde_json::from_str(INDEX_JSON)
-                .expect("vortex_extension_index.json is malformed");
+            let doc: IndexDocument =
+                serde_json::from_str(INDEX_JSON).expect("vortex_extension_index.json is malformed");
             doc.extensions
         })
         .as_slice()

@@ -138,47 +138,53 @@ pub fn read_modsettings(path: &Path) -> Result<ModSettings, LsxError> {
 
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(quick_xml::events::Event::Start(ref e)) => {
-                match e.name().as_ref() {
-                    b"version" => {
-                        for attr in e.attributes().flatten() {
-                            let key = std::str::from_utf8(attr.key.as_ref()).unwrap_or("").to_string();
-                            let val_str = attr.unescape_value().unwrap_or_default().to_string();
-                            let val = val_str.parse::<u32>().unwrap_or(0);
-                            match key.as_str() {
-                                "major" => version.major = val,
-                                "minor" => version.minor = val,
-                                "revision" => version.revision = val,
-                                "build" => version.build = val,
-                                _ => {}
-                            }
+            Ok(quick_xml::events::Event::Start(ref e)) => match e.name().as_ref() {
+                b"version" => {
+                    for attr in e.attributes().flatten() {
+                        let key = std::str::from_utf8(attr.key.as_ref())
+                            .unwrap_or("")
+                            .to_string();
+                        let val_str = attr.unescape_value().unwrap_or_default().to_string();
+                        let val = val_str.parse::<u32>().unwrap_or(0);
+                        match key.as_str() {
+                            "major" => version.major = val,
+                            "minor" => version.minor = val,
+                            "revision" => version.revision = val,
+                            "build" => version.build = val,
+                            _ => {}
                         }
                     }
-                    b"region" => {
-                        if attr_id_equals(e, "ModuleSettings") {
-                            in_module_settings_region = true;
-                        }
-                    }
-                    b"node" => {
-                        if in_module_settings_region {
-                            match attr_id_value(e).as_deref() {
-                                Some("Mods") => in_mods_node = true,
-                                Some("ModuleShortDesc") if in_mods_node => {
-                                    current_entry = Some(ModEntry::default());
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    _ => {}
                 }
-            }
+                b"region" => {
+                    if attr_id_equals(e, "ModuleSettings") {
+                        in_module_settings_region = true;
+                    }
+                }
+                b"node" => {
+                    if in_module_settings_region {
+                        match attr_id_value(e).as_deref() {
+                            Some("Mods") => in_mods_node = true,
+                            Some("ModuleShortDesc") if in_mods_node => {
+                                current_entry = Some(ModEntry::default());
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            },
             Ok(quick_xml::events::Event::Empty(ref e)) => {
                 match e.name().as_ref() {
                     b"version" => {
                         for attr in e.attributes().flatten() {
-                            let key = std::str::from_utf8(attr.key.as_ref()).unwrap_or("").to_string();
-                            let val = attr.unescape_value().unwrap_or_default().parse::<u32>().unwrap_or(0);
+                            let key = std::str::from_utf8(attr.key.as_ref())
+                                .unwrap_or("")
+                                .to_string();
+                            let val = attr
+                                .unescape_value()
+                                .unwrap_or_default()
+                                .parse::<u32>()
+                                .unwrap_or(0);
                             match key.as_str() {
                                 "major" => version.major = val,
                                 "minor" => version.minor = val,
@@ -222,22 +228,20 @@ pub fn read_modsettings(path: &Path) -> Result<ModSettings, LsxError> {
                     _ => {}
                 }
             }
-            Ok(quick_xml::events::Event::End(ref e)) => {
-                match e.name().as_ref() {
-                    b"node" => {
-                        if let Some(entry) = current_entry.take() {
-                            if !entry.uuid.is_empty() {
-                                mods.push(entry);
-                            }
+            Ok(quick_xml::events::Event::End(ref e)) => match e.name().as_ref() {
+                b"node" => {
+                    if let Some(entry) = current_entry.take() {
+                        if !entry.uuid.is_empty() {
+                            mods.push(entry);
                         }
                     }
-                    b"region" => {
-                        in_module_settings_region = false;
-                        in_mods_node = false;
-                    }
-                    _ => {}
                 }
-            }
+                b"region" => {
+                    in_module_settings_region = false;
+                    in_mods_node = false;
+                }
+                _ => {}
+            },
             Ok(quick_xml::events::Event::Eof) => break,
             Err(e) => return Err(LsxError::Parse(e.to_string())),
             _ => {}
@@ -276,7 +280,10 @@ pub fn write_modsettings(path: &Path, settings: &ModSettings) -> Result<(), LsxE
     writeln!(out, "                    <children>")?;
 
     for entry in &settings.mods {
-        writeln!(out, r#"                        <node id="ModuleShortDesc">"#)?;
+        writeln!(
+            out,
+            r#"                        <node id="ModuleShortDesc">"#
+        )?;
         writeln!(
             out,
             r#"                            <attribute id="Folder" type="LSString" value="{}" />"#,

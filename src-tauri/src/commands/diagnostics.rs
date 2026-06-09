@@ -1,15 +1,15 @@
 //! Diagnostic commands: Wine compatibility, preflight, crash logs, DXVK, and session tracking.
 
 use crate::crashlog;
-use crate::integrity;
 use crate::crashlog::{CrashLogEntry, CrashReport, NewCrashInfo};
-use crate::integrity::{IntegrityReport};
+use crate::integrity;
+use crate::integrity::IntegrityReport;
 use crate::mod_dependencies;
 use crate::mod_recommendations;
 use crate::preflight;
 use crate::session_tracker;
 use crate::wine_diagnostic;
-use crate::{AppState, resolve_bottle, resolve_game};
+use crate::{resolve_bottle, resolve_game, AppState};
 use std::path::{Path, PathBuf};
 use tauri::State;
 
@@ -70,12 +70,14 @@ pub async fn check_prefix_health_linux(
 ) -> Result<wine_diagnostic::LinuxPrefixHealth, String> {
     tokio::task::spawn_blocking(move || {
         let bottle = resolve_bottle(&bottle_name)?;
-        Ok(wine_diagnostic::check_prefix_health_linux(&bottle.path, &game_id))
+        Ok(wine_diagnostic::check_prefix_health_linux(
+            &bottle.path,
+            &game_id,
+        ))
     })
     .await
     .map_err(crate::format_join_error)?
 }
-
 
 // --- Pre-flight Commands ---
 
@@ -99,7 +101,6 @@ pub async fn run_preflight_check(
     .await
     .map_err(|e| format!("Preflight task failed: {e}"))?
 }
-
 
 // --- Mod Dependency Commands ---
 
@@ -176,7 +177,6 @@ pub async fn check_dependency_issues(
     .map_err(|e| format!("Dependency check task failed: {e}"))?
 }
 
-
 // --- Mod Recommendation Commands ---
 
 #[tauri::command]
@@ -207,7 +207,6 @@ pub async fn get_popular_mods(
     .await
     .map_err(crate::format_join_error)?
 }
-
 
 // --- Crash Logs ---
 
@@ -247,12 +246,14 @@ pub async fn chat_check_new_crashes(
 ) -> Result<NewCrashInfo, String> {
     tokio::task::spawn_blocking(move || {
         let bottle = resolve_bottle(&bottle_name)?;
-        Ok(crashlog::check_new_crashes(&PathBuf::from(&bottle.path), &game_id))
+        Ok(crashlog::check_new_crashes(
+            &PathBuf::from(&bottle.path),
+            &game_id,
+        ))
     })
     .await
     .map_err(crate::format_join_error)?
 }
-
 
 // --- Integrity ---
 
@@ -301,7 +302,6 @@ pub async fn has_game_snapshot(
     .await
     .map_err(crate::format_join_error)?
 }
-
 
 // --- Session Tracker Commands ---
 
@@ -389,7 +389,6 @@ pub async fn get_stability_summary(
     .map_err(|e| format!("Stability summary task failed: {e}"))?
 }
 
-
 // --- DXVK Configuration Commands ---
 
 #[tauri::command]
@@ -427,4 +426,3 @@ pub async fn detect_dxvk_version(prefix_path: String) -> Result<Option<String>, 
         &prefix_path,
     )))
 }
-

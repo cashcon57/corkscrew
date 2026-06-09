@@ -75,8 +75,8 @@ pub async fn register_unregistered_game(
     // outside the bottle root to prevent registering arbitrary host paths.
     let canon_bottle = std::fs::canonicalize(&bottle.path)
         .map_err(|e| format!("canonicalize bottle failed: {e}"))?;
-    let canon_exe = std::fs::canonicalize(exe_path_p)
-        .map_err(|e| format!("canonicalize exe failed: {e}"))?;
+    let canon_exe =
+        std::fs::canonicalize(exe_path_p).map_err(|e| format!("canonicalize exe failed: {e}"))?;
     if !canon_exe.starts_with(&canon_bottle) {
         return Err("exe_path must live inside the bottle".into());
     }
@@ -227,8 +227,8 @@ pub async fn update_custom_game_paths_cmd(
         .ok_or_else(|| format!("Bottle not found: {bottle_name}"))?;
     let canon_bottle = std::fs::canonicalize(&bottle.path)
         .map_err(|e| format!("canonicalize bottle failed: {e}"))?;
-    let canon_exe = std::fs::canonicalize(exe_path_p)
-        .map_err(|e| format!("canonicalize exe failed: {e}"))?;
+    let canon_exe =
+        std::fs::canonicalize(exe_path_p).map_err(|e| format!("canonicalize exe failed: {e}"))?;
     if !canon_exe.starts_with(&canon_bottle) {
         return Err("exe_path must live inside the bottle".into());
     }

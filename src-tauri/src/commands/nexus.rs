@@ -1,15 +1,15 @@
 //! NexusMods authentication: SSO, OAuth, Google OAuth, mod files, and NXM protocol handling.
 
-use crate::oauth;
 use crate::config;
 use crate::deployer;
 use crate::google_oauth;
 use crate::nexus;
 use crate::nexus_sso;
 use crate::nxm_handler;
+use crate::oauth;
 use crate::oauth::{NexusUserInfo, TokenPair};
 use crate::staging;
-use crate::{AppState, nexus_client, resolve_game};
+use crate::{nexus_client, resolve_game, AppState};
 use std::path::PathBuf;
 use tauri::Emitter;
 use tauri::{AppHandle, State};
@@ -24,7 +24,6 @@ pub async fn start_nexus_sso() -> Result<String, String> {
         .map_err(|e| format!("SSO task failed: {}", e))?
         .map_err(|e| e.to_string())
 }
-
 
 // --- OAuth ---
 
@@ -163,7 +162,6 @@ pub async fn get_nexus_account_status() -> Result<serde_json::Value, String> {
     }
 }
 
-
 // --- Google OAuth (Gemini) ---
 
 #[tauri::command]
@@ -187,7 +185,6 @@ pub async fn google_sign_out() -> Result<(), String> {
 pub fn google_auth_status() -> google_oauth::GoogleAuthStatus {
     google_oauth::get_google_auth_status()
 }
-
 
 // --- Nexus Mod Files & Direct Download ---
 
@@ -402,7 +399,6 @@ pub async fn download_and_install_nexus_mod(
     serde_json::to_value(installed).map_err(|e| e.to_string())
 }
 
-
 // --- NXM Handler ---
 
 #[tauri::command]
@@ -419,4 +415,3 @@ pub async fn unregister_nxm_handler() -> Result<(), String> {
 pub async fn is_nxm_handler_registered() -> Result<bool, String> {
     Ok(nxm_handler::is_nxm_handler_registered())
 }
-

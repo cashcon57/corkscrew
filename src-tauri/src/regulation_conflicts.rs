@@ -136,24 +136,36 @@ mod tests {
     #[test]
     fn no_conflicts_when_no_mods() {
         let (db, _t) = temp_db();
-        let conflicts =
-            detect_regulation_conflicts(&db, "eldenring", "default").expect("ok");
+        let conflicts = detect_regulation_conflicts(&db, "eldenring", "default").expect("ok");
         assert!(conflicts.is_empty());
     }
 
     #[test]
     fn no_conflicts_for_single_modifier() {
         let (db, _t) = temp_db();
-        add_mod(&db, "eldenring", "default", "OnlyOne", &["mod/A/regulation.bin"], true);
-        let conflicts =
-            detect_regulation_conflicts(&db, "eldenring", "default").expect("ok");
+        add_mod(
+            &db,
+            "eldenring",
+            "default",
+            "OnlyOne",
+            &["mod/A/regulation.bin"],
+            true,
+        );
+        let conflicts = detect_regulation_conflicts(&db, "eldenring", "default").expect("ok");
         assert!(conflicts.is_empty());
     }
 
     #[test]
     fn conflict_when_two_enabled_mods_modify_regulation() {
         let (db, _t) = temp_db();
-        add_mod(&db, "eldenring", "default", "GTS", &["mod/GTS/regulation.bin"], true);
+        add_mod(
+            &db,
+            "eldenring",
+            "default",
+            "GTS",
+            &["mod/GTS/regulation.bin"],
+            true,
+        );
         add_mod(
             &db,
             "eldenring",
@@ -163,10 +175,16 @@ mod tests {
             true,
         );
         // One enabled non-regulation mod for noise.
-        add_mod(&db, "eldenring", "default", "Reshade", &["mod/Reshade/d3d11.dll"], true);
+        add_mod(
+            &db,
+            "eldenring",
+            "default",
+            "Reshade",
+            &["mod/Reshade/d3d11.dll"],
+            true,
+        );
 
-        let conflicts =
-            detect_regulation_conflicts(&db, "eldenring", "default").expect("ok");
+        let conflicts = detect_regulation_conflicts(&db, "eldenring", "default").expect("ok");
         assert_eq!(conflicts.len(), 1);
         let c = &conflicts[0];
         assert_eq!(c.game_id, "eldenring");
@@ -179,12 +197,25 @@ mod tests {
     #[test]
     fn disabled_mod_excluded_from_conflict() {
         let (db, _t) = temp_db();
-        add_mod(&db, "sekiro", "default", "Active", &["mod/A/regulation.bin"], true);
+        add_mod(
+            &db,
+            "sekiro",
+            "default",
+            "Active",
+            &["mod/A/regulation.bin"],
+            true,
+        );
         // Disabled mod with regulation.bin should NOT count.
-        add_mod(&db, "sekiro", "default", "Disabled", &["mod/B/regulation.bin"], false);
+        add_mod(
+            &db,
+            "sekiro",
+            "default",
+            "Disabled",
+            &["mod/B/regulation.bin"],
+            false,
+        );
 
-        let conflicts =
-            detect_regulation_conflicts(&db, "sekiro", "default").expect("ok");
+        let conflicts = detect_regulation_conflicts(&db, "sekiro", "default").expect("ok");
         assert!(conflicts.is_empty(), "disabled mod must not contribute");
     }
 
@@ -201,8 +232,7 @@ mod tests {
                 true,
             );
         }
-        let conflicts =
-            detect_regulation_conflicts(&db, "darksouls3", "default").expect("ok");
+        let conflicts = detect_regulation_conflicts(&db, "darksouls3", "default").expect("ok");
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].mod_ids_modifying_regulation.len(), 3);
     }

@@ -45,7 +45,9 @@ impl GraphicsBackend {
     pub fn description(&self) -> &'static str {
         match self {
             Self::DxvkMoltenVk => "DX9-11 via Vulkan. Most compatible, good performance.",
-            Self::Dxmt => "DX11 directly to Metal. Best performance on Apple Silicon (CrossOver 25+).",
+            Self::Dxmt => {
+                "DX11 directly to Metal. Best performance on Apple Silicon (CrossOver 25+)."
+            }
             Self::D3dMetal => "Apple's translation layer. Supports DX12. May have shader stutter.",
             Self::Wined3d => "Classic OpenGL path. Slowest but most compatible fallback for DX9.",
             Self::Default => "Use the bottle's configured default — no overrides applied.",
@@ -88,28 +90,20 @@ pub fn backend_env_vars(backend: GraphicsBackend) -> Vec<(String, String)> {
     match backend {
         GraphicsBackend::DxvkMoltenVk => {
             // Force native d3d11/dxgi DLLs (DXVK's) over Wine builtin
-            vec![
-                ("WINEDLLOVERRIDES".into(), "d3d11,dxgi=n".into()),
-            ]
+            vec![("WINEDLLOVERRIDES".into(), "d3d11,dxgi=n".into())]
         }
         GraphicsBackend::Dxmt => {
             // DXMT uses its own d3d11 implementation, needs native override
             // CrossOver 25+ handles this via bottle config, but we set env as backup
-            vec![
-                ("CX_DXMT".into(), "1".into()),
-            ]
+            vec![("CX_DXMT".into(), "1".into())]
         }
         GraphicsBackend::D3dMetal => {
             // D3DMetal is activated via GPTK / CrossOver's D3DMetal setting
-            vec![
-                ("D3DMETALFX".into(), "1".into()),
-            ]
+            vec![("D3DMETALFX".into(), "1".into())]
         }
         GraphicsBackend::Wined3d => {
             // Force Wine's builtin d3d11 (wined3d) over any native override
-            vec![
-                ("WINEDLLOVERRIDES".into(), "d3d11,dxgi=b".into()),
-            ]
+            vec![("WINEDLLOVERRIDES".into(), "d3d11,dxgi=b".into())]
         }
         GraphicsBackend::Default => {
             // No overrides — use bottle config as-is
@@ -148,8 +142,13 @@ pub fn recommend_backend(game_id: &str, is_apple_silicon: bool) -> BackendRecomm
     };
 
     let reason = match recommended {
-        GraphicsBackend::Dxmt => "DXMT provides the best DX11 performance on Apple Silicon Macs with CrossOver 25+.".into(),
-        GraphicsBackend::DxvkMoltenVk => "DXVK is the most compatible DX11 translation layer for this configuration.".into(),
+        GraphicsBackend::Dxmt => {
+            "DXMT provides the best DX11 performance on Apple Silicon Macs with CrossOver 25+."
+                .into()
+        }
+        GraphicsBackend::DxvkMoltenVk => {
+            "DXVK is the most compatible DX11 translation layer for this configuration.".into()
+        }
         _ => "Using default bottle configuration.".into(),
     };
 

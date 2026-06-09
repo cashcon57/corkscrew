@@ -4,7 +4,7 @@ use crate::database;
 use crate::download_queue;
 use crate::nexus;
 use crate::nexus::ModUpdateInfo;
-use crate::{AppState, nexus_client};
+use crate::{nexus_client, AppState};
 use tauri::{AppHandle, Manager, State};
 
 // --- Download Queue ---
@@ -37,7 +37,6 @@ pub fn cancel_download(id: u64, state: State<AppState>) -> Result<(), String> {
 pub fn clear_finished_downloads(state: State<AppState>) -> usize {
     state.download_queue.clear_finished()
 }
-
 
 // --- Notification Log ---
 
@@ -87,7 +86,6 @@ pub async fn get_notification_count(state: State<'_, AppState>) -> Result<usize,
         .map_err(crate::format_join_error)?
 }
 
-
 // --- Error Event Diagnostics ---
 
 #[tauri::command]
@@ -119,7 +117,6 @@ pub async fn get_error_summary(
     .await
     .map_err(crate::format_join_error)?
 }
-
 
 // --- Update Checking ---
 
@@ -166,7 +163,6 @@ pub async fn check_mod_updates(
         .await
         .map_err(|e| e.to_string())
 }
-
 
 // --- Browser WebView Management ---
 
@@ -240,5 +236,3 @@ pub async fn navigate_browser_webview(app: AppHandle, url: String) -> Result<(),
     webview.navigate(parsed_url).map_err(|e| e.to_string())?;
     Ok(())
 }
-
-

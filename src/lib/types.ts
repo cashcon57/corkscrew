@@ -32,6 +32,14 @@ export interface NativeAppCandidate {
   sandboxed: boolean;
 }
 
+export interface ParalivesBepInExStatus {
+  installed: boolean;
+  version?: string | null;
+  mac_supported: boolean;
+  loader_path?: string | null;
+  reason?: string | null;
+}
+
 /**
  * Tagged-union runtime discriminator for detected games.
  * Serialises as `{"runtime": "wine", ...}` or `{"runtime": "native", ...}`.

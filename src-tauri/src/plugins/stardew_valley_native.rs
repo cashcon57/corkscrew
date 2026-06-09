@@ -373,10 +373,7 @@ impl GamePlugin for StardewValleyNativePlugin {
             // Read manifest.json from the staging root.
             let manifest_path = staging_path.join("manifest.json");
             let manifest = parse_manifest(&manifest_path).map_err(|e| {
-                DeployerError::Other(format!(
-                    "mod '{}': manifest.json error: {}",
-                    m.name, e
-                ))
+                DeployerError::Other(format!("mod '{}': manifest.json error: {}", m.name, e))
             })?;
 
             let unique_id = &manifest.unique_id;
@@ -384,7 +381,10 @@ impl GamePlugin for StardewValleyNativePlugin {
             // Safety: reject UniqueIDs that would escape <mods_dir>.
             // SMAPI UniqueIDs are dotted identifiers like "AuthorName.ModName"
             // and must never contain path separators or traversal sequences.
-            if !is_safe_relative_path(unique_id) || unique_id.contains('/') || unique_id.contains('\\') {
+            if !is_safe_relative_path(unique_id)
+                || unique_id.contains('/')
+                || unique_id.contains('\\')
+            {
                 return Err(DeployerError::Other(format!(
                     "mod '{}': UniqueID '{}' contains unsafe path characters",
                     m.name, unique_id
@@ -733,10 +733,7 @@ mod tests {
         assert_eq!(m.dependencies[0].unique_id, "Pathoschild.ContentPatcher");
         assert!(m.dependencies[0].is_required, "default IsRequired = true");
         assert!(!m.dependencies[1].is_required);
-        assert_eq!(
-            m.dependencies[1].minimum_version.as_deref(),
-            Some("1.2.3")
-        );
+        assert_eq!(m.dependencies[1].minimum_version.as_deref(), Some("1.2.3"));
     }
 
     #[test]
@@ -790,8 +787,7 @@ mod tests {
 
     #[test]
     fn resolve_mods_dir_returns_game_path_mods_for_native() {
-        let game_path =
-            std::path::PathBuf::from("/Applications/Stardew Valley.app/Contents/MacOS");
+        let game_path = std::path::PathBuf::from("/Applications/Stardew Valley.app/Contents/MacOS");
         let detected = DetectedGame {
             game_id: "stardew_valley_native".into(),
             display_name: "Stardew Valley".into(),
@@ -942,10 +938,7 @@ mod tests {
         let plugin = StardewValleyNativePlugin;
         let result = plugin.deploy_native(&detected, &db);
 
-        assert!(
-            result.is_err(),
-            "path-traversal UniqueID must be rejected"
-        );
+        assert!(result.is_err(), "path-traversal UniqueID must be rejected");
         let msg = format!("{}", result.unwrap_err());
         assert!(
             msg.contains("unsafe path characters") || msg.contains("escapes mods dir"),
@@ -1128,8 +1121,9 @@ mod tests {
         assert_eq!(results.len(), 1);
         let game = &results[0];
 
-        let expected_game_path =
-            std::path::PathBuf::from(bundle).join("Contents").join("MacOS");
+        let expected_game_path = std::path::PathBuf::from(bundle)
+            .join("Contents")
+            .join("MacOS");
         assert_eq!(game.game_path, expected_game_path);
         assert_eq!(
             game.exe_path,
@@ -1192,8 +1186,7 @@ mod tests {
         let plugin = StardewValleyNativePlugin;
         plugin.deploy_native(&detected, &db).unwrap();
 
-        let snapshots =
-            crate::rollback::list_snapshots(&db, "stardew_valley_native", "").unwrap();
+        let snapshots = crate::rollback::list_snapshots(&db, "stardew_valley_native", "").unwrap();
         assert!(
             !snapshots.is_empty(),
             "deploy_native should have created at least one snapshot"
