@@ -1699,11 +1699,13 @@ pub async fn launch_game_cmd(
     }
     tokio::task::spawn_blocking(move || {
     let launch_start = Instant::now();
-    let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
+    let (opt_bottle, game, _) = resolve_game_any_runtime(&game_id, &bottle_name)?;
     let game_path = PathBuf::from(&game.game_path);
     let data_dir_check = PathBuf::from(&game.data_dir);
 
-    // Pre-launch self-healing: check if deployment is consistent, auto-fix if not
+    // Pre-launch self-heal applies to both Wine and native — it's just
+    // a file-existence check against the deployment manifest. Run it
+    // before the runtime branch.
     {
         let t = Instant::now();
         let manifest = db.get_deployment_manifest(&game_id, &bottle_name).unwrap_or_default();
@@ -1725,10 +1727,41 @@ pub async fn launch_game_cmd(
             } else {
                 log::info!("Pre-launch: deployment integrity OK ({} files, {}ms)", manifest.len(), t.elapsed().as_millis());
             }
-        } else {
-            log::info!("Pre-launch: no deployment manifest ({}ms)", t.elapsed().as_millis());
         }
     }
+
+    // Native games: launch the .app bundle via macOS `open`. This goes
+    // through Launch Services exactly like double-clicking the .app in
+    // Finder — Gatekeeper, document defaults, etc. all apply.
+    if opt_bottle.is_none() {
+        let bundle_path = game
+            .runtime
+            .native()
+            .map(|n| n.app_bundle_path.clone())
+            .ok_or_else(|| "Native game has no app_bundle_path".to_string())?;
+        log::info!("launch_game_cmd: native launch `open {}`", bundle_path.display());
+        let output = std::process::Command::new("open")
+            .arg(&bundle_path)
+            .output()
+            .map_err(|e| format!("Failed to spawn `open`: {}", e))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!(
+                "`open {}` exited {}: {}",
+                bundle_path.display(),
+                output.status,
+                stderr.trim()
+            ));
+        }
+        return Ok(LaunchResult {
+            executable: bundle_path.to_string_lossy().to_string(),
+            bottle_name: String::new(),
+            pid: None, // `open` detaches — we don't get the child PID
+            success: true,
+            warning: None,
+        });
+    }
+    let bottle = opt_bottle.expect("opt_bottle was just checked to be Some");
 
     // When SKSE is requested, it takes priority over custom executables.
     // Otherwise, check for a custom default executable first.
