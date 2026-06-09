@@ -202,10 +202,44 @@ pub fn register() {
 }
 
 fn find_game_path(bottle: &Bottle) -> Option<PathBuf> {
+    if let Some(p) = check_proton_host_library(bottle) {
+        return Some(p);
+    }
     if let Some(p) = check_steam_default(bottle) {
         return Some(p);
     }
     check_steam_library_folders(bottle)
+}
+
+#[cfg(target_os = "linux")]
+fn check_proton_host_library(bottle: &Bottle) -> Option<PathBuf> {
+    if bottle.source != "Proton" {
+        return None;
+    }
+    let pfx = &bottle.path;
+    let app_dir = pfx.parent()?;
+    let app_id = app_dir.file_name()?.to_string_lossy();
+    if app_id != STEAM_APP_ID {
+        return None;
+    }
+    let compatdata = app_dir.parent()?;
+    if compatdata.file_name()?.to_string_lossy() != "compatdata" {
+        return None;
+    }
+    let steamapps = compatdata.parent()?;
+    let manifest = steamapps.join(format!("appmanifest_{STEAM_APP_ID}.acf"));
+    let install_dir = parse_appmanifest_installdir(&manifest).unwrap_or_else(|| "Paralives".into());
+    let game_path = steamapps.join("common").join(install_dir);
+    if game_path.is_dir() {
+        Some(game_path)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn check_proton_host_library(_bottle: &Bottle) -> Option<PathBuf> {
+    None
 }
 
 fn check_steam_default(bottle: &Bottle) -> Option<PathBuf> {
@@ -296,6 +330,20 @@ fn parse_library_folders_vdf(vdf_path: &Path) -> Option<Vec<PathBuf>> {
     } else {
         Some(paths)
     }
+}
+
+fn parse_appmanifest_installdir(path: &Path) -> Option<String> {
+    let content = fs::read_to_string(path).ok()?;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = strip_vdf_key(trimmed, "installdir") {
+            let value = strip_vdf_quotes(rest);
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+    None
 }
 
 fn strip_vdf_key<'a>(line: &'a str, key: &str) -> Option<&'a str> {

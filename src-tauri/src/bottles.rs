@@ -603,6 +603,7 @@ fn collect_proton_bottles(compatdata_dir: &Path, bottles: &mut Vec<Bottle>) {
         .collect();
     dirs.sort();
 
+    let mut seen_app_ids = std::collections::HashSet::new();
     for dir in dirs {
         let app_id_str = dir
             .file_name()
@@ -613,6 +614,7 @@ fn collect_proton_bottles(compatdata_dir: &Path, bottles: &mut Vec<Bottle>) {
         if !app_id_str.chars().all(|c| c.is_ascii_digit()) {
             continue;
         }
+        seen_app_ids.insert(app_id_str.clone());
 
         // The actual Wine prefix is at {appid}/pfx/
         let pfx_dir = dir.join("pfx");
@@ -633,6 +635,38 @@ fn collect_proton_bottles(compatdata_dir: &Path, bottles: &mut Vec<Bottle>) {
             path: pfx_dir,
             source: "Proton".to_string(),
         });
+    }
+
+    // Steam creates `compatdata/<appid>/pfx` lazily on first launch. Detect
+    // installed Proton games from appmanifests too so freshly-installed games
+    // are visible before their first run. The per-game plugin can still resolve
+    // the real game root from the sibling `steamapps/common` library.
+    if let Some(steamapps_dir) = steamapps_dir {
+        let Ok(manifests) = fs::read_dir(steamapps_dir) else {
+            return;
+        };
+        for manifest in manifests.flatten() {
+            let file_name = manifest.file_name().to_string_lossy().into_owned();
+            let Some(app_id_str) = file_name
+                .strip_prefix("appmanifest_")
+                .and_then(|s| s.strip_suffix(".acf"))
+                .map(|s| s.to_string())
+            else {
+                continue;
+            };
+            if !app_id_str.chars().all(|c| c.is_ascii_digit()) || seen_app_ids.contains(&app_id_str)
+            {
+                continue;
+            }
+            let Some(name) = parse_appmanifest_name(&manifest.path()) else {
+                continue;
+            };
+            bottles.push(Bottle {
+                name,
+                path: compatdata_dir.join(&app_id_str).join("pfx"),
+                source: "Proton".to_string(),
+            });
+        }
     }
 }
 

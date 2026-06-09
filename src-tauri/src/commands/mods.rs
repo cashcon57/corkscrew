@@ -529,6 +529,10 @@ pub async fn install_mod_cmd(
             if let Some(rel_path) = target {
                 let resolved = if game_id == "paralives" && mod_type_id == "Paralives_DataMod" {
                     data_dir.clone()
+                } else if game_id == "paralives" && mod_type_id == "Paralives_BepInEx" {
+                    game.game_path
+                        .join(rel_path)
+                        .join(crate::bepinex::plugin_subdir_for_mod(&name))
                 } else {
                     game.game_path.join(rel_path)
                 };

@@ -2575,6 +2575,117 @@ mod tests {
     }
 
     #[test]
+    fn paralives_mod_type_fixtures_deploy_to_expected_targets() {
+        let (db, tmp, staging, data_dir) = setup();
+        let game_root = tmp.path().join("Paralives");
+        let plugin_dir = game_root
+            .join("BepInEx")
+            .join("plugins")
+            .join(crate::bepinex::plugin_subdir_for_mod("Mod Organizer"));
+        fs::create_dir_all(&game_root).unwrap();
+        fs::create_dir_all(&data_dir).unwrap();
+
+        let script_staging = staging.join("script");
+        let bootstrap_staging = staging.join("bootstrap");
+        let data_staging = staging.join("data_mod");
+        fs::create_dir_all(&script_staging).unwrap();
+        fs::create_dir_all(&bootstrap_staging).unwrap();
+        fs::create_dir_all(&data_staging).unwrap();
+        create_staging_file(&script_staging, "ModOrganizer.dll", b"script dll");
+        create_staging_file(&bootstrap_staging, "winhttp.dll", b"doorstop proxy");
+        create_staging_file(
+            &bootstrap_staging,
+            "BepInEx/core/BepInEx.dll",
+            b"bepinex core",
+        );
+        create_staging_file(&data_staging, "Chair.catalog", b"catalog");
+        create_staging_file(&data_staging, "Chair.fbx", b"mesh");
+
+        let script_id = db
+            .add_mod(
+                "paralives",
+                "Gaming",
+                None,
+                "Mod Organizer",
+                "1.0",
+                "script.zip",
+                &["ModOrganizer.dll".to_string()],
+            )
+            .unwrap();
+        let bootstrap_id = db
+            .add_mod(
+                "paralives",
+                "Gaming",
+                None,
+                "BepInEx Bootstrap",
+                "5.4.22",
+                "bepinex.zip",
+                &[
+                    "winhttp.dll".to_string(),
+                    "BepInEx/core/BepInEx.dll".to_string(),
+                ],
+            )
+            .unwrap();
+        let data_id = db
+            .add_mod(
+                "paralives",
+                "Gaming",
+                None,
+                "Chair Asset",
+                "1.0",
+                "chair.zip",
+                &["Chair.catalog".to_string(), "Chair.fbx".to_string()],
+            )
+            .unwrap();
+
+        deploy_mod_atomic(
+            &db,
+            "paralives",
+            "Gaming",
+            bootstrap_id,
+            &bootstrap_staging,
+            &data_dir,
+            &[
+                "winhttp.dll".to_string(),
+                "BepInEx/core/BepInEx.dll".to_string(),
+            ],
+            &game_root,
+            "root",
+        )
+        .unwrap();
+        deploy_mod(
+            &db,
+            "paralives",
+            "Gaming",
+            script_id,
+            &script_staging,
+            &plugin_dir,
+            &["ModOrganizer.dll".to_string()],
+            "custom",
+        )
+        .unwrap();
+        deploy_mod_atomic(
+            &db,
+            "paralives",
+            "Gaming",
+            data_id,
+            &data_staging,
+            &data_dir,
+            &["Chair.catalog".to_string(), "Chair.fbx".to_string()],
+            &game_root,
+            "data",
+        )
+        .unwrap();
+
+        assert!(game_root.join("winhttp.dll").exists());
+        assert!(game_root.join("BepInEx/core/BepInEx.dll").exists());
+        assert!(plugin_dir.join("ModOrganizer.dll").exists());
+        assert!(data_dir.join("Chair.catalog").exists());
+        assert!(data_dir.join("Chair.fbx").exists());
+        assert!(!game_root.join("Chair.fbx").exists());
+    }
+
+    #[test]
     fn redeploy_all_preserves_mixed_root_data_file_targets_after_manifest_purge() {
         let (db, tmp, staging, data_dir) = setup();
         let game_root = tmp.path().join("game_root");

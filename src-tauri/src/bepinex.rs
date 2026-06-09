@@ -72,6 +72,7 @@ pub fn ensure_bepinex_mono_x64(game_path: &Path) -> Result<BepInExInstallResult>
 
     let asset = find_latest_mono_x64_asset()?;
     let bytes = download_asset(&asset)?;
+    remove_unix_doorstop_artifacts(game_path)?;
     extract_bepinex_zip(game_path, &bytes)?;
 
     let installed = status(game_path);
@@ -122,7 +123,10 @@ fn is_mono_x64_zip(name: &str) -> bool {
     lower.ends_with(".zip")
         && lower.contains("bepinex")
         && lower.contains("x64")
+        && lower.contains("win")
         && !lower.contains("x86")
+        && !lower.contains("linux")
+        && !lower.contains("macos")
         && !lower.contains("unix")
         && !lower.contains("il2cpp")
 }
@@ -154,6 +158,21 @@ fn download_asset(asset: &GithubAsset) -> Result<Vec<u8>> {
         anyhow::bail!("BepInEx asset exceeded size limit while downloading");
     }
     Ok(bytes)
+}
+
+fn remove_unix_doorstop_artifacts(game_path: &Path) -> Result<()> {
+    for rel in ["libdoorstop.so", "run_bepinex.sh", ".doorstop_version"] {
+        let path = game_path.join(rel);
+        if path.exists() {
+            fs::remove_file(&path).with_context(|| {
+                format!(
+                    "Failed to remove incompatible Unix BepInEx artifact {}",
+                    path.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
 }
 
 fn extract_bepinex_zip(game_path: &Path, bytes: &[u8]) -> Result<()> {
@@ -210,6 +229,24 @@ pub fn is_bepinex_mod_type(type_id: &str) -> bool {
     )
 }
 
+/// Safe per-mod subdirectory name for BepInEx/plugins/<mod>/ deployments.
+pub fn plugin_subdir_for_mod(mod_name: &str) -> String {
+    let mut out = String::with_capacity(mod_name.len());
+    for ch in mod_name.chars() {
+        match ch {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0' => out.push('_'),
+            c if (c as u32) < 0x20 => out.push('_'),
+            c => out.push(c),
+        }
+    }
+    let trimmed = out.trim_matches(|c: char| c.is_whitespace() || c == '.');
+    if trimmed.is_empty() {
+        "mod".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,6 +254,7 @@ mod tests {
     #[test]
     fn mono_x64_asset_filter_rejects_wrong_runtimes() {
         assert!(is_mono_x64_zip("BepInEx_win_x64_5.4.23.4.zip"));
+        assert!(!is_mono_x64_zip("BepInEx_linux_x64_5.4.23.4.zip"));
         assert!(!is_mono_x64_zip("BepInEx_win_x86_5.4.23.4.zip"));
         assert!(!is_mono_x64_zip("BepInEx_unix_5.4.23.4.zip"));
         assert!(!is_mono_x64_zip("BepInEx_UnityIL2CPP_x64.zip"));
@@ -243,5 +281,27 @@ mod tests {
         fs::write(root.join("winhttp.dll"), b"proxy").unwrap();
         fs::write(root.join("BepInEx/core/BepInEx.dll"), b"core").unwrap();
         assert!(status(root).installed);
+    }
+
+    #[test]
+    fn plugin_subdir_for_mod_sanitizes_windows_and_traversal_chars() {
+        assert_eq!(plugin_subdir_for_mod("Mod Organizer"), "Mod Organizer");
+        assert_eq!(plugin_subdir_for_mod("../evil:mod.dll"), "_evil_mod.dll");
+        assert_eq!(plugin_subdir_for_mod("..."), "mod");
+    }
+
+    #[test]
+    #[ignore]
+    fn live_paralives_install_bootstrap_when_env_set() {
+        let game_path = std::env::var("CORKSCREW_LIVE_PARALIVES_PATH")
+            .expect("set CORKSCREW_LIVE_PARALIVES_PATH to the Paralives install root");
+        let game_path = PathBuf::from(game_path);
+        ensure_bepinex_mono_x64(&game_path).unwrap();
+        let status = status(&game_path);
+        assert!(
+            status.installed,
+            "BepInEx should be installed at {game_path:?}"
+        );
+        assert!(status.plugins_dir.is_dir());
     }
 }
