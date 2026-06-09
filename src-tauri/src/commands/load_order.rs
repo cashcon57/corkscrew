@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::games::{self, LoadOrderFormat, LoadOrderKind};
-use crate::resolve_game;
+use crate::resolve_game_any_runtime;
 
 // ---------------------------------------------------------------------------
 // Types exposed to the frontend
@@ -58,7 +58,7 @@ pub async fn get_load_order_kind_cmd(
     game_id: String,
     bottle_name: String,
 ) -> Result<LoadOrderKindDto, String> {
-    let (_bottle, game, _data_dir) = resolve_game(&game_id, &bottle_name)?;
+    let (_opt_bottle, game, _data_dir) = resolve_game_any_runtime(&game_id, &bottle_name)?;
     let game_path = PathBuf::from(&game.game_path);
 
     let kind = games::with_plugin(&game_id, |plugin| plugin.load_order_kind(&game_path))
@@ -78,7 +78,7 @@ pub async fn get_file_based_load_order(
     game_id: String,
     bottle_name: String,
 ) -> Result<Vec<LoadOrderEntry>, String> {
-    let (_bottle, game, _data_dir) = resolve_game(&game_id, &bottle_name)?;
+    let (_opt_bottle, game, _data_dir) = resolve_game_any_runtime(&game_id, &bottle_name)?;
     let game_path = PathBuf::from(&game.game_path);
 
     // Snapshot the FileBasedLoadOrder out of the registry — we cannot hold
@@ -119,7 +119,7 @@ pub async fn set_file_based_load_order(
     bottle_name: String,
     order: Vec<LoadOrderEntry>,
 ) -> Result<(), String> {
-    let (_bottle, game, _data_dir) = resolve_game(&game_id, &bottle_name)?;
+    let (_opt_bottle, game, _data_dir) = resolve_game_any_runtime(&game_id, &bottle_name)?;
     let game_path = PathBuf::from(&game.game_path);
 
     let cfg = games::with_plugin(&game_id, |plugin| match plugin.load_order_kind(&game_path) {
@@ -309,34 +309,19 @@ fn write_bg3_load_order(path: &Path, order: &[LoadOrderEntry]) -> Result<(), Str
         bg3_lsx::read_modsettings(path)
             .map_err(|e| format!("Failed to read existing {}: {}", path.display(), e))?
     } else {
-        // Bootstrap with master entries if the file doesn't exist yet.
-        // (Normally deploy_native creates this first, but be defensive.)
-        let masters = vec![
-            crate::bg3_lsx::ModEntry {
-                folder: "GustavDev".into(),
-                md5: String::new(),
-                name: "GustavDev".into(),
-                publish_handle: "0".into(),
-                uuid: bg3_lsx::MASTER_GUSTAV_DEV_UUID.into(),
-                version64: "36028797018963968".into(),
-            },
-            crate::bg3_lsx::ModEntry {
-                folder: "Gustav".into(),
-                md5: String::new(),
-                name: "Gustav".into(),
-                publish_handle: "0".into(),
-                uuid: bg3_lsx::MASTER_GUSTAV_UUID.into(),
-                version64: "36028797018963968".into(),
-            },
-            crate::bg3_lsx::ModEntry {
-                folder: "SharedDev".into(),
-                md5: String::new(),
-                name: "SharedDev".into(),
-                publish_handle: "0".into(),
-                uuid: bg3_lsx::MASTER_SHARED_DEV_UUID.into(),
-                version64: "36028797018963968".into(),
-            },
-        ];
+        // Bootstrap with the modern Patch 8+ master if the file doesn't
+        // exist yet. (Normally deploy_native creates this first, but be
+        // defensive.) Vanilla 4.8.0.700 ships exactly one master, GustavX —
+        // writing the legacy GustavDev/Gustav/SharedDev trio here would
+        // inject phantom masters on Patch 8 installs.
+        let masters = vec![crate::bg3_lsx::ModEntry {
+            folder: "GustavX".into(),
+            md5: String::new(),
+            name: "GustavX".into(),
+            publish_handle: "0".into(),
+            uuid: bg3_lsx::MASTER_GUSTAV_X_UUID.into(),
+            version64: "36028797018963968".into(),
+        }];
         ModSettings {
             version: LsxVersion { major: 4, minor: 0, revision: 9, build: 319 },
             mods: masters,
@@ -963,6 +948,30 @@ mod tests {
         assert_eq!(updated.version.minor, 0, "version.minor must be preserved");
         assert_eq!(updated.version.revision, 9, "version.revision must be preserved");
         assert_eq!(updated.version.build, 319, "version.build must be preserved");
+    }
+
+    #[test]
+    fn bg3_load_order_write_bootstraps_gustav_x_when_file_missing() {
+        // Regression: when modsettings.lsx doesn't exist, the defensive
+        // bootstrap must write the Patch 8 GustavX master — NOT the legacy
+        // GustavDev/Gustav/SharedDev trio, which would be phantom masters
+        // on a modern install.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("modsettings.lsx");
+
+        write_bg3_load_order(&path, &[]).unwrap();
+
+        let written = crate::bg3_lsx::read_modsettings(&path).unwrap();
+        let uuids: Vec<String> = written.mods.iter().map(|m| m.uuid.to_lowercase()).collect();
+        assert_eq!(
+            uuids,
+            vec![crate::bg3_lsx::MASTER_GUSTAV_X_UUID.to_lowercase()],
+            "missing-file bootstrap must write exactly one GustavX master"
+        );
+        assert!(
+            !uuids.contains(&MASTER_GUSTAV_DEV_UUID.to_lowercase()),
+            "legacy GustavDev must not be injected"
+        );
     }
 
     #[test]
