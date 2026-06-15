@@ -349,12 +349,34 @@ pub(crate) fn open_browser(url: &str) -> Result<(), OAuthError> {
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     let cmd = "open"; // fallback
 
-    std::process::Command::new(cmd)
+    let output = std::process::Command::new(cmd)
         .arg(url)
-        .spawn()
+        .output()
         .map_err(OAuthError::Io)?;
 
+    if !output.status.success() {
+        let detail = browser_open_failure_detail(cmd, &output);
+        return Err(OAuthError::TokenExchange(format!(
+            "Failed to open browser for Nexus Mods sign-in: {detail}. \
+             Make sure a default browser is installed and configured."
+        )));
+    }
+
     Ok(())
+}
+
+fn browser_open_failure_detail(cmd: &str, output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !stderr.is_empty() {
+        return stderr;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !stdout.is_empty() {
+        return stdout;
+    }
+
+    format!("{cmd} exited with status {}", output.status)
 }
 
 /// Detect Steam Deck Game Mode (gamescope-session) where browser launches
@@ -1302,6 +1324,37 @@ mod tests {
         let headers = auth_headers(&method);
 
         assert!(headers.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_browser_open_failure_detail_prefers_stderr() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let output = std::process::Output {
+            status: std::process::ExitStatus::from_raw(1 << 8),
+            stdout: b"stdout fallback".to_vec(),
+            stderr: b"xdg-open: no method available".to_vec(),
+        };
+
+        assert_eq!(
+            browser_open_failure_detail("xdg-open", &output),
+            "xdg-open: no method available"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_browser_open_failure_detail_falls_back_to_status() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let output = std::process::Output {
+            status: std::process::ExitStatus::from_raw(2 << 8),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        };
+
+        assert!(browser_open_failure_detail("xdg-open", &output).contains("xdg-open exited"));
     }
 
     #[test]
