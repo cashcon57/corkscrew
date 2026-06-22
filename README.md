@@ -96,7 +96,7 @@ We're actively expanding support to cover the **top 80 most-modded games on Nexu
 | Game | Mods on Nexus | Load Order | Script Extender | Collections |
 |------|--------------|------------|-----------------|-------------|
 | Skyrim Special Edition | 129k | LOOT | SKSE (auto-install) | Full |
-| Fallout 4 | 72.2k | LOOT | — | Full |
+| Fallout 4 | 72.2k | LOOT | F4SE (auto-install) | Full |
 
 ### Enhanced Support: Hogwarts Legacy
 
