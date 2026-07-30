@@ -12,6 +12,10 @@
     setSksePreference,
     checkSkyrimVersion,
     downgradeSkyrim,
+    startDepotDownload,
+    checkDepotReady,
+    applyDowngrade,
+    getDepotDownloadCommand,
     fixSkyrimDisplay,
     getGameLockStatus,
     forceUnlockGame,
@@ -95,6 +99,10 @@
 
   onDestroy(() => {
     stopGameLockPolling();
+    if (depotPollTimer) {
+      clearInterval(depotPollTimer);
+      depotPollTimer = null;
+    }
   });
 
   async function checkSkseStatus(g: DetectedGame, gen: number) {
@@ -309,17 +317,63 @@
     }
   }
 
+  let depotPollTimer: ReturnType<typeof setInterval> | null = null;
+
   async function handleDowngrade() {
     downgrading = true;
     try {
+      // Fast path: a cached 1.5.97 exe or an already-downloaded depot.
       const status = await downgradeSkyrim(game.game_id, (wineCtx(game)?.bottle_name ?? ""), "full");
-      downgradeStatus = status;
-      showDowngradeBanner = false;
-      showSuccess(`Game downgraded to v${status.target_version}`);
+      finishDowngrade(status);
     } catch (e: unknown) {
-      showError(`Downgrade failed: ${e}`);
-    } finally {
+      if (String(e).includes("NEEDS_DEPOT_DOWNLOAD")) {
+        await startSteamDepotDownload();
+      } else {
+        downgrading = false;
+        showError(`Downgrade failed: ${e}`);
+      }
+    }
+  }
+
+  function finishDowngrade(status: DowngradeStatus) {
+    downgrading = false;
+    downgradeStatus = status;
+    if (status.is_downgraded) {
+      showDowngradeBanner = false;
+      showSuccess(`Game downgraded to v${status.current_version}`);
+    } else {
+      showError(`Downgrade did not complete — game is still v${status.current_version}`);
+    }
+  }
+
+  async function startSteamDepotDownload() {
+    try {
+      const automated = await startDepotDownload(game.game_id);
+      if (!automated) {
+        try {
+          const info = await getDepotDownloadCommand(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
+          await navigator.clipboard.writeText(info.command);
+          showSuccess("Command copied! Paste it in the Steam console that opened.");
+        } catch (err) {
+          console.error("depot command clipboard copy failed:", err);
+        }
+      }
+      depotPollTimer = setInterval(async () => {
+        try {
+          const ready = await checkDepotReady(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
+          if (ready) {
+            if (depotPollTimer) clearInterval(depotPollTimer);
+            depotPollTimer = null;
+            const status = await applyDowngrade(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
+            finishDowngrade(status);
+          }
+        } catch (err) {
+          console.error("depot readiness poll failed:", err);
+        }
+      }, 3000);
+    } catch (e: unknown) {
       downgrading = false;
+      showError(`Steam depot download failed: ${e}`);
     }
   }
 

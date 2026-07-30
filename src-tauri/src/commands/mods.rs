@@ -2434,27 +2434,51 @@ pub async fn downgrade_skyrim(
         return Err("Downgrade is only available for Skyrim SE".to_string());
     }
 
-    let (_, game, _) = resolve_game(&game_id, &bottle_name)?;
+    let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
     let game_path = PathBuf::from(&game.game_path);
-    let download_dir = config::get_config()
-        .ok()
-        .and_then(|c| c.download_dir.map(PathBuf::from))
-        .unwrap_or_else(config::downloads_dir);
 
-    // Create a downgrade copy of the game files
-    let downgrade_dir = download_dir
-        .parent()
-        .unwrap_or(&download_dir)
-        .join("downgraded_games");
-    let downgrade_path =
-        downgrader::create_downgrade_copy(&game_path, &downgrade_dir).map_err(|e| e.to_string())?;
+    let status = {
+        let game_id = game_id.clone();
+        let game_path = game_path.clone();
+        tokio::task::spawn_blocking(move || -> Result<DowngradeStatus, String> {
+            // A cached v1.5.97 exe can be swapped in directly.
+            let cached = downgrader::list_cached_versions(&game_id);
+            if let Some(se) = cached.iter().find(|c| c.version.starts_with("1.5.97")) {
+                let version = se.version.clone();
+                return downgrader::swap_to_version(&game_path, &game_id, &version)
+                    .map_err(|e| e.to_string());
+            }
 
-    // Store downgrade path in config
-    let config_key = format!("downgrade:{}:{}", game_id, bottle_name);
-    let _ = config::set_config_value(&config_key, &downgrade_path.to_string_lossy());
+            // A depot download already on disk can be applied.
+            for steam_dir in downgrader::depot_search_dirs(&bottle.path) {
+                if let Some(depot_exe) = downgrader::check_depot_downloaded(
+                    &steam_dir,
+                    downgrader::SKYRIM_APP_ID,
+                    downgrader::SKYRIM_DEPOT_ID,
+                ) {
+                    return downgrader::apply_depot_downgrade(&game_path, &depot_exe, &game_id)
+                        .map_err(|e| e.to_string());
+                }
+            }
 
-    // Return status (actual USSEDP patching is a future enhancement)
-    downgrader::detect_skyrim_version(&downgrade_path).map_err(|e| e.to_string())
+            Err("NEEDS_DEPOT_DOWNLOAD".to_string())
+        })
+        .await
+        .map_err(crate::format_join_error)??
+    };
+
+    // The v1.5.97 exe needs the matching SKSE build.
+    if status.is_downgraded && skse::get_skse_preference(&game_id, &bottle_name) {
+        match skse::install_skse_auto(&game_path, &status.current_version).await {
+            Ok(skse_status) => log::info!(
+                "Auto-reinstalled SKSE after downgrade: {:?}",
+                skse_status.version
+            ),
+            Err(e) => log::warn!("SKSE auto-reinstall failed after downgrade: {}", e),
+        }
+    }
+
+    Ok(status)
 }
 
 #[tauri::command]
@@ -2486,15 +2510,17 @@ pub async fn start_depot_download(game_id: String) -> Result<bool, String> {
 pub async fn check_depot_ready(game_id: String, bottle_name: String) -> Result<Option<String>, String> {
     tokio::task::spawn_blocking(move || {
         let (bottle, _, _) = resolve_game(&game_id, &bottle_name)?;
-        let steam_dir = downgrader::find_steam_dir(&bottle.path)
-            .ok_or_else(|| "Steam directory not found in bottle".to_string())?;
 
-        Ok(downgrader::check_depot_downloaded(
-            &steam_dir,
-            downgrader::SKYRIM_APP_ID,
-            downgrader::SKYRIM_DEPOT_ID,
-        )
-        .map(|p| p.to_string_lossy().into_owned()))
+        Ok(downgrader::depot_search_dirs(&bottle.path)
+            .into_iter()
+            .find_map(|steam_dir| {
+                downgrader::check_depot_downloaded(
+                    &steam_dir,
+                    downgrader::SKYRIM_APP_ID,
+                    downgrader::SKYRIM_DEPOT_ID,
+                )
+            })
+            .map(|p| p.to_string_lossy().into_owned()))
     })
     .await
     .map_err(crate::format_join_error)?
@@ -2508,17 +2534,20 @@ pub async fn apply_downgrade_cmd(
     tokio::task::spawn_blocking(move || {
         let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
         let game_path = PathBuf::from(&game.game_path);
-        let steam_dir = downgrader::find_steam_dir(&bottle.path)
-            .ok_or_else(|| "Steam directory not found in bottle".to_string())?;
 
-        let depot_exe = downgrader::check_depot_downloaded(
-            &steam_dir,
-            downgrader::SKYRIM_APP_ID,
-            downgrader::SKYRIM_DEPOT_ID,
-        )
-        .ok_or_else(|| {
-            "Depot files not downloaded yet. Run download_depot in Steam console first.".to_string()
-        })?;
+        let depot_exe = downgrader::depot_search_dirs(&bottle.path)
+            .into_iter()
+            .find_map(|steam_dir| {
+                downgrader::check_depot_downloaded(
+                    &steam_dir,
+                    downgrader::SKYRIM_APP_ID,
+                    downgrader::SKYRIM_DEPOT_ID,
+                )
+            })
+            .ok_or_else(|| {
+                "Depot files not downloaded yet. Run download_depot in Steam console first."
+                    .to_string()
+            })?;
 
         downgrader::apply_depot_downgrade(&game_path, &depot_exe, &game_id)
             .map_err(|e| e.to_string())
