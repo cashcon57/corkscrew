@@ -3548,9 +3548,9 @@ dependencies = [
 
 [[package]]
 name = "libloadorder"
-version = "18.6.0"
+version = "18.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab729022a2cf10b7c1ce24139b230936ce81176f94b871ae8f867727f7fc68e1"
+checksum = "c56f600203795fb91dd595c86ae99e469261c260973b464f93de70f20606ea16"
 dependencies = [
  "dirs",
  "encoding_rs",
@@ -3565,9 +3565,9 @@ dependencies = [
 
 [[package]]
 name = "libloot"
-version = "0.29.2"
+version = "0.29.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d15479cea5044f195885f64a701e9a8df37f0d135a3ad6edb24448c16e22880e"
+checksum = "e1c38fd5bcd946273e36ad06d664485fa47f43b8302a9740aa88137d8318812e"
 dependencies = [
  "crc32fast",
  "esplugin",
