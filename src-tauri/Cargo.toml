@@ -39,7 +39,7 @@ tokio = { version = "1", features = ["full"] }
 
 # Archive extraction
 zip = "2"
-sevenz-rust2 = "0.20"
+sevenz-rust2 = "0.21"
 unrar = "0.5"
 tar = "0.4"
 flate2 = "1"
