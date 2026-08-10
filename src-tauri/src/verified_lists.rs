@@ -228,8 +228,11 @@ pub fn maybe_refresh_in_background() {
     if !should_refresh {
         return;
     }
-    // Sync Tauri commands run on a blocking thread with no Tokio runtime.
-    // `tauri::async_runtime::spawn` is runtime-agnostic and safe to call here.
+    // This spawns onto Tauri's Tokio runtime and therefore must be invoked
+    // from a context where that runtime is active. Callers (the verified-lists
+    // Tauri commands) are `async fn`, so they execute on the runtime and a
+    // reactor is present; calling this from a synchronous command would panic
+    // with "there is no reactor running".
     tauri::async_runtime::spawn(async {
         if let Err(e) = refresh_from_remote().await {
             log::debug!("verified_lists refresh: {e}");
