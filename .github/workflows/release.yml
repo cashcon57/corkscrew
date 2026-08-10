@@ -303,7 +303,7 @@ jobs:
           echo "──"
 
       - name: Publish release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           draft: false
           body_path: /tmp/release-notes.md
