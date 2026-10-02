@@ -75,6 +75,19 @@ jobs:
           echo "Stripped conflicting libs"
           cd -
 
+          # linuxdeploy writes .DirIcon as an absolute symlink into this
+          # runner's build dir, which dangles on every other machine (the
+          # AppImage catalog lint rejects it as "missing"). Re-point it at
+          # the bundled icon with a relative link.
+          ln -sfn Corkscrew.png squashfs-root/.DirIcon
+          if [ ! -f squashfs-root/.DirIcon ]; then
+            echo "::error::.DirIcon does not resolve to a file"; exit 1
+          fi
+          ABS_LINKS=$(find squashfs-root -maxdepth 1 -type l -lname '/*')
+          if [ -n "$ABS_LINKS" ]; then
+            echo "::error::Absolute symlinks at AppDir root: $ABS_LINKS"; exit 1
+          fi
+
           # Repack with appimagetool
           wget -q https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage -O /tmp/appimagetool
           chmod +x /tmp/appimagetool
@@ -257,13 +270,15 @@ jobs:
           VERSION=$(jq -r .version src-tauri/tauri.conf.json)
           DIR=artifacts/linux-x86_64-unknown-linux-gnu
 
+          # AppImages are named <App>-<version>-<arch>.AppImage per the
+          # AppImage catalog convention ("Linux" in the name is redundant).
           cd "$DIR"
           for f in *; do
             case "$f" in
-              *.AppImage.tar.gz.sig) mv "$f" "Corkscrew-${VERSION}-Linux.AppImage.tar.gz.sig" ;;
-              *.AppImage.tar.gz)     mv "$f" "Corkscrew-${VERSION}-Linux.AppImage.tar.gz" ;;
-              *.AppImage.sig)        mv "$f" "Corkscrew-${VERSION}-Linux.AppImage.sig" ;;
-              *.AppImage)            mv "$f" "Corkscrew-${VERSION}-Linux.AppImage" ;;
+              *.AppImage.tar.gz.sig) mv "$f" "Corkscrew-${VERSION}-x86_64.AppImage.tar.gz.sig" ;;
+              *.AppImage.tar.gz)     mv "$f" "Corkscrew-${VERSION}-x86_64.AppImage.tar.gz" ;;
+              *.AppImage.sig)        mv "$f" "Corkscrew-${VERSION}-x86_64.AppImage.sig" ;;
+              *.AppImage)            mv "$f" "Corkscrew-${VERSION}-x86_64.AppImage" ;;
               *.deb)                 mv "$f" "Corkscrew-${VERSION}-Linux.deb" ;;
               *.rpm)                 mv "$f" "Corkscrew-${VERSION}-Linux.rpm" ;;
             esac

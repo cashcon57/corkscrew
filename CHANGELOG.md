@@ -2,6 +2,16 @@
 
 All notable changes to Corkscrew are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.14.12] - 2026-10-02
+
+### Fixed
+
+- **Linux AppImage had a dangling `.DirIcon`**: linuxdeploy wrote `.DirIcon` as an absolute symlink into the CI runner's build directory, so it resolved nowhere on users' machines. File managers and AppImage integrators (and the AppImage catalog lint) saw no icon. The release workflow now re-points it at the bundled `Corkscrew.png` with a relative link and fails the build if any absolute symlink remains at the AppDir root.
+
+### Changed
+
+- **Linux AppImage renamed** from `Corkscrew-<version>-Linux.AppImage` to `Corkscrew-<version>-x86_64.AppImage` (plus matching `.sig` / `.tar.gz` updater files), following the AppImage naming convention. Auto-update is unaffected: `latest.json` points at whatever name the release publishes.
+
 ## [0.14.9] - 2026-05-11
 
 ### Added
