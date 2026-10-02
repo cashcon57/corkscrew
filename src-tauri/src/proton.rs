@@ -508,47 +508,42 @@ fn variant_priority(v: &ProtonVariant) -> u32 {
 }
 
 fn find_steam_common_dirs() -> Vec<PathBuf> {
+    dirs::home_dir()
+        .map(|home| find_steam_common_dirs_in_home(&home))
+        .unwrap_or_default()
+}
+
+fn find_steam_common_dirs_in_home(home: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-
-    if let Some(home) = dirs::home_dir() {
-        // Standard Steam install
-        let standard = home.join(".local/share/Steam/steamapps/common");
-        if standard.is_dir() {
-            dirs.push(standard);
+    let mut seen = std::collections::HashSet::new();
+    let mut add_common = |common: PathBuf| {
+        // Validate paths from VDF files and collapse symlink aliases before scanning.
+        if let Ok(canonical) = common.canonicalize() {
+            if canonical.is_dir() && seen.insert(canonical) {
+                dirs.push(common);
+            }
         }
+    };
 
-        // Symlinked .steam path
-        let steam_link = home.join(".steam/root/steamapps/common");
-        if steam_link.is_dir() && !dirs.iter().any(|d| same_dir(d, &steam_link)) {
-            dirs.push(steam_link);
-        }
-
-        // Flatpak Steam
-        let flatpak =
-            home.join(".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common");
-        if flatpak.is_dir() {
-            dirs.push(flatpak);
-        }
-
-        // Snap Steam
-        let snap = home.join("snap/steam/common/.local/share/Steam/steamapps/common");
-        if snap.is_dir() {
-            dirs.push(snap);
-        }
+    for root in [
+        ".local/share/Steam",
+        ".steam/root",
+        ".var/app/com.valvesoftware.Steam/data/Steam",
+        ".var/app/com.valvesoftware.Steam/.local/share/Steam",
+        "snap/steam/common/.local/share/Steam",
+    ] {
+        add_common(home.join(root).join("steamapps/common"));
     }
 
-    // Also check Steam library folders (secondary drives)
-    for libraryfolders_path in find_library_folders_paths() {
+    // Native and Flatpak installations can have independent secondary libraries.
+    for libraryfolders_path in find_library_folders_paths(home) {
         if let Ok(content) = std::fs::read_to_string(&libraryfolders_path) {
             for line in content.lines() {
                 let line = line.trim();
                 if line.starts_with('"') && line.contains("\"path\"") {
-                    // VDF format: "path"		"/mnt/games/SteamLibrary"
+                    // VDF format: "path"        "/mnt/games/SteamLibrary"
                     if let Some(path_str) = extract_vdf_value(line) {
-                        let common = PathBuf::from(path_str).join("steamapps/common");
-                        if common.is_dir() && !dirs.contains(&common) {
-                            dirs.push(common);
-                        }
+                        add_common(PathBuf::from(path_str).join("steamapps/common"));
                     }
                 }
             }
@@ -609,20 +604,19 @@ fn find_compat_tools_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-fn find_library_folders_paths() -> Vec<PathBuf> {
+fn find_library_folders_paths(home: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    if let Some(home) = dirs::home_dir() {
-        let candidates = [
-            home.join(".local/share/Steam/steamapps/libraryfolders.vdf"),
-            home.join(".steam/root/steamapps/libraryfolders.vdf"),
-            home.join(
-                ".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/libraryfolders.vdf",
-            ),
-        ];
-        for c in &candidates {
-            if c.exists() {
-                paths.push(c.clone());
-                break; // Usually only one is authoritative
+    let mut seen = std::collections::HashSet::new();
+    for root in [
+        ".local/share/Steam",
+        ".steam/root",
+        ".var/app/com.valvesoftware.Steam/data/Steam",
+        ".var/app/com.valvesoftware.Steam/.local/share/Steam",
+    ] {
+        let candidate = home.join(root).join("steamapps/libraryfolders.vdf");
+        if let Ok(canonical) = candidate.canonicalize() {
+            if canonical.is_file() && seen.insert(canonical) {
+                paths.push(candidate);
             }
         }
     }
@@ -780,6 +774,146 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixture_proton(root: &Path, name: &str) -> PathBuf {
+        let proton = root.join("steamapps/common").join(name);
+        std::fs::create_dir_all(proton.join("files/bin")).unwrap();
+        std::fs::write(proton.join("files/bin/wine"), b"fixture").unwrap();
+        proton
+    }
+
+    fn fixture_libraries(root: &Path, libraries: &[&Path]) {
+        std::fs::create_dir_all(root.join("steamapps")).unwrap();
+        let mut content = String::from("\"libraryfolders\"\n{\n");
+        for (index, library) in libraries.iter().enumerate() {
+            content.push_str(&format!(
+                "\"{index}\"\n{{\n\"path\" \"{}\"\n}}\n",
+                library.display()
+            ));
+        }
+        content.push_str("}\n");
+        std::fs::write(root.join("steamapps/libraryfolders.vdf"), content).unwrap();
+    }
+
+    fn fixture_official_versions(home: &Path) -> Vec<ProtonVersion> {
+        let mut versions = Vec::new();
+        for common in find_steam_common_dirs_in_home(home) {
+            scan_proton_dir(&common, &mut versions);
+        }
+        versions
+    }
+
+    #[test]
+    fn test_official_proton_flatpak_data_and_secondary_library() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let flatpak = home.join(".var/app/com.valvesoftware.Steam/data/Steam");
+        let secondary = home.join("secondary drive/SteamLibrary");
+        let primary_proton = fixture_proton(&flatpak, "Proton 10.0");
+        let secondary_proton = fixture_proton(&secondary, "Proton 9.0");
+        fixture_libraries(&flatpak, &[&flatpak, &secondary]);
+
+        let versions = fixture_official_versions(home);
+        assert_eq!(versions.len(), 2);
+        for expected in [primary_proton, secondary_proton] {
+            let version = versions.iter().find(|v| v.path == expected).unwrap();
+            assert_eq!(version.variant, ProtonVariant::Official);
+            assert_eq!(version.wine_bin, expected.join("files/bin/wine"));
+        }
+    }
+
+    #[test]
+    fn test_native_library_config_does_not_hide_flatpak_libraries() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let native = home.join(".local/share/Steam");
+        let flatpak = home.join(".var/app/com.valvesoftware.Steam/data/Steam");
+        let native_secondary = home.join("native-library");
+        let flatpak_secondary = home.join("flatpak-library");
+        let native_proton = fixture_proton(&native_secondary, "Proton 9.0");
+        let flatpak_proton = fixture_proton(&flatpak_secondary, "Proton 10.0");
+        fixture_libraries(&native, &[&native_secondary]);
+        fixture_libraries(&flatpak, &[&flatpak_secondary]);
+
+        assert_eq!(find_library_folders_paths(home).len(), 2);
+        let versions = fixture_official_versions(home);
+        assert_eq!(versions.len(), 2);
+        assert!(versions.iter().any(|v| v.path == native_proton));
+        assert!(versions.iter().any(|v| v.path == flatpak_proton));
+    }
+
+    #[test]
+    fn test_official_proton_legacy_layouts() {
+        for layout in [
+            ".local/share/Steam",
+            ".steam/root",
+            ".var/app/com.valvesoftware.Steam/.local/share/Steam",
+            "snap/steam/common/.local/share/Steam",
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join(layout);
+            let expected = fixture_proton(&root, "Proton 10.0");
+            let versions = fixture_official_versions(temp.path());
+            assert_eq!(versions.len(), 1, "layout: {layout}");
+            assert_eq!(versions[0].path, expected);
+            assert_eq!(versions[0].variant, ProtonVariant::Official);
+
+            // Preserve secondary-library discovery for each existing VDF location.
+            if !layout.starts_with("snap/") {
+                let secondary = temp.path().join("secondary");
+                let expected_secondary = fixture_proton(&secondary, "Proton 9.0");
+                fixture_libraries(&root, &[&secondary]);
+                let versions = fixture_official_versions(temp.path());
+                assert_eq!(versions.len(), 2, "layout: {layout}");
+                assert!(versions.iter().any(|v| v.path == expected_secondary));
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_official_proton_deduplicates_canonical_aliases() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let native = home.join(".local/share/Steam");
+        let flatpak = home.join(".var/app/com.valvesoftware.Steam/data/Steam");
+        let secondary = home.join("secondary");
+        let alias = home.join("secondary-alias");
+        fixture_proton(&native, "Proton 10.0");
+        fixture_proton(&flatpak, "Proton 9.0");
+        fixture_proton(&secondary, "Proton 8.0");
+        symlink(&secondary, &alias).unwrap();
+        for (target, relative) in [
+            (&native, ".steam/root"),
+            (&flatpak, ".var/app/com.valvesoftware.Steam/.local/share/Steam"),
+            (&flatpak, "snap/steam/common/.local/share/Steam"),
+        ] {
+            let link = home.join(relative);
+            std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+            symlink(target, link).unwrap();
+        }
+        fixture_libraries(&native, &[&native, &secondary, &alias]);
+        fixture_libraries(&flatpak, &[&flatpak, &alias, &secondary]);
+
+        assert_eq!(find_library_folders_paths(home).len(), 2);
+        assert_eq!(find_steam_common_dirs_in_home(home).len(), 3);
+        let versions = fixture_official_versions(home);
+        assert_eq!(versions.len(), 3);
+        let unique: std::collections::HashSet<_> = versions
+            .iter()
+            .map(|v| v.path.canonicalize().unwrap())
+            .collect();
+        assert_eq!(unique.len(), 3);
+    }
+
+    #[test]
+    fn test_official_proton_empty_home() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(find_library_folders_paths(temp.path()).is_empty());
+        assert!(fixture_official_versions(temp.path()).is_empty());
+    }
 
     #[test]
     fn test_parse_official_proton() {
