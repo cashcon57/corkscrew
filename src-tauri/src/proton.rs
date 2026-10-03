@@ -508,9 +508,13 @@ fn variant_priority(v: &ProtonVariant) -> u32 {
 }
 
 fn find_steam_common_dirs() -> Vec<PathBuf> {
+    find_steam_common_dirs_for_home(dirs::home_dir().as_deref())
+}
+
+fn find_steam_common_dirs_for_home(home: Option<&Path>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = home {
         // Standard Steam install
         let standard = home.join(".local/share/Steam/steamapps/common");
         if standard.is_dir() {
@@ -532,21 +536,26 @@ fn find_steam_common_dirs() -> Vec<PathBuf> {
 
         // Snap Steam
         let snap = home.join("snap/steam/common/.local/share/Steam/steamapps/common");
-        if snap.is_dir() {
+        if snap.is_dir() && !dirs.iter().any(|d| same_dir(d, &snap)) {
             dirs.push(snap);
         }
     }
 
     // Also check Steam library folders (secondary drives)
-    for libraryfolders_path in find_library_folders_paths() {
+    for libraryfolders_path in find_library_folders_paths(home) {
         if let Ok(content) = std::fs::read_to_string(&libraryfolders_path) {
             for line in content.lines() {
                 let line = line.trim();
                 if line.starts_with('"') && line.contains("\"path\"") {
                     // VDF format: "path"		"/mnt/games/SteamLibrary"
                     if let Some(path_str) = extract_vdf_value(line) {
-                        let common = PathBuf::from(path_str).join("steamapps/common");
-                        if common.is_dir() && !dirs.contains(&common) {
+                        let Ok(common) = PathBuf::from(path_str)
+                            .join("steamapps/common")
+                            .canonicalize()
+                        else {
+                            continue;
+                        };
+                        if common.is_dir() && !dirs.iter().any(|d| same_dir(d, &common)) {
                             dirs.push(common);
                         }
                     }
@@ -609,20 +618,21 @@ fn find_compat_tools_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-fn find_library_folders_paths() -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    if let Some(home) = dirs::home_dir() {
+fn find_library_folders_paths(home: Option<&Path>) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    if let Some(home) = home {
         let candidates = [
             home.join(".local/share/Steam/steamapps/libraryfolders.vdf"),
             home.join(".steam/root/steamapps/libraryfolders.vdf"),
             home.join(
                 ".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/libraryfolders.vdf",
             ),
+            home.join("snap/steam/common/.local/share/Steam/steamapps/libraryfolders.vdf"),
         ];
         for c in &candidates {
-            if c.exists() {
+            // Native and sandboxed installs can have independent libraries.
+            if c.is_file() && !paths.iter().any(|p| same_dir(p, c)) {
                 paths.push(c.clone());
-                break; // Usually only one is authoritative
             }
         }
     }
@@ -780,6 +790,99 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SNAP_STEAM: &str = "snap/steam/common/.local/share/Steam";
+    const NATIVE_STEAM: &str = ".local/share/Steam";
+
+    fn write_library_folders(steam: &Path, libraries: &[&Path]) {
+        std::fs::create_dir_all(steam.join("steamapps")).unwrap();
+        let mut content = String::from("\"libraryfolders\"\n{\n");
+        for (index, library) in libraries.iter().enumerate() {
+            content.push_str(&format!(
+                "\"{index}\"\n{{\n\"path\"\t\"{}\"\n}}\n",
+                library.display()
+            ));
+        }
+        content.push_str("}\n");
+        std::fs::write(steam.join("steamapps/libraryfolders.vdf"), content).unwrap();
+    }
+
+    fn create_library_proton(library: &Path) -> PathBuf {
+        let proton = library.join("steamapps/common/Proton 10.0");
+        std::fs::create_dir_all(proton.join("files/bin")).unwrap();
+        std::fs::write(proton.join("files/bin/wine"), "").unwrap();
+        proton.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn test_snap_secondary_library_proton() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let snap = home.join(SNAP_STEAM);
+        let secondary = temp.path().join("Snap Library");
+        let expected = create_library_proton(&secondary);
+        std::fs::create_dir_all(snap.join("steamapps/common")).unwrap();
+        write_library_folders(&snap, &[&snap, &secondary]);
+
+        let dirs = find_steam_common_dirs_for_home(Some(&home));
+        assert_eq!(dirs.len(), 2);
+        let mut versions = Vec::new();
+        for dir in dirs {
+            scan_proton_dir(&dir, &mut versions);
+        }
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].path, expected);
+    }
+
+    #[test]
+    fn test_native_and_snap_secondary_libraries_coexist() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let native_library = temp.path().join("native-library");
+        let snap_library = temp.path().join("snap-library");
+        let native_proton = create_library_proton(&native_library);
+        let snap_proton = create_library_proton(&snap_library);
+        write_library_folders(&home.join(NATIVE_STEAM), &[&native_library]);
+        write_library_folders(&home.join(SNAP_STEAM), &[&snap_library]);
+
+        assert_eq!(find_library_folders_paths(Some(&home)).len(), 2);
+        let dirs = find_steam_common_dirs_for_home(Some(&home));
+        assert_eq!(dirs.len(), 2);
+        let mut versions = Vec::new();
+        for dir in dirs {
+            scan_proton_dir(&dir, &mut versions);
+        }
+        assert_eq!(versions.len(), 2);
+        assert!(versions.iter().any(|v| v.path == native_proton));
+        assert!(versions.iter().any(|v| v.path == snap_proton));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_snap_and_native_library_aliases_are_deduplicated() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let native = home.join(NATIVE_STEAM);
+        let snap = home.join(SNAP_STEAM);
+        let secondary = temp.path().join("library");
+        let alias = temp.path().join("library-alias");
+        create_library_proton(&secondary);
+        symlink(&secondary, &alias).unwrap();
+        std::fs::create_dir_all(native.join("steamapps/common")).unwrap();
+        write_library_folders(&native, &[&native, &secondary]);
+        write_library_folders(&snap, &[&native, &alias, &secondary]);
+        std::fs::create_dir_all(home.join(".steam")).unwrap();
+        symlink(&native, home.join(".steam/root")).unwrap();
+
+        // The native metadata alias is skipped, but Snap's distinct VDF is read.
+        assert_eq!(find_library_folders_paths(Some(&home)).len(), 2);
+        let dirs = find_steam_common_dirs_for_home(Some(&home));
+        assert_eq!(dirs.len(), 2);
+        assert!(same_dir(&dirs[0], &native.join("steamapps/common")));
+        assert!(same_dir(&dirs[1], &secondary.join("steamapps/common")));
+    }
 
     #[test]
     fn test_parse_official_proton() {
