@@ -341,12 +341,23 @@ fn platform_search_locations(home: &Path) -> Vec<SearchLocation> {
                 .join("wine")
                 .join("prefixes"),
         },
-        // Bottles (Flatpak-first app)
+        // Bottles (native install)
         SearchLocation {
             source: "Bottles",
             path: home
                 .join(".local")
                 .join("share")
+                .join("bottles")
+                .join("bottles"),
+        },
+        // Bottles (Flatpak)
+        SearchLocation {
+            source: "Bottles",
+            path: home
+                .join(".var")
+                .join("app")
+                .join("com.usebottles.bottles")
+                .join("data")
                 .join("bottles")
                 .join("bottles"),
         },
@@ -1039,6 +1050,80 @@ mod tests {
         let bottle = parent.join(name);
         fs::create_dir_all(bottle.join("drive_c")).expect("create drive_c");
         bottle
+    }
+
+    #[cfg(target_os = "linux")]
+    fn collect_fixture_bottles(home: &Path) -> Vec<Bottle> {
+        let mut bottles = Vec::new();
+        for location in platform_search_locations(home) {
+            collect_bottles_from(&location, &mut bottles);
+        }
+        deduplicate_bottles_by_name(bottles)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn flatpak_bottles_collects_prefix() {
+        let home = tempfile::tempdir().unwrap();
+        let parent = home
+            .path()
+            .join(".var/app/com.usebottles.bottles/data/bottles/bottles");
+        let prefix = create_fake_bottle(&parent, "FlatpakGame");
+
+        let bottles = collect_fixture_bottles(home.path());
+
+        assert_eq!(bottles.len(), 1);
+        assert_eq!(bottles[0].name, "FlatpakGame");
+        assert_eq!(bottles[0].path, prefix);
+        assert_eq!(bottles[0].source, "Bottles");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn flatpak_bottles_coexists_with_native_prefix() {
+        let home = tempfile::tempdir().unwrap();
+        let flatpak = create_fake_bottle(
+            &home
+                .path()
+                .join(".var/app/com.usebottles.bottles/data/bottles/bottles"),
+            "FlatpakGame",
+        );
+        let native = create_fake_bottle(
+            &home.path().join(".local/share/bottles/bottles"),
+            "NativeGame",
+        );
+
+        let mut bottles = collect_fixture_bottles(home.path());
+        bottles.sort_by(|a, b| a.name.cmp(&b.name));
+
+        assert_eq!(bottles.len(), 2);
+        assert_eq!(bottles[0].name, "FlatpakGame");
+        assert_eq!(bottles[0].path, flatpak);
+        assert_eq!(bottles[0].source, "Bottles");
+        assert_eq!(bottles[1].name, "NativeGame");
+        assert_eq!(bottles[1].path, native);
+        assert_eq!(bottles[1].source, "Bottles");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn flatpak_bottles_skips_missing_and_invalid_prefixes() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(collect_fixture_bottles(home.path()).is_empty());
+
+        let parent = home
+            .path()
+            .join(".var/app/com.usebottles.bottles/data/bottles/bottles");
+        fs::create_dir_all(parent.join("MissingDriveC")).unwrap();
+        fs::write(parent.join("NotADirectory"), "not a prefix").unwrap();
+        assert!(collect_fixture_bottles(home.path()).is_empty());
+
+        let valid = create_fake_bottle(&parent, "ValidGame");
+        let bottles = collect_fixture_bottles(home.path());
+        assert_eq!(bottles.len(), 1);
+        assert_eq!(bottles[0].name, "ValidGame");
+        assert_eq!(bottles[0].path, valid);
+        assert_eq!(bottles[0].source, "Bottles");
     }
 
     #[test]
