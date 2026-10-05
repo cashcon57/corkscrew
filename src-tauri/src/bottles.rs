@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::fomod::{find_case_insensitive, resolve_path_case_insensitive};
+
 /// Enriched game info from Heroic Launcher.
 #[derive(Debug, Clone, Serialize)]
 pub struct HeroicGameInfo {
@@ -47,7 +49,7 @@ impl Bottle {
 
     /// Path to the `users` directory inside drive_c.
     pub fn users_dir(&self) -> PathBuf {
-        self.drive_c().join("users")
+        find_case_insensitive(&self.drive_c(), "users").unwrap_or_else(|| self.drive_c().join("users"))
     }
 
     /// Best-effort path to a user's `AppData\Local` directory.
@@ -66,14 +68,14 @@ impl Bottle {
                     }
 
                     // Standard AppData path
-                    let local = user_dir.join("AppData").join("Local");
-                    if local.exists() {
+                    if let Some(local) = resolve_path_case_insensitive(&user_dir, "AppData/Local") {
                         return local;
                     }
 
                     // Legacy path used by some bottles
-                    let legacy = user_dir.join("Local Settings").join("Application Data");
-                    if legacy.exists() {
+                    if let Some(legacy) =
+                        resolve_path_case_insensitive(&user_dir, "Local Settings/Application Data")
+                    {
                         return legacy;
                     }
                 }
@@ -99,14 +101,14 @@ impl Bottle {
                     }
 
                     // Standard Documents path
-                    let docs = user_dir.join("Documents");
-                    if docs.exists() {
+                    if let Some(docs) = resolve_path_case_insensitive(&user_dir, "Documents") {
                         return docs;
                     }
 
                     // Legacy "My Documents" path
-                    let my_docs = user_dir.join("My Documents");
-                    if my_docs.exists() {
+                    if let Some(my_docs) =
+                        resolve_path_case_insensitive(&user_dir, "My Documents")
+                    {
                         return my_docs;
                     }
                 }
@@ -1373,6 +1375,123 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let games = parse_heroic_epic_games(tmp.path());
         assert!(games.is_empty());
+    }
+
+    #[test]
+    fn user_data_paths_match_mixed_case_modern_and_legacy_layouts() {
+        for (local, documents) in [
+            ("aPpDaTa/lOcAl", "dOcUmEnTs"),
+            ("lOcAl SeTtInGs/aPpLiCaTiOn DaTa", "mY dOcUmEnTs"),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let bottle = Bottle {
+                name: "Test".into(),
+                path: create_fake_bottle(tmp.path(), "Bottle"),
+                source: "Test".into(),
+            };
+            let users = bottle.drive_c().join("UsErS");
+            let user = users.join("Player");
+            fs::create_dir_all(user.join(local)).unwrap();
+            fs::create_dir_all(user.join(documents)).unwrap();
+
+            assert_eq!(bottle.users_dir(), users);
+            assert_eq!(bottle.appdata_local(), user.join(local));
+            assert_eq!(bottle.documents_dir(), user.join(documents));
+        }
+    }
+
+    #[test]
+    fn user_data_paths_prefer_modern_over_legacy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle = Bottle {
+            name: "Test".into(),
+            path: create_fake_bottle(tmp.path(), "Bottle"),
+            source: "Test".into(),
+        };
+        let user = bottle.drive_c().join("users/Player");
+        for relative in [
+            "aPpDaTa/lOcAl",
+            "Local Settings/Application Data",
+            "dOcUmEnTs",
+            "My Documents",
+        ] {
+            fs::create_dir_all(user.join(relative)).unwrap();
+        }
+        assert_eq!(bottle.appdata_local(), user.join("aPpDaTa/lOcAl"));
+        assert_eq!(bottle.documents_dir(), user.join("dOcUmEnTs"));
+    }
+
+    // Linux permits distinct entries whose names differ only in case.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn user_data_paths_prefer_exact_case() {
+        for (local, documents, alternate_local, alternate_documents) in [
+            ("AppData/Local", "Documents", "appdata/local", "documents"),
+            (
+                "Local Settings/Application Data",
+                "My Documents",
+                "local settings/application data",
+                "my documents",
+            ),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let bottle = Bottle {
+                name: "Test".into(),
+                path: create_fake_bottle(tmp.path(), "Bottle"),
+                source: "Test".into(),
+            };
+            let users = bottle.drive_c().join("users");
+            let user = users.join("Player");
+            fs::create_dir_all(bottle.drive_c().join("USERS/Other/AppData/Local")).unwrap();
+            fs::create_dir_all(bottle.drive_c().join("USERS/Other/Documents")).unwrap();
+            for relative in [alternate_local, alternate_documents, local, documents] {
+                fs::create_dir_all(user.join(relative)).unwrap();
+            }
+            // Also exercise exact preference at the final AppData component.
+            if local == "AppData/Local" {
+                fs::create_dir_all(user.join("AppData/local")).unwrap();
+            } else {
+                fs::create_dir_all(user.join("Local Settings/application data")).unwrap();
+            }
+            assert_eq!(bottle.users_dir(), users);
+            assert_eq!(bottle.appdata_local(), user.join(local));
+            assert_eq!(bottle.documents_dir(), user.join(documents));
+        }
+    }
+
+    #[test]
+    fn user_data_paths_preserve_cross_over_fallbacks() {
+        for users_name in ["users", "UsErS"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let bottle = Bottle {
+                name: "Test".into(),
+                path: create_fake_bottle(tmp.path(), "Bottle"),
+                source: "Test".into(),
+            };
+            let default_users = bottle.drive_c().join("users");
+            assert_eq!(bottle.users_dir(), default_users);
+            assert_eq!(
+                bottle.appdata_local(),
+                default_users.join("crossover/AppData/Local")
+            );
+            assert_eq!(
+                bottle.documents_dir(),
+                default_users.join("crossover/Documents")
+            );
+
+            let users = bottle.drive_c().join(users_name);
+            fs::create_dir_all(&users).unwrap();
+            for populated in [false, true] {
+                if populated {
+                    fs::create_dir_all(users.join("Player/AppData")).unwrap();
+                    fs::create_dir_all(users.join("Player/Local Settings")).unwrap();
+                    fs::write(users.join("not-a-user"), "").unwrap();
+                }
+                assert_eq!(bottle.users_dir(), users);
+                assert_eq!(bottle.appdata_local(), users.join("crossover/AppData/Local"));
+                assert_eq!(bottle.documents_dir(), users.join("crossover/Documents"));
+            }
+        }
     }
 
     #[test]
