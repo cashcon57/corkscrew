@@ -456,24 +456,49 @@ pub fn find_steam_dir(bottle_path: &Path) -> Option<PathBuf> {
 /// its `download_depot` output lands in the native Steam directory — while a
 /// user pasting the command into the bottle's Windows Steam produces files
 /// inside the bottle. Both must be searched.
+///
+/// Order: the bottle's Steam first (it is also the directory
+/// `get_depot_download_info` reports as the expected path), then the macOS
+/// Steam data dir, then every Linux root from
+/// `steam_integration::steam_root_candidates` (native, Flatpak, Snap, and the
+/// raw `/var/home` variants on Fedora Atomic / Bazzite).
 pub fn depot_search_dirs(bottle_path: &Path) -> Vec<PathBuf> {
-    let mut dirs_found = Vec::new();
-    if let Some(dir) = find_steam_dir(bottle_path) {
-        dirs_found.push(dir);
-    }
-    if let Some(home) = dirs::home_dir() {
-        let native_candidates = [
-            home.join("Library/Application Support/Steam"), // macOS
-            home.join(".steam/steam"),                      // Linux
-            home.join(".local/share/Steam"),                // Linux
-        ];
-        for candidate in native_candidates {
-            if candidate.exists() {
-                dirs_found.push(candidate);
-            }
+    let bottle_steam = find_steam_dir(bottle_path);
+    match dirs::home_dir() {
+        Some(raw_home) => {
+            let home = crate::bottles::normalize_container_path(&raw_home);
+            depot_search_dirs_in(bottle_steam, &home, &raw_home)
         }
+        None => bottle_steam.into_iter().collect(),
     }
-    dirs_found
+}
+
+/// `depot_search_dirs` with the bottle's Steam dir and home paths injected.
+///
+/// Only existing directories are returned. Aliases of the same install (e.g.
+/// `~/.steam/steam` symlinked to `~/.local/share/Steam`, or `/var/home` vs
+/// `/home`) are collapsed to their first occurrence so each Steam install is
+/// searched once.
+fn depot_search_dirs_in(
+    bottle_steam: Option<PathBuf>,
+    home: &Path,
+    raw_home: &Path,
+) -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = bottle_steam.into_iter().collect();
+    candidates.push(home.join("Library/Application Support/Steam")); // macOS
+    if home != raw_home {
+        candidates.push(raw_home.join("Library/Application Support/Steam"));
+    }
+    candidates.extend(crate::steam_integration::steam_root_candidates(
+        home, raw_home,
+    ));
+
+    let mut seen = std::collections::HashSet::new();
+    candidates
+        .into_iter()
+        .filter(|c| c.is_dir())
+        .filter(|c| seen.insert(fs::canonicalize(c).unwrap_or_else(|_| c.clone())))
+        .collect()
 }
 
 /// Get the expected depot download path after `download_depot` completes.
@@ -1042,5 +1067,62 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let result = find_skyrim_exe(tmp.path());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn depot_search_dirs_bottle_first_then_macos_then_linux_roots() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home/deck");
+        let raw_home = tmp.path().join("var/home/deck");
+        let bottle_steam = tmp.path().join("bottle/drive_c/Program Files (x86)/Steam");
+
+        let rels = [
+            "Library/Application Support/Steam",
+            ".steam/steam",
+            ".local/share/Steam",
+            ".var/app/com.valvesoftware.Steam/data/Steam",
+            ".var/app/com.valvesoftware.Steam/.local/share/Steam",
+            "snap/steam/common/.local/share/Steam",
+        ];
+        for rel in rels {
+            fs::create_dir_all(home.join(rel)).unwrap();
+        }
+        // Raw `/var/home` only has a Flatpak install.
+        fs::create_dir_all(raw_home.join(".var/app/com.valvesoftware.Steam/data/Steam")).unwrap();
+        fs::create_dir_all(&bottle_steam).unwrap();
+        // A regular file where a root would be is not a Steam dir.
+        fs::create_dir_all(home.join("snap/steam/current/.steam")).unwrap();
+        fs::write(home.join("snap/steam/current/.steam/steam"), b"").unwrap();
+
+        let dirs = depot_search_dirs_in(Some(bottle_steam.clone()), &home, &raw_home);
+
+        let mut expected = vec![bottle_steam.clone()];
+        expected.extend(rels.iter().map(|rel| home.join(rel)));
+        expected.push(raw_home.join(".var/app/com.valvesoftware.Steam/data/Steam"));
+        assert_eq!(dirs, expected);
+
+        // Without a bottle Steam, host roots keep the same relative order.
+        let dirs = depot_search_dirs_in(None, &home, &raw_home);
+        assert_eq!(dirs, expected[1..]);
+
+        // Identical homes don't produce raw-home candidates.
+        let dirs = depot_search_dirs_in(None, &home, &home);
+        assert_eq!(dirs, expected[1..expected.len() - 1]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn depot_search_dirs_collapses_symlinked_aliases() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home/deck");
+        let real = home.join(".local/share/Steam");
+        fs::create_dir_all(&real).unwrap();
+        fs::create_dir_all(home.join(".steam")).unwrap();
+        std::os::unix::fs::symlink(&real, home.join(".steam/steam")).unwrap();
+        std::os::unix::fs::symlink(&real, home.join(".steam/root")).unwrap();
+
+        let dirs = depot_search_dirs_in(None, &home, &home);
+        // The first (highest-priority) alias wins; the install is searched once.
+        assert_eq!(dirs, vec![home.join(".steam/steam")]);
     }
 }

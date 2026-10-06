@@ -2,6 +2,12 @@
 
 All notable changes to Corkscrew are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.14.17] - 2026-10-06
+
+### Fixed
+
+- **Skyrim SE downgrade missed depot downloads in Flatpak/Snap Steam**: the depot lookup only searched the bottle's Windows Steam plus `~/Library/Application Support/Steam`, `~/.steam/steam`, and `~/.local/share/Steam`, so `download_depot` output from Flatpak (`~/.var/app/com.valvesoftware.Steam/...`), Snap (`~/snap/steam/...`), or `~/.steam/root` installs was never found. It now reuses the same Steam root list as Steam detection, including raw `/var/home` homes on Fedora Atomic / Bazzite. The bottle's Steam is still checked first, macOS Steam is still supported, and symlinked aliases of one install are searched only once.
+
 ## [0.14.16] - 2026-10-06
 
 ### Fixed

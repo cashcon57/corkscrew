@@ -69,8 +69,10 @@ const STEAM_ROOT_SUFFIXES: &[&str] = &[
 
 /// Build the ordered list of candidate Steam roots for `home`, plus the raw
 /// (`/var/home`) variant when it differs from the normalized home.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn steam_root_candidates(home: &Path, raw_home: &Path) -> Vec<PathBuf> {
+///
+/// Also used by `downgrader::depot_search_dirs` so depot lookup searches the
+/// same native/Flatpak/Snap roots as Steam detection.
+pub(crate) fn steam_root_candidates(home: &Path, raw_home: &Path) -> Vec<PathBuf> {
     let mut candidates: Vec<PathBuf> =
         STEAM_ROOT_SUFFIXES.iter().map(|s| home.join(s)).collect();
     // Also check /var/home variant if the normalized home differs from the raw home
